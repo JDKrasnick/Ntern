@@ -87,9 +87,10 @@ async function handoffShadowExtraction(input: {
 }): Promise<void> {
   const description = input.description?.trim() ?? '';
   const descriptionBytes = new TextEncoder().encode(description).byteLength;
+  const normalized = normalizeExactPostingDescription(input.title, description, input.incomplete);
   let outcome: 'enqueued' | 'skipped-no-text' | 'skipped-no-binding' | 'skipped-oversized' | 'failed';
   try {
-    if (!description) outcome = 'skipped-no-text';
+    if (!normalized.title || !normalized.description) outcome = 'skipped-no-text';
     else if (!input.env.SHADOW_EXTRACTION_QUEUE || !input.env.SHADOW_EXTRACTION_ARTIFACTS) outcome = 'skipped-no-binding';
     else {
       const enqueued = await enqueueShadowExtraction({ DB: input.env.DB, SHADOW_EXTRACTION_QUEUE: input.env.SHADOW_EXTRACTION_QUEUE,

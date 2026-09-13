@@ -123,25 +123,26 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   let stored = serialize(normalized);
   const artifactLimit = maxInputBytes + 2_000;
   if (bytes(stored) > artifactLimit) {
-    // The description is capped independently, but the serialized envelope
-    // (identity, baseline, retention, JSON escaping) can still push the input
-    // over the ceiling. Re-truncate the description against the measured
-    // overhead so a complete posting still enqueues instead of being silently
-    // dropped (see issue #189).
-    const overhead = bytes(stored) - bytes(normalized.description);
-    // r2Text permits the serialized artifact's 2 KB envelope allowance too.
-    // Preserve as much exact posting text as that established limit permits.
-    let budget = artifactLimit - overhead;
-    while (budget > 0) {
-      normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget);
-      stored = serialize(normalized);
-      const excess = bytes(stored) - artifactLimit;
-      if (excess <= 0) break;
-      // Truncation can itself change serialized metadata (for example,
-      // completeness). Re-measure and remove only that remaining excess.
-      budget -= excess;
+    // JSON escaping means raw description bytes cannot be subtracted from the
+    // serialized size to measure envelope overhead. Search the actual artifact
+    // size so escaped text keeps the largest byte-bounded prefix that fits.
+    let low = 1;
+    let high = bytes(normalized.description);
+    let fitting: { normalized: typeof normalized; stored: string } | undefined;
+    while (low <= high) {
+      const budget = Math.floor((low + high) / 2);
+      const candidate = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget);
+      const candidateStored = serialize(candidate);
+      if (candidate.title && candidate.description && bytes(candidateStored) <= artifactLimit) {
+        fitting = { normalized: candidate, stored: candidateStored };
+        low = budget + 1;
+      } else {
+        high = budget - 1;
+      }
     }
-    if (!normalized.title || !normalized.description || bytes(stored) > artifactLimit) return undefined;
+    if (!fitting) return undefined;
+    normalized = fitting.normalized;
+    stored = fitting.stored;
   }
   const cacheKey = shadowExtractionCacheKey(normalized);
   const runKey = shadowReportFingerprint({ jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId,

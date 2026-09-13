@@ -350,6 +350,34 @@ describe('destination verification queue consumer', () => {
     });
   });
 
+  it('records text removed by normalization as skipped-no-text', async () => {
+    const { database, db, jobs } = subject();
+    const { job, reference } = role();
+    await jobs.putInternship(job);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+      id: Number(reference.externalId), title: reference.title, content: '\u0001',
+    })));
+    const shadowQueue = { send: vi.fn(), sendBatch: vi.fn() };
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId,
+      externalId: reference.externalId!, candidateUrl: reference.applyUrl, providerIdentity: {
+        provider: 'greenhouse', sourceId: reference.sourceId, sourceUrl: reference.sourceUrl,
+        tenant: 'acme', postingId: reference.externalId,
+      }, reason: 'historical-backfill', queuedAt: '2026-08-30T00:00:00Z',
+      metadataBackfillToken: 'normalized-empty-shadow-handoff' });
+
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: shadowQueue,
+      SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn() } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(shadowQueue.send).not.toHaveBeenCalled();
+    expect(JSON.parse(database.prepare('SELECT report FROM role_metadata_acquisition WHERE job_id = ? AND source_id = ?')
+      .get(job.jobId, reference.sourceId)!.report as string)).toMatchObject({
+      shadowHandoff: { outcome: 'skipped-no-text', method: 'greenhouse-api' },
+    });
+  });
+
   it('retries a durable metadata acquisition when its shadow queue handoff fails', async () => {
     const { database, db, jobs } = subject();
     const { job, reference } = role();

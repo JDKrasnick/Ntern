@@ -56,17 +56,27 @@ function sha256(value: string): string {
 
 function utf8(value: string): number { return new TextEncoder().encode(value).byteLength; }
 
+function truncateUtf8(value: string, maxBytes: number): string {
+  const encoded = new TextEncoder().encode(value);
+  if (encoded.byteLength <= maxBytes) return value;
+  let end = Math.max(0, Math.floor(maxBytes));
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  while (end > 0) {
+    try { return decoder.decode(encoded.slice(0, end)); }
+    catch { end -= 1; }
+  }
+  return '';
+}
+
 /** Keeps heading, table, and list syntax intact. Only line endings/control bytes
  * are normalized, and a bounded input says explicitly when it is incomplete. */
 export function normalizeExactPostingDescription(title: string, description: string, forceIncomplete = false, maxBytes = SHADOW_EXTRACTION_MAX_INPUT_BYTES): NormalizedPostingInput {
   const cleanTitle = removeUnsafeControls(title).trim();
   let normalized = removeUnsafeControls(description.replace(/\r\n?/gu, '\n'));
   let completeness: NormalizedPostingInput['completeness'] = forceIncomplete ? 'incomplete' : 'complete';
-  const budget = Math.min(maxBytes, SHADOW_EXTRACTION_MAX_INPUT_BYTES);
+  const budget = Math.max(0, Math.min(maxBytes, SHADOW_EXTRACTION_MAX_INPUT_BYTES));
   if (utf8(normalized) > budget) {
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-    normalized = decoder.decode(encoder.encode(normalized).slice(0, budget));
+    normalized = truncateUtf8(normalized, budget);
     completeness = 'incomplete';
   }
   return { title: cleanTitle, description: normalized, completeness,
