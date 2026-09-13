@@ -200,6 +200,7 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(message).toBeDefined();
     expect(sent).toHaveLength(1);
     expect(artifacts.values.get(message!.inputKey)!.byteLength).toBeLessThanOrEqual(40_000 + 2_000);
+    expect(artifacts.values.get(message!.inputKey)!.byteLength).toBeGreaterThan(40_000);
     expect(await DB.prepare('SELECT job_id FROM shadow_extraction_posting_revisions WHERE job_id = ?').bind('big').first())
       .toEqual({ job_id: 'big' });
   });

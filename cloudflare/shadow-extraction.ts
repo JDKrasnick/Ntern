@@ -121,19 +121,27 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   let normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete);
   if (!normalized.title || !normalized.description) return undefined;
   let stored = serialize(normalized);
-  if (bytes(stored) > maxInputBytes + 2_000) {
+  const artifactLimit = maxInputBytes + 2_000;
+  if (bytes(stored) > artifactLimit) {
     // The description is capped independently, but the serialized envelope
     // (identity, baseline, retention, JSON escaping) can still push the input
     // over the ceiling. Re-truncate the description against the measured
     // overhead so a complete posting still enqueues instead of being silently
     // dropped (see issue #189).
     const overhead = bytes(stored) - bytes(normalized.description);
-    const budget = maxInputBytes - overhead;
-    if (budget > 0) {
+    // r2Text permits the serialized artifact's 2 KB envelope allowance too.
+    // Preserve as much exact posting text as that established limit permits.
+    let budget = artifactLimit - overhead;
+    while (budget > 0) {
       normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget);
       stored = serialize(normalized);
+      const excess = bytes(stored) - artifactLimit;
+      if (excess <= 0) break;
+      // Truncation can itself change serialized metadata (for example,
+      // completeness). Re-measure and remove only that remaining excess.
+      budget -= excess;
     }
-    if (bytes(stored) > maxInputBytes + 2_000) return undefined;
+    if (!normalized.title || !normalized.description || bytes(stored) > artifactLimit) return undefined;
   }
   const cacheKey = shadowExtractionCacheKey(normalized);
   const runKey = shadowReportFingerprint({ jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId,
