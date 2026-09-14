@@ -18,6 +18,7 @@ export class SourceFetchError extends Error {
 
   get retryable(): boolean {
     if (this.category === 'transport') return true;
+    if (this.category === 'capacity') return true;
     if (this.category === 'http') return this.status === 429 || (this.status !== undefined && this.status >= 500);
     return false;
   }

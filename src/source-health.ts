@@ -4,6 +4,7 @@ import type { SourceFailureCategory, SourceHealth, SourceOutcome, SourceRun } fr
 
 const MAX_RECENT_RUNS = 25;
 const QUALITY_FAILURES_BEFORE_QUARANTINE = 2;
+const CAPACITY_FAILURES_BEFORE_QUARANTINE = 2;
 const MAX_PROVIDER_BACKOFF_MS = 30 * 60_000;
 
 export class ApplicationLinkValidationError extends Error {
@@ -36,6 +37,7 @@ export function sourceFailureCategory(error: unknown): SourceFailureCategory {
   if (/application link|application host|eligible .* link/.test(message)) return 'link';
   if (/shape|schema|malformed json/.test(message)) return 'json';
   if (/quality|suspicious zero-row/.test(message)) return 'quality';
+  if (/exceeded(?: cpu| memory)?|resource limit|too much cpu|out of memory|memory limit|response body too large|too many jobs/i.test(message)) return 'capacity';
   if (/timeout|timed out|aborted|fetch|network|socket|econn/.test(message)) return 'transport';
   return 'persistence';
 }
@@ -44,7 +46,8 @@ function shouldQuarantine(category: SourceFailureCategory, error: unknown, failu
   if (error instanceof SourceFetchError && error.immediateQuarantine) return true;
   if (category === 'json' || category === 'identity') return true;
   if (category === 'http' && error instanceof SourceFetchError && [401, 403, 404].includes(error.status ?? 0)) return true;
-  return (category === 'quality' || category === 'link' || category === 'empty') && failures >= QUALITY_FAILURES_BEFORE_QUARANTINE;
+  return (category === 'quality' || category === 'link' || category === 'empty') && failures >= QUALITY_FAILURES_BEFORE_QUARANTINE
+    || category === 'capacity' && failures >= CAPACITY_FAILURES_BEFORE_QUARANTINE;
 }
 
 function withRun(previous: SourceHealth | undefined, run: SourceRun): SourceRun[] {
@@ -79,6 +82,7 @@ export function sourceFailureOutcome(error: unknown): SourceOutcome {
   }
   if (category === 'identity') return 'application_host_mismatch';
   if (category === 'empty' || category === 'quality') return 'unexpected_raw_zero';
+  if (category === 'capacity') return 'resource_limit';
   if (category === 'persistence') return 'catalog_write_failed';
   return 'failed';
 }

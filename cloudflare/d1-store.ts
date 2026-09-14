@@ -439,8 +439,9 @@ export class D1InternshipStore implements InternshipStore {
   putSourceOccurrence(occurrence: SourceOccurrenceState) {
     return this.sourceOccurrenceStatement(occurrence).run().then(() => undefined);
   }
-  async listPendingProviderShadowVerifications() {
-    const result = await this.db.prepare("SELECT value FROM catalog_items WHERE kind = 'provider-shadow-verification' AND sk = 'PENDING' LIMIT 100")
+  async listPendingProviderShadowVerifications(limit = 100) {
+    const result = await this.db.prepare("SELECT value FROM catalog_items WHERE kind = 'provider-shadow-verification' AND sk = 'PENDING' LIMIT ?")
+      .bind(Math.min(100, Math.max(1, limit)))
       .all<JsonRow>();
     return result.results.map((row) => JSON.parse(row.value) as NonNullable<Extract<PostingObservationCommit, { job: Internship }>['providerShadowVerification']>);
   }

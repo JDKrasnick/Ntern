@@ -79,7 +79,7 @@ export interface InternshipStore {
   resolvePostingIdentity(identity: PostingIdentity, preferredJobId?: string): Promise<AliasResolution>;
   /** Atomically claims aliases and writes the occurrence projection plus deterministic outbox event. */
   commitPostingObservation(input: PostingObservationCommit): Promise<PostingObservationCommitResult>;
-  listPendingProviderShadowVerifications?(): Promise<DestinationVerificationRequest[]>;
+  listPendingProviderShadowVerifications?(limit?: number): Promise<DestinationVerificationRequest[]>;
   markProviderShadowVerificationEnqueued?(idempotencyKey: string): Promise<void>;
   putInternship(job: Internship): Promise<void>;
   getJob(jobId: string): Promise<Internship | undefined>;
@@ -211,7 +211,7 @@ export class MemoryInternshipStore implements InternshipStore {
     }
     return { outcome: 'committed', canonicalJobId: input.job.jobId, notificationInserted };
   }
-  async listPendingProviderShadowVerifications() { return [...this.providerShadowVerifications.values()].map((value) => structuredClone(value)); }
+  async listPendingProviderShadowVerifications(limit = 100) { return [...this.providerShadowVerifications.values()].slice(0, limit).map((value) => structuredClone(value)); }
   async markProviderShadowVerificationEnqueued(idempotencyKey: string) { this.providerShadowVerifications.delete(idempotencyKey); }
   async putInternship(job: Internship) { const canonical = canonicalCatalogRecency(job); this.jobs.set(canonical.jobId, structuredClone(canonical)); }
   async getSourceOccurrences(sourceId: string) { return [...this.occurrences.values()].filter((value) => value.sourceId === sourceId).map((value) => structuredClone(value)); }

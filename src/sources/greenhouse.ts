@@ -36,6 +36,11 @@ export interface GreenhouseAdapterOptions {
   now?: () => Date;
 }
 
+export const GREENHOUSE_RESPONSE_MAX_BYTES = 64 * 1024 * 1024;
+export const GREENHOUSE_JOB_MAX_BYTES = 512 * 1024;
+export const GREENHOUSE_BOARD_MAX_JOBS = 5_000;
+export const GREENHOUSE_CONTENT_HASH_VERSION = 2;
+
 /**
  * Read-only evidence for a token found on an employer's official careers page.
  * This is deliberately not a `ReviewedGreenhouseSource`: probing never writes
@@ -159,6 +164,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+async function boundedJson(response: Response, limit: number): Promise<unknown> {
+  if (!response.body) return JSON.parse(await response.text());
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > limit) throw new SourceFetchError(`Greenhouse response body exceeds ${limit} bytes`, 'capacity');
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const payload = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) { payload.set(chunk, offset); offset += chunk.byteLength; }
+  return JSON.parse(new TextDecoder().decode(payload));
+}
+
 function isNamedList(value: unknown): boolean {
   return value === undefined
     || (Array.isArray(value) && value.every((item) => item === null || (isRecord(item) && (item.name === undefined || typeof item.name === 'string'))));
@@ -187,10 +214,8 @@ export function isGreenhouseJobShape(value: unknown): value is GreenhouseJob {
  * departments/offices, and prospect status — so a change that affects the
  * catalog cannot leave the hash unchanged.
  */
-function projection(jobs: GreenhouseJob[]): string {
-  return JSON.stringify(
-    jobs
-      .map((job) => ({
+function jobProjection(job: GreenhouseJob): string {
+  return JSON.stringify({
         id: String(job.id ?? ''),
         prospect: job.internal_job_id === null || job.internal_job_id === undefined,
         updated_at: job.updated_at ?? '',
@@ -200,9 +225,13 @@ function projection(jobs: GreenhouseJob[]): string {
         content: job.content ?? '',
         departments: names(job.departments),
         offices: names(job.offices),
-      }))
-      .sort((a, b) => a.id.localeCompare(b.id)),
-  );
+      });
+}
+
+/** Order-independent aggregate avoids retaining a second, sorted full board. */
+function projectionHash(jobs: GreenhouseJob[]): string {
+  const hashes = jobs.map((job) => createHash('sha256').update(jobProjection(job)).digest('hex')).sort();
+  return createHash('sha256').update(`greenhouse-v${GREENHOUSE_CONTENT_HASH_VERSION}:${hashes.join('')}`).digest('hex');
 }
 
 /**
@@ -327,28 +356,42 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       };
     }
     if (!response.ok) throw new SourceFetchError(`${this.id}: Greenhouse fetch failed (${response.status})`, 'http', response.status);
+    const contentLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > GREENHOUSE_RESPONSE_MAX_BYTES) {
+      throw new SourceFetchError(`${this.id}: Greenhouse response body exceeds ${GREENHOUSE_RESPONSE_MAX_BYTES} bytes`, 'capacity');
+    }
     let payload: unknown;
-    try { payload = await response.json(); } catch { throw new SourceFetchError(`${this.id}: Greenhouse returned malformed JSON`, 'json'); }
+    try { payload = await boundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES); }
+    catch (error) {
+      if (error instanceof SourceFetchError) throw new SourceFetchError(`${this.id}: ${error.message}`, error.category);
+      throw new SourceFetchError(`${this.id}: Greenhouse returned malformed JSON`, 'json');
+    }
     if (!payload || typeof payload !== 'object' || !Array.isArray((payload as GreenhouseJobsResponse).jobs)) {
       throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
     }
     const jobs = (payload as GreenhouseJobsResponse).jobs ?? [];
+    if (jobs.length > GREENHOUSE_BOARD_MAX_JOBS) {
+      throw new SourceFetchError(`${this.id}: Greenhouse board exceeds ${GREENHOUSE_BOARD_MAX_JOBS} jobs`, 'capacity');
+    }
     const returnedEtag = response.headers.get('etag');
     const fetchedAt = this.now().toISOString();
     const postings: SourcedPosting[] = [];
     const rejectedApplicationUrls: Array<{ row: number; url: string; reason: string }> = [];
     for (const [index, job] of jobs.entries()) {
       if (!isGreenhouseJobShape(job)) throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
+      if (new TextEncoder().encode(JSON.stringify(job)).byteLength > GREENHOUSE_JOB_MAX_BYTES) {
+        throw new SourceFetchError(`${this.id}: Greenhouse job ${String(job.id ?? index + 1)} exceeds ${GREENHOUSE_JOB_MAX_BYTES} bytes`, 'capacity');
+      }
       const posting = mapGreenhouseSourcedPosting(job, this.options.source, fetchedAt, index + 1);
       if (!posting) continue;
       const rejection = greenhouseApplicationUrlRejection(posting.applyUrl, this.options.source.allowedInitialHosts);
       if (rejection) rejectedApplicationUrls.push({ row: index + 1, url: posting.applyUrl, reason: rejection });
       else postings.push(posting);
     }
-    const contentHash = createHash('sha256').update(projection(jobs)).digest('hex');
+    const contentHash = projectionHash(jobs);
     const neutral: SourceSnapshot = {
       sourceId: this.id,
-      outcome: contentHash === previous?.contentHash ? 'unchanged' : 'changed',
+      outcome: previous?.contentHashAlgorithmVersion === GREENHOUSE_CONTENT_HASH_VERSION && contentHash === previous?.contentHash ? 'unchanged' : 'changed',
       complete: true,
       postings,
       rawCount: jobs.length,
@@ -357,6 +400,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
         sourceId: this.id,
         etag: returnedEtag ?? previous?.etag,
         contentHash,
+        contentHashAlgorithmVersion: GREENHOUSE_CONTENT_HASH_VERSION,
         lastSuccessAt: fetchedAt,
         successfulFetches: (previous?.successfulFetches ?? 0) + 1,
         lastRowCount: 0,

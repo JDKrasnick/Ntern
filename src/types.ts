@@ -123,7 +123,7 @@ export interface DeliveryReceipt {
 }
 
 /** Reason a source fetch or snapshot did not produce a trusted result. */
-export type SourceFailureCategory = 'http' | 'json' | 'transport' | 'identity' | 'link' | 'empty' | 'quality' | 'persistence';
+export type SourceFailureCategory = 'http' | 'json' | 'transport' | 'identity' | 'link' | 'empty' | 'quality' | 'persistence' | 'capacity';
 
 export interface SourceCheckpoint {
   /** Forces continuation and gate rollback until all admission slices finish. */
@@ -132,6 +132,8 @@ export interface SourceCheckpoint {
   etag?: string;
   documentEtags?: Record<string, string>;
   contentHash?: string;
+  /** Algorithm used to calculate contentHash; missing values are legacy v1. */
+  contentHashAlgorithmVersion?: number;
   /** Version of the reviewed admission configuration applied to this snapshot. */
   admissionConfigurationVersion?: string;
   /** Parser version applied after a successful full source reconciliation. */
@@ -216,7 +218,8 @@ export type SourceOutcome =
   | 'incomplete_pagination'
   | 'unexpected_raw_zero'
   | 'application_host_mismatch'
-  | 'catalog_write_failed';
+  | 'catalog_write_failed'
+  | 'resource_limit';
 
 export interface SourceHealth {
   sourceId: string;
