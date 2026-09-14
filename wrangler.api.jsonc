@@ -21,7 +21,7 @@
   "version_metadata": { "binding": "VERSION_METADATA" },
   "vars": {
     "PUBLIC_API_URL": "https://intern-notifs.jdkrasnick.workers.dev",
-    "AUTH_FROM_EMAIL": "InternNotifs <notifications@send.internnotifs.app>",
+    "AUTH_FROM_EMAIL": "Ntern <notifications@send.ntern.app>",
     "AUTH_DEV_MODE": "false",
     "EMPLOYER_PORTAL_ENABLED": "true",
     "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED": "false",

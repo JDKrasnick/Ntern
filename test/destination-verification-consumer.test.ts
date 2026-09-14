@@ -453,13 +453,13 @@ describe('destination verification queue consumer', () => {
     vi.stubGlobal('fetch', send);
     const sent = await sendAdmissionOperationalAlert(operations, {
       RESEND_API_KEY: 'resend-key', ADMISSION_SUPPORT_RECIPIENT: 'support@example.test',
-      AUTH_FROM_EMAIL: 'InternNotifs <notifications@send.internnotifs.app>',
+      AUTH_FROM_EMAIL: 'Ntern <notifications@send.ntern.app>',
     }, { signals: ['destination-verification-dlq'], details: 'One message is waiting.', observedAt: '2026-08-30T12:00:00Z' });
     expect(sent).toBe(true);
     expect(send).toHaveBeenCalledOnce();
     const init = send.mock.calls[0]![1] as RequestInit;
     expect(JSON.parse(init.body as string)).toMatchObject({
-      from: 'InternNotifs <notifications@send.internnotifs.app>',
+      from: 'Ntern <notifications@send.ntern.app>',
       to: ['support@example.test'],
     });
     vi.unstubAllGlobals();
