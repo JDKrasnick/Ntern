@@ -97,13 +97,12 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('{ name = "ADMISSION_STALE_ALERT_THRESHOLD", type = "plain_text", text = tostring(var.admission_stale_alert_threshold) }');
   });
 
-  it('keeps GitHub ingestion serialized in Wrangler and OpenTofu', () => {
+  it('keeps GitHub ingestion parallelism synchronized in Wrangler and OpenTofu', () => {
     const terraform = read('infra/cloudflare/main.tf');
     const consumer = ingestion.queues?.consumers?.find(({ queue }) => queue === 'intern-notifs-github');
 
-    expect(consumer?.max_concurrency).toBe(1);
-    expect(terraform).toContain('max_concurrency  = each.key == "greenhouse" ? 2 : 1');
-    expect(terraform).not.toContain('contains(["greenhouse", "github"], each.key) ? 2 : 1');
+    expect(consumer?.max_concurrency).toBe(2);
+    expect(terraform).toContain('max_concurrency  = contains(["greenhouse", "github"], each.key) ? 2 : 1');
   });
 
   it('keeps behavior-critical API variables synchronized across Wrangler and OpenTofu', () => {
