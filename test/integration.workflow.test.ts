@@ -102,4 +102,24 @@ describe('mocked production workflow integration', () => {
     });
     expect(health?.backoffUntil).toBeDefined();
   });
+
+  it('quarantines a Greenhouse source after two consecutive capacity failures', async () => {
+    const store = new MemoryInternshipStore();
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => new Response('{"jobs":[]}', {
+        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
+      }),
+    });
+
+    await new Poller([adapter], store, () => new Date('2026-09-14T19:00:00.000Z')).poll();
+    await new Poller([adapter], store, () => new Date('2026-09-14T19:01:00.000Z')).poll();
+
+    await expect(store.getSourceHealth(acmeSource.id)).resolves.toMatchObject({
+      consecutiveFailures: 2,
+      lastOutcome: 'resource_limit',
+      state: 'quarantined',
+      sourceStatus: 'paused',
+    });
+  });
 });

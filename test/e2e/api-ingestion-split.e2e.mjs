@@ -242,3 +242,26 @@ test('delays a D1-overload retry in the compiled ingestion queue consumer', asyn
 
   assert.deepEqual(retries, [{ delaySeconds: 60 }]);
 });
+
+test('uses the longer D1-overload delay after the first compiled queue delivery', async () => {
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  const retries = [];
+  const statement = {
+    bind() { return statement; },
+    async first() { return null; },
+    async all() { throw new Error('D1_ERROR: database busy'); },
+    async run() { return { meta: { changes: 1 } }; },
+  };
+  const database = { prepare() { return statement; }, async batch() { return []; } };
+
+  await builtWorker.queue({
+    queue: 'intern-notifs-greenhouse',
+    messages: [{
+      id: 'd1-overload-retry', body: { sourceId: 'greenhouse-acme' }, attempts: 2, timestamp: new Date(),
+      ack() { throw new Error('a D1 overload must not acknowledge the message'); },
+      retry(options) { retries.push(options); },
+    }],
+  }, { DB: database });
+
+  assert.deepEqual(retries, [{ delaySeconds: 300 }]);
+});
