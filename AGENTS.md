@@ -33,12 +33,13 @@ The detailed product tracker is [`docs/product-roadmap.md`](docs/product-roadmap
 - Repository: `JDKrasnick/intern-notifs`; owner GitHub handle: `JDKrasnick`.
 - Make small, atomic or medium-sized commits and keep CI green. Preserve unrelated dirty working-tree changes.
 - Production runs on Cloudflare, not AWS: Workers `intern-notifs-ingestion`
-  and `intern-notifs`, backed by D1, R2, and Cloudflare Queues. Deploy code
-  with `npm run build:cloudflare`, then OpenTofu
-  (`tofu -chdir=infra/cloudflare plan` and `apply`); state lives in the R2
-  bucket `intern-notifs-opentofu-state` and local credentials live in an
-  untracked `.env`. The legacy AWS CLI profiles are stale, and AWS/CDK
-  instructions elsewhere in the repo are historical.
+  and `intern-notifs`, backed by D1, R2, and Cloudflare Queues. Validate access
+  with `npx wrangler whoami` before Cloudflare operations. Deploy code with
+  `npm run build:cloudflare`, then OpenTofu (`tofu -chdir=infra/cloudflare plan`
+  and `apply`); state lives in the R2 bucket `intern-notifs-opentofu-state` and
+  local credentials live in an untracked `.env`. AWS is rollback/export
+  infrastructure only: do not access, deploy, or modify it unless the owner
+  explicitly requests legacy export or recovery.
 - The owner handles Apple/App Store Connect UI and physical-device testing when required. Agents can launch EAS builds and submissions after approval.
 - After using the iPhone Simulator, shut down any booted simulator and quit the Simulator app before finishing unless the owner asks to leave it running; it consumes significant memory.
 
@@ -51,4 +52,4 @@ The detailed product tracker is [`docs/product-roadmap.md`](docs/product-roadmap
 
 ## Security boundary
 
-Do not put passwords, cloud provider credentials, Apple private keys, App Store Connect API keys, personal email addresses, or Expo tokens in Git, documentation, or mobile `EXPO_PUBLIC_*` variables. The IDs and URLs declared public below are configuration identifiers, not secrets.
+Do not put passwords, Cloudflare API tokens, AWS credentials, Apple private keys, App Store Connect API keys, personal email addresses, or Expo tokens in Git, documentation, or mobile `EXPO_PUBLIC_*` variables. The IDs and URLs declared public below are configuration identifiers, not secrets.

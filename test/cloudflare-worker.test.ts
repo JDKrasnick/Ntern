@@ -209,6 +209,45 @@ describe('GitHub source recovery guard', () => {
   });
 });
 
+describe('Catalog queue setup failures', () => {
+  it('ledgers and retries every Greenhouse message when the reviewed-source registry is unavailable', async () => {
+    const failureRows: unknown[][] = [];
+    const prepare = vi.fn((query: string) => {
+      const statement = {
+        async first() { return null; },
+        bind: (...values: unknown[]) => ({
+          async all() {
+            if (query.includes('reviewed_source_registry')) throw new Error('D1 DB reset because its code was updated');
+            return { results: [] };
+          },
+          async run() { failureRows.push(values); return { meta: { changes: 1 } }; },
+        }),
+      };
+      return statement;
+    });
+    const first = { id: 'first', body: { sourceId: 'greenhouse-acme' }, attempts: 2,
+      ack: vi.fn(), retry: vi.fn() };
+    const second = { id: 'second', body: { sourceId: 'greenhouse-beta' }, attempts: 2,
+      ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-greenhouse', messages: [first, second] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.retry).toHaveBeenCalledOnce();
+    expect(second.retry).toHaveBeenCalledOnce();
+    expect(first.ack).not.toHaveBeenCalled();
+    expect(second.ack).not.toHaveBeenCalled();
+    expect(failureRows).toHaveLength(2);
+    expect(failureRows.map((values) => ({ sourceId: values[5], category: values[8], diagnostic: values[9] }))).toEqual([
+      { sourceId: 'greenhouse-acme', category: 'persistence', diagnostic: 'D1 DB reset because its code was updated' },
+      { sourceId: 'greenhouse-beta', category: 'persistence', diagnostic: 'D1 DB reset because its code was updated' },
+    ]);
+    vi.restoreAllMocks();
+  });
+});
+
 describe('Cloudflare operations queue adapter', () => {
   it('validates backfill providers from the registry while retaining structured fleet sharing', () => {
     for (const provider of catalogProviderIds) expect(validBackfillProvider(provider)).toBe(true);
