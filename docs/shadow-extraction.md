@@ -73,7 +73,18 @@ secret. Its committed default is disabled and empty. A valid enabled policy has
 `version`, a non-empty supported `allowedFields` set, and unique exact cohort
 entries. The authenticated operations endpoint
 `/internal/operations/shadow-publication` reports policy state, versioned field
-evaluation metrics, and extraction scope. `record-evaluation` stores one of
+evaluation metrics, extraction scope, and the natural-production rollout gate.
+The gate fixes its review cohort to the first 25 completed runs from ordinary
+`provider-poll` or `scheduled-verification` traffic on the current pinned model,
+prompt, schema, and preprocessing versions. A run counts as reviewed only after
+all seven fields have a decision. New publication receipts fail closed until
+every cohort run is reviewed and each policy-allowed field has measurable
+precision and recall of at least 95%. This also requires at least one
+`correct-present` production example, so compensation cannot be enabled from an
+absent-only sample. Existing exact-revision receipts remain active and identical
+receipt requests stay idempotent while the gate is pending.
+
+`record-evaluation` stores one of
 `correct-present`, `correct-absent`, `false-positive`, `false-negative`,
 `wrong-value`, or `wrong-status` for each reviewed run field, and returns a
 per-field `conformance` advisory against the deterministic baseline recorded on

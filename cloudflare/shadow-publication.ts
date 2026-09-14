@@ -6,6 +6,7 @@ import {
   parseShadowPublicationPolicy,
   policyAllows,
   shadowExtractionEvidence,
+  shadowPublicationFields,
   shadowPublicationFingerprint,
   shadowPublishableFields,
   type BaselineState,
@@ -22,6 +23,8 @@ type EvaluationField = typeof evaluationFields[number];
 const evaluationOutcomes = ['correct-present', 'correct-absent', 'false-positive', 'false-negative', 'wrong-value', 'wrong-status'] as const;
 type EvaluationOutcome = typeof evaluationOutcomes[number];
 const maxArtifactBytes = 100_000;
+const rolloutReviewTarget = 25;
+const rolloutMetricFloor = 0.95;
 
 interface RunRow {
   run_key: string;
@@ -87,6 +90,54 @@ async function evaluationSummary(db: D1Database) {
     preprocessing: row.preprocessing_version, field: row.field, outcome: row.outcome, count: row.count })) };
 }
 
+async function rolloutQualityGate(db: D1Database) {
+  const rows = await db.prepare(`SELECT cohort.run_key, evaluations.field, evaluations.outcome
+    FROM (
+      SELECT run_key FROM shadow_extraction_runs
+      WHERE state = 'completed' AND origin IN ('provider-poll', 'scheduled-verification')
+        AND model_id = ? AND prompt_version = ? AND schema_version = ? AND preprocessing_version = ?
+      ORDER BY created_at, run_key
+      LIMIT ?
+    ) cohort
+    LEFT JOIN shadow_extraction_evaluations evaluations ON evaluations.run_key = cohort.run_key
+    ORDER BY cohort.run_key, evaluations.field`).bind(SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION,
+      SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION, rolloutReviewTarget)
+    .all<{ run_key: string; field: string | null; outcome: EvaluationOutcome | null }>();
+  const evaluationsByRun = new Map<string, Map<string, EvaluationOutcome>>();
+  for (const row of rows.results) {
+    const evaluations = evaluationsByRun.get(row.run_key) ?? new Map<string, EvaluationOutcome>();
+    if (row.field && row.outcome) evaluations.set(row.field, row.outcome);
+    evaluationsByRun.set(row.run_key, evaluations);
+  }
+  const reviewedRuns = [...evaluationsByRun.entries()].filter(([, evaluations]) =>
+    evaluationFields.every(field => evaluations.has(field)) && evaluations.size === evaluationFields.length);
+  const fields = Object.fromEntries(shadowPublicationFields.map(field => {
+    const counts = Object.fromEntries(evaluationOutcomes.map(outcome => [outcome, 0])) as Record<EvaluationOutcome, number>;
+    for (const [, evaluations] of reviewedRuns) {
+      const outcome = evaluations.get(field);
+      if (outcome) counts[outcome] += 1;
+    }
+    const precisionDenominator = counts['correct-present'] + counts['false-positive'] + counts['wrong-value'];
+    const recallDenominator = counts['correct-present'] + counts['false-negative'] + counts['wrong-value'];
+    const precision = precisionDenominator ? counts['correct-present'] / precisionDenominator : null;
+    const recall = recallDenominator ? counts['correct-present'] / recallDenominator : null;
+    return [field, { ...counts, precision, recall, positiveExamples: counts['correct-present'],
+      passed: reviewedRuns.length === rolloutReviewTarget && precision !== null && recall !== null
+        && precision >= rolloutMetricFloor && recall >= rolloutMetricFloor && counts['wrong-status'] === 0 }];
+  })) as Record<ShadowPublicationField, Record<EvaluationOutcome, number> & {
+    precision: number | null;
+    recall: number | null;
+    positiveExamples: number;
+    passed: boolean;
+  }>;
+  return {
+    cohort: { targetRuns: rolloutReviewTarget, selectedRuns: evaluationsByRun.size, fullyReviewedRuns: reviewedRuns.length,
+      origins: ['provider-poll', 'scheduled-verification'] },
+    thresholds: { minimumPrecision: rolloutMetricFloor, minimumRecall: rolloutMetricFloor },
+    fields,
+  };
+}
+
 export async function handleShadowPublication(request: Request, env: {
   DB: D1Database;
   SHADOW_EXTRACTION_ARTIFACTS: R2Bucket;
@@ -98,6 +149,7 @@ export async function handleShadowPublication(request: Request, env: {
       WHERE revoked_at IS NULL GROUP BY policy_version`).all<{ policy_version: string; count: number }>();
     return Response.json({ enabled: policy.enabled, version: policy.version, allowedFields: policy.allowedFields,
       cohortSize: policy.cohort.length, activeReceipts: receipts.results, evaluations: await evaluationSummary(env.DB),
+      rolloutQualityGate: await rolloutQualityGate(env.DB),
       extractionScope: { classification: ['technical', 'earlyCareer', 'disciplines'],
         metadata: [...evaluationFields], publishedMetadata: ['compensation', 'locations', 'workMode'],
         deterministicBaseline: { covered: [...deterministicBaselineFields], llmOnly: ['eligibility'] } } },
@@ -163,6 +215,13 @@ export async function handleShadowPublication(request: Request, env: {
     const evidenceFingerprint = shadowPublicationFingerprint({ jobId: run.job_id, sourceId: run.source_id, externalId: run.external_id,
       contentHash: run.content_hash, runKey: run.run_key, policyVersion: policy.version, allowedFields: acceptedFields });
     const receiptId = createHash('sha256').update(`receipt\0${evidenceFingerprint}`).digest('hex');
+    const existingReceipt = await env.DB.prepare(`SELECT receipt_id FROM shadow_publication_receipts
+      WHERE receipt_id = ? AND revoked_at IS NULL`).bind(receiptId).first<{ receipt_id: string }>();
+    if (!existingReceipt) {
+      const qualityGate = await rolloutQualityGate(env.DB);
+      const blockedFields = policy.allowedFields.filter(field => !qualityGate.fields[field].passed);
+      if (blockedFields.length) throw new Error(`Natural production quality gate has not passed for: ${blockedFields.join(', ')}`);
+    }
     await env.DB.prepare(`INSERT INTO shadow_publication_receipts
       (receipt_id, job_id, source_id, external_id, content_hash, run_key, policy_version, accepted_fields, evidence_fingerprint, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(receipt_id) DO NOTHING`).bind(receiptId, run.job_id, run.source_id, run.external_id,

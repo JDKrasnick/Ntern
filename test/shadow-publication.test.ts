@@ -5,7 +5,8 @@ import { parseShadowPublicationPolicy, policyAllows, shadowExtractionEvidence } 
 import cloudflareWorker, { type Environment } from '../cloudflare/worker.js';
 import { reconcileRoleMetadata, ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
-import type { ShadowExtraction } from '../src/shadow-extraction.js';
+import { SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PREPROCESSING_VERSION, SHADOW_EXTRACTION_PROMPT_VERSION,
+  SHADOW_EXTRACTION_SCHEMA_VERSION, type ShadowExtraction } from '../src/shadow-extraction.js';
 import type { Internship, RoleMetadataEvidence } from '../src/types.js';
 import type { R2Bucket } from '../cloudflare/types.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
@@ -55,7 +56,8 @@ const extraction: ShadowExtraction = {
 async function publicationDatabase(): Promise<{ database: DatabaseSync; artifacts: MemoryR2 }> {
   const database = new DatabaseSync(':memory:');
   for (const migration of ['0001_initial.sql', '0003_billing_shutdown.sql', '0015_role_metadata_enrichment.sql', '0020_shadow_extraction.sql', '0021_shadow_extraction_fencing.sql',
-    '0022_shadow_extraction_cache_expiry.sql', '0023_shadow_extraction_attempt_costs.sql', '0024_shadow_publication_receipts.sql', '0025_shadow_extraction_evaluations.sql']) {
+    '0022_shadow_extraction_cache_expiry.sql', '0023_shadow_extraction_attempt_costs.sql', '0024_shadow_publication_receipts.sql', '0025_shadow_extraction_evaluations.sql',
+    '0026_shadow_extraction_origin.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   database.prepare(`INSERT INTO shadow_extraction_runs
@@ -87,6 +89,24 @@ async function publicationDatabase(): Promise<{ database: DatabaseSync; artifact
   const validation = { accepted: extraction, failures: [], fieldOutcomes: Object.entries(extraction.fields).map(([field, value]) => ({ field, status: value.status, accepted: true })) };
   await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ response: extraction, validation })).buffer);
   return { database, artifacts };
+}
+
+function seedRolloutQualityGate(database: DatabaseSync): void {
+  const fields = ['compensation', 'locations', 'workMode', 'housing', 'timing', 'education', 'eligibility'] as const;
+  for (let index = 1; index <= 25; index += 1) {
+    const runKey = index.toString(16).padStart(64, '0');
+    const timestamp = `2026-09-${String(index).padStart(2, '0')}T00:00:00.000Z`;
+    database.prepare(`INSERT INTO shadow_extraction_runs
+      (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version,
+        schema_version, preprocessing_version, state, input_key, response_key, created_at, completed_at, updated_at, origin)
+      VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, 'provider-poll')`).run(
+      runKey, `gate-job-${index}`, `greenhouse-gate-${index}`, String(index), `https://jobs.example/${index}`, runKey,
+      SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION,
+      SHADOW_EXTRACTION_PREPROCESSING_VERSION, `input-${index}`, `response-${index}`, timestamp, timestamp, timestamp,
+    );
+    for (const field of fields) database.prepare(`INSERT INTO shadow_extraction_evaluations (run_key, field, outcome, evaluated_at)
+      VALUES (?, ?, ?, ?)`).run(runKey, field, field === 'locations' || field === 'workMode' ? 'correct-present' : 'correct-absent', timestamp);
+  }
 }
 
 async function createReceipt(database: DatabaseSync, artifacts: MemoryR2, version: string, acceptedFields: string[]) {
@@ -182,8 +202,42 @@ describe('shadow publication policy', () => {
     expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get()).toEqual({ count: 0 });
   });
 
+  it('blocks new receipts until 25 natural current-version runs are fully reviewed', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    const policy = { enabled: true, version: 'expanded-v1', allowedFields: ['locations'],
+      cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }] };
+    database.prepare(`INSERT INTO shadow_extraction_evaluations (run_key, field, outcome, evaluated_at)
+      VALUES (?, 'locations', 'correct-present', ?)`).run(hash, '2026-09-08T00:00:00.000Z');
+    const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': 'secret' },
+      body: JSON.stringify({ action: 'create-receipt', runKey: hash, acceptedFields: ['locations'] }),
+    }), { OPERATIONS_SHARED_SECRET: 'secret', DB: d1(database), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) } as unknown as Environment);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ message: 'Natural production quality gate has not passed for: locations' });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get()).toEqual({ count: 0 });
+  });
+
+  it('reports and passes the bounded natural quality gate without qualifying compensation on absent-only examples', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    seedRolloutQualityGate(database);
+    const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+      headers: { 'X-Operations-Key': 'secret' },
+    }), { OPERATIONS_SHARED_SECRET: 'secret', DB: d1(database), SHADOW_EXTRACTION_ARTIFACTS: artifacts } as unknown as Environment);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { rolloutQualityGate: {
+      cohort: { targetRuns: number; selectedRuns: number; fullyReviewedRuns: number };
+      fields: Record<string, { positiveExamples: number; precision: number | null; recall: number | null; passed: boolean }>;
+    } };
+    expect(body.rolloutQualityGate.cohort).toMatchObject({ targetRuns: 25, selectedRuns: 25, fullyReviewedRuns: 25 });
+    expect(body.rolloutQualityGate.fields.locations).toMatchObject({ positiveExamples: 25, precision: 1, recall: 1, passed: true });
+    expect(body.rolloutQualityGate.fields.workMode).toMatchObject({ positiveExamples: 25, precision: 1, recall: 1, passed: true });
+    expect(body.rolloutQualityGate.fields.compensation).toMatchObject({ positiveExamples: 0, precision: null, recall: null, passed: false });
+  });
+
   it('keeps changed review decisions append-only and identical receipt creation idempotent', async () => {
     const { database, artifacts } = await publicationDatabase();
+    seedRolloutQualityGate(database);
     const first = await createReceipt(database, artifacts, 'v1', ['locations']);
     const second = await createReceipt(database, artifacts, 'v2', ['workMode']);
     const repeated = await createReceipt(database, artifacts, 'v2', ['workMode']);
