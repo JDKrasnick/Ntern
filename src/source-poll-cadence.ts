@@ -9,6 +9,11 @@ const providerSchedules = Object.fromEntries(
 export const SOURCE_POLL_CADENCE = {
   publishedIntervalMs: 30 * 60 * 1000,
   shadowIntervalMs: 3 * 60 * 60 * 1000,
+  // Quarantined sources receive one validation-only retry per day. Their
+  // stable six-hour slot prevents a provider outage from triggering a second
+  // synchronized fleet-wide burst.
+  recoveryProbeIntervalMs: 24 * 60 * 60 * 1000,
+  recoveryProbeJitterMs: 6 * 60 * 60 * 1000,
   // With the current account concurrency quota of 10, three provider fleets
   // can use at most six worker executions and leave capacity for the public API.
   workerMaxConcurrency: 2,
@@ -61,6 +66,19 @@ function isShadowSourceDue(
   return currentWindow % buckets === stableSourceBucket(sourceId, buckets);
 }
 
+export function isQuarantinedRecoveryProbeDue(sourceId: string, health: SourceHealth, now: Date): boolean {
+  if (health.state !== 'quarantined') return false;
+  const lastAttemptAt = timestamp(health.lastAttemptAt) ?? timestamp(health.quarantinedAt);
+  if (lastAttemptAt === undefined) return false;
+  const elapsedWindows = Math.floor(now.getTime() / SOURCE_POLL_CADENCE.publishedIntervalMs)
+    - Math.floor(lastAttemptAt / SOURCE_POLL_CADENCE.publishedIntervalMs);
+  const recoveryWindows = SOURCE_POLL_CADENCE.recoveryProbeIntervalMs / SOURCE_POLL_CADENCE.publishedIntervalMs;
+  if (elapsedWindows < recoveryWindows) return false;
+  const jitterWindows = SOURCE_POLL_CADENCE.recoveryProbeJitterMs / SOURCE_POLL_CADENCE.publishedIntervalMs;
+  const currentWindow = Math.floor(now.getTime() / SOURCE_POLL_CADENCE.publishedIntervalMs);
+  return currentWindow % jitterWindows === stableSourceBucket(sourceId, jitterWindows);
+}
+
 export function isProviderSourceDue(
   sourceId: string,
   sourceStatus: 'published' | 'shadow',
@@ -68,7 +86,8 @@ export function isProviderSourceDue(
   now: Date,
   health?: SourceHealth,
 ): boolean {
-  if (health?.sourceStatus === 'paused' || health?.state === 'quarantined') return false;
+  if (health?.state === 'quarantined') return isQuarantinedRecoveryProbeDue(sourceId, health, now);
+  if (health?.sourceStatus === 'paused') return false;
   const backoffUntil = timestamp(health?.backoffUntil);
   if (backoffUntil !== undefined && backoffUntil > now.getTime()) return false;
   if (sourceStatus === 'published') return true;

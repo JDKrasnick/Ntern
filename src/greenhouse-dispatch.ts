@@ -42,9 +42,13 @@ function chunks<T>(items: T[], size: number): T[][] {
 export function greenhouseWorkMessages(
   sources: ReviewedGreenhouseSource[] = reviewedGreenhouseSources,
   scheduledAt = new Date(),
+  recoveryProbeSourceIds = new Set<string>(),
 ): GreenhouseWorkMessage[] {
   const timestamp = scheduledAt.toISOString();
-  return sources.map((source) => ({ version: 1, sourceId: source.id, scheduledAt: timestamp }));
+  return sources.map((source) => ({
+    version: 1, sourceId: source.id, scheduledAt: timestamp,
+    ...(recoveryProbeSourceIds.has(source.id) ? { force: true } : {}),
+  }));
 }
 
 export function isGreenhouseSourceDue(
@@ -60,8 +64,8 @@ async function dueSources(
   sources: ReviewedGreenhouseSource[],
   checkpointReader: CheckpointReader | undefined,
   now: Date,
-): Promise<ReviewedGreenhouseSource[]> {
-  if (!checkpointReader) return sources;
+): Promise<Array<{ source: ReviewedGreenhouseSource; recoveryProbe: boolean }>> {
+  if (!checkpointReader) return sources.map((source) => ({ source, recoveryProbe: false }));
   const checkpoints = new Map<string, SourceCheckpoint | undefined>();
   const health = new Map<string, SourceHealth | undefined>();
   let next = 0;
@@ -78,14 +82,22 @@ async function dueSources(
     }
   };
   await Promise.all(Array.from({ length: Math.min(24, sources.length) }, worker));
-  return sources.filter((source) => isGreenhouseSourceDue(source, checkpoints.get(source.id), now, health.get(source.id)));
+  return sources.flatMap((source) => {
+    const sourceHealth = health.get(source.id);
+    if (!isGreenhouseSourceDue(source, checkpoints.get(source.id), now, sourceHealth)) return [];
+    return [{ source, recoveryProbe: sourceHealth?.state === 'quarantined' }];
+  });
 }
 
 export async function dispatchGreenhouseBoards(dependencies: GreenhouseDispatchDependencies): Promise<{ queued: number }> {
   const client = dependencies.client ?? new SQSClient({});
   const now = (dependencies.now ?? (() => new Date()))();
   const sources = dependencies.sources ?? reviewedGreenhouseSources;
-  const messages = greenhouseWorkMessages(await dueSources(sources, dependencies.checkpointReader, now), now);
+  const due = await dueSources(sources, dependencies.checkpointReader, now);
+  const messages = greenhouseWorkMessages(
+    due.map(({ source }) => source), now,
+    new Set(due.filter(({ recoveryProbe }) => recoveryProbe).map(({ source }) => source.id)),
+  );
   const window = Math.floor(now.getTime() / GREENHOUSE_POLL_INTERVAL_MS);
   let queued = 0;
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { queueHasBacklog } from '../cloudflare/queue-backlog.js';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, documentContent, failedStructuredRecoveryHealth, githubSourceRunBlocked, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, dispatchProviders, documentContent, failedStructuredRecoveryHealth, githubSourceRunBlocked, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -8,6 +8,13 @@ import type { Queue } from '../cloudflare/types.js';
 import { catalogProviderIds, integrationRegistry } from '../src/integration-registry.js';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
+import { D1EmployerStore } from '../cloudflare/employer-store.js';
+import { isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
+import { reviewedAshbySources } from '../src/sources/ashby-config.js';
+import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
+import { reviewedLeverSources } from '../src/sources/lever-config.js';
+import type { ReviewedSourceRecord } from '../src/employer-types.js';
+import type { SourceHealth } from '../src/types.js';
 
 const queue = (metrics: Queue['metrics']): Queue => ({
   async send() {},
@@ -28,6 +35,58 @@ describe('Cloudflare scheduled dispatch cost guard', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(queueHasBacklog(queue(async () => { throw new Error('metrics unavailable'); }), 'greenhouse')).resolves.toBe(false);
     vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['greenhouse', reviewedGreenhouseSources.find((source) => source.status === 'shadow')!],
+    ['lever', reviewedLeverSources.find((source) => source.status === 'shadow')!],
+    ['ashby', reviewedAshbySources.find((source) => source.status === 'shadow')!],
+  ] as const)('serializes an eligible %s recovery probe as forced work', async (provider, source) => {
+    const health: SourceHealth = {
+      sourceId: source.id,
+      state: 'quarantined',
+      sourceStatus: 'paused',
+      lastAttemptAt: '2026-09-01T00:00:00.000Z',
+      quarantinedAt: '2026-09-01T00:00:00.000Z',
+      consecutiveFailures: 2,
+      durationMs: 20,
+    };
+    const start = Date.parse(health.lastAttemptAt) + SOURCE_POLL_CADENCE.recoveryProbeIntervalMs;
+    const probeAt = Array.from(
+      { length: SOURCE_POLL_CADENCE.recoveryProbeJitterMs / SOURCE_POLL_CADENCE.publishedIntervalMs },
+      (_, index) => new Date(start + index * SOURCE_POLL_CADENCE.publishedIntervalMs),
+    ).find((now) => isQuarantinedRecoveryProbeDue(source.id, health, now))!;
+    const record: ReviewedSourceRecord = {
+      sourceId: source.id,
+      provider,
+      config: { ...source },
+      evidence: { origin: 'checked-in-reviewed-registry', retained: true },
+      state: 'shadow',
+      createdAt: '2026-09-01T00:00:00.000Z',
+      updatedAt: '2026-09-01T00:00:00.000Z',
+    };
+    const sent: unknown[] = [];
+    const workQueue: Queue = {
+      async send() {},
+      async sendBatch(messages) { sent.push(...messages.map(({ body }) => body)); },
+    };
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([record]);
+    vi.spyOn(D1EmployerStore.prototype, 'putReviewedSource').mockResolvedValue();
+    vi.spyOn(D1InternshipStore.prototype, 'getCheckpoint').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(health);
+    vi.spyOn(D1InternshipStore.prototype, 'listLeverAdmissions').mockResolvedValue([]);
+
+    try {
+      await expect(dispatchProviders({
+        DB: {} as Environment['DB'],
+        GREENHOUSE_QUEUE: workQueue,
+        LEVER_QUEUE: workQueue,
+        ASHBY_QUEUE: workQueue,
+      } as Environment, provider, probeAt)).resolves.toBe(1);
+      expect(sent).toEqual([expect.objectContaining({ sourceId: source.id, force: true })]);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
 
