@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import simplifyBaselineReport from '../docs/trusted-community/simplify-summer-2026-baseline.json' with { type: 'json' };
 import { deriveCanonicalAdmission, evaluateCatalogAdmission } from '../src/catalog-admission.js';
 import { CatalogReconciler } from '../src/ingestion/catalog-reconciler.js';
@@ -565,6 +565,15 @@ function migrationFixture() {
 }
 
 describe('trusted rollout repair boundaries', { timeout: 20_000 }, () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(inspectedAt));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('revokes without upstream access and can reverse an interrupted rollback', async () => {
     const { store, rows, state, poll, sourceId } = migrationFixture();
     await poll(true);
