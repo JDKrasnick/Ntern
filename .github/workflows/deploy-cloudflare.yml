@@ -1,0 +1,153 @@
+name: Deploy Cloudflare Workers
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact green commit currently at the tip of main
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: cloudflare-workers-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: cloudflare-workers-production
+      url: https://intern-notifs.jdkrasnick.workers.dev
+    env:
+      DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.sha }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
+      AWS_REGION: auto
+      AWS_ENDPOINT_URL_S3: https://${{ vars.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_public_api_url: ${{ vars.PUBLIC_API_URL }}
+      TF_VAR_employer_portal_enabled: ${{ vars.EMPLOYER_PORTAL_ENABLED }}
+      TF_VAR_auth_from_email: ${{ vars.AUTH_FROM_EMAIL }}
+      TF_VAR_gmail_enabled: ${{ vars.GMAIL_ENABLED }}
+      TF_VAR_gmail_client_id: ${{ vars.GMAIL_CLIENT_ID }}
+      TF_VAR_gmail_redirect_uri: ${{ vars.GMAIL_REDIRECT_URI }}
+      TF_VAR_identity_unconfirmed_publication_enabled: ${{ vars.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED }}
+      TF_VAR_trusted_community_catalog_enabled: ${{ vars.TRUSTED_COMMUNITY_CATALOG_ENABLED }}
+      TF_VAR_identity_confirmed_coverage_floor: ${{ vars.IDENTITY_CONFIRMED_COVERAGE_FLOOR }}
+      TF_VAR_llm_metadata_publication_policy_json: ${{ vars.LLM_METADATA_PUBLICATION_POLICY_JSON }}
+      TF_VAR_shadow_extraction_enabled: ${{ vars.SHADOW_EXTRACTION_ENABLED }}
+      TF_VAR_shadow_extraction_monthly_forecast_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS }}
+      TF_VAR_shadow_extraction_monthly_headroom_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS }}
+      OPERATIONS_SHARED_SECRET: ${{ secrets.OPERATIONS_SHARED_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.10.0
+      - name: Reject missing production configuration
+        shell: bash
+        run: |
+          required=(
+            CLOUDFLARE_API_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+            TF_VAR_cloudflare_account_id TF_VAR_public_api_url TF_VAR_employer_portal_enabled
+            TF_VAR_auth_from_email TF_VAR_gmail_enabled TF_VAR_gmail_client_id
+            TF_VAR_gmail_redirect_uri TF_VAR_identity_unconfirmed_publication_enabled
+            TF_VAR_trusted_community_catalog_enabled TF_VAR_identity_confirmed_coverage_floor
+            TF_VAR_llm_metadata_publication_policy_json TF_VAR_shadow_extraction_enabled
+            TF_VAR_shadow_extraction_monthly_forecast_cents
+            TF_VAR_shadow_extraction_monthly_headroom_cents
+          )
+          for name in "${required[@]}"; do
+            if test -z "${!name}"; then
+              echo "Missing production setting: $name" >&2
+              exit 1
+            fi
+          done
+      - name: Reject an obsolete or unverified main revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$DEPLOY_SHA" = "$(git rev-parse HEAD)"
+          test "$DEPLOY_SHA" = "$(git ls-remote origin refs/heads/main | cut -f1)"
+          if test "$GITHUB_EVENT_NAME" = workflow_dispatch; then
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=$DEPLOY_SHA&per_page=10" \
+              --jq '.workflow_runs | map(select(.head_sha == env.DEPLOY_SHA)) | first | .conclusion')
+            test "$conclusion" = success
+          fi
+      - run: npm ci
+      - run: npm run build:cloudflare
+      - name: Initialize production state
+        run: tofu -chdir=infra/cloudflare init -reconfigure
+      - name: Back up pre-deploy state
+        id: backup_before
+        shell: bash
+        run: |
+          release="production-deployments/$DEPLOY_SHA/$GITHUB_RUN_ID"
+          echo "RELEASE_PREFIX=$release" >> "$GITHUB_ENV"
+          tofu -chdir=infra/cloudflare state pull > "$RUNNER_TEMP/cloudflare-before.tfstate"
+          aws s3 cp "$RUNNER_TEMP/cloudflare-before.tfstate" \
+            "s3://intern-notifs-opentofu-state/$release/cloudflare-before.tfstate" \
+            --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
+      - name: Create and validate saved plan
+        id: plan
+        shell: bash
+        run: |
+          tofu -chdir=infra/cloudflare plan -lock-timeout=5m -out="$RUNNER_TEMP/cloudflare.tfplan"
+          tofu -chdir=infra/cloudflare show -json "$RUNNER_TEMP/cloudflare.tfplan" > "$RUNNER_TEMP/cloudflare-plan.json"
+          npx tsx scripts/cloudflare-plan-guard.ts "$RUNNER_TEMP/cloudflare-plan.json"
+          aws s3 cp "$RUNNER_TEMP/cloudflare.tfplan" \
+            "s3://intern-notifs-opentofu-state/$RELEASE_PREFIX/cloudflare.tfplan" \
+            --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
+          sha256sum "$RUNNER_TEMP/cloudflare.tfplan" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Apply exact saved plan
+        if: steps.plan.outputs.changed == 'true'
+        run: tofu -chdir=infra/cloudflare apply -auto-approve "$RUNNER_TEMP/cloudflare.tfplan"
+      - name: Require converged state
+        run: tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode
+      - name: Back up post-deploy state
+        if: always() && steps.backup_before.outcome == 'success'
+        shell: bash
+        run: |
+          tofu -chdir=infra/cloudflare state pull > "$RUNNER_TEMP/cloudflare-after.tfstate"
+          aws s3 cp "$RUNNER_TEMP/cloudflare-after.tfstate" \
+            "s3://intern-notifs-opentofu-state/$RELEASE_PREFIX/cloudflare-after.tfstate" \
+            --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
+      - name: Smoke-test and monitor production
+        shell: bash
+        run: |
+          api="$TF_VAR_public_api_url"
+          for attempt in 1 2 3; do
+            test "$(curl -fsS -o /dev/null -w '%{http_code}' "$api/jobs")" = 200
+            test "$(curl -sS -o /dev/null -w '%{http_code}' "$api/me/applications")" = 401
+            test "$(curl -sS -o /dev/null -w '%{http_code}' "$api/operations/sources")" = 401
+            if test "$attempt" != 3; then sleep 60; fi
+          done
+          curl -fsS "$api/catalog?disciplines=Software%20Engineering" \
+            | jq -e '.groups | length > 0 and all(.[]; .disciplines | index("SWE"))' >/dev/null
+          if test -n "$OPERATIONS_SHARED_SECRET"; then
+            curl -fsS -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" "$api/internal/deployment" \
+              | jq -e '.api and .ingestion' >/dev/null
+          fi
