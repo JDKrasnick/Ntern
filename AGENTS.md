@@ -25,7 +25,7 @@ The detailed product tracker is [`docs/product-roadmap.md`](docs/product-roadmap
 
 - Repository: `JDKrasnick/intern-notifs`; owner GitHub handle: `JDKrasnick`.
 - Make small, atomic or medium-sized commits and keep CI green. Preserve unrelated dirty working-tree changes.
-- Use AWS through the configured `intern-notifs` assumed role in the CLI; validate the active principal with `aws sts get-caller-identity`. Never use root credentials or commit credentials.
+- Operate the active backend through the configured Cloudflare account; validate access with `npx wrangler whoami` before Cloudflare operations. AWS is retained rollback/export infrastructure only: do not access, deploy, or modify it unless the owner explicitly requests a legacy export or recovery.
 - The owner handles Apple/App Store Connect UI and physical-device testing when required. Agents can launch EAS builds and submissions after approval.
 - After using the iPhone Simulator, shut down any booted simulator and quit the Simulator app before finishing unless the owner asks to leave it running; it consumes significant memory.
 
@@ -38,4 +38,4 @@ The detailed product tracker is [`docs/product-roadmap.md`](docs/product-roadmap
 
 ## Security boundary
 
-Do not put passwords, AWS credentials, Apple private keys, App Store Connect API keys, personal email addresses, or Expo tokens in Git, documentation, or mobile `EXPO_PUBLIC_*` variables. The IDs and URLs declared public below are configuration identifiers, not secrets.
+Do not put passwords, Cloudflare API tokens, AWS credentials, Apple private keys, App Store Connect API keys, personal email addresses, or Expo tokens in Git, documentation, or mobile `EXPO_PUBLIC_*` variables. The IDs and URLs declared public below are configuration identifiers, not secrets.

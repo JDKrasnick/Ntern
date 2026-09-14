@@ -1,8 +1,8 @@
 # Deployment and operations runbook
 
-> The active development backend is Cloudflare while the staged mobile cutover
-> is validated. Retained AWS resources remain rollback/export-only and must not
-> be deleted. The replacement Worker and Terraform configuration are documented
+> Cloudflare is the active backend. Retained AWS resources are rollback/export-only,
+> must not be deployed or modified during ordinary operations, and must not be
+> deleted. The replacement Worker and Terraform configuration are documented
 > in [`cloudflare-migration.md`](cloudflare-migration.md).
 
 ## Architecture
@@ -44,9 +44,11 @@ create an R2 token scoped only to that bucket with Object Read & Write access.
 Do not put the R2 access key, secret key, backend endpoint, state, or saved plan
 in Git.
 
-Supply the S3-compatible endpoint and bucket-scoped credentials through the
-operator environment. Use a dedicated shell so these R2 credentials cannot be
-mistaken for credentials to the retained AWS account:
+Supply the Cloudflare R2 S3-compatible endpoint and bucket-scoped credentials
+through the operator environment. OpenTofu uses `AWS_*` variable names solely
+because its R2 state backend is S3-compatible; these are Cloudflare R2
+credentials, not credentials for the retained AWS account. Use a dedicated
+shell so they cannot be confused with legacy AWS access:
 
 ```bash
 export AWS_ACCESS_KEY_ID='bucket-scoped R2 access key ID'
@@ -1015,9 +1017,12 @@ fall back to the fully normalized application URL. Employer/title/season role
 families intentionally remain diagnostic-only so regional requisitions are not
 silently discarded.
 
-## AWS deployment
+## Legacy AWS rollback/export reference
 
-Use the configured `intern-notifs` assumed role from the AWS CLI. Confirm the active identity before every deployment:
+AWS is not an active deployment target. The commands in this legacy reference
+are for an owner-approved export or rollback recovery only; ordinary deployment,
+operations, and verification use Cloudflare. Do not run these commands unless
+the owner explicitly authorizes legacy AWS work.
 
 ```bash
 aws sts get-caller-identity
