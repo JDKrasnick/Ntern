@@ -131,7 +131,7 @@ describe('polling', () => {
     expect(await store.pendingSms()).toEqual([]);
   });
 
-  it('retries a failed provider shadow queue handoff from the durable source checkpoint', async () => {
+  it('defers a failed provider shadow queue handoff without failing the source poll', async () => {
     const store = new MemoryInternshipStore(); const sourceId = 'greenhouse-acme';
     const makeSnapshot = (ids: string[], hash: string): SourceFetchResult & SourceSnapshot => ({ sourceId, outcome: 'changed', complete: true,
       rawCount: ids.length, contentHash: hash, checkpoint: { sourceId, successfulFetches: 1, contentHash: hash, activeExternalIds: ids }, listings: [], notModified: false,
@@ -152,7 +152,7 @@ describe('polling', () => {
       if (fail) throw new Error('queue unavailable'); delivered.push(request.externalId);
     }, resolver).poll({ naturalProviderPoll: true });
     await run(); snapshot = makeSnapshot(['100', '101'], 'new-role'); fail = true;
-    expect((await run()).failures).toEqual([expect.stringContaining('queue unavailable')]);
+    expect((await run()).failures).toEqual([]);
     expect(await store.listPendingProviderShadowVerifications()).toEqual([expect.objectContaining({ externalId: '101', shadowOrigin: 'provider-poll' })]);
     fail = false; await run();
     expect(delivered).toEqual(['101']);

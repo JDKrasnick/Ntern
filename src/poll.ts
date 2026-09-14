@@ -517,8 +517,17 @@ export class IngestionRunner {
     if (!this.enqueueDestinationVerification || !this.store.listPendingProviderShadowVerifications
       || !this.store.markProviderShadowVerificationEnqueued) return;
     for (const request of await this.store.listPendingProviderShadowVerifications()) {
-      await this.enqueueDestinationVerification(request);
-      await this.store.markProviderShadowVerificationEnqueued(request.idempotencyKey!);
+      try {
+        await this.enqueueDestinationVerification(request);
+        await this.store.markProviderShadowVerificationEnqueued(request.idempotencyKey!);
+      } catch (error) {
+        // Persistence already committed the outbox row. Leave it for the
+        // bounded scheduled sweep rather than turning a successful source poll
+        // into a retry storm when the downstream queue is unavailable.
+        console.error(JSON.stringify({ event: 'provider_shadow_handoff_deferred', sourceId: request.sourceId,
+          provider: request.providerIdentity.provider,
+          error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) }));
+      }
     }
   }
 
@@ -1234,7 +1243,6 @@ export class IngestionRunner {
       let failureCategory: NonNullable<SourceHealth['diagnosticCategory']> = 'transport';
       let trustedMetrics: SourceHealth['trustedCommunity'];
       try {
-        await this.drainProviderShadowVerifications();
         const admissionConfigurationVersion = prefetched
           ? prefetched.admissionConfigurationVersion
           : effectiveAdmissionConfigurationVersion({

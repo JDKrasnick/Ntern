@@ -1004,6 +1004,14 @@ async function sendQueueMessages(queue: Queue, messages: unknown[]): Promise<voi
   }
 }
 
+// D1 overload is intentionally not an in-request resilientD1 retry. Delaying
+// at the queue boundary prevents a consumer batch from amplifying contention.
+export function d1OverloadRetryDelay(error: unknown, attempts = 1): number | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/\bd1\b.*(?:overload|too many|busy|limit)|database is locked/i.test(message)) return undefined;
+  return attempts <= 1 ? 60 : 300;
+}
+
 export async function dispatchProviders(
   env: Environment,
   provider: Exclude<CatalogProviderId, 'github'>,
@@ -1053,6 +1061,28 @@ async function refreshCatalogProjection(store: D1InternshipStore) {
     groups: groups.length,
     roles: groups.reduce((total, group) => total + group.roles.length, 0),
   };
+}
+
+/** Recovery is deliberately bounded and best-effort: a temporarily unavailable
+ * downstream queue must not make unrelated scheduled maintenance fail. */
+export async function recoverPendingProviderShadowHandoffs(
+  store: D1InternshipStore,
+  queue: Queue,
+  log: (event: string) => void = console.error,
+): Promise<{ attempted: number; enqueued: number }> {
+  const pending = await store.listPendingProviderShadowVerifications(100);
+  let enqueued = 0;
+  for (const request of pending) {
+    try {
+      await sendQueueMessageWithin(queue, destinationVerificationMessage(request));
+      await store.markProviderShadowVerificationEnqueued(request.idempotencyKey!);
+      enqueued += 1;
+    } catch (error) {
+      log(JSON.stringify({ event: 'provider_shadow_handoff_recovery_failed', sourceId: request.sourceId,
+        provider: request.providerIdentity.provider, error: safeDiagnostic(error) }));
+    }
+  }
+  return { attempted: pending.length, enqueued };
 }
 
 export type PostingIdentityAuditEvent = {
@@ -1187,6 +1217,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   if (event.cron === '9-59/10 * * * *') {
     const observedAt = new Date(event.scheduledTime);
     const admissionVerificationRetries = await enqueueDueDestinationVerifications(env, observedAt);
+    const providerShadowRecovery = await recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE);
     const queueMetrics = env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined;
     const deadLetterMetrics = env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined;
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
@@ -1202,7 +1233,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     });
     const projection = await refreshCatalogProjection(store);
     const notifications = await drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher());
-    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries }));
+    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery }));
     return;
   }
   if (event.cron === '*/5 * * * *') {
@@ -1310,6 +1341,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   if (catalogProvider === 'github') {
     const failed = new Set<string>();
+    const overloadDelays = new Map<string, number>();
     const employerStore = new D1EmployerStore(env.DB);
     const admissionResolver = catalogAdmissionResolver(env);
     let structured: Awaited<ReturnType<typeof reviewedStructuredRegistry>>;
@@ -1327,7 +1359,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           body: queued.body, error,
         });
         console.error(JSON.stringify({ command: 'github-poll-setup', messageId: queued.id, error: safeDiagnostic(error) }));
-        queued.retry();
+        queued.retry({ delaySeconds: d1OverloadRetryDelay(error, queued.attempts) });
       }
       return;
     }
@@ -1393,6 +1425,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         await resolveFailures(queued.id, queued.attempts);
       } catch (error) {
         failed.add(record.messageId);
+        const delay = d1OverloadRetryDelay(error, queued.attempts);
+        if (delay) overloadDelays.set(record.messageId, delay);
         await recordQueueFailureBestEffort({
           db: env.DB, queueName: batch.queue, messageId: queued.id, attempts: queued.attempts,
           timestamp: queued.timestamp, sourceId: parsedMessage?.sourceId, sourceKind: parsedMessage?.sourceKind,
@@ -1402,13 +1436,17 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       }
     }
     for (const message of batch.messages) {
-      if (failed.has(message.id)) message.retry();
+      if (failed.has(message.id)) {
+        const delay = overloadDelays.get(message.id);
+        message.retry(delay ? { delaySeconds: delay } : undefined);
+      }
       else message.ack();
     }
     return;
   }
   const event = { Records: records };
   const messageById = new Map(batch.messages.map((message) => [message.id, message]));
+  const overloadDelays = new Map<string, number>();
   // Catalog polls carry only a sourceId. Persist the exact failure category and
   // diagnostic before the platform retries and dead-letters the message, so the
   // guarded DLQ inspector can explain every dead-letter instead of only GitHub.
@@ -1418,6 +1456,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       catch { return undefined; }
     })();
     const queued = messageById.get(record.messageId);
+    const delay = d1OverloadRetryDelay(error, queued?.attempts);
+    if (delay) overloadDelays.set(record.messageId, delay);
     await recordQueueFailureBestEffort({
       db: env.DB, queueName: batch.queue, messageId: record.messageId,
       attempts: queued?.attempts, timestamp: queued?.timestamp, sourceId: parsed?.sourceId,
@@ -1432,7 +1472,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     registry = await reviewedProviderRegistry(new D1EmployerStore(env.DB));
   } catch (error) {
     for (const record of records) await onRecordFailure(record, error);
-    for (const message of batch.messages) message.retry();
+    for (const message of batch.messages) message.retry({ delaySeconds: d1OverloadRetryDelay(error, message.attempts) });
     console.error(JSON.stringify({ command: 'catalog-poll-setup', provider: catalogProvider,
       messageIds: records.map((record) => record.messageId), error: safeDiagnostic(error) }));
     return;
@@ -1454,7 +1494,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       : [];
   } catch (error) {
     for (const record of records) await onRecordFailure(record, error);
-    for (const message of batch.messages) message.retry();
+    for (const message of batch.messages) message.retry({ delaySeconds: d1OverloadRetryDelay(error, message.attempts) });
     console.error(JSON.stringify({ command: 'catalog-poll-setup', provider: catalogProvider,
       messageIds: records.map((record) => record.messageId), error: safeDiagnostic(error) }));
     return;
@@ -1469,7 +1509,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         : { batchItemFailures: records.map((record) => ({ itemIdentifier: record.messageId })) };
   const failed = new Set(result.batchItemFailures.map(({ itemIdentifier }) => itemIdentifier));
   for (const message of batch.messages) {
-    if (failed.has(message.id)) message.retry();
+    if (failed.has(message.id)) {
+      const delay = overloadDelays.get(message.id);
+      message.retry(delay ? { delaySeconds: delay } : undefined);
+    }
     else {
       // A first-delivery message has no prior failure row, so skip the extra
       // write. Only retried deliveries (attempts > 1) can carry one to resolve.
