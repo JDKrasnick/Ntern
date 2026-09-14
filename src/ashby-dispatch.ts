@@ -47,6 +47,7 @@ export function ashbyWorkMessages(
   sources: ReviewedAshbySource[] = reviewedAshbySources,
   scheduledAt = new Date(),
   runId?: string,
+  recoveryProbeSourceIds = new Set<string>(),
 ): AshbyWorkMessage[] {
   const timestamp = scheduledAt.toISOString();
   return sources.map((source) => ({
@@ -54,6 +55,7 @@ export function ashbyWorkMessages(
     sourceId: source.id,
     scheduledAt: timestamp,
     ...(runId ? { runId } : {}),
+    ...(recoveryProbeSourceIds.has(source.id) ? { force: true } : {}),
   }));
 }
 
@@ -134,8 +136,8 @@ async function dueSources(
   sources: ReviewedAshbySource[],
   checkpointReader: CheckpointReader | undefined,
   now: Date,
-): Promise<ReviewedAshbySource[]> {
-  if (!checkpointReader) return sources;
+): Promise<Array<{ source: ReviewedAshbySource; recoveryProbe: boolean }>> {
+  if (!checkpointReader) return sources.map((source) => ({ source, recoveryProbe: false }));
   const checkpoints = new Map<string, SourceCheckpoint | undefined>();
   const health = new Map<string, SourceHealth | undefined>();
   let next = 0;
@@ -153,17 +155,23 @@ async function dueSources(
     }
   };
   await Promise.all(Array.from({ length: Math.min(24, sources.length) }, worker));
-  return sources.filter((source) => isAshbySourceDue(source, checkpoints.get(source.id), now, health.get(source.id)));
+  return sources.flatMap((source) => {
+    const sourceHealth = health.get(source.id);
+    if (!isAshbySourceDue(source, checkpoints.get(source.id), now, sourceHealth)) return [];
+    return [{ source, recoveryProbe: sourceHealth?.state === 'quarantined' }];
+  });
 }
 
 export async function dispatchAshbyBoards(dependencies: AshbyDispatchDependencies): Promise<{ queued: number }> {
   const client = dependencies.client ?? new SQSClient({});
   const now = (dependencies.now ?? (() => new Date()))();
   const sources = dependencies.sources ?? reviewedAshbySources;
+  const due = await dueSources(sources, dependencies.checkpointReader, now);
   const messages = ashbyWorkMessages(
-    await dueSources(sources, dependencies.checkpointReader, now),
+    due.map(({ source }) => source),
     now,
     dependencies.runId ?? randomUUID(),
+    new Set(due.filter(({ recoveryProbe }) => recoveryProbe).map(({ source }) => source.id)),
   );
   const window = Math.floor(now.getTime() / ASHBY_POLL_INTERVAL_MS);
   let queued = 0;

@@ -48,6 +48,7 @@ export function leverWorkMessages(
   sources: ReviewedLeverSource[] = reviewedLeverSources,
   scheduledAt = new Date(),
   runId?: string,
+  recoveryProbeSourceIds = new Set<string>(),
 ): LeverWorkMessage[] {
   const timestamp = scheduledAt.toISOString();
   return sources.map((source) => ({
@@ -55,6 +56,7 @@ export function leverWorkMessages(
     sourceId: source.id,
     scheduledAt: timestamp,
     ...(runId ? { runId } : {}),
+    ...(recoveryProbeSourceIds.has(source.id) ? { force: true } : {}),
   }));
 }
 
@@ -135,8 +137,8 @@ async function dueSources(
   sources: ReviewedLeverSource[],
   checkpointReader: CheckpointReader | undefined,
   now: Date,
-): Promise<ReviewedLeverSource[]> {
-  if (!checkpointReader) return sources;
+): Promise<Array<{ source: ReviewedLeverSource; recoveryProbe: boolean }>> {
+  if (!checkpointReader) return sources.map((source) => ({ source, recoveryProbe: false }));
   const checkpoints = new Map<string, SourceCheckpoint | undefined>();
   const health = new Map<string, SourceHealth | undefined>();
   let next = 0;
@@ -154,7 +156,11 @@ async function dueSources(
     }
   };
   await Promise.all(Array.from({ length: Math.min(24, sources.length) }, worker));
-  return sources.filter((source) => isLeverSourceDue(source, checkpoints.get(source.id), now, health.get(source.id)));
+  return sources.flatMap((source) => {
+    const sourceHealth = health.get(source.id);
+    if (!isLeverSourceDue(source, checkpoints.get(source.id), now, sourceHealth)) return [];
+    return [{ source, recoveryProbe: sourceHealth?.state === 'quarantined' }];
+  });
 }
 
 export async function dispatchLeverBoards(dependencies: LeverDispatchDependencies): Promise<{ queued: number }> {
@@ -164,10 +170,12 @@ export async function dispatchLeverBoards(dependencies: LeverDispatchDependencie
     ? []
     : (await dependencies.checkpointReader.listLeverAdmissions()).map(({ source }) => source);
   const sources = dependencies.sources ?? [...reviewedLeverSources, ...dynamic];
+  const due = await dueSources(sources, dependencies.checkpointReader, now);
   const messages = leverWorkMessages(
-    await dueSources(sources, dependencies.checkpointReader, now),
+    due.map(({ source }) => source),
     now,
     dependencies.runId ?? randomUUID(),
+    new Set(due.filter(({ recoveryProbe }) => recoveryProbe).map(({ source }) => source.id)),
   );
   const window = Math.floor(now.getTime() / LEVER_POLL_INTERVAL_MS);
   let queued = 0;
