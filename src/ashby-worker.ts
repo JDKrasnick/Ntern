@@ -209,7 +209,8 @@ export async function runAshbyBoard(
       const needsLinkEvidenceBackfill = previousHealth?.applicationLinksChecked === undefined
         || previousHealth.applicationLinkFailures === undefined;
       if (!result.notModified || (result.unchangedReason === 'content_hash' && needsLinkEvidenceBackfill)) {
-        if ((previous?.lastRawCount ?? 0) > 0 && (result.rawRowCount ?? 0) === 0) {
+        // An owner-acknowledged empty board is dormant, so its zero rows are expected.
+        if (!source.emptyBoardAcknowledged && (previous?.lastRawCount ?? 0) > 0 && (result.rawRowCount ?? 0) === 0) {
           throw new SourceFetchError(`${source.id}: rejected an unexpected raw-zero snapshot`, 'empty');
         }
         linkValidation = await validateShadowLinks(result.listings, validate);
@@ -316,6 +317,8 @@ export async function runAshbyBoard(
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver).poll({
     runId: message.runId,
+    // Published Ashby boards already tolerate a complete empty snapshot, so an
+    // `emptyBoardAcknowledged` declaration only changes the shadow guard above.
     allowCompleteEmptySnapshot: true,
     naturalProviderPoll: !message.force,
   });

@@ -3,7 +3,30 @@ import { reviewedAshbySources, type ReviewedAshbySource } from '../src/sources/a
 import { reviewedGreenhouseSources, type ReviewedGreenhouseSource } from '../src/sources/greenhouse-config.js';
 import { reviewedLeverSources, type ReviewedLeverSource } from '../src/sources/lever-config.js';
 import { verificationIsActive, type ReviewedSourceRecord } from '../src/employer-types.js';
+import type { EmptyBoardAcknowledgement } from '../src/sources/reviewed-source.js';
 import type { StructuredSourceConfig } from '../src/sources/structured/index.js';
+
+/** Stable comparison for a stored JSON config versus the checked-in reviewed config. */
+function configKey(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+    : item);
+}
+
+/**
+ * D1 stores reviewed config as JSON, so a declaration only reaches dispatch
+ * when it survives this mapping. A malformed one is dropped and the row-count
+ * guard stays armed.
+ */
+function acknowledgementField(value: unknown): { emptyBoardAcknowledged?: EmptyBoardAcknowledgement } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.acknowledgedBy !== 'string' || typeof candidate.acknowledgedAt !== 'string'
+    || typeof candidate.reason !== 'string') return {};
+  return { emptyBoardAcknowledged: {
+    acknowledgedBy: candidate.acknowledgedBy, acknowledgedAt: candidate.acknowledgedAt, reason: candidate.reason,
+  } };
+}
 
 function seededRecord(source: ReviewedGreenhouseSource | ReviewedLeverSource | ReviewedAshbySource, provider: 'greenhouse' | 'lever' | 'ashby'): ReviewedSourceRecord {
   const timestamp = 'admittedAt' in source ? source.admittedAt : new Date(0).toISOString();
@@ -14,15 +37,34 @@ function seededRecord(source: ReviewedGreenhouseSource | ReviewedLeverSource | R
   };
 }
 
-/** Fill any missing checked-in records, then read runtime dispatch exclusively from D1. */
+/**
+ * Reconcile the checked-in reviewed registry with D1, then dispatch from D1:
+ * a missing record is seeded and a drifted, employer-unowned config is
+ * refreshed, while lifecycle columns stay owned by D1 and the employer portal.
+ */
 export async function reviewedProviderRegistry(store: D1EmployerStore): Promise<{
   greenhouse: ReviewedGreenhouseSource[]; lever: ReviewedLeverSource[]; ashby: ReviewedAshbySource[];
 }> {
   const current = await store.listReviewedSources();
-  const existingIds = new Set(current.map((record) => record.sourceId));
-  for (const source of reviewedGreenhouseSources) if (!existingIds.has(source.id)) await store.putReviewedSource(seededRecord(source, 'greenhouse'));
-  for (const source of reviewedLeverSources) if (!existingIds.has(source.id)) await store.putReviewedSource(seededRecord(source, 'lever'));
-  for (const source of reviewedAshbySources) if (!existingIds.has(source.id)) await store.putReviewedSource(seededRecord(source, 'ashby'));
+  const byId = new Map(current.map((record) => [record.sourceId, record]));
+  const checkedIn = [
+    ...reviewedGreenhouseSources.map((source) => ['greenhouse', source] as const),
+    ...reviewedLeverSources.map((source) => ['lever', source] as const),
+    ...reviewedAshbySources.map((source) => ['ashby', source] as const),
+  ];
+  for (const [provider, source] of checkedIn) {
+    const existing = byId.get(source.id);
+    if (!existing) {
+      await store.putReviewedSource(seededRecord(source, provider));
+      continue;
+    }
+    // The checked-in registry owns reviewed config and D1 owns lifecycle state,
+    // so a reviewed config change shipped in code has to refresh the stored row
+    // or it never reaches dispatch. Employer-owned rows stay with the portal.
+    if (existing.organizationId || configKey(existing.config) === configKey(source)) continue;
+    await store.putReviewedSource({ ...existing, provider, config: { ...source }, updatedAt: new Date().toISOString() });
+    console.log(JSON.stringify({ event: 'reviewed_source_config_refreshed', sourceId: source.id, provider }));
+  }
   const candidates = await store.listReviewedSources(undefined, ['active', 'shadow']);
   const active = (await Promise.all(candidates.map(async (record) => {
     if (!record.organizationId) return record;
@@ -38,6 +80,7 @@ export async function reviewedProviderRegistry(store: D1EmployerStore): Promise<
       || !Array.isArray(value.allowedInitialHosts) || !Array.isArray(value.allowedFinalHosts)
       || (value.status !== 'shadow' && value.status !== 'published')) return undefined;
     return {
+      ...acknowledgementField(value.emptyBoardAcknowledged),
       id: value.id, employerId: value.employerId, displayName: value.displayName,
       aliases: value.aliases.filter((item): item is string => typeof item === 'string'), boardToken: value.boardToken,
       careersUrl: value.careersUrl, expectedBoardNames: value.expectedBoardNames.filter((item): item is string => typeof item === 'string'),
@@ -54,7 +97,11 @@ export async function reviewedProviderRegistry(store: D1EmployerStore): Promise<
       || typeof value.careersUrl !== 'string' || typeof value.admittedAt !== 'string'
       || (value.status !== 'shadow' && value.status !== 'published') || value.region !== 'global'
       || (value.evidenceStatus !== 'agent-verified' && value.evidenceStatus !== 'legacy-review')) return undefined;
-    return { id: value.id, company: value.company, site: value.site, careersUrl: value.careersUrl, admittedAt: value.admittedAt, status: value.status, region: value.region, evidenceStatus: value.evidenceStatus };
+    return {
+      ...acknowledgementField(value.emptyBoardAcknowledged),
+      id: value.id, company: value.company, site: value.site, careersUrl: value.careersUrl, admittedAt: value.admittedAt,
+      status: value.status, region: value.region, evidenceStatus: value.evidenceStatus,
+    };
   };
   const ashby = (record: ReviewedSourceRecord): ReviewedAshbySource | undefined => {
     const value = record.config; const identity = value.identity;
@@ -64,6 +111,7 @@ export async function reviewedProviderRegistry(store: D1EmployerStore): Promise<
     const board = identity as Record<string, unknown>;
     if (board.provider !== 'ashby' || typeof board.boardKey !== 'string' || board.apiRegion !== 'global') return undefined;
     return {
+      ...acknowledgementField(value.emptyBoardAcknowledged),
       id: value.id, company: value.company, identity: { provider: 'ashby', boardKey: board.boardKey, apiRegion: 'global' },
       careersUrl: value.careersUrl, admittedAt: value.admittedAt,
       evidenceState: value.evidenceState === 'ownership-verified' ? 'ownership-verified' : 'pending-review',

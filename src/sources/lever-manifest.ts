@@ -11,6 +11,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { admissibleLeverEvidence, evidenceViolations, LEVER_ADMISSIBLE_OWNERSHIP_STATES, type LeverOwnershipEvidence } from './lever-evidence.js';
 import { reviewedLeverSources, type ReviewedLeverSource } from './lever-config.js';
 import { sourceQualityPolicies, type SourceQualityPolicy } from './quality.js';
+import { emptyBoardAcknowledgementViolations } from './reviewed-source.js';
 
 export const LEVER_EVIDENCE_ROOT = 'test/fixtures/lever';
 export const LEVER_REVERIFICATION_DAYS = 180;
@@ -121,6 +122,9 @@ export function collectLeverManifestViolations(
     seenIds.add(source.id);
     seenSites.add(source.site);
     if (!source.id.startsWith('lever-')) violations.push(`${source.id}: source id must be namespaced lever-*`);
+    if (source.emptyBoardAcknowledged) {
+      for (const issue of emptyBoardAcknowledgementViolations(source.emptyBoardAcknowledged, now)) violations.push(`${source.id}: ${issue}`);
+    }
 
     // A registry entry with no matching quality policy is a board whose
     // application URLs nothing checks, which is the drift this catches.

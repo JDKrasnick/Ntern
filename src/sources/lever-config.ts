@@ -1,3 +1,4 @@
+import type { EmptyBoardAcknowledgement } from './reviewed-source.js';
 import { reviewedLeverExpansionSources } from './lever-expansion-data.js';
 import { reviewedLeverOwnerApprovedExpansionSources } from './lever-owner-approved-expansion-data.js';
 
@@ -46,6 +47,8 @@ export interface ReviewedLeverSource {
    * clock, and re-verifying one converts it.
    */
   evidenceStatus: 'agent-verified' | 'legacy-review';
+  /** Set only after the owner confirms the board itself is empty. */
+  emptyBoardAcknowledged?: EmptyBoardAcknowledgement;
 }
 
 export const reviewedLeverSources: ReviewedLeverSource[] = [

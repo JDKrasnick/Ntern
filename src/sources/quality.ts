@@ -1,6 +1,6 @@
 import type { SourceCheckpoint, SourceFetchResult } from '../types.js';
 import { reviewedGreenhouseSources, type ReviewedGreenhouseSource } from './greenhouse-config.js';
-import { reviewedLeverSources } from './lever-config.js';
+import { reviewedLeverSources, type ReviewedLeverSource } from './lever-config.js';
 
 export type SourceClass = 'curated' | 'lever' | 'greenhouse' | 'ashby' | 'smartrecruiters';
 
@@ -149,6 +149,8 @@ export function greenhouseQualityPolicy(source: ReviewedGreenhouseSource): Sourc
     id: source.id,
     sourceClass: 'greenhouse',
     greenhouseAllowedHosts: [...new Set([...source.allowedInitialHosts, ...source.allowedFinalHosts])],
+    // An owner-acknowledged empty board is dormant: its zero rows are expected.
+    ...(source.emptyBoardAcknowledged ? { dormant: true } : {}),
   };
 }
 
@@ -163,6 +165,17 @@ export function enabledGreenhouseQualityPolicies(
   return sources.filter((source) => source.status === 'published').map(greenhouseQualityPolicy);
 }
 
+/** A reviewed Lever board contributes a policy keyed to its reviewed site. */
+export function leverQualityPolicy(source: ReviewedLeverSource): SourceQualityPolicy {
+  return {
+    id: source.id,
+    sourceClass: 'lever',
+    leverSite: source.site,
+    // An owner-acknowledged empty board is dormant: its zero rows are expected.
+    ...(source.emptyBoardAcknowledged ? { dormant: true } : {}),
+  };
+}
+
 export const sourceQualityPolicies: SourceQualityPolicy[] = [
   ...enabledGreenhouseQualityPolicies(),
   { id: 'vanshb03-summer-2027', sourceClass: 'curated' },
@@ -172,7 +185,7 @@ export const sourceQualityPolicies: SourceQualityPolicy[] = [
   { id: 'speedyapply-2027-ai', sourceClass: 'curated' },
   { id: 'northwestern-fintech-2027-quant', sourceClass: 'curated' },
   { id: 'canadian-tech-2027', sourceClass: 'curated' },
-  ...reviewedLeverSources.map((source) => ({ id: source.id, sourceClass: 'lever' as const, leverSite: source.site })),
+  ...reviewedLeverSources.map(leverQualityPolicy),
 ];
 
 export function qualityPolicyFor(sourceId: string): SourceQualityPolicy {

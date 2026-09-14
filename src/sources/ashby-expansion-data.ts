@@ -270,7 +270,12 @@ export const reviewedAshbyExpansionSources: ReviewedSourceRecord[] = [
         "host": "jobs.ashbyhq.com"
       }
     ],
-    "status": "shadow"
+    "status": "shadow",
+    "emptyBoardAcknowledged": {
+      "acknowledgedBy": "JDKrasnick",
+      "acknowledgedAt": "2026-09-11T00:39:13.000Z",
+      "reason": "api.ashbyhq.com/posting-api/job-board/blockhouse returns 200 with the reviewed board identity and zero listed roles since 2026-08-28; the last listed role closed. Monitoring continues for its next listing."
+    }
   },
   {
     "id": "ashby-certifyos",

@@ -3,7 +3,7 @@ import { ashbyAdmissionViolations } from './ashby-admission.js';
 import { reviewedAshbySources } from './ashby-config.js';
 import type { AshbyOwnershipEvidence } from './ashby-evidence.js';
 import type { AshbyProbeResult } from './ashby-probe.js';
-import type { ReviewedSourceRecord } from './reviewed-source.js';
+import { emptyBoardAcknowledgementViolations, type ReviewedSourceRecord } from './reviewed-source.js';
 
 export const ASHBY_EVIDENCE_ROOT = 'test/fixtures/ashby';
 const ASHBY_PROMOTION_MIN_SNAPSHOTS = 3;
@@ -126,6 +126,9 @@ export function collectAshbyManifestViolations(
     ids.add(source.id); boards.add(board); claimedDirs.add(board);
     if (source.identity.provider !== 'ashby') violations.push(`${source.id}: provider is not ashby`);
     if (source.status !== 'shadow' && source.status !== 'published') violations.push(`${source.id}: invalid status`);
+    if (source.emptyBoardAcknowledged) {
+      for (const issue of emptyBoardAcknowledgementViolations(source.emptyBoardAcknowledged, now)) violations.push(`${source.id}: ${issue}`);
+    }
     for (const issue of promotionEvidenceViolations(source, now)) violations.push(`${source.id}: ${issue}`);
     const admitted = Date.parse(source.admittedAt);
     if (Number.isNaN(admitted)) violations.push(`${source.id}: admittedAt is invalid`);

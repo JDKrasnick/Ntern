@@ -95,6 +95,28 @@ describe('Greenhouse queue worker', () => {
     expect(await store.getCheckpoint(acmeSource.id)).toBeUndefined();
   });
 
+  it('rejects an unacknowledged zero-row shadow snapshot without advancing its checkpoint', async () => {
+    const store = new MemoryInternshipStore();
+    const dependencies = { store, sources: [acmeSource], linkValidator: async (url: string) => url };
+    await runGreenhouseBoard(message(), { ...dependencies, fetchImpl: async () => response() });
+    await expect(runGreenhouseBoard(message(), { ...dependencies, fetchImpl: async () => response({ jobs: [], meta: { total: 0 } }) }))
+      .rejects.toThrow('suspicious zero-row');
+    expect(await store.getCheckpoint(`shadow-${acmeSource.id}`)).toMatchObject({ lastRowCount: 1 });
+  });
+
+  it('accepts an owner-acknowledged empty board and advances its checkpoint', async () => {
+    const acknowledged: ReviewedGreenhouseSource = {
+      ...acmeSource,
+      emptyBoardAcknowledged: { acknowledgedBy: 'JDKrasnick', acknowledgedAt: '2026-09-11T00:00:00.000Z', reason: 'seasonally empty' },
+    };
+    const store = new MemoryInternshipStore();
+    const dependencies = { store, sources: [acknowledged], linkValidator: async (url: string) => url };
+    await runGreenhouseBoard(message(), { ...dependencies, fetchImpl: async () => response() });
+    await expect(runGreenhouseBoard(message(), { ...dependencies, fetchImpl: async () => response({ jobs: [], meta: { total: 0 } }) }))
+      .resolves.toMatchObject({ listings: 0 });
+    expect(await store.getCheckpoint(`shadow-${acmeSource.id}`)).toMatchObject({ lastRowCount: 0 });
+  });
+
   it('does not fetch paused work unless it is an explicit operator replay', async () => {
     const store = new MemoryInternshipStore();
     await store.putSourceHealth({

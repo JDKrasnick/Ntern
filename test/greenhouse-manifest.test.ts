@@ -53,6 +53,26 @@ describe('greenhouse manifest', () => {
     expect(collectManifestViolations([source], memoryFs(completeFixtures))).toEqual([]);
   });
 
+  it('gates an empty-board acknowledgement on an owner, a reason, and a fresh timestamp', () => {
+    const clock = new Date('2026-07-25T00:00:00Z');
+    const acknowledged = { ...source, emptyBoardAcknowledged: { acknowledgedBy: 'JDKrasnick', acknowledgedAt: '2026-07-24T18:00:00Z', reason: 'seasonally empty' } };
+    expect(collectManifestViolations([acknowledged], memoryFs(completeFixtures), GREENHOUSE_FIXTURE_ROOT, clock)).toEqual([]);
+    const malformed = { ...source, emptyBoardAcknowledged: { acknowledgedBy: '', acknowledgedAt: 'not-a-timestamp', reason: ' ' } };
+    expect(collectManifestViolations([malformed], memoryFs(completeFixtures), GREENHOUSE_FIXTURE_ROOT, clock)).toEqual([
+      `${source.id}: empty-board acknowledgement lacks an owner`,
+      `${source.id}: empty-board acknowledgement lacks a reason`,
+      `${source.id}: empty-board acknowledgement timestamp is invalid`,
+    ]);
+    const future = { ...source, emptyBoardAcknowledged: { acknowledgedBy: 'JDKrasnick', acknowledgedAt: '2026-07-25T00:06:00Z', reason: 'seasonally empty' } };
+    expect(collectManifestViolations([future], memoryFs(completeFixtures), GREENHOUSE_FIXTURE_ROOT, clock)).toEqual([
+      `${source.id}: empty-board acknowledgement timestamp is in the future`,
+    ]);
+    const stale = { ...source, emptyBoardAcknowledged: { acknowledgedBy: 'JDKrasnick', acknowledgedAt: '2026-01-01T00:00:00Z', reason: 'seasonally empty' } };
+    expect(collectManifestViolations([stale], memoryFs(completeFixtures), GREENHOUSE_FIXTURE_ROOT, clock)).toEqual([
+      `${source.id}: empty-board acknowledgement is overdue for re-verification (limit 180 days)`,
+    ]);
+  });
+
   it('fails when a reviewed board ships no fixture material', () => {
     const violations = collectManifestViolations([source], memoryFs({}));
     expect(violations).toEqual([

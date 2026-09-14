@@ -141,6 +141,19 @@ describe('Ashby queue worker', () => {
     expect(await store.getCheckpoint(`shadow-${shadowSource.id}`)).toMatchObject({ lastRawCount: 1 });
   });
 
+  it('accepts an owner-acknowledged empty board and advances its checkpoint', async () => {
+    const acknowledged: ReviewedAshbySource = {
+      ...shadowSource,
+      emptyBoardAcknowledged: { acknowledgedBy: 'JDKrasnick', acknowledgedAt: '2026-09-11T00:00:00.000Z', reason: 'seasonally empty' },
+    };
+    const store = new MemoryInternshipStore();
+    const dependencies = { store, sources: [acknowledged], linkValidator: async (url: string) => url };
+    await runAshbyBoard(message(), { ...dependencies, fetchImpl: async () => response() });
+    await expect(runAshbyBoard(message(), { ...dependencies, fetchImpl: async () => response([]) }))
+      .resolves.toMatchObject({ listings: 0 });
+    expect(await store.getCheckpoint(`shadow-${shadowSource.id}`)).toMatchObject({ lastRawCount: 0 });
+  });
+
   it('quietly baselines published boards and only emits later additions', async () => {
     const published: ReviewedAshbySource = { ...shadowSource, status: 'published' };
     const store = new MemoryInternshipStore();

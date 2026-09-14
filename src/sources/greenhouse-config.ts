@@ -1,4 +1,5 @@
 import type { SourceClass } from './quality.js';
+import type { EmptyBoardAcknowledgement } from './reviewed-source.js';
 import { apiProbedGreenhouseSources } from './greenhouse-registry-data.js';
 import { reviewedGreenhouseExpansionSources } from './greenhouse-expansion-data.js';
 import { reviewedGreenhouseOwnerApprovedExpansionSources } from './greenhouse-owner-approved-expansion-data.js';
@@ -41,6 +42,8 @@ export interface ReviewedGreenhouseSource {
   evidenceStatus?: 'reviewed' | 'api-probed';
   /** Required justification when a board uses a non-Greenhouse careers host. */
   hostExceptionReason?: string;
+  /** Set only after the owner confirms the board itself is empty. */
+  emptyBoardAcknowledged?: EmptyBoardAcknowledgement;
   sourceClass?: Extract<SourceClass, 'greenhouse'>;
 }
 

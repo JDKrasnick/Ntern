@@ -85,6 +85,16 @@ the month; the next month resets automatically.
   board closure is confirmed.
 - A valid non-empty board with zero eligible internships is normal. It remains
   on the published cadence while being classified as quiet.
+- A board whose `GET api.lever.co/v0/postings/{site}` still returns `200` for
+  its reviewed site but lists no postings is empty, not broken; a removed site
+  returns `404`. Do not force-replay it. Confirm the closure with the employer
+  page, then record an `emptyBoardAcknowledged` declaration on the reviewed
+  source (owner, UTC check time, reason). The declaration makes the board
+  dormant: zero rows are expected rather than parser drift, while identity,
+  site, host, and link checks still apply, and monitoring continues. Replay the
+  board once after recording the declaration so the forced run clears the
+  quarantine, then resume it when that run reports healthy. A declaration
+  expires after 180 days. Remove it when the board refills.
 
 ### Application-host mismatch or broken links
 

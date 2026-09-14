@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { hostMatchesAllowlist, matchesExpectedBoardName, type ReviewedGreenhouseSource } from './greenhouse-config.js';
+import { emptyBoardAcknowledgementViolations } from './reviewed-source.js';
 import { isGreenhouseJobShape, mapGreenhouseJob, type GreenhouseJob, type GreenhouseJobsResponse } from './greenhouse.js';
 
 /** Per-company evidence lives under `test/fixtures/greenhouse/{boardToken}/`. */
@@ -104,15 +105,20 @@ const REQUIRED_FIXTURES: Array<{
   { file: 'approval.json', validate: approvalArtifactError },
 ];
 
+/** `now` is injected so the empty-board acknowledgement age stays testable. */
 export function collectManifestViolations(
   registry: ReviewedGreenhouseSource[],
   fs: ManifestFs,
   root: string = GREENHOUSE_FIXTURE_ROOT,
+  now: Date = new Date(),
 ): string[] {
   const violations: string[] = [];
   const unclaimedDirs = new Set(fs.listBoardDirs(root));
   for (const source of registry) {
     unclaimedDirs.delete(source.boardToken);
+    if (source.emptyBoardAcknowledged) {
+      for (const issue of emptyBoardAcknowledgementViolations(source.emptyBoardAcknowledged, now)) violations.push(`${source.id}: ${issue}`);
+    }
     if (source.evidenceStatus === 'api-probed') continue;
     const dir = `${root}/${source.boardToken}`;
     const missing = REQUIRED_FIXTURES.filter(({ file }) => !fs.fileExists(`${dir}/${file}`));

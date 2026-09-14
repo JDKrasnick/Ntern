@@ -170,6 +170,11 @@ export const reviewedGreenhouseOwnerApprovedExpansionSources: ReviewedGreenhouse
       "job-boards.greenhouse.io"
     ],
     "status": "shadow",
+    "emptyBoardAcknowledged": {
+      "acknowledgedBy": "JDKrasnick",
+      "acknowledgedAt": "2026-09-11T00:39:13.000Z",
+      "reason": "boards-api.greenhouse.io/v1/boards/emergingtalent returns 200 with the reviewed board name and zero jobs since 2026-09-01; this emerging-talent board is seasonally empty. Monitoring continues for the next cycle."
+    },
     "evidenceStatus": "reviewed",
     "sourceClass": "greenhouse"
   },

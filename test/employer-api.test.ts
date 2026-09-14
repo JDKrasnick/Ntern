@@ -7,6 +7,8 @@ import { D1EmployerStore } from '../cloudflare/employer-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import { reviewedProviderRegistry, reviewedStructuredRegistry } from '../cloudflare/employer-registry.js';
+import { reviewedAshbySources } from '../src/sources/ashby-config.js';
+import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
 
 type SqliteValue = string | number | bigint | null | Uint8Array;
 function sqliteD1(database: DatabaseSync): D1Database {
@@ -44,6 +46,38 @@ describe('employer channel API', () => {
     expect(first.ashby.length).toBeGreaterThan(0);
     await reviewedProviderRegistry(store);
     expect(await store.listReviewedSources()).toHaveLength(count);
+    database.close();
+  });
+
+  it('carries a reviewed empty-board acknowledgement from D1 into runtime dispatch', async () => {
+    const { database, store } = fixture();
+    await reviewedProviderRegistry(store);
+    const ashby = reviewedAshbySources.find((source) => source.emptyBoardAcknowledged)!;
+    const greenhouse = reviewedGreenhouseSources.find((source) => source.emptyBoardAcknowledged)!;
+    const registry = await reviewedProviderRegistry(store);
+    expect(registry.ashby.find((source) => source.id === ashby.id)?.emptyBoardAcknowledged).toEqual(ashby.emptyBoardAcknowledged);
+    expect(registry.greenhouse.find((source) => source.id === greenhouse.id)?.emptyBoardAcknowledged).toEqual(greenhouse.emptyBoardAcknowledged);
+    database.close();
+  });
+
+  it('refreshes a drifted reviewed config and leaves employer-owned records alone', async () => {
+    const { database, store } = fixture();
+    await reviewedProviderRegistry(store);
+    const target = reviewedAshbySources.find((source) => source.id === 'ashby-blockhouse')!;
+    const stored = (await store.listReviewedSources()).find((record) => record.sourceId === target.id)!;
+    await store.putReviewedSource({ ...stored, config: { ...stored.config, emptyBoardAcknowledged: undefined, staleField: true } });
+    await reviewedProviderRegistry(store);
+    const refreshed = (await store.listReviewedSources()).find((record) => record.sourceId === target.id)!;
+    expect(refreshed.config).toEqual({ ...target });
+    expect(refreshed.state).toBe(stored.state);
+
+    const owned = reviewedAshbySources.find((source) => !source.emptyBoardAcknowledged)!;
+    database.prepare("INSERT INTO employer_organizations (id,name,domain,state,created_at,updated_at) VALUES ('org-owner','Owner Co','owner.test','active','2026-08-01','2026-08-01')").run();
+    const ownedStored = (await store.listReviewedSources()).find((record) => record.sourceId === owned.id)!;
+    await store.putReviewedSource({ ...ownedStored, organizationId: 'org-owner', config: { id: owned.id, employerSubmitted: true } });
+    await reviewedProviderRegistry(store);
+    const ownedAfter = (await store.listReviewedSources()).find((record) => record.sourceId === owned.id)!;
+    expect(ownedAfter.config).toEqual({ id: owned.id, employerSubmitted: true });
     database.close();
   });
 

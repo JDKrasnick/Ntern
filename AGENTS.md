@@ -20,18 +20,32 @@ The detailed product tracker is [`docs/product-roadmap.md`](docs/product-roadmap
 - Greenhouse monitoring deployment boundaries, queue flow, cadence, retries,
   shadow behavior, and rendered diagram:
   [`docs/greenhouse/architecture.md`](docs/greenhouse/architecture.md).
+- Cloudflare deployment, secrets, cutover, and rollback:
+  [`docs/cloudflare-migration.md`](docs/cloudflare-migration.md) and
+  [`docs/api-ingestion-split.md`](docs/api-ingestion-split.md).
+- Source operations (pause, resume, replay, recover, quarantine) run through
+  the Worker operations API with the `X-Operations-Key` secret. `recover`
+  forces one validation and leaves the source paused, so `resume` follows a
+  healthy run.
 
 ## Owner preferences
 
 - Repository: `JDKrasnick/intern-notifs`; owner GitHub handle: `JDKrasnick`.
 - Make small, atomic or medium-sized commits and keep CI green. Preserve unrelated dirty working-tree changes.
-- Operate the active backend through the configured Cloudflare account; validate access with `npx wrangler whoami` before Cloudflare operations. AWS is retained rollback/export infrastructure only: do not access, deploy, or modify it unless the owner explicitly requests a legacy export or recovery.
+- Production runs on Cloudflare, not AWS: Workers `intern-notifs-ingestion`
+  and `intern-notifs`, backed by D1, R2, and Cloudflare Queues. Validate access
+  with `npx wrangler whoami` before Cloudflare operations. Deploy code with
+  `npm run build:cloudflare`, then OpenTofu (`tofu -chdir=infra/cloudflare plan`
+  and `apply`); state lives in the R2 bucket `intern-notifs-opentofu-state` and
+  local credentials live in an untracked `.env`. AWS is rollback/export
+  infrastructure only: do not access, deploy, or modify it unless the owner
+  explicitly requests legacy export or recovery.
 - The owner handles Apple/App Store Connect UI and physical-device testing when required. Agents can launch EAS builds and submissions after approval.
 - After using the iPhone Simulator, shut down any booted simulator and quit the Simulator app before finishing unless the owner asks to leave it running; it consumes significant memory.
 
 ## Read before release work
 
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md): infrastructure, EAS/TestFlight, release commands, and operational identifiers.
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md): EAS/TestFlight, release commands, and operational identifiers. Its AWS/CDK infrastructure sections are historical; production runs on Cloudflare.
 - [`docs/testflight-checklist.md`](docs/testflight-checklist.md): physical-device acceptance checklist.
 - [`docs/PRODUCT_DECISIONS.md`](docs/PRODUCT_DECISIONS.md): authentication and App Store launch decisions.
 - [`docs/FRONTEND_DESIGN.md`](docs/FRONTEND_DESIGN.md): frontend principles and Sign in with Apple design constraints.
