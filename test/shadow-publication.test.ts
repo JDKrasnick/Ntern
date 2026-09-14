@@ -235,6 +235,35 @@ describe('shadow publication policy', () => {
     expect(body.rolloutQualityGate.fields.compensation).toMatchObject({ positiveExamples: 0, precision: null, recall: null, passed: false });
   });
 
+  it('keeps the first completed cohort fixed when an older transient run completes later', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    const delayedRunKey = 'b'.repeat(64);
+    database.prepare(`INSERT INTO shadow_extraction_runs
+      (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version,
+        schema_version, preprocessing_version, state, input_key, created_at, updated_at, origin)
+      VALUES (?, 'delayed-job', 'greenhouse-delayed', 'delayed', 'https://jobs.example/delayed', '{}', ?, ?, ?, ?, ?,
+        'transient-failure', 'input-delayed', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', 'provider-poll')`).run(
+      delayedRunKey, delayedRunKey, SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION,
+      SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION,
+    );
+    seedRolloutQualityGate(database);
+    database.prepare(`UPDATE shadow_extraction_runs SET state = 'completed', response_key = 'response-delayed',
+      completed_at = '2026-09-26T00:00:00.000Z', updated_at = '2026-09-26T00:00:00.000Z' WHERE run_key = ?`).run(delayedRunKey);
+
+    const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+      headers: { 'X-Operations-Key': 'secret' },
+    }), { OPERATIONS_SHARED_SECRET: 'secret', DB: d1(database), SHADOW_EXTRACTION_ARTIFACTS: artifacts } as unknown as Environment);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { rolloutQualityGate: {
+      cohort: { targetRuns: number; selectedRuns: number; fullyReviewedRuns: number };
+      fields: Record<string, { passed: boolean }>;
+    } };
+    expect(body.rolloutQualityGate.cohort).toEqual({ targetRuns: 25, selectedRuns: 25, fullyReviewedRuns: 25,
+      origins: ['provider-poll', 'scheduled-verification'] });
+    expect(body.rolloutQualityGate.fields.locations.passed).toBe(true);
+    expect(body.rolloutQualityGate.fields.workMode.passed).toBe(true);
+  });
+
   it('keeps changed review decisions append-only and identical receipt creation idempotent', async () => {
     const { database, artifacts } = await publicationDatabase();
     seedRolloutQualityGate(database);

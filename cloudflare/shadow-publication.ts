@@ -96,7 +96,7 @@ async function rolloutQualityGate(db: D1Database) {
       SELECT run_key FROM shadow_extraction_runs
       WHERE state = 'completed' AND origin IN ('provider-poll', 'scheduled-verification')
         AND model_id = ? AND prompt_version = ? AND schema_version = ? AND preprocessing_version = ?
-      ORDER BY created_at, run_key
+      ORDER BY completed_at, run_key
       LIMIT ?
     ) cohort
     LEFT JOIN shadow_extraction_evaluations evaluations ON evaluations.run_key = cohort.run_key
