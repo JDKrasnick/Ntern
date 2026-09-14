@@ -21,6 +21,7 @@ const allowedUpdates = new Set([
 ]);
 
 const allowedContentFields = new Set(['content_file', 'content_sha256']);
+const permittedPlainTextBinding = 'AUTH_FROM_EMAIL';
 // These provider-computed values may legitimately change after uploading new
 // code. Keep this list explicit so a new provider field fails closed.
 const computedWorkerPaths = new Set([
@@ -81,7 +82,24 @@ function containsUnknown(value: unknown): boolean {
   return false;
 }
 
-function isContentOnlyUpdate(change: ResourceChange['change']): boolean {
+function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
+  if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return false;
+  let senderChanged = false;
+  return before.every((binding, index) => {
+    const nextBinding = after[index];
+    if (!isRecord(binding) || !isRecord(nextBinding)) return false;
+    if (binding.name !== nextBinding.name) return false;
+    if (binding.name !== permittedPlainTextBinding) return isDeepStrictEqual(binding, nextBinding);
+    if (binding.type !== 'plain_text' || nextBinding.type !== 'plain_text') return false;
+    const { text: beforeText, ...beforeRest } = binding;
+    const { text: afterText, ...afterRest } = nextBinding;
+    if (typeof beforeText !== 'string' || typeof afterText !== 'string' || !isDeepStrictEqual(beforeRest, afterRest)) return false;
+    senderChanged ||= beforeText !== afterText;
+    return true;
+  }) && senderChanged;
+}
+
+function isSafeWorkerUpdate(change: ResourceChange['change']): boolean {
   if (!isRecord(change.before) || !isRecord(change.after)) return false;
   const before = change.before;
   const after = change.after;
@@ -89,11 +107,14 @@ function isContentOnlyUpdate(change: ResourceChange['change']): boolean {
   const contentChanged = [...allowedContentFields].some((field) => (
     !isDeepStrictEqual(before[field], after[field])
   ));
-  if (!contentChanged) return false;
+  const senderChanged = isPermittedBindingUpdate(before.bindings, after.bindings);
+  if (!contentChanged && !senderChanged) return false;
+
+  const beforeForComparison = senderChanged ? { ...before, bindings: after.bindings } : before;
 
   const afterUnknown = change.after_unknown;
   if (!isDeepStrictEqual(
-    protectedWorkerValue(before, afterUnknown),
+    protectedWorkerValue(beforeForComparison, afterUnknown),
     protectedWorkerValue(after, afterUnknown),
   )) return false;
 
@@ -114,7 +135,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
     !allowedUpdates.has(address)
     || change.actions.length !== 1
     || change.actions[0] !== 'update'
-    || !isContentOnlyUpdate(change)
+    || !isSafeWorkerUpdate(change)
   )).map(({ address, change }) => ({ address, actions: change.actions }));
 
   if (unsafe.length > 0) {
