@@ -79,6 +79,8 @@ before(async () => {
           OPERATIONS_SHARED_SECRET: { type: 'text', value: operationsSecret },
           DEPLOYMENT_ROLE: { type: 'text', value: 'ingestion' },
           DB: { type: 'd1', id: 'intern-notifs-e2e' },
+          DESTINATION_VERIFICATION_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-destination-verification' },
+          DESTINATION_VERIFICATION_DLQ: { type: 'queue', name: 'intern-notifs-e2e-destination-verification-dlq' },
         },
       ),
     ],
@@ -130,6 +132,72 @@ test('keeps the ingestion Worker private without service authentication', async 
   });
   assert.equal(response.status, 404);
   assert.deepEqual(await response.json(), { message: 'Not found' });
+});
+
+test('reports the admission baseline and queue health through the authenticated service boundary', async () => {
+  const denied = await api.fetch('https://api.example.test/internal/admission/health');
+  assert.equal(denied.status, 404);
+  assert.deepEqual(await denied.json(), { message: 'Not found' });
+
+  const privateResponse = await ingestion.fetch('https://ingestion.example.test/internal/admission/health', {
+    headers: { 'X-Operations-Key': operationsSecret },
+  });
+  assert.equal(privateResponse.status, 404);
+  assert.deepEqual(await privateResponse.json(), { message: 'Not found' });
+
+  const response = await api.fetch('https://api.example.test/internal/admission/health', {
+    headers: { 'X-Operations-Key': operationsSecret },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    queues: {
+      work: { backlogCount: 0, backlogBytes: 0 },
+      deadLetter: { backlogCount: 0, backlogBytes: 0 },
+    },
+    freshness: { fresh: 0, due: 0, stale: 0, staleEligible: 0, missing: 0 },
+    validationCoverage: { validated: 0, missing: 0 },
+    activeIncidents: 0,
+    operations: {
+      scheduled: 0,
+      leased: 0,
+      backfillQueued: 0,
+      backfillCompleted: 0,
+      repairStaged: 0,
+      repairApplied: 0,
+    },
+  });
+});
+
+test('returns the bounded admission audit through the compiled API and ingestion Workers', async () => {
+  const response = await api.fetch('https://api.example.test/internal/admission/audit?limit=1', {
+    headers: { 'X-Operations-Key': operationsSecret },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    scanned: 0,
+    eligible: 0,
+    review: 0,
+    legacyUnclassified: 0,
+    byReason: {},
+    bySource: {},
+    byDestination: {},
+    withNotificationHistory: 0,
+    freshness: { fresh: 0, due: 0, stale: 0, staleEligible: 0, missing: 0 },
+    validationCoverage: { validated: 0, missing: 0 },
+    continuationConflicts: 0,
+    closureSignals: {},
+    operations: {
+      scheduled: 0,
+      leased: 0,
+      backfillQueued: 0,
+      backfillCompleted: 0,
+      repairStaged: 0,
+      repairApplied: 0,
+    },
+    unresolvedEmployers: [],
+    unresolvedEmployerOccurrences: 0,
+    records: [],
+  });
 });
 
 test('keeps public catalog requests on the API Worker', async () => {

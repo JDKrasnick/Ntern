@@ -1,5 +1,11 @@
 # TestFlight release checklist
 
+For the release-candidate evidence record, including the #120 admission
+rollout prerequisites and the #96 go/no-go decision, use
+[`release-candidate-validation.md`](release-candidate-validation.md). Keep
+repair tokens, device tokens, and account identifiers in the private operations
+record rather than this repository.
+
 Run this from `mobile/` using the intended EAS environment:
 
 ```bash
