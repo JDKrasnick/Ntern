@@ -1392,7 +1392,6 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     return;
   }
   const event = { Records: records };
-  const registry = await reviewedProviderRegistry(new D1EmployerStore(env.DB));
   const messageById = new Map(batch.messages.map((message) => [message.id, message]));
   // Catalog polls carry only a sourceId. Persist the exact failure category and
   // diagnostic before the platform retries and dead-letters the message, so the
@@ -1409,13 +1408,41 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       sourceKind: catalogProvider, body: record.body, error,
     });
   };
+  let registry: Awaited<ReturnType<typeof reviewedProviderRegistry>>;
+  try {
+    // This read happens before an individual poll reaches processFifoBatch.
+    // Without this boundary a D1 failure retried the whole batch directly,
+    // leaving healthy sources with neither a health failure nor a ledger row.
+    registry = await reviewedProviderRegistry(new D1EmployerStore(env.DB));
+  } catch (error) {
+    for (const record of records) await onRecordFailure(record, error);
+    for (const message of batch.messages) message.retry();
+    console.error(JSON.stringify({ command: 'catalog-poll-setup', provider: catalogProvider,
+      messageIds: records.map((record) => record.messageId), error: safeDiagnostic(error) }));
+    return;
+  }
   const dependencies = {
     store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB),
     enqueueDestinationVerification: (request: Parameters<typeof destinationVerificationMessage>[0]) => env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage(request)),
     catalogAdmissionResolver: catalogAdmissionResolver(env),
     onRecordFailure,
   };
-  const legacyLever = (await dependencies.store.listLeverAdmissions?.() ?? []).map(({ source }) => source);
+  // Legacy Lever admissions are irrelevant to Greenhouse and Ashby polls.
+  // Avoid an additional D1 read before those providers enter their per-record
+  // failure hook, which previously made a transient failure invisible to the
+  // failure ledger.
+  let legacyLever: typeof registry.lever = [];
+  try {
+    legacyLever = catalogProvider === 'lever'
+      ? (await dependencies.store.listLeverAdmissions?.() ?? []).map(({ source }) => source)
+      : [];
+  } catch (error) {
+    for (const record of records) await onRecordFailure(record, error);
+    for (const message of batch.messages) message.retry();
+    console.error(JSON.stringify({ command: 'catalog-poll-setup', provider: catalogProvider,
+      messageIds: records.map((record) => record.messageId), error: safeDiagnostic(error) }));
+    return;
+  }
   const leverRegistry = [...registry.lever, ...legacyLever.filter((source) => !registry.lever.some((candidate) => candidate.id === source.id))];
   const result = catalogProvider === 'greenhouse'
     ? await processGreenhouseQueue(event, { ...dependencies, sources: registry.greenhouse })
