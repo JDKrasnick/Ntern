@@ -190,7 +190,8 @@ export const defaultSources: SourceAdapter[] = [
   // Keep the legacy source ID so existing checkpoints and occurrences roll
   // forward in place; the upstream repository and season are the 2027 cycle.
   new GitHubMarkdownAdapter({ id: 'simplify-summer-2026', owner: 'SimplifyJobs', repo: 'Summer2027-Internships', documents: [{ path: 'README.md', branch: 'dev', season: 'summer-2027' }, { path: 'README-Off-Season.md', branch: 'dev', season: 'offseason-2027' }] }),
-  new GitHubMarkdownAdapter({ id: 'zapply-2027', owner: 'zapplyjobs', repo: 'Internships-2027', documents: [{ path: 'README.md', branch: 'main', season: 'summer-2027' }] }),
+  // zapply-2027 was retired after its upstream switched to a single zapply.jobs
+  // redirect host. Historical rows retain the source ID but are no longer polled.
   new GitHubMarkdownAdapter({ id: 'speedyapply-2027-swe', owner: 'speedyapply', repo: '2027-SWE-College-Jobs', documents: [{ path: 'README.md', branch: 'main', season: 'summer-2027' }, { path: 'INTERN_INTL.md', branch: 'main', season: 'summer-2027' }] }),
   new GitHubMarkdownAdapter({ id: 'speedyapply-2027-ai', owner: 'speedyapply', repo: '2027-AI-College-Jobs', documents: [{ path: 'README.md', branch: 'main', season: 'summer-2027' }, { path: 'INTERN_INTL.md', branch: 'main', season: 'summer-2027' }] }),
   new GitHubMarkdownAdapter({ id: 'northwestern-fintech-2027-quant', owner: 'northwesternfintech', repo: '2027QuantInternships', documents: [{ path: 'README.md', branch: 'main', season: 'summer-2027' }], parser: parseQuantInternshipMarkdown }),

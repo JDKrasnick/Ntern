@@ -10,7 +10,8 @@ const officialSourceIds = new Set([
 ]);
 
 // These are exact reviewed registry identities retained for rows written before
-// occurrence provenance was introduced. New rows always persist provenance.
+// occurrence provenance was introduced, including retired sources. New rows
+// always persist provenance.
 const reviewedCommunitySourceIds = new Set([
   'vanshb03-summer-2027',
   'simplify-summer-2026',
