@@ -44,6 +44,32 @@ create an R2 token scoped only to that bucket with Object Read & Write access.
 Do not put the R2 access key, secret key, backend endpoint, state, or saved plan
 in Git.
 
+The `Deploy Cloudflare Workers` workflow runs after a successful `CI` push run
+on `main`; it can also recover a deployment through a manual dispatch for the
+exact green SHA at the tip of `main`. The `cloudflare-workers-production`
+environment supplies the Cloudflare token, bucket-scoped state credentials,
+and live non-secret Terraform variables. The job rejects obsolete revisions
+and any plan containing creates, deletes, replacements, or updates outside the
+two Worker scripts. It applies the exact saved plan, requires a no-drift second
+plan, then monitors public and authentication-boundary smoke checks for two
+minutes. Keep environment approval rules enabled when a human deployment gate
+is required.
+
+Configure these environment secrets: `CLOUDFLARE_API_TOKEN`,
+`R2_STATE_ACCESS_KEY_ID`, and `R2_STATE_SECRET_ACCESS_KEY`. The optional
+`OPERATIONS_SHARED_SECRET` enables the authenticated deployment-ID smoke check.
+Keep the live values for `CLOUDFLARE_ACCOUNT_ID`, `PUBLIC_API_URL`,
+`EMPLOYER_PORTAL_ENABLED`, `AUTH_FROM_EMAIL`, `GMAIL_ENABLED`,
+`GMAIL_CLIENT_ID`, `GMAIL_REDIRECT_URI`,
+`IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED`,
+`TRUSTED_COMMUNITY_CATALOG_ENABLED`, `IDENTITY_CONFIRMED_COVERAGE_FLOOR`,
+`LLM_METADATA_PUBLICATION_POLICY_JSON`, `SHADOW_EXTRACTION_ENABLED`,
+`SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS`, and
+`SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS` as environment variables. Saved
+plans and before/after state backups remain in the private state bucket under
+`production-deployments/DEPLOY_SHA/GITHUB_RUN_ID/`; never upload them as public
+workflow artifacts.
+
 Supply the Cloudflare R2 S3-compatible endpoint and bucket-scoped credentials
 through the operator environment. OpenTofu uses `AWS_*` variable names solely
 because its R2 state backend is S3-compatible; these are Cloudflare R2
