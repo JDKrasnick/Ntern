@@ -118,6 +118,7 @@
 - [x] Add a private operations dashboard for all official Greenhouse sources with per-run volume, withheld rows, redacted diagnostics, queue/DLQ and alarm status, plus deterministic quarantine and recovery.
 - [x] Add bounded 512-KiB application-page evidence, quarantine-enforced scheduling, protected selective operations for all six Cloudflare DLQs, and exact GitHub queue failure attribution.
 - [ ] Reconcile the production DLQ backlog and degraded GitHub sources (#219) with ledger-backed sample classifications, source-specific recovery evidence, and a reviewed guarded disposition plan; preserve intentional quarantines.
+  - [x] Retry transient D1 disconnects before the catalog billing guard and throughout catalog persistence with bounded exponential backoff and jitter (#203); production depth reconciliation remains required before closing #219.
 - [ ] Complete issue #28's registry-driven provider rollout.
   - [x] Add the shared catalog-provider registry, forward-compatible source health, capability-aware operations metadata, isolated provider availability, and registry-resolved AWS/Cloudflare fleet telemetry for Greenhouse, Lever, Ashby, and GitHub.
   - [ ] Deploy the Worker/Terraform binding update and update the separately deployed private monitoring console to render `providers`, unavailable integrations, and only advertised controls before closing #28.

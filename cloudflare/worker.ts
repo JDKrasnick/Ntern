@@ -1264,6 +1264,12 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
 }
 
 async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Promise<void> {
+  const catalogProvider = providerForQueueName(batch.queue);
+  // Catalog persistence is idempotent, so protect every D1 query in these
+  // consumers, including the billing guard that runs before queue routing.
+  // Without this early boundary, a transient disconnect throws the whole batch
+  // before per-record source health or failure-ledger diagnostics can run.
+  if (catalogProvider) env = { ...env, DB: resilientD1(env.DB) };
   if (await isShutdown(env)) {
     for (const message of batch.messages) message.ack();
     return;
@@ -1302,14 +1308,6 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     }
     return;
   }
-  // Catalog consumers dead-letter valid work when D1 rotates its instance
-  // mid-poll. Their persistence writes are idempotent, so retry the transient
-  // reconnect error only for stores built by these catalog paths (issue #203).
-  // Do not extend this wrapper to destination, shadow, or Gmail consumers:
-  // their state transitions include writes whose business semantics require
-  // their own idempotency guards.
-  env = { ...env, DB: resilientD1(env.DB) };
-  const catalogProvider = providerForQueueName(batch.queue);
   if (catalogProvider === 'github') {
     const failed = new Set<string>();
     const employerStore = new D1EmployerStore(env.DB);
