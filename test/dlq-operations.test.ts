@@ -72,7 +72,17 @@ describe('protected DLQ operations', () => {
       sourceId: 'lever-acme', sourceKind: 'lever', body: { sourceId: 'lever-acme' },
       error: new Error('fetch to https://api.lever.co/v0/postings timed out') });
     const result = await inspectDlq({ queue: 'lever', limit: 100 }, dependencies);
-    expect(result.messages[0]).toMatchObject({ messageId: 'm1', failureCategory: 'transport', latestDiagnostic: 'fetch to [url] timed out' });
+    expect(result.messages[0]).toMatchObject({ messageId: 'm1', failureCategory: 'transport', latestDiagnostic: 'fetch to [url] timed out', failureProvenance: 'ledgered' });
+    expect(result.classificationCounts).toEqual({ ledgered: 1, 'missing-ledger': 0, 'not-applicable': 0 });
+    database.close();
+  });
+
+  it('marks catalog messages with no ledger event as unclassified instead of inferring a transient', async () => {
+    const { database, dependencies } = subject([catalogMessage('historical')]);
+    const result = await inspectDlq({ queue: 'github', limit: 100 }, dependencies);
+    expect(result.messages[0]).toMatchObject({ messageId: 'historical', failureProvenance: 'missing-ledger' });
+    expect(result.messages[0]).not.toHaveProperty('failureCategory');
+    expect(result.classificationCounts).toEqual({ ledgered: 0, 'missing-ledger': 1, 'not-applicable': 0 });
     database.close();
   });
 
