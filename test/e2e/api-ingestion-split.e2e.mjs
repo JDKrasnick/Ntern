@@ -219,3 +219,26 @@ test('processes a compiled shadow queue event through R2 and exposes its disable
   assert.ok(summaryBody.runs.some((item) => item.state === 'disabled' && item.count === 1));
   assert.deepEqual(summaryBody.providerOutbox, { pending: 0 });
 });
+
+test('delays a D1-overload retry in the compiled ingestion queue consumer', async () => {
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  const retries = [];
+  const statement = {
+    bind() { return statement; },
+    async first() { return null; },
+    async all() { throw new Error('D1_ERROR: too many requests'); },
+    async run() { return { meta: { changes: 1 } }; },
+  };
+  const database = { prepare() { return statement; }, async batch() { return []; } };
+
+  await builtWorker.queue({
+    queue: 'intern-notifs-greenhouse',
+    messages: [{
+      id: 'd1-overload', body: { sourceId: 'greenhouse-acme' }, attempts: 1, timestamp: new Date(),
+      ack() { throw new Error('a D1 overload must not acknowledge the message'); },
+      retry(options) { retries.push(options); },
+    }],
+  }, { DB: database });
+
+  assert.deepEqual(retries, [{ delaySeconds: 60 }]);
+});
