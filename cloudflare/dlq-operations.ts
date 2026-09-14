@@ -27,6 +27,8 @@ export interface DlqDependencies {
   now?: () => Date;
 }
 
+type FailureProvenance = 'ledgered' | 'missing-ledger' | 'not-applicable';
+
 interface ParsedMessage {
   body: Record<string, unknown>;
   serialized: string;
@@ -104,6 +106,11 @@ async function summary(name: DlqName, message: PeekedMessage, dependencies: DlqD
         WHERE queue_name = ? AND message_id = ? ORDER BY last_failed_at DESC LIMIT 1`)
       .bind(queueName(name, false), message.id).first<{ category: string; diagnostic: string }>()
     : null;
+  // A missing event is meaningful for catalog work: the operator must treat it
+  // as unclassified rather than inferring a transient from current source health.
+  const failureProvenance: FailureProvenance = !isCatalogDlq(name)
+    ? 'not-applicable'
+    : failure ? 'ledgered' : 'missing-ledger';
   return {
     messageId: message.id,
     attempts: message.attempts,
@@ -117,6 +124,7 @@ async function summary(name: DlqName, message: PeekedMessage, dependencies: DlqD
     // for a dead-lettered message the per-message failure reason is more useful
     // than the source's current health diagnostic (still surfaced via sourceStatus).
     ...(failure ? { failureCategory: failure.category, latestDiagnostic: failure.diagnostic } : {}),
+    failureProvenance,
   };
 }
 
@@ -127,7 +135,12 @@ export async function inspectDlq(input: { queue: unknown; limit?: unknown }, dep
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Inspection limit must be between 1 and 100');
   const id = await dependencies.api.resolveQueueId(queueName(name, true));
   const messages = await dependencies.api.peek(id, limit);
-  return { queue: name, count: messages.length, messages: await Promise.all(messages.map((message) => summary(name, message, dependencies))) };
+  const summaries = await Promise.all(messages.map((message) => summary(name, message, dependencies)));
+  const classificationCounts = summaries.reduce((counts, message) => {
+    counts[message.failureProvenance] += 1;
+    return counts;
+  }, { ledgered: 0, 'missing-ledger': 0, 'not-applicable': 0 } satisfies Record<FailureProvenance, number>);
+  return { queue: name, count: summaries.length, classificationCounts, messages: summaries };
 }
 
 export async function planDlq(input: {
