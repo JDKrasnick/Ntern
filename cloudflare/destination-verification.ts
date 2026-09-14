@@ -87,12 +87,13 @@ async function handoffShadowExtraction(input: {
 }): Promise<void> {
   const description = input.description?.trim() ?? '';
   const descriptionBytes = new TextEncoder().encode(description).byteLength;
-  let outcome: 'enqueued' | 'skipped-no-text' | 'skipped-no-binding' | 'failed';
+  const normalized = normalizeExactPostingDescription(input.title, description, input.incomplete);
+  let outcome: 'enqueued' | 'skipped-no-text' | 'skipped-no-binding' | 'skipped-oversized' | 'failed';
   try {
-    if (!description) outcome = 'skipped-no-text';
+    if (!normalized.title || !normalized.description) outcome = 'skipped-no-text';
     else if (!input.env.SHADOW_EXTRACTION_QUEUE || !input.env.SHADOW_EXTRACTION_ARTIFACTS) outcome = 'skipped-no-binding';
     else {
-      await enqueueShadowExtraction({ DB: input.env.DB, SHADOW_EXTRACTION_QUEUE: input.env.SHADOW_EXTRACTION_QUEUE,
+      const enqueued = await enqueueShadowExtraction({ DB: input.env.DB, SHADOW_EXTRACTION_QUEUE: input.env.SHADOW_EXTRACTION_QUEUE,
         SHADOW_EXTRACTION_ARTIFACTS: input.env.SHADOW_EXTRACTION_ARTIFACTS }, {
         jobId: input.message.jobId, sourceId: input.message.sourceId, externalId: input.message.externalId,
         sourceUrl: input.sourceUrl, providerIdentity: input.message.providerIdentity, title: input.title,
@@ -100,7 +101,10 @@ async function handoffShadowExtraction(input: {
         origin: input.message.shadowOrigin ?? (input.message.reason === 'historical-backfill' ? 'backfill' : 'scheduled-verification'),
         ...(input.baseline ? { baseline: input.baseline } : {}),
       });
-      outcome = 'enqueued';
+      // enqueueShadowExtraction returns undefined when it declines to enqueue
+      // (empty normalized text or an over-ceiling input). Record that skip
+      // instead of a false 'enqueued' so the handoff denominator is accurate.
+      outcome = enqueued ? 'enqueued' : 'skipped-oversized';
     }
   } catch {
     outcome = 'failed';

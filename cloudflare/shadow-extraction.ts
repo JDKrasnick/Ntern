@@ -111,20 +111,45 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   baseline?: ShadowBaseline;
   origin?: ShadowExtractionOrigin;
 }): Promise<ShadowExtractionMessage | undefined> {
-  const normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete);
+  const origin = input.origin ?? 'legacy-unknown';
+  const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
+  const serialize = (candidate: ReturnType<typeof normalizeExactPostingDescription>) => JSON.stringify({
+    version: 1, normalized: candidate, baseline: input.baseline ?? {}, identity: {
+      jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId, sourceUrl: input.sourceUrl,
+      providerIdentity: input.providerIdentity, observedAt: input.observedAt, origin,
+    }, retention: { expiresAt: new Date(Date.parse(input.observedAt) + retentionDays * 86_400_000).toISOString() } });
+  let normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete);
   if (!normalized.title || !normalized.description) return undefined;
+  let stored = serialize(normalized);
+  const artifactLimit = maxInputBytes + 2_000;
+  if (bytes(stored) > artifactLimit) {
+    // JSON escaping means raw description bytes cannot be subtracted from the
+    // serialized size to measure envelope overhead. Search the actual artifact
+    // size so escaped text keeps the largest byte-bounded prefix that fits.
+    let low = 1;
+    let high = bytes(normalized.description);
+    let fitting: { normalized: typeof normalized; stored: string } | undefined;
+    while (low <= high) {
+      const budget = Math.floor((low + high) / 2);
+      const candidate = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget);
+      const candidateStored = serialize(candidate);
+      if (candidate.title && candidate.description && bytes(candidateStored) <= artifactLimit) {
+        fitting = { normalized: candidate, stored: candidateStored };
+        low = budget + 1;
+      } else {
+        high = budget - 1;
+      }
+    }
+    if (!fitting) return undefined;
+    normalized = fitting.normalized;
+    stored = fitting.stored;
+  }
   const cacheKey = shadowExtractionCacheKey(normalized);
   const runKey = shadowReportFingerprint({ jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId,
     contentHash: normalized.contentHash, cacheKey });
   // The normalized text is content-addressed by cacheKey, while this artifact
   // also holds posting-specific baseline state and therefore must not be shared.
   const inputKey = r2Key(runKey);
-  const origin = input.origin ?? 'legacy-unknown';
-  const stored = JSON.stringify({ version: 1, normalized, baseline: input.baseline ?? {}, identity: {
-    jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId, sourceUrl: input.sourceUrl,
-    providerIdentity: input.providerIdentity, observedAt: input.observedAt, origin,
-  }, retention: { expiresAt: new Date(Date.parse(input.observedAt) + retentionDays * 86_400_000).toISOString() } });
-  if (new TextEncoder().encode(stored).byteLength > maxInputBytes + 2_000) return undefined;
   await env.SHADOW_EXTRACTION_ARTIFACTS.put(inputKey, new TextEncoder().encode(stored).buffer, { httpMetadata: { contentType: 'application/json' } });
   const message: ShadowExtractionMessage = { version: 1, runKey, cacheKey, jobId: input.jobId, sourceId: input.sourceId,
     externalId: input.externalId, sourceUrl: input.sourceUrl, providerIdentity: input.providerIdentity,

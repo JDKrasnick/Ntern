@@ -659,7 +659,7 @@ export class D1CatalogAdmissionStore {
   }
 
   async recordShadowExtractionHandoff(jobId: string, sourceId: string, acquisitionObservedAt: string, input: {
-    outcome: 'enqueued' | 'skipped-no-text' | 'skipped-no-binding' | 'failed';
+    outcome: 'enqueued' | 'skipped-no-text' | 'skipped-no-binding' | 'skipped-oversized' | 'failed';
     method: string;
     descriptionBytes: number;
     observedAt: string;
