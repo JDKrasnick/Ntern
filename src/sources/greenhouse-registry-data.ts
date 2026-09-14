@@ -80,7 +80,6 @@ const apiProbedBoards: Array<{
   { token: "gotion", name: "Gotion, Inc.", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "groww", name: "Groww", initialHosts: ["job-boards.eu.greenhouse.io"], finalHosts: ["job-boards.eu.greenhouse.io"] },
   { token: "gusto", name: "Gusto, Inc.", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
-  { token: "haizelabs", name: "Haize Labs", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "honehealth", name: "Hone Health", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "horizonindustrieslimited", name: "Horizon Industries", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "icml", name: "Optiver - ICML", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
