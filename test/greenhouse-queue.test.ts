@@ -26,6 +26,11 @@ describe('Greenhouse queue dispatch', () => {
     );
   });
 
+  it('does not schedule the retired Haize Labs board', () => {
+    expect(reviewedGreenhouseSources.map((source) => source.id)).not.toContain('greenhouse-haizelabs');
+    expect(greenhouseWorkMessages().map((item) => item.sourceId)).not.toContain('greenhouse-haizelabs');
+  });
+
   it('queues FIFO work in API-sized batches with per-board ordering and window deduplication', async () => {
     const sources = Array.from({ length: 12 }, (_, index) => ({
       ...acmeSource,
