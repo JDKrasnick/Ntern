@@ -15,7 +15,7 @@ function statement(overrides: Partial<Record<'first' | 'all' | 'run', () => Prom
   return self;
 }
 
-const noSleep = { sleep: async () => {} };
+const noSleep = { random: () => 0.5, sleep: async () => {} };
 
 describe('resilientD1', () => {
   it('retries a read that fails with the reconnect error, rebuilding the statement each attempt', async () => {
@@ -63,5 +63,26 @@ describe('resilientD1', () => {
 
     await expect(db.prepare('UPDATE t SET a = 1').run()).rejects.toThrow('no longer active');
     expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses exponential backoff with jitter between reconnect attempts', async () => {
+    const run = vi.fn()
+      .mockRejectedValueOnce(instanceGone())
+      .mockRejectedValueOnce(instanceGone())
+      .mockRejectedValueOnce(instanceGone())
+      .mockRejectedValueOnce(instanceGone())
+      .mockResolvedValueOnce({ meta: { changes: 1 } });
+    const sleep = vi.fn(async () => {});
+    const db = resilientD1(
+      { prepare: () => statement({ run }), batch: async () => [] } as unknown as D1Database,
+      { baseDelayMs: 40, random: () => 0.25, sleep },
+    );
+
+    await expect(db.prepare('UPDATE t SET a = 1').run()).resolves.toEqual({ meta: { changes: 1 } });
+    expect(sleep).toHaveBeenNthCalledWith(1, 30);
+    expect(sleep).toHaveBeenNthCalledWith(2, 60);
+    expect(sleep).toHaveBeenNthCalledWith(3, 120);
+    expect(sleep).toHaveBeenNthCalledWith(4, 240);
+    expect(run).toHaveBeenCalledTimes(5);
   });
 });

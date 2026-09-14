@@ -269,6 +269,24 @@ describe('GitHub source recovery guard', () => {
 });
 
 describe('Catalog queue setup failures', () => {
+  it('retries the shutdown guard query before catalog queue routing', async () => {
+    const first = vi.fn()
+      .mockRejectedValueOnce(new Error('D1_ERROR: Connection closed: this D1 DB instance is no longer active. Reconnect or retry the request.'))
+      .mockResolvedValueOnce({ value: 'stopped' });
+    const prepare = vi.fn(() => ({ bind: vi.fn(), first }));
+    const message = { id: 'first', body: { sourceId: 'greenhouse-acme' }, attempts: 1,
+      ack: vi.fn(), retry: vi.fn() };
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-greenhouse', messages: [message] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first).toHaveBeenCalledTimes(2);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(message.retry).not.toHaveBeenCalled();
+  });
+
   it('ledgers and retries every Greenhouse message when the reviewed-source registry is unavailable', async () => {
     const failureRows: unknown[][] = [];
     const prepare = vi.fn((query: string) => {

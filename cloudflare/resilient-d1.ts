@@ -15,15 +15,17 @@ function isRetryable(error: unknown): boolean {
   return error instanceof Error && RETRYABLE.test(error.message);
 }
 
-async function withRetry<T>(operation: () => Promise<T>, attempts: number, baseDelayMs: number, sleep: (ms: number) => Promise<void>): Promise<T> {
+async function withRetry<T>(operation: () => Promise<T>, options: ResilientOptions): Promise<T> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  for (let attempt = 0; attempt < options.attempts; attempt += 1) {
     try {
       return await operation();
     } catch (error) {
       lastError = error;
-      if (!isRetryable(error) || attempt === attempts - 1) throw error;
-      await sleep(baseDelayMs * (attempt + 1));
+      if (!isRetryable(error) || attempt === options.attempts - 1) throw error;
+      // Exponential backoff keeps repeated reconnect attempts from piling onto
+      // a rotating instance; jitter prevents queue consumers retrying in lockstep.
+      await options.sleep(options.baseDelayMs * (2 ** attempt) * (0.5 + options.random()));
     }
   }
   throw lastError;
@@ -34,6 +36,7 @@ const BUILD = Symbol('resilient-d1-build');
 interface ResilientOptions {
   attempts: number;
   baseDelayMs: number;
+  random: () => number;
   sleep: (ms: number) => Promise<void>;
 }
 
@@ -41,9 +44,9 @@ function wrapStatement(build: () => D1PreparedStatement, options: ResilientOptio
   const statement = {
     [BUILD]: build,
     bind: (...values: unknown[]) => wrapStatement(() => build().bind(...values), options),
-    first: <T,>() => withRetry(() => build().first<T>(), options.attempts, options.baseDelayMs, options.sleep),
-    all: <T,>() => withRetry(() => build().all<T>(), options.attempts, options.baseDelayMs, options.sleep),
-    run: () => withRetry(() => build().run(), options.attempts, options.baseDelayMs, options.sleep),
+    first: <T,>() => withRetry(() => build().first<T>(), options),
+    all: <T,>() => withRetry(() => build().all<T>(), options),
+    run: () => withRetry(() => build().run(), options),
   };
   return statement as unknown as D1PreparedStatement;
 }
@@ -69,14 +72,15 @@ function rebuild(statement: D1PreparedStatement): () => D1PreparedStatement {
  */
 export function resilientD1(
   db: D1Database,
-  { attempts = 3, baseDelayMs = 50, sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)) }: Partial<ResilientOptions> = {},
+  { attempts = 5, baseDelayMs = 50, random = Math.random,
+    sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)) }: Partial<ResilientOptions> = {},
 ): D1Database {
-  const options: ResilientOptions = { attempts, baseDelayMs, sleep };
+  const options: ResilientOptions = { attempts, baseDelayMs, random, sleep };
   // Returns only prepare/batch because cloudflare/types.ts declares D1Database
   // with exactly those two members. A future interface method (exec, withSession,
   // raw, dump) would be silently undefined here unless added to this wrapper.
   return {
     prepare: (query) => wrapStatement(() => db.prepare(query), options),
-    batch: (statements) => withRetry(() => db.batch(statements.map((statement) => rebuild(statement)())), options.attempts, options.baseDelayMs, options.sleep),
+    batch: (statements) => withRetry(() => db.batch(statements.map((statement) => rebuild(statement)())), options),
   };
 }
