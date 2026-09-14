@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GreenhouseBoardAdapter, greenhouseJobsUrl, isGreenhouseJobShape, mapGreenhouseJob } from '../src/sources/greenhouse.js';
+import { GREENHOUSE_RESPONSE_MAX_BYTES, GreenhouseBoardAdapter, greenhouseJobsUrl, isGreenhouseJobShape, mapGreenhouseJob } from '../src/sources/greenhouse.js';
 import { reconcileRoleMetadata } from '../src/role-metadata.js';
 import { enabledGreenhouseQualityPolicies, greenhouseQualityPolicy, verifySourceQuality } from '../src/sources/quality.js';
 import { defaultSources } from '../src/sources/index.js';
@@ -172,6 +172,15 @@ describe('GreenhouseBoardAdapter', () => {
     await expect(new GreenhouseBoardAdapter({ source: acmeSource, fetchImpl: async () => new Response('nope', { status: 502 }) }).fetch()).rejects.toThrow('fetch failed (502)');
     await expect(new GreenhouseBoardAdapter({ source: acmeSource, fetchImpl: async () => new Response('{', { status: 200 }) }).fetch()).rejects.toThrow('malformed JSON');
     await expect(new GreenhouseBoardAdapter({ source: acmeSource, fetchImpl: async () => jsonResponse({ jobs: 'nope' }) }).fetch()).rejects.toThrow('shape was invalid');
+  });
+  it('rejects an oversized declared Greenhouse response before reading it', async () => {
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => new Response('{"jobs":[]}', {
+        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
+      }),
+    });
+    await expect(adapter.fetch()).rejects.toThrow('response body exceeds');
   });
   it('rejects a wrongly-typed job row as an invalid response shape', async () => {
     const cases = [

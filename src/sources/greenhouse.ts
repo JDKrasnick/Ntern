@@ -167,23 +167,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function boundedJson(response: Response, limit: number): Promise<unknown> {
   if (!response.body) return JSON.parse(await response.text());
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
   let bytes = 0;
+  let text = '';
+  const decoder = new TextDecoder();
   try {
     while (true) {
       const next = await reader.read();
       if (next.done) break;
       bytes += next.value.byteLength;
       if (bytes > limit) throw new SourceFetchError(`Greenhouse response body exceeds ${limit} bytes`, 'capacity');
-      chunks.push(next.value);
+      text += decoder.decode(next.value, { stream: true });
     }
+    text += decoder.decode();
+  } catch (error) {
+    // Stop a body without a useful Content-Length as soon as it crosses the
+    // limit, rather than retaining or continuing to consume its remaining data.
+    try { await reader.cancel(error); } catch { /* The size error remains primary. */ }
+    throw error;
   } finally {
     reader.releaseLock();
   }
-  const payload = new Uint8Array(bytes);
-  let offset = 0;
-  for (const chunk of chunks) { payload.set(chunk, offset); offset += chunk.byteLength; }
-  return JSON.parse(new TextDecoder().decode(payload));
+  return JSON.parse(text);
 }
 
 function isNamedList(value: unknown): boolean {
