@@ -983,13 +983,19 @@ async function due<T extends { id: string; status: 'published' | 'shadow' }>(
   store: D1InternshipStore,
   now: Date,
   predicate: (source: T, checkpoint: SourceCheckpoint | undefined, now: Date, health?: SourceHealth) => boolean,
-): Promise<T[]> {
-  const results: Array<T | undefined> = await Promise.all(sources.map(async (source): Promise<T | undefined> => {
+): Promise<Array<{ source: T; recoveryProbe: boolean }>> {
+  const results = await Promise.all(sources.map(async (source) => {
     const checkpointId = source.status === 'shadow' ? `shadow-${source.id}` : source.id;
     const [checkpoint, health] = await Promise.all([store.getCheckpoint(checkpointId), store.getSourceHealth(source.id)]);
-    return predicate(source, checkpoint, now, health) ? source : undefined;
+    return predicate(source, checkpoint, now, health)
+      ? { source, recoveryProbe: health?.state === 'quarantined' }
+      : undefined;
   }));
-  return results.filter((source): source is T => Boolean(source));
+  return results.filter((result): result is { source: T; recoveryProbe: boolean } => Boolean(result));
+}
+
+function recoveryProbeSourceIds<T extends { id: string }>(sources: Array<{ source: T; recoveryProbe: boolean }>): Set<string> {
+  return new Set(sources.filter(({ recoveryProbe }) => recoveryProbe).map(({ source }) => source.id));
 }
 
 async function sendQueueMessages(queue: Queue, messages: unknown[]): Promise<void> {
@@ -998,7 +1004,7 @@ async function sendQueueMessages(queue: Queue, messages: unknown[]): Promise<voi
   }
 }
 
-async function dispatchProviders(
+export async function dispatchProviders(
   env: Environment,
   provider: Exclude<CatalogProviderId, 'github'>,
   now = new Date(),
@@ -1007,21 +1013,33 @@ async function dispatchProviders(
   const store = new D1InternshipStore(env.DB);
   const registry = await reviewedProviderRegistry(new D1EmployerStore(env.DB));
   if (provider === 'greenhouse') {
-    const sources = force ? registry.greenhouse : await due(registry.greenhouse, store, now, isGreenhouseSourceDue);
-    const messages = greenhouseWorkMessages(sources, now);
+    const dueSources = force
+      ? registry.greenhouse.map((source) => ({ source, recoveryProbe: false }))
+      : await due(registry.greenhouse, store, now, isGreenhouseSourceDue);
+    const messages = greenhouseWorkMessages(
+      dueSources.map(({ source }) => source), now, recoveryProbeSourceIds(dueSources),
+    );
     await sendQueueMessages(env.GREENHOUSE_QUEUE, messages);
     return messages.length;
   }
   if (provider === 'lever') {
     const dynamic = (await store.listLeverAdmissions?.() ?? []).map(({ source }) => source);
     const leverRegistry = [...registry.lever, ...dynamic.filter((source) => !registry.lever.some((candidate) => candidate.id === source.id))];
-    const sources = force ? leverRegistry : await due(leverRegistry, store, now, isLeverSourceDue);
-    const messages = leverWorkMessages(sources, now, crypto.randomUUID());
+    const dueSources = force
+      ? leverRegistry.map((source) => ({ source, recoveryProbe: false }))
+      : await due(leverRegistry, store, now, isLeverSourceDue);
+    const messages = leverWorkMessages(
+      dueSources.map(({ source }) => source), now, crypto.randomUUID(), recoveryProbeSourceIds(dueSources),
+    );
     await sendQueueMessages(env.LEVER_QUEUE, messages);
     return messages.length;
   }
-  const sources = force ? registry.ashby : await due(registry.ashby, store, now, isAshbySourceDue);
-  const messages = ashbyWorkMessages(sources, now, crypto.randomUUID());
+  const dueSources = force
+    ? registry.ashby.map((source) => ({ source, recoveryProbe: false }))
+    : await due(registry.ashby, store, now, isAshbySourceDue);
+  const messages = ashbyWorkMessages(
+    dueSources.map(({ source }) => source), now, crypto.randomUUID(), recoveryProbeSourceIds(dueSources),
+  );
   await sendQueueMessages(env.ASHBY_QUEUE, messages);
   return messages.length;
 }
