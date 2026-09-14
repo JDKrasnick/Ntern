@@ -184,7 +184,7 @@ resource "cloudflare_queue_consumer" "ingestion" {
     batch_size = each.key == "destination-verification" ? 5 : 1
     # The high-volume ingestion fleets get two consumers. Gmail stays at one
     # because per-account leases serialize sync work.
-    max_concurrency  = each.key == "greenhouse" ? 2 : 1
+    max_concurrency  = contains(["greenhouse", "github"], each.key) ? 2 : 1
     max_retries      = each.key == "gmail" ? 5 : 2
     max_wait_time_ms = contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000
     retry_delay      = each.key == "shadow-extraction" ? 300 : null
