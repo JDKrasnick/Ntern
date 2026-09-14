@@ -1007,8 +1007,12 @@ async function sendQueueMessages(queue: Queue, messages: unknown[]): Promise<voi
 // D1 overload is intentionally not an in-request resilientD1 retry. Delaying
 // at the queue boundary prevents a consumer batch from amplifying contention.
 export function d1OverloadRetryDelay(error: unknown, attempts = 1): number | undefined {
-  const message = error instanceof Error ? error.message : String(error);
-  if (!/\bd1\b.*(?:overload|too many|busy|limit)|database is locked/i.test(message)) return undefined;
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'object' && error !== null && 'message' in error
+      ? String(error.message)
+      : String(error);
+  if (!/(?:\bd1\b|d1[_\s-]?error).*?(?:overload|too many|busy|limit)|database is locked/i.test(message)) return undefined;
   return attempts <= 1 ? 60 : 300;
 }
 

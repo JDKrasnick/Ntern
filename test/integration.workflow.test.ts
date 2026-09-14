@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { NtfyPublisher, sendDigest, sendPendingNotifications, SesEmailSender, type EmailSender, type PushMessage, type PushPublisher } from '../src/notifications.js';
 import { Poller } from '../src/poll.js';
 import { MemoryInternshipStore } from '../src/store.js';
+import { GREENHOUSE_RESPONSE_MAX_BYTES, GreenhouseBoardAdapter } from '../src/sources/greenhouse.js';
 import type { RawListing, SourceAdapter, SourceCheckpoint, SourceFetchResult } from '../src/types.js';
+import { acmeSource } from './fixtures/greenhouse.js';
 
 const row = (number: number, sourceId = 'fixture'): RawListing => ({
   sourceId, document: 'README.md', sourceUrl: 'https://github.com/fixture/list', row: number,
@@ -77,5 +79,47 @@ describe('mocked production workflow integration', () => {
     expect(sesCommand).toBeInstanceOf(SendEmailCommand);
     expect((sesCommand as SendEmailCommand).input).toMatchObject({ FromEmailAddress: 'sender@example.com', Destination: { ToAddresses: ['recipient@example.com'] }, Content: { Simple: { Subject: { Data: 'Synthetic email smoke test' }, Body: { Text: { Data: 'plain' }, Html: { Data: '<p>html</p>' } } } } });
     sesSend.mockRestore();
+  });
+
+  it('records an oversized Greenhouse board as a retryable resource-limit failure', async () => {
+    const store = new MemoryInternshipStore();
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => new Response('{"jobs":[]}', {
+        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
+      }),
+    });
+
+    const result = await new Poller([adapter], store, () => new Date('2026-09-14T19:00:00.000Z')).poll();
+    const health = await store.getSourceHealth(acmeSource.id);
+
+    expect(result.failures).toEqual([expect.stringContaining('response body exceeds')]);
+    expect(health).toMatchObject({
+      sourceId: acmeSource.id,
+      outcome: 'resource_limit',
+      failureCategory: 'capacity',
+      diagnosticCategory: 'capacity',
+    });
+    expect(health?.backoffUntil).toBeDefined();
+  });
+
+  it('quarantines a Greenhouse source after two consecutive capacity failures', async () => {
+    const store = new MemoryInternshipStore();
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => new Response('{"jobs":[]}', {
+        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
+      }),
+    });
+
+    await new Poller([adapter], store, () => new Date('2026-09-14T19:00:00.000Z')).poll();
+    await new Poller([adapter], store, () => new Date('2026-09-14T19:01:00.000Z')).poll();
+
+    await expect(store.getSourceHealth(acmeSource.id)).resolves.toMatchObject({
+      consecutiveFailures: 2,
+      lastOutcome: 'resource_limit',
+      state: 'quarantined',
+      sourceStatus: 'paused',
+    });
   });
 });
