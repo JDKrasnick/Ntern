@@ -46,8 +46,8 @@ describe('GitHub source adapters', () => {
     await expect(adapter.fetch()).rejects.toMatchObject({ category: 'http', status: 503, retryable: true });
     expect(cancel).toHaveBeenCalledOnce();
   });
-  it('ships each requested feed and document', () => {
-    expect(defaultSources.map((source) => source.id)).toEqual(['vanshb03-summer-2027', 'simplify-summer-2026', 'zapply-2027', 'speedyapply-2027-swe', 'speedyapply-2027-ai', 'northwestern-fintech-2027-quant', 'canadian-tech-2027']);
+  it('ships each active feed and document', () => {
+    expect(defaultSources.map((source) => source.id)).toEqual(['vanshb03-summer-2027', 'simplify-summer-2026', 'speedyapply-2027-swe', 'speedyapply-2027-ai', 'northwestern-fintech-2027-quant', 'canadian-tech-2027']);
   });
   it('keeps queued Greenhouse and Lever work outside the general poll registry', () => {
     expect(productionSources.filter((source) => source.id.startsWith('lever-'))).toEqual([]);

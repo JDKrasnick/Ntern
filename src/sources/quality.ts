@@ -180,7 +180,6 @@ export const sourceQualityPolicies: SourceQualityPolicy[] = [
   ...enabledGreenhouseQualityPolicies(),
   { id: 'vanshb03-summer-2027', sourceClass: 'curated' },
   { id: 'simplify-summer-2026', sourceClass: 'curated' },
-  { id: 'zapply-2027', sourceClass: 'curated' },
   { id: 'speedyapply-2027-swe', sourceClass: 'curated' },
   { id: 'speedyapply-2027-ai', sourceClass: 'curated' },
   { id: 'northwestern-fintech-2027-quant', sourceClass: 'curated' },
