@@ -52,12 +52,12 @@ function jsonResponse(body: unknown, url: string, status = 200): Response {
 
 describe('reviewed Greenhouse registry', () => {
   it('keeps the published inventory plus reviewed shadow additions', () => {
-    expect(reviewedGreenhouseSources).toHaveLength(184);
+    expect(reviewedGreenhouseSources).toHaveLength(183);
     expect(reviewedGreenhouseSources.slice(0, 3).map((source) => source.id)).toEqual(['greenhouse-figma', 'greenhouse-datadog', 'greenhouse-cloudflare']);
-    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(164);
+    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(163);
     expect(reviewedGreenhouseSources.filter((source) => source.status === 'shadow')).toHaveLength(20);
     expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'reviewed')).toHaveLength(23);
-    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(161);
+    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(160);
   });
 
   it('keeps every future reviewed entry within the admission contract', () => {
