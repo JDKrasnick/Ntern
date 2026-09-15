@@ -1,9 +1,13 @@
 # #236 greenhouse-spacex recovery
 
-Status: the quarantine cause is identified and fixed in code. The source stays
-quarantined and paused until one controlled recovery validation succeeds, and
-`resume` is only allowed once `state` is no longer `quarantined`. Per the issue,
-do not bypass quarantine: keep the source paused while validation fails.
+Status: recovered on 2026-09-15. The classification fix shipped in
+[#238](https://github.com/JDKrasnick/Ntern/pull/238) (merge `482a26a`,
+deployed 15:12:40Z), one controlled recovery validation succeeded at
+15:15:59Z, and the source is healthy and resumed. Its next scheduled poll is
+subject to the greenhouse dispatch gate, which skips a run while the work queue
+holds a backlog. D1 persistence instability remains with #203; if it recurs,
+keep the source quarantined and hand the failure there rather than bypassing
+quarantine.
 
 ## Determination
 
@@ -85,22 +89,18 @@ complete-but-invalid body) and `test/integration.workflow.test.ts` (a cut-off
 transfer leaves the source `degraded`/`transport`, not quarantined). Against the
 previous adapter all three fail with `json`, and the poll-level one quarantines.
 
-## Remaining operational steps
+## Recovery record
 
-1. Deploy the fix (merge to `main`, then the deploy workflow).
-2. Run one supported recovery validation:
+The supported flow ran on 2026-09-15 against the deployed fix:
 
-   ```bash
-   read -s OPERATIONS_SHARED_SECRET
-   curl -fsS -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
-     -H 'Content-Type: application/json' -d '{"action":"recover"}' \
-     https://intern-notifs.jdkrasnick.workers.dev/operations/sources/greenhouse-spacex/actions
-   ```
+| Step | Result |
+| --- | --- |
+| `recover` requested 15:15:31.923Z (`recovery-64282ef1-905d-40c7-b5d3-36fc1b1fe49b`) | `202`, `sourceStatus: paused`, `state: quarantined` |
+| Validation poll 15:15:43.905Z → 15:15:59.073Z | `success_changed`, 2,444 raw rows, 40 eligible listings, 21,981 ms fetch span |
+| Health after validation | `state: healthy`, `consecutiveFailures: 0`, `sourceStatus: paused` |
+| `resume` at 15:16:19.478Z | `state: healthy`, `sourceStatus: active`, `incidentState: resolved` |
+| Public API | `GET /jobs` 200 with the same 25 job ids; `GET /catalog?disciplines=Software%20Engineering` byte-identical to the pre-recovery capture; `GET /me/applications` and `GET /operations/sources` still 401 |
 
-3. Confirm the validation run sets `state` to `healthy` (it stays `paused`).
-   If the run fails again, keep the source quarantined and hand the persistence
-   failure to #203.
-4. `resume` the source, then verify the next scheduled poll completes and that
-   `GET /jobs`, `GET /catalog?disciplines=Software%20Engineering`,
-   `GET /me/applications` (401) and `GET /operations/sources` (401) are
-   unchanged.
+The same persisted diagnostic strings in this document come from
+`catalog_items` (`SOURCE#greenhouse-spacex` / `HEALTH`) and the ingestion
+Worker event stream, so a future recurrence can be diffed against them.
