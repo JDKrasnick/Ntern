@@ -8,7 +8,10 @@ export type D1FailureClass = 'retryable' | 'overloaded' | 'internal' | 'other';
 // rebuild-and-retry is safe. Cloudflare's guidance for this set is to retry.
 const RETRYABLE = /no longer active|Connection closed|reset because the connection|D1 DB reset|Network connection lost|storage caused object to be reset/i;
 // Transient pressure, not a dead instance. Retrying immediately worsens it;
-// this class is paced at the queue boundary instead.
+// this class is paced at the queue boundary instead. The `limit` arm also
+// covers the observed "D1_ERROR: Memory limit exceeded before EOF." variant:
+// D1 hitting its per-query memory ceiling on a large read is resource pressure,
+// not a dead instance. See #241.
 const OVERLOADED = /(?:\bd1\b|d1[_\s-]?error).*?(?:overload|too many|busy|limit)|database is locked/i;
 // "D1_ERROR: internal error; reference = ..." matches neither Cloudflare's
 // documented retryable list nor the overload wording, so it is treated as its

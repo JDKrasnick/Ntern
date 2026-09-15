@@ -9,6 +9,7 @@ describe('D1 failure classification', () => {
     ['D1_ERROR: storage caused object to be reset.', 'retryable'],
     ['D1_ERROR: D1 DB is overloaded. Requests queued for too long.', 'overloaded'],
     ['D1_ERROR: too many requests', 'overloaded'],
+    ['D1_ERROR: Memory limit exceeded before EOF.', 'overloaded'],
     ['database is locked', 'overloaded'],
     ['D1_ERROR: internal error; reference = 6hi9i83lajvi9r65mtnuni1t', 'internal'],
     ['D1_ERROR: internal error', 'internal'],
