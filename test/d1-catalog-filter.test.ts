@@ -1,5 +1,5 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
@@ -52,6 +52,54 @@ function sqliteD1(database: DatabaseSync, inspectRows?: (query: string, rows: un
 }
 
 describe('D1 filtered catalog projection', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('continues serving a complete projection after a missed daily refresh without loading catalog jobs', async () => {
+    vi.useFakeTimers();
+    const now = new Date('2026-09-15T05:30:00.000Z');
+    vi.setSystemTime(now);
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (
+        pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL,
+        catalog_sort_key TEXT, PRIMARY KEY (pk, sk)
+      )
+    `);
+    const details = catalogGroupDetails(groupCatalogJobs([job('stale-projection', 'Software Engineering Intern')])[0]!);
+    const insert = database.prepare('INSERT INTO catalog_items (pk, sk, kind, value, catalog_sort_key) VALUES (?, ?, ?, ?, ?)');
+    insert.run('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', JSON.stringify({
+      version: 'last-complete', generatedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1_000).toISOString(), schemaVersion: 4,
+    }), null);
+    insert.run('CATALOG_PROJECTION#last-complete', `GROUP#${details.group.groupId}`, 'catalog-projection', JSON.stringify(details), '00000000');
+    insert.run('JOB#unbounded-fallback', 'META', 'internship', JSON.stringify(job('unbounded-fallback', 'Should not load')), null);
+    try {
+      const queries: string[] = [];
+      const store = new D1InternshipStore(sqliteD1(database, (query) => queries.push(query)));
+      await expect(store.listCatalogProjection(undefined, 25)).resolves.toMatchObject({ groups: [{ group: { groupId: details.group.groupId } }] });
+      expect(queries.some((query) => query.includes("kind = 'internship'"))).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('still rejects projections older than the bounded recovery window', async () => {
+    vi.useFakeTimers();
+    const now = new Date('2026-09-15T05:30:00.000Z');
+    vi.setSystemTime(now);
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    database.prepare('INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, ?, ?, ?)').run(
+      'CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', JSON.stringify({
+        version: 'expired', generatedAt: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1_000).toISOString(), schemaVersion: 4,
+      }),
+    );
+    try {
+      await expect(new D1InternshipStore(sqliteD1(database)).listCatalogProjection()).resolves.toBeUndefined();
+    } finally {
+      database.close();
+    }
+  });
+
   it('lists and filters the catalog through bounded composite-key pages', async () => {
     const database = new DatabaseSync(':memory:');
     database.exec(`
