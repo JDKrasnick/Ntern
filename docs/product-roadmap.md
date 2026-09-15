@@ -119,6 +119,7 @@
 - [x] Add bounded 512-KiB application-page evidence, quarantine-enforced scheduling, protected selective operations for all six Cloudflare DLQs, and exact GitHub queue failure attribution.
 - [ ] Reconcile the production DLQ backlog and degraded GitHub sources (#219) with ledger-backed sample classifications, source-specific recovery evidence, and a reviewed guarded disposition plan; preserve intentional quarantines.
   - [x] Retry transient D1 disconnects before the catalog billing guard and throughout catalog persistence with bounded exponential backoff and jitter (#203); production depth reconciliation remains required before closing #219.
+  - [x] Page the per-source D1 occurrence read so a large, long-lived source partition cannot exceed D1's per-query memory ceiling mid-poll (#203, #241).
   - [x] Capture the September 14 D1 baseline, apply the pending provider-shadow index migration, and deploy the reviewed two-Worker OpenTofu plan without changing queues, consumers, or schedules (#231). Protected DLQ inspection and owner-approved dispositions remain required.
 - [ ] Complete issue #28's registry-driven provider rollout.
   - [x] Add the shared catalog-provider registry, forward-compatible source health, capability-aware operations metadata, isolated provider availability, and registry-resolved AWS/Cloudflare fleet telemetry for Greenhouse, Lever, Ashby, and GitHub.

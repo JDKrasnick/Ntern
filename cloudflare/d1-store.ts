@@ -22,6 +22,13 @@ const deliveryReceiptLifetimeSeconds = 90 * 24 * 60 * 60;
 // maintenance run instead of falling back to a whole-catalog materialization.
 const catalogProjectionMaxAgeMs = 7 * 24 * 60 * 60 * 1_000;
 const documentUploadLeaseSeconds = 15 * 60;
+// Occurrence rows are retained for every posting a source has ever listed, so a
+// per-source partition grows without bound. Reading it in one statement lets the
+// result set exceed D1's per-query memory ceiling ("Memory limit exceeded before
+// EOF"), which rotates/overloads the instance mid-poll and dead-letters valid
+// work. Page the read so no single statement streams the whole partition.
+// See issues #203 and #241.
+const sourceOccurrencePageSize = 500;
 
 function receiptExpiry(value: Pick<DeliveryReceipt, 'updatedAt'>): number {
   return Math.floor(new Date(value.updatedAt).getTime() / 1_000) + deliveryReceiptLifetimeSeconds;
@@ -438,8 +445,18 @@ export class D1InternshipStore implements InternshipStore {
     return canonical && withEmployerCategory(canonical);
   }
   async getSourceOccurrences(sourceId: string): Promise<SourceOccurrenceState[]> {
-    const result = await this.db.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk LIKE 'OCCURRENCE#%'").bind(`SOURCE#${sourceId}`).all<JsonRow>();
-    return result.results.map((row) => JSON.parse(row.value) as SourceOccurrenceState);
+    // Paged by `sk` (the primary key's second column) so each statement is
+    // bounded. The returned set is unchanged; only the transport is chunked.
+    const occurrences: SourceOccurrenceState[] = [];
+    let cursor = 'OCCURRENCE#';
+    for (;;) {
+      const result = await this.db.prepare(`SELECT sk, value FROM catalog_items
+        WHERE pk = ? AND sk > ? AND sk LIKE 'OCCURRENCE#%'
+        ORDER BY sk LIMIT ?`).bind(`SOURCE#${sourceId}`, cursor, sourceOccurrencePageSize).all<{ sk: string; value: string }>();
+      for (const row of result.results) occurrences.push(JSON.parse(row.value) as SourceOccurrenceState);
+      if (result.results.length < sourceOccurrencePageSize) return occurrences;
+      cursor = result.results[result.results.length - 1]!.sk;
+    }
   }
   putSourceOccurrence(occurrence: SourceOccurrenceState) {
     return this.sourceOccurrenceStatement(occurrence).run().then(() => undefined);
