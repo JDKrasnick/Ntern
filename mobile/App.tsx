@@ -5619,7 +5619,7 @@ function Profile({
       .replace(/\{posted\}/g, "Today")
       .replace(/\{postedDetail\}/g, " · Employer posted: Today")
       .replace(/\{source\}/g, "Job board")
-      .replace(/\{url\}/g, "internnotifs.app/roles/northstar");
+      .replace(/\{url\}/g, "ntern.app/roles/northstar");
   const previewDescription = (template: string, fallback: string) => {
     const selected = template.trim() || fallback;
     return previewTemplate(

@@ -93,7 +93,7 @@ jobs:
       cancel-in-progress: false
     environment:
       name: cloudflare-pages-production
-      url: https://internnotifs.app
+      url: https://ntern.app
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

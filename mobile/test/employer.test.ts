@@ -9,7 +9,7 @@ import {
 
 describe("employer web routes", () => {
   it("routes only the dedicated employer path", () => {
-    expect(employerRouteFromUrl("https://internnotifs.app/employer")).toBe("verification");
+    expect(employerRouteFromUrl("https://ntern.app/employer")).toBe("verification");
     expect(employerRouteFromUrl("/employer/sources?from=email")).toBe("sources");
     expect(employerRouteFromUrl("/employer/submissions/")).toBe("submissions");
     expect(employerRouteFromUrl("/employer/sources/unexpected")).toBeUndefined();
