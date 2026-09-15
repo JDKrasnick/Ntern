@@ -18,6 +18,7 @@ import { defaultSources } from '../src/sources/index.js';
 import type { SourceCheckpoint, SourceHealth } from '../src/types.js';
 import { authenticatedInstallation, authenticatedUser, cleanupExpiredAuth, consumeAuthRateLimit, createInstallation, deleteAuthUser, handleAuthRequest, type AuthEnvironment } from './auth.js';
 import { runCatalogQualityBackfill } from '../src/catalog-quality-backfill.js';
+import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
 import { queueHasBacklog } from './queue-backlog.js';
@@ -748,9 +749,17 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     const input = await request.json().catch(() => ({})) as {
       apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
-      scope?: 'all' | 'identity' | 'occurrences';
+      scope?: 'all' | 'identity' | 'occurrences'; audit?: boolean; jobBatch?: number;
     };
     try {
+      // The audit is the read-only integrity gate. It pages the catalog so a
+      // production-sized identity check never depends on one unbounded read.
+      if (input.audit) {
+        return withCors(Response.json(await runPostingIdentityAudit(env.DB, {
+          ...(input.jobBatch === undefined ? {} : { jobBatch: input.jobBatch }),
+          log: (event) => console.log(event),
+        })));
+      }
       const report = await runPostingIdentityRepair(env.DB, input);
       if (input.apply && report.projectionRefreshRequired) {
         await refreshCatalogProjection(new D1InternshipStore(env.DB));
@@ -1111,8 +1120,12 @@ export type PostingIdentityAuditEvent = {
   danglingOccurrenceReferences: number | null;
 };
 
+/** Findings shared by the single-pass repair plan and the paged audit. */
+type PostingIdentityAuditFindings = Pick<PostingIdentityRepairPlan,
+  'occurrenceCounts' | 'gate' | 'duplicateJobs' | 'duplicateAlertGroups'>;
+
 function postingIdentityAuditEvent(
-  plan: PostingIdentityRepairPlan,
+  plan: PostingIdentityAuditFindings,
   enforcementActive: boolean,
   confirmedCoverageFloor: number,
 ): PostingIdentityAuditEvent {
@@ -1147,7 +1160,7 @@ function postingIdentityAuditEvent(
 export async function runScheduledPostingIdentityAudit(
   env: Pick<Environment, 'DB' | 'IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED' | 'IDENTITY_CONFIRMED_COVERAGE_FLOOR'>,
   dependencies: {
-    audit?: (db: D1Database) => Promise<PostingIdentityRepairPlan>;
+    audit?: (db: D1Database) => Promise<PostingIdentityAuditFindings>;
     log?: (event: string) => void;
   } = {},
 ): Promise<PostingIdentityAuditEvent> {
@@ -1157,7 +1170,9 @@ export async function runScheduledPostingIdentityAudit(
     && Number.isFinite(parsedCoverageFloor) && parsedCoverageFloor >= 0 && parsedCoverageFloor <= 1
     ? parsedCoverageFloor
     : undefined;
-  const audit = dependencies.audit ?? ((db: D1Database) => runPostingIdentityRepair(db));
+  // Production catalogs do not fit an unbounded read in one Worker invocation;
+  // the paged audit computes the same gate and coverage facts slice by slice.
+  const audit = dependencies.audit ?? ((db: D1Database) => runPostingIdentityAudit(db));
   let event: PostingIdentityAuditEvent;
   try {
     const plan = await audit(env.DB);

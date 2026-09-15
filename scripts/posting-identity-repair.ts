@@ -2,6 +2,10 @@ const args = new Set(process.argv.slice(2));
 const value = (name: string) => process.argv[process.argv.indexOf(name) + 1];
 const apply = args.has('--apply');
 const gate = args.has('--gate');
+/** Read-only integrity gate. It pages the catalog, so it runs on production
+ * catalogs that cannot be read whole inside one Worker invocation. */
+const audit = args.has('--audit');
+const jobBatch = args.has('--job-batch') ? Number(value('--job-batch')) : undefined;
 const repairToken = args.has('--repair-token') ? value('--repair-token') : undefined;
 const expectedChanges = args.has('--expected-changes') ? Number(value('--expected-changes')) : undefined;
 const expectedDuplicateJobs = args.has('--expected-duplicate-jobs') ? Number(value('--expected-duplicate-jobs')) : undefined;
@@ -16,7 +20,7 @@ if (!secret) throw new Error('OPERATIONS_SHARED_SECRET is required');
 const response = await fetch(`${baseUrl.replace(/\/$/u, '')}/internal/posting-identity-repair`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'X-Operations-Key': secret },
-  body: JSON.stringify({ apply, repairToken, expectedChanges, expectedDuplicateJobs, scope }),
+  body: JSON.stringify({ apply, repairToken, expectedChanges, expectedDuplicateJobs, scope, audit, jobBatch }),
 });
 const body = await response.text();
 console.log(body);
