@@ -76,33 +76,36 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
-  it('accepts an AUTH_FROM_EMAIL plain-text binding update', () => {
+  it.each([
+    'AUTH_FROM_EMAIL',
+    'IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED',
+    'IDENTITY_CONFIRMED_COVERAGE_FLOOR',
+  ])('accepts the permitted %s plain-text binding update', (name) => {
     expect(validateCloudflarePlan(plan([{
       address: 'cloudflare_workers_script.application',
       actions: ['update'],
       before: {
         ...worker,
-        bindings: [...worker.bindings, { name: 'AUTH_FROM_EMAIL', type: 'plain_text', text: 'Old <old@example.test>' }],
+        bindings: [...worker.bindings, { name, type: 'plain_text', text: 'old-value' }],
       },
       after: {
         ...worker,
-        bindings: [...worker.bindings, { name: 'AUTH_FROM_EMAIL', type: 'plain_text', text: 'New <new@example.test>' }],
+        bindings: [...worker.bindings, { name, type: 'plain_text', text: 'new-value' }],
       },
     }]))).toHaveLength(1);
   });
 
-  it('rejects binding updates beyond AUTH_FROM_EMAIL text', () => {
+  it('rejects binding updates beyond the permitted plain-text values', () => {
     expect(() => validateCloudflarePlan(plan([{
       address: 'cloudflare_workers_script.application',
       actions: ['update'],
       before: {
         ...worker,
-        bindings: [...worker.bindings, { name: 'AUTH_FROM_EMAIL', type: 'plain_text', text: 'Old <old@example.test>' }],
+        bindings: [...worker.bindings, { name: 'UNRELATED_SETTING', type: 'plain_text', text: 'old-value' }],
       },
       after: {
         ...worker,
-        bindings: [...worker.bindings, { name: 'AUTH_FROM_EMAIL', type: 'plain_text', text: 'New <new@example.test>' }],
-        compatibility_date: '2026-09-09',
+        bindings: [...worker.bindings, { name: 'UNRELATED_SETTING', type: 'plain_text', text: 'new-value' }],
       },
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });

@@ -21,7 +21,14 @@ const allowedUpdates = new Set([
 ]);
 
 const allowedContentFields = new Set(['content_file', 'content_sha256']);
-const permittedPlainTextBinding = 'AUTH_FROM_EMAIL';
+// Terraform redacts these production values in a Worker script update. They
+// are the only configuration bindings that the production release workflow is
+// allowed to reconcile along with a new Worker bundle.
+const permittedPlainTextBindings = new Set([
+  'AUTH_FROM_EMAIL',
+  'IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED',
+  'IDENTITY_CONFIRMED_COVERAGE_FLOOR',
+]);
 // These provider-computed values may legitimately change after uploading new
 // code. Keep this list explicit so a new provider field fails closed.
 const computedWorkerPaths = new Set([
@@ -89,7 +96,7 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
     const nextBinding = after[index];
     if (!isRecord(binding) || !isRecord(nextBinding)) return false;
     if (binding.name !== nextBinding.name) return false;
-    if (binding.name !== permittedPlainTextBinding) return isDeepStrictEqual(binding, nextBinding);
+    if (!permittedPlainTextBindings.has(String(binding.name))) return isDeepStrictEqual(binding, nextBinding);
     if (binding.type !== 'plain_text' || nextBinding.type !== 'plain_text') return false;
     const { text: beforeText, ...beforeRest } = binding;
     const { text: afterText, ...afterRest } = nextBinding;
