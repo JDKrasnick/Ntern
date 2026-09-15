@@ -519,6 +519,20 @@ and configuration through OpenTofu, then use superseding review decisions and
 a new guarded repair. Do not delete operational records or deploy retained AWS
 stacks.
 
+### Issue #231 production foundation (2026-09-14)
+
+Export the D1 snapshot outside Git before making catalog-admission changes. The
+baseline contained 9,614 catalog internships, 12,183 source occurrences, 326
+source-health records, 385 notification events, 29 applications, and 128 push
+receipts. Migration `0027_provider_shadow_outbox_index.sql` then applied as the
+sole pending migration. The saved OpenTofu plan updated only the API and
+ingestion Worker scripts (zero creates, destroys, queue, consumer, or schedule
+changes); the exact apply completed with two updates, and a refreshed plan had
+no drift. Public `/jobs` returned HTTP 200, with all seven ingestion consumers
+and the single ingestion cron still present. This evidence does not authorize a
+DLQ disposition, employer mapping, repair, or source resume; those remain
+owner-approved operations, and Haize Labs stays paused.
+
 Keep issue #120 and its production roadmap items open after merge and rollout.
 The final gate requires physical iOS, physical Android, and production web
 acceptance for browse, detail, Saved/unavailable behavior, grouped results, and
