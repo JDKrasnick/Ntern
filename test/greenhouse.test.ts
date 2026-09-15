@@ -182,6 +182,46 @@ describe('GreenhouseBoardAdapter', () => {
     });
     await expect(adapter.fetch()).rejects.toThrow('response body exceeds');
   });
+  it('keeps a board transfer that fails mid-body retryable instead of quarantining it as schema drift', async () => {
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"jobs":['));
+          controller.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+        },
+      })),
+    });
+    await expect(adapter.fetch()).rejects.toMatchObject({
+      category: 'transport',
+      retryable: true,
+      message: expect.stringContaining('The operation was aborted due to timeout'),
+    });
+  });
+  it('keeps a board body that ends short of its declared length retryable', async () => {
+    const body = '{"jobs":[]}';
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => new Response(body.slice(0, 5), { headers: { 'content-length': String(body.length) } }),
+    });
+    await expect(adapter.fetch()).rejects.toMatchObject({
+      category: 'transport',
+      retryable: true,
+      message: `greenhouse-acmerobotics: Greenhouse response body ended after 5 of ${body.length} declared bytes`,
+    });
+  });
+  it('still quarantines a complete board body the provider sent as invalid JSON', async () => {
+    const body = '{"jobs":[';
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => new Response(body, { headers: { 'content-length': String(body.length) } }),
+    });
+    await expect(adapter.fetch()).rejects.toMatchObject({
+      category: 'json',
+      retryable: false,
+      message: 'greenhouse-acmerobotics: Greenhouse returned malformed JSON',
+    });
+  });
   it('rejects a wrongly-typed job row as an invalid response shape', async () => {
     const cases = [
       { ...technicalInternship, departments: 'engineering' },

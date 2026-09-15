@@ -77,7 +77,8 @@ fallback.
 - Worker maximum concurrency: four.
 - Worker timeout: two minutes.
 - Queue visibility timeout: six minutes.
-- Greenhouse API timeout: eight seconds per request.
+- Greenhouse API timeout: eight seconds per identity or admission request, and
+  fifteen seconds per board fetch, which covers headers and the whole body.
 - Queue retention: one day.
 - Dead-letter retention: fourteen days.
 - Dead-letter threshold: four receives.

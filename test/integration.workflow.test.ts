@@ -103,6 +103,32 @@ describe('mocked production workflow integration', () => {
     expect(health?.backoffUntil).toBeDefined();
   });
 
+  it('keeps a Greenhouse source degraded when the board body is cut off mid-transfer', async () => {
+    const store = new MemoryInternshipStore();
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"jobs":['));
+          controller.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+        },
+      })),
+    });
+
+    const result = await new Poller([adapter], store, () => new Date('2026-09-15T13:30:00.000Z')).poll();
+    const health = await store.getSourceHealth(acmeSource.id);
+
+    expect(result.failures).toEqual([expect.stringContaining('The operation was aborted due to timeout')]);
+    expect(health).toMatchObject({
+      sourceId: acmeSource.id,
+      state: 'degraded',
+      outcome: 'temporary_provider_error',
+      failureCategory: 'transport',
+      consecutiveFailures: 1,
+    });
+    expect(health?.backoffUntil).toBeDefined();
+  });
+
   it('quarantines a Greenhouse source after two consecutive capacity failures', async () => {
     const store = new MemoryInternshipStore();
     const adapter = new GreenhouseBoardAdapter({
