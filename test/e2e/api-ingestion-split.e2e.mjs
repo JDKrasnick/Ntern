@@ -200,6 +200,35 @@ test('returns the bounded admission audit through the compiled API and ingestion
   });
 });
 
+test('runs the paged posting-identity integrity gate through the compiled API Worker', async () => {
+  const denied = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ audit: true, jobBatch: 1 }),
+  });
+  assert.equal(denied.status, 404);
+  assert.deepEqual(await denied.json(), { message: 'Not found' });
+
+  const response = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({ audit: true, jobBatch: 1 }),
+  });
+  assert.equal(response.status, 200);
+  const report = await response.json();
+  assert.deepEqual(report.occurrenceCounts, {
+    confirmed: 0, unconfirmed: 0, legacy: 0, quarantined: 0, confirmedCoverage: null,
+  });
+  assert.deepEqual(report.gate, {
+    passed: true, exactDuplicateGroups: 0, aliasConflicts: 0, untrackedQuarantines: 0,
+    presentationBlockers: 0, legacyOccurrences: 0, projectionMismatches: 0,
+    duplicateOccurrenceReferences: 0, danglingOccurrenceReferences: 0,
+  });
+  assert.equal(report.schemaVersion, 1);
+  assert.equal(report.pages, 1);
+  assert.equal(report.jobsScanned, 0);
+  assert.deepEqual(report.conflicts, []);
+  assert.equal(report.outboxRows, 0);
+});
+
 test('keeps public catalog requests on the API Worker', async () => {
   const response = await api.fetch('https://api.example.test/jobs');
   assert.equal(response.status, 200);
