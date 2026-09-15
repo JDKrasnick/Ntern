@@ -118,7 +118,7 @@ identity values on every plan and apply:
 
 ```bash
 export TF_VAR_identity_unconfirmed_publication_enabled='true'
-export TF_VAR_identity_confirmed_coverage_floor='0.7130649137222679'
+export TF_VAR_identity_confirmed_coverage_floor='1'
 ```
 
 Build the Worker before the final plan. Save that plan outside the repository,
@@ -259,7 +259,7 @@ historical artifact versions, extraction outcomes, conflicts, and guarded repair
 staging, acquisition leases and host backoff. Full job descriptions are never
 written to these tables. Preserve the active production publication flags:
 `IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED=true` and
-`IDENTITY_CONFIRMED_COVERAGE_FLOOR=0.70`; local defaults differ.
+`IDENTITY_CONFIRMED_COVERAGE_FLOOR=1`; local defaults differ.
 
 After deployment, use the existing destination-verification queue to collect
 historical exact-posting evidence. Identity-checked public APIs run first;
@@ -880,9 +880,47 @@ identity corruption. Record both the activation snapshot and the lower policy
 floor, and review the floor separately whenever the expected source mix
 changes. While `IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED=false`, a failed gate
 is logged but
-does not fail the invocation. Once publication enforcement is active, a failed
-or unavailable audit fails the invocation. Broader dashboards and source
-discovery-latency metrics remain part of issue #40.
+ does not fail the invocation. Once publication enforcement is active, a failed
+ or unavailable audit fails the invocation. Broader dashboards and source
+ discovery-latency metrics remain part of issue #40.
+
+#### Bounded production identity audit (2026-09-15)
+
+The all-scope plan needs the whole catalog in one pass, which does not fit a
+Worker invocation at production size. Measured against the 2026-09-14
+production snapshot — 9,614 internships, 12,183 source occurrences, and 209.6 MB
+of identity row values — the single-pass plan peaked at 787 MB resident memory,
+and a compacted projection still needed roughly 450 MB of JavaScript heap. The
+daily cron therefore runs `runPostingIdentityAudit`, which reads the same
+identity facts through bounded keyset pages and merges them instead of
+deserialising the whole catalog.
+
+- Every catalog read is a keyset page (`(pk, sk) > (?, ?)`, 500 rows) plus one
+  keyset walk per small kind; no query returns a production-sized result set.
+- Each page carries the slice's jobs, the slice's occurrence rows, global job
+  heads, and the global review context. Alias claims and notification history
+  are resolved only in the final group pass, where whole group membership
+  exists; a slice that saw one member at a time would report false claim
+  conflicts.
+- The audit reads a projection that drops or digests only fields the plan never
+  reads by name: `roleMetadata`, `internshipIdentity` beyond the reviewed
+  company ID, occurrence metadata evidence beyond its slot and digest,
+  `sourceMetadataProcessing`, and reference-level admission. Everything the gate
+  reports is kept verbatim, and `test/posting-identity-audit.test.ts` pins the
+  equality against a single-pass plan over the same catalog.
+- `POST /internal/posting-identity-repair` accepts `{"audit": true}` with an
+  optional `jobBatch`. `npm run audit:posting-identity` uses that mode, so the
+  gate no longer depends on a single unbounded read.
+
+Measured on the production snapshot on 2026-09-15: the paged audit returned
+exactly the single-pass gate, coverage, duplicate, presentation, conflict, and
+outbox facts in 20 pages at the default batch, used 14 s of CPU, and completed
+under a 104 MB V8 heap cap (96 MB at a 250-job batch). The single-pass plan
+needs 787 MB resident and over 256 MB of heap before it fails. That envelope
+still has to be confirmed in the deployed Worker before the daily gate is
+trusted. The guarded repair plan and apply are unchanged and still read the
+whole catalog: plan or apply a repair from a bounded scope, or outside the
+Worker, until a batch-scoped repair read is reviewed.
 
 #### Issue #50 staged production execution
 
