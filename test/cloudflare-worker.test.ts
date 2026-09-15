@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { queueHasBacklog } from '../cloudflare/queue-backlog.js';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, dispatchProviders, documentContent, failedStructuredRecoveryHealth, githubSourceRunBlocked, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, dispatchProviders, documentContent, failedStructuredRecoveryHealth, githubSourceRunBlocked, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -35,6 +35,19 @@ describe('Cloudflare scheduled dispatch cost guard', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(queueHasBacklog(queue(async () => { throw new Error('metrics unavailable'); }), 'greenhouse')).resolves.toBe(false);
     vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['D1_ERROR: D1 DB is overloaded. Requests queued for too long.', 60, 300],
+    ['D1_ERROR: internal error; reference = 6hi9i83lajvi9r65mtnuni1t', 120, 600],
+  ])('paces a D1 queue-boundary retry for %s', (message, firstDelay, laterDelay) => {
+    expect(d1QueueRetryDelay(new Error(message), 1)).toBe(firstDelay);
+    expect(d1QueueRetryDelay(new Error(message), 2)).toBe(laterDelay);
+  });
+
+  it('does not pace a queue retry for a reconnect error or an unrelated failure', () => {
+    expect(d1QueueRetryDelay(new Error('D1_ERROR: Connection closed: this D1 DB instance is no longer active. Reconnect or retry the request.'))).toBeUndefined();
+    expect(d1QueueRetryDelay(new Error('UNIQUE constraint failed'))).toBeUndefined();
   });
 
   it.each([

@@ -130,10 +130,17 @@ export async function runGreenhouseBoard(
 
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver).poll({ naturalProviderPoll: !message.force });
-  const sourceFailures = poll.failures.filter((failure) => failure.startsWith(`${source.id}:`));
-  const widespreadLinkFailure = poll.processedListings > 0 && sourceFailures.length / poll.processedListings > SHADOW_LINK_FAILURE_THRESHOLD;
-  if (sourceFailures.length && widespreadLinkFailure) {
-    throw new Error(`${sourceFailures.length}/${poll.processedListings} eligible Greenhouse application links failed validation`);
+  // An outer fetch or persistence failure aborts the whole source and must
+  // never be acknowledged as a successful poll: retry the queue message so
+  // resilientD1 and the bounded queue retries can apply. Only a sparse set of
+  // per-row link-validation failures is tolerated.
+  if (poll.sourceFailures.length) {
+    throw new Error(poll.sourceFailures.map(({ message }) => message).join('; '));
+  }
+  const rowFailures = poll.failures.filter((failure) => failure.startsWith(`${source.id}:`));
+  const widespreadLinkFailure = poll.processedListings > 0 && rowFailures.length / poll.processedListings > SHADOW_LINK_FAILURE_THRESHOLD;
+  if (rowFailures.length && widespreadLinkFailure) {
+    throw new Error(`${rowFailures.length}/${poll.processedListings} eligible Greenhouse application links failed validation`);
   }
   const checkpoint = await dependencies.store.getCheckpoint(source.id);
   const notifications = dependencies.userStore
@@ -152,7 +159,7 @@ export async function runGreenhouseBoard(
     notModified: poll.unchangedSources.includes(adapter.id),
     listings: poll.processedListings,
     rawRows: checkpoint?.lastRawRowCount,
-    withheldRows: (checkpoint?.lastWithheldRowCount ?? 0) + sourceFailures.length,
+    withheldRows: (checkpoint?.lastWithheldRowCount ?? 0) + rowFailures.length,
     notifications,
   };
 }

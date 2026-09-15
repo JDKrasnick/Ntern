@@ -1,3 +1,4 @@
+import { isRetryableD1Failure } from './d1-errors.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 
 // D1 drops connections and resets instances out from under in-flight
@@ -8,12 +9,8 @@ import type { D1Database, D1PreparedStatement } from './types.js';
 // this class of error is to retry: a fresh prepare/bind runs against the
 // reconnected instance. Ingestion polls that hit this during persistence
 // otherwise exhaust their two queue retries and dead-letter valid work (see
-// issues #203 and #205).
-const RETRYABLE = /no longer active|Connection closed|reset because the connection|D1 DB reset|Network connection lost|storage caused object to be reset/i;
-
-function isRetryable(error: unknown): boolean {
-  return error instanceof Error && RETRYABLE.test(error.message);
-}
+// issues #203 and #205). Classification is shared with worker.ts so the retry
+// set is defined once (see d1-errors.ts).
 
 async function withRetry<T>(operation: () => Promise<T>, options: ResilientOptions): Promise<T> {
   let lastError: unknown;
@@ -22,7 +19,7 @@ async function withRetry<T>(operation: () => Promise<T>, options: ResilientOptio
       return await operation();
     } catch (error) {
       lastError = error;
-      if (!isRetryable(error) || attempt === options.attempts - 1) throw error;
+      if (!isRetryableD1Failure(error) || attempt === options.attempts - 1) throw error;
       // Exponential backoff keeps repeated reconnect attempts from piling onto
       // a rotating instance; jitter prevents queue consumers retrying in lockstep.
       await options.sleep(options.baseDelayMs * (2 ** attempt) * (0.5 + options.random()));
@@ -58,8 +55,9 @@ function rebuild(statement: D1PreparedStatement): () => D1PreparedStatement {
 
 /**
  * Wraps a D1 binding so reads, writes, and batches retry the transient D1
- * instance failures listed in RETRYABLE: an instance rotation, a deploy-time
- * reset, or a lost connection that rejects an in-flight statement. Each retry
+ * instance failures classified as retryable (see d1-errors.ts): an instance
+ * rotation, a deploy-time reset, or a lost connection that rejects an in-flight
+ * statement. Each retry
  * rebuilds the statement so it runs against the reconnected instance.
  * Non-retryable errors propagate immediately and unchanged.
  *

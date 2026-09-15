@@ -4,6 +4,8 @@ import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 
 const instanceGone = () => new Error('D1_ERROR: Connection closed: this D1 DB instance is no longer active. Reconnect or retry the request.');
 const resetOnDeploy = () => new Error('D1_ERROR: D1 DB reset because its code was updated.');
+const internalError = () => new Error('D1_ERROR: internal error; reference = 6hi9i83lajvi9r65mtnuni1t');
+const overloaded = () => new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.');
 
 function statement(overrides: Partial<Record<'first' | 'all' | 'run', () => Promise<unknown>>>): D1PreparedStatement {
   const self: D1PreparedStatement = {
@@ -47,6 +49,18 @@ describe('resilientD1', () => {
 
     await expect(db.prepare('UPDATE t SET a = 1').run()).resolves.toEqual({ meta: { changes: 1 } });
     expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a bare internal error or an overload in-request', async () => {
+    const internalRun = vi.fn().mockRejectedValue(internalError());
+    const internalDb = resilientD1({ prepare: () => statement({ run: internalRun }), batch: async () => [] } as unknown as D1Database, noSleep);
+    await expect(internalDb.prepare('UPDATE t SET a = 1').run()).rejects.toThrow('internal error');
+    expect(internalRun).toHaveBeenCalledTimes(1);
+
+    const overloadRun = vi.fn().mockRejectedValue(overloaded());
+    const overloadDb = resilientD1({ prepare: () => statement({ run: overloadRun }), batch: async () => [] } as unknown as D1Database, noSleep);
+    await expect(overloadDb.prepare('UPDATE t SET a = 1').run()).rejects.toThrow('overloaded');
+    expect(overloadRun).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry an unrelated error', async () => {

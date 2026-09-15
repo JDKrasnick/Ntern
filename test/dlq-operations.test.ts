@@ -86,6 +86,18 @@ describe('protected DLQ operations', () => {
     database.close();
   });
 
+  it('surfaces the durable source-health category when the failure ledger is missing', async () => {
+    const { database, dependencies } = subject([catalogMessage('m1')], async () => ({
+      sourceId: 'lever-acme', state: 'degraded', sourceStatus: 'active', lastAttemptAt: 'now', consecutiveFailures: 1,
+      durationMs: 1, diagnosticCategory: 'persistence', lastSafeDiagnostic: 'D1_ERROR: internal error; reference = abc',
+    }));
+    const result = await inspectDlq({ queue: 'lever', limit: 100 }, dependencies);
+    expect(result.messages[0]).toMatchObject({ messageId: 'm1', failureProvenance: 'missing-ledger',
+      currentHealthCategory: 'persistence' });
+    expect(result.messages[0]).not.toHaveProperty('failureCategory');
+    database.close();
+  });
+
   it('keeps malformed messages inspectable and selectively discardable', async () => {
     const malformed: PeekedMessage = { id: 'broken', attempts: 5, ref: 'private-broken', body: '{not-json' };
     const { database, dependencies, purge } = subject([malformed]);

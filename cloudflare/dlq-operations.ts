@@ -119,7 +119,12 @@ async function summary(name: DlqName, message: PeekedMessage, dependencies: DlqD
     payloadHash: parsed.payloadHash,
     ...(parsed.sourceId ? { sourceId: parsed.sourceId } : {}),
     ...(parsed.jobId ? { jobId: parsed.jobId } : {}),
-    ...(health ? { currentHealth: health.state, sourceStatus: health.sourceStatus, latestDiagnostic: health.lastSafeDiagnostic } : {}),
+    ...(health ? { currentHealth: health.state, sourceStatus: health.sourceStatus, latestDiagnostic: health.lastSafeDiagnostic,
+      // The failure ledger also lives in D1, so a D1 outage leaves no per-message
+      // category. Source health is written on a best-effort path and is the
+      // durable category signal for that failure mode (see #203).
+      ...(health.diagnosticCategory ?? health.lastFailureCategory
+        ? { currentHealthCategory: health.diagnosticCategory ?? health.lastFailureCategory } : {}) } : {}),
     // failure.diagnostic deliberately overwrites health.lastSafeDiagnostic above:
     // for a dead-lettered message the per-message failure reason is more useful
     // than the source's current health diagnostic (still surfaced via sourceStatus).

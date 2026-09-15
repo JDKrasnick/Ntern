@@ -40,6 +40,7 @@ import type { BrowserWorker } from '@cloudflare/puppeteer';
 import { destinationVerificationMessage, enqueueDueDestinationVerifications, processDestinationVerificationBatch,
   sendAdmissionOperationalAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
+import { classifyD1Failure } from './d1-errors.js';
 import { resilientD1 } from './resilient-d1.js';
 import type { CatalogAdmissionResolver } from '../src/destination-verification.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
@@ -1013,16 +1014,15 @@ async function sendQueueMessages(queue: Queue, messages: unknown[]): Promise<voi
   }
 }
 
-// D1 overload is intentionally not an in-request resilientD1 retry. Delaying
-// at the queue boundary prevents a consumer batch from amplifying contention.
-export function d1OverloadRetryDelay(error: unknown, attempts = 1): number | undefined {
-  const message = error instanceof Error
-    ? error.message
-    : typeof error === 'object' && error !== null && 'message' in error
-      ? String(error.message)
-      : String(error);
-  if (!/(?:\bd1\b|d1[_\s-]?error).*?(?:overload|too many|busy|limit)|database is locked/i.test(message)) return undefined;
-  return attempts <= 1 ? 60 : 300;
+// D1 overload and bare internal errors are intentionally not in-request
+// resilientD1 retries. Delaying at the queue boundary prevents a consumer
+// batch from amplifying contention. See d1-errors.ts for the classification.
+export function d1QueueRetryDelay(error: unknown, attempts = 1): number | undefined {
+  switch (classifyD1Failure(error)) {
+    case 'overloaded': return attempts <= 1 ? 60 : 300;
+    case 'internal': return attempts <= 1 ? 120 : 600;
+    default: return undefined;
+  }
 }
 
 export async function dispatchProviders(
@@ -1378,7 +1378,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           body: queued.body, error,
         });
         console.error(JSON.stringify({ command: 'github-poll-setup', messageId: queued.id, error: safeDiagnostic(error) }));
-        queued.retry({ delaySeconds: d1OverloadRetryDelay(error, queued.attempts) });
+        queued.retry({ delaySeconds: d1QueueRetryDelay(error, queued.attempts) });
       }
       return;
     }
@@ -1444,7 +1444,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         await resolveFailures(queued.id, queued.attempts);
       } catch (error) {
         failed.add(record.messageId);
-        const delay = d1OverloadRetryDelay(error, queued.attempts);
+        const delay = d1QueueRetryDelay(error, queued.attempts);
         if (delay) overloadDelays.set(record.messageId, delay);
         await recordQueueFailureBestEffort({
           db: env.DB, queueName: batch.queue, messageId: queued.id, attempts: queued.attempts,
@@ -1475,7 +1475,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       catch { return undefined; }
     })();
     const queued = messageById.get(record.messageId);
-    const delay = d1OverloadRetryDelay(error, queued?.attempts);
+    const delay = d1QueueRetryDelay(error, queued?.attempts);
     if (delay) overloadDelays.set(record.messageId, delay);
     await recordQueueFailureBestEffort({
       db: env.DB, queueName: batch.queue, messageId: record.messageId,
@@ -1491,7 +1491,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     registry = await reviewedProviderRegistry(new D1EmployerStore(env.DB));
   } catch (error) {
     for (const record of records) await onRecordFailure(record, error);
-    for (const message of batch.messages) message.retry({ delaySeconds: d1OverloadRetryDelay(error, message.attempts) });
+    for (const message of batch.messages) message.retry({ delaySeconds: d1QueueRetryDelay(error, message.attempts) });
     console.error(JSON.stringify({ command: 'catalog-poll-setup', provider: catalogProvider,
       messageIds: records.map((record) => record.messageId), error: safeDiagnostic(error) }));
     return;
@@ -1513,7 +1513,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       : [];
   } catch (error) {
     for (const record of records) await onRecordFailure(record, error);
-    for (const message of batch.messages) message.retry({ delaySeconds: d1OverloadRetryDelay(error, message.attempts) });
+    for (const message of batch.messages) message.retry({ delaySeconds: d1QueueRetryDelay(error, message.attempts) });
     console.error(JSON.stringify({ command: 'catalog-poll-setup', provider: catalogProvider,
       messageIds: records.map((record) => record.messageId), error: safeDiagnostic(error) }));
     return;

@@ -183,6 +183,10 @@ export interface PollReport {
   quarantinedListings: Array<{ sourceId: string; row: number; reason: string }>;
   continuationSources: string[];
   failures: string[];
+  // An outer fetch or persistence failure aborts the whole source. It is
+  // tracked separately from per-row `failures` so a consumer can retry the
+  // queue message instead of acknowledging a source that never ran. See #203.
+  sourceFailures: Array<{ sourceId: string; message: string }>;
 }
 
 interface TrustedBatch {
@@ -1184,6 +1188,7 @@ export class IngestionRunner {
       quarantinedListings: [],
       continuationSources: [],
       failures: [],
+      sourceFailures: [],
     };
     const health: SourceHealth[] = [];
     this.boardActiveIds.clear();
@@ -1765,7 +1770,9 @@ export class IngestionRunner {
         health.push(failureHealth);
         try { await this.store.putSourceHealth(failureHealth); }
         catch { /* The original source/persistence failure remains primary. */ }
-        report.failures.push(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        report.failures.push(message);
+        report.sourceFailures.push({ sourceId: connector.id, message });
         emitFailureMetric(
           connector.id,
           providerFor(connector.id),
