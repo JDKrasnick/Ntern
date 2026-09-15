@@ -200,10 +200,84 @@ test('returns the bounded admission audit through the compiled API and ingestion
   });
 });
 
+test('runs the paged posting-identity integrity gate through the compiled API Worker', async () => {
+  const denied = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ audit: true, jobBatch: 1 }),
+  });
+  assert.equal(denied.status, 404);
+  assert.deepEqual(await denied.json(), { message: 'Not found' });
+
+  const response = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({ audit: true, jobBatch: 1 }),
+  });
+  assert.equal(response.status, 200);
+  const report = await response.json();
+  assert.deepEqual(report.occurrenceCounts, {
+    confirmed: 0, unconfirmed: 0, legacy: 0, quarantined: 0, confirmedCoverage: null,
+  });
+  assert.deepEqual(report.gate, {
+    passed: true, exactDuplicateGroups: 0, aliasConflicts: 0, untrackedQuarantines: 0,
+    presentationBlockers: 0, legacyOccurrences: 0, projectionMismatches: 0,
+    duplicateOccurrenceReferences: 0, danglingOccurrenceReferences: 0,
+  });
+  assert.equal(report.schemaVersion, 1);
+  assert.equal(report.pages, 1);
+  assert.equal(report.jobsScanned, 0);
+  assert.deepEqual(report.conflicts, []);
+  assert.equal(report.outboxRows, 0);
+});
+
 test('keeps public catalog requests on the API Worker', async () => {
   const response = await api.fetch('https://api.example.test/jobs');
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).jobs, []);
+});
+
+test('honors a one-job audit batch through the compiled API Worker', async () => {
+  const database = await runtime.getD1Database('DB', apiWorkerName);
+  const makeJob = (jobId) => ({
+    jobId, company: 'Paged Employer', title: 'Software Engineering Intern', location: 'New York', season: 'summer-2027',
+    applyUrl: `https://careers.example.test/jobs/${jobId}`, normalizedUrl: `https://careers.example.test/jobs/${jobId}`,
+    fingerprint: `fingerprint-${jobId}`, compensation: { raw: '' }, sourceReferences: [], open: true, technical: true,
+    firstSeenAt: '2026-08-01T00:00:00.000Z', catalogVisibleAt: '2026-08-01T00:00:00.000Z',
+    lastSeenAt: '2026-08-02T00:00:00.000Z', notification: { smsPending: false, digestPending: false },
+  });
+  for (const jobId of ['page-a', 'page-b']) {
+    await database.prepare('INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, ?, ?, ?)')
+      .bind(`JOB#${jobId}`, 'META', 'internship', JSON.stringify(makeJob(jobId))).run();
+  }
+
+  const response = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({ audit: true, jobBatch: 1 }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    schemaVersion: 1,
+    pages: 2,
+    jobsScanned: 2,
+    occurrenceCounts: { confirmed: 0, unconfirmed: 0, legacy: 0, quarantined: 0, confirmedCoverage: null },
+    gate: {
+      passed: true, exactDuplicateGroups: 0, aliasConflicts: 0, untrackedQuarantines: 0,
+      presentationBlockers: 0, legacyOccurrences: 0, projectionMismatches: 0,
+      duplicateOccurrenceReferences: 0, danglingOccurrenceReferences: 0,
+    },
+    duplicateAlertGroups: 0,
+    unknownUrlFamilyCandidates: [],
+    providerGroups: 0,
+    duplicateGroups: 0,
+    duplicateJobs: 0,
+    eligibleDuplicateGroups: 0,
+    eligibleDuplicateJobs: 0,
+    unresolvedDuplicateGroups: 0,
+    presentationDisagreements: [],
+    samples: [],
+    conflicts: [],
+    outboxRows: 0,
+  });
 });
 
 test('runs a dev account through signup, verification, sign-in, and private reads', async () => {

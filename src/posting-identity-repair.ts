@@ -121,6 +121,23 @@ export interface PresentationDisagreement {
 type InternalPlan = PostingIdentityRepairPlan & {
   catalogWrites: CatalogWrite[]; catalogDeletes: CatalogRow[];
   userWrites: UserWrite[]; userDeletes: UserRow[]; proposalUpdates: ProposalRow[];
+  scan: PostingIdentityScan;
+};
+
+/**
+ * Compact, merge-safe outputs of one plan pass. The paged identity audit runs
+ * this same plan over catalog slices and merges these values instead of the
+ * whole catalog, so an audit never holds every row in Worker memory.
+ */
+export type PostingIdentityScan = {
+  /** Durable occurrence keys with the identity decision the plan counted. */
+  occurrenceDecisions: Array<[string, string | null]>;
+  /** Unconfirmed review family per classified occurrence key. */
+  unconfirmedFamilies: Array<[string, string]>;
+  /** Reviewed provider identity groups: key, member job ID, first-seen stamp. */
+  groupMembers: Array<[string, string, string]>;
+  /** Provider aliases each reviewed group claims: group key, alias value. */
+  groupAliases: Array<[string, string]>;
 };
 
 export type PostingIdentityRepairReviewContext = {
@@ -492,13 +509,24 @@ function officialPresentation(members: Internship[], evidence: HistoricalProvide
   return [...matches].sort((a, b) => (b.providerTimestamp?.value ?? '').localeCompare(a.providerTimestamp?.value ?? ''))[0];
 }
 
+/**
+ * `audit` computes every gate, coverage, and conflict fact the plan reports and
+ * skips write materialisation: the canonical merge, alias and job-ID claims,
+ * the occurrence and season synchronisation sweep, tombstones, and user-item
+ * remaps. The paged audit discards writes, so spending Worker memory and CPU on
+ * them would make the slice passable for no gain.
+ */
+export type PostingIdentityPlanMode = 'repair' | 'audit';
+
 export function postingIdentityRepairPlan(
   catalogRows: CatalogRow[],
   userRows: UserRow[],
   proposalRows: ProposalRow[] = [],
   scope: PostingIdentityRepairScope = 'all',
   reviewContext: PostingIdentityRepairReviewContext = {},
+  mode: PostingIdentityPlanMode = 'repair',
 ): InternalPlan {
+  const audit = mode === 'audit';
   const conflicts: string[] = [];
   const employerMappings = new Map<string, string>();
   for (const mapping of reviewContext.employerMappings ?? []) {
@@ -685,6 +713,8 @@ export function postingIdentityRepairPlan(
   const canonicalByJobId = new Map(existingCanonicalByJobId);
   const identityCanonicalByJobId = new Map<string, string>();
   const canonicalJobs = new Map<string, Internship>();
+  const scanGroupMembers: PostingIdentityScan['groupMembers'] = [];
+  const scanGroupAliases: PostingIdentityScan['groupAliases'] = [];
   const catalogWrites: CatalogWrite[] = [];
   const catalogDeletes: CatalogRow[] = [];
   const samples: PostingIdentityRepairPlan['samples'] = [];
@@ -704,6 +734,7 @@ export function postingIdentityRepairPlan(
     });
     const ordered = hydrated.sort((a, b) => firstSeen(a.job).localeCompare(firstSeen(b.job)) || a.job.jobId.localeCompare(b.job.jobId));
     if (!ordered.length) continue;
+    for (const item of ordered) scanGroupMembers.push([key, item.job.jobId, firstSeen(item.job)]);
     const canonical = ordered[0]!;
     const presentationMembers = ordered.map((item) => ({ ...item.job, sourceReferences: item.job.sourceReferences
       .map((reference) => classifiedOccurrence(reference, firstSeen(item.job))) }));
@@ -749,32 +780,35 @@ export function postingIdentityRepairPlan(
     const classifyReference = scope === 'identity'
       ? (reference: SourceOccurrence) => reference
       : classifiedOccurrence;
-    const merged = retainedIdentity
+    const merged = audit ? canonical.job : retainedIdentity
       ? { ...canonical.job, postingIdentityStatus: 'confirmed' as const,
           sourceReferences: canonical.job.sourceReferences.map((reference) => classifyReference(reference, canonical.job.firstSeenAt)) }
       : mergeJob(canonical.job, ordered.map((item) => item.job), identity, official, classifyReference);
-    canonicalJobs.set(canonical.job.jobId, merged);
+    if (!audit) canonicalJobs.set(canonical.job.jobId, merged);
     for (const item of ordered) {
       canonicalByJobId.set(item.job.jobId, canonical.job.jobId);
       identityCanonicalByJobId.set(item.job.jobId, canonical.job.jobId);
     }
     if (scope === 'occurrences') continue;
-    if (JSON.stringify(stable(merged)) !== JSON.stringify(stable(parse<Internship>(canonical.row.value)))) {
-      catalogWrites.push({ before: canonical.row, pk: canonical.row.pk, sk: canonical.row.sk, kind: 'internship', value: JSON.stringify(merged), columns: jobColumns(merged) });
+    if (!audit) {
+      if (JSON.stringify(stable(merged)) !== JSON.stringify(stable(parse<Internship>(canonical.row.value)))) {
+        catalogWrites.push({ before: canonical.row, pk: canonical.row.pk, sk: canonical.row.sk, kind: 'internship', value: JSON.stringify(merged), columns: jobColumns(merged) });
+      }
+      catalogDeletes.push(...ordered.slice(1).map((item) => item.row));
     }
-    catalogDeletes.push(...ordered.slice(1).map((item) => item.row));
     const duplicateIds = new Set(ordered.slice(1).map((item) => item.job.jobId));
     const remappedAliasKeys = new Set<string>();
     for (const duplicateId of duplicateIds) {
       for (const { row, claim } of postingAliasesByCanonicalJobId.get(duplicateId) ?? []) {
         remappedAliasKeys.add(`${row.pk}\0${row.sk}`);
-        catalogWrites.push({ before: row, pk: row.pk, sk: row.sk, kind: row.kind,
+        if (!audit) catalogWrites.push({ before: row, pk: row.pk, sk: row.sk, kind: row.kind,
           value: JSON.stringify({ ...claim, canonicalJobId: canonical.job.jobId }) });
       }
     }
     const aliasValues = new Set(identity.aliases.filter((item) => item.value.startsWith('provider:')).map((item) => item.value));
     aliasValues.add(`provider:${key}`);
     for (const alias of [...aliasValues].sort()) {
+      scanGroupAliases.push([key, alias]);
       const pk = `POSTING_ALIAS#${alias}`; const existing = catalogByKey.get(`${pk}\0CLAIM`);
       if (existing) {
         const claim = parse<{ canonicalJobId?: string }>(existing.value);
@@ -782,7 +816,7 @@ export function postingIdentityRepairPlan(
         if (claim.canonicalJobId !== canonical.job.jobId) conflicts.push(`${alias}: already claimed by ${claim.canonicalJobId ?? 'an invalid row'}`);
         continue;
       }
-      catalogWrites.push({ pk, sk: 'CLAIM', kind: 'posting-alias', value: JSON.stringify({ alias, canonicalJobId: canonical.job.jobId, claimedAt: 'identity-repair' }) });
+      if (!audit) catalogWrites.push({ pk, sk: 'CLAIM', kind: 'posting-alias', value: JSON.stringify({ alias, canonicalJobId: canonical.job.jobId, claimedAt: 'identity-repair' }) });
     }
     for (const duplicate of ordered.slice(1)) {
       const pk = `JOB_ID_ALIAS#${duplicate.job.jobId}`; const existing = catalogByKey.get(`${pk}\0TARGET`);
@@ -791,7 +825,7 @@ export function postingIdentityRepairPlan(
         if (claim.canonicalJobId !== canonical.job.jobId) conflicts.push(`${duplicate.job.jobId}: legacy alias already targets ${claim.canonicalJobId ?? 'an invalid row'}`);
         continue;
       }
-      catalogWrites.push({ pk, sk: 'TARGET', kind: 'job-id-alias', value: JSON.stringify({ oldJobId: duplicate.job.jobId, canonicalJobId: canonical.job.jobId, createdBy: 'posting-identity-repair' }) });
+      if (!audit) catalogWrites.push({ pk, sk: 'TARGET', kind: 'job-id-alias', value: JSON.stringify({ oldJobId: duplicate.job.jobId, canonicalJobId: canonical.job.jobId, createdBy: 'posting-identity-repair' }) });
     }
   }
 
@@ -807,7 +841,7 @@ export function postingIdentityRepairPlan(
       memberIdsByCanonical.set(canonical, [...(memberIdsByCanonical.get(canonical) ?? []), job.jobId]);
     } catch { /* Malformed internship JSON was reported above. */ }
   }
-  if (scope !== 'identity') for (const row of jobRows) {
+  if (!audit && scope !== 'identity') for (const row of jobRows) {
     let stored: Internship;
     try { stored = parse<Internship>(row.value); } catch { continue; }
     const canonicalId = canonicalByJobId.get(stored.jobId) ?? stored.jobId;
@@ -843,7 +877,7 @@ export function postingIdentityRepairPlan(
   }
 
   let occurrenceRemaps = 0;
-  if (scope !== 'identity') for (const row of catalogRows.filter((item) => item.kind === 'source-occurrence')) {
+  if (!audit && scope !== 'identity') for (const row of catalogRows.filter((item) => item.kind === 'source-occurrence')) {
     try {
       const value = parse<{ jobId: string; occurrence: SourceOccurrence; firstObservedAt?: string; changedAt?: string }>(row.value);
       const canonical = canonicalByJobId.get(value.jobId) ?? value.jobId;
@@ -874,7 +908,7 @@ export function postingIdentityRepairPlan(
       notificationTombstoneGroups.set(target, [...(notificationTombstoneGroups.get(target) ?? []), row]);
     } catch { conflicts.push(`${row.pk}:${row.sk}: malformed notification tombstone JSON`); }
   }
-  for (const [target, rows] of notificationTombstoneGroups) {
+  for (const [target, rows] of audit ? [] : notificationTombstoneGroups) {
     const [pk, sk] = target.split('\0');
     const canonicalJobId = sk!.slice('ROLE#'.length);
     const existing = catalogByKey.get(target);
@@ -890,12 +924,15 @@ export function postingIdentityRepairPlan(
     notificationTombstoneRemaps += rows.filter((row) => row.pk !== pk || row.sk !== sk).length;
   }
 
+  // User history is only ever written back by the repair; the audit reports
+  // its conflicts and counts without materialising any of it.
+  const remappableUsers = audit ? [] : userRows;
   const userWrites: UserWrite[] = [];
   const userDeletes: UserRow[] = [];
   const applicationIdAliases = new Map<string, string>();
   let applicationRemaps = 0; let applicationMerges = 0;
   const applicationGroups = new Map<string, Array<{ row: UserRow; value: ApplicationRecord }>>();
-  for (const row of userRows.filter((item) => item.kind === 'application')) {
+  for (const row of remappableUsers.filter((item) => item.kind === 'application')) {
     const value = parse<ApplicationRecord>(row.value); const canonical = identityCanonicalByJobId.get(value.jobId);
     if (!canonical) continue;
     const group = `${row.user_id}\0${canonical}`;
@@ -933,7 +970,7 @@ export function postingIdentityRepairPlan(
   }
 
   let sessionRemaps = 0;
-  for (const row of userRows.filter((item) => item.kind === 'application-session')) {
+  for (const row of remappableUsers.filter((item) => item.kind === 'application-session')) {
     const value = parse<ApplicationSession>(row.value);
     const jobId = identityCanonicalByJobId.get(value.jobId) ?? value.jobId;
     const applicationId = applicationIdAliases.get(`${row.user_id}\0${value.applicationId}`) ?? value.applicationId;
@@ -944,7 +981,7 @@ export function postingIdentityRepairPlan(
 
   let receiptRemaps = 0; let receiptMerges = 0;
   const receiptGroups = new Map<string, Array<{ row: UserRow; value: DeliveryReceipt; itemKey: string }>>();
-  for (const row of userRows.filter((item) => item.kind === 'receipt')) {
+  for (const row of remappableUsers.filter((item) => item.kind === 'receipt')) {
     const value = parse<DeliveryReceipt>(row.value); const canonical = identityCanonicalByJobId.get(value.jobId);
     const job = canonical && canonicalJobs.get(canonical); if (!canonical || !job) continue;
     const dedupeKey = notificationDedupeKey(job); const itemKey = `RECEIPT#${dedupeKey}#${value.token}`;
@@ -953,7 +990,7 @@ export function postingIdentityRepairPlan(
   }
   for (const records of receiptGroups.values()) {
     const ordered = [...records].sort((a, b) => receiptRank(b.value) - receiptRank(a.value) || b.value.updatedAt.localeCompare(a.value.updatedAt));
-    const keeper = ordered[0]!; const existingTarget = userRows.find((row) => row.user_id === keeper.row.user_id && row.item_key === keeper.itemKey);
+    const keeper = ordered[0]!; const existingTarget = remappableUsers.find((row) => row.user_id === keeper.row.user_id && row.item_key === keeper.itemKey);
     if (existingTarget && !records.some((item) => item.row === existingTarget)) {
       ordered.push({ row: existingTarget, value: parse<DeliveryReceipt>(existingTarget.value), itemKey: keeper.itemKey });
       ordered.sort((a, b) => receiptRank(b.value) - receiptRank(a.value) || b.value.updatedAt.localeCompare(a.value.updatedAt));
@@ -971,7 +1008,7 @@ export function postingIdentityRepairPlan(
   }
 
   let releaseRemaps = 0;
-  for (const row of userRows.filter((item) => item.kind === 'catalog-release')) {
+  for (const row of remappableUsers.filter((item) => item.kind === 'catalog-release')) {
     const value = parse<CatalogRelease>(row.value);
     const mapIds = (ids: string[]) => [...new Set(ids.map((id) => identityCanonicalByJobId.get(id) ?? id))];
     const next = { ...value, jobIds: mapIds(value.jobIds), newJobIds: mapIds(value.newJobIds) };
@@ -979,7 +1016,7 @@ export function postingIdentityRepairPlan(
     releaseRemaps += 1; userWrites.push({ before: row, userId: row.user_id, itemKey: row.item_key, kind: row.kind, value: JSON.stringify(next) });
   }
 
-  const proposalUpdates = proposalRows.filter((row) => identityCanonicalByJobId.has(row.job_id)
+  const proposalUpdates = (audit ? [] : proposalRows).filter((row) => identityCanonicalByJobId.has(row.job_id)
     && identityCanonicalByJobId.get(row.job_id) !== row.job_id);
   const uniqueCatalogWrites = new Map<string, CatalogWrite>();
   for (const write of catalogWrites) {
@@ -1019,9 +1056,11 @@ export function postingIdentityRepairPlan(
     classifyResult(occurrence, occurrence.firstAttachedAt ?? '1970-01-01T00:00:00.000Z');
   }
   const plannedFamilyCounts = new Map<string, number>();
-  for (const { result } of classificationByOccurrence.values()) if (result.decision.status === 'unconfirmed') {
+  const scanUnconfirmedFamilies: PostingIdentityScan['unconfirmedFamilies'] = [];
+  for (const [occurrenceKey, { result }] of classificationByOccurrence) if (result.decision.status === 'unconfirmed') {
     const key = result.decision.reviewFamilyKey;
     plannedFamilyCounts.set(key, (plannedFamilyCounts.get(key) ?? 0) + 1);
+    scanUnconfirmedFamilies.push([occurrenceKey, key]);
   }
   const sortedConflicts = [...conflicts].sort();
   const gate = {
@@ -1060,6 +1099,12 @@ export function postingIdentityRepairPlan(
     conflicts: sortedConflicts, presentationDisagreements, samples: samples.slice(0, 20), expectedChanges,
     applied: false, projectionRefreshRequired: false,
     catalogWrites, catalogDeletes, userWrites, userDeletes, proposalUpdates,
+    scan: {
+      occurrenceDecisions: [...occurrenceDecisions].map(([key, decision]) => [key, decision?.status ?? null]),
+      unconfirmedFamilies: scanUnconfirmedFamilies,
+      groupMembers: scanGroupMembers,
+      groupAliases: scanGroupAliases,
+    },
   };
 }
 
