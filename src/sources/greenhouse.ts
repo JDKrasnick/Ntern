@@ -6,7 +6,7 @@ import { earlyCareerRequirements, hasLifecycleTitleSignal, htmlToText, inferSeas
 import { extractGreenhouseCompensationBands } from '../metadata-acquisition.js';
 import { greenhouseApplicationUrlRejection } from './quality.js';
 import { GREENHOUSE_BOARD_API_HOST, assertBoardToken, boardIdentityUrl, validateBoardToken, type ReviewedGreenhouseSource } from './greenhouse-config.js';
-import { SourceFetchError } from './source-error.js';
+import { SourceFetchError, categorizeFetchError } from './source-error.js';
 import { processSnapshot } from '../ingestion/processor.js';
 import type { RawListing, SourceAdapter, SourceCheckpoint, SourceConnector, SourceFetchResult, SourceSnapshot, SourcedPosting } from '../types.js';
 
@@ -40,6 +40,14 @@ export const GREENHOUSE_RESPONSE_MAX_BYTES = 64 * 1024 * 1024;
 export const GREENHOUSE_JOB_MAX_BYTES = 512 * 1024;
 export const GREENHOUSE_BOARD_MAX_JOBS = 5_000;
 export const GREENHOUSE_CONTENT_HASH_VERSION = 2;
+/**
+ * The deadline covers headers and body, because the largest reviewed boards are
+ * tens of megabytes (SpaceX answers `?content=true` with 27.7 MB). The same
+ * endpoint already gets this budget from the candidate probe and the live
+ * contract check; the adapter previously cut it off at 8 s, which aborted
+ * in-flight board transfers.
+ */
+export const GREENHOUSE_REQUEST_TIMEOUT_MS = 15_000;
 
 /**
  * Read-only evidence for a token found on an employer's official careers page.
@@ -164,8 +172,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-async function boundedJson(response: Response, limit: number): Promise<unknown> {
-  if (!response.body) return JSON.parse(await response.text());
+function declaredBodyBytes(response: Response): number | undefined {
+  const header = response.headers.get('content-length');
+  if (header === null) return undefined;
+  const value = Number(header);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+/** Streams the body under the response-size guard, stopping an oversized body early. */
+async function readBoundedBody(response: Response, limit: number, sourceId: string): Promise<{ text: string; bytes: number }> {
+  if (!response.body) {
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > limit) {
+      throw new SourceFetchError(`${sourceId}: Greenhouse response body exceeds ${limit} bytes`, 'capacity');
+    }
+    return { text: new TextDecoder().decode(buffer), bytes: buffer.byteLength };
+  }
   const reader = response.body.getReader();
   let bytes = 0;
   let text = '';
@@ -175,7 +197,7 @@ async function boundedJson(response: Response, limit: number): Promise<unknown> 
       const next = await reader.read();
       if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > limit) throw new SourceFetchError(`Greenhouse response body exceeds ${limit} bytes`, 'capacity');
+      if (bytes > limit) throw new SourceFetchError(`${sourceId}: Greenhouse response body exceeds ${limit} bytes`, 'capacity');
       text += decoder.decode(next.value, { stream: true });
     }
     text += decoder.decode();
@@ -187,7 +209,36 @@ async function boundedJson(response: Response, limit: number): Promise<unknown> 
   } finally {
     reader.releaseLock();
   }
-  return JSON.parse(text);
+  return { text, bytes };
+}
+
+/**
+ * Reads one board response and parses it.
+ *
+ * Only a body that arrived whole is evidence about the provider's schema, so a
+ * parse failure over a complete body stays `json` (immediate quarantine) while a
+ * failed or short transfer is `transport` (bounded retry, no quarantine). A
+ * transient abort used to be relabelled "malformed JSON" and quarantined a board
+ * whose payload was intact (see #236).
+ */
+async function boundedJson(response: Response, limit: number, sourceId: string): Promise<unknown> {
+  let body: { text: string; bytes: number };
+  try {
+    body = await readBoundedBody(response, limit, sourceId);
+  } catch (error) {
+    throw categorizeFetchError(error, sourceId);
+  }
+  const declared = declaredBodyBytes(response);
+  // A transfer that ends short of its declared length never delivered the board
+  // the provider promised, so its bytes say nothing about the schema.
+  if (declared !== undefined && body.bytes < declared) {
+    throw new SourceFetchError(`${sourceId}: Greenhouse response body ended after ${body.bytes} of ${declared} declared bytes`, 'transport');
+  }
+  try {
+    return JSON.parse(body.text);
+  } catch {
+    throw new SourceFetchError(`${sourceId}: Greenhouse returned malformed JSON`, 'json');
+  }
 }
 
 function isNamedList(value: unknown): boolean {
@@ -340,10 +391,17 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
   async fetch(previous?: SourceCheckpoint): Promise<TransitionalGreenhouseResult> {
     const url = greenhouseJobsUrl(this.options.source.boardToken);
     const conditionalRequestAttempted = Boolean(previous?.etag);
-    const response = await this.fetchImpl(url, {
-      headers: { Accept: 'application/json', ...(previous?.etag ? { 'If-None-Match': previous.etag } : {}) },
-      signal: AbortSignal.timeout(8_000),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        headers: { Accept: 'application/json', ...(previous?.etag ? { 'If-None-Match': previous.etag } : {}) },
+        signal: AbortSignal.timeout(GREENHOUSE_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      // A rejected fetch never delivered a board, so it is a transport failure
+      // rather than evidence about the provider's schema.
+      throw categorizeFetchError(error, this.id);
+    }
     if (response.status === 304) {
       return {
         sourceId: this.id,
@@ -360,16 +418,11 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       };
     }
     if (!response.ok) throw new SourceFetchError(`${this.id}: Greenhouse fetch failed (${response.status})`, 'http', response.status);
-    const contentLength = Number(response.headers.get('content-length'));
-    if (Number.isFinite(contentLength) && contentLength > GREENHOUSE_RESPONSE_MAX_BYTES) {
+    const contentLength = declaredBodyBytes(response);
+    if (contentLength !== undefined && contentLength > GREENHOUSE_RESPONSE_MAX_BYTES) {
       throw new SourceFetchError(`${this.id}: Greenhouse response body exceeds ${GREENHOUSE_RESPONSE_MAX_BYTES} bytes`, 'capacity');
     }
-    let payload: unknown;
-    try { payload = await boundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES); }
-    catch (error) {
-      if (error instanceof SourceFetchError) throw new SourceFetchError(`${this.id}: ${error.message}`, error.category);
-      throw new SourceFetchError(`${this.id}: Greenhouse returned malformed JSON`, 'json');
-    }
+    const payload = await boundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES, this.id);
     if (!payload || typeof payload !== 'object' || !Array.isArray((payload as GreenhouseJobsResponse).jobs)) {
       throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
     }
