@@ -16,6 +16,11 @@ import { D1CatalogAdmissionStore } from './catalog-admission-store.js';
 
 type JsonRow = { value: string };
 const deliveryReceiptLifetimeSeconds = 90 * 24 * 60 * 60;
+// A projection is a rebuildable read cache, not an admission decision.  The
+// public handler re-applies admission and handoff-url checks to every role it
+// returns.  Keep the last complete version available through a missed
+// maintenance run instead of falling back to a whole-catalog materialization.
+const catalogProjectionMaxAgeMs = 7 * 24 * 60 * 60 * 1_000;
 const documentUploadLeaseSeconds = 15 * 60;
 
 function receiptExpiry(value: Pick<DeliveryReceipt, 'updatedAt'>): number {
@@ -678,7 +683,7 @@ export class D1InternshipStore implements InternshipStore {
   }
   async listCatalogProjection(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {
     const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
-    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > 24 * 60 * 60 * 1_000) return undefined;
+    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
     const offset = cursorOffset(cursor);
     const rows = await this.db.prepare("SELECT value FROM catalog_items WHERE pk = ? AND kind = 'catalog-projection' ORDER BY catalog_sort_key ASC LIMIT ? OFFSET ?")
       .bind(`CATALOG_PROJECTION#${pointer.version}`, limit + 1, offset).all<JsonRow>();
@@ -687,7 +692,7 @@ export class D1InternshipStore implements InternshipStore {
   }
   async listCatalogProjectionFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
     const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
-    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > 24 * 60 * 60 * 1_000) return undefined;
+    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
     const offset = cursorOffset(cursor);
     const roleClauses = ["json_extract(role.value, '$.open') = ?"];
     const values: unknown[] = [filter.status === 'closed' ? 0 : 1];
@@ -770,7 +775,7 @@ export class D1InternshipStore implements InternshipStore {
   }
   async getCatalogProjectionGroup(groupId: string): Promise<CatalogGroupDetails | undefined> {
     const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
-    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > 24 * 60 * 60 * 1_000) return undefined;
+    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
     return this.get<CatalogGroupDetails>(`CATALOG_PROJECTION#${pointer.version}`, `GROUP#${groupId}`);
   }
   async listLeverAdmissions(): Promise<LeverAdmission[]> {
