@@ -54,4 +54,19 @@ describe('posting identity audit D1 integration', () => {
     expect(readLimits).toContain(500);
     expect(readLimits.every((limit) => Number.isSafeInteger(limit) && limit > 0 && limit <= 500)).toBe(true);
   });
+
+  it('caps an oversized requested job batch at the Worker safety ceiling', async () => {
+    const database = new DatabaseSync(':memory:');
+    for (const name of ['0001_initial.sql', '0002_cost_guards.sql', '0003_billing_shutdown.sql', '0004_auth_rate_limits.sql',
+      '0005_auth_consent.sql', '0006_employer_channel.sql', '0007_catalog_admission.sql', '0010_posting_identity.sql',
+      '0013_posting_presentation_reviews.sql']) {
+      database.exec(readFileSync(new URL(`../cloudflare/migrations/${name}`, import.meta.url), 'utf8'));
+    }
+
+    const readLimits: number[] = [];
+    const report = await runPostingIdentityAudit(sqliteD1(database, readLimits), { jobBatch: 50_000 });
+
+    expect(report).toMatchObject({ pages: 1, jobsScanned: 0, gate: { passed: true } });
+    expect(readLimits).toContain(2_000);
+  });
 });
