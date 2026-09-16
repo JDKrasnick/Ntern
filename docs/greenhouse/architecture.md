@@ -73,10 +73,11 @@ fallback.
 ## Capacity and failure boundaries
 
 - Schedule: every thirty minutes for published boards; every three hours for shadow boards.
-- Queue batch size: ten boards.
-- Worker maximum concurrency: four.
-- Worker timeout: two minutes.
-- Queue visibility timeout: six minutes.
+- Cloudflare Queue batch size: one board.
+- Cloudflare Queue maximum concurrency: six consumer invocations.
+- Per-message deadline: five minutes; timed-out work is recorded as a retryable
+  transport failure instead of holding a consumer slot until the platform limit.
+- Queue retries: two before the message is sent to the dead-letter queue.
 - Greenhouse API timeout: eight seconds per identity or admission request, and
   fifteen seconds per board fetch, which covers headers and the whole body.
 - Queue retention: one day.
