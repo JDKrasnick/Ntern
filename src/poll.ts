@@ -1417,8 +1417,11 @@ export class IngestionRunner {
         const migrationCandidates = migrationLimit === undefined
           ? batch.processed.listings
           : [...admissionCandidates, ...selectedMetadataMigrations];
-        const trustedFullBody = sourceAdmissionPolicy(connector.id).trust === 'trusted-community'
-          && this.trustedCommunityCatalogEnabled
+        // A trusted policy re-reads the whole body to advance an alert
+        // qualification streak, and a policy with alerts disabled never
+        // computes one: catalog exposure alone must not re-resolve every
+        // listing on every poll (the largest trusted list holds 3,029 rows).
+        const trustedFullBody = trustedPolicy?.alertMode !== undefined && trustedPolicy.alertMode !== 'disabled'
           && result.unchangedReason !== 'not_modified';
         const metadataFullBody = metadataVersionChanged && result.unchangedReason !== 'not_modified';
         // An unchanged snapshot repeats postings the checkpoint already trusts,
