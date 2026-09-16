@@ -108,13 +108,39 @@ per-message failure ledger (timestamps 2026-09-11 to 2026-09-15), so the origina
 category cannot be reconstructed. That is the expected result for a historical
 backlog, not evidence of a current defect.
 
-**Nothing was replayed or discarded.** Each of the 49 messages whose source is
-active and healthy belongs to a source that has polled successfully since the
-message was dead-lettered, so a catalog replay would send one fresh poll per
-source and purge the messages — duplicate work for no new evidence. The 6
-remaining messages belong to sources that are intentionally paused or
-quarantined; `plan` rejects catalog replay for those, and the standing instruction
-is not to bulk purge this backlog. The residual stays counted and owned by #219.
+**Applied (owner-approved, 2026-09-16):** the obsolete messages were discarded
+rather than replayed — each belongs to a source that has polled successfully
+since the message was dead-lettered, so a catalog replay would only send a
+duplicate poll. Every disposition is audited in `dlq_disposition_audit`:
+
+| Queue | Action | Messages | Applied | Plan |
+| --- | --- | --- | --- | --- |
+| lever | discard | 6 | 05:18:47Z | `bc411063-e454-4dc2-adb5-55c5829ca05e` |
+| greenhouse | discard | 4 | 05:38:45Z | `a893b6b9-c555-4ea7-80ba-aac2b52c29bb` |
+
+**Residual, counted and retained:** greenhouse 74, github 196, ashby 2 (both
+ashby messages belong to a paused source and were intentionally kept). Failed
+plans stay unapplied and write no audit row, so a drift error can never purge a
+partial selection.
+
+**Why the drain stopped at ten.** A non-consuming peek returns only the messages
+that are currently available, not the queue depth: against depths of 75
+(greenhouse) and 196 (github), peeks returned 1-35 messages and the window
+rotated between calls. `plan` and `apply` each re-peek and validate the selection
+by message id and payload hash, so a selection larger than the current window
+fails with `Selection drift`, and on github even a single-message selection
+drifted because the window changed between the inspect and the plan — concurrent
+operator peeks (there are unapplied github replay plans from an earlier session)
+make that window move faster. Practical guidance:
+
+- Select only ids returned by the peek you are about to plan from, keep the
+  selection small, and expect to iterate: draining a deep DLQ takes many cycles
+  across sessions, not one plan.
+- Expect to wait between cycles; a peek leases what it returns, so the population
+  it will hand you next is smaller and different.
+- If a full drain is ever required, the missing capability is server-side
+  selection (stage the plan from the plan's own peek) rather than client-supplied
+  ids. Until then, a large historical backlog is an expected residual.
 
 Two measurement caveats learned here:
 
@@ -135,8 +161,7 @@ Two measurement caveats learned here:
 All six published GitHub sources showed `state: degraded` on the operations
 surface while storing `state: healthy` with a successful run. The stored `state`
 was healthy, so the surface derived `degraded` from
-`integrationRegistry.github.freshnessWindowMs` (30 minutes), which equals the
-published interval: any normal jitter crossed it.
+`integrationRegistry.github.freshnessWindowMs` (30 minutes).
 
 The reason their successes were ~31-33 minutes apart, despite a ten-minute cron,
 was the dispatch lease. The GitHub consumer ledgered a failure but never wrote
@@ -146,3 +171,22 @@ even though its message had already failed. Recording the failed attempt (this
 PR) releases the lease, resets the interval, and makes `state`, `outcome`,
 `consecutiveFailures`, and the alert surface describe the source truthfully.
 Structured sources already did this; only the default list sources did not.
+
+**The window itself is correct and was left unchanged.** Every fleet sets three
+sweep cadences — 90 minutes for the half-hourly crons, 30 minutes for GitHub's
+ten-minute cron — so it tolerates exactly two missed sweeps. Measured after the
+lease fix (successful-run intervals from `recentRuns`, 2026-09-16):
+
+| Source | p50 interval | worst of the last 8 | all-time max |
+| --- | --- | --- | --- |
+| `simplify-summer-2026` | 0.5 min | 0.7 min | 1.2 min |
+| `speedyapply-2027-ai` | 0.5 min | 0.9 min | 1.1 min |
+| `vanshb03-summer-2027` | 0.6 min | 0.9 min | 10.0 min |
+| `speedyapply-2027-swe` | 0.5 min | 1.4 min | 10.1 min |
+| `canadian-tech-2027` | 0.8 min | 3.0 min | 46.7 min |
+| `northwestern-fintech-2027-quant` | 16.7 min | 10.5 min | 128.9 min |
+
+The sub-minute pairs are retried deliveries of the same source; the 10-minute
+figures are the cron cadence. The all-time maxima (46.7 and 128.9 minutes) are
+pre-fix stalls. A source now has to miss two full sweeps to be reported
+degraded, which is the intended signal — widening the window would hide it.

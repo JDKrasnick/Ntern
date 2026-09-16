@@ -31,6 +31,15 @@ export interface CatalogSourceProviderDefinition {
   category: Extract<IntegrationCategory, 'catalog-source'>;
   regions: readonly string[];
   defaultRegion: string;
+  /**
+   * How long a source may go without a successful snapshot before the
+   * operations surface reports it `degraded`. Every fleet sets three sweep
+   * cadences — 90 minutes for the half-hourly crons (greenhouse, lever, ashby)
+   * and 30 minutes for GitHub's ten-minute cron — so the window tolerates two
+   * missed sweeps. Measured 2026-09-16 after the dispatch-lease fix: GitHub
+   * success intervals sit at the ten-minute cadence, so the window holds ~3x
+   * headroom; a source that trips it has genuinely missed its sweeps.
+   */
   freshnessWindowMs: number;
   sourceAuthority: 'official-provider' | 'reviewed-community';
   queues: {
