@@ -30,6 +30,18 @@ import type {
  * decision under the reviewed trusted policy, and alerts stay off because every
  * trusted list runs `alertMode: 'disabled'`.
  *
+ * The repair token is the operator's guard, and it covers exactly the rows
+ * whose visibility changes: the published rows, keyed by `sourceId:externalId`
+ * together with the admission the apply will write. Re-graded rows — a version
+ * re-stamp that leaves the row blocked — are excluded on purpose. Other sources
+ * keep re-stamping the shared job rows of a live catalog, so a token over every
+ * touched row can never survive the window between a dry run and the apply it
+ * authorizes, which is how the backlog stayed unpublished. Those rows are still
+ * applied, opportunistically and without gating, because re-grading cannot
+ * change what anyone can see. A published set that drifted since the dry run
+ * fails closed and writes nothing, and every guarded group still requires each
+ * row it touches to hold the value the apply read.
+ *
  * The enabled catalog gate is a precondition: with the gate off the same
  * occurrences are graded under the dormant standard policy while the poller
  * revokes trusted admissions, so publishing here would thrash.
@@ -70,11 +82,30 @@ export interface TrustedAdmissionBackfillReport {
   before: Record<string, TrustedAdmissionCounts>;
   /** The same rows after this repair's decisions. */
   after: Record<string, TrustedAdmissionCounts>;
+  /** What the plan decided for every occurrence row it read. */
   totals: Record<TrustedAdmissionRowCategory, number>;
+  /**
+   * What this run wrote. `published` is the guarded set the token covers;
+   * `regraded` rows are applied opportunistically, without gating, because
+   * re-grading them cannot change what anyone can see. Zero on a dry run.
+   */
+  appliedTotals: { published: number; regraded: number };
   changes: { occurrences: number; jobs: number; checkpoints: number };
   samples: Record<TrustedAdmissionRowCategory, string[]>;
+  /**
+   * Covers exactly the published rows: their `sourceId:externalId` and the
+   * admission the apply writes, with evaluation stamps dropped. Re-graded rows
+   * are never part of it.
+   */
   repairToken: string;
+  /** Published rows at plan time — the count the token was computed over. */
   expectedChanged: number;
+  /**
+   * Whether this run applied rows outside the guard. Re-graded rows are applied
+   * opportunistically, so their writes are never authorized by the token; they
+   * are counted in `appliedTotals.regraded`.
+   */
+  regradedWithoutGuard: boolean;
   conflicts: string[];
   projectionRefreshRequired: boolean;
 }
@@ -86,6 +117,12 @@ type Target = {
   label: string;
   oldValue: string;
   value: string;
+  /**
+   * Set on exactly the published occurrence rows: the row's guard identity —
+   * `sourceId:externalId` plus the admission the apply will write — that the
+   * repair token is computed from. A re-graded row carries none.
+   */
+  guarded?: { key: string; admission: string };
   /** Derived catalog columns; only job rows carry them. */
   columns?: Record<string, string | number | null>;
 };
@@ -106,7 +143,8 @@ type ScanResult = {
   after: Record<string, TrustedAdmissionCounts>;
   totals: Record<TrustedAdmissionRowCategory, number>;
   samples: Record<TrustedAdmissionRowCategory, string[]>;
-  descriptors: Array<{ pk: string; sk: string; before: string; after: string }>;
+  /** The guarded rows only, sorted by key so the token is scan-order independent. */
+  published: Array<{ key: string; admission: string }>;
   jobs: Set<string>;
   checkpoints: number;
 };
@@ -133,10 +171,11 @@ function parse<T>(value?: string): T | undefined {
 }
 
 /**
- * A target's identity for the repair token. Evaluation stamps are dropped: they
- * move on every run, so a dry-run token would otherwise never authorize the
- * apply it was computed for. Exact row drift is still caught by the guarded
- * apply, which compares the whole stored value.
+ * A value's identity for the repair token, used on the admission a guarded row
+ * will carry. Evaluation stamps are dropped: they move on every run, so a
+ * dry-run token would otherwise never authorize the apply it was computed for.
+ * Exact row drift is still caught by the guarded apply, which compares the
+ * whole stored value.
  */
 function planFingerprint(value: string): string {
   return catalogQualityHash(JSON.stringify(JSON.parse(value), (key, item) => (key === 'evaluatedAt' ? undefined : item)));
@@ -264,7 +303,6 @@ async function scanTrustedSources(input: {
   sourceIds: string[];
   versions: Map<string, string>;
   now: string;
-  collectDescriptors: boolean;
   flush: (targets: Target[]) => Promise<void>;
 }): Promise<ScanResult> {
   const { db, now } = input;
@@ -272,7 +310,7 @@ async function scanTrustedSources(input: {
     before: {}, after: {},
     totals: { published: 0, regraded: 0, unchanged: 0, skipped: 0 },
     samples: { published: [], regraded: [], unchanged: [], skipped: [] },
-    descriptors: [], jobs: new Set(), checkpoints: 0,
+    published: [], jobs: new Set(), checkpoints: 0,
   };
   const record = (category: TrustedAdmissionRowCategory, label: string) => {
     result.totals[category] += 1;
@@ -311,11 +349,7 @@ async function scanTrustedSources(input: {
       bytes = 0;
       if (!buffer.length) return;
       const targets = buffer.splice(0, buffer.length);
-      if (input.collectDescriptors) {
-        for (const target of targets) {
-          result.descriptors.push({ pk: target.pk, sk: target.sk, before: planFingerprint(target.oldValue), after: planFingerprint(target.value) });
-        }
-      }
+      for (const target of targets) if (target.guarded) result.published.push(target.guarded);
       await input.flush(targets);
     };
     let cursor = '';
@@ -359,7 +393,14 @@ async function scanTrustedSources(input: {
         }
         entry.references.set(occurrenceKey(decision.reference), decision.reference);
         const value = JSON.stringify({ ...state, occurrence: decision.reference });
-        buffer.push({ pk: row.pk, sk: row.sk, label, oldValue: row.value, value });
+        buffer.push({
+          pk: row.pk, sk: row.sk, label, oldValue: row.value, value,
+          // Only a row whose visibility changes joins the guard: the token has
+          // to survive re-grades of rows that stay blocked.
+          ...(decision.category === 'published'
+            ? { guarded: { key: label, admission: planFingerprint(JSON.stringify(decision.admission)) } }
+            : {}),
+        });
         bytes += row.value.length + value.length;
         if (buffer.length + jobEntries.size >= APPLY_TARGET_ROWS || bytes >= APPLY_TARGET_BYTES) await flush();
       }
@@ -380,6 +421,8 @@ async function scanTrustedSources(input: {
     }
     await flush();
   }
+  // Sorted so the token depends on the guarded set alone, not on scan order.
+  result.published.sort((left, right) => left.key.localeCompare(right.key));
   return result;
 }
 
@@ -471,44 +514,62 @@ export async function runTrustedAdmissionBackfill(
   const resolverVersion = await new D1CatalogAdmissionStore(db).configurationVersion();
   const versions = new Map(sourceIds.map((sourceId) => [sourceId, admissionConfigurationVersion(sourceId, resolverVersion)]));
   const plan = await scanTrustedSources({
-    db, sourceIds, versions, now, collectDescriptors: true,
+    db, sourceIds, versions, now,
     flush: async () => { /* The plan pass only reads; the token authorizes the writes. */ },
   });
-  const repairToken = catalogQualityHash(plan.descriptors);
-  const changed = plan.totals.published + plan.totals.regraded;
+  // The guard covers the rows whose visibility changes. Gating the re-graded
+  // rows instead would refuse every apply on a live catalog: other sources keep
+  // re-stamping the shared job rows without changing whether these occurrences
+  // publish.
+  const repairToken = catalogQualityHash(plan.published);
+  const published = plan.totals.published;
+  const changed = published + plan.totals.regraded;
   const report: TrustedAdmissionBackfillReport = {
     dryRun: !options.apply,
     before: plan.before,
     after: plan.after,
     totals: plan.totals,
+    appliedTotals: { published: 0, regraded: 0 },
     changes: { occurrences: changed, jobs: plan.jobs.size, checkpoints: plan.checkpoints },
     samples: plan.samples,
     repairToken,
-    expectedChanged: changed,
+    expectedChanged: published,
+    regradedWithoutGuard: false,
     conflicts: [],
     projectionRefreshRequired: false,
   };
   if (!options.apply) return report;
-  if (options.repairToken !== repairToken || options.expectedChanged !== changed) {
-    throw new Error('Trusted admission eligibility changed after dry run; use the latest repair token and exact changed-row count');
+  if (options.repairToken !== repairToken || options.expectedChanged !== published) {
+    throw new Error('Trusted admission eligibility changed after dry run; use the latest repair token and exact published-row count');
   }
   if (!changed) return report;
-  const outcome = { occurrences: 0, conflicts: [] as string[] };
+  const outcome = { published: 0, regraded: 0, conflicts: [] as string[] };
   const applied = await scanTrustedSources({
-    db, sourceIds, versions, now, collectDescriptors: false,
+    db, sourceIds, versions, now,
     flush: async (targets) => {
       // A guard failure means a concurrent writer touched this cohort; stop
       // instead of stacking more groups on top of a catalog that moved.
       if (outcome.conflicts.length) return;
       const result = await applyTargets(db, repairToken, targets);
       // A rejected group writes nothing, so it must not be reported as applied.
-      if (!result.conflicts.length) outcome.occurrences += targets.filter((target) => target.sk.startsWith('OCCURRENCE#')).length;
+      if (!result.conflicts.length) {
+        for (const target of targets) {
+          if (!target.sk.startsWith('OCCURRENCE#')) continue;
+          if (target.guarded) outcome.published += 1;
+          else outcome.regraded += 1;
+        }
+      }
       outcome.conflicts.push(...result.conflicts);
     },
   });
   report.conflicts = outcome.conflicts;
-  report.projectionRefreshRequired = outcome.occurrences > 0;
-  if (!report.conflicts.length && (applied.totals.published + applied.totals.regraded !== changed || outcome.occurrences !== changed)) {
+  report.appliedTotals = { published: outcome.published, regraded: outcome.regraded };
+  report.regradedWithoutGuard = outcome.regraded > 0;
+  report.projectionRefreshRequired = outcome.published + outcome.regraded > 0;
+  // The token authorized one published set: the apply pass must have seen the
+  // same one, and every row it decided on must have been written.
+  if (!report.conflicts.length && (catalogQualityHash(applied.published) !== repairToken
+    || outcome.published + outcome.regraded !== applied.totals.published + applied.totals.regraded)) {
     report.conflicts = ['Trusted admission rows changed between planning and apply'];
   }
   return report;

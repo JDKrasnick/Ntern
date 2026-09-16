@@ -275,6 +275,9 @@ describe('trusted admission backfill', () => {
       apply: true, repairToken: dryRun.repairToken, expectedChanged: dryRun.expectedChanged,
     });
     expect(applied.totals.regraded).toBe(1);
+    // The token covers no published row here, yet the re-grade is applied.
+    expect(applied.appliedTotals).toEqual({ published: 0, regraded: 1 });
+    expect(applied.regradedWithoutGuard).toBe(true);
 
     // The version stamp is the poller's migration cursor: it must stop selecting this row.
     const version = await currentVersion(db, TRUSTED_SOURCE);
@@ -339,6 +342,7 @@ describe('trusted admission backfill', () => {
     expect(writes().length).toBe(fixtureWrites);
 
     await expect(runTrustedAdmissionBackfill(db, { apply: true, repairToken: 'stale', expectedChanged: 1 })).rejects.toThrow(/changed after dry run/u);
+    // A count that does not match the published set the token covers.
     await expect(runTrustedAdmissionBackfill(db, { apply: true, repairToken: dryRun.repairToken, expectedChanged: 2 })).rejects.toThrow(/changed after dry run/u);
     expect(writes().length).toBe(fixtureWrites);
     expect(read<Internship>(database, 'JOB#job-1', 'META').admission?.catalogEligible).toBe(false);
@@ -359,6 +363,98 @@ describe('trusted admission backfill', () => {
     expect(second.expectedChanged).toBe(0);
     expect(second.totals).toEqual({ published: 0, regraded: 0, unchanged: 1, skipped: 0 });
     expect(writes().length).toBe(writesBefore);
+  });
+
+  it('applies when only re-graded rows drifted since the dry run', async () => {
+    const { database, db } = subject();
+    await suppressedRow({
+      db, sourceId: TRUSTED_SOURCE, externalId: 'ext-1', jobId: 'job-1',
+      admission: admissionOf('application-form', ['employer-unresolved']),
+    });
+    await suppressedRow({
+      db, sourceId: TRUSTED_SOURCE, externalId: 'ext-2', jobId: 'job-2',
+      admission: admissionOf('aggregate-board', ['destination-aggregate-board', 'employer-unresolved']),
+    });
+    await put(db, `SOURCE#${TRUSTED_SOURCE}`, 'CHECKPOINT', 'checkpoint', checkpointOf(TRUSTED_SOURCE, {
+      pendingAdmissionConfigurationVersion: 'stale',
+    }));
+
+    const dryRun = await runTrustedAdmissionBackfill(db);
+    expect(dryRun.totals).toEqual({ published: 1, regraded: 1, unchanged: 0, skipped: 0 });
+    // Only the published row is guarded: a row that merely re-grades cannot
+    // change what anyone can see, so it must not invalidate the token.
+    expect(dryRun.expectedChanged).toBe(1);
+
+    // What a live catalog does between a dry run and the apply it authorizes:
+    // other sources re-stamp the shared job row, and another blocked occurrence
+    // arrives to be re-graded.
+    const shared = read<Internship>(database, 'JOB#job-1', 'META');
+    database.prepare('UPDATE catalog_items SET value = ? WHERE pk = ? AND sk = ?')
+      .run(JSON.stringify({ ...shared, lastSeenAt: '2026-09-14T00:00:00Z' }), 'JOB#job-1', 'META');
+    await suppressedRow({
+      db, sourceId: TRUSTED_SOURCE, externalId: 'ext-3', jobId: 'job-3',
+      admission: admissionOf('aggregate-board', ['destination-aggregate-board', 'employer-unresolved']),
+    });
+
+    const applied = await runTrustedAdmissionBackfill(db, {
+      apply: true, repairToken: dryRun.repairToken, expectedChanged: dryRun.expectedChanged,
+    });
+    expect(applied.conflicts).toEqual([]);
+    expect(applied.totals).toEqual({ published: 1, regraded: 2, unchanged: 0, skipped: 0 });
+    expect(applied.appliedTotals).toEqual({ published: 1, regraded: 2 });
+    expect(applied.regradedWithoutGuard).toBe(true);
+    expect(applied.projectionRefreshRequired).toBe(true);
+
+    const version = await currentVersion(db, TRUSTED_SOURCE);
+    expect(read<Internship>(database, 'JOB#job-1', 'META').admission?.catalogEligible).toBe(true);
+    for (const jobId of ['job-2', 'job-3']) {
+      const job = read<Internship>(database, `JOB#${jobId}`, 'META');
+      expect(job.admission?.catalogEligible).toBe(false);
+      expect(job.sourceReferences[0]?.admissionConfigurationVersion).toBe(version);
+    }
+    expect(read<SourceCheckpoint>(database, `SOURCE#${TRUSTED_SOURCE}`, 'CHECKPOINT').pendingAdmissionConfigurationVersion).toBeUndefined();
+  });
+
+  it('refuses the apply and writes nothing when the published set drifted since the dry run', async () => {
+    const recorder: Recorder = { log: [] };
+    const { database, db } = subject(recorder);
+    await suppressedRow({
+      db, sourceId: TRUSTED_SOURCE, externalId: 'ext-1', jobId: 'job-1',
+      admission: admissionOf('application-form', ['employer-unresolved']),
+    });
+    await put(db, `SOURCE#${TRUSTED_SOURCE}`, 'CHECKPOINT', 'checkpoint', checkpointOf(TRUSTED_SOURCE, {
+      pendingAdmissionConfigurationVersion: 'stale',
+    }));
+    const writes = () => recorder.log!.filter((entry) => /^\s*(?:INSERT|UPDATE|DELETE)/iu.test(entry.query));
+
+    const dryRun = await runTrustedAdmissionBackfill(db);
+    expect(dryRun.expectedChanged).toBe(1);
+
+    // A second occurrence becomes publishable. The guard covers it, so the token
+    // and count the dry run issued authorize nothing any more.
+    await suppressedRow({
+      db, sourceId: TRUSTED_SOURCE, externalId: 'ext-2', jobId: 'job-2',
+      admission: admissionOf('application-form', ['employer-unresolved']),
+    });
+    const fixtureWrites = writes().length;
+    await expect(runTrustedAdmissionBackfill(db, {
+      apply: true, repairToken: dryRun.repairToken, expectedChanged: dryRun.expectedChanged,
+    })).rejects.toThrow(/changed after dry run/u);
+    expect(writes().length).toBe(fixtureWrites);
+    expect(read<Internship>(database, 'JOB#job-1', 'META').admission?.catalogEligible).toBe(false);
+    expect(read<Internship>(database, 'JOB#job-2', 'META').admission?.catalogEligible).toBe(false);
+    expect(read<SourceCheckpoint>(database, `SOURCE#${TRUSTED_SOURCE}`, 'CHECKPOINT').pendingAdmissionConfigurationVersion).toBe('stale');
+
+    // The published set a fresh dry run sees is the one that authorizes writes.
+    const fresh = await runTrustedAdmissionBackfill(db);
+    expect(fresh.expectedChanged).toBe(2);
+    expect(fresh.repairToken).not.toBe(dryRun.repairToken);
+    const applied = await runTrustedAdmissionBackfill(db, {
+      apply: true, repairToken: fresh.repairToken, expectedChanged: fresh.expectedChanged,
+    });
+    expect(applied.conflicts).toEqual([]);
+    expect(applied.appliedTotals).toEqual({ published: 2, regraded: 0 });
+    expect(read<Internship>(database, 'JOB#job-2', 'META').admission?.catalogEligible).toBe(true);
   });
 
   it('reads a large source in bounded pages and applies it in bounded guarded batches', async () => {

@@ -942,7 +942,9 @@ describe('polling', () => {
       undefined,
       async () => { throw new Error('Application link returned HTTP 404'); },
     ).poll();
-    expect(report.failures).toEqual([expect.stringContaining('row 5: Application link returned HTTP 404')]);
+    // The failing row is still reported; a delivery whose links are mostly dead
+    // also carries the source-level share failure alongside it.
+    expect(report.failures).toContainEqual(expect.stringContaining('row 5: Application link returned HTTP 404'));
     expect(store.jobs.size).toBe(0);
     expect(report.newJobs).toEqual([]);
   });
@@ -1006,7 +1008,12 @@ describe('polling', () => {
     const logs: string[] = [];
     const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => { logs.push(String(line)); });
     const report = await new Poller(
-      [new Adapter('one', [listing('https://jobs.example.com/reachable'), listing('https://jobs.example.com/unreachable')])],
+      [new Adapter('one', [
+        listing('https://jobs.example.com/reachable'),
+        listing('https://jobs.example.com/ok-2'), listing('https://jobs.example.com/ok-3'),
+        listing('https://jobs.example.com/ok-4'), listing('https://jobs.example.com/ok-5'),
+        listing('https://jobs.example.com/unreachable'),
+      ])],
       store, undefined, undefined,
       async (url) => {
         if (url.includes('unreachable')) throw new Error('Application page could not be reached');
@@ -1017,23 +1024,36 @@ describe('polling', () => {
     spy.mockRestore();
     // A page that could not be reached withdraws its row; it is not evidence that
     // the source failed, which is what kept healthy lists quarantined.
-    expect(report.failures.some((failure) => failure.includes('unreachable'))).toBe(false);
-    expect(logs.some((line) => line.includes('row_transport_withdrawn') && line.includes('could not be reached'))).toBe(true);
+    expect(report.failures.some((failure) => failure.includes('could not be reached'))).toBe(false);
+    expect(logs.some((line) => line.includes('row_probe_withdrawn') && line.includes('could not be reached'))).toBe(true);
     const references = [...store.jobs.values()].flatMap((job) => job.sourceReferences.map((reference) => reference.applyUrl));
     expect(references).toContain('https://jobs.example.com/reachable');
     expect(references).not.toContain('https://jobs.example.com/unreachable');
   });
 
-  it('still fails the delivery when a row fails for a non-transport reason', async () => {
+  it('still fails the delivery when a row fails for a non-probe reason and when the probe share is exceeded', async () => {
     const store = new MemoryInternshipStore();
     await store.putCheckpoint({ sourceId: 'one', successfulFetches: 1, lastRowCount: 0 });
     const report = await new Poller(
-      [new Adapter('one', [listing('https://jobs.example.com/dead')])], store, undefined, undefined,
-      async (url) => { throw new Error(`Application host rejected the request for ${url}`); },
+      [new Adapter('one', [listing('https://jobs.example.com/one')])], store, undefined, undefined,
+      async () => { throw new Error('admission evaluation threw'); },
       false,
     ).poll();
-    // A completed probe that rejects the link still fails the delivery.
-    expect(report.failures.some((failure) => failure.includes('Application host rejected'))).toBe(true);
+    // A failure that is not a page probe still fails the delivery.
+    expect(report.failures.some((failure) => failure.includes('admission evaluation threw'))).toBe(true);
+
+    const broken = new MemoryInternshipStore();
+    await broken.putCheckpoint({ sourceId: 'one', successfulFetches: 1, lastRowCount: 0 });
+    const mostlyBroken = await new Poller(
+      [new Adapter('one', [
+        listing('https://jobs.example.com/1'), listing('https://jobs.example.com/2'),
+        listing('https://jobs.example.com/3'), listing('https://jobs.example.com/4'),
+      ])], broken, undefined, undefined,
+      async (url) => { throw new Error(`Application link is dead: ${url}`); },
+      false,
+    ).poll();
+    // When most rows cannot be verified, the list itself is the failure.
+    expect(mostlyBroken.failures.some((failure) => failure.includes('rows could not be verified'))).toBe(true);
   });
 
   it('lets per-source workers validate incoming listings without applying their host policy to the catalog', async () => {
