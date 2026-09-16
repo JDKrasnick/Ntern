@@ -204,7 +204,12 @@ export function processSnapshot(snapshot: SourceSnapshot): ProcessedSnapshot {
   for (const posting of snapshot.postings) {
     if (isTruncatedTitle(posting.title)) continue;
     const key = htmlToText(posting.employer.name).toLowerCase();
-    employerTitles.set(key, [...(employerTitles.get(key) ?? []), htmlToText(posting.title)]);
+    const title = htmlToText(posting.title);
+    // Appending in place keeps one array per employer: copying the accumulated
+    // list on every row is quadratic for a single-employer ATS board.
+    const titles = employerTitles.get(key);
+    if (titles) titles.push(title);
+    else employerTitles.set(key, [title]);
   }
   for (const posting of snapshot.postings) {
     const result = processPosting(posting, employerTitles.get(htmlToText(posting.employer.name).toLowerCase()) ?? []);

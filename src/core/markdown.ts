@@ -42,9 +42,29 @@ function htmlCells(row: string): string[] {
   return [...row.matchAll(/<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]>/gi)].map((match) => match[1].trim());
 }
 
+/** Offsets of every line start, so a byte offset maps to a 1-based line in O(log n). */
+function lineStarts(markdown: string): number[] {
+  const starts = [0];
+  for (let index = markdown.indexOf('\n'); index >= 0; index = markdown.indexOf('\n', index + 1)) starts.push(index + 1);
+  return starts;
+}
+
+/** Greatest line start at or before `offset`, 1-based — the line the offset sits on. */
+function lineNumberAt(starts: number[], offset: number): number {
+  let low = 0; let high = starts.length - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >> 1;
+    if (starts[middle] <= offset) low = middle; else high = middle - 1;
+  }
+  return low + 1;
+}
+
 /** Supports source lists that use simple HTML tables while retaining their raw links. */
 function htmlTables(markdown: string): Table[] {
   const result: Table[] = [];
+  // One index for the whole document keeps row numbering linear; deriving it per
+  // row re-scanned every preceding byte and dominated parse CPU on large boards.
+  const starts = lineStarts(markdown);
   for (const table of markdown.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/gi)) {
     const body = table[1]; const rows = [...body.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
     const headerAt = rows.findIndex((row) => /<th\b/i.test(row[1]));
@@ -56,7 +76,7 @@ function htmlTables(markdown: string): Table[] {
       const cells = htmlCells(row[1]);
       if (cells.length !== headers.length) continue;
       const start = (table.index ?? 0) + (row.index ?? 0);
-      parsedRows.push({ cells, row: markdown.slice(0, start).split('\n').length });
+      parsedRows.push({ cells, row: lineNumberAt(starts, start) });
     }
     result.push({ headers, rows: parsedRows });
   }

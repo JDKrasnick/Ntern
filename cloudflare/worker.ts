@@ -8,6 +8,7 @@ import { processGreenhouseQueue } from '../src/greenhouse-worker.js';
 import { isLeverSourceDue, leverWorkMessages } from '../src/lever-dispatch.js';
 import { processLeverQueue } from '../src/lever-worker.js';
 import { drainPendingExpoNotifications, ExpoPushPublisher, type EmailSender } from '../src/notifications.js';
+import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
 import { runRuntimeCommand } from '../src/runtime.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
@@ -1518,6 +1519,9 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           // slices small enough to make durable progress even when the tail is
           // dominated by destinations that consume the six connection slots.
           maxAdmissionMigrationListingsPerSourceRun: 20,
+          // The largest reviewed board holds 3,029 postings; one delivery
+          // resolves a bounded slice and re-enqueues itself for the rest.
+          maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
           config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT },
         }), SOURCE_MESSAGE_DEADLINE_MS);
         if (result.poll && (result.poll.continuationSources.length || result.poll.failures.length)) {
@@ -1525,6 +1529,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
             event: 'github_admission_migration_slice',
             sourceId: source.id,
             continuation: result.poll.continuationSources.includes(source.id),
+            resolutionPending: result.poll.pendingResolution[source.id] ?? 0,
             failureCount: result.poll.failures.length,
             failures: result.poll.failures.slice(0, 20),
           }));

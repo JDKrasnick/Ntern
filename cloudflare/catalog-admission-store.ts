@@ -38,6 +38,11 @@ export const DESTINATION_VERIFICATION_LEASE_LIMIT = 100;
 export const BACKFILL_REPAIR_RECORD_LIMIT = 120;
 export const ATOMIC_REPAIR_BYTE_LIMIT = 8 * 1024 * 1024;
 export const ROLE_METADATA_REVALIDATION_MS = 30 * 24 * 60 * 60_000;
+// The catalog holds tens of thousands of internship documents (144 MB at
+// production size), so catalog-wide readers walk it in bounded keyset pages: one
+// statement over `kind = 'internship'` exceeds D1's per-query memory ceiling
+// ("Memory limit exceeded before EOF") and fails the whole invocation.
+export const CATALOG_JOB_PAGE_ROWS = 100;
 
 export interface RoleMetadataCollectionCoverage {
   extractionVersion: number;
@@ -1250,10 +1255,8 @@ export class D1CatalogAdmissionStore {
   async reviewSampleCandidates(rule: DestinationReviewRule, limit = 3): Promise<Array<{
     jobId: string; sourceId: string; externalId: string; sourceUrl: string; candidateUrl: string; expectedPostingId?: string;
   }>> {
-    const rows = await this.db.prepare("SELECT value FROM catalog_items WHERE kind = 'internship'").all<JsonRow>();
     const candidates: Array<{ jobId: string; sourceId: string; externalId: string; sourceUrl: string; candidateUrl: string; expectedPostingId?: string }> = [];
-    for (const row of rows.results) {
-      const job = JSON.parse(row.value) as Internship;
+    for await (const job of this.catalogJobPages()) {
       for (const reference of job.sourceReferences) {
         if (!reference.externalId || !reference.admission) continue;
         const destination = reference.admission.destination;
@@ -1273,11 +1276,9 @@ export class D1CatalogAdmissionStore {
     jobId: string; sourceId: string; externalId: string; candidateUrl: string; providerIdentity: ProviderIdentity;
     occurrenceSnapshotHash: string;
   }>> {
-    const rows = await this.db.prepare("SELECT value FROM catalog_items WHERE kind = 'internship' ORDER BY pk").all<JsonRow>();
     const candidates: Array<{ jobId: string; sourceId: string; externalId: string; candidateUrl: string;
       providerIdentity: ProviderIdentity; occurrenceSnapshotHash: string }> = [];
-    for (const row of rows.results) {
-      const job = JSON.parse(row.value) as Internship;
+    for await (const job of this.catalogJobPages()) {
       for (const reference of job.sourceReferences) {
         if (!reference.externalId || reference.admission) continue;
         const providerIdentity = providerIdentityForReference(reference);
@@ -1287,6 +1288,29 @@ export class D1CatalogAdmissionStore {
       }
     }
     return candidates;
+  }
+
+  /**
+   * Walks the catalog one bounded page at a time for readers that must inspect
+   * every job. Reading `kind = 'internship'` in one statement streams the whole
+   * catalog (megabytes at production size) into a single result, which fails
+   * with `D1_ERROR: Memory limit exceeded before EOF` and takes the caller down
+   * with it. Pages are keyset-ordered by `(pk, sk)`, so a caller that returns
+   * early never pays for the rest of the catalog.
+   */
+  private async *catalogJobPages(pageSize = CATALOG_JOB_PAGE_ROWS): AsyncGenerator<Internship> {
+    let cursor: readonly [string, string] = ['', ''];
+    for (;;) {
+      const rows = await this.db.prepare(`SELECT pk, sk, value FROM catalog_items
+        WHERE kind = 'internship' AND (pk, sk) > (?, ?)
+        ORDER BY pk, sk LIMIT ?`)
+        .bind(cursor[0], cursor[1], pageSize)
+        .all<{ pk: string; sk: string; value: string }>();
+      for (const row of rows.results) yield JSON.parse(row.value) as Internship;
+      if (rows.results.length < pageSize) return;
+      const last = rows.results[rows.results.length - 1]!;
+      cursor = [last.pk, last.sk];
+    }
   }
 
   async syncVerificationSchedule(now: string, limit = DESTINATION_SCHEDULE_SYNC_LIMIT): Promise<number> {

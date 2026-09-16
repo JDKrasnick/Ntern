@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryInternshipStore } from '../src/store.js';
 import { Poller } from '../src/poll.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
-import type { RawListing, SourceAdapter, SourceCheckpoint, SourceFetchResult, SourceSnapshot } from '../src/types.js';
+import type { RawListing, SourceAdapter, SourceCheckpoint, SourceFetchResult, SourceSnapshot, SourcedPosting } from '../src/types.js';
 
 const listing = (url: string, sourceId = 'one'): RawListing => ({ sourceId, document: 'README.md', sourceUrl: 'https://github.com/x', row: 5, company: 'Acme', title: 'Software Engineering Intern', location: 'NYC', season: 'summer-2027', applyUrl: url, compensation: { raw: '$40/hr', maxHourlyUSD: 40 }, state: 'open', fetchedAt: '2026-01-01T00:00:00Z' });
 const greenhouseListing = (postingId: string, url: string): RawListing => ({
@@ -17,6 +18,40 @@ class Adapter implements SourceAdapter {
   fetches = 0;
   constructor(readonly id: string, private readonly rows: RawListing[]) {}
   async fetch(previous?: SourceCheckpoint): Promise<SourceFetchResult> { this.fetches += 1; return { sourceId: this.id, listings: this.rows, notModified: false, checkpoint: { sourceId: this.id, successfulFetches: (previous?.successfulFetches ?? 0) + 1, lastRowCount: this.rows.length } }; }
+}
+/** One row of a full-snapshot board, sized so a delivery slice is observable. */
+const snapshotRow = (ordinal: number, sourceId = 'github-example'): SourcedPosting => ({
+  sourceId, provenance: 'official-ats', externalId: `role-${ordinal}`, document: 'README.md', row: ordinal + 1,
+  sourceUrl: 'https://github.com/example/jobs', fetchedAt: '2026-09-10T00:00:00Z',
+  employer: { id: 'example', name: 'Example', authority: 'reviewed-registry' },
+  title: `Software Engineering Intern ${ordinal}`,
+  content: [{ kind: 'description', format: 'plain', value: 'Build production software with the platform team.' }],
+  locations: ['Remote'], applyUrl: `https://jobs.example.com/role-${ordinal}`,
+  sourceState: 'open', lifecycleAuthority: 'title',
+});
+const snapshotRows = (count: number, sourceId = 'github-example') => Array.from({ length: count }, (_, index) => snapshotRow(index, sourceId));
+const snapshotHash = (rows: SourcedPosting[]) => createHash('sha256').update(rows.map((row) => row.externalId).join('|')).digest('hex');
+class SnapshotAdapter implements SourceAdapter {
+  fetches = 0;
+  readonly received: Array<SourceCheckpoint | undefined> = [];
+  constructor(readonly id: string, private rows: SourcedPosting[]) {}
+  setRows(rows: SourcedPosting[]) { this.rows = rows; }
+  async fetch(previous?: SourceCheckpoint): Promise<SourceFetchResult & SourceSnapshot> {
+    this.fetches += 1;
+    this.received.push(previous);
+    const contentHash = snapshotHash(this.rows);
+    const unchanged = previous?.contentHash === contentHash;
+    return {
+      sourceId: this.id, outcome: unchanged ? 'unchanged' : 'changed', complete: true,
+      rawCount: this.rows.length, rawRowCount: this.rows.length, contentHash, postings: this.rows, listings: [], notModified: unchanged,
+      ...(unchanged ? { unchangedReason: 'content_hash' as const } : {}),
+      checkpoint: {
+        sourceId: this.id, successfulFetches: (previous?.successfulFetches ?? 0) + (unchanged ? 0 : 1),
+        etag: 'board-etag', documentEtags: { 'README.md': 'document-etag' },
+        lastRowCount: this.rows.length, contentHash, activeExternalIds: this.rows.map((row) => row.externalId),
+      },
+    };
+  }
 }
 describe('polling', () => {
   it('persists successful not-modified checkpoints for source-health visibility', async () => {
@@ -1165,4 +1200,134 @@ describe('polling', () => {
     expect(await store.getCheckpoint('greenhouse-acme')).toMatchObject({ admissionConfigurationVersion: 'configuration-v2' });
     expect([...store.jobs.values()][0]).toMatchObject({ company: 'Acme', admission: { catalogEligible: true } });
   });
+
+  it('slices a bounded resolution pass and resumes it across deliveries', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const adapter = new SnapshotAdapter(sourceId, snapshotRows(900));
+    const poll = () => new Poller([adapter], store).poll({ maxListingsPerSourceRun: 750 });
+
+    const first = await poll();
+    expect(await store.getSourceOccurrences(sourceId)).toHaveLength(750);
+    expect(first.pendingResolution[sourceId]).toBe(150);
+    expect(first.continuationSources).toEqual([sourceId]);
+    expect(first.failures).toEqual([]);
+    const firstCheckpoint = (await store.getCheckpoint(sourceId))!;
+    expect(firstCheckpoint.etag).toBe('board-etag');
+    expect(firstCheckpoint.pendingResolutionRows).toHaveLength(150);
+    expect(firstCheckpoint.pendingResolutionRows).toContain('role-750');
+    expect(firstCheckpoint.pendingResolutionRows).not.toContain('role-749');
+
+    // An open pass re-reads the whole board: only the validators are cleared, so
+    // the delivery is still labelled unchanged while the remaining 150 rows resolve.
+    const second = await poll();
+    expect(adapter.received[1]?.etag).toBeUndefined();
+    expect(adapter.received[1]?.documentEtags).toBeUndefined();
+    expect(adapter.received[1]?.contentHash).toBe(firstCheckpoint.contentHash);
+    expect(second.unchangedSources).toEqual([sourceId]);
+    expect(await store.getSourceOccurrences(sourceId)).toHaveLength(900);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toBeUndefined();
+    expect(second.pendingResolution[sourceId]).toBeUndefined();
+    expect(second.continuationSources).toEqual([]);
+    expect(second.failures).toEqual([]);
+  }, 15_000);
+
+  it('resumes a seeded resolution pass from an unchanged delivery', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const rows = snapshotRows(900);
+    const adapter = new SnapshotAdapter(sourceId, rows);
+    // Settle the board first so the seeded pass is the only outstanding work and
+    // the checkpoint's metadata versions are current: an unchanged delivery
+    // resolves nothing unless the pending set keeps the full body in scope.
+    await new Poller([adapter], store).poll();
+    const checkpoint = (await store.getCheckpoint(sourceId))!;
+    await store.putCheckpoint({ ...checkpoint, pendingResolutionRows: rows.map((row) => row.externalId) });
+
+    const report = await new Poller([adapter], store).poll({ maxListingsPerSourceRun: 750 });
+
+    expect(report.unchangedSources).toEqual([sourceId]);
+    expect(adapter.received[1]?.contentHash).toBe(checkpoint.contentHash);
+    expect(report.pendingResolution[sourceId]).toBe(150);
+    expect(report.continuationSources).toEqual([sourceId]);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(150);
+    expect(await store.getSourceOccurrences(sourceId)).toHaveLength(900);
+    expect(report.failures).toEqual([]);
+  }, 15_000);
+
+  it('closes a resolution pass when pending rows leave the board', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const adapter = new SnapshotAdapter(sourceId, snapshotRows(1000));
+    const poll = () => new Poller([adapter], store).poll({ maxListingsPerSourceRun: 750 });
+
+    const first = await poll();
+    expect(first.pendingResolution[sourceId]).toBe(250);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(250);
+
+    // 150 pending rows disappear between deliveries; only the 100 still listed
+    // can resolve, and the pass must close instead of holding those 150 forever.
+    adapter.setRows(snapshotRows(850));
+    const second = await poll();
+
+    expect(await store.getSourceOccurrences(sourceId)).toHaveLength(850);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toBeUndefined();
+    expect(second.pendingResolution[sourceId]).toBeUndefined();
+    expect(second.continuationSources).toEqual([]);
+    expect(second.failures).toEqual([]);
+  }, 15_000);
+
+  it('reconciles an omission on the delivery that empties the resolution pass', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const staleReference = {
+      ...listing('https://jobs.example.com/role-stale', sourceId), externalId: 'role-stale',
+    };
+    await store.putInternship({
+      jobId: 'stale-job', company: 'Acme', title: 'Software Engineering Intern', location: 'NYC', season: 'summer-2027',
+      applyUrl: 'https://jobs.example.com/role-stale', normalizedUrl: 'https://jobs.example.com/role-stale',
+      fingerprint: 'stale-job', compensation: { raw: '$40/hr', maxHourlyUSD: 40 }, sourceReferences: [staleReference],
+      open: true, firstSeenAt: '2026-09-09T00:00:00.000Z', lastSeenAt: '2026-09-09T00:00:00.000Z',
+      notification: { smsPending: false, digestPending: false },
+    });
+    await store.putSourceOccurrence({
+      sourceId, externalId: 'role-stale', jobId: 'stale-job', occurrence: staleReference, present: true,
+      consecutiveOmissions: 1, changedSnapshotHash: 'prior-snapshot', changedAt: '2026-09-09T00:00:00.000Z',
+    });
+    const adapter = new SnapshotAdapter(sourceId, snapshotRows(800));
+    const poll = () => new Poller([adapter], store).poll({ maxListingsPerSourceRun: 750 });
+
+    const first = await poll();
+    expect(first.continuationSources).toEqual([sourceId]);
+    expect(first.pendingResolution[sourceId]).toBe(50);
+    // An open pass defers the closure to the delivery that empties it, so the
+    // omitted job survives even though the row is already missing from the board.
+    expect((await store.getJob('stale-job'))?.open).toBe(true);
+
+    const final = await poll();
+    expect(final.continuationSources).toEqual([]);
+    expect(final.pendingResolution[sourceId]).toBeUndefined();
+    expect((await store.getSourceOccurrences(sourceId)).find((value) => value.externalId === 'role-stale'))
+      .toMatchObject({ present: false, occurrence: { state: 'closed' } });
+    expect((await store.getJob('stale-job'))?.open).toBe(false);
+    expect((await store.getSourceOccurrences(sourceId)).filter((value) => value.present)).toHaveLength(800);
+    expect([...store.jobs.values()].filter((job) => job.jobId !== 'stale-job').every((job) => job.open)).toBe(true);
+  }, 15_000);
+
+  it('does not open a resolution pass for an unchanged board', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const adapter = new SnapshotAdapter(sourceId, snapshotRows(900));
+    await new Poller([adapter], store).poll();
+    expect(await store.getSourceOccurrences(sourceId)).toHaveLength(900);
+
+    const unchanged = await new Poller([adapter], store).poll({ maxListingsPerSourceRun: 750 });
+
+    expect(unchanged.unchangedSources).toEqual([sourceId]);
+    expect(unchanged.pendingResolution[sourceId]).toBeUndefined();
+    expect(unchanged.continuationSources).toEqual([]);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toBeUndefined();
+    expect(await store.getSourceOccurrences(sourceId)).toHaveLength(900);
+    expect(unchanged.failures).toEqual([]);
+  }, 15_000);
 });

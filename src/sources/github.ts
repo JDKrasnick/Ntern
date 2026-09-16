@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readBoundedBody } from '../core/bounded-body.js';
 import { parseInternshipMarkdown, type MarkdownParseOptions } from '../core/markdown.js';
 import { normalizeUrl } from '../core/normalize.js';
 import { platformFetch } from '../core/platform-fetch.js';
@@ -10,6 +11,15 @@ import type { RawListing, SourceAdapter, SourceCheckpoint, SourceConnector, Sour
 
 export interface GitHubDocument { path: string; branch: string; season: string; }
 export interface GitHubAdapterOptions { id: string; owner: string; repo: string; documents: GitHubDocument[]; parser?: (markdown: string, options: MarkdownParseOptions) => RawListing[]; fetchImpl?: typeof fetch; }
+
+/**
+ * Document and source ceilings: the largest document ever observed is 1.65 MB
+ * (`README-Off-Season.md`), so both sit several times above every real board and
+ * only stop a body that has run away upstream. A source is measured across its
+ * documents and rejected before any of them is parsed.
+ */
+export const GITHUB_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024;
+export const GITHUB_SOURCE_MAX_BYTES = 16 * 1024 * 1024;
 
 export function markdownListingToSourcedPosting(listing: RawListing): SourcedPosting {
   return {
@@ -78,9 +88,10 @@ export class GitHubMarkdownAdapter implements SourceAdapter, SourceConnector {
           void response.body?.cancel().catch(() => undefined);
           if (expired) throw timedOut();
           if (response.status !== 304) throw new SourceFetchError(`${this.id}: ${path} fetch failed (${response.status})`, 'http', response.status);
-          return { response, markdown: '' };
+          return { response, markdown: '', bytes: 0 };
         }
-        return { response, markdown: await response.text() };
+        const body = await readBoundedBody(response, GITHUB_DOCUMENT_MAX_BYTES, `${this.id}: ${path}`);
+        return { response, markdown: body.text, bytes: body.bytes };
       };
       // The same deadline covers headers and body, including fetchers that
       // fail to settle when their AbortSignal is aborted.
@@ -93,6 +104,7 @@ export class GitHubMarkdownAdapter implements SourceAdapter, SourceConnector {
 
   async fetch(previous?: SourceCheckpoint): Promise<TransitionalMarkdownResult> {
     const rawListings: RawListing[] = []; const rejectedApplicationUrls: Array<{ row: number; url: string; reason: string }> = []; const documentEtags = { ...previous?.documentEtags }; let etag: string | undefined; let allUnchanged = true;
+    let sourceBytes = 0;
     for (const document of this.options.documents) {
       const url = `https://raw.githubusercontent.com/${this.options.owner}/${this.options.repo}/${document.branch}/${document.path}`;
       // A 304 supplies no body. Multi-document sources therefore fetch every
@@ -100,8 +112,12 @@ export class GitHubMarkdownAdapter implements SourceAdapter, SourceConnector {
       const knownEtag = this.options.documents.length === 1
         ? previous?.documentEtags?.[document.path] ?? previous?.etag
         : undefined;
-      const { response, markdown } = await this.fetchDocument(url, document.path, knownEtag);
+      const { response, markdown, bytes } = await this.fetchDocument(url, document.path, knownEtag);
       if (response.status === 304) continue;
+      sourceBytes += bytes;
+      if (sourceBytes > GITHUB_SOURCE_MAX_BYTES) {
+        throw new SourceFetchError(`${this.id}: source documents exceed ${GITHUB_SOURCE_MAX_BYTES} bytes`, 'capacity');
+      }
       allUnchanged = false; etag = response.headers.get('etag') ?? etag;
       const documentEtag = response.headers.get('etag'); if (documentEtag) documentEtags[document.path] = documentEtag;
       const parsed = (this.options.parser ?? parseInternshipMarkdown)(markdown, { sourceId: this.id, document: document.path, sourceUrl: url, season: document.season });

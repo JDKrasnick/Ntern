@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readBoundedJson } from '../core/bounded-body.js';
 import { hasLifecycleTitleSignal } from '../core/early-career.js';
 import { isTechnicalJob } from '../core/filters.js';
 import { parseCompensation } from '../core/normalize.js';
@@ -201,6 +202,14 @@ type TransitionalLeverResult = SourceSnapshot & SourceFetchResult;
 export const LEVER_PAGE_SIZE = 100;
 export const LEVER_MAX_PAGES = 50;
 export const LEVER_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Measured ceilings: the largest observed page is 1.94 MB (Palantir at 100
+ * postings) and the largest whole board 6.1 MB across 316 postings, so a page
+ * ceiling above either stops a runaway response before `JSON.parse` while the
+ * board ceiling bounds the retained set of pages.
+ */
+export const LEVER_PAGE_MAX_BYTES = 4 * 1024 * 1024;
+export const LEVER_BOARD_MAX_BYTES = 16 * 1024 * 1024;
 
 export class LeverPostingsAdapter implements SourceAdapter, SourceConnector {
   readonly id: string;
@@ -216,6 +225,7 @@ export class LeverPostingsAdapter implements SourceAdapter, SourceConnector {
   async fetch(previous?: SourceCheckpoint): Promise<TransitionalLeverResult> {
     const sourceUrl = `https://api.lever.co/v0/postings/${this.options.site}?mode=json`;
     const postings: LeverPosting[] = [];
+    let boardBytes = 0;
     // Lever returns weak ETags but does not honor If-None-Match on this public
     // endpoint. Always fetch every page and use the stable content hash to
     // detect unchanged boards.
@@ -236,8 +246,12 @@ export class LeverPostingsAdapter implements SourceAdapter, SourceConnector {
           response.status === 429 ? retryAfterMs(response, this.now()) : undefined,
         );
       }
-      let payload: unknown;
-      try { payload = await response.json(); } catch { throw new SourceFetchError(`${this.id}: Lever returned malformed JSON`, 'json'); }
+      const body = await readBoundedJson(response, LEVER_PAGE_MAX_BYTES, `${this.id}: Lever`);
+      boardBytes += body.bytes;
+      if (boardBytes > LEVER_BOARD_MAX_BYTES) {
+        throw new SourceFetchError(`${this.id}: Lever board exceeds ${LEVER_BOARD_MAX_BYTES} bytes`, 'capacity');
+      }
+      const payload = body.value;
       if (!Array.isArray(payload)) throw new SourceFetchError(`${this.id}: Lever response was not an array`, 'json');
       postings.push(...payload as LeverPosting[]);
       if (payload.length < LEVER_PAGE_SIZE) break;

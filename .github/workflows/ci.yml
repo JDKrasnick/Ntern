@@ -42,6 +42,7 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - run: npm run test:budget
       - run: npm run test:e2e
       - run: npm run terraform:fmt
       - run: tofu -chdir=infra/cloudflare init -backend=false

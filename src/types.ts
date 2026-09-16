@@ -153,6 +153,12 @@ export interface SourceCheckpoint {
     extractionVersion: number;
     processingRevision: number;
   }>;
+  /**
+   * Listings still owed a resolution pass while a bounded delivery slice is
+   * open. Present only while the pass is incomplete; the delivery that empties
+   * it also reconciles omissions and closures.
+   */
+  pendingResolutionRows?: string[];
   lastSuccessAt?: string;
   successfulFetches: number;
   lastRowCount?: number;

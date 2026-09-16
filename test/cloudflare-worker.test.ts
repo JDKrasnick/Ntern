@@ -9,6 +9,7 @@ import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.j
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { D1EmployerStore } from '../cloudflare/employer-store.js';
 import { isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
+import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
 import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
 import { reviewedLeverSources } from '../src/sources/lever-config.js';
@@ -648,5 +649,79 @@ describe('Cloudflare document upload bounds', () => {
     const result = await readDocumentUpload(request);
     expect(result.tooLarge).toBe(false);
     if (!result.tooLarge) expect(result.content.byteLength).toBe(5 * 1024 * 1024);
+  });
+});
+
+describe('Cloudflare GitHub queue continuation', () => {
+  const reviewedGithub = defaultSources[0]!;
+
+  /**
+   * Deliver one GitHub message whose runtime poll reports `report`. The reviewed
+   * structured registry is empty, so the delivery reaches the reviewed GitHub
+   * branch, and the source reports no prior health so quarantine cannot block it.
+   */
+  const deliver = async (report: Record<string, unknown>) => {
+    const sent: unknown[] = [];
+    const handled: string[] = [];
+    const polls: Array<{ command: string; sourceIds: string[]; maxListingsPerSourceRun: number | undefined }> = [];
+    const workQueue: Queue = {
+      async send(message) { sent.push(message); },
+      async sendBatch() {},
+    };
+    const logged: string[] = [];
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(undefined);
+    runtime.runRuntimeCommand.mockImplementationOnce(async (command, dependencies) => {
+      polls.push({
+        command,
+        sourceIds: (dependencies.sources ?? []).map((source) => source.id),
+        maxListingsPerSourceRun: dependencies.maxListingsPerSourceRun,
+      });
+      return { poll: report };
+    });
+    vi.spyOn(console, 'log').mockImplementation((line) => { logged.push(String(line)); });
+    const message = {
+      id: 'github-first', body: { sourceId: reviewedGithub.id }, attempts: 1,
+      ack() { handled.push('ack'); }, retry() { handled.push('retry'); },
+    };
+    try {
+      await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [message] }, {
+        DB: { prepare: () => ({ async first() { return null; } }), async batch() { return []; } },
+        GITHUB_QUEUE: workQueue,
+      } as unknown as Environment);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    // One bounded poll slice per delivery is the delivery's whole reason to
+    // re-enqueue itself, so every case pins the poll it issued.
+    expect(polls).toEqual([{
+      command: 'poll', sourceIds: [reviewedGithub.id],
+      maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
+    }]);
+    const sliceEvents = logged.map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((event) => event.event === 'github_admission_migration_slice');
+    return { sent, handled, sliceEvents };
+  };
+
+  it('re-enqueues the source once and acks while the delivery leaves a pending resolution slice', async () => {
+    const { sent, handled, sliceEvents } = await deliver({
+      continuationSources: [reviewedGithub.id],
+      pendingResolution: { [reviewedGithub.id]: 4 },
+      failures: [],
+    });
+
+    expect(sent).toEqual([{ sourceId: reviewedGithub.id }]);
+    expect(sliceEvents).toEqual([expect.objectContaining({
+      sourceId: reviewedGithub.id, continuation: true, resolutionPending: 4, failureCount: 0,
+    })]);
+    expect(handled).toEqual(['ack']);
+  });
+
+  it('acks a delivery that resolved its whole slice without re-enqueueing it', async () => {
+    const { sent, handled, sliceEvents } = await deliver({ continuationSources: [], pendingResolution: {}, failures: [] });
+
+    expect(sent).toEqual([]);
+    expect(sliceEvents).toEqual([]);
+    expect(handled).toEqual(['ack']);
   });
 });
