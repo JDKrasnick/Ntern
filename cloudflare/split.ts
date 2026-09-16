@@ -13,6 +13,7 @@ export function isIngestionOperationPath(pathname: string): boolean {
     || pathname === '/internal/refresh-catalog'
     || pathname === '/internal/recover-notifications'
     || pathname === '/internal/catalog-quality-backfill'
+    || pathname === '/internal/trusted-admission-backfill'
     || pathname === '/internal/posting-identity-repair'
     || pathname === '/internal/poll-source'
     || pathname === '/internal/backfill'
