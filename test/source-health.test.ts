@@ -242,6 +242,8 @@ describe('application link probe failures', () => {
   it('classifies a probe that never completed as transport, not link integrity', () => {
     expect(sourceFailureCategory(new ApplicationUrlValidationError('Application link timed out'))).toBe('transport');
     expect(sourceFailureCategory(new ApplicationUrlValidationError('Application link could not be reached'))).toBe('transport');
+    expect(sourceFailureCategory(new ApplicationUrlValidationError('Application page could not be reached'))).toBe('transport');
+    expect(sourceFailureCategory(new ApplicationUrlValidationError('Application page body timed out'))).toBe('transport');
   });
 
   it('classifies a row-level probe timeout the way the poll reports it', () => {
@@ -249,6 +251,7 @@ describe('application link probe failures', () => {
     // next to a storage failure must not read as a broken link.
     expect(sourceFailureCategory(new Error('simplify-summer-2026: row 12685: Application link timed out'))).toBe('transport');
     expect(sourceFailureCategory(new Error('simplify-summer-2026: row 12685: Application link timed out; D1_ERROR: D1 DB is overloaded. Requests queued for too long.'))).toBe('transport');
+    expect(sourceFailureCategory(new Error('simplify-summer-2026: row 612: Application page could not be reached; simplify-summer-2026: row 2348: Application link timed out'))).toBe('transport');
   });
 
   it('keeps completed-probe rejections classified as link', () => {
