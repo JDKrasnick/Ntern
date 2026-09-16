@@ -1029,7 +1029,10 @@ export class IngestionRunner {
             const failure = `${listing.sourceId}: row ${listing.row}: ${error instanceof Error ? error.message : String(error)}`;
             // A probe that never completed withdraws its row; a completed probe
             // that reports a dead or gone link is still a delivery failure.
-            if (sourceFailureCategory(error) === 'transport') withdrawnTransportFailures.push(failure);
+            // A bounded metadata refresh cannot withdraw its selected row: doing
+            // so would certify a parser revision that never successfully read
+            // the page. Keep that obligation pending for a later delivery.
+            if (sourceFailureCategory(error) === 'transport' && !stampSourceMetadata) withdrawnTransportFailures.push(failure);
             else failures[slot] = failure;
             if (!admissionManaged) {
               failedExternalIds.add(id);
