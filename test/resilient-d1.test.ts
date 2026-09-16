@@ -79,6 +79,26 @@ describe('resilientD1', () => {
     expect(run).toHaveBeenCalledTimes(3);
   });
 
+  it('bounds a statement that never settles and retries it as a stall', async () => {
+    const stalled = vi.fn(() => new Promise<never>(() => undefined));
+    const db = resilientD1({ prepare: () => statement({ first: stalled }), batch: async () => [] } as unknown as D1Database,
+      { ...noSleep, attempts: 2, attemptTimeoutMs: 20 });
+
+    await expect(db.prepare('SELECT 1').first()).rejects.toThrow('D1 statement did not settle within 20 ms');
+    expect(stalled).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers when a later attempt settles after a stall', async () => {
+    const run = vi.fn()
+      .mockImplementationOnce(() => new Promise<never>(() => undefined))
+      .mockResolvedValueOnce({ results: [{ value: 'ok' }] });
+    const db = resilientD1({ prepare: () => statement({ all: run }), batch: async () => [] } as unknown as D1Database,
+      { ...noSleep, attemptTimeoutMs: 20 });
+
+    await expect(db.prepare('SELECT 1').all()).resolves.toEqual({ results: [{ value: 'ok' }] });
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
   it('uses exponential backoff with jitter between reconnect attempts', async () => {
     const run = vi.fn()
       .mockRejectedValueOnce(instanceGone())
