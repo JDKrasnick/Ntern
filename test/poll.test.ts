@@ -1000,6 +1000,42 @@ describe('polling', () => {
     expect(report.failures).toContain('catalog: legacy-role: Application link returned HTTP 403');
   });
 
+  it('withdraws a row whose application page could not be reached instead of failing the delivery', async () => {
+    const store = new MemoryInternshipStore();
+    await store.putCheckpoint({ sourceId: 'one', successfulFetches: 1, lastRowCount: 0 });
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => { logs.push(String(line)); });
+    const report = await new Poller(
+      [new Adapter('one', [listing('https://jobs.example.com/reachable'), listing('https://jobs.example.com/unreachable')])],
+      store, undefined, undefined,
+      async (url) => {
+        if (url.includes('unreachable')) throw new Error('Application page could not be reached');
+        return { url, evidence: { url, confidence: { score: 100, level: 'high', recommendation: 'alert-eligible', signals: ['source policy'] } } };
+      },
+      false,
+    ).poll();
+    spy.mockRestore();
+    // A page that could not be reached withdraws its row; it is not evidence that
+    // the source failed, which is what kept healthy lists quarantined.
+    expect(report.failures.some((failure) => failure.includes('unreachable'))).toBe(false);
+    expect(logs.some((line) => line.includes('row_transport_withdrawn') && line.includes('could not be reached'))).toBe(true);
+    const references = [...store.jobs.values()].flatMap((job) => job.sourceReferences.map((reference) => reference.applyUrl));
+    expect(references).toContain('https://jobs.example.com/reachable');
+    expect(references).not.toContain('https://jobs.example.com/unreachable');
+  });
+
+  it('still fails the delivery when a row fails for a non-transport reason', async () => {
+    const store = new MemoryInternshipStore();
+    await store.putCheckpoint({ sourceId: 'one', successfulFetches: 1, lastRowCount: 0 });
+    const report = await new Poller(
+      [new Adapter('one', [listing('https://jobs.example.com/dead')])], store, undefined, undefined,
+      async (url) => { throw new Error(`Application host rejected the request for ${url}`); },
+      false,
+    ).poll();
+    // A completed probe that rejects the link still fails the delivery.
+    expect(report.failures.some((failure) => failure.includes('Application host rejected'))).toBe(true);
+  });
+
   it('lets per-source workers validate incoming listings without applying their host policy to the catalog', async () => {
     const store = new MemoryInternshipStore();
     await legacyOpenRole(store);

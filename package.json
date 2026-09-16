@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "vitest run --dir test",
+    "test": "vitest run --dir test --exclude ingestion-resource-budget.test.ts",
     "test:budget": "NODE_OPTIONS=--expose-gc vitest run --dir test test/ingestion-resource-budget.test.ts",
     "test:unit": "vitest run --dir test --exclude test/integration.workflow.test.ts --exclude test/api.workflow.test.ts --exclude test/full-day.workflow.test.ts",
     "test:integration": "vitest run test/integration.workflow.test.ts test/api.workflow.test.ts test/full-day.workflow.test.ts",

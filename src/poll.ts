@@ -32,7 +32,7 @@ import {
 import { trustedCommunityCircuitBreaches, trustedCommunityMetrics } from './sources/trusted-community-health.js';
 import { SourceFetchError } from './sources/source-error.js';
 import { extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence, projectRoleMetadata, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from './role-metadata.js';
-import { failedSourceHealth, sourceFailureOutcome, successfulSourceHealth } from './source-health.js';
+import { failedSourceHealth, sourceFailureCategory, sourceFailureOutcome, successfulSourceHealth } from './source-health.js';
 import type {
   CatalogAdmission,
   Internship,
@@ -213,22 +213,24 @@ const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
 /**
  * Listings one GitHub queue delivery may resolve. Sliced because resolving a
  * whole board in one message is what killed these deliveries: the largest
- * reviewed source holds 3,029 postings, and in production each resolved row also
- * pays a destination check and its own catalog writes. 750 rows measured a
- * 300 s (five-minute) message-deadline abort on `simplify-summer-2026`, so the
- * slice is sized at roughly a third of that budget; the pass is resumable from
- * the checkpoint (`pendingResolutionRows`), so lowering this only trades
- * deliveries for per-delivery cost.
+ * reviewed source holds 3,063 raw rows, and in production each resolved row also
+ * pays a destination check, a browser inspection for roughly half of them, and
+ * its own catalog writes. 750 rows measured a 300 s (five-minute) message-deadline
+ * abort on `simplify-summer-2026`, and 200 rows still exceeded that deadline for
+ * the same list, so the slice is 100; the pass is resumable from the checkpoint
+ * (`pendingResolutionRows`), so lowering this only trades deliveries for
+ * per-delivery cost.
  */
-export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 200;
+export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 100;
 /**
  * Listings one delivery may re-grade after an admission policy change. The
  * bounded-migration gate suppresses newly admitted rows of a trusted list until
  * its migration drains, so this bound also sets how fast those rows publish;
- * 20 rows per delivery left migrated rows hidden for hours, while 200 converges
- * in a handful of deliveries and still fits the five-minute message deadline.
+ * 20 rows per delivery left migrated rows hidden for hours, while 100 converges
+ * in a manageable number of deliveries and keeps the migration inside the same
+ * message budget as the resolution slice above.
  */
-export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 200;
+export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 100;
 
 /**
  * Bounded worker pool that always drains: the first error is rethrown only once
@@ -743,6 +745,12 @@ export class IngestionRunner {
     // reported failures do not depend on which worker finished first.
     const accepted = new Array<ProcessedListing | undefined>(listings.length);
     const failures = new Array<string | undefined>(listings.length);
+    // Rows whose application page could not be reached are withdrawn from this
+    // delivery instead of failing it: the row never reaches `accepted`, and the
+    // source-level gates (zero-row, floor and coverage checks) still catch a
+    // source that is genuinely down. Failing the whole delivery here is what
+    // kept healthy reviewed lists quarantined and filled the GitHub DLQ.
+    const withdrawnTransportFailures: string[] = [];
     const priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
     await forEachBounded(listings, async (sourceListing, slot) => {
       // Transitional RawListing adapters predate provider-neutral evidence.
@@ -1018,7 +1026,14 @@ export class IngestionRunner {
             }
           } catch (error) {
             reachability = reachabilityFromFailure(error);
-            failures[slot] = `${listing.sourceId}: row ${listing.row}: ${error instanceof Error ? error.message : String(error)}`;
+            const failure = `${listing.sourceId}: row ${listing.row}: ${error instanceof Error ? error.message : String(error)}`;
+            // A probe that never completed withdraws its row; a completed probe
+            // that reports a dead or gone link is still a delivery failure.
+            // A bounded metadata refresh cannot withdraw its selected row: doing
+            // so would certify a parser revision that never successfully read
+            // the page. Keep that obligation pending for a later delivery.
+            if (sourceFailureCategory(error) === 'transport' && !stampSourceMetadata) withdrawnTransportFailures.push(failure);
+            else failures[slot] = failure;
             if (!admissionManaged) {
               failedExternalIds.add(id);
               if (existing?.open && reachability === 'gone') await this.quarantine(existing);
@@ -1175,7 +1190,10 @@ export class IngestionRunner {
         accepted[slot] = listing;
         handledExternalIds.add(id);
       } catch (error) {
-        failures[slot] = `${listing.sourceId}: row ${listing.row}: ${error instanceof Error ? error.message : String(error)}`;
+        const message = error instanceof Error ? error.message : String(error);
+        const failure = `${listing.sourceId}: row ${listing.row}: ${message}`;
+        if (sourceFailureCategory(error) === 'transport') withdrawnTransportFailures.push(failure);
+        else failures[slot] = failure;
         failedExternalIds.add(id);
         await completeFailedAdmissionMigration();
       }
@@ -1190,6 +1208,7 @@ export class IngestionRunner {
       handledExternalIds,
       failedExternalIds,
       providerShadowVerifications,
+      withdrawnTransportFailures,
     };
   }
 
@@ -1481,6 +1500,14 @@ export class IngestionRunner {
         // Existing catalog decisions are the durable migration obligation.
         // Rows with no prior occurrence are evaluated with spare slice capacity
         // but fail closed and cannot hold the source checkpoint open forever.
+        if (resolution.withdrawnTransportFailures.length) {
+          console.log(JSON.stringify({
+            event: 'row_transport_withdrawn',
+            sourceId: connector.id,
+            count: resolution.withdrawnTransportFailures.length,
+            samples: resolution.withdrawnTransportFailures.slice(0, 5),
+          }));
+        }
         const admissionEvidencePending = migrationLimit !== undefined && (
           requiredMigrationCandidates.length > selectedRequiredMigrations.length
           || selectedRequiredMigrations.some((listing) => !resolution.handledExternalIds.has(externalId(listing)))
