@@ -29,7 +29,7 @@ import {
   postingSpecificDestination,
   sourceAdmissionPolicy,
 } from './sources/trust-policy.js';
-import { trustedCommunityCircuitBreaches, trustedCommunityMetrics } from './sources/trusted-community-health.js';
+import { trustedCommunityCircuitBreaches, trustedCommunityMetrics, trustedCommunityThresholdsFor } from './sources/trusted-community-health.js';
 import { SourceFetchError } from './sources/source-error.js';
 import { extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence, projectRoleMetadata, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from './role-metadata.js';
 import { failedSourceHealth, sourceFailureOutcome, successfulSourceHealth } from './source-health.js';
@@ -1527,13 +1527,17 @@ export class IngestionRunner {
           const breaches = trustedCommunityCircuitBreaches({
             metrics: trustedMetrics,
             alertMode: trustedPolicy.alertMode,
+            // Judge the list against its own observed shape: these boards differ
+            // by an order of magnitude in size.
+            thresholds: trustedCommunityThresholdsFor(connector.id),
             // Partial bounded slices are allowed to accumulate evidence. Any
             // pass that can clear suppression or advance the policy checkpoint
             // must prove that the current eligible snapshot was inspected.
             requireCompleteInspection: !admissionEvidencePending,
           });
           if (breaches.length) {
-            report.continuationSources = report.continuationSources.filter((sourceId) => sourceId !== connector.id);
+            // Hidden listings apply either way: the per-posting inspection keeps
+            // unsafe rows out of the catalog whether or not the list is stopped.
             await this.hideUnsafeTrustedCommunityListings({
               sourceId: connector.id,
               snapshotHash: batch.snapshotHash,
@@ -1542,7 +1546,24 @@ export class IngestionRunner {
               resolvedJobs: resolution.resolved,
               now,
             });
-            throw new SourceFetchError(`${connector.id}: trusted-community circuit breaker: ${breaches.join('; ')}`, 'quality', undefined, undefined, true);
+            if (trustedPolicy.circuitBreaker === 'alert') {
+              // Breaching an aggregate rate for a verified list is a signal, not a
+              // reason to stop polling it (owner decision 2026-09-16).
+              console.log(JSON.stringify({
+                event: 'trusted_community_circuit_alert',
+                sourceId: connector.id,
+                runId: options.runId,
+                breaches,
+                rawRows: trustedMetrics.rawRows,
+                eligibleRows: trustedMetrics.eligibleRows,
+                inspectedCandidates: trustedMetrics.inspectedCandidates,
+                destinationFailureRate: trustedMetrics.destinationFailureRate,
+                catalogYield: trustedMetrics.catalogYield,
+              }));
+            } else {
+              report.continuationSources = report.continuationSources.filter((sourceId) => sourceId !== connector.id);
+              throw new SourceFetchError(`${connector.id}: trusted-community circuit breaker: ${breaches.join('; ')}`, 'quality', undefined, undefined, true);
+            }
           }
         }
         // A bounded policy migration stores evidence but exposes none of its

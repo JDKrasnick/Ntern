@@ -12,6 +12,15 @@ export interface TrustedCommunityAdmissionPolicy {
   version: string;
   catalogMode: 'validated-posting-specific-destination';
   alertMode: TrustedCommunityAlertMode;
+  /**
+   * `quarantine` (default) stops polling a list that breaches its circuit
+   * breaker. `alert` keeps polling: the breach is logged, unsafe listings are
+   * still hidden, and nothing is quarantined. Use it for lists whose failure
+   * rate is a property of their aggregation (they link the long tail of the
+   * web), not evidence the list is bad — the per-posting URL inspection is what
+   * keeps bad rows out of the catalog.
+   */
+  circuitBreaker?: 'quarantine' | 'alert';
 }
 
 export interface StandardAdmissionPolicy {

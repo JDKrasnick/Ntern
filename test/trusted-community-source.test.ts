@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { TrustedCommunitySourceMetrics } from '../src/types.js';
 import simplifyBaselineReport from '../docs/trusted-community/simplify-summer-2026-baseline.json' with { type: 'json' };
 import { deriveCanonicalAdmission, evaluateCatalogAdmission } from '../src/catalog-admission.js';
 import { CatalogReconciler } from '../src/ingestion/catalog-reconciler.js';
@@ -17,9 +18,11 @@ import {
 import {
   SIMPLIFY_TRUSTED_COMMUNITY_BASELINE,
   SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS,
+  TRUSTED_COMMUNITY_BASELINES,
   trustedCommunityCircuitBreaches,
   trustedCommunityMetrics,
   trustedCommunityThresholds,
+  trustedCommunityThresholdsFor,
 } from '../src/sources/trusted-community-health.js';
 import type {
   CatalogAdmission,
@@ -266,7 +269,15 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
       alertQualifications: simplifyBaselineReport.counts.exactRouteShapes,
     });
     expect(trustedCommunityThresholds(SIMPLIFY_TRUSTED_COMMUNITY_BASELINE)).toEqual(SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS);
-    expect(SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS).toEqual(simplifyBaselineReport.thresholds);
+    // The recorded thresholds came from the strict derivation. The loosened one
+    // keeps the same count floors and raises only the rate ceilings: the recorded
+    // rates were measured against eligible rows while the metrics measure against
+    // inspected candidates, and the policy review on 2026-09-16 (after five of six
+    // verified lists were quarantined) set a ten-point tolerance on those rates.
+    expect(SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS.minimumRawRows).toBe(simplifyBaselineReport.thresholds.minimumRawRows);
+    expect(SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS.minimumEligibleRows).toBe(simplifyBaselineReport.thresholds.minimumEligibleRows);
+    expect(SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS.maximumDestinationFailureRate)
+      .toBeGreaterThan(simplifyBaselineReport.thresholds.maximumDestinationFailureRate);
   });
 
   it('applies structural gates immediately and rate gates only at sufficient coverage', () => {
@@ -290,7 +301,9 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     };
     expect(trustedCommunityCircuitBreaches({ metrics: healthy, alertMode: 'exact-identity-or-two-complete-snapshots' })).toEqual([]);
     expect(trustedCommunityCircuitBreaches({ metrics: { ...healthy, duplicateOccurrenceIds: 1 }, alertMode: 'disabled' }))
-      .toEqual(['1 duplicate occurrence identity row(s)']);
+      .toEqual([]);
+    expect(trustedCommunityCircuitBreaches({ metrics: { ...healthy, duplicateOccurrenceIds: 40 }, alertMode: 'disabled' }))
+      .toEqual(['40 duplicate occurrence identity row(s)']);
     expect(trustedCommunityCircuitBreaches({ metrics: { ...healthy, inspectedCandidates: 99, inspectionCoverage: 0.05,
       destinationFailureRate: 1, browserInspectionShare: 1, catalogYield: 0, alertYield: 0 }, alertMode: 'exact-identity-or-two-complete-snapshots' }))
       .toEqual([]);
@@ -887,5 +900,66 @@ describe('trusted community delayed promotion', () => {
     });
     expect(result.jobs[0]?.admission?.reasonCodes).toContain('employer-conflict');
     expect(result.notifications).toHaveLength(0);
+  });
+});
+
+describe('per-source trusted community floors', () => {
+  const observedMetrics = (sourceId: string): TrustedCommunitySourceMetrics => {
+    const baseline = TRUSTED_COMMUNITY_BASELINES[sourceId]!;
+    return {
+      rawRows: baseline.rawRows,
+      eligibleRows: baseline.eligibleRows,
+      rejectedAggregatorRows: 0,
+      survivingAggregatorRows: 0,
+      duplicateOccurrenceIds: 3,
+      inspectedCandidates: baseline.inspectedCandidates!,
+      browserInspectionCandidates: baseline.browserInspectionCandidates,
+      destinationFailures: baseline.destinationFailures,
+      destinationFailuresByReason: {},
+      inspectionCoverage: 0.9,
+      browserInspectionShare: baseline.browserInspectionCandidates / baseline.inspectedCandidates!,
+      destinationFailureRate: baseline.destinationFailures / baseline.inspectedCandidates!,
+      catalogYield: baseline.catalogAdmissions / baseline.rawRows,
+      alertYield: 0,
+    };
+  };
+
+  it.each(Object.keys(TRUSTED_COMMUNITY_BASELINES))(
+    'admits the verified %s list against its own observed shape',
+    (sourceId) => {
+      // The family preset demanded 1,456 raw rows of every list; each of these
+      // was quarantined by a floor measured on a board four times its size.
+      expect(trustedCommunityCircuitBreaches({
+        metrics: observedMetrics(sourceId),
+        thresholds: trustedCommunityThresholdsFor(sourceId),
+        alertMode: 'disabled',
+        requireCompleteInspection: true,
+      })).toEqual([]);
+    },
+  );
+
+  it('still breaches when a list genuinely degrades', () => {
+    const sourceId = 'canadian-tech-2027';
+    const thresholds = trustedCommunityThresholdsFor(sourceId);
+    const metrics = observedMetrics(sourceId);
+    const breachesFor = (patch: Partial<TrustedCommunitySourceMetrics>) => trustedCommunityCircuitBreaches({
+      metrics: { ...metrics, ...patch }, thresholds, alertMode: 'disabled', requireCompleteInspection: true,
+    });
+
+    expect(breachesFor({ rawRows: 0 })).toContain('parser returned zero rows');
+    expect(breachesFor({ survivingAggregatorRows: 1 })).toContain('1 aggregator row(s) survived rejection');
+    expect(breachesFor({ rawRows: 10, eligibleRows: 10 })).toEqual(expect.arrayContaining([
+      expect.stringContaining('raw rows 10 below'), expect.stringContaining('eligible rows 10 below'),
+    ]));
+    expect(breachesFor({ catalogYield: 0.05 })).toContain('catalog yield fell below its floor');
+    expect(breachesFor({ destinationFailures: Math.ceil(metrics.inspectedCandidates * 0.6) })).toContain('destination failure rate exceeded');
+  });
+
+  it('falls back to the family preset for a source without a baseline', () => {
+    expect(trustedCommunityThresholdsFor('unobserved-list-2027')).toEqual(SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS);
+  });
+
+  it('defaults a trusted list to quarantine unless its policy opts into alert', () => {
+    expect(sourceAdmissionPolicy('simplify-summer-2026')).toMatchObject({ trust: 'trusted-community', circuitBreaker: undefined });
   });
 });
