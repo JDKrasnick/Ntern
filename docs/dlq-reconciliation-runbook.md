@@ -89,3 +89,60 @@ source-specific defect in the operations dashboard or incident record.
 An unexplained historical backlog is an expected residual only when it remains
 untouched, is explicitly counted, and has a follow-up owner. It is never a
 reason to bulk replay or purge.
+
+## 6. Reconciliation record: 2026-09-16
+
+Classified with `inspect` (100-message non-consuming peek) for all four catalog
+queues after the dispatch fixes landed (#240). Counts are *visible* messages, not
+depth.
+
+| Queue | Visible | `missing-ledger` | Source active + healthy | Source paused/quarantined | DLQ depth |
+| --- | --- | --- | --- | --- | --- |
+| github | 35 | 35 | 35 | 0 | 195 |
+| greenhouse | 12 | 12 | 8 | 4 (`greenhouse-andurilindustries` ×3, `greenhouse-iherb`) | 75 |
+| lever | 6 | 6 | 6 | 0 | 6 |
+| ashby | 2 | 2 | 0 | 2 (`ashby-odin-dynamics`) | 2 |
+
+Every visible catalog message is `missing-ledger`: its payload predates the
+per-message failure ledger (timestamps 2026-09-11 to 2026-09-15), so the original
+category cannot be reconstructed. That is the expected result for a historical
+backlog, not evidence of a current defect.
+
+**Nothing was replayed or discarded.** Each of the 49 messages whose source is
+active and healthy belongs to a source that has polled successfully since the
+message was dead-lettered, so a catalog replay would send one fresh poll per
+source and purge the messages — duplicate work for no new evidence. The 6
+remaining messages belong to sources that are intentionally paused or
+quarantined; `plan` rejects catalog replay for those, and the standing instruction
+is not to bulk purge this backlog. The residual stays counted and owned by #219.
+
+Two measurement caveats learned here:
+
+- **Depth is not the peek count.** A non-consuming peek leases what it reads, so
+  the messages it returns stay invisible to the next peek for the lease duration.
+  `github` reports depth 195 while a single peek returns 35; `lever` and `ashby`
+  reconcile exactly (6/6, 2/2) because their populations are small enough to be
+  fully returned each time. Wait for the lease to lapse before comparing, and
+  never plan against a selection built from an older peek — `plan` re-peeks and
+  rejects selection drift for exactly this reason.
+- **DLQ depth has no REST metrics surface.** `/queues/{queue_id}/metrics` returns
+  `Invalid queueID` for a dead-letter queue; only the operations surface (the
+  worker binding) reports DLQ depth. Use `fleet.queue.deadLettered` for depth and
+  `inspect` for population.
+
+### Degraded GitHub sources: cause and fix
+
+All six published GitHub sources showed `state: degraded` on the operations
+surface while storing `state: healthy` with a successful run. The stored `state`
+was healthy, so the surface derived `degraded` from
+`integrationRegistry.github.freshnessWindowMs` (30 minutes), which equals the
+published interval: any normal jitter crossed it.
+
+The reason their successes were ~31-33 minutes apart, despite a ten-minute cron,
+was the dispatch lease. The GitHub consumer ledgered a failure but never wrote
+source health, so `lastAttemptAt` stayed at the last *success*: the marker
+written at dispatch kept that source suppressed for a whole lease (30 minutes)
+even though its message had already failed. Recording the failed attempt (this
+PR) releases the lease, resets the interval, and makes `state`, `outcome`,
+`consecutiveFailures`, and the alert surface describe the source truthfully.
+Structured sources already did this; only the default list sources did not.
