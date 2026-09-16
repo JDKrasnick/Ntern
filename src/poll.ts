@@ -1547,6 +1547,10 @@ export class IngestionRunner {
             requireCompleteInspection: !admissionEvidencePending,
           });
           if (breaches.length) {
+            // A breaching pass is not evidence that the source advanced, so it
+            // never self-enqueues: the alert ends the delivery and the throw
+            // fails it for the sources that quarantine.
+            report.continuationSources = report.continuationSources.filter((sourceId) => sourceId !== connector.id);
             // Hidden listings apply either way: the per-posting inspection keeps
             // unsafe rows out of the catalog whether or not the list is stopped.
             await this.hideUnsafeTrustedCommunityListings({

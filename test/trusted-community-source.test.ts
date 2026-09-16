@@ -581,8 +581,11 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
   it('restarts qualification when an occurrence is absent from a complete source snapshot', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'simplify-summer-2026';
+    // Degenerate, floor-passing board for the same reason as `migrationFixture`:
+    // a short snapshot is what this test manipulates, not a short board.
+    const thresholds = trustedCommunityThresholdsFor(sourceId);
     const target = listing();
-    const filler = Array.from({ length: SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS.minimumEligibleRows }, (_, index) => {
+    const filler = Array.from({ length: thresholds.minimumEligibleRows }, (_, index) => {
       const postingId = `filler-${index}`;
       const applyUrl = `https://careers-${index % 2}.example.test/jobs/${postingId}`;
       return listing({
@@ -609,7 +612,7 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
         const listings = snapshots[fetchIndex++]!;
         return {
           sourceId,
-          rawRowCount: SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS.minimumRawRows,
+          rawRowCount: thresholds.minimumRawRows,
           listings,
           notModified: false,
           checkpoint: {
@@ -666,7 +669,11 @@ function changedDestination() {
 function migrationFixture() {
   const store = new MemoryInternshipStore();
   const sourceId = 'simplify-summer-2026';
-  const rows = Array.from({ length: SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS.minimumEligibleRows + 1 }, (_, index) => {
+  // Deliberately degenerate board: the fixture is pinned to the floors its own
+  // source is judged by, so these boundaries exercise the rollout machinery
+  // rather than tripping a floor and ending the pass in the alert path.
+  const thresholds = trustedCommunityThresholdsFor(sourceId);
+  const rows = Array.from({ length: thresholds.minimumEligibleRows + 1 }, (_, index) => {
     const postingId = `role-${index}`;
     const applyUrl = `https://careers-${index % 2}.example.test/jobs/${postingId}`;
     return listing({ externalId: `README.md:${applyUrl}`, applyUrl, row: index + 1, company: `Employer ${index}`,
@@ -675,7 +682,7 @@ function migrationFixture() {
   const state = { version: 'registry-v1', calls: 0, gone: false, aggregate: false, tick: 0, failFetch: false };
   const adapter: SourceAdapter = { id: sourceId, async fetch(previous) {
     if (state.failFetch) throw new Error('source unavailable');
-    return { sourceId, listings: rows, rawRowCount: SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS.minimumRawRows, notModified: false,
+    return { sourceId, listings: rows, rawRowCount: thresholds.minimumRawRows, notModified: false,
       checkpoint: { sourceId, successfulFetches: (previous?.successfulFetches ?? 0) + 1, lastRowCount: rows.length } };
   } };
   const resolver = {
@@ -1051,12 +1058,14 @@ describe('per-source trusted community floors', () => {
     'admits the verified %s list against its own observed shape',
     (sourceId) => {
       // The family preset demanded 1,456 raw rows of every list; each of these
-      // was quarantined by a floor measured on a board four times its size.
+      // was quarantined by a floor measured on a board four times its size. The
+      // structural inspection gate is a global constant rather than a per-source
+      // floor — a 71-row board cannot report 100 inspected candidates — so it is
+      // asserted by the gate test above and left out of this one.
       expect(trustedCommunityCircuitBreaches({
         metrics: observedMetrics(sourceId),
         thresholds: trustedCommunityThresholdsFor(sourceId),
         alertMode: 'disabled',
-        requireCompleteInspection: true,
       })).toEqual([]);
     },
   );
@@ -1075,14 +1084,26 @@ describe('per-source trusted community floors', () => {
       expect.stringContaining('raw rows 10 below'), expect.stringContaining('eligible rows 10 below'),
     ]));
     expect(breachesFor({ catalogYield: 0.05 })).toContain('catalog yield fell below its floor');
-    expect(breachesFor({ destinationFailures: Math.ceil(metrics.inspectedCandidates * 0.6) })).toContain('destination failure rate exceeded');
+    // The metrics carry the rate as measured; a failure spike has to move both.
+    expect(breachesFor({ destinationFailures: Math.ceil(metrics.inspectedCandidates * 0.6), destinationFailureRate: 0.6 }))
+      .toContain('destination failure rate exceeded');
   });
 
   it('falls back to the family preset for a source without a baseline', () => {
     expect(trustedCommunityThresholdsFor('unobserved-list-2027')).toEqual(SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS);
   });
 
-  it('defaults a trusted list to quarantine unless its policy opts into alert', () => {
-    expect(sourceAdmissionPolicy('simplify-summer-2026')).toMatchObject({ trust: 'trusted-community', circuitBreaker: undefined });
+  it('pins the alert-only breaker to the six reviewed lists and blocks everything else', () => {
+    // The reviewed set and the measured set are the same six lists; a list that
+    // were measured but not reviewed would silently keep blocking.
+    expect(Object.keys(TRUSTED_COMMUNITY_BASELINES).sort()).toEqual([
+      'canadian-tech-2027', 'northwestern-fintech-2027-quant', 'simplify-summer-2026',
+      'speedyapply-2027-ai', 'speedyapply-2027-swe', 'vanshb03-summer-2027',
+    ]);
+    for (const sourceId of Object.keys(TRUSTED_COMMUNITY_BASELINES)) {
+      expect(sourceAdmissionPolicy(sourceId)).toMatchObject({ trust: 'trusted-community', circuitBreaker: 'alert' });
+    }
+    // The field is an explicit opt-in: anything unreviewed quarantines on breach.
+    expect(sourceAdmissionPolicy('unreviewed-list-2027')).not.toHaveProperty('circuitBreaker');
   });
 });
