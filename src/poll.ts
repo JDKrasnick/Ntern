@@ -29,7 +29,7 @@ import {
   postingSpecificDestination,
   sourceAdmissionPolicy,
 } from './sources/trust-policy.js';
-import { trustedCommunityCircuitBreaches, trustedCommunityMetrics } from './sources/trusted-community-health.js';
+import { trustedCommunityCircuitBreaches, trustedCommunityMetrics, trustedCommunityThresholdsFor } from './sources/trusted-community-health.js';
 import { SourceFetchError } from './sources/source-error.js';
 import { extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence, projectRoleMetadata, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from './role-metadata.js';
 import { failedSourceHealth, sourceFailureOutcome, successfulSourceHealth } from './source-health.js';
@@ -1538,13 +1538,17 @@ export class IngestionRunner {
           const breaches = trustedCommunityCircuitBreaches({
             metrics: trustedMetrics,
             alertMode: trustedPolicy.alertMode,
+            // Judge the list against its own observed shape: these boards differ
+            // by an order of magnitude in size.
+            thresholds: trustedCommunityThresholdsFor(connector.id),
             // Partial bounded slices are allowed to accumulate evidence. Any
             // pass that can clear suppression or advance the policy checkpoint
             // must prove that the current eligible snapshot was inspected.
             requireCompleteInspection: !admissionEvidencePending,
           });
           if (breaches.length) {
-            report.continuationSources = report.continuationSources.filter((sourceId) => sourceId !== connector.id);
+            // Hidden listings apply either way: the per-posting inspection keeps
+            // unsafe rows out of the catalog whether or not the list is stopped.
             await this.hideUnsafeTrustedCommunityListings({
               sourceId: connector.id,
               snapshotHash: batch.snapshotHash,
