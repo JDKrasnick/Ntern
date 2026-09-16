@@ -213,22 +213,24 @@ const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
 /**
  * Listings one GitHub queue delivery may resolve. Sliced because resolving a
  * whole board in one message is what killed these deliveries: the largest
- * reviewed source holds 3,029 postings, and in production each resolved row also
- * pays a destination check and its own catalog writes. 750 rows measured a
- * 300 s (five-minute) message-deadline abort on `simplify-summer-2026`, so the
- * slice is sized at roughly a third of that budget; the pass is resumable from
- * the checkpoint (`pendingResolutionRows`), so lowering this only trades
- * deliveries for per-delivery cost.
+ * reviewed source holds 3,063 raw rows, and in production each resolved row also
+ * pays a destination check, a browser inspection for roughly half of them, and
+ * its own catalog writes. 750 rows measured a 300 s (five-minute) message-deadline
+ * abort on `simplify-summer-2026`, and 200 rows still exceeded that deadline for
+ * the same list, so the slice is 100; the pass is resumable from the checkpoint
+ * (`pendingResolutionRows`), so lowering this only trades deliveries for
+ * per-delivery cost.
  */
-export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 200;
+export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 100;
 /**
  * Listings one delivery may re-grade after an admission policy change. The
  * bounded-migration gate suppresses newly admitted rows of a trusted list until
  * its migration drains, so this bound also sets how fast those rows publish;
- * 20 rows per delivery left migrated rows hidden for hours, while 200 converges
- * in a handful of deliveries and still fits the five-minute message deadline.
+ * 20 rows per delivery left migrated rows hidden for hours, while 100 converges
+ * in a manageable number of deliveries and keeps the migration inside the same
+ * message budget as the resolution slice above.
  */
-export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 200;
+export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 100;
 
 /**
  * Bounded worker pool that always drains: the first error is rethrown only once

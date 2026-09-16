@@ -772,7 +772,7 @@ test('acknowledges a production-scale scheduled cycle without retries or dead le
   }
   assert.ok((occurrenceCounts.get(githubSourceId) ?? 0) >= githubResolvedRows,
     'every row resolved from the 3,029-row source should persist an occurrence');
-  assert.ok(pendingResolutionRows.length > 0 && githubRows - pendingResolutionRows.length <= 200,
+  assert.ok(pendingResolutionRows.length > 0 && githubRows - pendingResolutionRows.length <= 100,
     'the bounded resolution pass should defer the remainder of a 3,029-row source');
   assert.deepEqual(queues.github.sent, [{ sourceId: githubSourceId }], 'the deferred rows must re-enqueue exactly once');
   assert.deepEqual(queues.greenhouse.sent, []);
