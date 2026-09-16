@@ -1,4 +1,4 @@
-import { isRetryableD1Failure } from './d1-errors.js';
+import { D1StatementStallError, isRetryableD1Failure } from './d1-errors.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 
 // D1 drops connections and resets instances out from under in-flight
@@ -15,14 +15,30 @@ import type { D1Database, D1PreparedStatement } from './types.js';
 async function withRetry<T>(operation: () => Promise<T>, options: ResilientOptions): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < options.attempts; attempt += 1) {
+    // A D1 request can fail without failing: the statement never settles and no
+    // error is ever produced, so nothing above can classify or retry it and the
+    // invoking consumer parks until the platform's fifteen-minute limit. Racing
+    // each attempt turns that into an ordinary retryable failure. The abandoned
+    // request keeps running, but the attempt that owns it has already returned.
+    // The timer is cleared on every path so a settled attempt leaves nothing
+    // behind for the isolate (or a test process) to wait on.
+    let expire: (() => void) | undefined;
+    const timer = setTimeout(() => expire?.(), options.attemptTimeoutMs);
     try {
-      return await operation();
+      return await Promise.race([
+        operation(),
+        new Promise<never>((_resolve, reject) => {
+          expire = () => reject(new D1StatementStallError(options.attemptTimeoutMs));
+        }),
+      ]);
     } catch (error) {
       lastError = error;
       if (!isRetryableD1Failure(error) || attempt === options.attempts - 1) throw error;
       // Exponential backoff keeps repeated reconnect attempts from piling onto
       // a rotating instance; jitter prevents queue consumers retrying in lockstep.
       await options.sleep(options.baseDelayMs * (2 ** attempt) * (0.5 + options.random()));
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw lastError;
@@ -35,6 +51,9 @@ interface ResilientOptions {
   baseDelayMs: number;
   random: () => number;
   sleep: (ms: number) => Promise<void>;
+  /** Per-attempt ceiling. A statement that outlives it is treated as a
+   * retryable stall instead of parking the caller. */
+  attemptTimeoutMs: number;
 }
 
 function wrapStatement(build: () => D1PreparedStatement, options: ResilientOptions): D1PreparedStatement {
@@ -70,10 +89,10 @@ function rebuild(statement: D1PreparedStatement): () => D1PreparedStatement {
  */
 export function resilientD1(
   db: D1Database,
-  { attempts = 5, baseDelayMs = 50, random = Math.random,
+  { attempts = 5, baseDelayMs = 50, random = Math.random, attemptTimeoutMs = 20_000,
     sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)) }: Partial<ResilientOptions> = {},
 ): D1Database {
-  const options: ResilientOptions = { attempts, baseDelayMs, random, sleep };
+  const options: ResilientOptions = { attempts, baseDelayMs, random, sleep, attemptTimeoutMs };
   // Returns only prepare/batch because cloudflare/types.ts declares D1Database
   // with exactly those two members. A future interface method (exec, withSession,
   // raw, dump) would be silently undefined here unless added to this wrapper.

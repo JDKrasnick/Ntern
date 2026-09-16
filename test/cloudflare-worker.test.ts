@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { queueHasBacklog } from '../cloudflare/queue-backlog.js';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, dispatchProviders, documentContent, failedStructuredRecoveryHealth, githubSourceRunBlocked, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -13,8 +12,18 @@ import { isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/sourc
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
 import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
 import { reviewedLeverSources } from '../src/sources/lever-config.js';
+import { defaultSources } from '../src/sources/index.js';
 import type { ReviewedSourceRecord } from '../src/employer-types.js';
 import type { SourceHealth } from '../src/types.js';
+
+// The GitHub queue consumer delegates the poll itself to the runtime command;
+// the continuation decision, the re-enqueue, and the ack are the consumer's own
+// contract, so the poll result is supplied instead of fetched.
+const runtime = vi.hoisted(() => ({ runRuntimeCommand: vi.fn<(command: string, dependencies: { sources?: Array<{ id: string }>; maxListingsPerSourceRun?: number }) => Promise<unknown>>() }));
+vi.mock('../src/runtime.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  runRuntimeCommand: runtime.runRuntimeCommand,
+}));
 
 const queue = (metrics: Queue['metrics']): Queue => ({
   async send() {},
@@ -22,21 +31,15 @@ const queue = (metrics: Queue['metrics']): Queue => ({
   metrics,
 });
 
-describe('Cloudflare scheduled dispatch cost guard', () => {
-  it('skips a new polling cycle while prior messages remain queued', async () => {
-    await expect(queueHasBacklog(queue(async () => ({ backlogCount: 12, backlogBytes: 1024 })), 'greenhouse')).resolves.toBe(true);
-  });
+const publishedGreenhouseRecords: ReviewedSourceRecord[] = reviewedGreenhouseSources
+  .filter((source) => source.status === 'published')
+  .map((source) => ({
+    sourceId: source.id, provider: 'greenhouse', config: { ...source },
+    evidence: { origin: 'checked-in-reviewed-registry', retained: true },
+    state: 'active', createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+  }));
 
-  it('allows a polling cycle when the queue is empty', async () => {
-    await expect(queueHasBacklog(queue(async () => ({ backlogCount: 0, backlogBytes: 0 })), 'github')).resolves.toBe(false);
-  });
-
-  it('fails open when best-effort queue metrics are unavailable', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    await expect(queueHasBacklog(queue(async () => { throw new Error('metrics unavailable'); }), 'greenhouse')).resolves.toBe(false);
-    vi.restoreAllMocks();
-  });
-
+describe('Cloudflare scheduled dispatch leases', () => {
   it.each([
     ['D1_ERROR: D1 DB is overloaded. Requests queued for too long.', 60, 300],
     ['D1_ERROR: internal error; reference = 6hi9i83lajvi9r65mtnuni1t', 120, 600],
@@ -87,6 +90,8 @@ describe('Cloudflare scheduled dispatch cost guard', () => {
     vi.spyOn(D1EmployerStore.prototype, 'putReviewedSource').mockResolvedValue();
     vi.spyOn(D1InternshipStore.prototype, 'getCheckpoint').mockResolvedValue(undefined);
     vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(health);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceDispatchesMany').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'putSourceDispatches').mockResolvedValue();
     vi.spyOn(D1InternshipStore.prototype, 'listLeverAdmissions').mockResolvedValue([]);
 
     try {
@@ -97,6 +102,142 @@ describe('Cloudflare scheduled dispatch cost guard', () => {
         ASHBY_QUEUE: workQueue,
       } as Environment, provider, probeAt)).resolves.toBe(1);
       expect(sent).toEqual([expect.objectContaining({ sourceId: source.id, force: true })]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('dispatches a due source while the provider queue reports a backlog', async () => {
+    const record = publishedGreenhouseRecords[0]!;
+    const sent: unknown[] = [];
+    const workQueue = queue(async () => ({ backlogCount: 50, backlogBytes: 5_000 }));
+    workQueue.sendBatch = async (messages) => { sent.push(...messages.map(({ body }) => body)); };
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([record]);
+    vi.spyOn(D1EmployerStore.prototype, 'putReviewedSource').mockResolvedValue();
+    vi.spyOn(D1InternshipStore.prototype, 'getCheckpoint').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceDispatchesMany').mockResolvedValue([]);
+    const written = vi.spyOn(D1InternshipStore.prototype, 'putSourceDispatches').mockResolvedValue();
+    try {
+      const now = new Date('2026-09-15T16:42:00.000Z');
+      await expect(dispatchProviders({ DB: {} as Environment['DB'], GREENHOUSE_QUEUE: workQueue } as Environment, 'greenhouse', now)).resolves.toBe(1);
+      expect(sent).toEqual([expect.objectContaining({ sourceId: record.sourceId })]);
+      expect(written).toHaveBeenCalledWith([{ sourceId: record.sourceId, provider: 'greenhouse', dispatchedAt: now.toISOString() }]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('suppresses only the sources whose message is still in flight', async () => {
+    const [first, second] = publishedGreenhouseRecords;
+    const sent: unknown[] = [];
+    const workQueue = queue(async () => ({ backlogCount: 50, backlogBytes: 5_000 }));
+    workQueue.sendBatch = async (messages) => { sent.push(...messages.map(({ body }) => body)); };
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue(publishedGreenhouseRecords.slice(0, 2));
+    vi.spyOn(D1EmployerStore.prototype, 'putReviewedSource').mockResolvedValue();
+    vi.spyOn(D1InternshipStore.prototype, 'getCheckpoint').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceDispatchesMany').mockResolvedValue([
+      { sourceId: first!.sourceId, provider: 'greenhouse', dispatchedAt: '2026-09-15T16:42:00.000Z' },
+    ]);
+    const written = vi.spyOn(D1InternshipStore.prototype, 'putSourceDispatches').mockResolvedValue();
+    try {
+      const now = new Date('2026-09-15T16:50:00.000Z');
+      await expect(dispatchProviders({ DB: {} as Environment['DB'], GREENHOUSE_QUEUE: workQueue } as Environment, 'greenhouse', now)).resolves.toBe(1);
+      expect(sent).toEqual([expect.objectContaining({ sourceId: second!.sourceId })]);
+      expect(written).toHaveBeenCalledWith([{ sourceId: second!.sourceId, provider: 'greenhouse', dispatchedAt: now.toISOString() }]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('re-dispatches a source whose marker is older than one cadence', async () => {
+    const record = publishedGreenhouseRecords[0]!;
+    const sent: unknown[] = [];
+    const workQueue = queue(async () => ({ backlogCount: 50, backlogBytes: 5_000 }));
+    workQueue.sendBatch = async (messages) => { sent.push(...messages.map(({ body }) => body)); };
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([record]);
+    vi.spyOn(D1EmployerStore.prototype, 'putReviewedSource').mockResolvedValue();
+    vi.spyOn(D1InternshipStore.prototype, 'getCheckpoint').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceDispatchesMany').mockResolvedValue([{
+      sourceId: record.sourceId, provider: 'greenhouse',
+      dispatchedAt: new Date(Date.parse('2026-09-15T16:50:00.000Z') - SOURCE_POLL_CADENCE.publishedIntervalMs - 1).toISOString(),
+    }]);
+    vi.spyOn(D1InternshipStore.prototype, 'putSourceDispatches').mockResolvedValue();
+    try {
+      await expect(dispatchProviders({ DB: {} as Environment['DB'], GREENHOUSE_QUEUE: workQueue } as Environment, 'greenhouse',
+        new Date('2026-09-15T16:50:00.000Z'))).resolves.toBe(1);
+      expect(sent).toEqual([expect.objectContaining({ sourceId: record.sourceId })]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('does not suppress a source whose attempt completed after its dispatch', async () => {
+    const record = publishedGreenhouseRecords[0]!;
+    const sent: unknown[] = [];
+    const workQueue = queue(async () => ({ backlogCount: 50, backlogBytes: 5_000 }));
+    workQueue.sendBatch = async (messages) => { sent.push(...messages.map(({ body }) => body)); };
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([record]);
+    vi.spyOn(D1EmployerStore.prototype, 'putReviewedSource').mockResolvedValue();
+    vi.spyOn(D1InternshipStore.prototype, 'getCheckpoint').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue({
+      sourceId: record.sourceId, lastAttemptAt: '2026-09-15T16:44:00.000Z', consecutiveFailures: 0, durationMs: 90,
+    });
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceDispatchesMany').mockResolvedValue([
+      { sourceId: record.sourceId, provider: 'greenhouse', dispatchedAt: '2026-09-15T16:42:00.000Z' },
+    ]);
+    vi.spyOn(D1InternshipStore.prototype, 'putSourceDispatches').mockResolvedValue();
+    try {
+      await expect(dispatchProviders({ DB: {} as Environment['DB'], GREENHOUSE_QUEUE: workQueue } as Environment, 'greenhouse',
+        new Date('2026-09-15T16:50:00.000Z'))).resolves.toBe(1);
+      expect(sent).toEqual([expect.objectContaining({ sourceId: record.sourceId })]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('reports the published sources that missed a scheduled interval', async () => {
+    const now = new Date('2026-09-15T18:00:00.000Z');
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealthMany').mockResolvedValue([
+      { sourceId: 'slipped', lastAttemptAt: '2026-09-15T16:00:00.000Z', consecutiveFailures: 0, durationMs: 10 },
+      { sourceId: 'current', lastAttemptAt: '2026-09-15T17:45:00.000Z', consecutiveFailures: 0, durationMs: 10 },
+      { sourceId: 'paused', lastAttemptAt: '2026-09-15T16:00:00.000Z', sourceStatus: 'paused', consecutiveFailures: 0, durationMs: 10 },
+    ]);
+    try {
+      await expect(overduePublishedSourceIds(new D1InternshipStore({} as Environment['DB']), [
+        { id: 'slipped', status: 'published' }, { id: 'current', status: 'published' },
+        { id: 'paused', status: 'published' }, { id: 'never', status: 'published' },
+        { id: 'quiet-shadow', status: 'shadow' },
+      ], now)).resolves.toEqual(['slipped']);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('dispatches a due source on the scheduled cron while the queue reports a backlog', async () => {
+    const record = publishedGreenhouseRecords[0]!;
+    const sent: unknown[] = [];
+    const workQueue = queue(async () => ({ backlogCount: 50, backlogBytes: 5_000 }));
+    workQueue.sendBatch = async (messages) => { sent.push(...messages.map(({ body }) => body)); };
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([record]);
+    vi.spyOn(D1EmployerStore.prototype, 'putReviewedSource').mockResolvedValue();
+    vi.spyOn(D1InternshipStore.prototype, 'getCheckpoint').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealthMany').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceDispatchesMany').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'putSourceDispatches').mockResolvedValue();
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await cloudflareWorker.scheduled({
+        cron: '12,42 * * * *', scheduledTime: Date.parse('2026-09-15T16:42:00.000Z'),
+      } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) },
+        GREENHOUSE_QUEUE: workQueue,
+      } as unknown as Environment);
+      expect(sent).toEqual([expect.objectContaining({ sourceId: record.sourceId })]);
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"provider_dispatch_complete"'));
     } finally {
       vi.restoreAllMocks();
     }
@@ -156,6 +297,36 @@ describe('Cloudflare queue continuation bounds', () => {
       await sending;
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('Cloudflare GitHub source failure health', () => {
+  it('records a failed delivery against its source so the dispatch lease can be released', async () => {
+    const source = defaultSources[0]!;
+    const stored: SourceHealth[] = [];
+    const prepare = vi.fn(() => ({
+      async first() { return null; },
+      bind: () => ({ async all() { return { results: [] }; }, async run() { return { meta: { changes: 1 } }; }, async first() { return null; } }),
+    }));
+    vi.spyOn(D1InternshipStore.prototype, 'putSourceHealth').mockImplementation(async (health) => { stored.push(health); });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('provider fetch unavailable in test'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const before = Date.now();
+    const message = { id: 'github-source', body: { sourceId: source.id }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
+    try {
+      await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [message] }, {
+        DB: { prepare, async batch() { return []; } },
+        AUTH_FROM_EMAIL: 'notifications@example.test', DIGEST_TO_EMAIL: 'digest@example.test',
+      } as unknown as Environment);
+
+      const recorded = stored.filter((health) => health.provider === 'github');
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({ sourceId: source.id, state: 'degraded', sourceStatus: 'active', consecutiveFailures: 1 });
+      expect(Date.parse(recorded[0]!.lastAttemptAt)).toBeGreaterThanOrEqual(before);
+      expect(message.retry).toHaveBeenCalledOnce();
+    } finally {
+      vi.restoreAllMocks();
     }
   });
 });
@@ -338,6 +509,37 @@ describe('Catalog queue setup failures', () => {
   });
 });
 
+describe('Cloudflare DNS resolver queries', () => {
+  it('bounds every DoH query with a timeout signal', async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    const endpoints: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: URL | RequestInfo, init?: RequestInit) => {
+      endpoints.push(String(url));
+      signals.push(init?.signal ?? undefined);
+      return new Response(JSON.stringify({ Answer: [{ data: '203.0.113.10' }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await expect(dnsJson('boards.example.test', 'A')).resolves.toEqual([{ data: '203.0.113.10' }]);
+      expect(signals[0]).toBeInstanceOf(AbortSignal);
+      expect(endpoints[0]).toContain('type=A');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fails a stalled DoH query instead of waiting for it', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error('The operation was aborted due to timeout'); }) as typeof fetch;
+    try {
+      await expect(dnsJson('boards.example.test', 'AAAA'))
+        .rejects.toThrow('DNS verification timed out for boards.example.test (AAAA)');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
 describe('Cloudflare operations queue adapter', () => {
   it('validates backfill providers from the registry while retaining structured fleet sharing', () => {
     for (const provider of catalogProviderIds) expect(validBackfillProvider(provider)).toBe(true);
@@ -348,7 +550,7 @@ describe('Cloudflare operations queue adapter', () => {
 
   it('reports live work-queue and dead-letter-queue backlogs', async () => {
     const client = cloudflareOperationsQueueClient({
-      GREENHOUSE_QUEUE: queue(async () => ({ backlogCount: 7, backlogBytes: 700 })),
+      GREENHOUSE_QUEUE: queue(async () => ({ backlogCount: 7, backlogBytes: 700, oldestMessageTimestamp: new Date('2026-09-15T16:02:15.922Z') })),
       LEVER_QUEUE: queue(async () => ({ backlogCount: 0, backlogBytes: 0 })),
       ASHBY_QUEUE: queue(async () => ({ backlogCount: 0, backlogBytes: 0 })),
       GITHUB_QUEUE: queue(async () => ({ backlogCount: 3, backlogBytes: 300 })),
@@ -359,13 +561,16 @@ describe('Cloudflare operations queue adapter', () => {
     });
 
     await expect(client.send({ input: { QueueUrl: integrationRegistry.greenhouse.queues.work } })).resolves.toMatchObject({
-      Attributes: { ApproximateNumberOfMessages: '7' },
+      Attributes: { ApproximateNumberOfMessages: '7', oldest_message_timestamp_ms: '1789488135922' },
     });
     await expect(client.send({ input: { QueueUrl: integrationRegistry.greenhouse.queues.work } })).resolves.not.toMatchObject({
       Attributes: { ApproximateNumberOfMessagesNotVisible: expect.anything() },
     });
     await expect(client.send({ input: { QueueUrl: integrationRegistry.greenhouse.queues.deadLetter } })).resolves.toMatchObject({
       Attributes: { ApproximateNumberOfMessages: '2' },
+    });
+    await expect(client.send({ input: { QueueUrl: integrationRegistry.greenhouse.queues.deadLetter } })).resolves.not.toMatchObject({
+      Attributes: { oldest_message_timestamp_ms: expect.anything() },
     });
     await expect(client.send({ input: { QueueUrl: integrationRegistry.github.queues.deadLetter } })).resolves.toMatchObject({
       Attributes: { ApproximateNumberOfMessages: '1' },

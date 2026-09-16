@@ -197,6 +197,21 @@ describe('Lever queue worker', () => {
     expect(await store.getSourceHealth(published.id)).toMatchObject({ outcome: 'rate_limited', backoffUntil: expect.any(String) });
   });
 
+  it('never parks a shadow consumer on a Lever Retry-After beyond the retry cap', async () => {
+    const store = new MemoryInternshipStore();
+    const slept: number[] = [];
+
+    await expect(runLeverBoard(message(), {
+      store,
+      sources: [shadowSource],
+      fetchImpl: async () => new Response(null, { status: 429, headers: { 'Retry-After': '120' } }),
+      linkValidator: async (url: string) => url,
+      sleep: async (milliseconds: number) => { slept.push(milliseconds); },
+    })).rejects.toThrow('Lever fetch failed (429)');
+
+    expect(slept).toEqual([]);
+  });
+
   it('treats a hash-identical response as healthy without erasing the last trusted counts', async () => {
     const store = new MemoryInternshipStore();
     const dependencies = {

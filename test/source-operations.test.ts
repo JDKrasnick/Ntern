@@ -1,5 +1,5 @@
 import { DescribeAlarmsCommand, type CloudWatchClient } from '@aws-sdk/client-cloudwatch';
-import { SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
+import { GetQueueAttributesCommand, SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import { describe, expect, it } from 'vitest';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
 import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
@@ -33,7 +33,10 @@ function dependencies(store: MemoryInternshipStore) {
         async send(command: unknown) {
           commands.push(command);
           if (command instanceof SendMessageCommand) return {};
-          return { Attributes: { ApproximateNumberOfMessages: '0', ApproximateNumberOfMessagesNotVisible: '0' } };
+          if (!(command instanceof GetQueueAttributesCommand)) return {};
+          return (command.input.QueueUrl ?? '').includes('-dlq')
+            ? { Attributes: { ApproximateNumberOfMessages: '0', ApproximateNumberOfMessagesNotVisible: '0' } }
+            : { Attributes: { ApproximateNumberOfMessages: '82', ApproximateNumberOfMessagesNotVisible: '0', oldest_message_timestamp_ms: '1789488135922' } };
         },
       } as unknown as SQSClient,
       cloudwatch: { async send(command: unknown) {
@@ -111,6 +114,12 @@ describe('shared source operations', () => {
 
   it('marks alarm telemetry unavailable instead of reporting a fabricated healthy zero', async () => {
     const store = new MemoryInternshipStore();
+    // One published source that attempted long ago and one that attempted a
+    // minute before the snapshot: only the first is a cadence slip.
+    const staleSource = reviewedGreenhouseSources.find((candidate) => candidate.status === 'published')!;
+    const freshSource = reviewedLeverSources.find((candidate) => candidate.status === 'published')!;
+    await store.putSourceHealth({ sourceId: staleSource.id, lastAttemptAt: '2026-07-30T18:00:00.000Z', consecutiveFailures: 0, durationMs: 10 });
+    await store.putSourceHealth({ sourceId: freshSource.id, lastAttemptAt: '2026-07-30T19:59:00.000Z', consecutiveFailures: 0, durationMs: 10 });
     const setup = dependencies(store);
     const response = await createSourceOperationsHandler({
       ...setup.value,
@@ -122,6 +131,16 @@ describe('shared source operations', () => {
     expect(response.statusCode).toBe(200);
     expect(body.productionMetrics.activeAlarms).toBeNull();
     expect(body.productionMetrics.processingMessages).toBeNull();
+    expect(body.fleet.queue).toMatchObject({
+      backlogCount: 246, waiting: 246, oldestMessageTimestampMs: 1789488135922,
+    });
+    expect(body.fleets[0].queue.backlogCount).toBe(82);
+    const stale = body.sources.filter((entry: { lastAttemptAt?: string; sourceStatus?: string; state: string; source: { mode: string } }) =>
+      entry.source.mode === 'published' && entry.sourceStatus !== 'paused' && entry.state !== 'quarantined'
+      && entry.lastAttemptAt !== undefined
+      && Date.parse(entry.lastAttemptAt) < Date.parse(body.generatedAt) - 60 * 60_000);
+    expect(stale.map((entry: { source: { sourceId: string } }) => entry.source.sourceId)).toEqual([staleSource.id]);
+    expect(body.productionMetrics.overduePublishedSources).toBe(1);
     expect(body.fleet.queueTelemetry).toEqual({ status: 'partial', reason: 'Only total backlog is exposed.' });
     expect(body.fleet.alarmTelemetry).toEqual({
       status: 'unavailable',

@@ -5,6 +5,7 @@ import { reviewedAshbySources, type ReviewedAshbySource } from './sources/ashby-
 import { AshbyPostingsAdapter } from './sources/ashby.js';
 import { SourceFetchError } from './sources/source-error.js';
 import { ApplicationLinkValidationError, failedSourceHealth, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
+import { SOURCE_RETRY_DELAY_CAP_MS } from './source-poll-cadence.js';
 import { DynamoInternshipStore, DynamoUserStore, type InternshipStore, type UserStore } from './store.js';
 import type { SourceCheckpoint, SourceFetchResult } from './types.js';
 import type { AshbyWorkMessage } from './ashby-dispatch.js';
@@ -50,6 +51,7 @@ export interface AshbyBoardDependencies {
   catalogAdmissionResolver?: CatalogAdmissionResolver;
   sleep?: (milliseconds: number) => Promise<void>;
   onRecordFailure?: (record: QueueRecord, error: unknown) => Promise<void> | void;
+  messageDeadlineMs?: number;
 }
 
 export interface AshbyBoardResult {
@@ -83,6 +85,9 @@ async function fetchShadowWithRetry(
       lastError = error;
       if (!(error instanceof SourceFetchError) || !error.retryable || attempt === 2) throw error;
       const delay = Math.max(error.retryAfterMs ?? 0, 250 * (2 ** attempt));
+      // A provider Retry-After beyond the cap belongs to the durable backoff and
+      // the queue retry path, not to a consumer slot parked for minutes.
+      if (delay > SOURCE_RETRY_DELAY_CAP_MS) throw error;
       console.log(JSON.stringify({
         event: 'source_fetch_retry_scheduled',
         provider: 'ashby',
@@ -377,7 +382,7 @@ export async function processAshbyQueue(
       }));
       throw error;
     }
-  }, undefined, dependencies.onRecordFailure);
+  }, undefined, dependencies.onRecordFailure, dependencies.messageDeadlineMs);
 }
 
 export async function handler(

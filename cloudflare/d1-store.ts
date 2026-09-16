@@ -7,7 +7,7 @@ import type { ApplicationSession } from '../src/application-automation.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
-import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
+import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from '../src/identity/projection.js';
@@ -179,6 +179,25 @@ export class D1InternshipStore implements InternshipStore {
       health.push(...rows.results.map((row) => JSON.parse(row.value) as SourceHealth));
     }
     return health;
+  }
+  async getSourceDispatchesMany(sourceIds: string[]): Promise<SourceDispatch[]> {
+    if (!sourceIds.length) return [];
+    const dispatches: SourceDispatch[] = [];
+    for (let offset = 0; offset < sourceIds.length; offset += 100) {
+      const chunk = sourceIds.slice(offset, offset + 100);
+      const rows = await this.db.prepare(`SELECT value FROM catalog_items WHERE sk = 'DISPATCH' AND pk IN (${chunk.map(() => '?').join(', ')})`)
+        .bind(...chunk.map((id) => `SOURCE#${id}`)).all<JsonRow>();
+      dispatches.push(...rows.results.map((row) => JSON.parse(row.value) as SourceDispatch));
+    }
+    return dispatches;
+  }
+  async putSourceDispatches(dispatches: SourceDispatch[]): Promise<void> {
+    if (!dispatches.length) return;
+    const statements = dispatches.map((dispatch) => this.db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES (?, 'DISPATCH', 'source-dispatch', ?)
+      ON CONFLICT(pk, sk) DO UPDATE SET kind = excluded.kind, value = excluded.value`)
+      .bind(`SOURCE#${dispatch.sourceId}`, JSON.stringify(dispatch)));
+    for (let offset = 0; offset < statements.length; offset += 50) await this.db.batch(statements.slice(offset, offset + 50));
   }
   getMonitoringChecklist(period: string) { return this.get<MonitoringChecklist>('OPERATIONS#MONITORING', `CHECKLIST#${period}`); }
   putMonitoringChecklist(checklist: MonitoringChecklist) { return this.put('OPERATIONS#MONITORING', `CHECKLIST#${checklist.period}`, 'monitoring-checklist', checklist); }

@@ -21,7 +21,8 @@ import { runCatalogQualityBackfill } from '../src/catalog-quality-backfill.js';
 import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
-import { queueHasBacklog } from './queue-backlog.js';
+import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
+import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, shadowExtractionSummary } from './shadow-extraction.js';
 import { handleShadowPublication } from './shadow-publication.js';
 import type { D1Database, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
@@ -47,7 +48,6 @@ import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import {
   catalogProviderDefinitions,
   catalogProviderIds,
-  integrationRegistry,
   isCatalogProviderId,
   providerForCloudflareCron,
   providerForQueueName,
@@ -139,10 +139,19 @@ function catalogAdmissionResolver(env: Environment): CatalogAdmissionResolver {
   };
 }
 
-async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise<Array<{ data?: string }>> {
+const DOH_QUERY_TIMEOUT_MS = 8_000;
+
+export async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise<Array<{ data?: string }>> {
   const endpoint = new URL('https://cloudflare-dns.com/dns-query');
   endpoint.searchParams.set('name', name); endpoint.searchParams.set('type', type);
-  const response = await fetch(endpoint, { headers: { Accept: 'application/dns-json' } });
+  let response: Response;
+  try {
+    response = await fetch(endpoint, { headers: { Accept: 'application/dns-json' }, signal: AbortSignal.timeout(DOH_QUERY_TIMEOUT_MS) });
+  } catch (error) {
+    // A stalled resolver query must fail the probe rather than park a queue
+    // consumer invocation until the platform's fifteen-minute limit.
+    throw new Error(`DNS verification timed out for ${name} (${type}): ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (!response.ok) throw new Error('DNS verification is temporarily unavailable');
   const value = await response.json() as { Answer?: Array<{ data?: string }> };
   return value.Answer ?? [];
@@ -329,9 +338,12 @@ export function cloudflareOperationsQueueClient(env: OperationsQueueEnvironment)
       return {
         Attributes: {
           // Cloudflare exposes one real-time backlog total rather than SQS's
-          // visible/in-flight split. The operations response marks processing
-          // telemetry unavailable instead of fabricating that split.
+          // visible/in-flight split; `backlog_count` and `oldest_message_timestamp_ms`
+          // on /accounts/{account_id}/queues/{queue_id}/metrics are the same fields.
           ApproximateNumberOfMessages: String(metrics.backlogCount),
+          ...(metrics.oldestMessageTimestamp
+            ? { oldest_message_timestamp_ms: String(metrics.oldestMessageTimestamp.getTime()) }
+            : {}),
         },
       };
     },
@@ -867,7 +879,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       },
       queueTelemetry: {
         status: 'partial',
-        reason: 'queuedMessages is the live total backlog; Cloudflare does not expose a waiting-versus-processing split.',
+        reason: 'queuedMessages is Cloudflare backlog_count; Cloudflare does not expose a waiting-versus-processing split.',
       },
     });
     const result = await operations({
@@ -993,15 +1005,28 @@ async function due<T extends { id: string; status: 'published' | 'shadow' }>(
   store: D1InternshipStore,
   now: Date,
   predicate: (source: T, checkpoint: SourceCheckpoint | undefined, now: Date, health?: SourceHealth) => boolean,
-): Promise<Array<{ source: T; recoveryProbe: boolean }>> {
+): Promise<{ due: Array<{ source: T; recoveryProbe: boolean }>; inFlightSkipped: string[] }> {
+  // One dispatch marker per source keeps a swept source from being enqueued
+  // again on the next sweep. A non-empty queue never suppresses a source that
+  // has no message of its own pending.
+  const dispatches = new Map((await store.getSourceDispatchesMany(sources.map(({ id }) => id)))
+    .map((dispatch) => [dispatch.sourceId, dispatch]));
+  const skipped = new Set<string>();
   const results = await Promise.all(sources.map(async (source) => {
     const checkpointId = source.status === 'shadow' ? `shadow-${source.id}` : source.id;
     const [checkpoint, health] = await Promise.all([store.getCheckpoint(checkpointId), store.getSourceHealth(source.id)]);
+    if (isSourceDispatchInFlight(dispatches.get(source.id), health, now)) {
+      skipped.add(source.id);
+      return undefined;
+    }
     return predicate(source, checkpoint, now, health)
       ? { source, recoveryProbe: health?.state === 'quarantined' }
       : undefined;
   }));
-  return results.filter((result): result is { source: T; recoveryProbe: boolean } => Boolean(result));
+  return {
+    due: results.filter((result): result is { source: T; recoveryProbe: boolean } => Boolean(result)),
+    inFlightSkipped: sources.filter((source) => skipped.has(source.id)).map(({ id }) => id),
+  };
 }
 
 function recoveryProbeSourceIds<T extends { id: string }>(sources: Array<{ source: T; recoveryProbe: boolean }>): Set<string> {
@@ -1034,35 +1059,80 @@ export async function dispatchProviders(
   const store = new D1InternshipStore(env.DB);
   const registry = await reviewedProviderRegistry(new D1EmployerStore(env.DB));
   if (provider === 'greenhouse') {
-    const dueSources = force
-      ? registry.greenhouse.map((source) => ({ source, recoveryProbe: false }))
+    const { due: dueSources, inFlightSkipped } = force
+      ? { due: registry.greenhouse.map((source) => ({ source, recoveryProbe: false })), inFlightSkipped: [] as string[] }
       : await due(registry.greenhouse, store, now, isGreenhouseSourceDue);
     const messages = greenhouseWorkMessages(
       dueSources.map(({ source }) => source), now, recoveryProbeSourceIds(dueSources),
     );
     await sendQueueMessages(env.GREENHOUSE_QUEUE, messages);
+    await recordScheduledDispatch(store, provider, { sources: dueSources.map(({ source }) => source), candidates: registry.greenhouse.length, queued: messages.length, inFlightSkipped }, now);
     return messages.length;
   }
   if (provider === 'lever') {
     const dynamic = (await store.listLeverAdmissions?.() ?? []).map(({ source }) => source);
     const leverRegistry = [...registry.lever, ...dynamic.filter((source) => !registry.lever.some((candidate) => candidate.id === source.id))];
-    const dueSources = force
-      ? leverRegistry.map((source) => ({ source, recoveryProbe: false }))
+    const { due: dueSources, inFlightSkipped } = force
+      ? { due: leverRegistry.map((source) => ({ source, recoveryProbe: false })), inFlightSkipped: [] as string[] }
       : await due(leverRegistry, store, now, isLeverSourceDue);
     const messages = leverWorkMessages(
       dueSources.map(({ source }) => source), now, crypto.randomUUID(), recoveryProbeSourceIds(dueSources),
     );
     await sendQueueMessages(env.LEVER_QUEUE, messages);
+    await recordScheduledDispatch(store, provider, { sources: dueSources.map(({ source }) => source), candidates: leverRegistry.length, queued: messages.length, inFlightSkipped }, now);
     return messages.length;
   }
-  const dueSources = force
-    ? registry.ashby.map((source) => ({ source, recoveryProbe: false }))
+  const { due: dueSources, inFlightSkipped } = force
+    ? { due: registry.ashby.map((source) => ({ source, recoveryProbe: false })), inFlightSkipped: [] as string[] }
     : await due(registry.ashby, store, now, isAshbySourceDue);
   const messages = ashbyWorkMessages(
     dueSources.map(({ source }) => source), now, crypto.randomUUID(), recoveryProbeSourceIds(dueSources),
   );
   await sendQueueMessages(env.ASHBY_QUEUE, messages);
+  await recordScheduledDispatch(store, provider, { sources: dueSources.map(({ source }) => source), candidates: registry.ashby.length, queued: messages.length, inFlightSkipped }, now);
   return messages.length;
+}
+
+/** A healthy published source that has not attempted a poll within two cadences
+ * has missed a scheduled interval; the queue-depth gate that used to hide that
+ * condition is gone, so the alarm is the only remaining signal. */
+export async function overduePublishedSourceIds(
+  store: D1InternshipStore,
+  sources: Array<{ id: string; status: 'published' | 'shadow' }>,
+  now: Date,
+): Promise<string[]> {
+  const healths = new Map((await store.getSourceHealthMany(sources.map(({ id }) => id)))
+    .map((health) => [health.sourceId, health]));
+  return sources.filter(({ id, status }) => missedPublishedInterval(status, healths.get(id), now)).map(({ id }) => id);
+}
+
+async function alertCadenceSlip(
+  env: Environment,
+  provider: string,
+  overdue: string[],
+  observedAt: Date,
+): Promise<void> {
+  console.log(JSON.stringify({ event: 'provider_cadence_slip', provider, count: overdue.length,
+    sourceIds: overdue.slice(0, 20), observedAt: observedAt.toISOString() }));
+  await sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
+    signals: [`${provider}-cadence-slip`],
+    observedAt: observedAt.toISOString(),
+    details: `${overdue.length} healthy published ${provider} source(s) missed a scheduled interval: ${overdue.slice(0, 20).join(', ')}.`,
+  });
+}
+
+/** Markers are written only after a successful send: a send failure leaves the
+ * sources unsuppressed and they are dispatched again on the next sweep, which
+ * costs one idempotent poll instead of a missed interval. */
+async function recordScheduledDispatch(
+  store: D1InternshipStore,
+  provider: string,
+  dispatched: { sources: Array<{ id: string }>; candidates: number; queued: number; inFlightSkipped: string[] },
+  now: Date,
+): Promise<void> {
+  await store.putSourceDispatches(dispatched.sources.map(({ id }) => ({ sourceId: id, provider, dispatchedAt: now.toISOString() })));
+  console.log(JSON.stringify({ event: 'provider_dispatch_complete', provider, candidates: dispatched.candidates,
+    queued: dispatched.queued, inFlightSkipped: dispatched.inFlightSkipped.length, scheduledAt: now.toISOString() }));
 }
 
 async function refreshCatalogProjection(store: D1InternshipStore) {
@@ -1212,25 +1282,40 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   }
   const scheduledProvider = providerForCloudflareCron(event.cron);
   if (scheduledProvider === 'github') {
-    if (await queueHasBacklog(env.GITHUB_QUEUE, 'github')) return;
+    const now = new Date();
     const structured = await reviewedStructuredRegistry(new D1EmployerStore(env.DB));
+    const candidates = [...defaultSources, ...structured];
+    const dispatches = new Map((await store.getSourceDispatchesMany(candidates.map(({ id }) => id)))
+      .map((dispatch) => [dispatch.sourceId, dispatch]));
+    const inFlightSkipped = new Set<string>();
     const dueStructured = (await Promise.all(structured.map(async (source) => {
       const health = await store.getSourceHealth(source.id);
+      if (isSourceDispatchInFlight(dispatches.get(source.id), health, now)) { inFlightSkipped.add(source.id); return undefined; }
       if (health?.sourceStatus === 'paused' || health?.state === 'quarantined') return undefined;
-      if (health?.backoffUntil && Date.parse(health.backoffUntil) > Date.now()) return undefined;
-      if (health?.lastAttemptAt && Date.parse(health.lastAttemptAt) > Date.now() - 30 * 60_000) return undefined;
+      if (health?.backoffUntil && Date.parse(health.backoffUntil) > now.getTime()) return undefined;
+      if (health?.lastAttemptAt && Date.parse(health.lastAttemptAt) > now.getTime() - 30 * 60_000) return undefined;
       return source;
     }))).filter((source): source is ReviewedStructuredSource => Boolean(source));
     const dueGithub = (await Promise.all(defaultSources.map(async (source) => {
       const health = await store.getSourceHealth(source.id);
+      if (isSourceDispatchInFlight(dispatches.get(source.id), health, now)) { inFlightSkipped.add(source.id); return undefined; }
       if (health?.sourceStatus === 'paused' || health?.state === 'quarantined') return undefined;
-      if (health?.backoffUntil && Date.parse(health.backoffUntil) > Date.now()) return undefined;
+      if (health?.backoffUntil && Date.parse(health.backoffUntil) > now.getTime()) return undefined;
       return source;
     }))).filter((source): source is typeof defaultSources[number] => Boolean(source));
     await sendQueueMessages(env.GITHUB_QUEUE, [
       ...dueGithub.map((source) => ({ sourceId: source.id })),
       ...dueStructured.map((source) => ({ sourceId: source.id, sourceKind: 'structured' })),
     ]);
+    await recordScheduledDispatch(store, 'github', {
+      sources: [...dueGithub, ...dueStructured], candidates: candidates.length,
+      queued: dueGithub.length + dueStructured.length, inFlightSkipped: [...inFlightSkipped],
+    }, now);
+    const overdue = await overduePublishedSourceIds(store, [
+      ...defaultSources.map((source) => ({ id: source.id, status: 'published' as const })),
+      ...structured.map((source) => ({ id: source.id, status: source.status })),
+    ], now);
+    if (overdue.length) await alertCadenceSlip(env, 'github', overdue, now);
     return;
   }
   if (event.cron === '9-59/10 * * * *') {
@@ -1270,8 +1355,14 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   }
   if (scheduledProvider) {
     const provider = scheduledProvider as Exclude<CatalogProviderId, 'github'>;
-    const queue = env[integrationRegistry[provider].runtime.cloudflareWorkBinding];
-    if (!await queueHasBacklog(queue, provider)) await dispatchProviders(env, provider);
+    const now = new Date();
+    await dispatchProviders(env, provider, now);
+    const registry = await reviewedProviderRegistry(new D1EmployerStore(env.DB));
+    const sources = provider === 'lever'
+      ? [...registry.lever, ...(await store.listLeverAdmissions?.() ?? []).map(({ source }) => source)]
+      : registry[provider];
+    const overdue = await overduePublishedSourceIds(store, sources, now);
+    if (overdue.length) await alertCadenceSlip(env, provider, overdue, now);
     return;
   }
   if (event.cron === '0 * * * *') {
@@ -1395,6 +1486,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     for (const queued of batch.messages) {
       const record = { messageId: queued.id, body: typeof queued.body === 'string' ? queued.body : JSON.stringify(queued.body) };
       let parsedMessage: { sourceId?: string; sourceKind?: string; force?: boolean } | undefined;
+      const startedAt = new Date().toISOString();
       try {
         const message = JSON.parse(record.body) as { sourceId?: string; sourceKind?: string; force?: boolean };
         parsedMessage = message;
@@ -1413,12 +1505,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
             reason: priorHealth?.state === 'quarantined' ? 'quarantined' : priorHealth?.sourceStatus === 'paused' ? 'paused' : 'backoff' }));
           continue;
         }
-        const result = await runRuntimeCommand('poll', {
+        const result = await withinMessageDeadline(runRuntimeCommand('poll', {
           store: new D1InternshipStore(env.DB),
           userStore: new D1UserStore(env.DB),
           sources: [source],
           validateCatalogOnPoll: false,
-          enqueueDestinationVerification: (request) => env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage(request)),
+          enqueueDestinationVerification: (request) => sendQueueMessageWithin(env.DESTINATION_VERIFICATION_QUEUE, destinationVerificationMessage(request)),
           catalogAdmissionResolver: admissionResolver,
           identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
           trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
@@ -1427,7 +1519,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           // dominated by destinations that consume the six connection slots.
           maxAdmissionMigrationListingsPerSourceRun: 20,
           config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT },
-        });
+        }), SOURCE_MESSAGE_DEADLINE_MS);
         if (result.poll && (result.poll.continuationSources.length || result.poll.failures.length)) {
           console.log(JSON.stringify({
             event: 'github_admission_migration_slice',
@@ -1446,6 +1538,27 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         failed.add(record.messageId);
         const delay = d1QueueRetryDelay(error, queued.attempts);
         if (delay) overloadDelays.set(record.messageId, delay);
+        // Structured sources already persist their own failure health. The
+        // default list sources did not, which left `lastAttemptAt` untouched on a
+        // failed delivery: the dispatch marker written at dispatch then kept
+        // suppressing that source for a full lease even though its message had
+        // already failed, and the operations surface could not tell a failing
+        // source from a quiet one (#219).
+        if (parsedMessage?.sourceId && parsedMessage.sourceKind !== 'structured') {
+          try {
+            const healthStore = new D1InternshipStore(env.DB);
+            await healthStore.putSourceHealth(failedSourceHealth({
+              sourceId: parsedMessage.sourceId,
+              provider: 'github',
+              previous: await healthStore.getSourceHealth(parsedMessage.sourceId),
+              startedAt,
+              completedAt: new Date().toISOString(),
+              error,
+            }));
+          } catch (healthError) {
+            console.error(JSON.stringify({ command: 'github-health', messageId: record.messageId, error: safeDiagnostic(healthError) }));
+          }
+        }
         await recordQueueFailureBestEffort({
           db: env.DB, queueName: batch.queue, messageId: queued.id, attempts: queued.attempts,
           timestamp: queued.timestamp, sourceId: parsedMessage?.sourceId, sourceKind: parsedMessage?.sourceKind,
@@ -1498,7 +1611,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   const dependencies = {
     store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB),
-    enqueueDestinationVerification: (request: Parameters<typeof destinationVerificationMessage>[0]) => env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage(request)),
+    enqueueDestinationVerification: (request: Parameters<typeof destinationVerificationMessage>[0]) => sendQueueMessageWithin(env.DESTINATION_VERIFICATION_QUEUE, destinationVerificationMessage(request)),
     catalogAdmissionResolver: catalogAdmissionResolver(env),
     onRecordFailure,
   };
@@ -1520,11 +1633,11 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   const leverRegistry = [...registry.lever, ...legacyLever.filter((source) => !registry.lever.some((candidate) => candidate.id === source.id))];
   const result = catalogProvider === 'greenhouse'
-    ? await processGreenhouseQueue(event, { ...dependencies, sources: registry.greenhouse })
+    ? await processGreenhouseQueue(event, { ...dependencies, sources: registry.greenhouse, messageDeadlineMs: SOURCE_MESSAGE_DEADLINE_MS })
     : catalogProvider === 'lever'
-      ? await processLeverQueue(event, { ...dependencies, sources: leverRegistry })
+      ? await processLeverQueue(event, { ...dependencies, sources: leverRegistry, messageDeadlineMs: SOURCE_MESSAGE_DEADLINE_MS })
       : catalogProvider === 'ashby'
-        ? await processAshbyQueue(event, { ...dependencies, sources: registry.ashby })
+        ? await processAshbyQueue(event, { ...dependencies, sources: registry.ashby, messageDeadlineMs: SOURCE_MESSAGE_DEADLINE_MS })
         : { batchItemFailures: records.map((record) => ({ itemIdentifier: record.messageId })) };
   const failed = new Set(result.batchItemFailures.map(({ itemIdentifier }) => itemIdentifier));
   for (const message of batch.messages) {

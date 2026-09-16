@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { inferLeverSeason, LeverPostingsAdapter, leverRequirements, mapLeverPosting, mapLeverSourcedPosting } from '../src/sources/lever.js';
+import { describe, expect, it, vi } from 'vitest';
+import { inferLeverSeason, LEVER_REQUEST_TIMEOUT_MS, LeverPostingsAdapter, leverRequirements, mapLeverPosting, mapLeverSourcedPosting } from '../src/sources/lever.js';
 import { extractPostingMetadataEvidence } from '../src/role-metadata.js';
 
 const postingId = (index: number) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
@@ -69,6 +69,30 @@ describe('LeverPostingsAdapter', () => {
     expect(leverRequirements('Applicants must be U.S. citizens. A Ph.D. is required.')).toEqual({ requiresUsCitizenship: true, advancedDegreeRequired: true });
     expect(leverRequirements('We welcome all citizenships; our founders have master\'s degrees.')).toEqual({ requiresUsCitizenship: false, advancedDegreeRequired: false });
   });
+  it('bounds every Lever page fetch with the request timeout signal', async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    const timeouts: Array<number | undefined> = [];
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds: number) => {
+      timeouts.push(milliseconds);
+      return new AbortController().signal;
+    });
+    try {
+      const adapter = new LeverPostingsAdapter({
+        ...options,
+        fetchImpl: async (_url, init) => {
+          signals.push(init?.signal ?? undefined);
+          return new Response(JSON.stringify([posting]), { status: 200 });
+        },
+      });
+
+      await expect(adapter.fetch()).resolves.toMatchObject({ notModified: false });
+      expect(signals[0]).toBeInstanceOf(AbortSignal);
+      expect(timeouts).toEqual([LEVER_REQUEST_TIMEOUT_MS]);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it('ignores stored ETags and uses the content hash for unchanged boards', async () => {
     const calls: RequestInit[] = [];
     const first = await new LeverPostingsAdapter({ ...options, fetchImpl: async () => new Response(JSON.stringify([posting]), { status: 200 }) }).fetch();
