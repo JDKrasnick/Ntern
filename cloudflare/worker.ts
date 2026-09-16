@@ -48,7 +48,6 @@ import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import {
   catalogProviderDefinitions,
   catalogProviderIds,
-  integrationRegistry,
   isCatalogProviderId,
   providerForCloudflareCron,
   providerForQueueName,
