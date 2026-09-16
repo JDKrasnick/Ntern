@@ -327,3 +327,32 @@ source whose messages sit in those DLQs has polled successfully since
 (`simplify-summer-2026` 05:18:00Z, `speedyapply-2027-swe` 04:14:20Z,
 `speedyapply-2027-ai` 04:15:04Z), which matches the #240 record's determination
 for the same backlog. Nothing was replayed or discarded.
+
+**4. The scheduled handler also owns catalog publication — the freeze window.**
+Reported by the owner as "the web and mobile just aren't showing the new
+postings". The same cron failure above had a second consequence: the handler runs
+`enqueueDueDestinationVerifications` *before* `refreshCatalogProjection`, so while
+the unpaged scan threw, the projection was never rebuilt either. Measured in
+production:
+
+| Evidence | Value |
+| --- | --- |
+| Newest role in the served catalog | `updatedAt 2026-09-15T14:14:39Z` — publication stopped at that minute and stayed stopped until the fix deployed |
+| Cron outcome before the fix | `scriptThrewException` at `:49:48` past every hour (`…04:49:48`, `04:59:48`, `05:09:48`) |
+| Cron outcome after the fix | no `scriptThrewException`; projection `generatedAt` refreshed to `13:32:09Z` |
+| Admission evaluations resumed | 767 in the 13:00Z hour, 27 of them newly `catalogEligible` (Tenstorrent, Toshiba, Meta — visible in the app) |
+
+So the projection and re-admission are working again. What still hides *new*
+postings is a deliberate publication gate, not a fault: 101 of the day's 102 new
+rows come from `simplify-summer-2026` and all carry
+`reasonCodes: ["employer-unresolved"]`, because production runs with
+`TRUSTED_COMMUNITY_CATALOG_ENABLED=false` (the policy that would classify them
+`employerResolution: source-reported` and admit them once their destination
+validates as `posting-detail`/`application-form`) and only 35 reviewed
+`employer_mappings` rows exist (github 7, greenhouse 23, plus tesla, meta, imc,
+janestreet, goldman-sachs). `IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED=false`
+additionally withholds the 2,093 open jobs whose posting identity is unconfirmed.
+133 open jobs of 5,836 are `catalogEligible`. 5,138 destination-verification rows
+are due, draining through a consumer with `max_concurrency: 1`. Enabling either
+flag is an owner product decision (the decisions log keeps community catalog
+exposure default-off), so no visibility setting was changed by this work.
