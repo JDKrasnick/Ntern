@@ -5,6 +5,7 @@ import { providerEvidenceForOccurrence, reviewedProviderUrlReference } from '../
 import { postingReviewFamily, resolvePostingIdentityDecision, reviewedCanonicalUrlEvidenceHash, stableSourceOccurrenceJobId } from '../src/identity/registry.js';
 
 describe('posting identity', () => {
+  const plusId = '5f2c0f4e-1c3a-4f2b-9d3e-77c1a2b4c5d6';
   it('keeps syntactically normalized but unreviewed URLs source-local', () => {
     const first = resolvePostingIdentityDecision({
       sourceId: 'community-a', externalId: '42', applicationUrl: 'https://careers.example.test/jobs/42?utm_source=a',
@@ -90,7 +91,57 @@ describe('posting identity', () => {
       sourceId: 'community', externalId: 'role',
       applicationUrl: 'https://job-boards.greenhouse.io/figma/jobs/101',
       observedAt: '2026-08-30T12:00:00.000Z', previousDecision: initial.decision,
-    })).toMatchObject({ decision: { status: 'unconfirmed', reason: 'insufficient-exact-evidence' } });
+    })).toMatchObject({
+      decision: { status: 'confirmed', exactKey: 'provider:greenhouse:figma:101', evidenceKind: 'immutable-provider-id' },
+    });
+  });
+
+  it('confirms identity from a scoped provider route with no other evidence', () => {
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role',
+      applicationUrl: 'https://job-boards.greenhouse.io/figma/jobs/100',
+      observedAt: '2026-08-29T12:00:00.000Z',
+    })).toMatchObject({
+      decision: { status: 'confirmed', exactKey: 'provider:greenhouse:figma:100', evidenceKind: 'immutable-provider-id' },
+    });
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role-2',
+      applicationUrl: `https://jobs.lever.co/plus-2/${plusId}/apply`,
+      observedAt: '2026-08-29T12:00:00.000Z',
+    })).toMatchObject({ decision: { status: 'confirmed', exactKey: `provider:lever:plus-2:${plusId}` } });
+  });
+
+  it('quarantines routes that name two ids or two provider scopes', () => {
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role',
+      applicationUrl: 'https://job-boards.greenhouse.io/figma/jobs/100',
+      observedUrls: ['https://job-boards.greenhouse.io/figma/jobs/101'],
+      observedAt: '2026-08-29T12:00:00.000Z',
+    }).decision).toMatchObject({ status: 'quarantined', reason: 'multiple-immutable-provider-postings' });
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role',
+      applicationUrl: 'https://job-boards.greenhouse.io/figma/jobs/100',
+      observedUrls: [`https://jobs.lever.co/plus-2/${plusId}`],
+      observedAt: '2026-08-29T12:00:00.000Z',
+    }).decision).toMatchObject({ status: 'quarantined', reason: 'provider-scope-mismatch' });
+  });
+
+  it('confirms a scoped route on the legacy greenhouse board host', () => {
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role',
+      applicationUrl: 'https://boards.greenhouse.io/figma/jobs/100',
+      observedAt: '2026-08-29T12:00:00.000Z',
+    })).toMatchObject({
+      decision: { status: 'confirmed', exactKey: 'provider:greenhouse:figma:100', evidenceKind: 'immutable-provider-id' },
+    });
+  });
+
+  it('keeps an unscoped greenhouse embed token unconfirmed', () => {
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role',
+      applicationUrl: 'https://boards.greenhouse.io/embed/job_app?token=100&utm_source=Simplify',
+      observedAt: '2026-08-29T12:00:00.000Z',
+    }).decision).toMatchObject({ status: 'unconfirmed', reason: 'under-scoped-id' });
   });
 
   it('sanitizes URL-family candidates without retaining query values', () => {

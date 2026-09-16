@@ -66,7 +66,7 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
   const url = new URL(canonicalizePostingUrl(input));
   const host = url.hostname.replace(/^www\./, '');
   let match: RegExpExecArray | null;
-  if (host === 'job-boards.greenhouse.io' && (match = /^\/([^/]+)\/jobs\/(\d+)\/?$/i.exec(url.pathname))) {
+  if ((host === 'job-boards.greenhouse.io' || host === 'boards.greenhouse.io') && (match = /^\/([^/]+)\/jobs\/(\d+)\/?$/i.exec(url.pathname))) {
     return { provider: 'greenhouse', tenant: match[1]!.toLowerCase(), postingId: match[2] };
   }
   if (host === 'jobs.lever.co' && (match = /^\/([^/]+)\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:\/apply)?\/?$/i.exec(url.pathname))) {
@@ -149,10 +149,10 @@ export function buildPostingIdentity(input: BuildPostingIdentityInput): PostingI
     tenant: input.providerEvidence.tenant.toLowerCase(),
     postingId: input.providerEvidence.postingId.toLowerCase(),
   } satisfies ProviderPostingReference : undefined;
-  // Greenhouse and Lever references require connector/checkpoint evidence, but
-  // the other exact route contracts remain safe to derive from their URLs.
-  const exactRouteReferences = urls.map(providerPostingReference)
-    .filter((candidate) => candidate.provider !== 'greenhouse' && candidate.provider !== 'lever');
+  // Provider routes in URLs are scoped provider-owned keys and are claimed like
+  // any other exact reference; `resolvePostingAliases` and the registry both
+  // quarantine reference sets that disagree on scope or name two ids.
+  const exactRouteReferences = urls.map(providerPostingReference);
   const references = [explicitReference, ...(input.reviewedProviderReferences ?? []), ...exactRouteReferences]
     .filter((candidate): candidate is ProviderPostingReference => Boolean(candidate?.postingId));
   const reference = references[0] ?? { provider: 'unknown' as const };
@@ -248,8 +248,8 @@ export function preferredJobIdentityConflicts(identity: PostingIdentity, job: In
       if (alias.value.startsWith('provider:') || alias.value.startsWith('requisition:')) confirmed.add(alias.value);
     }
     // A confirmed URL-only identity can only have been created by the reviewed
-    // canonical-URL contract. Provider-backed jobs deliberately ignore their
-    // presentation URLs here because those URLs may be reused.
+    // canonical-URL contract. Provider-backed jobs also compare their claimed
+    // provider reference, which now includes scoped provider routes.
     if (!confirmed.size && job.postingIdentity?.provider === 'unknown') {
       for (const alias of job.postingIdentity.aliases) confirmed.add(alias.value);
     }
