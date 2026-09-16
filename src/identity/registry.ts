@@ -191,10 +191,19 @@ export function resolvePostingIdentityDecision(input: PostingIdentityRegistryInp
     tenant: input.providerEvidence.tenant.toLowerCase(),
     postingId: input.providerEvidence.postingId.toLowerCase(),
   } satisfies ProviderPostingReference] : [];
+  // A provider route in an application URL is a scoped, provider-owned key
+  // (provider + tenant + posting id), so it is claimed like any other exact
+  // reference. Greenhouse and Lever were previously excluded on the theory that
+  // their URLs could be reused by different postings; measured across the live
+  // catalog the only sharing is the same posting ingested from several lists
+  // (one Lyft `?gh_jid=` role in three lists), and the guards below stay
+  // fail-closed: references that disagree on scope, or that name two different
+  // ids, quarantine the posting instead of bridging it. `unknown` stays out
+  // because it carries no posting id at all.
   const routeReferences = urls.map((url) => {
     try { return providerPostingReference(url); }
     catch { return { provider: 'unknown' as const }; }
-  }).filter((reference) => reference.provider !== 'greenhouse' && reference.provider !== 'lever' && reference.provider !== 'unknown');
+  }).filter((reference) => reference.provider !== 'unknown');
   const references = [...explicit, ...(input.reviewedProviderReferences ?? []), ...routeReferences]
     .filter((reference): reference is ProviderPostingReference & { provider: Exclude<PostingProvider, 'unknown'>; postingId: string } => reference.provider !== 'unknown' && Boolean(reference.postingId))
     .map((reference) => ({ ...reference, tenant: reference.tenant?.toLowerCase(), postingId: reference.postingId.toLowerCase() }));
