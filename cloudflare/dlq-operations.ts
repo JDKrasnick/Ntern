@@ -148,6 +148,43 @@ export async function inspectDlq(input: { queue: unknown; limit?: unknown }, dep
   return { queue: name, count: summaries.length, classificationCounts, messages: summaries };
 }
 
+/**
+ * A plan's own peek is the only view of its selection that is ever
+ * authoritative. Peeking leases what it returns, so a second peek hands back a
+ * different subset and can only reject a selection that was valid when it was
+ * planned. `plan` therefore stages every peeked message under a plan-scoped
+ * `catalog_items` key — the same staging surface `trusted-admission-backfill`
+ * uses for its repair targets — and `apply` replays that staged set verbatim.
+ */
+const SELECTION_KIND = 'dlq-repair-selection';
+const SELECTION_PK_PREFIX = 'DLQ_REPAIR_SELECTION#';
+
+interface StagedSelection extends PeekedMessage {
+  /** Position in the planned selection; `apply` replays in this order. */
+  ordinal: number;
+  /** Recorded so a staged payload identifies its queue on its own. */
+  queue: DlqName;
+}
+
+const selectionPk = (planId: string) => `${SELECTION_PK_PREFIX}${planId}`;
+
+async function stageSelection(db: D1Database, planId: string, selection: StagedSelection): Promise<void> {
+  await db.prepare('INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, ?, ?, ?)')
+    .bind(selectionPk(planId), selection.id, SELECTION_KIND, JSON.stringify(selection)).run();
+}
+
+async function stagedSelections(db: D1Database, planId: string): Promise<StagedSelection[]> {
+  const rows = (await db.prepare('SELECT value FROM catalog_items WHERE pk = ? AND kind = ?')
+    .bind(selectionPk(planId), SELECTION_KIND).all<{ value: string }>()).results;
+  // The planned order lives inside the staged value, not in the key: the plan
+  // replays what it was asked for, in the order it was asked to replay it.
+  return rows.map((row) => JSON.parse(row.value) as StagedSelection).sort((left, right) => left.ordinal - right.ordinal);
+}
+
+async function clearStagedSelections(db: D1Database, planId: string): Promise<void> {
+  await db.prepare('DELETE FROM catalog_items WHERE pk = ? AND kind = ?').bind(selectionPk(planId), SELECTION_KIND).run();
+}
+
 export async function planDlq(input: {
   queue: unknown; action?: unknown; messageIds?: unknown; reason?: unknown; expectedCount?: unknown;
 }, dependencies: DlqDependencies) {
@@ -192,14 +229,16 @@ export async function planDlq(input: {
     (plan_id, repair_token_hash, queue_name, operation, reason, expected_count, created_at, expires_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(planId, hash(repairToken), input.queue, input.action, reason, ids.length, now.toISOString(), expiresAt).run();
-  for (const item of parsed) {
+  for (const [ordinal, item] of parsed.entries()) {
     await dependencies.db.prepare(`INSERT INTO dlq_repair_plan_items
       (plan_id, message_id, payload_hash, message_body, logical_key, source_id, job_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .bind(planId, item.message.id, item.parsed.payloadHash, item.parsed.serialized, item.parsed.logicalKey,
         item.parsed.sourceId ?? null, item.parsed.jobId ?? null).run();
+    await stageSelection(dependencies.db, planId, { ...item.message, ordinal, queue: input.queue });
   }
-  return { planId, repairToken, queue: input.queue, action: input.action, expectedCount: ids.length, expiresAt, irreversible: input.action === 'discard' };
+  return { planId, repairToken, queue: input.queue, action: input.action, expectedCount: ids.length,
+    stagedCount: parsed.length, expiresAt, irreversible: input.action === 'discard' };
 }
 
 interface PlanRow {
@@ -211,29 +250,54 @@ interface ItemRow {
   job_id: string | null; replayed_at: string | null; purged_at: string | null;
 }
 
-export async function applyDlq(input: { planId?: unknown; repairToken?: unknown; expectedCount?: unknown; actor?: string }, dependencies: DlqDependencies) {
+interface ApplyReport {
+  planId: string;
+  queue: DlqName;
+  action: 'replay' | 'discard';
+  /** Messages this apply disposed of (purged and audited); 0 for a repeated apply. */
+  appliedCount: number;
+  /**
+   * Planned messages that could not be purged because they are no longer in the
+   * DLQ. A non-empty report leaves the plan retryable and records no disposition
+   * for the conflicting messages, so nothing is claimed that did not happen.
+   */
+  conflicts: string[];
+  appliedAt: string | null;
+}
+
+export async function applyDlq(input: { planId?: unknown; repairToken?: unknown; expectedCount?: unknown; actor?: string }, dependencies: DlqDependencies): Promise<ApplyReport> {
   if (typeof input.planId !== 'string' || typeof input.repairToken !== 'string') throw new Error('Plan ID and repair token are required');
   const plan = await dependencies.db.prepare('SELECT * FROM dlq_repair_plans WHERE plan_id = ?').bind(input.planId).first<PlanRow>();
   if (!plan || plan.repair_token_hash !== hash(input.repairToken)) throw new Error('Repair plan or token is invalid');
+  if (Number(input.expectedCount) !== plan.expected_count) throw new Error('Expected count does not match the repair plan');
   const now = (dependencies.now ?? (() => new Date()))();
-  if (plan.applied_at) throw new Error('Repair plan has already been applied');
+  // A repeated apply is a no-op rather than an error: the plan already disposed
+  // of its messages and the caller may be retrying a response it never read.
+  if (plan.applied_at) {
+    return { planId: plan.plan_id, queue: plan.queue_name, action: plan.operation, appliedCount: 0, conflicts: [], appliedAt: plan.applied_at };
+  }
   if (plan.applying_at) throw new Error('Repair plan is already being applied');
   if (Date.parse(plan.expires_at) <= now.getTime()) throw new Error('Repair plan has expired');
-  if (Number(input.expectedCount) !== plan.expected_count) throw new Error('Expected count does not match the repair plan');
   const items = (await dependencies.db.prepare('SELECT * FROM dlq_repair_plan_items WHERE plan_id = ? ORDER BY message_id')
     .bind(plan.plan_id).all<ItemRow>()).results;
   if (items.length !== plan.expected_count) throw new Error('Repair plan item count drifted');
+  // Nothing below re-peeks: a peek only holds a lease on what it returned, so a
+  // fresh peek is not a statement about the planned selection. The staged rows
+  // are, and each must still reproduce the hash the plan recorded, so a
+  // partially written selection fails before anything is sent or purged.
+  const staged = await stagedSelections(dependencies.db, plan.plan_id);
+  if (staged.length !== plan.expected_count) throw new Error('Repair plan selection is incomplete');
+  const itemsById = new Map(items.map((item) => [item.message_id, item]));
+  const selected = staged.map((selection) => {
+    const item = itemsById.get(selection.id);
+    if (!item) throw new Error('Repair plan selection does not match its items');
+    const planned = plan.operation === 'discard'
+      ? discardableMessage(plan.queue_name, selection)
+      : parseMessage(plan.queue_name, selection.body);
+    if (planned.payloadHash !== item.payload_hash) throw new Error('Repair plan selection no longer matches its recorded payload');
+    return { selection, item };
+  });
   const dlqId = await dependencies.api.resolveQueueId(queueName(plan.queue_name, true));
-  const visible = new Map((await dependencies.api.peek(dlqId, 100)).map((message) => [message.id, message]));
-  for (const item of items.filter((candidate) => !candidate.purged_at)) {
-    const current = visible.get(item.message_id);
-    const currentPayload = current && (plan.operation === 'discard'
-      ? discardableMessage(plan.queue_name, current)
-      : parseMessage(plan.queue_name, current.body));
-    if (!currentPayload || currentPayload.payloadHash !== item.payload_hash) {
-      throw new Error('Selection drift: planned messages changed or are no longer visible');
-    }
-  }
 
   const lock = await dependencies.db.prepare(`UPDATE dlq_repair_plans SET applying_at = ?
     WHERE plan_id = ? AND applying_at IS NULL AND applied_at IS NULL`)
@@ -244,8 +308,8 @@ export async function applyDlq(input: { planId?: unknown; repairToken?: unknown;
     if (plan.operation === 'replay') {
       if (isCatalogDlq(plan.queue_name)) {
         const groups = new Map<string, ItemRow[]>();
-        for (const item of items.filter((candidate) => !candidate.replayed_at)) {
-          const group = groups.get(item.source_id!) ?? []; group.push(item); groups.set(item.source_id!, group);
+        for (const entry of selected.filter((candidate) => !candidate.item.replayed_at)) {
+          const group = groups.get(entry.item.source_id!) ?? []; group.push(entry.item); groups.set(entry.item.source_id!, group);
         }
         for (const [sourceId, group] of groups) {
           const health = await dependencies.sourceHealth(sourceId);
@@ -257,23 +321,22 @@ export async function applyDlq(input: { planId?: unknown; repairToken?: unknown;
             .bind(now.toISOString(), plan.plan_id, item.message_id).run();
         }
       } else {
-        for (const item of items.filter((candidate) => !candidate.replayed_at)) {
-          await dependencies.workQueues[plan.queue_name].send(parseBody(item.message_body));
+        for (const entry of selected.filter((candidate) => !candidate.item.replayed_at)) {
+          await dependencies.workQueues[plan.queue_name].send(parseBody(entry.selection.body));
           await dependencies.db.prepare('UPDATE dlq_repair_plan_items SET replayed_at = ? WHERE plan_id = ? AND message_id = ?')
-          .bind(now.toISOString(), plan.plan_id, item.message_id).run();
+          .bind(now.toISOString(), plan.plan_id, entry.item.message_id).run();
         }
       }
     }
 
-    const pending = items.filter((item) => !item.purged_at);
-    const refsById = new Map(pending.map((item) => [item.message_id, visible.get(item.message_id)!.ref]));
+    const pending = selected.filter((entry) => !entry.item.purged_at);
     const failedRefs = pending.length
-      ? (await dependencies.api.purge(dlqId, [...refsById.values()])).failedRefs
+      ? (await dependencies.api.purge(dlqId, pending.map((entry) => entry.selection.ref))).failedRefs
       : [];
     const failed = new Set(failedRefs);
-    const purged = pending.filter((item) => !failed.has(refsById.get(item.message_id)!));
+    const purged = pending.filter((entry) => !failed.has(entry.selection.ref));
     const actor = input.actor?.trim() || 'operations-owner';
-    for (const item of purged) {
+    for (const { item } of purged) {
       const recordedFailure = plan.queue_name === 'github' && plan.operation === 'replay'
         ? await dependencies.db.prepare(`SELECT id FROM queue_failure_events
             WHERE queue_name = ? AND message_id = ? LIMIT 1`)
@@ -296,11 +359,26 @@ export async function applyDlq(input: { planId?: unknown; repairToken?: unknown;
             plan.operation, classification, diagnostic, plan.reason, actor, now.toISOString()),
       ]);
     }
-    if (failed.size) throw new Error(`${failed.size} selected message(s) could not be purged; the plan remains retryable`);
+    const conflicts = pending.filter((entry) => failed.has(entry.selection.ref)).map((entry) => entry.item.message_id);
+    if (conflicts.length) {
+      // A message that left the DLQ cannot be purged. It has already been
+      // replayed — a replay is pushed before the DLQ copy is purged, so the
+      // purge is the first point at which its absence is observable — and a
+      // retry does not push it again. Reporting it and carrying on keeps one
+      // vanished message from failing the messages that were disposed, while
+      // leaving the plan retryable: a retry only touches what is still pending.
+      await dependencies.db.prepare('UPDATE dlq_repair_plans SET applying_at = NULL WHERE plan_id = ? AND applied_at IS NULL')
+        .bind(plan.plan_id).run();
+      return { planId: plan.plan_id, queue: plan.queue_name, action: plan.operation,
+        appliedCount: purged.length, conflicts, appliedAt: null };
+    }
     await dependencies.db.prepare(`UPDATE dlq_repair_plans SET applying_at = NULL, applied_at = ?
       WHERE plan_id = ? AND applied_at IS NULL`)
       .bind(now.toISOString(), plan.plan_id).run();
-    return { planId: plan.plan_id, queue: plan.queue_name, action: plan.operation, appliedCount: items.length, appliedAt: now.toISOString() };
+    try { await clearStagedSelections(dependencies.db, plan.plan_id); }
+    catch { /* Staged selections are inert once the plan is applied; a cleanup failure must not hide a completed apply. */ }
+    return { planId: plan.plan_id, queue: plan.queue_name, action: plan.operation,
+      appliedCount: purged.length, conflicts: [], appliedAt: now.toISOString() };
   } catch (error) {
     await dependencies.db.prepare('UPDATE dlq_repair_plans SET applying_at = NULL WHERE plan_id = ? AND applied_at IS NULL')
       .bind(plan.plan_id).run();
@@ -363,6 +441,12 @@ export async function resolveQueueFailures(db: D1Database, queueNameValue: strin
 
 export async function cleanupDlqRecords(db: D1Database, now = new Date()): Promise<void> {
   const cutoff = new Date(now.getTime() - 30 * 86_400_000).toISOString();
+  // A plan keeps its staged selection while it can still be applied or retried;
+  // clearing it together with the plan that owns it keeps an abandoned plan from
+  // leaving selection rows behind in the catalog table.
+  await db.prepare(`DELETE FROM catalog_items WHERE kind = ? AND pk IN (
+    SELECT ? || plan_id FROM dlq_repair_plans WHERE expires_at < ?)`)
+    .bind(SELECTION_KIND, SELECTION_PK_PREFIX, now.toISOString()).run();
   await db.prepare('DELETE FROM dlq_repair_plans WHERE expires_at < ?').bind(now.toISOString()).run();
   await db.prepare('DELETE FROM dlq_disposition_audit WHERE disposed_at < ?').bind(cutoff).run();
   await db.prepare('DELETE FROM queue_failure_events WHERE last_failed_at < ?').bind(cutoff).run();

@@ -18,21 +18,57 @@ function sqliteD1(database: DatabaseSync): D1Database {
   return { prepare: (query) => prepared(query), batch: async (statements) => Promise.all(statements.map((statement) => statement.run())) };
 }
 
-function subject(messages: PeekedMessage[], health: DlqDependencies['sourceHealth'] = async () => undefined) {
-  const database = new DatabaseSync(':memory:');
-  database.exec(readFileSync('cloudflare/migrations/0015_dlq_recovery.sql', 'utf8'));
+/**
+ * A DLQ stand-in that leases what a peek returns, like the real API: the next
+ * peek starts after the messages this one handed back, so consecutive peeks
+ * return different subsets until the lease lapses. `retire` takes a message out
+ * of the DLQ without this plan disposing of it, which is what makes its `ref`
+ * unpurgeable.
+ */
+function dlqFake(messages: PeekedMessage[], leaseSize = messages.length) {
+  const held = new Map(messages.map((message) => [message.ref, message]));
+  const peeks: string[][] = [];
   const events: string[] = [];
-  const send = vi.fn(async (message: unknown) => { void message; events.push('send'); });
-  const purge = vi.fn(async (queueId: string, refs: string[]): Promise<{ failedRefs: string[] }> => {
-    void queueId; void refs; events.push('purge'); return { failedRefs: [] };
+  let cursor = 0;
+  const purge = vi.fn(async (_queueId: string, refs: string[]): Promise<{ failedRefs: string[] }> => {
+    events.push('purge');
+    const failedRefs = refs.filter((ref) => !held.has(ref));
+    for (const ref of refs) held.delete(ref);
+    return { failedRefs };
   });
+  return {
+    peeks, events,
+    retire(id: string) { for (const [ref, message] of held) if (message.id === id) held.delete(ref); },
+    api: {
+      async resolveQueueId(name: string) { return name; },
+      async peek(_queueId: string, limit: number) {
+        const available = [...held.values()];
+        if (!available.length) { peeks.push([]); return []; }
+        const start = cursor % available.length;
+        const leased = [...available.slice(start), ...available.slice(0, start)].slice(0, Math.min(limit, leaseSize));
+        cursor = (start + leased.length) % available.length;
+        peeks.push(leased.map((message) => message.id));
+        return leased;
+      },
+      purge,
+    },
+  };
+}
+
+function subject(messages: PeekedMessage[], health: DlqDependencies['sourceHealth'] = async () => undefined,
+  leaseSize = messages.length) {
+  const database = new DatabaseSync(':memory:');
+  database.exec(readFileSync('cloudflare/migrations/0001_initial.sql', 'utf8'));
+  database.exec(readFileSync('cloudflare/migrations/0015_dlq_recovery.sql', 'utf8'));
+  const fake = dlqFake(messages, leaseSize);
+  const send = vi.fn(async (message: unknown) => { void message; fake.events.push('send'); });
   const queue: Queue = { send, async sendBatch() {} };
   const dependencies: DlqDependencies = {
     db: sqliteD1(database), sourceHealth: health, now: () => new Date('2026-09-04T12:00:00.000Z'),
     workQueues: { greenhouse: queue, lever: queue, ashby: queue, github: queue, gmail: queue, 'destination-verification': queue },
-    api: { async resolveQueueId(name) { return name; }, async peek() { return messages; }, purge },
+    api: fake.api,
   };
-  return { database, dependencies, send, purge, events };
+  return { database, dependencies, send, purge: fake.api.purge, events: fake.events, fake };
 }
 
 const catalogMessage = (id: string, sourceId = 'lever-acme'): PeekedMessage => ({
@@ -40,13 +76,13 @@ const catalogMessage = (id: string, sourceId = 'lever-acme'): PeekedMessage => (
   body: { version: 1, sourceId, scheduledAt: '2026-09-04T09:00:00.000Z', runId: 'old-run' },
 });
 
-const destinationMessage = (id: string): PeekedMessage => ({
+const destinationMessage = (id: string, label = '42'): PeekedMessage => ({
   id, attempts: 5, timestampMs: Date.parse('2026-09-04T10:00:00.000Z'), ref: `private-${id}`,
   body: {
-    version: 1, jobId: 'job-1', sourceId: 'greenhouse-acme', externalId: 'gh-42',
-    providerIdentity: { provider: 'greenhouse', sourceId: 'greenhouse-acme', sourceUrl: 'https://boards.greenhouse.io/acme', postingId: '42' },
-    candidateUrl: 'https://boards.greenhouse.io/acme/jobs/42', reason: 'content-change',
-    queuedAt: '2026-09-04T09:00:00.000Z', idempotencyKey: 'idem-42', metadataExtractionVersion: 7,
+    version: 1, jobId: 'job-1', sourceId: 'greenhouse-acme', externalId: `gh-${label}`,
+    providerIdentity: { provider: 'greenhouse', sourceId: 'greenhouse-acme', sourceUrl: 'https://boards.greenhouse.io/acme', postingId: label },
+    candidateUrl: `https://boards.greenhouse.io/acme/jobs/${label}`, reason: 'content-change',
+    queuedAt: '2026-09-04T09:00:00.000Z', idempotencyKey: `idem-${label}`, metadataExtractionVersion: 7,
     metadataArtifactHash: 'artifact-hash-42', shadowOrigin: 'provider-poll',
   },
 });
@@ -135,8 +171,10 @@ describe('protected DLQ operations', () => {
     expect(send.mock.calls[0]?.[0]).not.toHaveProperty('force');
     expect(purge).toHaveBeenCalledWith('intern-notifs-lever-dlq', ['private-m1', 'private-m2']);
     expect(events).toEqual(['send', 'purge']);
+    // A repeated apply is a no-op: the plan already disposed of its messages.
     await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2 }, dependencies))
-      .rejects.toThrow('already been applied');
+      .resolves.toMatchObject({ appliedCount: 0, conflicts: [] });
+    expect(send).toHaveBeenCalledTimes(1);
     database.close();
   });
 
@@ -202,9 +240,12 @@ describe('protected DLQ operations', () => {
     const { database, dependencies, send, purge } = subject([catalogMessage('m1'), catalogMessage('m2')]);
     const plan = await planDlq({ queue: 'lever', action: 'replay', messageIds: ['m1', 'm2'], expectedCount: 2, reason: 'fixed' }, dependencies);
     purge.mockResolvedValueOnce({ failedRefs: ['private-m1'] }).mockResolvedValueOnce({ failedRefs: [] });
+    // The message that could not be purged is reported rather than thrown, and
+    // the plan stays retryable for exactly that message.
     await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2 }, dependencies))
-      .rejects.toThrow('plan remains retryable');
-    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2 }, dependencies)).resolves.toMatchObject({ appliedCount: 2 });
+      .resolves.toMatchObject({ appliedCount: 1, conflicts: ['m1'] });
+    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2 }, dependencies))
+      .resolves.toMatchObject({ appliedCount: 1, conflicts: [] });
     expect(send).toHaveBeenCalledTimes(1);
     expect(purge).toHaveBeenCalledTimes(2);
     expect(purge.mock.calls[1]?.[1]).toEqual(['private-m1']);
@@ -237,5 +278,112 @@ describe('protected DLQ operations', () => {
     await expect(recordQueueFailureBestEffort({ db, queueName: 'intern-notifs-github', messageId: 'm1', attempts: 4,
       body: { sourceId: 'github-pitt-csc' }, error: new Error('upstream failed') })).resolves.toBe(false);
     expect(run).toHaveBeenCalledOnce();
+  });
+});
+
+describe('DLQ replay from the selection the plan peeked', () => {
+  it('applies a selection seen by the plan peek even when a later peek is disjoint', async () => {
+    const { database, dependencies, send, purge, fake } = subject(
+      [catalogMessage('m1'), catalogMessage('m2'), catalogMessage('m3'), catalogMessage('m4')], undefined, 2);
+    const plan = await planDlq({ queue: 'lever', action: 'replay', messageIds: ['m1', 'm2'], expectedCount: 2,
+      reason: 'Page inspection limit was fixed' }, dependencies);
+    expect(plan).toMatchObject({ expectedCount: 2, stagedCount: 2 });
+    expect(fake.peeks).toEqual([['m1', 'm2']]);
+
+    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2 }, dependencies))
+      .resolves.toMatchObject({ appliedCount: 2, conflicts: [], appliedAt: '2026-09-04T12:00:00.000Z' });
+    // apply never peeked, so the lease that hides m1 and m2 from the next peek
+    // cannot invalidate a plan that was valid when it was planned.
+    expect(fake.peeks).toEqual([['m1', 'm2']]);
+    expect((await dependencies.api.peek('intern-notifs-lever-dlq', 100)).map((message) => message.id)).toEqual(['m3', 'm4']);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(purge).toHaveBeenCalledWith('intern-notifs-lever-dlq', ['private-m1', 'private-m2']);
+    database.close();
+  });
+
+  it('replays the planned messages in planned order with the payload the plan peeked', async () => {
+    const messages = [destinationMessage('d1', '1'), destinationMessage('d2', '2'), destinationMessage('d3', '3')];
+    const { database, dependencies, send, purge } = subject(messages);
+    const plan = await planDlq({ queue: 'destination-verification', action: 'replay', messageIds: ['d3', 'd2', 'd1'],
+      expectedCount: 3, reason: 'Consumer fix landed; safe to re-verify' }, dependencies);
+    await applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 3 }, dependencies);
+    expect(send.mock.calls.map(([body]) => body)).toEqual([messages[2]!.body, messages[1]!.body, messages[0]!.body]);
+    expect(purge).toHaveBeenCalledWith('intern-notifs-destination-verification-dlq', ['private-d3', 'private-d2', 'private-d1']);
+    database.close();
+  });
+
+  it('reports a message that left the DLQ as a conflict and replays the rest', async () => {
+    const { database, dependencies, send, purge, fake } = subject(
+      [catalogMessage('m1'), catalogMessage('m2'), catalogMessage('m3'), catalogMessage('m4')], undefined, 2);
+    const plan = await planDlq({ queue: 'lever', action: 'replay', messageIds: ['m1', 'm2'], expectedCount: 2,
+      reason: 'Page inspection limit was fixed' }, dependencies);
+    fake.retire('m1');
+
+    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2 }, dependencies))
+      .resolves.toMatchObject({ appliedCount: 1, conflicts: ['m1'], appliedAt: null });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(purge).toHaveBeenCalledWith('intern-notifs-lever-dlq', ['private-m1', 'private-m2']);
+    // The vanished message keeps its disposition unrecorded and the plan open.
+    expect(database.prepare('SELECT message_id FROM dlq_disposition_audit').all()).toEqual([{ message_id: 'm2' }]);
+    expect(database.prepare('SELECT applied_at FROM dlq_repair_plans').get()).toEqual({ applied_at: null });
+
+    // A retry only touches what is still pending: nothing is replayed twice.
+    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2 }, dependencies))
+      .resolves.toMatchObject({ appliedCount: 0, conflicts: ['m1'] });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(purge).toHaveBeenCalledTimes(2);
+    database.close();
+  });
+
+  it('rejects a stale token or expected count and no-ops a repeated apply', async () => {
+    const { database, dependencies, send, purge } = subject([catalogMessage('m1')]);
+    const plan = await planDlq({ queue: 'lever', action: 'replay', messageIds: ['m1'], expectedCount: 1, reason: 'fixed' }, dependencies);
+    await expect(applyDlq({ planId: plan.planId, repairToken: 'stale-token', expectedCount: 1 }, dependencies))
+      .rejects.toThrow('token is invalid');
+    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2 }, dependencies))
+      .rejects.toThrow('Expected count does not match');
+    expect(send).not.toHaveBeenCalled();
+    expect(purge).not.toHaveBeenCalled();
+    expect(database.prepare('SELECT applied_at, applying_at FROM dlq_repair_plans').get())
+      .toMatchObject({ applied_at: null, applying_at: null });
+
+    const applied = await applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 1 }, dependencies);
+    expect(applied).toMatchObject({ appliedCount: 1, conflicts: [] });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM catalog_items').get()).toMatchObject({ count: 0 });
+
+    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 1 }, dependencies))
+      .resolves.toMatchObject({ appliedCount: 0, conflicts: [], appliedAt: applied.appliedAt });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(purge).toHaveBeenCalledTimes(1);
+    database.close();
+  });
+
+  it('discards the planned selection and records the disposition audit', async () => {
+    const { database, dependencies, send, purge } = subject([catalogMessage('m1'), catalogMessage('m2')]);
+    const plan = await planDlq({ queue: 'lever', action: 'discard', messageIds: ['m1', 'm2'], expectedCount: 2,
+      reason: 'Superseded retry' }, dependencies);
+    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 2, actor: 'ops-owner' }, dependencies))
+      .resolves.toMatchObject({ action: 'discard', appliedCount: 2, conflicts: [] });
+    expect(send).not.toHaveBeenCalled();
+    expect(purge).toHaveBeenCalledWith('intern-notifs-lever-dlq', ['private-m1', 'private-m2']);
+    expect(database.prepare('SELECT message_id, operation, classification, actor FROM dlq_disposition_audit ORDER BY message_id').all())
+      .toEqual([
+        { message_id: 'm1', operation: 'discard', classification: 'discarded', actor: 'ops-owner' },
+        { message_id: 'm2', operation: 'discard', classification: 'discarded', actor: 'ops-owner' },
+      ]);
+    database.close();
+  });
+
+  it('clears the staged selection with the plan that owns it', async () => {
+    const { database, dependencies } = subject([catalogMessage('m1')]);
+    await planDlq({ queue: 'lever', action: 'replay', messageIds: ['m1'], expectedCount: 1, reason: 'fixed' }, dependencies);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM catalog_items').get()).toMatchObject({ count: 1 });
+    // An applyable plan keeps its selection; an expired one does not outlive it.
+    await cleanupDlqRecords(dependencies.db, new Date('2026-09-04T12:05:00.000Z'));
+    expect(database.prepare('SELECT COUNT(*) AS count FROM catalog_items').get()).toMatchObject({ count: 1 });
+    await cleanupDlqRecords(dependencies.db, new Date('2026-09-04T12:20:00.000Z'));
+    expect(database.prepare('SELECT COUNT(*) AS count FROM catalog_items').get()).toMatchObject({ count: 0 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM dlq_repair_plans').get()).toMatchObject({ count: 0 });
+    database.close();
   });
 });
