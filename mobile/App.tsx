@@ -385,6 +385,87 @@ function useSheetEntranceOffset(visible: boolean) {
   return offset;
 }
 
+function useRoleSheetTransition(visible: boolean, onDismiss: () => void) {
+  const motionAllowed = useContext(MotionAllowedContext);
+  const isMobile = Platform.OS !== "web";
+  const entranceDistance = 72;
+  const [modalVisible, setModalVisible] = useState(visible);
+  const dimOpacity = useRef(new Animated.Value(isMobile ? 0 : 1)).current;
+  const sheetOffset = useRef(new Animated.Value(entranceDistance)).current;
+  const closing = useRef(false);
+
+  const animateClose = (afterClose?: () => void) => {
+    if (!isMobile || !motionAllowed) {
+      dimOpacity.setValue(0);
+      sheetOffset.setValue(entranceDistance);
+      setModalVisible(false);
+      afterClose?.();
+      return;
+    }
+    closing.current = true;
+    Animated.parallel([
+      Animated.timing(dimOpacity, {
+        toValue: 0,
+        duration: 160,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(sheetOffset, {
+        toValue: entranceDistance,
+        duration: 200,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (!finished) return;
+      closing.current = false;
+      setModalVisible(false);
+      afterClose?.();
+    });
+  };
+
+  useEffect(() => {
+    if (!visible) {
+      if (modalVisible && !closing.current) animateClose();
+      return;
+    }
+    setModalVisible(true);
+    if (!isMobile || !motionAllowed) {
+      dimOpacity.setValue(1);
+      sheetOffset.setValue(0);
+      return;
+    }
+    dimOpacity.setValue(0);
+    sheetOffset.setValue(entranceDistance);
+    const animation = Animated.parallel([
+      Animated.timing(dimOpacity, {
+        toValue: 1,
+        duration: 220,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(sheetOffset, {
+        toValue: 0,
+        duration: 280,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]);
+    animation.start();
+    return () => animation.stop();
+  }, [dimOpacity, entranceDistance, isMobile, motionAllowed, sheetOffset, visible]);
+
+  return {
+    modalVisible,
+    dimOpacity,
+    sheetOffset,
+    dismiss: () => {
+      if (closing.current) return;
+      animateClose(onDismiss);
+    },
+  };
+}
+
 function openWebApplication(url: string, handoff: ApplicationHandoff) {
   if (handoff === "tab") return window.open(url, "_blank");
   const width = window.screen?.availWidth || window.innerWidth;
@@ -1194,7 +1275,7 @@ function JobDetailSheet({
   const [handoffPending, setHandoffPending] = useState(false);
   const presentation = jobDetailPresentation(Boolean(job), routeState);
   const visible = presentation.visible;
-  const sheetOffset = useSheetEntranceOffset(visible);
+  const roleSheet = useRoleSheetTransition(visible, onDismiss);
 
   if (job) displayedJob.current = job;
 
@@ -1221,8 +1302,8 @@ function JobDetailSheet({
     <Modal
       animationType="none"
       transparent
-      visible={visible}
-      onRequestClose={onDismiss}
+      visible={roleSheet.modalVisible}
+      onRequestClose={roleSheet.dismiss}
       onDismiss={() => {
         const action = pendingAction.current;
         pendingAction.current = null;
@@ -1236,20 +1317,20 @@ function JobDetailSheet({
       }}
       statusBarTranslucent
     >
-      <View style={styles.sheetOverlay}>
+      <Animated.View style={[styles.sheetOverlay, { opacity: roleSheet.dimOpacity }]}>
         <TouchableOpacity
           accessibilityRole="button"
           accessibilityLabel="Close role details"
           style={styles.sheetDismissArea}
-          onPress={onDismiss}
+          onPress={roleSheet.dismiss}
         />
         <Animated.View
           accessibilityViewIsModal
-          style={[styles.jobSheet, { transform: [{ translateY: sheetOffset }] }]}
+          style={[styles.jobSheet, { transform: [{ translateY: roleSheet.sheetOffset }] }]}
         >
           <View style={styles.sheetHandle} />
           {presentation.content === "route" ? (
-            <JobRouteStatusContent state={routeState} onDismiss={onDismiss} onRetry={onRetry} />
+            <JobRouteStatusContent state={routeState} onDismiss={roleSheet.dismiss} onRetry={onRetry} />
           ) : role ? (
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetContent}>
               <Text style={styles.sheetEyebrow}>{role.open ? "Role details" : "Closed role"}</Text>
@@ -1329,7 +1410,7 @@ function JobDetailSheet({
                     accessibilityHint="Saves this role and adds it to the apply queue"
                     onPress={() => {
                       if (role && onSaveForWeb) onSaveForWeb(role);
-                      onDismiss();
+                      roleSheet.dismiss();
                     }}
                     style={styles.sheetSaveBar}
                   >
@@ -1340,7 +1421,7 @@ function JobDetailSheet({
                   <TouchableOpacity
                     accessibilityRole="button"
                     accessibilityLabel="Remove from queue"
-                    onPress={() => { onUnsave(role); onDismiss(); }}
+                    onPress={() => { onUnsave(role); roleSheet.dismiss(); }}
                     style={styles.sheetSavedBar}
                   >
                     <Ionicons name="bookmark" size={18} color={colors.signal} />
@@ -1354,7 +1435,7 @@ function JobDetailSheet({
                     accessibilityHint="Saves without adding to the apply queue"
                     onPress={() => {
                       if (role && onSaveForLater) onSaveForLater(role);
-                      onDismiss();
+                      roleSheet.dismiss();
                     }}
                     style={styles.sheetHideBar}
                   >
@@ -1366,14 +1447,14 @@ function JobDetailSheet({
                   <TouchableOpacity
                     accessibilityRole="button"
                     accessibilityLabel="Hide on this device"
-                    onPress={() => { onHideLocally(role); onDismiss(); }}
+                    onPress={() => { onHideLocally(role); roleSheet.dismiss(); }}
                     style={styles.sheetHideBar}
                   >
                     <Ionicons name="eye-off-outline" size={18} color={colors.muted} />
                     <Text style={styles.sheetHideBarText}>Hide</Text>
                   </TouchableOpacity>
                 ) : null}
-                <ActionButton label="Not now" variant="secondary" onPress={onDismiss} />
+                <ActionButton label="Not now" variant="secondary" onPress={roleSheet.dismiss} />
               </View>
               <Text style={styles.sheetHelper}>
                 {!role.open
@@ -1389,7 +1470,7 @@ function JobDetailSheet({
             </ScrollView>
           ) : null}
         </Animated.View>
-      </View>
+      </Animated.View>
     </Modal>
   );
 
@@ -1397,7 +1478,7 @@ function JobDetailSheet({
     if (!role || pendingAction.current) return;
     pendingAction.current = { job: role, kind };
     setHandoffPending(true);
-    onDismiss();
+    roleSheet.dismiss();
     // Android does not fire Modal.onDismiss. Let its modal teardown finish
     // before opening the Custom Tab instead.
     if (Platform.OS !== "ios") {

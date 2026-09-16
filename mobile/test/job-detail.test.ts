@@ -38,10 +38,15 @@ describe('mobile job routes', () => {
     expect(app).not.toContain('<Text style={styles.catalogPaginationText}>Loading roles…</Text>');
   });
 
-  it('starts one responsive entrance motion for single and grouped role sheets before paint', () => {
+  it('fades the mobile role-sheet dim while using a quadratic sheet transition', () => {
     const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 
-    expect(app.match(/useSheetEntranceOffset\(/g)).toHaveLength(3);
+    expect(app.match(/useSheetEntranceOffset\(/g)).toHaveLength(2);
+    expect(app).toContain('function useRoleSheetTransition(visible: boolean, onDismiss: () => void)');
+    expect(app).toContain('const dimOpacity = useRef(new Animated.Value(isMobile ? 0 : 1)).current;');
+    expect(app).toContain('easing: Easing.out(Easing.quad)');
+    expect(app).toContain('easing: Easing.in(Easing.quad)');
+    expect(app).toContain('style={[styles.sheetOverlay, { opacity: roleSheet.dimOpacity }]}');
     expect(app).toContain('Platform.OS === "web" ? 40 : 72');
     expect(app).toContain('Platform.OS === "web" ? 180 : 240');
     expect(app).toContain('useLayoutEffect(() => {');
