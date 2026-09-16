@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ApplicationLinkValidationError, failedSourceHealth, sourceFailureCategory, sourceFailureOutcome, successfulSourceHealth } from '../src/source-health.js';
+import { ApplicationUrlValidationError } from '../src/core/application-url.js';
 import { SourceFetchError } from '../src/sources/source-error.js';
+import type { SourceHealth } from '../src/types.js';
 
 describe('source health', () => {
   it('keeps temporary transport failures degraded and retains the last success', () => {
@@ -63,7 +65,9 @@ describe('source health', () => {
       completedAt: '2026-07-29T12:10:01.000Z',
       error: new Error('2/3 eligible Greenhouse application links failed validation'),
     });
-    expect(sourceFailureCategory(new Error('application link timed out'))).toBe('link');
+    // An aggregate validator failure still describes link integrity: the probe
+    // completed and rejected the links.
+    expect(sourceFailureCategory(new Error('2/3 eligible Greenhouse application links failed validation'))).toBe('link');
     expect(first.state).toBe('degraded');
     expect(second.state).toBe('quarantined');
     expect(second.recentRuns).toHaveLength(2);
@@ -226,5 +230,44 @@ describe('source health', () => {
 
     expect(successful).toMatchObject({ provider: 'greenhouse', region: 'unknown' });
     expect(failed).toMatchObject({ provider: 'greenhouse', region: 'unknown' });
+  });
+});
+
+describe('application link probe failures', () => {
+  const attempt = (previous: SourceHealth | undefined, error: unknown, completedAt: string) => failedSourceHealth({
+    sourceId: 'simplify-summer-2026', provider: 'github', previous,
+    startedAt: completedAt, completedAt, error,
+  });
+
+  it('classifies a probe that never completed as transport, not link integrity', () => {
+    expect(sourceFailureCategory(new ApplicationUrlValidationError('Application link timed out'))).toBe('transport');
+    expect(sourceFailureCategory(new ApplicationUrlValidationError('Application link could not be reached'))).toBe('transport');
+  });
+
+  it('classifies a row-level probe timeout the way the poll reports it', () => {
+    // Production shape: the poll joins per-row failures, and one timed-out row
+    // next to a storage failure must not read as a broken link.
+    expect(sourceFailureCategory(new Error('simplify-summer-2026: row 12685: Application link timed out'))).toBe('transport');
+    expect(sourceFailureCategory(new Error('simplify-summer-2026: row 12685: Application link timed out; D1_ERROR: D1 DB is overloaded. Requests queued for too long.'))).toBe('transport');
+  });
+
+  it('keeps completed-probe rejections classified as link', () => {
+    expect(sourceFailureCategory(new ApplicationUrlValidationError('Application link returned HTTP 404'))).toBe('link');
+    expect(sourceFailureCategory(new ApplicationUrlValidationError('Application link host jobs.example.test is not an approved source host'))).toBe('link');
+    expect(sourceFailureCategory(new ApplicationLinkValidationError('GitHub', 3, 2_000, []))).toBe('link');
+  });
+
+  it('does not quarantine a source for two consecutive probe timeouts', () => {
+    const first = attempt(undefined, new Error('simplify-summer-2026: row 12685: Application link timed out'), '2026-09-16T08:40:00.000Z');
+    expect(first).toMatchObject({ state: 'degraded', failureCategory: 'transport', consecutiveFailures: 1 });
+    const second = attempt(first, new Error('simplify-summer-2026: row 9601: Application link timed out'), '2026-09-16T08:45:00.000Z');
+    expect(second).toMatchObject({ state: 'degraded', failureCategory: 'transport', consecutiveFailures: 2 });
+    expect(second.quarantinedAt).toBeUndefined();
+  });
+
+  it('still quarantines a source whose links are genuinely broken twice in a row', () => {
+    const first = attempt(undefined, new ApplicationUrlValidationError('Application link returned HTTP 404'), '2026-09-16T08:40:00.000Z');
+    const second = attempt(first, new ApplicationUrlValidationError('Application link returned HTTP 404'), '2026-09-16T08:45:00.000Z');
+    expect(second).toMatchObject({ state: 'quarantined', sourceStatus: 'paused', failureCategory: 'link' });
   });
 });
