@@ -221,6 +221,14 @@ const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
  * deliveries for per-delivery cost.
  */
 export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 200;
+/**
+ * Listings one delivery may re-grade after an admission policy change. The
+ * bounded-migration gate suppresses newly admitted rows of a trusted list until
+ * its migration drains, so this bound also sets how fast those rows publish;
+ * 20 rows per delivery left migrated rows hidden for hours, while 200 converges
+ * in a handful of deliveries and still fits the five-minute message deadline.
+ */
+export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 200;
 
 /**
  * Bounded worker pool that always drains: the first error is rethrown only once

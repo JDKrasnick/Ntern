@@ -8,7 +8,7 @@ import { processGreenhouseQueue } from '../src/greenhouse-worker.js';
 import { isLeverSourceDue, leverWorkMessages } from '../src/lever-dispatch.js';
 import { processLeverQueue } from '../src/lever-worker.js';
 import { drainPendingExpoNotifications, ExpoPushPublisher, type EmailSender } from '../src/notifications.js';
-import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
+import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
 import { runRuntimeCommand } from '../src/runtime.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
@@ -1515,10 +1515,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           catalogAdmissionResolver: admissionResolver,
           identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
           trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
-          // One row can perform several bounded HTTP probes. Keep migration
-          // slices small enough to make durable progress even when the tail is
-          // dominated by destinations that consume the six connection slots.
-          maxAdmissionMigrationListingsPerSourceRun: 20,
+          // One row can perform several bounded HTTP probes, so this stays well
+          // inside the five-minute message deadline while still draining a
+          // whole list's admission migration in a handful of deliveries: at 20
+          // rows per delivery a trusted list's migrated rows stayed suppressed
+          // behind the pending migration for hours.
+          maxAdmissionMigrationListingsPerSourceRun: GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY,
           // The largest reviewed board holds 3,029 postings; one delivery
           // resolves a bounded slice and re-enqueues itself for the rest.
           maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
