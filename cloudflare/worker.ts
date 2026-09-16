@@ -1486,6 +1486,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     for (const queued of batch.messages) {
       const record = { messageId: queued.id, body: typeof queued.body === 'string' ? queued.body : JSON.stringify(queued.body) };
       let parsedMessage: { sourceId?: string; sourceKind?: string; force?: boolean } | undefined;
+      const startedAt = new Date().toISOString();
       try {
         const message = JSON.parse(record.body) as { sourceId?: string; sourceKind?: string; force?: boolean };
         parsedMessage = message;
@@ -1537,6 +1538,27 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         failed.add(record.messageId);
         const delay = d1QueueRetryDelay(error, queued.attempts);
         if (delay) overloadDelays.set(record.messageId, delay);
+        // Structured sources already persist their own failure health. The
+        // default list sources did not, which left `lastAttemptAt` untouched on a
+        // failed delivery: the dispatch marker written at dispatch then kept
+        // suppressing that source for a full lease even though its message had
+        // already failed, and the operations surface could not tell a failing
+        // source from a quiet one (#219).
+        if (parsedMessage?.sourceId && parsedMessage.sourceKind !== 'structured') {
+          try {
+            const healthStore = new D1InternshipStore(env.DB);
+            await healthStore.putSourceHealth(failedSourceHealth({
+              sourceId: parsedMessage.sourceId,
+              provider: 'github',
+              previous: await healthStore.getSourceHealth(parsedMessage.sourceId),
+              startedAt,
+              completedAt: new Date().toISOString(),
+              error,
+            }));
+          } catch (healthError) {
+            console.error(JSON.stringify({ command: 'github-health', messageId: record.messageId, error: safeDiagnostic(healthError) }));
+          }
+        }
         await recordQueueFailureBestEffort({
           db: env.DB, queueName: batch.queue, messageId: queued.id, attempts: queued.attempts,
           timestamp: queued.timestamp, sourceId: parsedMessage?.sourceId, sourceKind: parsedMessage?.sourceKind,

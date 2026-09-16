@@ -12,6 +12,7 @@ import { isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/sourc
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
 import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
 import { reviewedLeverSources } from '../src/sources/lever-config.js';
+import { defaultSources } from '../src/sources/index.js';
 import type { ReviewedSourceRecord } from '../src/employer-types.js';
 import type { SourceHealth } from '../src/types.js';
 
@@ -296,6 +297,36 @@ describe('Cloudflare queue continuation bounds', () => {
       await sending;
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('Cloudflare GitHub source failure health', () => {
+  it('records a failed delivery against its source so the dispatch lease can be released', async () => {
+    const source = defaultSources[0]!;
+    const stored: SourceHealth[] = [];
+    const prepare = vi.fn(() => ({
+      async first() { return null; },
+      bind: () => ({ async all() { return { results: [] }; }, async run() { return { meta: { changes: 1 } }; }, async first() { return null; } }),
+    }));
+    vi.spyOn(D1InternshipStore.prototype, 'putSourceHealth').mockImplementation(async (health) => { stored.push(health); });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('provider fetch unavailable in test'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const before = Date.now();
+    const message = { id: 'github-source', body: { sourceId: source.id }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
+    try {
+      await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [message] }, {
+        DB: { prepare, async batch() { return []; } },
+        AUTH_FROM_EMAIL: 'notifications@example.test', DIGEST_TO_EMAIL: 'digest@example.test',
+      } as unknown as Environment);
+
+      const recorded = stored.filter((health) => health.provider === 'github');
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({ sourceId: source.id, state: 'degraded', sourceStatus: 'active', consecutiveFailures: 1 });
+      expect(Date.parse(recorded[0]!.lastAttemptAt)).toBeGreaterThanOrEqual(before);
+      expect(message.retry).toHaveBeenCalledOnce();
+    } finally {
+      vi.restoreAllMocks();
     }
   });
 });
