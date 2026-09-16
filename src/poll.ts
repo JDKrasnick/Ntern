@@ -32,7 +32,7 @@ import {
 import { trustedCommunityCircuitBreaches, trustedCommunityMetrics } from './sources/trusted-community-health.js';
 import { SourceFetchError } from './sources/source-error.js';
 import { extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence, projectRoleMetadata, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from './role-metadata.js';
-import { failedSourceHealth, sourceFailureOutcome, successfulSourceHealth } from './source-health.js';
+import { failedSourceHealth, sourceFailureCategory, sourceFailureOutcome, successfulSourceHealth } from './source-health.js';
 import type {
   CatalogAdmission,
   Internship,
@@ -745,6 +745,12 @@ export class IngestionRunner {
     // reported failures do not depend on which worker finished first.
     const accepted = new Array<ProcessedListing | undefined>(listings.length);
     const failures = new Array<string | undefined>(listings.length);
+    // Rows whose application page could not be reached are withdrawn from this
+    // delivery instead of failing it: the row never reaches `accepted`, and the
+    // source-level gates (zero-row, floor and coverage checks) still catch a
+    // source that is genuinely down. Failing the whole delivery here is what
+    // kept healthy reviewed lists quarantined and filled the GitHub DLQ.
+    const withdrawnTransportFailures: string[] = [];
     const priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
     await forEachBounded(listings, async (sourceListing, slot) => {
       // Transitional RawListing adapters predate provider-neutral evidence.
@@ -1020,7 +1026,11 @@ export class IngestionRunner {
             }
           } catch (error) {
             reachability = reachabilityFromFailure(error);
-            failures[slot] = `${listing.sourceId}: row ${listing.row}: ${error instanceof Error ? error.message : String(error)}`;
+            const failure = `${listing.sourceId}: row ${listing.row}: ${error instanceof Error ? error.message : String(error)}`;
+            // A probe that never completed withdraws its row; a completed probe
+            // that reports a dead or gone link is still a delivery failure.
+            if (sourceFailureCategory(error) === 'transport') withdrawnTransportFailures.push(failure);
+            else failures[slot] = failure;
             if (!admissionManaged) {
               failedExternalIds.add(id);
               if (existing?.open && reachability === 'gone') await this.quarantine(existing);
@@ -1177,7 +1187,10 @@ export class IngestionRunner {
         accepted[slot] = listing;
         handledExternalIds.add(id);
       } catch (error) {
-        failures[slot] = `${listing.sourceId}: row ${listing.row}: ${error instanceof Error ? error.message : String(error)}`;
+        const message = error instanceof Error ? error.message : String(error);
+        const failure = `${listing.sourceId}: row ${listing.row}: ${message}`;
+        if (sourceFailureCategory(error) === 'transport') withdrawnTransportFailures.push(failure);
+        else failures[slot] = failure;
         failedExternalIds.add(id);
         await completeFailedAdmissionMigration();
       }
@@ -1192,6 +1205,7 @@ export class IngestionRunner {
       handledExternalIds,
       failedExternalIds,
       providerShadowVerifications,
+      withdrawnTransportFailures,
     };
   }
 
@@ -1483,6 +1497,14 @@ export class IngestionRunner {
         // Existing catalog decisions are the durable migration obligation.
         // Rows with no prior occurrence are evaluated with spare slice capacity
         // but fail closed and cannot hold the source checkpoint open forever.
+        if (resolution.withdrawnTransportFailures.length) {
+          console.log(JSON.stringify({
+            event: 'row_transport_withdrawn',
+            sourceId: connector.id,
+            count: resolution.withdrawnTransportFailures.length,
+            samples: resolution.withdrawnTransportFailures.slice(0, 5),
+          }));
+        }
         const admissionEvidencePending = migrationLimit !== undefined && (
           requiredMigrationCandidates.length > selectedRequiredMigrations.length
           || selectedRequiredMigrations.some((listing) => !resolution.handledExternalIds.has(externalId(listing)))
