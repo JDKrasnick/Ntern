@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { processFifoBatch } from '../src/sqs-fifo-batch.js';
+import { processFifoBatch, QueueMessageDeadlineError } from '../src/sqs-fifo-batch.js';
+import { sourceFailureCategory } from '../src/source-health.js';
 
 const record = (messageId: string, groupId: string) => ({
   messageId,
@@ -86,5 +87,37 @@ describe('FIFO batch processing', () => {
     }, undefined, () => { throw new Error('ledger unavailable'); });
 
     expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'failed' }]);
+  });
+
+  it('fails a record that outlives the message deadline so its slot is released', async () => {
+    const failures: string[] = [];
+    const result = await processFifoBatch([
+      record('hung', 'a'),
+      record('other', 'b'),
+    ], async (item) => {
+      if (item.messageId === 'hung') await new Promise<void>(() => undefined);
+    }, undefined, (_item, error) => { failures.push(error instanceof Error ? error.message : String(error)); }, 25);
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'hung' }]);
+    expect(failures).toEqual(['message deadline: the operation timed out after 25 ms']);
+  });
+
+  it('categorizes a deadline failure as a transient transport timeout, not a capacity limit', () => {
+    expect(sourceFailureCategory(new QueueMessageDeadlineError(300_000))).toBe('transport');
+  });
+
+  it('leaves a record that finishes inside the deadline untouched', async () => {
+    const processed: string[] = [];
+    const result = await processFifoBatch([
+      record('fast', 'a'),
+    ], async (item) => { processed.push(item.messageId); }, undefined, undefined, 5_000);
+
+    expect(processed).toEqual(['fast']);
+    expect(result.batchItemFailures).toEqual([]);
+  });
+
+  it('rejects a non-positive message deadline', async () => {
+    await expect(processFifoBatch([record('a', 'a')], async () => undefined, undefined, undefined, 0))
+      .rejects.toThrow('FIFO message deadline must be a positive integer');
   });
 });

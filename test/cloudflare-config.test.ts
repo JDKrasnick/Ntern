@@ -97,12 +97,19 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('{ name = "ADMISSION_STALE_ALERT_THRESHOLD", type = "plain_text", text = tostring(var.admission_stale_alert_threshold) }');
   });
 
-  it('keeps GitHub ingestion parallelism synchronized in Wrangler and OpenTofu', () => {
+  it('keeps every work-queue consumer concurrency synchronized in Wrangler and OpenTofu', () => {
     const terraform = read('infra/cloudflare/main.tf');
-    const consumer = ingestion.queues?.consumers?.find(({ queue }) => queue === 'intern-notifs-github');
+    const block = terraform.match(/consumer_max_concurrency = \{([^}]*)\}/s)?.[1] ?? '';
+    const declared = Object.fromEntries([...block.matchAll(/([\w-]+)\s*=\s*(\d+)/g)]
+      .map(([, provider, value]) => [provider, Number(value)]));
 
-    expect(consumer?.max_concurrency).toBe(2);
-    expect(terraform).toContain('max_concurrency  = contains(["greenhouse", "github"], each.key) ? 2 : 1');
+    expect(Object.keys(declared).sort()).toEqual([
+      'ashby', 'destination-verification', 'github', 'gmail', 'greenhouse', 'lever', 'shadow-extraction',
+    ]);
+    for (const consumer of ingestion.queues?.consumers ?? []) {
+      expect(consumer.max_concurrency).toBe(declared[consumer.queue.replace('intern-notifs-', '')]);
+    }
+    expect(terraform).toContain('max_concurrency  = lookup(local.consumer_max_concurrency, each.key, 1)');
   });
 
   it('keeps behavior-critical API variables synchronized across Wrangler and OpenTofu', () => {

@@ -204,6 +204,46 @@ describe('Greenhouse queue worker', () => {
     expect(after?.recentRuns).toHaveLength(2);
   });
 
+  it('fails a board that outlives the message deadline so the consumer slot is released', async () => {
+    const published: ReviewedGreenhouseSource = { ...acmeSource, status: 'published' };
+    const store = new MemoryInternshipStore();
+    const failures: string[] = [];
+    const startedAt = Date.now();
+    const result = await processGreenhouseQueue({
+      Records: [{ messageId: 'hung', body: JSON.stringify(message()) }],
+    }, {
+      store,
+      sources: [published],
+      fetchImpl: () => new Promise<Response>(() => undefined),
+      linkValidator: async (url) => url,
+      catalogAdmissionResolver,
+      messageDeadlineMs: 25,
+      onRecordFailure: (_record, error) => { failures.push(error instanceof Error ? error.message : String(error)); },
+    });
+
+    expect(result).toEqual({ batchItemFailures: [{ itemIdentifier: 'hung' }] });
+    expect(failures).toEqual(['message deadline: the operation timed out after 25 ms']);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it('leaves a board that finishes inside the message deadline untouched', async () => {
+    const published: ReviewedGreenhouseSource = { ...acmeSource, status: 'published' };
+    const store = new MemoryInternshipStore();
+    const result = await processGreenhouseQueue({
+      Records: [{ messageId: 'fast', body: JSON.stringify(message()) }],
+    }, {
+      store,
+      sources: [published],
+      fetchImpl: async () => response(),
+      linkValidator: async (url) => url,
+      catalogAdmissionResolver,
+      messageDeadlineMs: 5_000,
+    });
+
+    expect(result).toEqual({ batchItemFailures: [] });
+    expect(await store.getSourceHealth(published.id)).toMatchObject({ state: 'healthy' });
+  });
+
   it('fails a published board whose D1 persistence aborted, so the message retries instead of acking', async () => {
     const published: ReviewedGreenhouseSource = { ...acmeSource, status: 'published' };
     const store = new MemoryInternshipStore();

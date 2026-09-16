@@ -1,11 +1,12 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CloudWatchClient, DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
-import { GetQueueAttributesCommand, SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import { GetQueueAttributesCommand, SendMessageCommand, SQSClient, type QueueAttributeName } from '@aws-sdk/client-sqs';
 import { GetParametersByPathCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { DynamoInternshipStore, type InternshipStore } from './store.js';
 import { acceptLeverAdmission, listLeverCandidates, verifyLeverAdmission, type LeverAdmissionInput } from './lever-admission.js';
 import { monitoringChecklistItems, monitoringPeriod, publicMonitoringChecklist } from './monitoring-checklist.js';
 import { occurrenceStatus } from './ingestion/monitoring.js';
+import { missedPublishedInterval } from './source-poll-cadence.js';
 import {
   catalogProviderDefinitions,
   integrationRegistry,
@@ -35,6 +36,10 @@ const responseHeaders = {
 };
 const reply = (statusCode: number, body: unknown) => ({ statusCode, headers: responseHeaders, body: JSON.stringify(body) });
 const inactiveHealthWindowMs = 7 * 60 * 60_000;
+// Cloudflare's queue-metrics client reports the age of the oldest message under
+// this name, which the SQS attribute union does not carry.
+type QueueAttributes = Partial<Record<QueueAttributeName | 'oldest_message_timestamp_ms', string>>;
+
 type Provider = CatalogProviderId;
 type OperationsSource = RegisteredOperationsSource;
 export type FleetConfiguration = Partial<Record<Provider, { queueUrl?: string; deadLetterQueueUrl?: string }>>;
@@ -130,10 +135,16 @@ async function fleetStatus(
     })),
   ]);
   const number = (value: string | undefined) => Number(value ?? 0);
+  const attributes: QueueAttributes | undefined = queue.Attributes;
   return {
     provider: provider.id,
     queue: {
       waiting: number(queue.Attributes?.ApproximateNumberOfMessages),
+      // The same quantity as `waiting`, under Cloudflare's own field name, so an
+      // operator can compare this row with /queues/{queue_id}/metrics directly.
+      backlogCount: number(queue.Attributes?.ApproximateNumberOfMessages),
+      oldestMessageTimestampMs: attributes?.oldest_message_timestamp_ms
+        ? number(attributes.oldest_message_timestamp_ms) : null,
       processing: number(queue.Attributes?.ApproximateNumberOfMessagesNotVisible),
       deadLettered: number(deadLetter.Attributes?.ApproximateNumberOfMessages) + number(deadLetter.Attributes?.ApproximateNumberOfMessagesNotVisible),
     },
@@ -546,11 +557,18 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
       const queueTelemetry = dependencies.queueTelemetry ?? { status: 'available' as const };
       const queue = fleetRows.reduce((total, row) => ({
           waiting: total.waiting + row.queue.waiting,
+          backlogCount: total.backlogCount + row.queue.backlogCount,
           processing: total.processing + row.queue.processing,
           deadLettered: total.deadLettered + row.queue.deadLettered,
-        }), { waiting: 0, processing: 0, deadLettered: 0 });
+        }), { waiting: 0, backlogCount: 0, processing: 0, deadLettered: 0 });
+      const oldestMessageTimestamps = fleetRows.flatMap((row) => row.queue.oldestMessageTimestampMs === null
+        ? [] : [row.queue.oldestMessageTimestampMs]);
       const fleet = {
-        queue: { ...queue, processing: queueTelemetry.status === 'available' ? queue.processing : null },
+        queue: {
+          ...queue,
+          oldestMessageTimestampMs: oldestMessageTimestamps.length ? Math.min(...oldestMessageTimestamps) : null,
+          processing: queueTelemetry.status === 'available' ? queue.processing : null,
+        },
         queueTelemetry,
         alarms: [...alarmsByName.values()],
         alarmTelemetry: dependencies.alarmTelemetry ?? { status: 'available' as const },
@@ -569,6 +587,10 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
           : null,
         queuedMessages: fleet.queue.waiting,
         processingMessages: fleet.queue.processing,
+        // The same predicate the provider crons alarm on, so an operator can see
+        // which published sources missed an interval before the daily email.
+        overduePublishedSources: sources.filter((source) => source.mode === 'published'
+          && missedPublishedInterval('published', health.get(source.sourceId), new Date(timestamp))).length,
         legacyPendingNotifications,
       };
       const order: Record<SourceHealthState, number> = { quarantined: 0, degraded: 1, 'never-succeeded': 2, healthy: 3 };

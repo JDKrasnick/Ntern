@@ -120,6 +120,20 @@ describe('Ashby queue worker', () => {
     });
   });
 
+  it('never parks a shadow consumer on an Ashby Retry-After beyond the retry cap', async () => {
+    const store = new MemoryInternshipStore();
+    const slept: number[] = [];
+
+    await expect(runAshbyBoard(message(), {
+      store, sources: [shadowSource],
+      fetchImpl: async () => new Response(null, { status: 429, headers: { 'Retry-After': '600' } }),
+      linkValidator: async (url: string) => url,
+      sleep: async (milliseconds: number) => { slept.push(milliseconds); },
+    })).rejects.toThrow('Ashby fetch failed (429)');
+
+    expect(slept).toEqual([]);
+  });
+
   it('rejects a shadow snapshot when link failures exceed the threshold', async () => {
     const store = new MemoryInternshipStore();
     await expect(runAshbyBoard(message(), {

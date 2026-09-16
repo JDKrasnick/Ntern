@@ -1,4 +1,4 @@
-import type { SourceCheckpoint, SourceHealth } from './types.js';
+import type { SourceCheckpoint, SourceDispatch, SourceHealth } from './types.js';
 import { catalogProviderDefinitions, type CatalogProviderId } from './integration-registry.js';
 
 const providerSchedules = Object.fromEntries(
@@ -19,6 +19,26 @@ export const SOURCE_POLL_CADENCE = {
   workerMaxConcurrency: 2,
   schedules: providerSchedules,
 } as const;
+
+/** Suppression of a source that already has a work message pending lasts at
+ * most one cadence, so consecutive attempts stay within two cadences. */
+export const SOURCE_DISPATCH_LEASE_MS = SOURCE_POLL_CADENCE.publishedIntervalMs;
+
+/** A published source that has not attempted a poll within two cadences has
+ * missed a scheduled interval. */
+export const SOURCE_CADENCE_SLIP_MS = SOURCE_POLL_CADENCE.publishedIntervalMs * 2;
+
+/** No queue consumer may sleep longer than this on a provider retry window:
+ * a longer wait fails the message into the durable backoff and queue retry. */
+export const SOURCE_RETRY_DELAY_CAP_MS = 60_000;
+
+/** A single work message may not hold a consumer slot for longer than this. A
+ * hung provider, browser, or storage call must fail the message into the queue
+ * retry path instead of parking a slot until the platform's 15-minute consumer
+ * limit — six parked invocations are what delayed a whole sweep. Five minutes is
+ * more than twice the longest legitimate attempt on record (a 27 MB board whose
+ * D1 write took 147 s) and one sixth of the published cadence. */
+export const SOURCE_MESSAGE_DEADLINE_MS = 5 * 60_000;
 
 function stableSourceBucket(sourceId: string, buckets: number): number {
   let hash = 2166136261;
@@ -77,6 +97,41 @@ export function isQuarantinedRecoveryProbeDue(sourceId: string, health: SourceHe
   const jitterWindows = SOURCE_POLL_CADENCE.recoveryProbeJitterMs / SOURCE_POLL_CADENCE.publishedIntervalMs;
   const currentWindow = Math.floor(now.getTime() / SOURCE_POLL_CADENCE.publishedIntervalMs);
   return currentWindow % jitterWindows === stableSourceBucket(sourceId, jitterWindows);
+}
+
+/** A source is suppressed only while its own work message is pending: the
+ * marker is unexpired and no attempt has completed since it was written. */
+export function isSourceDispatchInFlight(
+  dispatch: SourceDispatch | undefined,
+  health: SourceHealth | undefined,
+  now: Date,
+): boolean {
+  const dispatchedAt = timestamp(dispatch?.dispatchedAt);
+  if (dispatchedAt === undefined) return false;
+  if (now.getTime() - dispatchedAt >= SOURCE_DISPATCH_LEASE_MS) return false;
+  const attemptedAt = timestamp(health?.lastAttemptAt);
+  return attemptedAt === undefined || attemptedAt < dispatchedAt;
+}
+
+/** Deliberately mirrors the exclusions `isProviderSourceDue` applies, so a
+ * paused, quarantined, or backed-off source never raises a cadence alarm. A
+ * source with no health row is *not* a cadence slip: it has never been polled at
+ * all, and the provider cron dispatches it in the same run that would report it,
+ * so counting it would alarm on every newly published source before its first
+ * attempt could possibly complete. Never-polled sources are reported instead as
+ * `state: 'never-succeeded'` and counted in `productionMetrics.staleSources`. */
+export function missedPublishedInterval(
+  sourceStatus: 'published' | 'shadow',
+  health: Pick<SourceHealth, 'lastAttemptAt' | 'sourceStatus' | 'state' | 'backoffUntil'> | undefined,
+  now: Date,
+): boolean {
+  if (sourceStatus !== 'published') return false;
+  if (!health) return false;
+  if (health.state === 'quarantined' || health.sourceStatus === 'paused') return false;
+  const backoffUntil = timestamp(health.backoffUntil);
+  if (backoffUntil !== undefined && backoffUntil > now.getTime()) return false;
+  const lastAttemptAt = timestamp(health.lastAttemptAt);
+  return lastAttemptAt === undefined || now.getTime() - lastAttemptAt > SOURCE_CADENCE_SLIP_MS;
 }
 
 export function isProviderSourceDue(

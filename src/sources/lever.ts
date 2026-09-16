@@ -200,6 +200,7 @@ function retryAfterMs(response: Response, now: Date): number | undefined {
 type TransitionalLeverResult = SourceSnapshot & SourceFetchResult;
 export const LEVER_PAGE_SIZE = 100;
 export const LEVER_MAX_PAGES = 50;
+export const LEVER_REQUEST_TIMEOUT_MS = 15_000;
 
 export class LeverPostingsAdapter implements SourceAdapter, SourceConnector {
   readonly id: string;
@@ -225,6 +226,7 @@ export class LeverPostingsAdapter implements SourceAdapter, SourceConnector {
         headers: {
           Accept: 'application/json',
         },
+        signal: AbortSignal.timeout(LEVER_REQUEST_TIMEOUT_MS),
       });
       if (!response.ok) {
         throw new SourceFetchError(

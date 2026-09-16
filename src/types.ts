@@ -221,6 +221,14 @@ export type SourceOutcome =
   | 'catalog_write_failed'
   | 'resource_limit';
 
+/** One scheduled dispatch of a source. A source stays suppressed while this
+ * marker is unexpired and the source has not attempted a poll since. */
+export interface SourceDispatch {
+  sourceId: string;
+  provider: string;
+  dispatchedAt: string;
+}
+
 export interface SourceHealth {
   sourceId: string;
   employerId?: string;

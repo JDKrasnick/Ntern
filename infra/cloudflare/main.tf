@@ -5,6 +5,22 @@ locals {
   catalog_providers       = toset(["greenhouse", "lever", "ashby", "github"])
   asynchronous_queues     = setunion(local.catalog_providers, toset(["gmail", "destination-verification", "shadow-extraction"]))
 
+  # Sized from the 2026-09-15 drain measurements: published boards per sweep x
+  # per-message wall clock / cadence, doubled for the validation, notification,
+  # and D1 work that the recorded fetch duration does not cover. Greenhouse
+  # enqueues ~218 messages per half-hour sweep at ~23s each, which the previous
+  # concurrency of 2 could not retire inside the cadence. Keep in step with
+  # wrangler.ingestion.jsonc; see docs/240-dispatch-backlog-cadence.md.
+  consumer_max_concurrency = {
+    greenhouse               = 6
+    lever                    = 2
+    ashby                    = 2
+    github                   = 2
+    gmail                    = 1
+    destination-verification = 1
+    shadow-extraction        = 1
+  }
+
   api_plain_bindings = concat(
     [
       { name = "PUBLIC_API_URL", type = "plain_text", text = var.public_api_url },
@@ -183,9 +199,7 @@ resource "cloudflare_queue_consumer" "ingestion" {
   dead_letter_queue = cloudflare_queue.dead_letter[each.key].queue_name
   settings = {
     batch_size = each.key == "destination-verification" ? 5 : 1
-    # The high-volume ingestion fleets get two consumers. Gmail stays at one
-    # because per-account leases serialize sync work.
-    max_concurrency  = contains(["greenhouse", "github"], each.key) ? 2 : 1
+    max_concurrency  = lookup(local.consumer_max_concurrency, each.key, 1)
     max_retries      = each.key == "gmail" ? 5 : 2
     max_wait_time_ms = contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000
     retry_delay      = each.key == "shadow-extraction" ? 300 : null

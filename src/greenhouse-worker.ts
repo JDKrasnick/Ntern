@@ -37,6 +37,7 @@ export interface GreenhouseBoardDependencies {
   enqueueDestinationVerification?: (request: DestinationVerificationRequest) => Promise<void>;
   catalogAdmissionResolver?: CatalogAdmissionResolver;
   onRecordFailure?: (record: QueueRecord, error: unknown) => Promise<void> | void;
+  messageDeadlineMs?: number;
 }
 
 export interface GreenhouseBoardResult {
@@ -220,7 +221,7 @@ export async function processGreenhouseQueue(
       }));
       throw error;
     }
-  }, undefined, dependencies.onRecordFailure);
+  }, undefined, dependencies.onRecordFailure, dependencies.messageDeadlineMs);
 }
 
 export async function handler(event: QueueEvent): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> {

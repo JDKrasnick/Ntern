@@ -34,11 +34,11 @@
       { "binding": "SHADOW_EXTRACTION_DLQ", "queue": "intern-notifs-shadow-extraction-dlq" }
     ],
     "consumers": [
-      { "queue": "intern-notifs-greenhouse", "max_batch_size": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-greenhouse-dlq" },
-      { "queue": "intern-notifs-lever", "max_batch_size": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-lever-dlq" },
-      { "queue": "intern-notifs-ashby", "max_batch_size": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-ashby-dlq" },
+      { "queue": "intern-notifs-greenhouse", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 6, "dead_letter_queue": "intern-notifs-greenhouse-dlq" },
+      { "queue": "intern-notifs-lever", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-lever-dlq" },
+      { "queue": "intern-notifs-ashby", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-ashby-dlq" },
       { "queue": "intern-notifs-github", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-github-dlq" },
-      { "queue": "intern-notifs-gmail", "max_batch_size": 1, "max_retries": 5, "dead_letter_queue": "intern-notifs-gmail-dlq" },
+      { "queue": "intern-notifs-gmail", "max_batch_size": 1, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "intern-notifs-gmail-dlq" },
       { "queue": "intern-notifs-destination-verification", "max_batch_size": 5, "max_batch_timeout": 60, "max_concurrency": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-destination-verification-dlq" },
       { "queue": "intern-notifs-shadow-extraction", "max_batch_size": 1, "max_batch_timeout": 60, "max_concurrency": 1, "max_retries": 2, "retry_delay": 300, "dead_letter_queue": "intern-notifs-shadow-extraction-dlq" }
     ]
