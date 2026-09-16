@@ -34,6 +34,18 @@ export function sourceFailureCategory(error: unknown): SourceFailureCategory {
     return error.category;
   }
   const message = safeDiagnostic(error).toLowerCase();
+  // The link validator's own probe failures describe the request, not the link:
+  // `Application link timed out` and `Application link could not be reached` mean
+  // the validator's HEAD/GET never completed. Classifying them as `link` let a
+  // burst of row-level probe timeouts quarantine a healthy 3,029-row source for
+  // two consecutive deliveries (2026-09-16, `simplify-summer-2026`), and the same
+  // misclassification applied to the poll's joined failure list, where one
+  // timed-out row next to a `D1 DB is overloaded` error still read as `link`.
+  // Messages that describe a *completed* probe — a rejected host, a dead link, or
+  // an aggregate `N/M eligible ... links failed shadow validation` — carry no
+  // transport wording and stay `link`, so link integrity still quarantines at two
+  // strikes.
+  if (/application link (?:timed out|could not be reached)/.test(message)) return 'transport';
   if (/application link|application host|eligible .* link/.test(message)) return 'link';
   if (/shape|schema|malformed json/.test(message)) return 'json';
   if (/quality|suspicious zero-row/.test(message)) return 'quality';
