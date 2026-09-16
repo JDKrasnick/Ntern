@@ -28,6 +28,7 @@ locals {
       { name = "EMPLOYER_PORTAL_ENABLED", type = "plain_text", text = tostring(var.employer_portal_enabled) },
       { name = "GMAIL_ENABLED", type = "plain_text", text = tostring(var.gmail_enabled) },
       { name = "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED", type = "plain_text", text = tostring(var.identity_unconfirmed_publication_enabled) },
+      { name = "TRUSTED_COMMUNITY_CATALOG_ENABLED", type = "plain_text", text = tostring(var.trusted_community_catalog_enabled) },
       { name = "IDENTITY_CONFIRMED_COVERAGE_FLOOR", type = "plain_text", text = tostring(var.identity_confirmed_coverage_floor) },
       { name = "DEPLOYMENT_ROLE", type = "plain_text", text = "api" },
     ],

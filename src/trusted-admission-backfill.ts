@@ -38,12 +38,17 @@ const TRUSTED_COMMUNITY_CATALOG_ENABLED = true;
 
 /** Rows per keyset page; mirrors `D1InternshipStore.OCCURRENCE_PAGE_ROWS`. */
 const OCCURRENCE_PAGE_ROWS = 250;
-const JOB_LOOKUP_CHUNK = 100;
+// D1 rejects a statement that binds more than 100 parameters (the local sqlite
+// harness allows far more), so every chunk here stays under that cap: the job
+// lookup binds one id per row plus its LIMIT, and a staged row binds six values.
+const D1_MAX_BOUND_PARAMETERS = 100;
+const JOB_LOOKUP_CHUNK = D1_MAX_BOUND_PARAMETERS - 1;
 /** Rows per guarded apply, under the catalog's atomic-repair record limit. */
 const APPLY_TARGET_ROWS = 250;
 const APPLY_TARGET_BYTES = 4 * 1024 * 1024;
 const STAGE_KIND = 'trusted-admission-repair';
-const STAGE_ROWS_PER_STATEMENT = 20;
+const STAGE_VALUES_PER_ROW = 6;
+const STAGE_ROWS_PER_STATEMENT = Math.floor(D1_MAX_BOUND_PARAMETERS / STAGE_VALUES_PER_ROW);
 const STAGE_STATEMENTS_PER_BATCH = 25;
 const CONFLICT_LIMIT = 100;
 const SAMPLE_LIMIT = 10;

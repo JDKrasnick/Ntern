@@ -381,6 +381,9 @@ describe('trusted admission backfill', () => {
     expect(pages().length).toBeGreaterThan(1);
     expect(pages().every((entry) => entry.values[2] === 250)).toBe(true);
     expect(catalogReads().every((entry) => /LIMIT/iu.test(entry.query))).toBe(true);
+    // D1 rejects a statement binding more than 100 parameters, a limit the local
+    // sqlite harness does not enforce: every statement must stay under it.
+    expect(recorder.log!.every((entry) => entry.values.length <= 100)).toBe(true);
 
     await runTrustedAdmissionBackfill(db, { apply: true, repairToken: dryRun.repairToken, expectedChanged: dryRun.expectedChanged });
     expect(guardedApplies().length).toBeGreaterThan(1);
