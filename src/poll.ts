@@ -209,6 +209,13 @@ interface PrefetchedBoardFetch {
 }
 
 const SOURCE_WORK_CONCURRENCY = 24;
+/**
+ * Share of a delivery's rows whose application page may fail to verify before the
+ * source itself is treated as broken. Individual dead or unreachable pages are a
+ * per-row data problem (the row is withheld), while a mostly-broken list still
+ * fails the delivery and is surfaced by the source-level gates.
+ */
+const MAX_PROBE_FAILURE_SHARE = 0.2;
 const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
 /**
  * Listings one GitHub queue delivery may resolve. Sliced because resolving a
@@ -745,12 +752,17 @@ export class IngestionRunner {
     // reported failures do not depend on which worker finished first.
     const accepted = new Array<ProcessedListing | undefined>(listings.length);
     const failures = new Array<string | undefined>(listings.length);
-    // Rows whose application page could not be reached are withdrawn from this
-    // delivery instead of failing it: the row never reaches `accepted`, and the
-    // source-level gates (zero-row, floor and coverage checks) still catch a
-    // source that is genuinely down. Failing the whole delivery here is what
+    // Rows whose application page could not be reached or no longer resolves are
+    // withdrawn from this delivery instead of failing it: the row never reaches
+    // `accepted`, the source-level gates (zero-row, floor, coverage) still catch
+    // a source that is genuinely down, and the share gate below still fails a
+    // list whose links are mostly broken. Failing the whole delivery here is what
     // kept healthy reviewed lists quarantined and filled the GitHub DLQ.
-    const withdrawnTransportFailures: string[] = [];
+    const withdrawnProbeFailures: string[] = [];
+    const isProbeFailure = (error: unknown) => {
+      const category = sourceFailureCategory(error);
+      return category === 'transport' || category === 'link';
+    };
     const priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
     await forEachBounded(listings, async (sourceListing, slot) => {
       // Transitional RawListing adapters predate provider-neutral evidence.
@@ -1027,12 +1039,13 @@ export class IngestionRunner {
           } catch (error) {
             reachability = reachabilityFromFailure(error);
             const failure = `${listing.sourceId}: row ${listing.row}: ${error instanceof Error ? error.message : String(error)}`;
-            // A probe that never completed withdraws its row; a completed probe
-            // that reports a dead or gone link is still a delivery failure.
+            // A probe that never completed, or one that resolved to a dead link,
+            // withdraws its row rather than failing the delivery; a genuinely
+            // broken list is caught by the share gate in the caller.
             // A bounded metadata refresh cannot withdraw its selected row: doing
             // so would certify a parser revision that never successfully read
             // the page. Keep that obligation pending for a later delivery.
-            if (sourceFailureCategory(error) === 'transport' && !stampSourceMetadata) withdrawnTransportFailures.push(failure);
+            if (isProbeFailure(error) && !stampSourceMetadata) withdrawnProbeFailures.push(failure);
             else failures[slot] = failure;
             if (!admissionManaged) {
               failedExternalIds.add(id);
@@ -1192,12 +1205,23 @@ export class IngestionRunner {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const failure = `${listing.sourceId}: row ${listing.row}: ${message}`;
-        if (sourceFailureCategory(error) === 'transport') withdrawnTransportFailures.push(failure);
+        if (isProbeFailure(error)) withdrawnProbeFailures.push(failure);
         else failures[slot] = failure;
         failedExternalIds.add(id);
         await completeFailedAdmissionMigration();
       }
     });
+    // A list whose application pages are mostly broken is a real failure; a
+    // handful of dead links is data quality, and those rows are already withheld
+    // from this delivery.
+    const probeFailureShare = listings.length === 0 ? 0 : withdrawnProbeFailures.length / listings.length;
+    if (probeFailureShare > MAX_PROBE_FAILURE_SHARE) {
+      report.failures.push(
+        `${listings[0]?.sourceId ?? 'source'}: ${withdrawnProbeFailures.length} of ${listings.length} rows could not be verified `
+        + `(${(probeFailureShare * 100).toFixed(0)}% above ${MAX_PROBE_FAILURE_SHARE * 100}%)`,
+        ...withdrawnProbeFailures.slice(0, 5),
+      );
+    }
     report.failures.push(...failures.filter((failure): failure is string => failure !== undefined));
     return {
       accepted: accepted.filter((listing): listing is ProcessedListing => listing !== undefined),
@@ -1208,7 +1232,8 @@ export class IngestionRunner {
       handledExternalIds,
       failedExternalIds,
       providerShadowVerifications,
-      withdrawnTransportFailures,
+      withdrawnProbeFailures,
+      probeFailureShare,
     };
   }
 
@@ -1500,12 +1525,13 @@ export class IngestionRunner {
         // Existing catalog decisions are the durable migration obligation.
         // Rows with no prior occurrence are evaluated with spare slice capacity
         // but fail closed and cannot hold the source checkpoint open forever.
-        if (resolution.withdrawnTransportFailures.length) {
+        if (resolution.withdrawnProbeFailures.length) {
           console.log(JSON.stringify({
-            event: 'row_transport_withdrawn',
+            event: 'row_probe_withdrawn',
             sourceId: connector.id,
-            count: resolution.withdrawnTransportFailures.length,
-            samples: resolution.withdrawnTransportFailures.slice(0, 5),
+            count: resolution.withdrawnProbeFailures.length,
+            share: Number(resolution.probeFailureShare.toFixed(4)),
+            samples: resolution.withdrawnProbeFailures.slice(0, 5),
           }));
         }
         const admissionEvidencePending = migrationLimit !== undefined && (
