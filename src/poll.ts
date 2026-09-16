@@ -1553,6 +1553,34 @@ export class IngestionRunner {
               resolvedJobs: resolution.resolved,
               now,
             });
+            // An alert-only policy still hides the unsafe listings and records the
+            // breach, but the source keeps polling instead of quarantining: the
+            // reviewed list's anomalies are caught per posting downstream.
+            if (trustedPolicy.circuitBreaker === 'alert') {
+              // Withhold exactly as a pending migration does before ending the
+              // delivery: the pass is not evidence that the source advanced.
+              for (const listing of resolution.accepted) {
+                if (listing.trustedCommunityAlertQualification) {
+                  listing.trustedCommunityAlertQualification = {
+                    ...listing.trustedCommunityAlertQualification,
+                    catalogPublicationSuppressed: true,
+                  };
+                }
+                if (listing.admission) listing.admission = { ...listing.admission, catalogEligible: false, alertEligible: false };
+              }
+              resolution.alertEligible.clear();
+              console.log(JSON.stringify({
+                event: 'trusted_community_circuit_alert',
+                sourceId: connector.id,
+                breaches,
+                rawRows: trustedMetrics.rawRows,
+                eligibleRows: trustedMetrics.eligibleRows,
+                browserInspectionShare: trustedMetrics.browserInspectionShare,
+              }));
+              // The reviewed list keeps polling instead of quarantining: its
+              // anomalies are caught per posting downstream.
+              continue;
+            }
             throw new SourceFetchError(`${connector.id}: trusted-community circuit breaker: ${breaches.join('; ')}`, 'quality', undefined, undefined, true);
           }
         }

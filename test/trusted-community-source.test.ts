@@ -125,6 +125,9 @@ describe('trusted community source policy', () => {
         version: sourceId === 'simplify-summer-2026' ? 'simplify-trusted-community-v1' : `${sourceId}-trusted-community-v1`,
         catalogMode: 'validated-posting-specific-destination',
         alertMode: 'disabled',
+        // The reviewed lists alarm on a floor breach instead of quarantining:
+        // their boards are manually verified and anomalies are caught per posting.
+        circuitBreaker: 'alert',
       });
       expect(activeTrustedCommunityPolicy(sourceId, false)).toBeUndefined();
       expect(activeTrustedCommunityPolicy(sourceId, true)).toEqual(sourceAdmissionPolicy(sourceId));
@@ -461,7 +464,7 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     });
   });
 
-  it('does not checkpoint or self-enqueue a migration continuation after a circuit breach', async () => {
+  it('alerts on a circuit breach for a reviewed list without checkpointing, self-enqueueing, or quarantining', async () => {
     const store = new MemoryInternshipStore();
     const adapter: SourceAdapter = {
       id: 'simplify-summer-2026',
@@ -477,15 +480,20 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     await new Poller([adapter], store, () => new Date(inspectedAt), undefined, undefined, undefined, undefined,
       resolver, true, false).poll();
     const checkpoint = await store.getCheckpoint(adapter.id);
+    const alerts: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => { alerts.push(String(line)); });
     const breached = await new Poller([adapter], store, () => new Date('2026-09-04T12:10:00.000Z'), undefined,
       undefined, undefined, undefined, resolver, true, true).poll({ maxAdmissionMigrationListingsPerSourceRun: 0 });
-    expect(breached.failures).toEqual([expect.stringContaining('trusted-community circuit breaker')]);
+    spy.mockRestore();
+    // The reviewed lists alarm instead of quarantining, and the alert names the breach.
+    expect(alerts.some((line) => line.includes('trusted_community_circuit_alert') && line.includes('simplify-summer-2026'))).toBe(true);
+    expect(breached.failures).toEqual([]);
     expect(breached.continuationSources).toEqual([]);
     expect(await store.getCheckpoint(adapter.id)).toEqual(checkpoint);
-    expect(await store.getSourceHealth(adapter.id)).toMatchObject({ state: 'quarantined' });
+    expect((await store.getSourceHealth(adapter.id))?.state).not.toBe('quarantined');
   });
 
-  it('keeps the final migration hidden and uncheckpointed when current inspection coverage is incomplete', async () => {
+  it('alerts on incomplete inspection coverage without checkpointing, publishing nothing further, or quarantining', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'simplify-summer-2026';
     const { minimumRawRows, minimumEligibleRows } = SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS;
@@ -536,15 +544,25 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
       },
     };
 
+    const alerts: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => { alerts.push(String(line)); });
     const result = await new Poller([adapter], store, () => new Date(inspectedAt), undefined,
       undefined, undefined, undefined, resolver, true, true).poll({ maxAdmissionMigrationListingsPerSourceRun: minimumEligibleRows });
+    spy.mockRestore();
 
     const inspectedCoverage = ((100 / minimumEligibleRows) * 100).toFixed(2);
-    expect(result.failures).toContain(`simplify-summer-2026: trusted-community circuit breaker: inspection coverage ${inspectedCoverage}% below 90.00%`);
+    // The reviewed list alerts on the coverage breach and ends the delivery
+    // without checkpointing or quarantining. Publication is gated per row by
+    // each occurrence's own destination evidence, which this pass did inspect.
+    expect(alerts.some((line) => line.includes('trusted_community_circuit_alert')
+      && line.includes(`inspection coverage ${inspectedCoverage}% below 90.00%`))).toBe(true);
+    // The fixture's own resolution failures are expected; the breach must not be
+    // one of them, because an alert policy never fails the delivery.
+    expect(result.failures.some((failure) => failure.includes('circuit breaker'))).toBe(false);
     expect(result.continuationSources).toEqual([]);
     expect(await store.getCheckpoint(sourceId)).toEqual(previous);
     expect(await store.listCatalog()).toEqual([]);
-    expect(await store.getSourceHealth(sourceId)).toMatchObject({ state: 'quarantined' });
+    expect((await store.getSourceHealth(sourceId))?.state).not.toBe('quarantined');
   });
 
   it('restarts qualification when an occurrence is absent from a complete source snapshot', async () => {

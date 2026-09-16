@@ -12,6 +12,13 @@ export interface TrustedCommunityAdmissionPolicy {
   version: string;
   catalogMode: 'validated-posting-specific-destination';
   alertMode: TrustedCommunityAlertMode;
+  /**
+   * `block` (the default) fails the delivery so the source quarantines; `alert`
+   * hides the unsafe listings and logs the breach but keeps polling. The
+   * reviewed lists are manually verified and their anomalies are caught per
+   * posting, so a floor breach is an alarm rather than a stop.
+   */
+  circuitBreaker?: 'block' | 'alert';
 }
 
 export interface StandardAdmissionPolicy {
@@ -30,6 +37,7 @@ function trustedCommunityListPolicy(sourceId: string): TrustedCommunityAdmission
     version: `${sourceId}-trusted-community-v1`,
     catalogMode: 'validated-posting-specific-destination',
     alertMode: 'disabled',
+    circuitBreaker: 'alert',
   };
 }
 
@@ -53,6 +61,7 @@ const TRUSTED_COMMUNITY_POLICIES: Readonly<Record<string, TrustedCommunityAdmiss
     version: 'simplify-trusted-community-v1',
     catalogMode: 'validated-posting-specific-destination',
     alertMode: 'disabled',
+    circuitBreaker: 'alert',
   },
   'speedyapply-2027-swe': trustedCommunityListPolicy('speedyapply-2027-swe'),
   'speedyapply-2027-ai': trustedCommunityListPolicy('speedyapply-2027-ai'),
