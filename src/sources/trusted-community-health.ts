@@ -14,6 +14,10 @@ export interface TrustedCommunityBaseline {
   browserInspectionCandidates: number;
   catalogAdmissions: number;
   alertQualifications: number;
+  /** Occurrences the baseline pass could inspect. The rate gates are measured
+   * against inspected candidates, so a baseline has to carry the same
+   * denominator the metrics use. */
+  inspectedCandidates?: number;
 }
 
 export interface TrustedCommunityThresholds {
@@ -36,18 +40,75 @@ export const SIMPLIFY_TRUSTED_COMMUNITY_BASELINE: TrustedCommunityBaseline = {
   alertQualifications: simplifyBaselineReport.counts.exactRouteShapes,
 };
 
+/**
+ * Floors come from the source's own baseline. Absolute floors only fit the board
+ * they were measured on: on 2026-09-16 the family preset demanded 1,456 raw rows
+ * and a 5% destination-failure rate of boards holding 71 to 3,063 rows, which
+ * quarantined five of six verified lists. Rates are measured against inspected
+ * candidates with ten points of tolerance, so a list is judged against its own
+ * shape; the count floors keep the original 70%.
+ */
 export function trustedCommunityThresholds(baseline: TrustedCommunityBaseline): TrustedCommunityThresholds {
   const ratio = (numerator: number, denominator: number) => denominator ? numerator / denominator : 0;
+  const inspected = baseline.inspectedCandidates && baseline.inspectedCandidates > 0
+    ? baseline.inspectedCandidates
+    : baseline.eligibleRows;
   return {
     minimumRawRows: Math.ceil(baseline.rawRows * 0.7),
     minimumEligibleRows: Math.ceil(baseline.eligibleRows * 0.7),
     minimumInspectedCandidates: 100,
     minimumInspectionCoverage: 0.9,
-    maximumDestinationFailureRate: Math.min(0.2, ratio(baseline.destinationFailures, baseline.eligibleRows) + 0.05),
-    maximumBrowserInspectionShare: Math.min(0.5, ratio(baseline.browserInspectionCandidates, baseline.eligibleRows) + 0.1),
+    maximumDestinationFailureRate: Math.min(0.5, ratio(baseline.destinationFailures, inspected) + 0.1),
+    maximumBrowserInspectionShare: Math.min(0.9, ratio(baseline.browserInspectionCandidates, inspected) + 0.1),
     minimumCatalogYield: Math.max(0, ratio(baseline.catalogAdmissions, baseline.rawRows) - 0.1),
     minimumAlertYield: Math.max(0, ratio(baseline.alertQualifications, baseline.eligibleRows) - 0.1),
   };
+}
+
+/** Duplicate occurrence identities are deduped before publication, so a handful
+ * is a data-entry quirk in the upstream list rather than a reason to stop polling
+ * a trusted board: allow 1% of raw rows, at least five. */
+export function duplicateOccurrenceTolerance(metrics: { rawRows: number }): number {
+  return Math.max(5, Math.ceil(metrics.rawRows * 0.01));
+}
+
+/**
+ * Baselines observed from live passes on 2026-09-16, after each board was
+ * verified healthy in a browser (board renders, sampled application links resolve
+ * to live postings). Re-measure before tightening: these describe the shapes the
+ * lists actually have, and a list that shrinks by more than 30% still breaches.
+ */
+export const TRUSTED_COMMUNITY_BASELINES: Record<string, TrustedCommunityBaseline> = {
+  'vanshb03-summer-2027': {
+    rawRows: 371, eligibleRows: 352, inspectedCandidates: 137,
+    destinationFailures: 27, browserInspectionCandidates: 109, catalogAdmissions: 110, alertQualifications: 0,
+  },
+  'simplify-summer-2026': {
+    rawRows: 3_063, eligibleRows: 2_542, inspectedCandidates: 2_293,
+    destinationFailures: 261, browserInspectionCandidates: 1_081, catalogAdmissions: 2_032, alertQualifications: 0,
+  },
+  'speedyapply-2027-swe': {
+    rawRows: 1_035, eligibleRows: 1_017, inspectedCandidates: 187,
+    destinationFailures: 19, browserInspectionCandidates: 92, catalogAdmissions: 168, alertQualifications: 0,
+  },
+  'speedyapply-2027-ai': {
+    rawRows: 952, eligibleRows: 931, inspectedCandidates: 192,
+    destinationFailures: 27, browserInspectionCandidates: 103, catalogAdmissions: 168, alertQualifications: 0,
+  },
+  'northwestern-fintech-2027-quant': {
+    rawRows: 71, eligibleRows: 70, inspectedCandidates: 38,
+    destinationFailures: 15, browserInspectionCandidates: 26, catalogAdmissions: 23, alertQualifications: 0,
+  },
+  'canadian-tech-2027': {
+    rawRows: 273, eligibleRows: 220, inspectedCandidates: 162,
+    destinationFailures: 34, browserInspectionCandidates: 52, catalogAdmissions: 128, alertQualifications: 0,
+  },
+};
+
+/** Thresholds for a source: its own baseline when measured, else the family preset. */
+export function trustedCommunityThresholdsFor(sourceId: string): TrustedCommunityThresholds {
+  const baseline = TRUSTED_COMMUNITY_BASELINES[sourceId];
+  return baseline ? trustedCommunityThresholds(baseline) : SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS;
 }
 
 export const SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS = trustedCommunityThresholds(SIMPLIFY_TRUSTED_COMMUNITY_BASELINE);
@@ -138,7 +199,9 @@ export function trustedCommunityCircuitBreaches(input: {
   const breaches: string[] = [];
   if (metrics.rawRows === 0) breaches.push('parser returned zero rows');
   if (metrics.survivingAggregatorRows > 0) breaches.push(`${metrics.survivingAggregatorRows} aggregator row(s) survived rejection`);
-  if (metrics.duplicateOccurrenceIds > 0) breaches.push(`${metrics.duplicateOccurrenceIds} duplicate occurrence identity row(s)`);
+  if (metrics.duplicateOccurrenceIds > duplicateOccurrenceTolerance(metrics)) {
+    breaches.push(`${metrics.duplicateOccurrenceIds} duplicate occurrence identity row(s)`);
+  }
   if (metrics.rawRows < thresholds.minimumRawRows) breaches.push(`raw rows ${metrics.rawRows} below ${thresholds.minimumRawRows}`);
   if (metrics.eligibleRows < thresholds.minimumEligibleRows) breaches.push(`eligible rows ${metrics.eligibleRows} below ${thresholds.minimumEligibleRows}`);
   if (input.requireCompleteInspection && metrics.inspectedCandidates < thresholds.minimumInspectedCandidates) {
