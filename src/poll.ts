@@ -182,6 +182,8 @@ export interface PollReport {
   filteredJobs: Internship[];
   quarantinedListings: Array<{ sourceId: string; row: number; reason: string }>;
   continuationSources: string[];
+  /** Per source, listings still owed a bounded resolution pass; absent means none. */
+  pendingResolution: Record<string, number>;
   failures: string[];
   // An outer fetch or persistence failure aborts the whole source. It is
   // tracked separately from per-row `failures` so a consumer can retry the
@@ -208,6 +210,17 @@ interface PrefetchedBoardFetch {
 
 const SOURCE_WORK_CONCURRENCY = 24;
 const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
+/**
+ * Listings one GitHub queue delivery may resolve. Sliced because resolving a
+ * whole board in one message is what killed these deliveries: the largest
+ * reviewed source holds 3,029 postings, and in production each resolved row also
+ * pays a destination check and its own catalog writes. 750 rows measured a
+ * 300 s (five-minute) message-deadline abort on `simplify-summer-2026`, so the
+ * slice is sized at roughly a third of that budget; the pass is resumable from
+ * the checkpoint (`pendingResolutionRows`), so lowering this only trades
+ * deliveries for per-delivery cost.
+ */
+export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 200;
 
 /**
  * Bounded worker pool that always drains: the first error is rethrown only once
@@ -587,7 +600,7 @@ export class IngestionRunner {
     prior: SourceOccurrenceState,
     admissionConfigurationVersion: string | undefined,
     now: string,
-  ): Promise<void> {
+  ): Promise<SourceOccurrenceState> {
     const reference = prior.occurrence;
     const previousAdmission = reference.admission!;
     const job = await this.store.getJob(prior.jobId);
@@ -605,7 +618,7 @@ export class IngestionRunner {
     const occurrence = { ...prior, occurrence: updatedReference, changedAt: now };
     if (!job) {
       await this.store.putSourceOccurrence(occurrence);
-      return;
+      return occurrence;
     }
     const decision = reference.postingIdentityDecision;
     if (!decision || decision.status === 'quarantined') {
@@ -620,6 +633,7 @@ export class IngestionRunner {
       occurrence,
     });
     if (result.outcome !== 'committed') throw new Error(`Trusted admission revocation conflicted: ${prior.externalId}`);
+    return occurrence;
   }
 
   private readonly boardIndex = reviewedBoardIndex();
@@ -1176,6 +1190,7 @@ export class IngestionRunner {
     runId?: string;
     allowCompleteEmptySnapshot?: boolean;
     maxAdmissionMigrationListingsPerSourceRun?: number;
+    maxListingsPerSourceRun?: number;
     naturalProviderPoll?: boolean;
   } = {}): Promise<PollReport> {
     const report: PollReport = {
@@ -1187,6 +1202,7 @@ export class IngestionRunner {
       filteredJobs: [],
       quarantinedListings: [],
       continuationSources: [],
+      pendingResolution: {},
       failures: [],
       sourceFailures: [],
     };
@@ -1256,20 +1272,30 @@ export class IngestionRunner {
             trustedCommunityCatalogEnabled: this.trustedCommunityCatalogEnabled,
           });
         let remainingMigrationLimit = options.maxAdmissionMigrationListingsPerSourceRun;
+        let revocationOccurrences: SourceOccurrenceState[] | undefined;
         if (!this.trustedCommunityCatalogEnabled && sourceAdmissionPolicy(connector.id).trust === 'trusted-community') {
           failureCategory = 'persistence';
-          const revocations = (await this.store.getSourceOccurrences(connector.id))
-            .filter((item) => item.occurrence.admission?.evidenceCodes?.includes('trusted-community-source'));
-          if (revocations.length) await this.store.putCheckpoint({
+          // The sweep and the reconciliation below read the same rows, so one
+          // read serves both: each rewritten occurrence replaces its entry in
+          // this array, keeping it identical to a second read of the source.
+          const occurrences = await this.store.getSourceOccurrences(connector.id);
+          revocationOccurrences = occurrences;
+          const revocationIndexes: number[] = [];
+          occurrences.forEach((item, index) => {
+            if (item.occurrence.admission?.evidenceCodes?.includes('trusted-community-source')) revocationIndexes.push(index);
+          });
+          if (revocationIndexes.length) await this.store.putCheckpoint({
             sourceId: connector.id, successfulFetches: 0, ...previous,
             pendingAdmissionConfigurationVersion: admissionConfigurationVersion ?? 'standard-v1',
           });
-          const selected = remainingMigrationLimit === undefined ? revocations : revocations.slice(0, remainingMigrationLimit);
-          for (const occurrence of selected) {
-            await this.revokeTrustedCommunityAdmission(occurrence, admissionConfigurationVersion, this.now().toISOString());
+          const selectedIndexes = remainingMigrationLimit === undefined
+            ? revocationIndexes : revocationIndexes.slice(0, remainingMigrationLimit);
+          for (const index of selectedIndexes) {
+            occurrences[index] = await this.revokeTrustedCommunityAdmission(
+              occurrences[index]!, admissionConfigurationVersion, this.now().toISOString());
           }
-          if (remainingMigrationLimit !== undefined) remainingMigrationLimit -= selected.length;
-          if (selected.length < revocations.length) {
+          if (remainingMigrationLimit !== undefined) remainingMigrationLimit -= selectedIndexes.length;
+          if (selectedIndexes.length < revocationIndexes.length) {
             report.continuationSources.push(connector.id);
             continue;
           }
@@ -1281,7 +1307,16 @@ export class IngestionRunner {
           && admissionConfigurationVersion !== previous.admissionConfigurationVersion));
         const metadataVersionChanged = previous?.metadataExtractionVersion !== ROLE_METADATA_EXTRACTION_VERSION
           || previous?.metadataProcessingRevision !== SOURCE_METADATA_PROCESSING_REVISION;
-        const fetchCheckpoint = (admissionConfigurationChanged || metadataVersionChanged) && previous ? {
+        // A validators-only response carries no rows, so an open bounded
+        // resolution pass must re-read the whole board to make progress. Only
+        // the validators are cleared: the content hash still labels the
+        // re-read as unchanged instead of reporting a spurious source change.
+        const resolutionPassOpen = Boolean(previous?.pendingResolutionRows?.length);
+        const fetchCheckpoint = resolutionPassOpen && previous ? {
+          ...previous,
+          etag: undefined,
+          documentEtags: undefined,
+        } : (admissionConfigurationChanged || metadataVersionChanged) && previous ? {
           ...previous,
           etag: undefined,
           documentEtags: undefined,
@@ -1300,7 +1335,7 @@ export class IngestionRunner {
         if (baseline) report.baselineSources.push(connector.id);
         report.processedListings += batch.processed.counts.eligible;
         const now = this.now().toISOString();
-        const priorOccurrences = await this.store.getSourceOccurrences(connector.id);
+        const priorOccurrences = revocationOccurrences ?? await this.store.getSourceOccurrences(connector.id);
         // An unchanged snapshot repeats postings the checkpoint already trusts, so
         // only omission progress is reconciled; re-resolving every row would cost a
         // full catalog rewrite on every poll for byte-identical source content.
@@ -1386,11 +1421,42 @@ export class IngestionRunner {
           && this.trustedCommunityCatalogEnabled
           && result.unchangedReason !== 'not_modified';
         const metadataFullBody = metadataVersionChanged && result.unchangedReason !== 'not_modified';
+        // An unchanged snapshot repeats postings the checkpoint already trusts,
+        // so it resolves nothing unless a full body is due for another reason.
+        const resolutionDue = !batch.unchanged || trustedFullBody || metadataFullBody;
+        // A cleared-validator refetch of unchanged content still reports
+        // `unchangedReason: 'content_hash'`, so an open pass has to keep the
+        // full body in scope or it could never resolve its next slice.
+        const pendingResolutionRows = new Set(previous?.pendingResolutionRows ?? []);
+        const resolutionFullBody = options.maxListingsPerSourceRun !== undefined
+          && (pendingResolutionRows.size > 0
+            || (resolutionDue && batch.processed.listings.length > options.maxListingsPerSourceRun));
         const listingsToResolve = migrationLimit === undefined
-          ? (batch.unchanged && !trustedFullBody && !metadataFullBody ? [] : batch.processed.listings)
+          ? (resolutionDue || resolutionFullBody ? batch.processed.listings : [])
           : migrationCandidates;
+        // An admission migration's own rows stay obligated in every delivery,
+        // including one that also advances a bounded resolution pass.
+        const obligatedListings = migrationLimit === undefined ? [] : listingsToResolve;
+        // A pass slice comes from the whole board rather than from a concurrent
+        // migration's candidates, so neither pass can close the other early.
+        const resolutionScope = pendingResolutionRows.size
+          ? batch.processed.listings.filter((listing) => pendingResolutionRows.has(externalId(listing)))
+          : migrationLimit === undefined ? listingsToResolve : [];
+        const obligatedIds = new Set(obligatedListings.map(externalId));
+        const sliceCapacity = options.maxListingsPerSourceRun === undefined
+          ? undefined
+          : Math.max(0, options.maxListingsPerSourceRun - obligatedListings.length);
+        const selectedSlice = sliceCapacity === undefined ? resolutionScope : resolutionScope.slice(0, sliceCapacity);
+        const resolvedListings = obligatedListings.length
+          ? [...obligatedListings, ...selectedSlice.filter((listing) => !obligatedIds.has(externalId(listing)))]
+          : selectedSlice;
+        // Rows that left the board between deliveries stop holding the pass
+        // open; they have no listing to resolve and are reconciled as omissions.
+        const nextPendingRows = resolutionFullBody
+          ? resolutionScope.slice(sliceCapacity ?? resolutionScope.length).map(externalId)
+          : [];
         const resolution = await this.resolveListings(
-          listingsToResolve,
+          resolvedListings,
           report,
           priorOccurrences,
           githubAdmissionConfigurationVersion,
@@ -1434,6 +1500,12 @@ export class IngestionRunner {
             || metadataMigrationCandidates.length > 0 && unprocessedMissingOccurrences.length > 0);
         admissionMigrationPending ||= lifecycleMigrationPending;
         if (admissionMigrationPending) report.continuationSources.push(connector.id);
+        // An open resolution pass also holds the source open: the delivery that
+        // empties it reconciles omissions and closures in the same message.
+        if (nextPendingRows.length && !report.continuationSources.includes(connector.id)) {
+          report.continuationSources.push(connector.id);
+        }
+        if (nextPendingRows.length) report.pendingResolution[connector.id] = nextPendingRows.length;
         if (trustedPolicy && result.unchangedReason !== 'not_modified') {
           const diagnostics = result.trustedCommunityDiagnostics ?? {
             rejectedAggregatorRows: result.rejectedApplicationUrls?.filter((item) => item.reason.includes('aggregator')).length ?? 0,
@@ -1490,7 +1562,11 @@ export class IngestionRunner {
         // Admission configuration migration is independent of source
         // lifecycle reconciliation. Replaying inactive historical occurrences
         // defeats the slice bound; the next ordinary poll handles omissions.
-        const partialMigration = migrationLimit !== undefined && admissionMigrationPending;
+        // A bounded admission slice and an open resolution pass both defer
+        // closure work to the delivery that completes them, so no non-sliced
+        // row is closed while its own slice is still pending. Non-sliced active
+        // rows are still confirmed against the whole-board id set above.
+        const partialMigration = nextPendingRows.length > 0 || (migrationLimit !== undefined && admissionMigrationPending);
         const closureScope = boundedMetadataRefresh ? selectedClosures : partialMigration ? [] : missingOccurrences;
         const closureCandidates = closureScope.filter((prior) => !resolution.resolved.has(prior.externalId) && prior.consecutiveOmissions >= 1);
         await forEachBounded(closureCandidates, async (prior) => {
@@ -1724,6 +1800,7 @@ export class IngestionRunner {
             externalId, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
             processingRevision: SOURCE_METADATA_PROCESSING_REVISION,
           })),
+          pendingResolutionRows: nextPendingRows.length ? nextPendingRows : undefined,
           contentHash: batch.snapshotHash,
           activeExternalIds: [...batch.activeExternalIds],
           pendingAdmissionConfigurationVersion: admissionMigrationPending ? admissionConfigurationVersion : undefined,
@@ -1796,6 +1873,7 @@ export class Poller extends IngestionRunner {
     runId?: string;
     allowCompleteEmptySnapshot?: boolean;
     maxAdmissionMigrationListingsPerSourceRun?: number;
+    maxListingsPerSourceRun?: number;
     naturalProviderPoll?: boolean;
   } = {}) {
     return this.run(options);

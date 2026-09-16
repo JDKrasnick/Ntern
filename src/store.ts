@@ -84,6 +84,8 @@ export interface InternshipStore {
   putInternship(job: Internship): Promise<void>;
   getJob(jobId: string): Promise<Internship | undefined>;
   getSourceOccurrences(sourceId: string): Promise<SourceOccurrenceState[]>;
+  /** One occurrence by key, for readers that need a single row of a large source. */
+  getSourceOccurrence(sourceId: string, externalId: string): Promise<SourceOccurrenceState | undefined>;
   putSourceOccurrence(occurrence: SourceOccurrenceState): Promise<void>;
   /** Append-only audit history; current evidence is selected by source/artifact slot. */
   recordRoleMetadataEvidence?(jobId: string, evidence: readonly RoleMetadataEvidence[], conflicts: readonly MetadataConflict[], recordedAt: string,
@@ -215,6 +217,10 @@ export class MemoryInternshipStore implements InternshipStore {
   async markProviderShadowVerificationEnqueued(idempotencyKey: string) { this.providerShadowVerifications.delete(idempotencyKey); }
   async putInternship(job: Internship) { const canonical = canonicalCatalogRecency(job); this.jobs.set(canonical.jobId, structuredClone(canonical)); }
   async getSourceOccurrences(sourceId: string) { return [...this.occurrences.values()].filter((value) => value.sourceId === sourceId).map((value) => structuredClone(value)); }
+  async getSourceOccurrence(sourceId: string, externalId: string) {
+    const value = this.occurrences.get(`${sourceId}#${externalId}`);
+    return value ? structuredClone(value) : undefined;
+  }
   async putSourceOccurrence(occurrence: SourceOccurrenceState) { this.occurrences.set(`${occurrence.sourceId}#${occurrence.externalId}`, structuredClone(occurrence)); }
   async recordRoleMetadataEvidence(jobId: string, evidence: readonly RoleMetadataEvidence[], conflicts: readonly MetadataConflict[], _recordedAt: string,
     replace?: { sourceId: string; sourceClasses: readonly EvidenceSource[] }) {
@@ -342,6 +348,12 @@ export class DynamoInternshipStore implements InternshipStore {
       KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
       ExpressionAttributeValues: { ':pk': `SOURCE#${sourceId}`, ':prefix': 'OCCURRENCE#' },
     })).map((item) => item.occurrence as SourceOccurrenceState);
+  }
+  async getSourceOccurrence(sourceId: string, externalId: string): Promise<SourceOccurrenceState | undefined> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName, Key: { pk: `SOURCE#${sourceId}`, sk: `OCCURRENCE#${externalId}` },
+    }));
+    return result.Item?.occurrence as SourceOccurrenceState | undefined;
   }
   async putSourceOccurrence(occurrence: SourceOccurrenceState): Promise<void> {
     await this.client.send(new PutCommand({

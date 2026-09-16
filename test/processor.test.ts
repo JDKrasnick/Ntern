@@ -124,4 +124,32 @@ describe('shared posting processor', () => {
       ]);
     }
   });
+
+  it('repairs a cut title from the employer rows collected in one pass without moving any other row', () => {
+    const result = processSnapshot({
+      sourceId: 'lever-acme', outcome: 'changed', complete: true, rawCount: 3, contentHash: 'hash',
+      checkpoint: { sourceId: 'lever-acme', successfulFetches: 1 },
+      postings: [
+        posting({ externalId: 'cut', title: 'Backend Software Engineer Intern - Paym…' }),
+        posting({ externalId: 'whole', title: 'Backend Software Engineer Intern - Payments (Summer 2027)' }),
+        posting({ externalId: 'marketing', title: 'Marketing Intern' }),
+      ],
+    });
+
+    // One whole row of the employer's board repairs the row the source cut short,
+    // whichever order the rows arrive in.
+    expect(result.listings.map(({ externalId, title }) => [externalId, title])).toEqual([
+      ['cut', 'Backend Software Engineer Intern - Payments (Summer 2027)'],
+      ['whole', 'Backend Software Engineer Intern - Payments (Summer 2027)'],
+      ['marketing', 'Marketing Intern'],
+    ]);
+    expect(result.listings[0]).toMatchObject({ titleRepaired: true, season: 'summer-2027' });
+    // Accumulating the employer titles in place must not change any row's outcome.
+    expect(result.decisions).toEqual([
+      { externalId: 'cut', outcome: 'included', reason: 'source-policy' },
+      { externalId: 'whole', outcome: 'included', reason: 'source-policy' },
+      { externalId: 'marketing', outcome: 'shelved', reason: 'nontechnical' },
+    ]);
+    expect(result.counts).toEqual({ raw: 3, valid: 3, eligible: 2, shelved: 1, filtered: 0, withheld: 0 });
+  });
 });

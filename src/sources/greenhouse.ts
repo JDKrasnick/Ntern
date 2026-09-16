@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { declaredBodyBytes, readBoundedJson } from '../core/bounded-body.js';
 import { isTechnicalJob } from '../core/filters.js';
 import { parseCompensation } from '../core/normalize.js';
 import { platformFetch } from '../core/platform-fetch.js';
@@ -36,7 +37,14 @@ export interface GreenhouseAdapterOptions {
   now?: () => Date;
 }
 
-export const GREENHOUSE_RESPONSE_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * Board ceiling measured against the isolate: a `content=true` board is held as
+ * UTF-16, and `JSON.parse` plus the mapped postings peak near 3.7× the body
+ * bytes, so 16 MB leaves roughly a third of the memory limit for the occurrence
+ * set, the reconciliation plan, and notification fanout. Boards above it fail
+ * as `capacity` before `JSON.parse` instead of exhausting the isolate.
+ */
+export const GREENHOUSE_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
 export const GREENHOUSE_JOB_MAX_BYTES = 512 * 1024;
 export const GREENHOUSE_BOARD_MAX_JOBS = 5_000;
 export const GREENHOUSE_CONTENT_HASH_VERSION = 2;
@@ -172,75 +180,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function declaredBodyBytes(response: Response): number | undefined {
-  const header = response.headers.get('content-length');
-  if (header === null) return undefined;
-  const value = Number(header);
-  return Number.isFinite(value) ? value : undefined;
-}
-
-/** Streams the body under the response-size guard, stopping an oversized body early. */
-async function readBoundedBody(response: Response, limit: number, sourceId: string): Promise<{ text: string; bytes: number }> {
-  if (!response.body) {
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > limit) {
-      throw new SourceFetchError(`${sourceId}: Greenhouse response body exceeds ${limit} bytes`, 'capacity');
-    }
-    return { text: new TextDecoder().decode(buffer), bytes: buffer.byteLength };
-  }
-  const reader = response.body.getReader();
-  let bytes = 0;
-  let text = '';
-  const decoder = new TextDecoder();
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      bytes += next.value.byteLength;
-      if (bytes > limit) throw new SourceFetchError(`${sourceId}: Greenhouse response body exceeds ${limit} bytes`, 'capacity');
-      text += decoder.decode(next.value, { stream: true });
-    }
-    text += decoder.decode();
-  } catch (error) {
-    // Stop a body without a useful Content-Length as soon as it crosses the
-    // limit, rather than retaining or continuing to consume its remaining data.
-    try { await reader.cancel(error); } catch { /* The size error remains primary. */ }
-    throw error;
-  } finally {
-    reader.releaseLock();
-  }
-  return { text, bytes };
-}
-
-/**
- * Reads one board response and parses it.
- *
- * Only a body that arrived whole is evidence about the provider's schema, so a
- * parse failure over a complete body stays `json` (immediate quarantine) while a
- * failed or short transfer is `transport` (bounded retry, no quarantine). A
- * transient abort used to be relabelled "malformed JSON" and quarantined a board
- * whose payload was intact (see #236).
- */
-async function boundedJson(response: Response, limit: number, sourceId: string): Promise<unknown> {
-  let body: { text: string; bytes: number };
-  try {
-    body = await readBoundedBody(response, limit, sourceId);
-  } catch (error) {
-    throw categorizeFetchError(error, sourceId);
-  }
-  const declared = declaredBodyBytes(response);
-  // A transfer that ends short of its declared length never delivered the board
-  // the provider promised, so its bytes say nothing about the schema.
-  if (declared !== undefined && body.bytes < declared) {
-    throw new SourceFetchError(`${sourceId}: Greenhouse response body ended after ${body.bytes} of ${declared} declared bytes`, 'transport');
-  }
-  try {
-    return JSON.parse(body.text);
-  } catch {
-    throw new SourceFetchError(`${sourceId}: Greenhouse returned malformed JSON`, 'json');
-  }
-}
-
 function isNamedList(value: unknown): boolean {
   return value === undefined
     || (Array.isArray(value) && value.every((item) => item === null || (isRecord(item) && (item.name === undefined || typeof item.name === 'string'))));
@@ -281,12 +220,6 @@ function jobProjection(job: GreenhouseJob): string {
         departments: names(job.departments),
         offices: names(job.offices),
       });
-}
-
-/** Order-independent aggregate avoids retaining a second, sorted full board. */
-function projectionHash(jobs: GreenhouseJob[]): string {
-  const hashes = jobs.map((job) => createHash('sha256').update(jobProjection(job)).digest('hex')).sort();
-  return createHash('sha256').update(`greenhouse-v${GREENHOUSE_CONTENT_HASH_VERSION}:${hashes.join('')}`).digest('hex');
 }
 
 /**
@@ -422,7 +355,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     if (contentLength !== undefined && contentLength > GREENHOUSE_RESPONSE_MAX_BYTES) {
       throw new SourceFetchError(`${this.id}: Greenhouse response body exceeds ${GREENHOUSE_RESPONSE_MAX_BYTES} bytes`, 'capacity');
     }
-    const payload = await boundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES, this.id);
+    let payload: unknown = (await readBoundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES, `${this.id}: Greenhouse`)).value;
     if (!payload || typeof payload !== 'object' || !Array.isArray((payload as GreenhouseJobsResponse).jobs)) {
       throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
     }
@@ -433,19 +366,34 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     const returnedEtag = response.headers.get('etag');
     const fetchedAt = this.now().toISOString();
     const postings: SourcedPosting[] = [];
+    const digests: string[] = [];
     const rejectedApplicationUrls: Array<{ row: number; url: string; reason: string }> = [];
     for (const [index, job] of jobs.entries()) {
       if (!isGreenhouseJobShape(job)) throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
-      if (new TextEncoder().encode(JSON.stringify(job)).byteLength > GREENHOUSE_JOB_MAX_BYTES) {
+      // Description text is the only field that can approach the per-job limit,
+      // and UTF-8 bytes are never fewer than the UTF-16 code units that hold
+      // them, so only a row long enough to matter is measured exactly: an
+      // ordinary board no longer re-serializes every job to prove it fits.
+      if ((job.content?.length ?? 0) > GREENHOUSE_JOB_MAX_BYTES
+        && new TextEncoder().encode(JSON.stringify(job)).byteLength > GREENHOUSE_JOB_MAX_BYTES) {
         throw new SourceFetchError(`${this.id}: Greenhouse job ${String(job.id ?? index + 1)} exceeds ${GREENHOUSE_JOB_MAX_BYTES} bytes`, 'capacity');
       }
+      digests.push(createHash('sha256').update(jobProjection(job)).digest('hex'));
       const posting = mapGreenhouseSourcedPosting(job, this.options.source, fetchedAt, index + 1);
       if (!posting) continue;
       const rejection = greenhouseApplicationUrlRejection(posting.applyUrl, this.options.source.allowedInitialHosts);
       if (rejection) rejectedApplicationUrls.push({ row: index + 1, url: posting.applyUrl, reason: rejection });
       else postings.push(posting);
     }
-    const contentHash = projectionHash(jobs);
+    // The digest set is the same one, sorted the same way, so the content hash
+    // is unchanged — but no second array of full-content projections is kept
+    // alive alongside the parsed board.
+    const contentHash = createHash('sha256')
+      .update(`greenhouse-v${GREENHOUSE_CONTENT_HASH_VERSION}:${digests.sort().join('')}`)
+      .digest('hex');
+    // Every job is mapped, so the parsed container and whatever else the
+    // provider returned alongside `jobs` is dead before the snapshot is built.
+    payload = undefined;
     const neutral: SourceSnapshot = {
       sourceId: this.id,
       outcome: previous?.contentHashAlgorithmVersion === GREENHOUSE_CONTENT_HASH_VERSION && contentHash === previous?.contentHash ? 'unchanged' : 'changed',

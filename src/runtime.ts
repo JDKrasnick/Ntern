@@ -50,6 +50,8 @@ export interface RuntimeDependencies {
   allowCompleteEmptySnapshot?: boolean;
   /** Bounds resumable GitHub admission migration work in one queue delivery. */
   maxAdmissionMigrationListingsPerSourceRun?: number;
+  /** Bounds listings resolved in one queue delivery; the remainder resumes from the checkpoint. */
+  maxListingsPerSourceRun?: number;
   enqueueDestinationVerification?: (request: DestinationVerificationRequest) => Promise<void>;
   catalogAdmissionResolver?: CatalogAdmissionResolver;
   /** Defaults off in deployed runtimes until the compatible client is live. */
@@ -74,6 +76,7 @@ export async function runRuntimeCommand(command: 'poll' | 'digest', dependencies
     ).poll({
       allowCompleteEmptySnapshot: dependencies.allowCompleteEmptySnapshot,
       maxAdmissionMigrationListingsPerSourceRun: dependencies.maxAdmissionMigrationListingsPerSourceRun,
+      maxListingsPerSourceRun: dependencies.maxListingsPerSourceRun,
     });
     if (dependencies.userStore) {
       const publisher = dependencies.expoPublisher ?? new ExpoPushPublisher();

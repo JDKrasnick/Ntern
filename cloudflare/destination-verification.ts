@@ -213,7 +213,7 @@ export async function persistDestinationAdmission(input: {
   incident?: { sourceId: string; host: string; reason: string; incidentId: string; messageType: 'incident-opened' | 'quarantine' };
 }> {
   const { jobs, operations, message, job, reference, reachability, inspectedAt, evidence, browserVisible } = input;
-  const occurrence = (await jobs.getSourceOccurrences(message.sourceId)).find((item) => item.externalId === message.externalId);
+  const occurrence = await jobs.getSourceOccurrence(message.sourceId, message.externalId);
   const { listing, destination } = await classifyReferenceDestination({ operations, message, job, reference, reachability,
     inspectedAt, ...(evidence ? { evidence } : {}), ...(browserVisible !== undefined ? { browserVisible } : {}) });
   const trustedCommunityPolicy = activeTrustedCommunityPolicy(message.sourceId, input.trustedCommunityCatalogEnabled ?? false);

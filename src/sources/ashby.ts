@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readBoundedJson } from '../core/bounded-body.js';
 import { processSnapshot } from '../ingestion/processor.js';
 import { platformFetch } from '../core/platform-fetch.js';
 import type { ProcessedSnapshot, SourceAdapter, SourceCheckpoint, SourceConnector, SourceFetchResult, SourceSnapshot, SourcedPosting } from '../types.js';
@@ -9,6 +10,14 @@ import { SourceFetchError } from './source-error.js';
 
 export const ASHBY_REQUEST_TIMEOUT_MS = 15_000;
 export const ASHBY_JOB_HOST = 'jobs.ashbyhq.com';
+/**
+ * Measured ceilings: the largest observed board response is 10.3 MB (Airwallex,
+ * 583 listed postings), so the response ceiling sits above every live board
+ * while still stopping a runaway body before `JSON.parse`, and the posting cap
+ * bounds how many rows one delivery maps and reconciles.
+ */
+export const ASHBY_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+export const ASHBY_BOARD_MAX_POSTINGS = 1_000;
 
 interface AshbyCompensation {
   scrapeableCompensationSalarySummary?: string | null;
@@ -202,12 +211,14 @@ export class AshbyPostingsAdapter implements SourceAdapter, SourceConnector {
         response.status === 429 || response.status >= 500 ? retryAfterMs(response, this.now()) : undefined);
     }
     if (response.redirected || (response.url && response.url !== endpoint)) throw new SourceFetchError(`${this.id}: Ashby redirected the public posting request`, 'identity');
-    let payload: unknown;
-    try { payload = await response.json(); } catch { throw new SourceFetchError(`${this.id}: Ashby returned malformed JSON`, 'json'); }
+    const payload = (await readBoundedJson(response, ASHBY_RESPONSE_MAX_BYTES, `${this.id}: Ashby`)).value;
     if (!payload || typeof payload !== 'object') throw new SourceFetchError(`${this.id}: Ashby response root was malformed`, 'json');
     const root = payload as Record<string, unknown>;
     if (root.apiVersion !== ASHBY_API_VERSION) throw new SourceFetchError(`${this.id}: Ashby API version drifted`, 'identity');
     if (!Array.isArray(root.jobs)) throw new SourceFetchError(`${this.id}: Ashby jobs collection was malformed`, 'json');
+    if (root.jobs.length > ASHBY_BOARD_MAX_POSTINGS) {
+      throw new SourceFetchError(`${this.id}: Ashby board exceeds ${ASHBY_BOARD_MAX_POSTINGS} postings`, 'capacity');
+    }
     if (!root.jobs.every(isAshbyPosting)) throw new SourceFetchError(`${this.id}: Ashby posting row was malformed`, 'json');
 
     const listed = (root.jobs as AshbyPosting[]).filter(({ isListed }) => isListed);

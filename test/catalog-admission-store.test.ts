@@ -246,6 +246,50 @@ describe('D1 catalog admission operations', () => {
       unresolvedEmployers: [{ provider: 'greenhouse', tenant: 'acme', occurrenceCount: 25 }] });
   });
 
+  it('finds catalog candidates past the first page while walking the catalog in bounded pages', async () => {
+    const queries: string[] = [];
+    const budget: QueryBudget = { used: 0, maximum: 100_000, queries };
+    const { admission: store, jobs } = subject(budget);
+    const total = 250;
+    for (let index = 0; index < total; index += 1) {
+      const current = job();
+      current.jobId = `job-${index}`;
+      delete current.admission;
+      current.sourceReferences = [{
+        sourceId: 'community-list', provenance: 'reviewed-community', externalId: `row-${index}`, document: 'README.md',
+        sourceUrl: 'https://github.com/example/jobs', row: index + 1, company: 'Acme', title: current.title,
+        location: current.location, locations: [current.location], season: current.season,
+        applyUrl: `https://careers-${index}.example.test/role-${index}`, compensation: current.compensation,
+        state: 'open', employerLabelOrigin: 'explicit',
+      }];
+      await jobs.putInternship(current);
+    }
+    // The one occurrence carrying a reviewed destination sits on the last page.
+    const reviewed = job();
+    reviewed.jobId = 'job-last';
+    const destination = admission(true);
+    destination.destination = { ...destination.destination, candidateUrl: 'https://boards.acme.test/role-last',
+      provider: 'greenhouse', tenant: 'acme' };
+    reviewed.sourceReferences = [{
+      ...job().sourceReferences[0]!, sourceId: 'community-list', externalId: 'row-last', document: 'README.md',
+      sourceUrl: 'https://github.com/example/jobs', applyUrl: 'https://boards.acme.test/role-last',
+      locations: [reviewed.location], employerLabelOrigin: 'explicit', admission: destination,
+    }];
+    await jobs.putInternship(reviewed);
+
+    queries.length = 0;
+    await expect(store.reviewSampleCandidates({
+      id: 'rule-boards-acme', host: 'boards.acme.test', provider: 'greenhouse', tenant: 'acme',
+      decision: 'standard-provider-route', reviewedAt: '2026-09-01T00:00:00Z', reviewedBy: 'reviewer',
+    }, 1)).resolves.toEqual([expect.objectContaining({ jobId: 'job-last', externalId: 'row-last' })]);
+    // A second read that crosses a page boundary keeps the same bound.
+    await expect(store.legacyVerificationCandidates(150)).resolves.toHaveLength(150);
+
+    const catalogScans = queries.filter((query) => query.includes("kind = 'internship'"));
+    expect(catalogScans.length).toBeGreaterThan(2);
+    for (const query of catalogScans) expect(query).toMatch(/LIMIT \?/);
+  });
+
   it('queues every unclassified occurrence with provider identity for historical verification', async () => {
     const { admission: store, jobs } = subject();
     const current = job();

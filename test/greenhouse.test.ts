@@ -13,6 +13,7 @@ import {
   technicalFullTime,
   technicalInternship,
 } from './fixtures/greenhouse.js';
+import { PRODUCTION_GREENHOUSE_BOARD_BYTES } from './fixtures/production-scale.js';
 
 function jsonResponse(body: unknown, init: { status?: number; url?: string; etag?: string } = {}): Response {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -20,6 +21,28 @@ function jsonResponse(body: unknown, init: { status?: number; url?: string; etag
   const response = new Response(JSON.stringify(body), { status: init.status ?? 200, headers });
   if (init.url) Object.defineProperty(response, 'url', { value: init.url });
   return response;
+}
+
+/**
+ * A board body streamed in 64 KiB chunks, so a measured production board can be
+ * exercised without ever building the 27-40 MB payload a real provider sends.
+ * `pulled()` reports the bytes the adapter actually read; `highWaterMark: 0`
+ * stops the stream from running ahead of the reader, so the count is exact.
+ */
+function chunkedBoardResponse(totalBytes: number, chunkBytes = 65_536): { response: Response; pulled: () => number } {
+  const chunk = new Uint8Array(chunkBytes).fill(97);
+  let sent = 0;
+  let pulled = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent >= totalBytes) { controller.close(); return; }
+      const size = Math.min(chunkBytes, totalBytes - sent);
+      sent += size;
+      pulled += size;
+      controller.enqueue(size === chunkBytes ? chunk : chunk.slice(0, size));
+    },
+  }, { highWaterMark: 0 });
+  return { response: new Response(body), pulled: () => pulled };
 }
 
 describe('mapGreenhouseJob', () => {
@@ -181,6 +204,41 @@ describe('GreenhouseBoardAdapter', () => {
       }),
     });
     await expect(adapter.fetch()).rejects.toThrow('response body exceeds');
+  });
+  // Both sizes below are the measured production boards: `spacex` at 27,849,116 B
+  // and `andurilindustries` at 40,679,935 B, each now over the response ceiling.
+  it.each([
+    ['spacex', PRODUCTION_GREENHOUSE_BOARD_BYTES.spacex],
+    ['andurilindustries', PRODUCTION_GREENHOUSE_BOARD_BYTES.anduril],
+  ])('stops reading the measured %s board as soon as the streamed body crosses the ceiling', async (_board, boardBytes) => {
+    const { response, pulled } = chunkedBoardResponse(boardBytes);
+    const adapter = new GreenhouseBoardAdapter({ source: acmeSource, fetchImpl: async () => response });
+    await expect(adapter.fetch()).rejects.toMatchObject({
+      category: 'capacity',
+      message: expect.stringContaining('response body exceeds'),
+    });
+    // Nothing declared the length, so only the streaming guard can stop this
+    // body: it gives up within one chunk of the ceiling instead of retaining
+    // the whole board and parsing it.
+    expect(pulled()).toBeLessThan(GREENHOUSE_RESPONSE_MAX_BYTES + 2 * 65_536);
+  });
+  it('keeps the captured pre-#197 content hash for the fixture board and reports the repeat fetch unchanged', async () => {
+    // Literal captured from the implementation before `projectionHash` was folded
+    // into the mapping loop: SHA-256 over `greenhouse-v2:` plus the sorted per-job
+    // digests of the sorted projection.
+    const first = await new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => jsonResponse(acmeJobsResponse),
+      now: () => new Date('2026-09-16T00:00:00.000Z'),
+    }).fetch();
+    expect(first.checkpoint.contentHash).toBe('cf446ff527e4e1a987a31f376a33ad3a6cbb93316ce917ab897f7dbaaa621641');
+    const second = await new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => jsonResponse(acmeJobsResponse),
+      now: () => new Date('2026-09-16T01:00:00.000Z'),
+    }).fetch(first.checkpoint);
+    expect(second.outcome).toBe('unchanged');
+    expect(second.checkpoint.contentHash).toBe(first.checkpoint.contentHash);
   });
   it('keeps a board transfer that fails mid-body retryable instead of quarantining it as schema drift', async () => {
     const adapter = new GreenhouseBoardAdapter({

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { inferLeverSeason, LEVER_REQUEST_TIMEOUT_MS, LeverPostingsAdapter, leverRequirements, mapLeverPosting, mapLeverSourcedPosting } from '../src/sources/lever.js';
+import { inferLeverSeason, LEVER_BOARD_MAX_BYTES, LEVER_REQUEST_TIMEOUT_MS, LeverPostingsAdapter, leverRequirements, mapLeverPosting, mapLeverSourcedPosting } from '../src/sources/lever.js';
 import { extractPostingMetadataEvidence } from '../src/role-metadata.js';
+import { syntheticLeverPages } from './fixtures/production-scale.js';
 
 const postingId = (index: number) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
 const posting = {
@@ -162,5 +163,36 @@ describe('LeverPostingsAdapter', () => {
     await expect(malformed.fetch()).rejects.toThrow('malformed JSON');
     const error = new LeverPostingsAdapter({ ...options, fetchImpl: async () => new Response('nope', { status: 502 }) });
     await expect(error.fetch()).rejects.toThrow('Lever fetch failed (502)');
+  });
+  it('rejects a page that crosses the page ceiling without requesting the next page', async () => {
+    const [oversized] = syntheticLeverPages({ pages: 1, postingsPerPage: 100, bytesPerPosting: 43_000 });
+    const urls: string[] = [];
+    const adapter = new LeverPostingsAdapter({
+      ...options,
+      fetchImpl: async (url) => { urls.push(String(url)); return new Response(JSON.stringify(oversized), { status: 200 }); },
+    });
+    await expect(adapter.fetch()).rejects.toMatchObject({
+      category: 'capacity',
+      message: expect.stringContaining('response body exceeds'),
+    });
+    expect(urls).toHaveLength(1);
+  });
+  it('fails a board that crosses the board ceiling only after reading the pages that fit', async () => {
+    // Five 3.8 MB pages: every page stays under the page ceiling, so only the
+    // accumulated board size can reject this board.
+    const pages = syntheticLeverPages({ pages: 5, postingsPerPage: 100, bytesPerPosting: 38_000 });
+    let calls = 0;
+    const adapter = new LeverPostingsAdapter({
+      ...options,
+      fetchImpl: async () => new Response(JSON.stringify(pages[calls++] ?? []), { status: 200 }),
+    });
+    const failure = await adapter.fetch().then(() => undefined, (error: Error) => error);
+    expect(failure).toMatchObject({ category: 'capacity' });
+    expect(failure?.message).toContain('Lever board exceeds');
+    expect(failure?.message).toContain(String(LEVER_BOARD_MAX_BYTES));
+    // The fifth page is the one that crossed the ceiling; no sixth page is
+    // requested and the delivery fails on capacity rather than pagination.
+    expect(calls).toBe(5);
+    expect(failure?.message).not.toContain('pagination exceeded');
   });
 });

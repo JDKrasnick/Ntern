@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ApplicationLinkValidationError, failedSourceHealth, sourceFailureCategory, successfulSourceHealth } from '../src/source-health.js';
+import { ApplicationLinkValidationError, failedSourceHealth, sourceFailureCategory, sourceFailureOutcome, successfulSourceHealth } from '../src/source-health.js';
 import { SourceFetchError } from '../src/sources/source-error.js';
 
 describe('source health', () => {
@@ -66,6 +66,38 @@ describe('source health', () => {
     expect(sourceFailureCategory(new Error('application link timed out'))).toBe('link');
     expect(first.state).toBe('degraded');
     expect(second.state).toBe('quarantined');
+    expect(second.recentRuns).toHaveLength(2);
+  });
+
+  it('treats a body-capacity failure as a resource limit and quarantines only the repeat', () => {
+    const error = new SourceFetchError(
+      'greenhouse-acmerobotics: Greenhouse response body exceeds 16777216 bytes',
+      'capacity',
+    );
+    expect(sourceFailureOutcome(error)).toBe('resource_limit');
+    const first = failedSourceHealth({
+      sourceId: 'greenhouse-acmerobotics',
+      startedAt: '2026-09-16T12:00:00.000Z',
+      completedAt: '2026-09-16T12:00:01.000Z',
+      error,
+    });
+    const second = failedSourceHealth({
+      sourceId: 'greenhouse-acmerobotics',
+      previous: first,
+      startedAt: '2026-09-16T12:10:00.000Z',
+      completedAt: '2026-09-16T12:10:01.000Z',
+      error,
+    });
+    expect(first).toMatchObject({
+      state: 'degraded',
+      sourceStatus: 'active',
+      failureCategory: 'capacity',
+      outcome: 'resource_limit',
+      consecutiveFailures: 1,
+      backoffUntil: '2026-09-16T12:01:01.000Z',
+    });
+    expect(second).toMatchObject({ state: 'quarantined', sourceStatus: 'paused', consecutiveFailures: 2 });
+    expect(second.quarantineReason).toContain('response body exceeds');
     expect(second.recentRuns).toHaveLength(2);
   });
 

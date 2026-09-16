@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { IngestionRunner } from '../src/poll.js';
-import { AshbyPostingsAdapter, type AshbyPosting } from '../src/sources/ashby.js';
+import { ASHBY_BOARD_MAX_POSTINGS, ASHBY_RESPONSE_MAX_BYTES, AshbyPostingsAdapter, type AshbyPosting } from '../src/sources/ashby.js';
 import { SourceFetchError } from '../src/sources/source-error.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import type { ReviewedSourceRecord } from '../src/sources/reviewed-source.js';
+import { syntheticAshbyBoard } from './fixtures/production-scale.js';
 
 const source: ReviewedSourceRecord = {
   id: 'ashby-acme', company: 'Acme', identity: { provider: 'ashby', boardKey: 'Acme', apiRegion: 'global' },
@@ -32,6 +33,28 @@ const adapter = (jobs: unknown, sourceOverride: ReviewedSourceRecord = source) =
   source: sourceOverride, now: () => new Date('2026-08-09T13:00:00.000Z'),
   fetchImpl: (async () => response(jobs)) as typeof fetch,
 });
+
+/**
+ * Serves `payload` in 64 KiB chunks and reports the bytes the adapter read, so
+ * an over-ceiling response is exercised without a second copy of the body being
+ * buffered by the test. `highWaterMark: 0` keeps the stream from running ahead
+ * of the reader, which makes the byte count exact.
+ */
+function chunkedResponse(payload: string, chunkBytes = 65_536): { response: Response; pulled: () => number } {
+  const bytes = new TextEncoder().encode(payload);
+  let offset = 0;
+  let pulled = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset >= bytes.byteLength) { controller.close(); return; }
+      const chunk = bytes.subarray(offset, Math.min(offset + chunkBytes, bytes.byteLength));
+      offset += chunk.byteLength;
+      pulled += chunk.byteLength;
+      controller.enqueue(chunk);
+    },
+  }, { highWaterMark: 0 });
+  return { response: new Response(body), pulled: () => pulled };
+}
 
 describe('Ashby public posting adapter', () => {
   it('normalizes structured fields and trusts only explicit Intern employment type', async () => {
@@ -184,5 +207,26 @@ describe('Ashby public posting adapter', () => {
   it('uses SourceFetchError for malformed JSON', async () => {
     const subject = new AshbyPostingsAdapter({ source, fetchImpl: (async () => new Response('{')) as typeof fetch });
     await expect(subject.fetch()).rejects.toBeInstanceOf(SourceFetchError);
+  });
+
+  it('stops reading a board response as soon as the streamed body crosses the response ceiling', async () => {
+    const { response: body, pulled } = chunkedResponse(JSON.stringify(syntheticAshbyBoard({ postings: 600, bytesPerPosting: 30_000 })));
+    const subject = new AshbyPostingsAdapter({ source, fetchImpl: (async () => body) as typeof fetch });
+    await expect(subject.fetch()).rejects.toMatchObject({
+      category: 'capacity',
+      message: expect.stringContaining('response body exceeds'),
+    });
+    // No Content-Length is declared, so the guard is what stops this body: it
+    // gives up within one chunk of the ceiling instead of parsing it.
+    expect(pulled()).toBeLessThan(ASHBY_RESPONSE_MAX_BYTES + 2 * 65_536);
+  });
+
+  it('admits a board at the posting ceiling and rejects the board one posting above it', async () => {
+    const atCap = await adapter(syntheticAshbyBoard({ postings: ASHBY_BOARD_MAX_POSTINGS, bytesPerPosting: 200 }).jobs).fetch();
+    expect(atCap.rawCount).toBe(ASHBY_BOARD_MAX_POSTINGS);
+    expect(atCap.postings).toHaveLength(ASHBY_BOARD_MAX_POSTINGS);
+
+    await expect(adapter(syntheticAshbyBoard({ postings: ASHBY_BOARD_MAX_POSTINGS + 1, bytesPerPosting: 200 }).jobs).fetch())
+      .rejects.toMatchObject({ category: 'capacity', message: expect.stringContaining('postings') });
   });
 });

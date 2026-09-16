@@ -477,6 +477,10 @@ export class D1InternshipStore implements InternshipStore {
       cursor = result.results[result.results.length - 1]!.sk;
     }
   }
+  /** One occurrence by key, for readers that need a single row of a large source. */
+  getSourceOccurrence(sourceId: string, externalId: string): Promise<SourceOccurrenceState | undefined> {
+    return this.get<SourceOccurrenceState>(`SOURCE#${sourceId}`, `OCCURRENCE#${externalId}`);
+  }
   putSourceOccurrence(occurrence: SourceOccurrenceState) {
     return this.sourceOccurrenceStatement(occurrence).run().then(() => undefined);
   }

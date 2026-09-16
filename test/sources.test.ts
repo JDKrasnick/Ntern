@@ -1,10 +1,32 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Poller } from '../src/poll.js';
-import { parseInternshipMarkdown } from '../src/core/markdown.js';
-import { GitHubMarkdownAdapter, defaultSources } from '../src/sources/github.js';
+import { parseInternshipMarkdown, type MarkdownParseOptions } from '../src/core/markdown.js';
+import { GITHUB_DOCUMENT_MAX_BYTES, GITHUB_SOURCE_MAX_BYTES, GitHubMarkdownAdapter, defaultSources } from '../src/sources/github.js';
 import { defaultSources as productionSources } from '../src/sources/index.js';
 import { parseQuantInternshipMarkdown } from '../src/sources/quant.js';
 import { MemoryInternshipStore } from '../src/store.js';
+
+/**
+ * A document body streamed in 64 KiB chunks, so an over-ceiling document costs
+ * one chunk in this process instead of the whole generated payload. `pulled()`
+ * reports the bytes the adapter actually read; `highWaterMark: 0` keeps the
+ * stream from running ahead of the reader, so the count is exact.
+ */
+function chunkedFillerResponse(totalBytes: number, chunkBytes = 65_536): { response: Response; pulled: () => number } {
+  const chunk = new Uint8Array(chunkBytes).fill(97);
+  let sent = 0;
+  let pulled = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent >= totalBytes) { controller.close(); return; }
+      const size = Math.min(chunkBytes, totalBytes - sent);
+      sent += size;
+      pulled += size;
+      controller.enqueue(size === chunkBytes ? chunk : chunk.slice(0, size));
+    },
+  }, { highWaterMark: 0 });
+  return { response: new Response(body), pulled: () => pulled };
+}
 
 describe('GitHub source adapters', () => {
   afterEach(() => vi.useRealTimers());
@@ -45,6 +67,43 @@ describe('GitHub source adapters', () => {
     });
     await expect(adapter.fetch()).rejects.toMatchObject({ category: 'http', status: 503, retryable: true });
     expect(cancel).toHaveBeenCalledOnce();
+  });
+  it('stops reading a document as soon as the streamed body crosses the document ceiling', async () => {
+    const { response, pulled } = chunkedFillerResponse(GITHUB_DOCUMENT_MAX_BYTES + 2 * 1024 * 1024);
+    const adapter = new GitHubMarkdownAdapter({
+      id: 'fixture', owner: 'owner', repo: 'repo', documents: [{ path: 'README.md', branch: 'main', season: 'summer-2027' }],
+      fetchImpl: async () => response,
+    });
+    await expect(adapter.fetch()).rejects.toMatchObject({
+      category: 'capacity',
+      retryable: true,
+      message: `fixture: README.md response body exceeds ${GITHUB_DOCUMENT_MAX_BYTES} bytes`,
+    });
+    // The provider declared no Content-Length, so only the streaming guard can
+    // stop this body: it gives up within one chunk of the ceiling.
+    expect(pulled()).toBeLessThan(GITHUB_DOCUMENT_MAX_BYTES + 2 * 65_536);
+  });
+  it('rejects a multi-document source at the source ceiling before parsing the over-budget document', async () => {
+    const perDocumentBytes = 6 * 1024 * 1024;
+    const parsed: string[] = [];
+    const parser = vi.fn((_markdown: string, options: MarkdownParseOptions) => { parsed.push(options.document); return []; });
+    const adapter = new GitHubMarkdownAdapter({
+      id: 'fixture', owner: 'owner', repo: 'repo',
+      documents: [
+        { path: 'first.md', branch: 'main', season: 'summer-2027' },
+        { path: 'second.md', branch: 'main', season: 'summer-2027' },
+        { path: 'third.md', branch: 'main', season: 'summer-2027' },
+      ],
+      parser,
+      fetchImpl: async () => chunkedFillerResponse(perDocumentBytes).response,
+    });
+    const failure = await adapter.fetch().then(() => undefined, (error: Error) => error);
+    expect(failure).toMatchObject({ category: 'capacity' });
+    expect(failure?.message).toBe(`fixture: source documents exceed ${GITHUB_SOURCE_MAX_BYTES} bytes`);
+    // Every document is read (3 x 6 MB), but the third crosses the source
+    // ceiling, so only the two that fit are ever parsed.
+    expect(parsed).toEqual(['first.md', 'second.md']);
+    expect(parser).toHaveBeenCalledTimes(2);
   });
   it('ships each active feed and document', () => {
     expect(defaultSources.map((source) => source.id)).toEqual(['vanshb03-summer-2027', 'simplify-summer-2026', 'speedyapply-2027-swe', 'speedyapply-2027-ai', 'northwestern-fintech-2027-quant', 'canadian-tech-2027']);
