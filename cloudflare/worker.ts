@@ -8,7 +8,8 @@ import { processGreenhouseQueue } from '../src/greenhouse-worker.js';
 import { isLeverSourceDue, leverWorkMessages } from '../src/lever-dispatch.js';
 import { processLeverQueue } from '../src/lever-worker.js';
 import { drainPendingExpoNotifications, ExpoPushPublisher, type EmailSender } from '../src/notifications.js';
-import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
+import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
+import { runTrustedAdmissionBackfill } from '../src/trusted-admission-backfill.js';
 import { runRuntimeCommand } from '../src/runtime.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
@@ -727,6 +728,35 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       }, { status: report.conflicts.length || audit.deferredProjections.length || !audit.collectionCoverage.complete ? 409 : 200 }));
     } catch (error) {
       return withCors(Response.json({ message: error instanceof Error ? error.message : 'Role metadata backfill failed' }, { status: 409 }));
+    }
+  }
+  if (request.method === 'POST' && url.pathname === '/internal/trusted-admission-backfill') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    const input = await request.json().catch(() => ({})) as {
+      apply?: boolean; repairToken?: string; expectedChanged?: number; sourceIds?: unknown;
+    };
+    try {
+      // The repair grades rows under the reviewed trusted policy, so a dormant
+      // gate must never publish what the revocation sweep is taking back.
+      if (env.TRUSTED_COMMUNITY_CATALOG_ENABLED !== 'true') {
+        throw new Error('TRUSTED_COMMUNITY_CATALOG_ENABLED must be true to grade trusted-community admissions');
+      }
+      if (input.sourceIds !== undefined
+        && !(Array.isArray(input.sourceIds) && input.sourceIds.every((sourceId) => typeof sourceId === 'string' && sourceId))) {
+        throw new Error('sourceIds must be a list of source ids');
+      }
+      const sourceIds = input.sourceIds as string[] | undefined;
+      const report = await runTrustedAdmissionBackfill(env.DB, {
+        apply: input.apply, repairToken: input.repairToken, expectedChanged: input.expectedChanged, sourceIds,
+      });
+      if (input.apply && report.projectionRefreshRequired) {
+        await refreshCatalogProjection(new D1InternshipStore(env.DB));
+        const verified = await runTrustedAdmissionBackfill(env.DB, { apply: false, sourceIds });
+        return withCors(Response.json({ ...report, verification: verified }));
+      }
+      return withCors(Response.json(report, { status: report.conflicts.length ? 409 : 200 }));
+    } catch (error) {
+      return withCors(Response.json({ message: error instanceof Error ? error.message : 'Trusted admission backfill failed' }, { status: 409 }));
     }
   }
   if (request.method === 'POST' && url.pathname === '/internal/catalog-quality-backfill') {
@@ -1515,10 +1545,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           catalogAdmissionResolver: admissionResolver,
           identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
           trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
-          // One row can perform several bounded HTTP probes. Keep migration
-          // slices small enough to make durable progress even when the tail is
-          // dominated by destinations that consume the six connection slots.
-          maxAdmissionMigrationListingsPerSourceRun: 20,
+          // One row can perform several bounded HTTP probes, so this stays well
+          // inside the five-minute message deadline while still draining a
+          // whole list's admission migration in a handful of deliveries: at 20
+          // rows per delivery a trusted list's migrated rows stayed suppressed
+          // behind the pending migration for hours.
+          maxAdmissionMigrationListingsPerSourceRun: GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY,
           // The largest reviewed board holds 3,029 postings; one delivery
           // resolves a bounded slice and re-enqueues itself for the rest.
           maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,

@@ -221,6 +221,14 @@ const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
  * deliveries for per-delivery cost.
  */
 export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 200;
+/**
+ * Listings one delivery may re-grade after an admission policy change. The
+ * bounded-migration gate suppresses newly admitted rows of a trusted list until
+ * its migration drains, so this bound also sets how fast those rows publish;
+ * 20 rows per delivery left migrated rows hidden for hours, while 200 converges
+ * in a handful of deliveries and still fits the five-minute message deadline.
+ */
+export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 200;
 
 /**
  * Bounded worker pool that always drains: the first error is rethrown only once
@@ -1417,8 +1425,11 @@ export class IngestionRunner {
         const migrationCandidates = migrationLimit === undefined
           ? batch.processed.listings
           : [...admissionCandidates, ...selectedMetadataMigrations];
-        const trustedFullBody = sourceAdmissionPolicy(connector.id).trust === 'trusted-community'
-          && this.trustedCommunityCatalogEnabled
+        // A trusted policy re-reads the whole body to advance an alert
+        // qualification streak, and a policy with alerts disabled never
+        // computes one: catalog exposure alone must not re-resolve every
+        // listing on every poll (the largest trusted list holds 3,029 rows).
+        const trustedFullBody = trustedPolicy?.alertMode !== undefined && trustedPolicy.alertMode !== 'disabled'
           && result.unchangedReason !== 'not_modified';
         const metadataFullBody = metadataVersionChanged && result.unchangedReason !== 'not_modified';
         // An unchanged snapshot repeats postings the checkpoint already trusts,
@@ -1542,6 +1553,34 @@ export class IngestionRunner {
               resolvedJobs: resolution.resolved,
               now,
             });
+            // An alert-only policy still hides the unsafe listings and records the
+            // breach, but the source keeps polling instead of quarantining: the
+            // reviewed list's anomalies are caught per posting downstream.
+            if (trustedPolicy.circuitBreaker === 'alert') {
+              // Withhold exactly as a pending migration does before ending the
+              // delivery: the pass is not evidence that the source advanced.
+              for (const listing of resolution.accepted) {
+                if (listing.trustedCommunityAlertQualification) {
+                  listing.trustedCommunityAlertQualification = {
+                    ...listing.trustedCommunityAlertQualification,
+                    catalogPublicationSuppressed: true,
+                  };
+                }
+                if (listing.admission) listing.admission = { ...listing.admission, catalogEligible: false, alertEligible: false };
+              }
+              resolution.alertEligible.clear();
+              console.log(JSON.stringify({
+                event: 'trusted_community_circuit_alert',
+                sourceId: connector.id,
+                breaches,
+                rawRows: trustedMetrics.rawRows,
+                eligibleRows: trustedMetrics.eligibleRows,
+                browserInspectionShare: trustedMetrics.browserInspectionShare,
+              }));
+              // The reviewed list keeps polling instead of quarantining: its
+              // anomalies are caught per posting downstream.
+              continue;
+            }
             throw new SourceFetchError(`${connector.id}: trusted-community circuit breaker: ${breaches.join('; ')}`, 'quality', undefined, undefined, true);
           }
         }

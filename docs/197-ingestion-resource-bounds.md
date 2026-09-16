@@ -353,6 +353,18 @@ validates as `posting-detail`/`application-form`) and only 35 reviewed
 janestreet, goldman-sachs). `IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED=false`
 additionally withholds the 2,093 open jobs whose posting identity is unconfirmed.
 133 open jobs of 5,836 are `catalogEligible`. 5,138 destination-verification rows
-are due, draining through a consumer with `max_concurrency: 1`. Enabling either
-flag is an owner product decision (the decisions log keeps community catalog
-exposure default-off), so no visibility setting was changed by this work.
+are due, draining through a consumer with `max_concurrency: 1`.
+
+Resolved the same day, on the owner's decision to treat the reviewed community
+lists as trusted sources:
+
+| Change | Effect |
+| --- | --- |
+| `TRUSTED_COMMUNITY_POLICIES` covers all six reviewed lists (`simplify-summer-2026` plus `vanshb03-summer-2027`, `speedyapply-2027-swe`, `speedyapply-2027-ai`, `northwestern-fintech-2027-quant`, `canadian-tech-2027`), each with its own policy version and `alertMode: 'disabled'` | Admission-valid rows publish with `employerResolution: 'source-reported'` instead of blocking as `employer-unresolved`; membership is an explicit reviewed list, never inferred from the polled registry |
+| `TF_VAR_trusted_community_catalog_enabled=true` | Opens the catalog gate; the policy version re-grades existing rows, and alerts stay disabled |
+| `trustedFullBody` now also requires a policy whose `alertMode` is not `disabled` | Catalog exposure alone no longer re-resolves every listing of a trusted list on every poll (3,029 rows for the largest); the full-body refetch returns when an alert mode is activated, which is the only consumer of the snapshot streak |
+
+Still open for the same class of coverage: roles from *manually reviewed provider
+boards* whose employer has no `employer_mappings` row (for example
+`greenhouse-genscript`), and the 2,093 open jobs withheld by
+`IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED=false`.

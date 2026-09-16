@@ -6,7 +6,7 @@ import { isIngestionOperationPath, secretMatches } from '../cloudflare/split.js'
 import { billingShutdownQueueIds, type Environment } from '../cloudflare/worker.js';
 
 describe('API and ingestion Worker boundary', () => {
-  it('forwards only ingestion operations through the authenticated service binding', async () => {
+  it('forwards the trusted-admission backfill through the authenticated service binding', async () => {
     let forwarded: Request | undefined;
     const env = {
       INTERNAL_SERVICE_SECRET: 'internal-test-secret',
@@ -15,16 +15,17 @@ describe('API and ingestion Worker boundary', () => {
       INGESTION: { async fetch(request: Request) { forwarded = request; return Response.json({ queued: 0 }); } },
     } as ApiEnvironment;
 
-    const response = await apiWorker.fetch(new Request('https://api.example.test/internal/backfill', {
+    const response = await apiWorker.fetch(new Request('https://api.example.test/internal/trusted-admission-backfill', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Operations-Key': 'operations-test-secret' },
-      body: JSON.stringify({ provider: 'github' }),
+      body: JSON.stringify({ sourceIds: ['speedyapply-2027-swe'] }),
     }), env);
 
     expect(response.status).toBe(200);
     expect(forwarded?.headers.get('X-InternNotifs-Service-Key')).toBe('internal-test-secret');
     expect(forwarded?.headers.get('X-Operations-Key')).toBe('operations-test-secret');
-    expect(await forwarded?.json()).toEqual({ provider: 'github' });
+    expect(await forwarded?.json()).toEqual({ sourceIds: ['speedyapply-2027-swe'] });
+    expect(isIngestionOperationPath('/internal/trusted-admission-backfill')).toBe(true);
     expect(isIngestionOperationPath('/internal/backfill')).toBe(true);
     expect(isIngestionOperationPath('/internal/role-metadata/backfill')).toBe(true);
     expect(isIngestionOperationPath('/jobs')).toBe(false);

@@ -6,6 +6,7 @@ import { Poller } from '../src/poll.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import { MemoryInternshipStore, MemoryUserStore } from '../src/store.js';
 import { createApiHandler } from '../src/api.js';
+import { defaultSources } from '../src/sources/github.js';
 import { trustedCommunityBaselineReport } from '../src/sources/trusted-community-baseline.js';
 import {
   activeTrustedCommunityPolicy,
@@ -76,12 +77,65 @@ function admission(alertEligible: boolean): CatalogAdmission {
   };
 }
 
+/** The reviewed community lists whose rows the trusted policy may admit. */
+const COMMUNITY_LIST_IDS = [
+  'vanshb03-summer-2027',
+  'simplify-summer-2026',
+  'speedyapply-2027-swe',
+  'speedyapply-2027-ai',
+  'northwestern-fintech-2027-quant',
+  'canadian-tech-2027',
+] as const;
+
+/** Durable admission for one reviewed-community board polled through the real wire. */
+async function pollCommunityBoard(sourceId: string, trustedCommunityCatalogEnabled: boolean) {
+  const store = new MemoryInternshipStore();
+  const boards = [['careers.example.test', 'role-1'], ['careers-2.example.test', 'role-2']] as const;
+  const rows = boards.map(([host, postingId]) => {
+    const applyUrl = `https://${host}/jobs/${postingId}`;
+    return listing({ sourceId, externalId: `README.md:${applyUrl}`, applyUrl, title: `Software Engineering Intern ${postingId}`,
+      providerIdentity: { provider: 'github', sourceId, sourceUrl: 'https://github.com/example/jobs', postingId } });
+  });
+  const adapter: SourceAdapter = { id: sourceId, async fetch(previous) {
+    return { sourceId, listings: rows, rawRowCount: rows.length, notModified: false,
+      checkpoint: { sourceId, successfulFetches: (previous?.successfulFetches ?? 0) + 1, lastRowCount: rows.length } };
+  } };
+  const resolver = {
+    async configurationVersion() { return 'registry-v1'; },
+    async resolveCanonicalEmployer() { return undefined; },
+    async resolveDestinationRule() { return undefined; },
+  };
+  const validate = async (url: string) => ({ url, evidence: { url, title: 'Software Engineering Intern', postingIdPresent: true,
+    confidence: { score: 100, level: 'high' as const, recommendation: 'alert-eligible' as const, signals: [] } } });
+  await new Poller([adapter], store, () => new Date(inspectedAt), undefined, validate, false, undefined, resolver, true,
+    trustedCommunityCatalogEnabled).poll();
+  const admissions = [...store.jobs.values()].sort((left, right) => left.title.localeCompare(right.title))
+    .map((job) => job.admission);
+  return { store, admissions };
+}
+
 describe('trusted community source policy', () => {
-  it('trusts only the explicitly configured Simplify source behind the catalog gate', () => {
-    expect(sourceAdmissionPolicy('simplify-summer-2026')).toMatchObject({ trust: 'trusted-community', alertMode: 'disabled' });
-    expect(sourceAdmissionPolicy('vanshb03-summer-2027')).toEqual({ trust: 'standard', version: 'standard-v1' });
-    expect(activeTrustedCommunityPolicy('simplify-summer-2026', false)).toBeUndefined();
-    expect(activeTrustedCommunityPolicy('simplify-summer-2026', true)).toBeDefined();
+  it('trusts every reviewed community list behind the catalog gate and nothing else', () => {
+    // The reviewed set is the polled GitHub list registry; a list added there
+    // needs its own reviewed policy entry before it may publish.
+    expect(defaultSources.map((source) => source.id)).toEqual([...COMMUNITY_LIST_IDS]);
+    for (const sourceId of COMMUNITY_LIST_IDS) {
+      expect(sourceAdmissionPolicy(sourceId)).toEqual({
+        trust: 'trusted-community',
+        version: sourceId === 'simplify-summer-2026' ? 'simplify-trusted-community-v1' : `${sourceId}-trusted-community-v1`,
+        catalogMode: 'validated-posting-specific-destination',
+        alertMode: 'disabled',
+        // The reviewed lists alarm on a floor breach instead of quarantining:
+        // their boards are manually verified and anomalies are caught per posting.
+        circuitBreaker: 'alert',
+      });
+      expect(activeTrustedCommunityPolicy(sourceId, false)).toBeUndefined();
+      expect(activeTrustedCommunityPolicy(sourceId, true)).toEqual(sourceAdmissionPolicy(sourceId));
+    }
+    for (const sourceId of ['zapply-2027', 'greenhouse-figma', 'standard-review-fixture']) {
+      expect(sourceAdmissionPolicy(sourceId)).toEqual({ trust: 'standard', version: 'standard-v1' });
+      expect(activeTrustedCommunityPolicy(sourceId, true)).toBeUndefined();
+    }
   });
 
   it('includes both source policy and catalog gate state in the effective configuration version', () => {
@@ -89,6 +143,60 @@ describe('trusted community source policy', () => {
     const on = effectiveAdmissionConfigurationVersion({ sourceId: 'simplify-summer-2026', resolverVersion: 'registry-v1', trustedCommunityCatalogEnabled: true });
     expect(off).not.toBe(on);
     expect(effectiveAdmissionConfigurationVersion({ sourceId: 'ordinary', trustedCommunityCatalogEnabled: true })).toBeUndefined();
+  });
+
+  it('re-grades a newly listed community list while standard sources stay on the resolver version', () => {
+    const sourceId = 'speedyapply-2027-ai';
+    const resolverVersion = 'registry-v1';
+    const dormant = effectiveAdmissionConfigurationVersion({ sourceId, resolverVersion, trustedCommunityCatalogEnabled: false });
+    const enabled = effectiveAdmissionConfigurationVersion({ sourceId, resolverVersion, trustedCommunityCatalogEnabled: true });
+    expect(dormant).toBe(resolverVersion);
+    expect(enabled).not.toBe(resolverVersion);
+    // Each list carries its own policy version, so one list's rollout does not
+    // re-grade another's occurrences.
+    expect(enabled).not.toBe(effectiveAdmissionConfigurationVersion({ sourceId: 'canadian-tech-2027', resolverVersion, trustedCommunityCatalogEnabled: true }));
+    expect(effectiveAdmissionConfigurationVersion({ sourceId: 'zapply-2027', resolverVersion, trustedCommunityCatalogEnabled: true })).toBe(resolverVersion);
+  });
+
+  it.each(['posting-detail', 'application-form'] as const)(
+    'admits a newly listed community list from source-reported evidence with a %s destination',
+    (classification) => {
+      const sourceId = 'northwestern-fintech-2027-quant';
+      const trusted = activeTrustedCommunityPolicy(sourceId, true)!;
+      const rowDestination = destination({ classification });
+      const qualification = advanceTrustedCommunityQualification({ destination: rowDestination, postingIdentityDecision: unconfirmed(),
+        alertMode: trusted.alertMode, completeFetchSequence: 1 });
+      const admitted = evaluateCatalogAdmission({ listing: listing({ sourceId }), destination: rowDestination, postingAttributed: false,
+        evaluatedAt: inspectedAt, trustedCommunity: { policy: trusted, qualification } });
+      expect(admitted).toMatchObject({
+        employerResolution: 'source-reported', catalogEligible: true, alertEligible: false,
+        evidenceCodes: ['trusted-community-source'],
+      });
+      expect(admitted.canonicalEmployer).toBeUndefined();
+
+      const unlisted = 'greenhouse-figma';
+      expect(activeTrustedCommunityPolicy(unlisted, true)).toBeUndefined();
+      const blocked = evaluateCatalogAdmission({ listing: listing({ sourceId: unlisted }), destination: rowDestination,
+        postingAttributed: false, evaluatedAt: inspectedAt });
+      expect(blocked).toMatchObject({ employerResolution: 'unresolved', catalogEligible: false });
+      expect(blocked.reasonCodes).toContain('employer-unresolved');
+    },
+  );
+
+  it('leaves a newly listed community list dormant while the catalog gate is off', async () => {
+    const sourceId = 'canadian-tech-2027';
+    const dormant = await pollCommunityBoard(sourceId, false);
+    const control = await pollCommunityBoard('zapply-2027', false);
+    // The gate-off deploy must resolve a newly listed source exactly like a
+    // source that has no policy at all.
+    expect(dormant.admissions).toHaveLength(2);
+    expect(dormant.admissions).toEqual(control.admissions);
+    for (const item of dormant.admissions) {
+      expect(item).toMatchObject({ employerResolution: 'unresolved', catalogEligible: false, alertEligible: false });
+      expect(item?.reasonCodes).toContain('employer-unresolved');
+      expect(item?.evidenceCodes).toBeUndefined();
+    }
+    expect(await dormant.store.getCheckpoint(sourceId)).toMatchObject({ admissionConfigurationVersion: 'registry-v1' });
   });
 
   it('admits validated source-reported roles without inventing a canonical employer', () => {
@@ -356,7 +464,7 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     });
   });
 
-  it('does not checkpoint or self-enqueue a migration continuation after a circuit breach', async () => {
+  it('alerts on a circuit breach for a reviewed list without checkpointing, self-enqueueing, or quarantining', async () => {
     const store = new MemoryInternshipStore();
     const adapter: SourceAdapter = {
       id: 'simplify-summer-2026',
@@ -372,15 +480,20 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     await new Poller([adapter], store, () => new Date(inspectedAt), undefined, undefined, undefined, undefined,
       resolver, true, false).poll();
     const checkpoint = await store.getCheckpoint(adapter.id);
+    const alerts: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => { alerts.push(String(line)); });
     const breached = await new Poller([adapter], store, () => new Date('2026-09-04T12:10:00.000Z'), undefined,
       undefined, undefined, undefined, resolver, true, true).poll({ maxAdmissionMigrationListingsPerSourceRun: 0 });
-    expect(breached.failures).toEqual([expect.stringContaining('trusted-community circuit breaker')]);
+    spy.mockRestore();
+    // The reviewed lists alarm instead of quarantining, and the alert names the breach.
+    expect(alerts.some((line) => line.includes('trusted_community_circuit_alert') && line.includes('simplify-summer-2026'))).toBe(true);
+    expect(breached.failures).toEqual([]);
     expect(breached.continuationSources).toEqual([]);
     expect(await store.getCheckpoint(adapter.id)).toEqual(checkpoint);
-    expect(await store.getSourceHealth(adapter.id)).toMatchObject({ state: 'quarantined' });
+    expect((await store.getSourceHealth(adapter.id))?.state).not.toBe('quarantined');
   });
 
-  it('keeps the final migration hidden and uncheckpointed when current inspection coverage is incomplete', async () => {
+  it('alerts on incomplete inspection coverage without checkpointing, publishing nothing further, or quarantining', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'simplify-summer-2026';
     const { minimumRawRows, minimumEligibleRows } = SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS;
@@ -431,15 +544,25 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
       },
     };
 
+    const alerts: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => { alerts.push(String(line)); });
     const result = await new Poller([adapter], store, () => new Date(inspectedAt), undefined,
       undefined, undefined, undefined, resolver, true, true).poll({ maxAdmissionMigrationListingsPerSourceRun: minimumEligibleRows });
+    spy.mockRestore();
 
     const inspectedCoverage = ((100 / minimumEligibleRows) * 100).toFixed(2);
-    expect(result.failures).toContain(`simplify-summer-2026: trusted-community circuit breaker: inspection coverage ${inspectedCoverage}% below 90.00%`);
+    // The reviewed list alerts on the coverage breach and ends the delivery
+    // without checkpointing or quarantining. Publication is gated per row by
+    // each occurrence's own destination evidence, which this pass did inspect.
+    expect(alerts.some((line) => line.includes('trusted_community_circuit_alert')
+      && line.includes(`inspection coverage ${inspectedCoverage}% below 90.00%`))).toBe(true);
+    // The fixture's own resolution failures are expected; the breach must not be
+    // one of them, because an alert policy never fails the delivery.
+    expect(result.failures.some((failure) => failure.includes('circuit breaker'))).toBe(false);
     expect(result.continuationSources).toEqual([]);
     expect(await store.getCheckpoint(sourceId)).toEqual(previous);
     expect(await store.listCatalog()).toEqual([]);
-    expect(await store.getSourceHealth(sourceId)).toMatchObject({ state: 'quarantined' });
+    expect((await store.getSourceHealth(sourceId))?.state).not.toBe('quarantined');
   });
 
   it('restarts qualification when an occurrence is absent from a complete source snapshot', async () => {

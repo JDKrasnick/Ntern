@@ -12,6 +12,13 @@ export interface TrustedCommunityAdmissionPolicy {
   version: string;
   catalogMode: 'validated-posting-specific-destination';
   alertMode: TrustedCommunityAlertMode;
+  /**
+   * `block` (the default) fails the delivery so the source quarantines; `alert`
+   * hides the unsafe listings and logs the breach but keeps polling. The
+   * reviewed lists are manually verified and their anomalies are caught per
+   * posting, so a floor breach is an alarm rather than a stop.
+   */
+  circuitBreaker?: 'block' | 'alert';
 }
 
 export interface StandardAdmissionPolicy {
@@ -23,17 +30,43 @@ export type SourceAdmissionPolicy = StandardAdmissionPolicy | TrustedCommunityAd
 
 const STANDARD_POLICY: StandardAdmissionPolicy = { trust: 'standard', version: 'standard-v1' };
 
+/** The reviewed admission policy every trusted community list starts from. */
+function trustedCommunityListPolicy(sourceId: string): TrustedCommunityAdmissionPolicy {
+  return {
+    trust: 'trusted-community',
+    version: `${sourceId}-trusted-community-v1`,
+    catalogMode: 'validated-posting-specific-destination',
+    alertMode: 'disabled',
+    circuitBreaker: 'alert',
+  };
+}
+
 /**
  * Policy changes are reviewed configuration deployments. Keep the alert mode
  * disabled for the catalog-baseline rollout; activating it must bump version.
+ *
+ * Reviewed community lists whose rows may publish from source-reported employer
+ * evidence once the catalog gate is open. Every entry is an explicit reviewed
+ * decision: trust is never inferred from the polled source registry, so adding
+ * a list to `defaultSources` cannot admit it by itself. A newly trusted list is
+ * re-graded under its own policy version when the gate turns on.
+ *
+ * `simplify-summer-2026` was reviewed before the per-source version convention
+ * and keeps its exact version string, so its existing occurrences stay graded.
  */
 const TRUSTED_COMMUNITY_POLICIES: Readonly<Record<string, TrustedCommunityAdmissionPolicy>> = {
+  'vanshb03-summer-2027': trustedCommunityListPolicy('vanshb03-summer-2027'),
   'simplify-summer-2026': {
     trust: 'trusted-community',
     version: 'simplify-trusted-community-v1',
     catalogMode: 'validated-posting-specific-destination',
     alertMode: 'disabled',
+    circuitBreaker: 'alert',
   },
+  'speedyapply-2027-swe': trustedCommunityListPolicy('speedyapply-2027-swe'),
+  'speedyapply-2027-ai': trustedCommunityListPolicy('speedyapply-2027-ai'),
+  'northwestern-fintech-2027-quant': trustedCommunityListPolicy('northwestern-fintech-2027-quant'),
+  'canadian-tech-2027': trustedCommunityListPolicy('canadian-tech-2027'),
 };
 
 export function sourceAdmissionPolicy(sourceId: string): SourceAdmissionPolicy {
