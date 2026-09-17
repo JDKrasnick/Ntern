@@ -53,8 +53,11 @@ describe('grouped catalog API', () => {
     await jobs.putInternship({ ...job('ml', 10, 'Machine Learning Intern'), internshipIdentity: identity('Machine Learning Intern', 'ai-ml') });
     await jobs.putCatalogProjection(groupCatalogJobs(await jobs.listCatalog()).map(catalogGroupDetails), new Date().toISOString());
     let projectionReads = 0;
-    const projected = jobs.listCatalogProjection.bind(jobs);
-    jobs.listCatalogProjection = async (...args) => { projectionReads += 1; return projected(...args); };
+    // A searched page reads the matching groups in SQL and then re-checks each
+    // role's admission, so a projection written by an older deploy stays
+    // advisory rather than authoritative.
+    const projected = jobs.listCatalogProjectionFiltered.bind(jobs);
+    jobs.listCatalogProjectionFiltered = async (...args) => { projectionReads += 1; return projected(...args); };
     const response = await createApiHandler({ jobs, users: new MemoryUserStore() })(event('GET', '/catalog', { q: 'machine' }));
     expect(response.statusCode).toBe(200);
     expect(body<{ groups: Array<{ titles: string[] }> }>(response).groups).toMatchObject([{ titles: ['Machine Learning Intern'] }]);
@@ -132,15 +135,15 @@ describe('grouped catalog API', () => {
     }));
     await jobs.putCatalogProjection(groupCatalogJobs(roles, { includeClosed: true }).map(catalogGroupDetails), new Date().toISOString());
     const reads: Array<{ cursor?: string; limit?: number }> = [];
-    const readProjection = jobs.listCatalogProjection.bind(jobs);
-    jobs.listCatalogProjection = async (cursor, limit) => { reads.push({ cursor, limit }); return readProjection(cursor, limit); };
+    const readProjection = jobs.listCatalogProjectionFiltered.bind(jobs);
+    jobs.listCatalogProjectionFiltered = async (cursor, limit, filter) => { reads.push({ cursor, limit }); return readProjection(cursor, limit, filter); };
     const handler = createApiHandler({ jobs, users: new MemoryUserStore() });
     const first = body<{ groups: Array<{ roleIds: string[] }>; cursor?: string }>(await handler(event('GET', '/catalog', { status: 'closed', limit: '1' })));
     const second = body<{ groups: Array<{ roleIds: string[] }>; cursor?: string }>(await handler(event('GET', '/catalog', { status: 'closed', limit: '1', cursor: first.cursor! })));
     expect(first.groups).toHaveLength(1);
     expect(second.groups).toHaveLength(1);
     expect(second.groups[0]!.roleIds).not.toEqual(first.groups[0]!.roleIds);
-    expect(reads.every((read) => read.limit === 100)).toBe(true);
+    expect(reads.every((read) => read.limit === 1)).toBe(true);
     expect(reads.length).toBeLessThanOrEqual(4);
   });
 

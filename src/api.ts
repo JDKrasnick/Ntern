@@ -100,6 +100,26 @@ function eligibleProjectedGroup(details: CatalogGroupDetails, at = new Date()): 
 async function projectedCatalogPage(store: InternshipStore, cursor: string | undefined, limit: number, filter: CatalogGroupFilter) {
   const isDefaultBrowse = filter.status === 'open' && Object.keys(filter).length === 1;
   if (!store.listCatalogProjection) return undefined;
+  if (!isDefaultBrowse && store.listCatalogProjectionFiltered) {
+    // A filtered or searched request reads the matching groups in SQL instead of
+    // walking every group in the projection in JS. A sparse query used to read the
+    // whole catalog to find its matches, which a large employer card makes
+    // untenable; the eligibility re-check (a projection outlives the deploy that
+    // wrote it) still runs on what comes back, and a page whose groups all drop is
+    // followed by at most a few more rather than ending the feed early.
+    let next = cursor;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const page = await store.listCatalogProjectionFiltered(next, limit, filter);
+      if (!page) return undefined;
+      const groups = page.groups.flatMap((details) => {
+        const eligible = eligibleProjectedGroup(details);
+        return eligible ? filterCatalogGroupDetails([eligible], filter) : [];
+      });
+      if (groups.length || !page.cursor) return { groups, ...(page.cursor ? { cursor: page.cursor } : {}) };
+      next = page.cursor;
+    }
+    return { groups: [] };
+  }
   const scanLimit = isDefaultBrowse ? limit : Math.max(limit, 100);
   const groups = [];
   let next = cursor;
