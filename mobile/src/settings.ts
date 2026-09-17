@@ -52,6 +52,7 @@ export function jobPreferencesPayload<TFilter>(draft: {
     alertsEnabled: draft.alertsEnabled,
     alertSettings: {
       delivery: draft.delivery,
+      timezone: draft.quietHours.timezone,
       quietHours: draft.quietHours,
     },
   };

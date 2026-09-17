@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MemoryInternshipStore, MemoryUserStore } from '../src/store.js';
-import { compactRoleTitle, drainPendingExpoNotifications, ExpoPushPublisher, MAX_LEGACY_PUSH_JOBS_PER_RUN, notificationSourceLabel, NtfyPublisher, renderPushTemplate, sendDigest, sendNewJobNotifications, sendPendingNotifications, summaryChunks, type PushMessage } from '../src/notifications.js';
+import { compactRoleTitle, deliverDeferredExpoNotifications, drainPendingExpoNotifications, ExpoPushPublisher, MAX_LEGACY_PUSH_JOBS_PER_RUN, nextPushDeliveryAt, notificationDedupeKey, notificationSourceLabel, NtfyPublisher, renderPushTemplate, sendDigest, sendNewJobNotifications, sendPendingNotifications, summaryChunks, type PushMessage } from '../src/notifications.js';
 import type { Internship } from '../src/types.js';
 
 function job(index: number, company = 'Unknown'): Internship { return { jobId: `j${index}`, company, title: `Role ${index}`, location: 'NYC', season: 'summer-2027', applyUrl: `https://apply.example.com/${index}`, normalizedUrl: `https://apply.example.com/${index}`, fingerprint: String(index), compensation: { raw: '$50/hr', maxHourlyUSD: 50 }, sourceReferences: [{ sourceId: 'x', document: 'README', sourceUrl: 'x', row: index, company, title: `Role ${index}`, location: 'NYC', season: 'summer-2027', applyUrl: `https://apply.example.com/${index}`, compensation: { raw: '' }, state: 'open' }], open: true, firstSeenAt: `2026-01-0${index}T00:00:00Z`, lastSeenAt: '2026-01-01T00:00:00Z', notification: { smsPending: true, digestPending: true } }; }
@@ -64,6 +64,34 @@ describe('notifications', () => {
     const onboardingRace = await drainPendingExpoNotifications(store, users, new ExpoPushPublisher('https://push.example.test'));
     expect(onboardingRace).toMatchObject({ processed: 0, deferred: 2, delivery: { sent: 0 } });
     expect(await store.pendingSms()).toHaveLength(2);
+  });
+  it('persists daily and quiet-hours delivery until the selected local time', async () => {
+    expect(nextPushDeliveryAt(new Date('2026-01-15T18:00:00.000Z'), {
+      delivery: 'daily-digest', timezone: 'America/Los_Angeles', applicationReminders: true, followUpDays: 7,
+    })).toBe('2026-01-16T17:00:00.000Z');
+    expect(nextPushDeliveryAt(new Date('2026-03-08T15:00:00.000Z'), {
+      delivery: 'daily-digest', timezone: 'America/Los_Angeles', applicationReminders: true, followUpDays: 7,
+    })).toBe('2026-03-08T16:00:00.000Z');
+    expect(nextPushDeliveryAt(new Date('2026-08-25T01:30:00.000Z'), {
+      delivery: 'daily-digest', timezone: 'Asia/Tokyo', applicationReminders: true, followUpDays: 7,
+    })).toBe('2026-08-26T00:00:00.000Z');
+    expect(nextPushDeliveryAt(new Date('2026-08-25T03:00:00.000Z'), {
+      delivery: 'immediate', applicationReminders: true, followUpDays: 7,
+      quietHours: { start: '22:00', end: '08:00', timezone: 'UTC' },
+    })).toBe('2026-08-25T08:00:00.000Z');
+
+    const jobs = new MemoryInternshipStore(); const users = new MemoryUserStore(); const listing = job(1);
+    await jobs.putInternship(listing);
+    await users.putPreferences({ userId: 'user-1', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-08-25T00:00:00.000Z', alertSettings: { delivery: 'daily-digest', timezone: 'UTC', applicationReminders: true, followUpDays: 7, quietHours: { start: '22:00', end: '08:00', timezone: 'UTC' } } });
+    await users.putDevice({ userId: 'user-1', token: 'ExponentPushToken[test]', platform: 'ios', active: true, createdAt: '2026-08-25T00:00:00.000Z', updatedAt: '2026-08-25T00:00:00.000Z' });
+    let sends = 0;
+    const publisher = new ExpoPushPublisher('https://push.example.test', async () => { sends += 1; return new Response(JSON.stringify({ data: { id: 'ticket-1', status: 'ok' } }), { status: 200 }); });
+    const createdAt = new Date('2026-08-25T10:00:00.000Z');
+    expect(await sendNewJobNotifications([listing], users, publisher, () => createdAt)).toEqual({ sent: 0, skipped: 1, failed: 0 });
+    const receipt = await users.getReceipt('user-1', notificationDedupeKey(listing), 'ExponentPushToken[test]');
+    expect(receipt).toMatchObject({ status: 'deferred', deliveryState: 'deferred', deliverAfter: '2026-08-26T09:00:00.000Z' });
+    expect(await deliverDeferredExpoNotifications(jobs, users, publisher, () => new Date(receipt!.deliverAfter!))).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    expect(sends).toBe(1);
   });
   it('only marks a digest after SES accepts it', async () => {
     const store = new MemoryInternshipStore(); await store.putInternship(job(1));

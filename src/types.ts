@@ -27,6 +27,8 @@ export type ApplicationHandoff = 'window' | 'tab';
 /** Delivery preferences are stored separately from the role filter so they can evolve independently. */
 export interface AlertSettings {
   delivery: AlertDelivery;
+  /** IANA timezone used for daily delivery, even when quiet hours are disabled. */
+  timezone?: string;
   quietHours?: { start: string; end: string; timezone: string };
   applicationReminders: boolean;
   followUpDays: number;
@@ -111,13 +113,15 @@ export interface DeliveryReceipt {
   dedupeKey?: string;
   token: string;
   ticketId?: string;
-  status: 'pending' | 'retryable' | 'ok' | 'error';
+  status: 'deferred' | 'pending' | 'retryable' | 'ok' | 'error';
   attempts?: number;
   lastErrorCode?: string;
   lastErrorMessage?: string;
   lastErrorAt?: string;
   /** Provider-aware state; `status` remains during the legacy receipt migration. */
-  deliveryState?: 'claimed' | 'accepted' | 'delivered' | 'definitive-failure' | 'unknown';
+  deliveryState?: 'deferred' | 'claimed' | 'accepted' | 'delivered' | 'definitive-failure' | 'unknown';
+  /** The earliest time the user's selected alert cadence permits delivery. */
+  deliverAfter?: string;
   createdAt: string;
   updatedAt: string;
 }
