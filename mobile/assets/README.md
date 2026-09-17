@@ -1,7 +1,7 @@
 # App identity
 
-`icon.svg` is the editable vector master, recreated from the owner's reference:
-solid white background, cyan/blue rising-arrow monogram and signal arcs, with no border.
+`icon-master.png` is the approved high-resolution concept master: a borderless,
+cyan/blue rising-arrow monogram and signal arcs on a quiet grid canvas.
 Run `npm run build:icons` from the repository root after editing it.
 
 The generator exports the opaque 1024 × 1024 `icon.png`, the matching checked-in

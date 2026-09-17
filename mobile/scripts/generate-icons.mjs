@@ -1,15 +1,19 @@
 import sharp from "sharp";
 import { copyFile } from "node:fs/promises";
 
-// All raster exports come from the editable vector master. iOS applies its
-// own corner mask; keep the 1024px source opaque and full bleed.
+// All exports come from the approved concept artwork. iOS applies its own
+// corner mask; keep the 1024px source opaque and full bleed.
 const asset = (path) => new URL(`../${path}`, import.meta.url);
-const source = asset("assets/icon.svg");
+const source = asset("assets/icon-master.png");
 for (const [path, size] of [
   ["assets/icon.png", 1024],
+  ["assets/splash-icon.png", 512],
   ["public/apple-touch-icon.png", 180],
+  ["ios/InternNotifs/Images.xcassets/SplashScreenLogo.imageset/image.png", 180],
+  ["ios/InternNotifs/Images.xcassets/SplashScreenLogo.imageset/image@2x.png", 360],
+  ["ios/InternNotifs/Images.xcassets/SplashScreenLogo.imageset/image@3x.png", 540],
 ]) {
-  await sharp(source.pathname, { density: 384 })
+  await sharp(source.pathname)
     .resize(size, size)
     .removeAlpha()
     .png()
@@ -17,7 +21,7 @@ for (const [path, size] of [
 }
 // Browser tabs do not apply the system icon mask. Give the favicon transparent
 // rounded corners so the white tile blends into light and dark browser chrome.
-await sharp(source.pathname, { density: 384 })
+await sharp(source.pathname)
   .resize(64, 64)
   .ensureAlpha()
   .composite([{

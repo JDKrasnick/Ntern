@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   Alert,
@@ -28,6 +28,7 @@ import {
 import * as WebBrowser from "expo-web-browser";
 import * as Notifications from "expo-notifications";
 import * as DocumentPicker from "expo-document-picker";
+import * as SplashScreen from "expo-splash-screen";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, catalogCardKind, type GroupedCatalogPage } from "./src/catalog";
@@ -333,6 +334,8 @@ if (Platform.OS === 'web' && typeof document !== 'undefined') {
   document.body.style.backgroundColor = colors.canvas;
 }
 const MotionAllowedContext = createContext(false);
+
+if (Platform.OS !== "web") void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 function useMotionAllowed() {
   // Start enabled so the first interaction does not render without motion and
@@ -4320,13 +4323,79 @@ function EmployerPortal({ initialSection }: { initialSection: EmployerWorkspaceS
 
 export default function App() {
   const motionAllowed = useMotionAllowed();
+  const [launchVisible, setLaunchVisible] = useState(Platform.OS !== "web");
+  const finishLaunch = useCallback(() => setLaunchVisible(false), []);
   const employerSection = Platform.OS === "web" && typeof window !== "undefined"
     ? employerRouteFromUrl(window.location.href)
     : undefined;
+  useEffect(() => {
+    if (Platform.OS !== "web") void SplashScreen.hideAsync().catch(() => undefined);
+  }, []);
   return (
     <MotionAllowedContext.Provider value={motionAllowed}>
-      {employerSection ? <EmployerPortal initialSection={employerSection} /> : <AppContent />}
+      <View style={styles.launchRoot}>
+        {employerSection ? <EmployerPortal initialSection={employerSection} /> : <AppContent />}
+        {launchVisible ? <LaunchTransition motionAllowed={motionAllowed} onComplete={finishLaunch} /> : null}
+      </View>
     </MotionAllowedContext.Provider>
+  );
+}
+
+function LaunchTransition({ motionAllowed, onComplete }: { motionAllowed: boolean; onComplete: () => void }) {
+  const fade = useRef(new Animated.Value(1)).current;
+  const spin = useRef(new Animated.Value(0)).current;
+  const scale = useRef(new Animated.Value(1)).current;
+  const firstWave = useRef(new Animated.Value(0)).current;
+  const secondWave = useRef(new Animated.Value(0)).current;
+  const thirdWave = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    let active = true;
+    const finish = () => { if (active) onComplete(); };
+    if (!motionAllowed) {
+      const animation = Animated.timing(fade, { toValue: 0, duration: 160, useNativeDriver: true });
+      animation.start(finish);
+      return () => { active = false; animation.stop(); };
+    }
+    fade.setValue(1);
+    spin.setValue(0);
+    scale.setValue(1);
+    firstWave.setValue(0);
+    secondWave.setValue(0);
+    thirdWave.setValue(0);
+    const ripple = (value: Animated.Value, delay: number) => Animated.sequence([
+      Animated.delay(delay),
+      Animated.timing(value, { toValue: 1, duration: 470, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+    ]);
+    const animation = Animated.sequence([
+      Animated.parallel([ripple(firstWave, 0), ripple(secondWave, 90), ripple(thirdWave, 180)]),
+      Animated.parallel([
+        Animated.timing(spin, { toValue: 1, duration: 360, easing: Easing.bezier(0.16, 1, 0.3, 1), useNativeDriver: true }),
+        Animated.sequence([
+          Animated.timing(scale, { toValue: 1.06, duration: 160, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          Animated.timing(scale, { toValue: 0.96, duration: 200, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+        ]),
+      ]),
+      Animated.timing(fade, { toValue: 0, duration: 160, easing: Easing.in(Easing.quad), useNativeDriver: true }),
+    ]);
+    animation.start(finish);
+    return () => { active = false; animation.stop(); };
+  }, [fade, firstWave, motionAllowed, onComplete, scale, secondWave, spin, thirdWave]);
+  const waveStyle = (value: Animated.Value) => ({
+    opacity: value.interpolate({ inputRange: [0, 0.18, 1], outputRange: [0, 0.22, 0] }),
+    transform: [{ scale: value.interpolate({ inputRange: [0, 1], outputRange: [0.52, 1.74] }) }],
+  });
+  return (
+    <Animated.View accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.launchOverlay, { opacity: fade }]}>
+      <View style={styles.launchMarkStage}>
+        <Animated.View style={[styles.launchWave, waveStyle(firstWave)]} />
+        <Animated.View style={[styles.launchWave, waveStyle(secondWave)]} />
+        <Animated.View style={[styles.launchWave, waveStyle(thirdWave)]} />
+        <Animated.Image
+          source={require("./assets/icon.png")}
+          style={[styles.launchMark, { transform: [{ rotate: spin.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "90deg"] }) }, { scale }] }]}
+        />
+      </View>
+    </Animated.View>
   );
 }
 
@@ -6592,6 +6661,22 @@ function SignIn({
   );
 }
 const styles = StyleSheet.create({
+  launchRoot: { flex: 1 },
+  launchOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    backgroundColor: colors.canvas,
+    justifyContent: "center",
+    zIndex: 100,
+  },
+  launchMarkStage: { alignItems: "center", height: 180, justifyContent: "center", width: 180 },
+  launchWave: {
+    ...StyleSheet.absoluteFillObject,
+    borderColor: colors.signalGlow,
+    borderRadius: 90,
+    borderWidth: 2,
+  },
+  launchMark: { borderRadius: 32, height: 148, width: 148 },
   screen: { flex: 1, backgroundColor: colors.canvas },
   guestRoot: { flex: 1 },
   // Keep native list state/layout intact. On web, opacity and pointerEvents

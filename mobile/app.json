@@ -39,7 +39,7 @@
           "image": "./assets/splash-icon.png",
           "imageWidth": 180,
           "resizeMode": "contain",
-          "backgroundColor": "#061A33"
+          "backgroundColor": "#F8FAFC"
         }
       ],
       "expo-font",

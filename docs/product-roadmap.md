@@ -164,7 +164,7 @@
 
 ### Product owner
 
-- [x] Recreate the official reference icon as an editable vector and configure matching website favicon, Apple touch icon, and native iOS assets for the next TestFlight build.
+- [x] Maintain the approved concept artwork as the icon master and configure matching website favicon, Apple touch icon, native app icon, and splash assets for TestFlight builds.
 
 - [ ] Reactivate AWS account `628031636041` long enough to export retained development data and approve the final Cloudflare cutover; do not delete retained resources during migration.
 
