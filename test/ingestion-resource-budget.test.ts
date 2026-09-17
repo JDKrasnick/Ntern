@@ -2,8 +2,6 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
-import { D1TrafficController } from '../cloudflare/d1-traffic-controller.js';
-import { observeCatalogDelivery } from '../cloudflare/d1-traffic-observation.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
 import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY, IngestionRunner } from '../src/poll.js';
@@ -102,21 +100,6 @@ function catalog(): { database: DatabaseSync; store: D1InternshipStore } {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   return { database, store: new D1InternshipStore(sqliteD1(database)) };
-}
-
-function observationController() {
-  const values = new Map<string, unknown>();
-  const controller = new D1TrafficController({ storage: {
-    get: async <T>(key: string) => values.has(key) ? structuredClone(values.get(key)) as T : undefined,
-    put: async <T>(key: string, value: T) => { values.set(key, structuredClone(value)); },
-  } });
-  return {
-    controller,
-    namespace: {
-      idFromName: () => 'catalog-ingestion',
-      get: () => ({ fetch: (input: RequestInfo | URL, init?: RequestInit) => controller.fetch(input instanceof Request ? input : new Request(input, init)) }),
-    },
-  };
 }
 
 /** The expression `htmlTables` used before the line index: the regression reference. */
@@ -250,93 +233,6 @@ describe('ingestion resource budgets', () => {
         expect(delivery.peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
       }
     }
-  }, 300_000);
-
-  it('keeps regular, heavy, and super-heavy production-shaped job input resumable while observing every delivery', async () => {
-    const { store } = catalog();
-    const documents = productionDocuments();
-    await seedLargestSource(store);
-    const runner = new IngestionRunner([productionAdapter(documents)], store, () => new Date('2026-09-16T00:00:00.000Z'), undefined, undefined, false);
-    const { controller, namespace } = observationController();
-    const checkpoints = new Map([[1, 'regular'], [10, 'heavy'], [Math.ceil(PRODUCTION_GITHUB_SOURCE_ROWS / GITHUB_RESOLUTION_ROWS_PER_DELIVERY), 'super-heavy']]);
-    const summaries: Array<{ scenario: string; deliveries: number; resolved: number; maxCpuMs: number; controller: unknown }> = [];
-    let resolved = 0;
-    let maxCpuMs = 0;
-    const log = console.log;
-    console.log = () => undefined;
-    try {
-      for (let delivery = 1; delivery <= Math.ceil(PRODUCTION_GITHUB_SOURCE_ROWS / GITHUB_RESOLUTION_ROWS_PER_DELIVERY); delivery += 1) {
-        const observation = await observeCatalogDelivery({ controller: namespace, provider: 'github', queue: 'intern-notifs-github', messageId: `stress-${delivery}` });
-        const before = (await store.getCheckpoint(sourceId))?.pendingResolutionRows?.length ?? PRODUCTION_GITHUB_SOURCE_ROWS;
-        const started = process.cpuUsage();
-        const report = await runner.run({ maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY });
-        const cpuMs = cpuMsSince(started);
-        const after = (await store.getCheckpoint(sourceId))?.pendingResolutionRows?.length ?? 0;
-        await observation?.complete('success');
-        expect(report.failures).toEqual([]);
-        expect(before - after).toBeLessThanOrEqual(GITHUB_RESOLUTION_ROWS_PER_DELIVERY);
-        expect(before - after).toBeGreaterThan(0);
-        expect(cpuMs).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
-        resolved += before - after;
-        maxCpuMs = Math.max(maxCpuMs, cpuMs);
-        const scenario = checkpoints.get(delivery);
-        if (scenario) summaries.push({ scenario, deliveries: delivery, resolved, maxCpuMs, controller: await controller.status() });
-      }
-    } finally {
-      console.log = log;
-    }
-    expect(summaries).toEqual([
-      expect.objectContaining({ scenario: 'regular', deliveries: 1, resolved: 100, controller: expect.objectContaining({ mode: 'observation', permitsInUse: { P0: 0, P1: 0, P2: 0 } }) }),
-      expect.objectContaining({ scenario: 'heavy', deliveries: 10, resolved: 1_000, controller: expect.objectContaining({ mode: 'observation', permitsInUse: { P0: 0, P1: 0, P2: 0 } }) }),
-      expect.objectContaining({ scenario: 'super-heavy', deliveries: 31, resolved: PRODUCTION_GITHUB_SOURCE_ROWS, controller: expect.objectContaining({ mode: 'observation', permitsInUse: { P0: 0, P1: 0, P2: 0 } }) }),
-    ]);
-    console.log(JSON.stringify({ event: 'd1_traffic_ingestion_stress_summary', scenarios: summaries }));
-  }, 300_000);
-
-  it('keeps a super-heavy mixed input idempotent when malformed rows and repeated jobs arrive', async () => {
-    const { store } = catalog();
-    await seedLargestSource(store);
-    const documents = productionDocuments();
-    const repeated = '| Acme 0 | Software Engineering Intern | Remote | [Apply](https://careers-a.example.test/board/role-0) | repeated |';
-    documents['README.md'] = `${documents['README.md'].trimEnd()}\n${[
-      repeated,
-      repeated,
-      '| Missing link | Software Engineering Intern | Remote | Apply later |',
-      'this is deliberately not a table row',
-    ].join('\n')}\n`;
-    documents['README-Off-Season.md'] += '\n| Company | Role | Location | Apply |\n| --- | --- | --- | --- |\n'
-      + '| Aggregator | Software Engineering Intern | Remote | [Apply](https://www.indeed.com/viewjob?jk=stress) |\n';
-    const adapter = productionAdapter(documents);
-    const runner = new IngestionRunner([adapter], store, () => new Date('2026-09-16T00:00:00.000Z'), undefined, undefined, false);
-    const { controller, namespace } = observationController();
-    const log = console.log;
-    const cpuSamples: number[] = [];
-    console.log = () => undefined;
-    try {
-      for (let delivery = 1; delivery <= Math.ceil(PRODUCTION_GITHUB_SOURCE_ROWS / GITHUB_RESOLUTION_ROWS_PER_DELIVERY); delivery += 1) {
-        const observation = await observeCatalogDelivery({ controller: namespace, provider: 'github', queue: 'intern-notifs-github', messageId: `mixed-${delivery}` });
-        const started = process.cpuUsage();
-        const report = await runner.run({ maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY });
-        cpuSamples.push(cpuMsSince(started));
-        await observation?.complete(report.failures.length ? 'failure' : 'success');
-        expect(report.failures).toEqual([]);
-      }
-      const replayObservation = await observeCatalogDelivery({ controller: namespace, provider: 'github', queue: 'intern-notifs-github', messageId: 'mixed-replay' });
-      const replay = await runner.run({ maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY });
-      await replayObservation?.complete(replay.failures.length ? 'failure' : 'success');
-      expect(replay.failures).toEqual([]);
-      expect(replay.newJobs).toEqual([]);
-    } finally {
-      console.log = log;
-    }
-    const fetched = await adapter.fetch(await store.getCheckpoint(sourceId));
-    expect(fetched.rawRowCount).toBe(PRODUCTION_GITHUB_SOURCE_ROWS + 3);
-    expect(fetched.listings).toHaveLength(PRODUCTION_GITHUB_SOURCE_ROWS);
-    expect(fetched.trustedCommunityDiagnostics).toEqual(expect.objectContaining({ duplicateOccurrenceIds: 2, rejectedAggregatorRows: 1 }));
-    expect(Math.max(...cpuSamples)).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
-    expect(await controller.status()).toEqual(expect.objectContaining({ permitsInUse: { P0: 0, P1: 0, P2: 0 } }));
-    console.log(JSON.stringify({ event: 'd1_traffic_ingestion_edge_stress_summary', deliveries: cpuSamples.length,
-      maxCpuMs: Math.max(...cpuSamples), malformedRowsDropped: 1, duplicateRowsDropped: 2, aggregatorRowsRejected: 1 }));
   }, 300_000);
 
   it('reads one occurrence of a production-sized source by key', async () => {

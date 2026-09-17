@@ -753,4 +753,31 @@ describe('Cloudflare GitHub queue continuation', () => {
       vi.restoreAllMocks();
     }
   });
+
+  it('releases an observation permit when a GitHub source is skipped', async () => {
+    const controllerFetch = vi.fn()
+      .mockResolvedValueOnce(Response.json({ permit: { permitId: 'permit-skipped', expiresAt: '2026-09-17T00:00:30.000Z', fenced: true }, status: { mode: 'observation', permitsInUse: { P0: 1, P1: 0, P2: 0 }, budgets: { P0: 4, P1: 2, P2: 2 }, recentPressure: 0 } }))
+      .mockResolvedValueOnce(Response.json({ mode: 'observation', permitsInUse: { P0: 0, P1: 0, P2: 0 }, budgets: { P0: 4, P1: 2, P2: 2 }, recentPressure: 0 }));
+    const ack = vi.fn();
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue({
+      sourceId: reviewedGithub.id, state: 'quarantined', sourceStatus: 'paused', lastAttemptAt: '2026-09-17T00:00:00.000Z', consecutiveFailures: 1, durationMs: 1,
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [{
+        id: 'github-skipped', body: { sourceId: reviewedGithub.id }, attempts: 1, ack, retry: vi.fn(),
+      }] }, {
+        DB: { prepare: () => ({ async first() { return null; } }), async batch() { return []; } },
+        GITHUB_QUEUE: { async send() {}, async sendBatch() {} },
+        D1_TRAFFIC_CONTROLLER: { idFromName: vi.fn(() => 'catalog-ingestion'), get: vi.fn(() => ({ fetch: controllerFetch })) },
+      } as unknown as Environment);
+
+      expect(ack).toHaveBeenCalledOnce();
+      expect(controllerFetch).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(String(controllerFetch.mock.calls[1]![1]?.body))).toMatchObject({ permitId: 'permit-skipped', outcome: 'cancelled' });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
 });

@@ -95,6 +95,7 @@ jobs:
         with: { node-version: 22, cache: npm }
       - uses: opentofu/setup-opentofu@v1
       - run: npm ci
+      - run: npm run build:cloudflare
       - run: npm run terraform:fmt
       - run: tofu -chdir=infra/cloudflare init -backend=false
       - run: npm run terraform:validate

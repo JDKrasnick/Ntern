@@ -1481,7 +1481,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       }));
     }
   }
-  const completeTraffic = async (messageId: string, outcome: 'success' | 'failure', error?: unknown) => {
+  const completeTraffic = async (messageId: string, outcome: 'success' | 'failure' | 'cancelled', error?: unknown) => {
     await trafficObservations.get(messageId)?.complete(outcome, error);
   };
   if (batch.queue.includes('destination-verification')) {
@@ -1574,6 +1574,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         if (githubSourceRunBlocked(priorHealth, message.force)) {
           console.log(JSON.stringify({ event: 'source_poll_skipped', command: 'github-poll', sourceId: source.id,
             reason: priorHealth?.state === 'quarantined' ? 'quarantined' : priorHealth?.sourceStatus === 'paused' ? 'paused' : 'backoff' }));
+          await completeTraffic(queued.id, 'cancelled');
           continue;
         }
         const result = await withinMessageDeadline(runRuntimeCommand('poll', {
