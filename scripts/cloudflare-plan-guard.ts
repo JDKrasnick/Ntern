@@ -90,9 +90,19 @@ function containsUnknown(value: unknown): boolean {
 }
 
 function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
-  if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return false;
+  if (!Array.isArray(before) || !Array.isArray(after)) return false;
+  const controller = after.find((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER');
+  const beforeWithoutController = before.filter((binding) => !isRecord(binding) || binding.name !== 'D1_TRAFFIC_CONTROLLER');
+  const afterWithoutController = after.filter((binding) => !isRecord(binding) || binding.name !== 'D1_TRAFFIC_CONTROLLER');
+  const addedController = beforeWithoutController.length === before.length
+    && afterWithoutController.length + 1 === after.length
+    && isRecord(controller)
+    && controller.type === 'durable_object_namespace'
+    && controller.class_name === 'D1TrafficController';
+  if (!addedController && before.length !== after.length) return false;
+  if (addedController) { before = beforeWithoutController; after = afterWithoutController; }
   let senderChanged = false;
-  return before.every((binding, index) => {
+  const plainTextUpdate = before.length === after.length && before.every((binding, index) => {
     const nextBinding = after[index];
     if (!isRecord(binding) || !isRecord(nextBinding)) return false;
     if (binding.name !== nextBinding.name) return false;
@@ -104,6 +114,7 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
     senderChanged ||= beforeText !== afterText;
     return true;
   }) && senderChanged;
+  return addedController || plainTextUpdate;
 }
 
 function isSafeWorkerUpdate(change: ResourceChange['change']): boolean {
