@@ -151,6 +151,28 @@ describe('posting identity', () => {
     })).toMatchObject({ decision: { status: 'confirmed', exactKey: 'provider:icims:careers-springswindowfashions:12891' } });
   });
 
+  it('confirms a scoped Oracle Cloud route and keeps its sites apart', () => {
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role',
+      applicationUrl: 'https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/210774074',
+      observedAt: '2026-08-29T12:00:00.000Z',
+    })).toMatchObject({
+      decision: {
+        status: 'confirmed',
+        exactKey: 'provider:oracle:jpmc.fa.oraclecloud.com/cx_1001:210774074',
+        evidenceKind: 'immutable-provider-id',
+      },
+    });
+    // One pod can carry the same posting id under two candidate-experience
+    // sites, so two sites in one reference set must not merge.
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role',
+      applicationUrl: 'https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/210774074',
+      observedUrls: ['https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_2/job/210774074'],
+      observedAt: '2026-08-29T12:00:00.000Z',
+    }).decision).toMatchObject({ status: 'quarantined' });
+  });
+
   it('leaves a provider host without a posting route unconfirmed', () => {
     for (const url of ['https://jobs.smartrecruiters.com/BoschGroup', 'https://careers-sig.icims.com/jobs']) {
       expect(resolvePostingIdentityDecision({

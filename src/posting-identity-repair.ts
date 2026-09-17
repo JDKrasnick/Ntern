@@ -1192,13 +1192,28 @@ function repairReport(plan: InternalPlan): PostingIdentityRepairPlan {
   };
 }
 
+/** Catalogs above this row count need the paged audit: one pass cannot hold them. */
+export const POSTING_IDENTITY_REPAIR_MAX_ROWS = 20_000;
+
 export async function runPostingIdentityRepair(db: D1Database, options: {
   apply?: boolean;
   repairToken?: string;
   expectedChanges?: number;
   expectedDuplicateJobs?: number;
   scope?: PostingIdentityRepairScope;
+  /** Test seam for the ceiling this plan refuses above. */
+  catalogRowCeiling?: number;
 } = {}): Promise<PostingIdentityRepairPlan> {
+  // This plan is one pass over the whole catalog, so its reads are bounded by
+  // what a single invocation can hold rather than by a page. At production size
+  // the catalog read exceeds the D1 result limit, and retrying it only keeps the
+  // database overloaded for every other request, so refuse with the supported
+  // alternative instead of surfacing an opaque D1 error after the load.
+  const ceiling = options.catalogRowCeiling ?? POSTING_IDENTITY_REPAIR_MAX_ROWS;
+  const catalogRows = await db.prepare('SELECT COUNT(*) AS count FROM catalog_items').first<{ count: number }>();
+  if ((catalogRows?.count ?? 0) > ceiling) {
+    throw new Error(`The single-pass posting identity repair plan supports catalogs up to ${ceiling} rows, but this catalog holds ${catalogRows?.count}. Run the paged posting identity audit instead.`);
+  }
   const [catalog, users, proposals, employerMappings, presentationReviews] = await Promise.all([
     db.prepare(`SELECT * FROM catalog_items
       WHERE kind IN ('internship', 'job-id-alias', 'source-occurrence', 'posting-identity-incident',

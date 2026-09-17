@@ -720,6 +720,12 @@ describe('D1 posting identity repair', () => {
     });
   });
 
+  it('refuses a catalog larger than one pass can plan', async () => {
+    const { db } = await historicalDatabase({ presentationAgrees: true });
+    await expect(runPostingIdentityRepair(db, { catalogRowCeiling: 1 }))
+      .rejects.toThrow(/supports catalogs up to 1 rows/u);
+  });
+
   it('refuses stale guards and existing alias conflicts', async () => {
     const stale = await historicalDatabase({ presentationAgrees: true }); const dry = await runPostingIdentityRepair(stale.db);
     await expect(runPostingIdentityRepair(stale.db, { apply: true, repairToken: dry.repairToken, expectedChanges: dry.expectedChanges + 1, expectedDuplicateJobs: dry.duplicateJobs })).rejects.toThrow('Catalog changed after dry run');
@@ -823,7 +829,9 @@ describe('D1 posting identity repair', () => {
     expect(verification).toMatchObject({ expectedChanges: 0, conflicts: [] });
     expect(postingIdentityRepairQueryCount(dry.expectedChanges)).toBe(124);
     expect(postingIdentityRepairQueryCount(4_250 * 2)).toBe(439);
-    expect(metrics.statements).toBe(130);
+    // 128 plan/apply statements plus one catalog-size preflight per invocation
+    // (the dry run and the verification pass).
+    expect(metrics.statements).toBe(132);
     expect(metrics.statements).toBeLessThanOrEqual(900);
     expect(metrics.maxBoundParameters).toBeLessThanOrEqual(100);
     expect(metrics.maxBatchStatements).toBeLessThanOrEqual(25);
