@@ -622,6 +622,7 @@ export const POSTING_PROVIDERS = [
   'goldman-sachs',
   'imc',
   'icims',
+  'oracle',
   'smartrecruiters',
   'unknown',
 ] as const;

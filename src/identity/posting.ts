@@ -108,6 +108,12 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
   if (host.endsWith('.icims.com') && (match = /^\/jobs\/(\d+)(?:\/[^/]*)?\/job\/?$/i.exec(url.pathname))) {
     return { provider: 'icims', tenant: host.slice(0, -'.icims.com'.length), postingId: match[1] };
   }
+  if (host.endsWith('.oraclecloud.com')
+      && (match = /^\/hcmUI\/CandidateExperience\/[a-z]{2}\/sites\/([^/]+)\/job\/(\d+)\/?$/i.exec(url.pathname))) {
+    // The candidate-experience site scopes the id: one pod can carry the same
+    // posting id under two sites, so the scope is host plus site.
+    return { provider: 'oracle', tenant: `${host}/${match[1]!.toLowerCase()}`, postingId: match[2]! };
+  }
   return { provider: 'unknown' };
 }
 
