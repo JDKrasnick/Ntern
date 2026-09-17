@@ -1002,14 +1002,14 @@ export class D1UserStore implements UserStore {
     const key = `RECEIPT#${value.dedupeKey ?? value.jobId}#${value.token}`;
     const result = await this.db.prepare(`
       INSERT INTO user_items (user_id, item_key, kind, value, receipt_state, expires_at)
-      SELECT ?, ?, 'receipt', ?, 'PENDING', ?
+      SELECT ?, ?, 'receipt', ?, ?, ?
       WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
       ON CONFLICT(user_id, item_key) DO UPDATE SET value = excluded.value, receipt_state = excluded.receipt_state, expires_at = excluded.expires_at
       WHERE json_extract(user_items.value, '$.status') = 'error'
-    `).bind(value.userId, key, JSON.stringify(value), receiptExpiry(value), this.deletionOwner(value.userId)).run();
+    `).bind(value.userId, key, JSON.stringify(value), value.status === 'deferred' ? 'DEFERRED' : 'PENDING', receiptExpiry(value), this.deletionOwner(value.userId)).run();
     return result.meta.changes > 0;
   }
-  putReceipt(value: DeliveryReceipt) { return this.put(value.userId, `RECEIPT#${value.dedupeKey ?? value.jobId}#${value.token}`, 'receipt', value, { receipt_state: value.status === 'pending' ? 'PENDING' : value.status === 'retryable' ? 'RETRYABLE' : null, expires_at: receiptExpiry(value) }); }
+  putReceipt(value: DeliveryReceipt) { return this.put(value.userId, `RECEIPT#${value.dedupeKey ?? value.jobId}#${value.token}`, 'receipt', value, { receipt_state: value.status === 'pending' ? 'PENDING' : value.status === 'retryable' ? 'RETRYABLE' : value.status === 'deferred' ? 'DEFERRED' : null, expires_at: receiptExpiry(value) }); }
   async migrateReceipt(value: DeliveryReceipt, dedupeKey: string): Promise<boolean> {
     const migrated = { ...value, dedupeKey };
     const result = await this.db.prepare(`
@@ -1022,6 +1022,7 @@ export class D1UserStore implements UserStore {
   }
   async pendingReceipts() { const rows = await this.db.prepare("SELECT value FROM user_items WHERE receipt_state = 'PENDING'").all<JsonRow>(); return rows.results.map((row) => JSON.parse(row.value) as DeliveryReceipt); }
   async retryableReceipts() { const rows = await this.db.prepare("SELECT value FROM user_items WHERE receipt_state = 'RETRYABLE'").all<JsonRow>(); return rows.results.map((row) => JSON.parse(row.value) as DeliveryReceipt); }
+  async deferredReceipts() { const rows = await this.db.prepare("SELECT value FROM user_items WHERE receipt_state = 'DEFERRED'").all<JsonRow>(); return rows.results.map((row) => JSON.parse(row.value) as DeliveryReceipt); }
   async deleteUser(userId: string): Promise<UserDocument[]> { await this.beginUserDeletion(userId); const documents = await this.listDocuments(userId); await this.db.prepare('DELETE FROM user_items WHERE user_id = ?').bind(userId).run(); return documents; }
 }
 

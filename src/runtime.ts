@@ -3,7 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { auditCatalogIndexes, emitCatalogIndexAuditMetric } from './catalog-index-audit.js';
 import { validateApplicationUrlWithEvidence, type ApplicationUrlValidator } from './core/application-url.js';
-import { defaultPushTemplates, ExpoPushPublisher, inspectExpoPushReceipts, NtfyPublisher, retryExpoPushNotifications, sendDigest, sendNewJobNotifications, sendPendingNotifications, SesEmailSender, type EmailSender, type PushPublisher } from './notifications.js';
+import { defaultPushTemplates, deliverDeferredExpoNotifications, ExpoPushPublisher, inspectExpoPushReceipts, NtfyPublisher, retryExpoPushNotifications, sendDigest, sendNewJobNotifications, sendPendingNotifications, SesEmailSender, type EmailSender, type PushPublisher } from './notifications.js';
 import { Poller } from './poll.js';
 import { DynamoInternshipStore, DynamoUserStore, type InternshipStore, type UserStore } from './store.js';
 import { defaultSources } from './sources/index.js';
@@ -92,6 +92,7 @@ export async function runRuntimeCommand(command: 'poll' | 'digest', dependencies
           : { excludeUserIds: dependencies.groupedPipelineUserIds },
       );
       const receipts = await inspectExpoPushReceipts(dependencies.userStore, publisher);
+      const deferred = await deliverDeferredExpoNotifications(dependencies.store, dependencies.userStore, publisher);
       const pushRetries = await retryExpoPushNotifications(
         dependencies.store,
         dependencies.userStore,
@@ -101,7 +102,7 @@ export async function runRuntimeCommand(command: 'poll' | 'digest', dependencies
           ? { excludeAllUsers: true }
           : { excludeUserIds: dependencies.groupedPipelineUserIds },
       );
-      return { poll, notifications, ntfy, receipts, pushRetries };
+      return { poll, notifications, ntfy, deferred, receipts, pushRetries };
     }
     if (dependencies.notificationPublisher) {
       const { sendPendingNotifications } = await import('./notifications.js');

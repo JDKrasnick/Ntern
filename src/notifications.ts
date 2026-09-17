@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { evaluateJobFilter, inferJobFocuses, type FilterMatchReason, type JobFocus } from './core/filters.js';
 import { postingIdentityKey, score } from './core/normalize.js';
 import { platformFetch } from './core/platform-fetch.js';
-import type { DeliveryReceipt, Internship } from './types.js';
+import type { DeliveryReceipt, Internship, UserPreferences } from './types.js';
 import type { InternshipStore, UserStore } from './store.js';
 import { matchesJobFilter } from './core/filters.js';
 import { notificationSourceLabelFor } from './sources/source-label.js';
@@ -25,6 +25,7 @@ export interface PushPublisher { publish(message: PushMessage): Promise<void>; }
 
 const PUSH_REQUEST_TIMEOUT_MS = 5_000;
 export const MAX_LEGACY_PUSH_JOBS_PER_RUN = 10;
+const DAILY_DIGEST_LOCAL_MINUTE = 9 * 60;
 
 export interface ExpoPushTicket { id?: string; status: 'ok' | 'error'; details?: { error?: string }; message?: string; }
 export const MAX_EXPO_PUSH_ATTEMPTS = 3;
@@ -52,7 +53,7 @@ export function classifyAwsServiceFailure(error: unknown): ProviderFailureKind {
   return retryableExpoHttpStatus(status) ? 'retryable' : 'definitive-failure';
 }
 export type NotificationDeliveryEvent = {
-  event: 'notification_sent' | 'notification_failed' | 'notification_skipped_duplicate' | 'push_receipt_confirmed' | 'push_receipt_failed';
+  event: 'notification_sent' | 'notification_failed' | 'notification_deferred' | 'notification_skipped_duplicate' | 'push_receipt_confirmed' | 'push_receipt_failed';
   occurredAt: string;
   jobId: string;
   recipientKey: string;
@@ -127,6 +128,35 @@ function nativePushMessage(job: Internship, filter: Parameters<typeof evaluateJo
   };
 }
 
+function localClock(at: Date, timezone: string) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return Number(values.hour) * 60 + Number(values.minute);
+}
+
+function isQuietTime(at: Date, quietHours: NonNullable<UserPreferences['alertSettings']>['quietHours']) {
+  if (!quietHours || quietHours.start === quietHours.end) return false;
+  const [startHour, startMinute] = quietHours.start.split(':').map(Number);
+  const [endHour, endMinute] = quietHours.end.split(':').map(Number);
+  const start = startHour! * 60 + startMinute!;
+  const end = endHour! * 60 + endMinute!;
+  const clock = localClock(at, quietHours.timezone);
+  return start < end ? clock >= start && clock < end : clock >= start || clock < end;
+}
+
+/** Resolves cadence at 09:00 local time, stepping by minutes to remain correct across DST shifts. */
+export function nextPushDeliveryAt(at: Date, settings?: UserPreferences['alertSettings']) {
+  const quietHours = settings?.quietHours;
+  const timezone = quietHours?.timezone ?? 'UTC';
+  const daily = settings?.delivery === 'daily-digest';
+  for (let offset = daily ? 1 : 0; offset <= 60 * 48; offset += 1) {
+    const candidate = new Date(at.getTime() + offset * 60_000);
+    if (daily && localClock(candidate, timezone) !== DAILY_DIGEST_LOCAL_MINUTE) continue;
+    if (!isQuietTime(candidate, quietHours)) return candidate.toISOString();
+  }
+  throw new Error('Could not resolve the next push delivery time within 48 hours');
+}
+
 /**
  * Delivers each new listing to matching opted-in users. Receipts are written before
  * sending so a poll retry cannot fan out duplicate pushes to the same device.
@@ -154,14 +184,22 @@ export async function sendNewJobNotifications(
     // delivered role is not resent merely because its receipt key was hardened.
     const existing = await users.getReceipt(device.userId, dedupeKey, device.token)
       ?? await users.getReceipt(device.userId, job.jobId, device.token);
-    if (existing?.status === 'ok' || existing?.status === 'pending' || existing?.deliveryState === 'definitive-failure') {
+    if (existing?.status === 'ok' || existing?.status === 'pending' || existing?.status === 'deferred' || existing?.deliveryState === 'definitive-failure') {
       emitDeliveryEvent(logger, { event: 'notification_skipped_duplicate', occurredAt: now().toISOString(), ...context, reason: `existing_${existing.status}_receipt` });
       skipped += 1; continue;
     }
-    const timestamp = now().toISOString(); const receipt: DeliveryReceipt = { userId: device.userId, jobId: job.jobId, dedupeKey, token: device.token, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, deliveryState: 'claimed', createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp };
+    const timestamp = now().toISOString();
+    const deliverAfter = nextPushDeliveryAt(now(), preference.alertSettings);
+    const deferred = deliverAfter > timestamp;
+    const receipt: DeliveryReceipt = { userId: device.userId, jobId: job.jobId, dedupeKey, token: device.token, status: deferred ? 'deferred' : 'pending', attempts: deferred ? existing?.attempts ?? 0 : (existing?.attempts ?? 0) + 1, deliveryState: deferred ? 'deferred' : 'claimed', ...(deferred ? { deliverAfter } : {}), createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp };
     if (!await users.claimReceipt(receipt)) {
       emitDeliveryEvent(logger, { event: 'notification_skipped_duplicate', occurredAt: now().toISOString(), ...context, reason: 'concurrent_delivery_claim' });
       skipped += 1; continue;
+    }
+    if (deferred) {
+      emitDeliveryEvent(logger, { event: 'notification_deferred', occurredAt: timestamp, ...context, reason: preference.alertSettings?.delivery === 'daily-digest' ? 'daily_digest' : 'quiet_hours' });
+      skipped += 1;
+      continue;
     }
     try {
       const ticket = await publisher.publish(device.token, message);
@@ -216,6 +254,55 @@ export async function inspectExpoPushReceipts(users: UserStore, publisher: ExpoP
     }
   }
   return { ok, invalid, retryable, pending };
+}
+
+/** Sends persisted cadence/quiet-hours claims once their user-local delivery time arrives. */
+export async function deliverDeferredExpoNotifications(
+  jobs: InternshipStore,
+  users: UserStore,
+  publisher: ExpoPushPublisher,
+  now: () => Date = () => new Date(),
+): Promise<{ sent: number; skipped: number; failed: number }> {
+  let sent = 0; let skipped = 0; let failed = 0;
+  const devices = new Map((await users.activeDevices()).map((device) => [`${device.userId}\u0000${device.token}`, device]));
+  for (const receipt of await users.deferredReceipts()) {
+    if (!receipt.deliverAfter || Date.parse(receipt.deliverAfter) > now().getTime()) { skipped += 1; continue; }
+    const [job, preference] = await Promise.all([jobs.getJob(receipt.jobId), users.getPreferences(receipt.userId)]);
+    const device = devices.get(`${receipt.userId}\u0000${receipt.token}`);
+    if (!job || !device || !preference?.alertsEnabled || !preference.onboardingComplete || !matchesJobFilter(job, preference.filter)) {
+      await users.putReceipt({ ...receipt, status: 'error', deliveryState: 'definitive-failure', updatedAt: now().toISOString() });
+      skipped += 1;
+      continue;
+    }
+    const attempts = (receipt.attempts ?? 0) + 1;
+    const attemptedAt = now().toISOString();
+    try {
+      const ticket = await publisher.publish(device.token, nativePushMessage(job, preference.filter, preference.push));
+      const accepted = ticket.status === 'ok' && Boolean(ticket.id);
+      const invalid = ticket.details?.error === 'DeviceNotRegistered';
+      await users.putReceipt({
+        ...receipt, ticketId: ticket.id, attempts, status: accepted ? 'pending' : invalid ? 'error' : 'retryable',
+        deliveryState: accepted ? 'accepted' : invalid ? 'definitive-failure' : 'claimed',
+        ...(!accepted ? { lastErrorCode: ticket.details?.error ?? 'ExpoRejected', lastErrorMessage: ticket.message?.slice(0, 500), lastErrorAt: attemptedAt } : {}),
+        updatedAt: attemptedAt,
+      });
+      if (accepted) sent += 1;
+      else {
+        failed += 1;
+        if (invalid) await users.putDevice({ ...device, active: false, updatedAt: attemptedAt });
+      }
+    } catch (error) {
+      const failure = classifyExpoPushFailure(error);
+      const retryable = failure === 'retryable' && attempts < MAX_EXPO_PUSH_ATTEMPTS;
+      await users.putReceipt({
+        ...receipt, attempts, status: retryable ? 'retryable' : 'error', deliveryState: retryable ? 'claimed' : 'definitive-failure',
+        lastErrorCode: error instanceof ExpoPushHttpError ? `ExpoHttp${error.status}` : 'DeferredPushFailed',
+        lastErrorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500), lastErrorAt: attemptedAt, updatedAt: attemptedAt,
+      });
+      failed += 1;
+    }
+  }
+  return { sent, skipped, failed };
 }
 
 export async function retryExpoPushNotifications(
@@ -304,6 +391,7 @@ export async function drainPendingExpoNotifications(
   processed: number;
   deferred: number;
   delivery: Awaited<ReturnType<typeof sendNewJobNotifications>>;
+  delayedDelivery: Awaited<ReturnType<typeof deliverDeferredExpoNotifications>>;
   receipts: Awaited<ReturnType<typeof inspectExpoPushReceipts>>;
   retries: Awaited<ReturnType<typeof retryExpoPushNotifications>>;
 }> {
@@ -320,12 +408,14 @@ export async function drainPendingExpoNotifications(
     const sentAt = now().toISOString();
     for (const job of pending) await jobs.markSmsSent(job.jobId, sentAt);
   }
+  const delayedDelivery = await deliverDeferredExpoNotifications(jobs, users, publisher, now);
   const receipts = await inspectExpoPushReceipts(users, publisher, now);
   const retries = await retryExpoPushNotifications(jobs, users, publisher, now);
   return {
     processed: hasReadyDevice ? pending.length : 0,
     deferred: hasReadyDevice ? 0 : pending.length,
     delivery,
+    delayedDelivery,
     receipts,
     retries,
   };

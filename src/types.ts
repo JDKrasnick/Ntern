@@ -111,13 +111,15 @@ export interface DeliveryReceipt {
   dedupeKey?: string;
   token: string;
   ticketId?: string;
-  status: 'pending' | 'retryable' | 'ok' | 'error';
+  status: 'deferred' | 'pending' | 'retryable' | 'ok' | 'error';
   attempts?: number;
   lastErrorCode?: string;
   lastErrorMessage?: string;
   lastErrorAt?: string;
   /** Provider-aware state; `status` remains during the legacy receipt migration. */
-  deliveryState?: 'claimed' | 'accepted' | 'delivered' | 'definitive-failure' | 'unknown';
+  deliveryState?: 'deferred' | 'claimed' | 'accepted' | 'delivered' | 'definitive-failure' | 'unknown';
+  /** The earliest time the user's selected alert cadence permits delivery. */
+  deliverAfter?: string;
   createdAt: string;
   updatedAt: string;
 }
