@@ -146,7 +146,8 @@ type StructuredIdentity = {
 type CatalogJob = Internship & { internshipIdentity?: StructuredIdentity; identity?: StructuredIdentity };
 export type BuiltGroup = { row: CatalogGroupRow; jobs: Internship[] };
 
-const RELEASE_WINDOW_MS = 8_000;
+const RELEASE_SESSION_MS = 10 * 60_000;
+const RELEASE_MINIMUM_ROLES = 4;
 const compact = (value: string) => value.trim().replace(/\s+/g, ' ');
 const folded = (value: string) => compact(value).toLocaleLowerCase('en-US');
 const unique = (values: string[]) => [...new Map(values.filter(Boolean).map((value) => [folded(value), compact(value)])).values()];
@@ -278,7 +279,16 @@ function summarize(kind: CatalogGroupKind, jobs: Internship[], stableGroupId?: s
   };
 }
 
-function burstGroups(jobs: Internship[]) {
+/** Groups each employer's roles into release sessions. A session of four or more
+ * roles is one release card; the session is the window that starts at its first
+ * role and runs for `RELEASE_SESSION_MS`. The window used to be eight seconds,
+ * which split one employer's batch into several cards: a campus batch becomes
+ * visible over a poll or two, and the roles left behind appeared as individual
+ * cards beside a group that already contained their siblings (Visa's 15 roles
+ * arrived in five waves across half an hour). The window is measured from the
+ * session's first role rather than from the previous one so an employer that
+ * publishes continuously cannot chain a whole day into one card. */
+function releaseGroups(jobs: Internship[]) {
   const releases: Internship[][] = [];
   const remaining = new Set(jobs);
   const byCompany = new Map<string, Internship[]>();
@@ -293,13 +303,16 @@ function burstGroups(jobs: Internship[]) {
     for (let index = 0; index < ordered.length;) {
       const anchor = timestamp(ordered[index]!);
       let end = index + 1;
-      while (end < ordered.length && timestamp(ordered[end]!) - anchor <= RELEASE_WINDOW_MS) end += 1;
-      const burst = ordered.slice(index, end).filter((job) => remaining.has(job));
-      if (burst.length >= 4) {
-        releases.push(burst);
-        burst.forEach((job) => remaining.delete(job));
-        index = end;
-      } else index += 1;
+      while (end < ordered.length && timestamp(ordered[end]!) - anchor <= RELEASE_SESSION_MS) end += 1;
+      const session = ordered.slice(index, end);
+      // Every role of a session belongs to its card, so a role can never be shown
+      // as an individual card beside the group that holds its siblings.
+      const release = session.filter((job) => remaining.has(job));
+      if (release.length >= RELEASE_MINIMUM_ROLES) {
+        releases.push(release);
+        release.forEach((job) => remaining.delete(job));
+      }
+      index = end;
     }
   }
   return { releases, remaining: [...remaining] };
@@ -308,7 +321,7 @@ function burstGroups(jobs: Internship[]) {
 /** Deterministically builds safe catalog rows without treating title/location similarity as posting identity. */
 export function groupCatalogJobs(jobs: Internship[], options: { includeClosed?: boolean } = {}): BuiltGroup[] {
   const visible = jobs.filter((job) => (options.includeClosed || job.open) && job.technical !== false);
-  const { releases, remaining } = burstGroups(visible);
+  const { releases, remaining } = releaseGroups(visible);
   const grouped: Internship[][] = [];
   const unsafe: Internship[] = [];
   const programs = new Map<string, Internship[]>();
