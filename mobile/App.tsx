@@ -387,15 +387,14 @@ function useSheetEntranceOffset(visible: boolean) {
 
 function useRoleSheetTransition(visible: boolean, onDismiss: () => void) {
   const motionAllowed = useContext(MotionAllowedContext);
-  const isMobile = Platform.OS !== "web";
-  const entranceDistance = 72;
+  const entranceDistance = Platform.OS === "web" ? 40 : 72;
   const [modalVisible, setModalVisible] = useState(visible);
-  const dimOpacity = useRef(new Animated.Value(isMobile ? 0 : 1)).current;
+  const dimOpacity = useRef(new Animated.Value(0)).current;
   const sheetOffset = useRef(new Animated.Value(entranceDistance)).current;
   const closing = useRef(false);
 
   const animateClose = (afterClose?: () => void) => {
-    if (!isMobile || !motionAllowed) {
+    if (!motionAllowed) {
       dimOpacity.setValue(0);
       sheetOffset.setValue(entranceDistance);
       setModalVisible(false);
@@ -430,7 +429,7 @@ function useRoleSheetTransition(visible: boolean, onDismiss: () => void) {
       return;
     }
     setModalVisible(true);
-    if (!isMobile || !motionAllowed) {
+    if (!motionAllowed) {
       dimOpacity.setValue(1);
       sheetOffset.setValue(0);
       return;
@@ -453,7 +452,7 @@ function useRoleSheetTransition(visible: boolean, onDismiss: () => void) {
     ]);
     animation.start();
     return () => animation.stop();
-  }, [dimOpacity, entranceDistance, isMobile, motionAllowed, sheetOffset, visible]);
+  }, [dimOpacity, entranceDistance, motionAllowed, sheetOffset, visible]);
 
   return {
     modalVisible,
