@@ -1600,10 +1600,6 @@ export class IngestionRunner {
             requireCompleteInspection: !admissionEvidencePending,
           });
           if (breaches.length) {
-            // A breaching pass is not evidence that the source advanced, so it
-            // never self-enqueues: the alert ends the delivery and the throw
-            // fails it for the sources that quarantine.
-            report.continuationSources = report.continuationSources.filter((sourceId) => sourceId !== connector.id);
             // Hidden listings apply either way: the per-posting inspection keeps
             // unsafe rows out of the catalog whether or not the list is stopped.
             await this.hideUnsafeTrustedCommunityListings({
@@ -1639,10 +1635,21 @@ export class IngestionRunner {
                 browserInspectionShare: trustedMetrics.browserInspectionShare,
               }));
               // The reviewed list keeps polling instead of quarantining: its
-              // anomalies are caught per posting downstream.
-              continue;
+              // anomalies are caught per posting downstream. The pass falls
+              // through rather than ending here: dropping the continuation and
+              // the checkpoint left any list whose only breach is a
+              // not-yet-complete inspection floor permanently breaching, because
+              // every wake re-inspected the same bounded slice and coverage never
+              // climbed to its floor. Publication stays safe — every listing of
+              // this pass is suppressed above, and a bounded migration exposes
+              // nothing until one complete healthy pass clears it.
+            } else {
+              // A breaching pass is not evidence that the source advanced, so it
+              // never self-enqueues and the throw fails the delivery for the
+              // sources that quarantine.
+              report.continuationSources = report.continuationSources.filter((sourceId) => sourceId !== connector.id);
+              throw new SourceFetchError(`${connector.id}: trusted-community circuit breaker: ${breaches.join('; ')}`, 'quality', undefined, undefined, true);
             }
-            throw new SourceFetchError(`${connector.id}: trusted-community circuit breaker: ${breaches.join('; ')}`, 'quality', undefined, undefined, true);
           }
         }
         // A bounded policy migration stores evidence but exposes none of its

@@ -388,6 +388,37 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
       .toBeGreaterThan(simplifyBaselineReport.thresholds.maximumDestinationFailureRate);
   });
 
+  it('keeps each reviewed list’s inspection floor satisfiable by its own snapshot', () => {
+    // A complete pass inspects the list's whole eligible snapshot, so a
+    // family-sized floor of 100 candidates is unsatisfiable for a small list:
+    // every wake re-inspected the same bounded slice, coverage never climbed to
+    // the coverage floor, and the source could never leave quarantine.
+    for (const [sourceId, baseline] of Object.entries(TRUSTED_COMMUNITY_BASELINES)) {
+      const thresholds = trustedCommunityThresholdsFor(sourceId);
+      const inspected = baseline.inspectedCandidates ?? baseline.eligibleRows;
+      expect(thresholds.minimumInspectedCandidates).toBeLessThanOrEqual(baseline.eligibleRows);
+      expect(trustedCommunityCircuitBreaches({
+        metrics: {
+          rawRows: baseline.rawRows,
+          eligibleRows: baseline.eligibleRows,
+          rejectedAggregatorRows: 0, survivingAggregatorRows: 0,
+          duplicateOccurrenceIds: 0,
+          inspectedCandidates: inspected,
+          browserInspectionCandidates: baseline.browserInspectionCandidates ?? 0,
+          destinationFailures: baseline.destinationFailures ?? 0, destinationFailuresByReason: {},
+          inspectionCoverage: 1,
+          browserInspectionShare: (baseline.browserInspectionCandidates ?? 0) / inspected,
+          destinationFailureRate: (baseline.destinationFailures ?? 0) / inspected,
+          catalogYield: (baseline.catalogAdmissions ?? 0) / baseline.rawRows,
+          alertYield: (baseline.alertQualifications ?? 0) / baseline.eligibleRows,
+        },
+        thresholds,
+        alertMode: 'disabled',
+        requireCompleteInspection: true,
+      })).toEqual([]);
+    }
+  });
+
   it('applies structural gates immediately and rate gates only at sufficient coverage', () => {
     const thresholds = SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS;
     const healthy = {
@@ -477,7 +508,7 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     });
   });
 
-  it('alerts on a circuit breach for a reviewed list without checkpointing, self-enqueueing, or quarantining', async () => {
+  it('alerts on a circuit breach for a reviewed list, advancing without publishing and without quarantining', async () => {
     const store = new MemoryInternshipStore();
     const adapter: SourceAdapter = {
       id: 'simplify-summer-2026',
@@ -501,12 +532,18 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     // The reviewed lists alarm instead of quarantining, and the alert names the breach.
     expect(alerts.some((line) => line.includes('trusted_community_circuit_alert') && line.includes('simplify-summer-2026'))).toBe(true);
     expect(breached.failures).toEqual([]);
-    expect(breached.continuationSources).toEqual([]);
-    expect(await store.getCheckpoint(adapter.id)).toEqual(checkpoint);
+    // The pass still advances. A breach that withheld the continuation left any
+    // list with a not-yet-complete inspection floor re-inspecting the same
+    // bounded slice on every wake, so its coverage floor could never clear. The
+    // success counters stay put: a breaching pass is not evidence of advance.
+    expect(breached.continuationSources).toEqual([adapter.id]);
+    expect((await store.getCheckpoint(adapter.id))?.successfulFetches).toBe(checkpoint?.successfulFetches);
+    // Nothing a breaching pass saw may reach the catalog.
+    expect(breached.filteredJobs.every((job) => job.admission?.catalogEligible !== true)).toBe(true);
     expect((await store.getSourceHealth(adapter.id))?.state).not.toBe('quarantined');
   });
 
-  it('alerts on incomplete inspection coverage without checkpointing, publishing nothing further, or quarantining', async () => {
+  it('alerts on incomplete inspection coverage, publishing nothing and quarantining nothing', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'simplify-summer-2026';
     const { minimumRawRows, minimumEligibleRows } = SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS;
@@ -565,15 +602,21 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
 
     const inspectedCoverage = ((100 / minimumEligibleRows) * 100).toFixed(2);
     // The reviewed list alerts on the coverage breach and ends the delivery
-    // without checkpointing or quarantining. Publication is gated per row by
-    // each occurrence's own destination evidence, which this pass did inspect.
+    // without quarantining. Publication is gated per row by each occurrence's
+    // own destination evidence, which this pass did inspect.
     expect(alerts.some((line) => line.includes('trusted_community_circuit_alert')
       && line.includes(`inspection coverage ${inspectedCoverage}% below 90.00%`))).toBe(true);
     // The fixture's own resolution failures are expected; the breach must not be
     // one of them, because an alert policy never fails the delivery.
     expect(result.failures.some((failure) => failure.includes('circuit breaker'))).toBe(false);
-    expect(result.continuationSources).toEqual([]);
-    expect(await store.getCheckpoint(sourceId)).toEqual(previous);
+    // The pass advances so a later wake-up can finish the bounded inspection,
+    // while publishing nothing: every listing it saw is withheld. Snapshot
+    // bookkeeping moves; the success counters stay put.
+    expect(result.continuationSources).toEqual([sourceId]);
+    expect(await store.getCheckpoint(sourceId)).toMatchObject({
+      contentHash: 'current-snapshot',
+      successfulFetches: previous.successfulFetches,
+    });
     expect(await store.listCatalog()).toEqual([]);
     expect((await store.getSourceHealth(sourceId))?.state).not.toBe('quarantined');
   });

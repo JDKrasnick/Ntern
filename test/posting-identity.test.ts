@@ -136,6 +136,29 @@ describe('posting identity', () => {
     });
   });
 
+  it('confirms scoped provider routes for SmartRecruiters and iCIMS', () => {
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role',
+      applicationUrl: 'https://jobs.smartrecruiters.com/BoschGroup/744000139649345',
+      observedAt: '2026-08-29T12:00:00.000Z',
+    })).toMatchObject({
+      decision: { status: 'confirmed', exactKey: 'provider:smartrecruiters:boschgroup:744000139649345', evidenceKind: 'immutable-provider-id' },
+    });
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role-2',
+      applicationUrl: 'https://careers-springswindowfashions.icims.com/jobs/12891/job?mobile=true&needsRedirect=false',
+      observedAt: '2026-08-29T12:00:00.000Z',
+    })).toMatchObject({ decision: { status: 'confirmed', exactKey: 'provider:icims:careers-springswindowfashions:12891' } });
+  });
+
+  it('leaves a provider host without a posting route unconfirmed', () => {
+    for (const url of ['https://jobs.smartrecruiters.com/BoschGroup', 'https://careers-sig.icims.com/jobs']) {
+      expect(resolvePostingIdentityDecision({
+        sourceId: 'community', externalId: 'role', applicationUrl: url, observedAt: '2026-08-29T12:00:00.000Z',
+      }).decision).toMatchObject({ status: 'unconfirmed' });
+    }
+  });
+
   it('keeps an unscoped greenhouse embed token unconfirmed', () => {
     expect(resolvePostingIdentityDecision({
       sourceId: 'community', externalId: 'role',
