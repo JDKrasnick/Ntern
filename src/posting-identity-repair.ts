@@ -1192,8 +1192,56 @@ function repairReport(plan: InternalPlan): PostingIdentityRepairPlan {
   };
 }
 
-/** Catalogs above this row count need the paged audit: one pass cannot hold them. */
-export const POSTING_IDENTITY_REPAIR_MAX_ROWS = 20_000;
+/**
+ * The plan holds every row it reads, so the reads are keyset-paged: one `SELECT`
+ * over the 40,940-row catalog exceeds the D1 result limit, and retrying it keeps
+ * the database overloaded for every other request — an ops `recover` during that
+ * window answered a raw `error code: 1101`. Paging removes that limit without
+ * changing the plan.
+ */
+const PLAN_ROWS_PER_PAGE = 500;
+
+async function catalogRowsPaged(db: D1Database): Promise<CatalogRow[]> {
+  const rows: CatalogRow[] = [];
+  let afterPk = '';
+  let afterSk = '';
+  for (;;) {
+    const page = await db.prepare(`SELECT * FROM catalog_items
+      WHERE kind IN ('internship', 'job-id-alias', 'source-occurrence', 'posting-identity-incident',
+        'checkpoint', 'posting-alias', 'notification-tombstone', 'notification-event')
+        AND (pk > ? OR (pk = ? AND sk > ?))
+      ORDER BY pk, sk LIMIT ?`)
+      .bind(afterPk, afterPk, afterSk, PLAN_ROWS_PER_PAGE).all<CatalogRow>();
+    rows.push(...page.results);
+    if (page.results.length < PLAN_ROWS_PER_PAGE) break;
+    const last = page.results[page.results.length - 1]!;
+    // A store that ignores the predicate would repeat one page forever.
+    if (last.pk === afterPk && last.sk === afterSk) break;
+    afterPk = last.pk;
+    afterSk = last.sk;
+  }
+  return rows;
+}
+
+async function userRowsPaged(db: D1Database): Promise<UserRow[]> {
+  const rows: UserRow[] = [];
+  let afterUserId = '';
+  let afterItemKey = '';
+  for (;;) {
+    const page = await db.prepare(`SELECT * FROM user_items
+      WHERE kind IN ('application', 'application-session', 'receipt', 'catalog-release')
+        AND (user_id > ? OR (user_id = ? AND item_key > ?))
+      ORDER BY user_id, item_key LIMIT ?`)
+      .bind(afterUserId, afterUserId, afterItemKey, PLAN_ROWS_PER_PAGE).all<UserRow>();
+    rows.push(...page.results);
+    if (page.results.length < PLAN_ROWS_PER_PAGE) break;
+    const last = page.results[page.results.length - 1]!;
+    if (last.user_id === afterUserId && last.item_key === afterItemKey) break;
+    afterUserId = last.user_id;
+    afterItemKey = last.item_key;
+  }
+  return rows;
+}
 
 export async function runPostingIdentityRepair(db: D1Database, options: {
   apply?: boolean;
@@ -1201,27 +1249,10 @@ export async function runPostingIdentityRepair(db: D1Database, options: {
   expectedChanges?: number;
   expectedDuplicateJobs?: number;
   scope?: PostingIdentityRepairScope;
-  /** Test seam for the ceiling this plan refuses above. */
-  catalogRowCeiling?: number;
 } = {}): Promise<PostingIdentityRepairPlan> {
-  // This plan is one pass over the whole catalog, so its reads are bounded by
-  // what a single invocation can hold rather than by a page. At production size
-  // the catalog read exceeds the D1 result limit, and retrying it only keeps the
-  // database overloaded for every other request, so refuse with the supported
-  // alternative instead of surfacing an opaque D1 error after the load.
-  const ceiling = options.catalogRowCeiling ?? POSTING_IDENTITY_REPAIR_MAX_ROWS;
-  const catalogRows = await db.prepare('SELECT COUNT(*) AS count FROM catalog_items').first<{ count: number }>();
-  if ((catalogRows?.count ?? 0) > ceiling) {
-    throw new Error(`The single-pass posting identity repair plan supports catalogs up to ${ceiling} rows, but this catalog holds ${catalogRows?.count}. Run the paged posting identity audit instead.`);
-  }
   const [catalog, users, proposals, employerMappings, presentationReviews] = await Promise.all([
-    db.prepare(`SELECT * FROM catalog_items
-      WHERE kind IN ('internship', 'job-id-alias', 'source-occurrence', 'posting-identity-incident',
-        'checkpoint', 'posting-alias', 'notification-tombstone', 'notification-event')
-      ORDER BY pk, sk`).all<CatalogRow>(),
-    db.prepare(`SELECT * FROM user_items
-      WHERE kind IN ('application', 'application-session', 'receipt', 'catalog-release')
-      ORDER BY user_id, item_key`).all<UserRow>(),
+    catalogRowsPaged(db),
+    userRowsPaged(db),
     db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>(),
     db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
       WHERE superseded_at IS NULL ORDER BY provider, scope`).all<EmployerMappingRow>(),
@@ -1231,7 +1262,7 @@ export async function runPostingIdentityRepair(db: D1Database, options: {
   ]);
   const scope = options.scope ?? 'all';
   if (!['all', 'identity', 'occurrences'].includes(scope)) throw new Error('Posting identity repair scope must be all, identity, or occurrences');
-  const plan = postingIdentityRepairPlan(catalog.results, users.results, proposals.results, scope, {
+  const plan = postingIdentityRepairPlan(catalog, users, proposals.results, scope, {
     employerMappings: employerMappings.results,
     presentationReviews: presentationReviews.results,
   });
