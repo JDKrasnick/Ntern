@@ -60,15 +60,14 @@ export function candidateFitsActiveBucket(
 export const EXPO_RECEIPT_DELAY_SECONDS = 15 * 60;
 export const MAX_EXPO_RECEIPT_CHECKS = 8;
 
-export function notificationCandidateEligible(job: Internship | undefined, at = new Date()): job is Internship {
-  return Boolean(job?.open && job.technical !== false && alertEligible(job, at));
+export function notificationCandidateEligible(job: Internship | undefined): job is Internship {
+  return Boolean(job?.open && job.technical !== false && alertEligible(job));
 }
 
 export function notificationCandidatesForFlush(
   candidates: Array<Internship | undefined>,
-  attemptedAt = new Date(),
 ): Internship[] {
-  return candidates.filter((job) => notificationCandidateEligible(job, attemptedAt));
+  return candidates.filter((job) => notificationCandidateEligible(job));
 }
 
 export interface ReceiptMessage {
@@ -215,7 +214,6 @@ async function flushBucket(message: { bucketId: string }) {
   if (!bucket?.openedAt) return;
   const releaseJobs = notificationCandidatesForFlush(
     await Promise.all([...(bucket.jobIds ?? [])].map((jobId) => jobs.getJob(jobId))),
-    attemptedAt,
   );
   if (releaseJobs.length) {
     const candidate = createCandidateRelease(releaseJobs, new Date(bucket.openedAt));

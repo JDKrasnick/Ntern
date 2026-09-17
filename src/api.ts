@@ -88,9 +88,7 @@ async function jobsPage(
 
 function eligibleProjectedGroup(details: CatalogGroupDetails, at = new Date()): CatalogGroupDetails | undefined {
   const roles = details.roles
-    .filter((role) => catalogEligible({
-      admission: deriveCanonicalAdmission(role.sourceReferences, at.toISOString()),
-    }, at))
+    .filter((role) => catalogEligible({ admission: deriveCanonicalAdmission(role.sourceReferences, at.toISOString()) }))
     // A projection outlives the deploy that wrote it, so the read path
     // sanitizes handoff URLs as well as the projection builder.
     .map((role) => ({ ...role, officialApplyUrl: publicApplicationUrl(role.officialApplyUrl) }));
