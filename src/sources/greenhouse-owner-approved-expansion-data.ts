@@ -277,30 +277,6 @@ export const reviewedGreenhouseOwnerApprovedExpansionSources: ReviewedGreenhouse
     "sourceClass": "greenhouse"
   },
   {
-    "id": "greenhouse-postman",
-    "employerId": "postman",
-    "displayName": "Postman",
-    "aliases": [
-      "Postman"
-    ],
-    "boardToken": "postman",
-    "careersUrl": "https://www.postman.com/company/careers/",
-    "expectedBoardNames": [
-      "Postman"
-    ],
-    "admittedBoardName": "Postman",
-    "admittedAt": "2026-08-18T11:55:00.000Z",
-    "allowedInitialHosts": [
-      "job-boards.greenhouse.io"
-    ],
-    "allowedFinalHosts": [
-      "job-boards.greenhouse.io"
-    ],
-    "status": "shadow",
-    "evidenceStatus": "reviewed",
-    "sourceClass": "greenhouse"
-  },
-  {
     "id": "greenhouse-redwoodmaterials",
     "employerId": "redwoodmaterials",
     "displayName": "Redwood Materials",

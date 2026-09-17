@@ -63,16 +63,6 @@ export const reviewedLeverOwnerApprovedExpansionSources: ReviewedLeverSource[] =
     "evidenceStatus": "agent-verified"
   },
   {
-    "id": "lever-calstart",
-    "company": "CALSTART",
-    "site": "calstart",
-    "careersUrl": "https://calstart.org/careers/",
-    "admittedAt": "2026-08-18T11:55:00.000Z",
-    "status": "shadow",
-    "region": "global",
-    "evidenceStatus": "agent-verified"
-  },
-  {
     "id": "lever-certik",
     "company": "CertiK",
     "site": "certik",
