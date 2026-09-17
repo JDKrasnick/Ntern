@@ -720,12 +720,6 @@ describe('D1 posting identity repair', () => {
     });
   });
 
-  it('refuses a catalog larger than one pass can plan', async () => {
-    const { db } = await historicalDatabase({ presentationAgrees: true });
-    await expect(runPostingIdentityRepair(db, { catalogRowCeiling: 1 }))
-      .rejects.toThrow(/supports catalogs up to 1 rows/u);
-  });
-
   it('refuses stale guards and existing alias conflicts', async () => {
     const stale = await historicalDatabase({ presentationAgrees: true }); const dry = await runPostingIdentityRepair(stale.db);
     await expect(runPostingIdentityRepair(stale.db, { apply: true, repairToken: dry.repairToken, expectedChanges: dry.expectedChanges + 1, expectedDuplicateJobs: dry.duplicateJobs })).rejects.toThrow('Catalog changed after dry run');
@@ -796,7 +790,9 @@ describe('D1 posting identity repair', () => {
     const db = sqliteD1(sqlite, metrics);
     const insert = sqlite.prepare('INSERT INTO catalog_items (pk, sk, kind, value, source_id, external_id) VALUES (?, ?, ?, ?, ?, ?)');
     // This executable fixture exceeds the old 900-statement ceiling; the
-    // production-size assertion below covers the current 4,250-job shape.
+    // production-size assertion below covers the current 4,250-job shape. At
+    // 2,200 rows it also spans several plan pages, so the keyset-paged reads run
+    // here for real.
     const corpusSize = 1_100;
     sqlite.exec('BEGIN');
     try {
@@ -829,9 +825,10 @@ describe('D1 posting identity repair', () => {
     expect(verification).toMatchObject({ expectedChanges: 0, conflicts: [] });
     expect(postingIdentityRepairQueryCount(dry.expectedChanges)).toBe(124);
     expect(postingIdentityRepairQueryCount(4_250 * 2)).toBe(439);
-    // 128 plan/apply statements plus one catalog-size preflight per invocation
-    // (the dry run and the verification pass).
-    expect(metrics.statements).toBe(132);
+    // 128 plan/apply statements plus the keyset-paged reads: 2,200 catalog rows
+    // page at 500 per statement, so the reads cost a handful of statements
+    // instead of one unbounded `SELECT` that D1 refuses outright.
+    expect(metrics.statements).toBe(140);
     expect(metrics.statements).toBeLessThanOrEqual(900);
     expect(metrics.maxBoundParameters).toBeLessThanOrEqual(100);
     expect(metrics.maxBatchStatements).toBeLessThanOrEqual(25);
