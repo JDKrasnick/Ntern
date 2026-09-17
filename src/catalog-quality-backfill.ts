@@ -1,4 +1,5 @@
 import { catalogSearchText, catalogSourceClasses } from './catalog-fields.js';
+import { catalogEligible } from './catalog-admission.js';
 import { openCatalogSortKey } from './catalog-recency.js';
 import { normalizeInternship, normalizeListing, catalogQualityHash } from './catalog-quality.js';
 import { isPastSeason } from './core/early-career.js';
@@ -126,16 +127,20 @@ function stagedRepair(repair: Repair): StagedRepair {
   };
   if (repair.row.kind !== 'internship') return staged;
   const job = repair.value as Internship;
+  // A visible row is one the catalog admits: deriving `catalog_state` from
+  // `open` alone would mark rows the directory gate rejected as OPEN, and the
+  // browse query trusts this column.
+  const visible = job.technical !== false && catalogEligible(job);
   return {
     ...staged,
     urlKey: job.normalizedUrl,
     fingerprintKey: job.fingerprint,
-    smsPending: job.notification.smsPending ? 1 : 0,
-    digestPending: job.notification.digestPending ? 1 : 0,
-    catalogState: job.technical === false ? null : job.open ? 'OPEN' : 'CLOSED',
-    catalogSortKey: job.technical === false ? null : job.open ? openCatalogSortKey(job) : `${job.lastSeenAt}#${job.jobId}`,
-    searchText: job.technical === false ? null : catalogSearchText(job),
-    sourceClasses: job.technical === false ? null : JSON.stringify(catalogSourceClasses(job)),
+    smsPending: job.notification.smsPending && visible ? 1 : 0,
+    digestPending: job.notification.digestPending && visible ? 1 : 0,
+    catalogState: visible ? (job.open ? 'OPEN' : 'CLOSED') : null,
+    catalogSortKey: visible ? (job.open ? openCatalogSortKey(job) : `${job.lastSeenAt}#${job.jobId}`) : null,
+    searchText: visible ? catalogSearchText(job) : null,
+    sourceClasses: visible ? JSON.stringify(catalogSourceClasses(job)) : null,
   };
 }
 
@@ -169,12 +174,40 @@ async function clearStagedRepairs(db: D1Database, stagePk: string): Promise<void
   await db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND kind = '${REPAIR_STAGE_KIND}'`).bind(stagePk).run();
 }
 
+/**
+ * The plan needs every row, but one `SELECT` over the whole catalog exceeds the
+ * D1 result limit at production size (40,940 rows on 2026-09-17). Read it in
+ * keyset pages and keep the mapping work unchanged.
+ */
+const CATALOG_QUALITY_PAGE_ROWS = 500;
+
+async function catalogQualityRows(db: D1Database): Promise<CatalogQualityRow[]> {
+  const rows: CatalogQualityRow[] = [];
+  let afterPk = '';
+  let afterSk = '';
+  for (;;) {
+    const page = await db.prepare(`SELECT pk, sk, kind, value FROM catalog_items
+      WHERE kind IN ('internship', 'source-occurrence', 'checkpoint')
+        AND (pk > ? OR (pk = ? AND sk > ?))
+      ORDER BY pk, sk LIMIT ?`)
+      .bind(afterPk, afterPk, afterSk, CATALOG_QUALITY_PAGE_ROWS).all<CatalogQualityRow>();
+    rows.push(...page.results);
+    if (page.results.length < CATALOG_QUALITY_PAGE_ROWS) break;
+    const last = page.results[page.results.length - 1]!;
+    // A store that ignores the keyset predicate would repeat the same page
+    // forever, so stop as soon as the cursor stops advancing.
+    if (last.pk === afterPk && last.sk === afterSk) break;
+    afterPk = last.pk;
+    afterSk = last.sk;
+  }
+  return rows;
+}
+
 export async function runCatalogQualityBackfill(
   db: D1Database,
   options: { apply?: boolean; repairToken?: string; expectedChanged?: number } = {},
 ): Promise<CatalogQualityBackfillReport> {
-  const result = await db.prepare("SELECT pk, sk, kind, value FROM catalog_items WHERE kind IN ('internship', 'source-occurrence', 'checkpoint') ORDER BY pk, sk").all<CatalogQualityRow>();
-  const plan = catalogQualityBackfillPlan(result.results);
+  const plan = catalogQualityBackfillPlan(await catalogQualityRows(db));
   const report: CatalogQualityBackfillReport = {
     dryRun: !options.apply,
     before: plan.before,
