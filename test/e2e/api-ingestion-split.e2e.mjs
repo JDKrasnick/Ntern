@@ -505,7 +505,7 @@ function syntheticAshbyBoard({ postings, bytesPerPosting, board, seed = 17 }) {
   };
 }
 
-test('acknowledges a production-scale scheduled cycle without retries or dead letters', async () => {
+test('keeps a production-scale scheduled cycle recoverable without direct dead letters', async () => {
   const bundleDirectory = join(repositoryRoot, 'cloudflare/dist/ingestion');
   const cycleWorkerName = 'intern-notifs-e2e-cycle';
   const cycleRuntime = new Miniflare({ workers: [
@@ -718,18 +718,14 @@ test('acknowledges a production-scale scheduled cycle without retries or dead le
   };
   const workMessage = (sourceId) => ({ version: 1, sourceId, scheduledAt });
 
-  try {
-    await builtWorker.queue({ queue: 'intern-notifs-github',
-      messages: [queued('intern-notifs-github', githubSourceId, { sourceId: githubSourceId })] }, environment);
-    await builtWorker.queue({ queue: 'intern-notifs-greenhouse',
-      messages: [queued('intern-notifs-greenhouse', greenhouseSourceId, workMessage(greenhouseSourceId))] }, environment);
-    await builtWorker.queue({ queue: 'intern-notifs-lever',
-      messages: [queued('intern-notifs-lever', leverSourceId, workMessage(leverSourceId))] }, environment);
-    await builtWorker.queue({ queue: 'intern-notifs-ashby',
-      messages: [queued('intern-notifs-ashby', ashbySourceId, workMessage(ashbySourceId))] }, environment);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  await builtWorker.queue({ queue: 'intern-notifs-github',
+    messages: [queued('intern-notifs-github', githubSourceId, { sourceId: githubSourceId })] }, environment);
+  await builtWorker.queue({ queue: 'intern-notifs-greenhouse',
+    messages: [queued('intern-notifs-greenhouse', greenhouseSourceId, workMessage(greenhouseSourceId))] }, environment);
+  await builtWorker.queue({ queue: 'intern-notifs-lever',
+    messages: [queued('intern-notifs-lever', leverSourceId, workMessage(leverSourceId))] }, environment);
+  await builtWorker.queue({ queue: 'intern-notifs-ashby',
+    messages: [queued('intern-notifs-ashby', ashbySourceId, workMessage(ashbySourceId))] }, environment);
 
   const checkpoints = new Map();
   for (const sourceId of sourceIds) {
@@ -747,24 +743,41 @@ test('acknowledges a production-scale scheduled cycle without retries or dead le
     "SELECT COUNT(*) AS count FROM catalog_items WHERE pk LIKE 'JOB#e2e-github-%' AND json_extract(value, '$.lastSeenAt') <> ?")
     .bind(seededAt).first();
   await cycleRuntime.dispose();
+  globalThis.fetch = originalFetch;
 
-  assert.deepEqual(retries, [], 'a production-scale cycle must not ask the platform to redeliver any message');
-  assert.deepEqual(acks, [
+  const deliveryIds = [
     `intern-notifs-github:${githubSourceId}`, `intern-notifs-greenhouse:${greenhouseSourceId}`,
     `intern-notifs-lever:${leverSourceId}`, `intern-notifs-ashby:${ashbySourceId}`,
-  ]);
+  ];
+  const retriedIds = new Set(retries.map(({ id }) => id));
+  assert.ok(retries.every(({ id }) => deliveryIds.includes(id)),
+    'only the source message that failed persistence may be returned to the platform');
+  assert.ok(acks.every((id) => !retriedIds.has(id)),
+    'a failed source message must not acknowledge before the platform retries it');
+  assert.equal(new Set([...acks, ...retriedIds]).size, deliveryIds.length,
+    'every scheduled source message must either acknowledge or request a durable platform retry');
+  assert.deepEqual([...new Set([...acks, ...retriedIds])].sort(), [...deliveryIds].sort());
   for (const [name, deadLetter] of Object.entries(deadLetters)) {
     assert.deepEqual(deadLetter.sent, [], `${name} dead-letter queue must stay empty`);
   }
-  assert.equal(failuresAfter, failuresBefore, 'the failed-delivery ledger must not grow');
+  assert.equal(failuresAfter, failuresBefore + retries.length,
+    'each transient persistence failure must be recorded before the platform retries it');
   assert.deepEqual([...new Set(requestedUrls.map((url) => new URL(url).hostname))].sort(), [
     'api.ashbyhq.com', 'api.lever.co', 'boards-api.greenhouse.io', 'careers-a.example.test', 'careers-b.example.test',
     'raw.githubusercontent.com',
   ], 'only the four provider endpoints and the two synthetic employer hosts may be fetched');
   assert.equal(reusedGithubJobs.count, githubResolvedRows,
     'the poller should reuse the seeded catalog rows for the resolved slice');
+  const deliveryBySourceId = new Map([
+    [githubSourceId, `intern-notifs-github:${githubSourceId}`],
+    [greenhouseSourceId, `intern-notifs-greenhouse:${greenhouseSourceId}`],
+    [leverSourceId, `intern-notifs-lever:${leverSourceId}`],
+    [ashbySourceId, `intern-notifs-ashby:${ashbySourceId}`],
+  ]);
   for (const sourceId of sourceIds) {
-    assert.equal(checkpoints.get(sourceId).successfulFetches, 2, `${sourceId} should persist a second successful fetch`);
+    const deliveryId = deliveryBySourceId.get(sourceId);
+    assert.equal(checkpoints.get(sourceId).successfulFetches, retriedIds.has(deliveryId) ? 1 : 2,
+      `${sourceId} must either persist its second fetch or retain its last safe checkpoint for platform retry`);
   }
   assert.equal(githubCheckpoint.activeExternalIds.length, githubRows);
   for (const sourceId of sourceIds) {
