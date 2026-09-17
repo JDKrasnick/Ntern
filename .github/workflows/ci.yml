@@ -31,19 +31,70 @@ jobs:
               - 'docs/source-policy.html'
               - 'docs/support.html'
               - 'docs/terms.html'
-  verify:
+  verify-core:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  ingestion-traffic-contracts:
+    name: Ingestion traffic contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx vitest run test/d1-traffic-controller.test.ts test/d1-traffic-observation.test.ts test/cloudflare-worker.test.ts
+
+  ingestion-resource-budget:
+    name: Ingestion resource budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run test:budget
+
+  worker-bundles:
+    name: Worker bundles
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build:cloudflare
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run test:e2e
+
+  infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: opentofu/setup-opentofu@v1
       - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run test:budget
-      - run: npm run test:e2e
       - run: npm run terraform:fmt
       - run: tofu -chdir=infra/cloudflare init -backend=false
       - run: npm run terraform:validate
@@ -86,7 +137,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   deploy-web:
-    needs: [changes, verify, verify-mobile]
+    needs: [changes, verify-core, ingestion-traffic-contracts, ingestion-resource-budget, worker-bundles, e2e, infrastructure, verify-mobile]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     concurrency:
