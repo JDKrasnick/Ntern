@@ -157,8 +157,8 @@ function applicationSummary(
           assistance: assistanceAvailability(job, application.applyMode),
         } : {
           unavailableReason: job.postingIdentityStatus === 'unconfirmed' && !identityUnconfirmedPublicationEnabled
-            ? 'InternNotifs verified the employer and application page, but is still reviewing this listing’s exact posting identity.'
-            : 'InternNotifs couldn’t verify the official role page and is reviewing it.',
+            ? 'Ntern verified the employer and application page, but is still reviewing this listing’s exact posting identity.'
+            : 'Ntern couldn’t verify the official role page and is reviewing it.',
         }),
         sourceReferences: publicJob(job).sourceReferences.map(({ sourceId, sourceUrl, provenance, state }) => ({ sourceId, sourceUrl, provenance, state })),
       },
@@ -646,7 +646,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
         const job = await dependencies.jobs.getJob?.(application.jobId);
         if (!job) return reply(404, { message: 'Job not found' });
         if (!catalogEligible(job) || !identityPublished(job, identityUnconfirmedPublicationEnabled)) {
-          return reply(409, { message: 'Assistance is unavailable while InternNotifs reviews the official role page' });
+          return reply(409, { message: 'Assistance is unavailable while Ntern reviews the official role page' });
         }
         const body = parseBody(event);
         if (body.mode !== 'headed' && body.mode !== 'headless') return reply(400, { message: 'mode must be headed or headless' });
@@ -688,7 +688,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
       if (method === 'DELETE' && docMatch) { const document = (await dependencies.users.listDocuments(userId)).find((item) => item.documentId === decodeURIComponent(docMatch[1])); if (!document) return reply(404, { message: 'Document not found' }); if (documentStorage) await documentStorage.deleteObject(document.objectKey); await dependencies.users.deleteDocument(userId, document.documentId); return reply(204, {}); }
       if (method === 'DELETE' && path === '/me') {
         if (!dependencies.deleteIdentity) {
-          return reply(503, { code: 'ACCOUNT_DELETION_UNAVAILABLE', retryable: false, message: 'Account deletion is unavailable on this retired service. Update InternNotifs and try again.' });
+          return reply(503, { code: 'ACCOUNT_DELETION_UNAVAILABLE', retryable: false, message: 'Account deletion is unavailable on this retired service. Update Ntern and try again.' });
         }
         let documents: Awaited<ReturnType<UserStore['listDocuments']>>;
         let activeDocumentUploads: boolean;

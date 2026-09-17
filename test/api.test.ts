@@ -70,7 +70,7 @@ describe('public API ownership boundary', () => {
     expect((await handler(event(undefined, 'GET', `/jobs/${job.jobId}`))).statusCode).toBe(404);
     const summary = JSON.parse((await handler(event('student', 'GET', '/me/applications'))).body).applications[0];
     expect(summary.job).toMatchObject({ company: 'Acme', title: 'Software Intern', availability: 'catalog-review',
-      unavailableReason: 'InternNotifs couldn’t verify the official role page and is reviewing it.' });
+      unavailableReason: 'Ntern couldn’t verify the official role page and is reviewing it.' });
     expect(summary.job).not.toHaveProperty('applyUrl');
     expect(summary.job).not.toHaveProperty('assistance');
     expect((await handler(event('student', 'PATCH', '/me/applications/saved-1', { status: 'applied' }))).statusCode).toBe(200);
