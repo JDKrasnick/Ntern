@@ -803,14 +803,20 @@ export async function processDestinationVerificationBatch(
   }
 }
 
+/**
+ * Incident warnings only. Owner decision, 2026-09-17: nothing re-inspects a
+ * destination after it is admitted — a stored decision is durable — so the
+ * scheduled daily re-checks, the schedule-table sync that fed them, the weekly
+ * review samples, and the metadata revalidation pass are all gone. Inspection at
+ * admission time still runs, and the operations API can still enqueue a check by
+ * hand. Returns the number of warning groups sent.
+ */
 export async function enqueueDueDestinationVerifications(
   env: Pick<DestinationVerificationEnvironment, 'DB' | 'DESTINATION_VERIFICATION_QUEUE' | 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL'>,
   now = new Date(),
-  options: { syncSchedule?: boolean } = { syncSchedule: true },
 ): Promise<number> {
   const operations = new D1CatalogAdmissionStore(env.DB);
   const incidents = await operations.listActiveIncidents();
-  let queued = 0;
   const warnings = new Map<string, { sourceId: string; host: string; reason: string; incidents: string[] }>();
   for (const incident of incidents) {
     if (!incident.graceDeadline || incident.warningSentAt) continue;
@@ -826,46 +832,5 @@ export async function enqueueDueDestinationVerifications(
       for (const id of group.incidents) await operations.markIncidentNotification(id, 'grace-warning', sentAt);
     }
   }
-  const rules = await operations.listReviewRules();
-  for (const rule of rules.filter((candidate) => !candidate.sampleDueAt || Date.parse(candidate.sampleDueAt) <= now.getTime())) {
-    for (const candidate of await operations.reviewSampleCandidates(rule)) {
-      await env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage({
-        jobId: candidate.jobId, sourceId: candidate.sourceId, externalId: candidate.externalId,
-        providerIdentity: { provider: rule.provider, sourceId: candidate.sourceId, sourceUrl: candidate.sourceUrl,
-          ...(rule.tenant ? { tenant: rule.tenant } : {}), ...(candidate.expectedPostingId ? { postingId: candidate.expectedPostingId } : {}) },
-        candidateUrl: candidate.candidateUrl, reason: 'weekly-sample',
-        metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
-      }, now.toISOString()));
-      queued += 1;
-    }
-    await operations.markReviewRuleSampled(rule.id, new Date(now.getTime() + 7 * 86_400_000).toISOString());
-  }
-  const scheduledAt = now.toISOString();
-  if (options.syncSchedule !== false) await operations.syncVerificationSchedule(scheduledAt);
-  for (const candidate of await operations.leaseDueVerifications(scheduledAt)) {
-    const idempotencyKey = createHash('sha256').update(`${candidate.occurrenceKey}\0${candidate.nextCheckAt}`).digest('hex');
-    await env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage({
-      jobId: candidate.jobId, sourceId: candidate.sourceId, externalId: candidate.externalId,
-      providerIdentity: candidate.providerIdentity, candidateUrl: candidate.candidateUrl, reason: 'daily-retry',
-      metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
-      occurrenceKey: candidate.occurrenceKey, leaseToken: candidate.leaseToken, idempotencyKey,
-    }, scheduledAt));
-    await operations.markVerificationEnqueued(candidate.occurrenceKey, candidate.leaseToken, scheduledAt);
-    queued += 1;
-  }
-  const metadataObservedBefore = new Date(now.getTime() - ROLE_METADATA_REVALIDATION_MS).toISOString();
-  for (const candidate of await operations.metadataVerificationCandidates(100, {
-    observedBefore: metadataObservedBefore,
-    includeUnobserved: true,
-    reserveAt: now.toISOString(),
-  })) {
-    await env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage({
-      jobId: candidate.jobId, sourceId: candidate.sourceId, externalId: candidate.externalId,
-      providerIdentity: candidate.providerIdentity, candidateUrl: candidate.candidateUrl, reason: 'content-change',
-      metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
-      ...(candidate.metadataArtifactHash ? { metadataArtifactHash: candidate.metadataArtifactHash } : {}),
-    }, now.toISOString()));
-    queued += 1;
-  }
-  return queued;
+  return warnings.size;
 }

@@ -439,12 +439,11 @@ describe('destination verification queue consumer', () => {
     expect(queued.ack).not.toHaveBeenCalled();
 
     const queue = { send: vi.fn(), sendBatch: vi.fn() };
+    // Owner decision, 2026-09-17: nothing re-inspects a destination after it is
+    // admitted, so the sweep never enqueues a check however overdue one is.
     await expect(enqueueDueDestinationVerifications({ ...environment(db), DESTINATION_VERIFICATION_QUEUE: queue },
-      new Date('2026-08-31T00:01:00Z'), { syncSchedule: false })).resolves.toBe(0);
+      new Date('2026-08-31T01:02:00Z'))).resolves.toBe(0);
     expect(queue.send).not.toHaveBeenCalled();
-    await expect(enqueueDueDestinationVerifications({ ...environment(db), DESTINATION_VERIFICATION_QUEUE: queue },
-      new Date('2026-08-31T01:02:00Z'), { syncSchedule: false })).resolves.toBe(1);
-    expect(queue.send).toHaveBeenCalledOnce();
   });
 
   it('uses the configured verified sender for operational alerts', async () => {

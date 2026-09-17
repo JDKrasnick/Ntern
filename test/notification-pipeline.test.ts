@@ -6,10 +6,9 @@ import * as ses from 'aws-cdk-lib/aws-ses';
 import { describe, expect, it, vi } from 'vitest';
 import { NotificationPipeline } from '../infra/notification-pipeline.js';
 import { candidateFitsActiveBucket, EXPO_RECEIPT_DELAY_SECONDS, expoReceiptRetryDelaySeconds, MAX_EXPO_RECEIPT_CHECKS,
-  nextReceiptCheck, notificationCandidateEligible, notificationCandidatesForFlush, notificationStreamTarget,
+  nextReceiptCheck, notificationStreamTarget,
   transitionClaim } from '../src/notification-pipeline-handler.js';
 import type { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import type { Internship } from '../src/types.js';
 
 function pipelineStack(releaseWindow = cdk.Duration.seconds(8)) {
   const app = new cdk.App();
@@ -85,22 +84,6 @@ describe('NotificationPipeline', () => {
   });
   it('waits fifteen minutes before checking Expo receipts', () => {
     expect(EXPO_RECEIPT_DELAY_SECONDS).toBe(900);
-  });
-  it('drops delayed legacy-shaped candidates when destination evidence expires before aggregation or flush', () => {
-    const job = { open: true, technical: true, admission: {
-      destination: { inspectedAt: '2026-08-23T00:00:00Z' }, evidenceObservedAt: '2026-08-23T00:00:00Z', alertEligible: true,
-    } } as Internship;
-    expect(notificationCandidateEligible(job, new Date('2026-08-29T23:59:59Z'))).toBe(true);
-    expect(notificationCandidateEligible(job, new Date('2026-08-30T00:00:00Z'))).toBe(false);
-  });
-  it('rechecks freshness at the current flush attempt after a bucket was closed earlier', () => {
-    const job = { open: true, technical: true, admission: {
-      destination: { inspectedAt: '2026-08-23T00:00:00Z', freshUntil: '2026-08-30T00:00:00Z' }, alertEligible: true,
-    } } as Internship;
-    const priorClosedAt = new Date('2026-08-29T23:59:59Z');
-    const retriedAt = new Date('2026-08-30T00:00:01Z');
-    expect(notificationCandidateEligible(job, priorClosedAt)).toBe(true);
-    expect(notificationCandidatesForFlush([job], retriedAt)).toEqual([]);
   });
   it('bounds receipt retries and backs them off instead of sending a receipt to the DLQ while pending', () => {
     const message = {

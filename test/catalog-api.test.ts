@@ -61,7 +61,7 @@ describe('grouped catalog API', () => {
     expect(projectionReads).toBe(1);
   });
 
-  it('hides expired legacy-shaped roles from default, filtered, and detail projection paths', async () => {
+  it('keeps an admitted role with old evidence visible in default, filtered, and detail projection paths', async () => {
     const jobs = new MemoryInternshipStore();
     const admission: CatalogAdmission = {
       canonicalEmployer: { id: 'acme', displayName: 'Acme' }, employerResolution: 'resolved', postingAttribution: 'attributed',
@@ -79,9 +79,11 @@ describe('grouped catalog API', () => {
     const [details] = groupCatalogJobs([stale]).map(catalogGroupDetails);
     await jobs.putCatalogProjection([details!], new Date().toISOString());
     const handler = createApiHandler({ jobs, users: new MemoryUserStore() });
-    expect(body<{ groups: unknown[] }>(await handler(event('GET', '/catalog'))).groups).toEqual([]);
-    expect(body<{ groups: unknown[] }>(await handler(event('GET', '/catalog', { q: 'software' }))).groups).toEqual([]);
-    expect((await handler(event('GET', `/catalog/groups/${details!.group.groupId}`))).statusCode).toBe(404);
+    // Owner decision, 2026-09-17: admission is durable, so a stale evidence
+    // timestamp no longer hides a role the catalog admitted.
+    expect(body<{ groups: unknown[] }>(await handler(event('GET', '/catalog'))).groups).toHaveLength(1);
+    expect(body<{ groups: unknown[] }>(await handler(event('GET', '/catalog', { q: 'software' }))).groups).toHaveLength(1);
+    expect((await handler(event('GET', `/catalog/groups/${details!.group.groupId}`))).statusCode).toBe(200);
   });
 
   it('lists public rows, recomputes filtered summaries, and opens complete group details', async () => {

@@ -208,49 +208,20 @@ describe('record-level catalog admission', () => {
 
   });
 
-  it('fails closed from wall-clock freshness even when a scheduled verifier is unavailable', () => {
+  it('keeps a stored admission eligible after its evidence timestamp ages out', () => {
+    // Owner decision, 2026-09-17: nothing re-inspects a destination after it is
+    // admitted, so an aged evidence timestamp must not retire a role or stop its
+    // alerts. Only the stored decision itself decides.
     const role = listing();
     const destination = classifyDestination({ listing: role, reachability: 'live', evidence: page({ postingIdPresent: true }),
       inspectedAt: '2026-08-20T12:00:00Z' });
     const admission = evaluateCatalogAdmission({ listing: role, destination, postingAttributed: true,
       evaluatedAt: '2026-08-20T12:00:00Z' });
-    expect(alertEligible({ admission }, new Date('2026-08-27T11:59:59Z'))).toBe(true);
-    expect(alertEligible({ admission }, new Date('2026-08-27T12:00:00Z'))).toBe(false);
-    expect(catalogEligible({ admission }, new Date('2026-08-27T11:59:59Z'))).toBe(true);
-    expect(catalogEligible({ admission }, new Date('2026-08-27T12:00:00Z'))).toBe(false);
-  });
 
-  it('bounds admissions written before freshUntil was persisted', () => {
-    const role = listing();
-    const destination = classifyDestination({ listing: role, reachability: 'live', evidence: page({ postingIdPresent: true }),
-      inspectedAt: '2026-08-20T12:00:00Z' });
-    const admission = evaluateCatalogAdmission({ listing: role, destination, postingAttributed: true,
-      evaluatedAt: '2026-08-20T12:00:00Z' });
-    delete admission.destination.freshUntil;
-
-    expect(alertEligible({ admission }, new Date('2026-08-27T11:59:59Z'))).toBe(true);
-    expect(alertEligible({ admission }, new Date('2026-08-27T12:00:00Z'))).toBe(false);
-    expect(catalogEligible({ admission }, new Date('2026-08-27T11:59:59Z'))).toBe(true);
-    expect(catalogEligible({ admission }, new Date('2026-08-27T12:00:00Z'))).toBe(false);
-
-    admission.destination.freshUntil = 'not-a-date';
-    expect(alertEligible({ admission }, new Date('2026-08-27T12:00:00Z'))).toBe(false);
-    expect(catalogEligible({ admission }, new Date('2026-09-03T12:00:00Z'))).toBe(false);
-  });
-
-  it('fails closed when an admitted record has no trustworthy evidence timestamp', () => {
-    const role = listing();
-    const destination = classifyDestination({ listing: role, reachability: 'live', evidence: page({ postingIdPresent: true }),
-      inspectedAt: '2026-08-20T12:00:00Z' });
-    const admission = evaluateCatalogAdmission({ listing: role, destination, postingAttributed: true,
-      evaluatedAt: '2026-08-20T12:00:00Z' });
-    admission.destination.freshUntil = 'not-a-date';
-    admission.destination.inspectedAt = 'not-a-date';
-    admission.evidenceObservedAt = 'not-a-date';
-    admission.lastVerifiedAt = 'not-a-date';
-
-    expect(alertEligible({ admission }, new Date('1970-01-01T00:00:00Z'))).toBe(false);
-    expect(catalogEligible({ admission }, new Date('1970-01-01T00:00:00Z'))).toBe(false);
+    expect(alertEligible({ admission })).toBe(true);
+    expect(catalogEligible({ admission })).toBe(true);
+    expect(catalogEligible({ admission: { ...admission, catalogEligible: false } })).toBe(false);
+    expect(alertEligible({ admission: { ...admission, alertEligible: false } })).toBe(false);
   });
 
   it('treats validThrough as conclusive closure without catalog grace', () => {
@@ -260,13 +231,14 @@ describe('record-level catalog admission', () => {
       inspectedAt: '2026-08-26T12:00:00Z' });
     const admission = evaluateCatalogAdmission({ listing: role, destination, postingAttributed: true,
       evaluatedAt: '2026-08-26T12:00:00Z' });
-    expect(catalogEligible({ admission }, new Date('2026-09-01T11:59:59Z'))).toBe(true);
-    expect(catalogEligible({ admission }, new Date('2026-09-01T12:00:00Z'))).toBe(false);
+    expect(catalogEligible({ admission })).toBe(true);
     const transient = classifyDestination({ listing: role, reachability: 'unreachable', inspectedAt: '2026-08-31T12:00:00Z' });
     const retained = evaluateCatalogAdmission({ listing: role, destination: transient, postingAttributed: true,
       evaluatedAt: '2026-08-31T12:00:00Z', previous: admission });
     expect(retained.destination.validThrough).toBe('2026-09-01T12:00:00Z');
-    expect(catalogEligible({ admission: retained }, new Date('2026-09-01T12:00:00Z'))).toBe(false);
+    // The deadline is evidence at admission time; it does not retire a role that
+    // is already admitted, because nothing re-inspects it.
+    expect(catalogEligible({ admission: retained })).toBe(true);
   });
 
   it('classifies explicit closure and expired validThrough before role-specific 200 evidence', () => {
