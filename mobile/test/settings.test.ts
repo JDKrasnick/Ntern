@@ -44,6 +44,7 @@ describe("profile settings navigation", () => {
     expect(jobUpdate).not.toHaveProperty("push");
     expect(jobUpdate.alertSettings).not.toHaveProperty("applicationReminders");
     expect(jobUpdate.alertSettings).not.toHaveProperty("followUpDays");
+    expect(jobUpdate.alertSettings).toMatchObject({ timezone: "America/New_York" });
     expect(appUpdate).not.toHaveProperty("filter");
     expect(appUpdate).not.toHaveProperty("alertsEnabled");
     expect(appUpdate.applicationHandoff).toBe("window");

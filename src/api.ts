@@ -285,6 +285,17 @@ function alertSettings(
     throw new Error('alertSettings.followUpDays must be a whole number from 1 to 30');
   }
   const quietHours = settings.quietHours ?? previous?.quietHours;
+  const timezone = settings.timezone ?? previous?.timezone ?? (quietHours as { timezone?: unknown } | undefined)?.timezone;
+  if (timezone !== undefined) {
+    if (typeof timezone !== 'string' || !timezone.trim() || timezone.length > 100) {
+      throw new Error('alertSettings.timezone must be a timezone name');
+    }
+    try { new Intl.DateTimeFormat('en-US', { timeZone: timezone.trim() }); }
+    catch { throw new Error('alertSettings.timezone must be a valid IANA timezone'); }
+  }
+  if (settings.delivery === 'daily-digest' && timezone === undefined) {
+    throw new Error('alertSettings.timezone is required for daily-digest delivery');
+  }
   if (quietHours !== undefined) {
     if (!quietHours || typeof quietHours !== 'object' || Array.isArray(quietHours)) {
       throw new Error('alertSettings.quietHours must be an object');
@@ -304,6 +315,7 @@ function alertSettings(
   }
   return {
     delivery,
+    ...(timezone ? { timezone: timezone.trim() } : {}),
     applicationReminders: reminders,
     followUpDays,
     ...(quietHours ? { quietHours: quietHours as { start: string; end: string; timezone: string } } : {}),

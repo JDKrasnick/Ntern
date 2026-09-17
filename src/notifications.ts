@@ -147,7 +147,7 @@ function isQuietTime(at: Date, quietHours: NonNullable<UserPreferences['alertSet
 /** Resolves cadence at 09:00 local time, stepping by minutes to remain correct across DST shifts. */
 export function nextPushDeliveryAt(at: Date, settings?: UserPreferences['alertSettings']) {
   const quietHours = settings?.quietHours;
-  const timezone = quietHours?.timezone ?? 'UTC';
+  const timezone = settings?.timezone ?? quietHours?.timezone ?? 'UTC';
   const daily = settings?.delivery === 'daily-digest';
   for (let offset = daily ? 1 : 0; offset <= 60 * 48; offset += 1) {
     const candidate = new Date(at.getTime() + offset * 60_000);

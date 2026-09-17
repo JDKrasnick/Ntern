@@ -250,6 +250,7 @@ type PushPreferences = {
 };
 type AlertSettings = {
   delivery: "immediate" | "daily-digest";
+  timezone?: string;
   quietHours?: { start: string; end: string; timezone: string };
   applicationReminders: boolean;
   followUpDays: number;

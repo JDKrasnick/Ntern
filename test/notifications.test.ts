@@ -66,6 +66,15 @@ describe('notifications', () => {
     expect(await store.pendingSms()).toHaveLength(2);
   });
   it('persists daily and quiet-hours delivery until the selected local time', async () => {
+    expect(nextPushDeliveryAt(new Date('2026-01-15T18:00:00.000Z'), {
+      delivery: 'daily-digest', timezone: 'America/Los_Angeles', applicationReminders: true, followUpDays: 7,
+    })).toBe('2026-01-16T17:00:00.000Z');
+    expect(nextPushDeliveryAt(new Date('2026-03-08T15:00:00.000Z'), {
+      delivery: 'daily-digest', timezone: 'America/Los_Angeles', applicationReminders: true, followUpDays: 7,
+    })).toBe('2026-03-08T16:00:00.000Z');
+    expect(nextPushDeliveryAt(new Date('2026-08-25T01:30:00.000Z'), {
+      delivery: 'daily-digest', timezone: 'Asia/Tokyo', applicationReminders: true, followUpDays: 7,
+    })).toBe('2026-08-26T00:00:00.000Z');
     expect(nextPushDeliveryAt(new Date('2026-08-25T03:00:00.000Z'), {
       delivery: 'immediate', applicationReminders: true, followUpDays: 7,
       quietHours: { start: '22:00', end: '08:00', timezone: 'UTC' },
@@ -73,7 +82,7 @@ describe('notifications', () => {
 
     const jobs = new MemoryInternshipStore(); const users = new MemoryUserStore(); const listing = job(1);
     await jobs.putInternship(listing);
-    await users.putPreferences({ userId: 'user-1', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-08-25T00:00:00.000Z', alertSettings: { delivery: 'daily-digest', applicationReminders: true, followUpDays: 7, quietHours: { start: '22:00', end: '08:00', timezone: 'UTC' } } });
+    await users.putPreferences({ userId: 'user-1', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-08-25T00:00:00.000Z', alertSettings: { delivery: 'daily-digest', timezone: 'UTC', applicationReminders: true, followUpDays: 7, quietHours: { start: '22:00', end: '08:00', timezone: 'UTC' } } });
     await users.putDevice({ userId: 'user-1', token: 'ExponentPushToken[test]', platform: 'ios', active: true, createdAt: '2026-08-25T00:00:00.000Z', updatedAt: '2026-08-25T00:00:00.000Z' });
     let sends = 0;
     const publisher = new ExpoPushPublisher('https://push.example.test', async () => { sends += 1; return new Response(JSON.stringify({ data: { id: 'ticket-1', status: 'ok' } }), { status: 200 }); });

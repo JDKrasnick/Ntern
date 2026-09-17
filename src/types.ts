@@ -27,6 +27,8 @@ export type ApplicationHandoff = 'window' | 'tab';
 /** Delivery preferences are stored separately from the role filter so they can evolve independently. */
 export interface AlertSettings {
   delivery: AlertDelivery;
+  /** IANA timezone used for daily delivery, even when quiet hours are disabled. */
+  timezone?: string;
   quietHours?: { start: string; end: string; timezone: string };
   applicationReminders: boolean;
   followUpDays: number;

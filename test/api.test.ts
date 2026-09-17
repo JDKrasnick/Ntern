@@ -202,13 +202,17 @@ describe('public API ownership boundary', () => {
     const saved = await handler(event('user-a', 'PUT', '/me/preferences', {
       alertSettings: {
         delivery: 'daily-digest',
+        timezone: 'America/New_York',
         quietHours: { start: '22:00', end: '08:00', timezone: 'America/New_York' },
         applicationReminders: true,
         followUpDays: 5
       }
     }));
     expect(saved.statusCode).toBe(200);
-    expect(JSON.parse(saved.body)).toMatchObject({ alertSettings: { delivery: 'daily-digest', quietHours: { start: '22:00', end: '08:00' }, applicationReminders: true, followUpDays: 5 } });
+    expect(JSON.parse(saved.body)).toMatchObject({ alertSettings: { delivery: 'daily-digest', timezone: 'America/New_York', quietHours: { start: '22:00', end: '08:00' }, applicationReminders: true, followUpDays: 5 } });
+    const missingTimezone = await handler(event('user-b', 'PUT', '/me/preferences', { alertSettings: { delivery: 'daily-digest' } }));
+    expect(missingTimezone.statusCode).toBe(400);
+    expect(JSON.parse(missingTimezone.body).message).toContain('timezone');
     const invalid = await handler(event('user-a', 'PUT', '/me/preferences', { alertSettings: { quietHours: { start: 'after dark', end: '08:00', timezone: 'America/New_York' } } }));
     expect(invalid.statusCode).toBe(400);
     expect(JSON.parse(invalid.body).message).toContain('quietHours');
