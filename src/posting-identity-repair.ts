@@ -464,17 +464,29 @@ function comparablePresentationValue(field: PresentationField, value: unknown): 
   try { return canonicalizePostingUrl(value); } catch { return value; }
 }
 
+/**
+ * The only presentation disagreement that blocks a duplicate merge. Owner
+ * decision, 2026-09-17, taken empirically from the live groups: they differ in
+ * how a list wrote the same role — "…Co-op" against "…Co-op - Jan. 2027", a
+ * campus in one title and not the other — and `mergeJob` already resolves every
+ * other field deterministically. It takes the canonical member's company, title,
+ * location and apply URL, and re-derives the admission from the merged
+ * references, so a name, title or URL difference settles itself. A disagreement
+ * about the *reviewed employer identity* is two different employers and stays
+ * blocked for a human.
+ */
+const MERGE_BLOCKING_PRESENTATION_FIELDS: readonly PresentationField[] = ['employerIdentity'];
+
 function presentationDisagreement(
   providerIdentity: string,
   canonicalJobId: string,
   members: Internship[],
   employerMappings: Map<string, string>,
-  official?: SourceOccurrence,
 ): PresentationDisagreement | undefined {
   const values = {} as PresentationDisagreement['values'];
   const fields: PresentationField[] = [];
   for (const field of Object.keys(presentation(members[0]!, employerMappings)) as PresentationField[]) {
-    if (official && ['employerName', 'title', 'location', 'destinationUrl'].includes(field)) continue;
+    if (!MERGE_BLOCKING_PRESENTATION_FIELDS.includes(field)) continue;
     const observed = members.map((job) => ({ jobId: job.jobId, value: presentation(job, employerMappings)[field] }));
     if (new Set(observed.map((item) => JSON.stringify(stable(comparablePresentationValue(field, item.value))))).size <= 1) continue;
     fields.push(field);
@@ -741,7 +753,7 @@ export function postingIdentityRepairPlan(
     const official = officialPresentation(presentationMembers, canonical.evidence)
       ?? presentationReviews.get(key);
     const disagreement = ordered.length > 1
-      ? presentationDisagreement(key, canonical.job.jobId, presentationMembers, employerMappings, official)
+      ? presentationDisagreement(key, canonical.job.jobId, presentationMembers, employerMappings)
       : undefined;
     if (ordered.length > 1) {
       duplicateGroups += 1;

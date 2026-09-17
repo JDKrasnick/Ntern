@@ -232,17 +232,20 @@ describe('D1 posting identity repair', () => {
     expect(first).toMatchObject({
       duplicateGroups: 2,
       duplicateJobs: 2,
-      eligibleDuplicateGroups: 0,
-      unresolvedDuplicateGroups: 2,
+      eligibleDuplicateGroups: 2,
+      unresolvedDuplicateGroups: 0,
       conflicts: [],
       outboxRows: 1,
-      applicationMerges: 0,
-      proposalRemaps: 0,
+      // Merging a duplicate now carries its user rows onto the canonical job,
+      // which is the point of the merge: a student who saved the duplicate keeps
+      // their application.
+      applicationMerges: 1,
+      proposalRemaps: 1,
     });
-    expect(first.presentationDisagreements).toEqual(expect.arrayContaining([
-      expect.objectContaining({ canonicalJobId: 'plus-old', fields: ['destinationUrl'] }),
-      expect.objectContaining({ canonicalJobId: 'drw-old', fields: ['destinationUrl'] }),
-    ]));
+    // A destination-URL difference no longer blocks a merge: the canonical
+    // member's URL wins and the admission is re-derived from the merged
+    // references (owner decision, 2026-09-17).
+    expect(first.presentationDisagreements).toEqual([]);
     expect(first.samples).toEqual(expect.arrayContaining([
       expect.objectContaining({ canonicalJobId: 'plus-old', duplicateJobIds: ['plus-duplicate'] }),
       expect.objectContaining({ canonicalJobId: 'drw-old', duplicateJobIds: ['drw-duplicate'] }),
@@ -611,17 +614,6 @@ describe('D1 posting identity repair', () => {
       presentationDisagreements: [expect.objectContaining({ fields: ['employerIdentity'] })],
     });
     sqlite.close();
-  });
-
-  it('refuses to apply an identity match whose presentation is unresolved', async () => {
-    const { db } = await historicalDatabase();
-    const dry = await runPostingIdentityRepair(db);
-    await expect(runPostingIdentityRepair(db, {
-      apply: true,
-      repairToken: dry.repairToken,
-      expectedChanges: dry.expectedChanges,
-      expectedDuplicateJobs: dry.duplicateJobs,
-    })).rejects.toThrow('unresolved presentation disagreements');
   });
 
   it('applies exact guarded remaps for presentation-agreeing groups, preserves workflow/notifications, resolves legacy IDs, and is idempotent', async () => {
