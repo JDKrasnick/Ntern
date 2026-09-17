@@ -1,11 +1,17 @@
 name: One-off trusted-admission re-grade
 
 # Manual, idempotent repair: re-evaluates stored trusted-community admissions
-# with the catalog gate open and publishes the rows a closed gate had withheld.
-# Runs in the deploy environment so it can use the operations key without it ever
-# leaving the repository's secret store.
+# with the catalog gate open and publishes rows a closed gate had withheld.
+# Scoped per source because one plan over every source does not fit in a single
+# Worker invocation. Runs in the deploy environment so the operations key stays
+# in the repository's secret store.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      source-ids:
+        description: Comma-separated trusted source ids
+        required: false
+        default: vanshb03-summer-2027,simplify-summer-2026,speedyapply-2027-swe,speedyapply-2027-ai,northwestern-fintech-2027-quant,canadian-tech-2027
 
 jobs:
   regrade:
@@ -17,21 +23,27 @@ jobs:
     env:
       OPERATIONS_SHARED_SECRET: ${{ secrets.OPERATIONS_SHARED_SECRET }}
       CATALOG_API_URL: ${{ vars.PUBLIC_API_URL }}
+      SOURCE_IDS: ${{ inputs.source-ids }}
     steps:
-      - name: Report the plan and apply it
+      - name: Plan and apply each source
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           post() {
             curl -fsS -X POST "$CATALOG_API_URL/internal/trusted-admission-backfill" \
               -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
               -H 'Content-Type: application/json' -d "$1"
           }
-          dry=$(post '{"apply":false}')
-          echo "$dry" | jq '{dryRun, totals, changes, before, after}'
-          token=$(echo "$dry" | jq -r '.repairToken')
-          expected=$(echo "$dry" | jq -r '.expectedChanged')
-          echo "expectedChanged=$expected"
-          if [ "$expected" = "0" ]; then echo "nothing to publish"; exit 0; fi
-          post "{\"apply\":true,\"repairToken\":\"$token\",\"expectedChanged\":$expected}" \
-            | jq '{applied: .applied, appliedTotals, projectionRefreshRequired, verification: {dryRun: .verification.dryRun, totals: .verification.totals}}'
+          IFS=',' read -ra ids <<< "$SOURCE_IDS"
+          for raw in "${ids[@]}"; do
+            id=$(echo "$raw" | tr -d ' ')
+            echo "=== $id"
+            dry=$(post "{\"apply\":false,\"sourceIds\":[\"$id\"]}") || { echo "dry run failed for $id"; continue; }
+            echo "$dry" | jq -c '{totals, changes}'
+            expected=$(echo "$dry" | jq -r '.expectedChanged')
+            token=$(echo "$dry" | jq -r '.repairToken')
+            if [ "$expected" = "0" ]; then echo "nothing to publish"; continue; fi
+            post "{\"apply\":true,\"repairToken\":\"$token\",\"expectedChanged\":$expected,\"sourceIds\":[\"$id\"]}" \
+              | jq -c '{applied, appliedTotals, projectionRefreshRequired, conflicts}' \
+              || echo "apply failed for $id"
+          done
