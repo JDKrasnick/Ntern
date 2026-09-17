@@ -48,6 +48,7 @@ import { destinationVerificationMessage, enqueueDueDestinationVerifications, pro
   sendAdmissionOperationalAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
+import { observeCatalogDelivery } from './d1-traffic-observation.js';
 import { resilientD1 } from './resilient-d1.js';
 export { D1TrafficController } from './d1-traffic-controller.js';
 import type { CatalogAdmissionResolver } from '../src/destination-verification.js';
@@ -1472,6 +1473,17 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     for (const message of batch.messages) message.ack();
     return;
   }
+  const trafficObservations = new Map<string, Awaited<ReturnType<typeof observeCatalogDelivery>>>();
+  if (catalogProvider) {
+    for (const message of batch.messages) {
+      trafficObservations.set(message.id, await observeCatalogDelivery({
+        controller: env.D1_TRAFFIC_CONTROLLER, provider: catalogProvider, queue: batch.queue, messageId: message.id,
+      }));
+    }
+  }
+  const completeTraffic = async (messageId: string, outcome: 'success' | 'failure', error?: unknown) => {
+    await trafficObservations.get(messageId)?.complete(outcome, error);
+  };
   if (batch.queue.includes('destination-verification')) {
     await processDestinationVerificationBatch(batch, env);
     return;
@@ -1526,6 +1538,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           body: queued.body, error,
         });
         console.error(JSON.stringify({ command: 'github-poll-setup', messageId: queued.id, error: safeDiagnostic(error) }));
+        await completeTraffic(queued.id, 'failure', error);
         queued.retry({ delaySeconds: d1QueueRetryDelay(error, queued.attempts) });
       }
       return;
@@ -1553,6 +1566,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         if (reviewedStructured) {
           const ran = await runStructuredSource(reviewedStructured, env, { forceRecovery: message.force === true });
           if (ran) await resolveFailures(queued.id, queued.attempts);
+          await completeTraffic(queued.id, 'success');
           continue;
         }
         if (!source) throw new Error(`Unknown reviewed source ${JSON.stringify(sourceId)}`);
@@ -1597,6 +1611,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           await sendQueueMessageWithin(env.GITHUB_QUEUE, { sourceId: source.id });
         }
         await resolveFailures(queued.id, queued.attempts);
+        await completeTraffic(queued.id, 'success');
       } catch (error) {
         failed.add(record.messageId);
         const delay = d1QueueRetryDelay(error, queued.attempts);
@@ -1628,6 +1643,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           body: queued.body, error,
         });
         console.error(JSON.stringify({ command: 'github-poll', messageId: record.messageId, error: safeDiagnostic(error) }));
+        await completeTraffic(queued.id, 'failure', error);
       }
     }
     for (const message of batch.messages) {
@@ -1658,6 +1674,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       attempts: queued?.attempts, timestamp: queued?.timestamp, sourceId: parsed?.sourceId,
       sourceKind: catalogProvider, body: record.body, error,
     });
+    await completeTraffic(record.messageId, 'failure', error);
   };
   let registry: Awaited<ReturnType<typeof reviewedProviderRegistry>>;
   try {
@@ -1705,10 +1722,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   const failed = new Set(result.batchItemFailures.map(({ itemIdentifier }) => itemIdentifier));
   for (const message of batch.messages) {
     if (failed.has(message.id)) {
+      await completeTraffic(message.id, 'failure');
       const delay = overloadDelays.get(message.id);
       message.retry(delay ? { delaySeconds: delay } : undefined);
     }
     else {
+      await completeTraffic(message.id, 'success');
       // A first-delivery message has no prior failure row, so skip the extra
       // write. Only retried deliveries (attempts > 1) can carry one to resolve.
       if ((message.attempts ?? 0) > 1) {

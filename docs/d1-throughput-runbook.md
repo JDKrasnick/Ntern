@@ -2,7 +2,7 @@
 
 ## Rollout guardrails
 
-The controller deploys in `observation` mode. It records permit demand and D1 pressure but grants every permit. Do not enable enforcement, create queues, apply migration `0030`, or configure `OPS_ALERT_RECIPIENT` without owner review of the exact OpenTofu plan and a saved production backup.
+The controller deploys in `observation` mode. Every catalog queue delivery (GitHub, Greenhouse, Lever, and Ashby) records a P0 permit acquisition and completion with its D1 failure class, but every permit is granted and an observation failure never changes queue acknowledgement or retry behavior. Do not enable enforcement, create queues, apply migration `0030`, or configure `OPS_ALERT_RECIPIENT` without owner review of the exact OpenTofu plan and a saved production backup.
 
 ## Staged activation
 
