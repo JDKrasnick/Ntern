@@ -15,7 +15,7 @@ describe('notifications', () => {
       await store.putInternship(index === 2 ? withSource(listing, 'lever-palantir') : listing);
     }
     const messages: PushMessage[] = []; await sendPendingNotifications(store, { publish: async (message) => { messages.push(message); } });
-    expect(messages).toHaveLength(6); expect(messages[0]).toMatchObject({ title: 'Role 1 — OpenAI', body: 'NYC · summer-2027 · $50/hr\nFound by InternNotifs: Jan 1, 2026\nSource: Job board\nhttps://apply.example.com/1', click: 'https://apply.example.com/1' }); expect(messages[5]?.body).toContain('Source: Lever'); expect(messages.map((message) => message.body).join('\n')).toContain('https://apply.example.com/7'); expect(await store.pendingSms()).toHaveLength(0);
+    expect(messages).toHaveLength(6); expect(messages[0]).toMatchObject({ title: 'Role 1 — OpenAI', body: 'NYC · summer-2027 · $50/hr\nFound by Ntern: Jan 1, 2026\nSource: Job board\nhttps://apply.example.com/1', click: 'https://apply.example.com/1' }); expect(messages[5]?.body).toContain('Source: Lever'); expect(messages.map((message) => message.body).join('\n')).toContain('https://apply.example.com/7'); expect(await store.pendingSms()).toHaveLength(0);
   });
   it('appends the identity-unconfirmed disclosure to legacy push copy', async () => {
     const store = new MemoryInternshipStore();
@@ -109,7 +109,7 @@ describe('notifications', () => {
     expect(compactRoleTitle('Software Engineering Intern', { 'software engineering': 'Dev' })).toBe('Dev');
     expect(renderPushTemplate('{focus}{postedDetail}', { ...listing, title: 'Machine Learning Intern', sourceReferences: [{ ...listing.sourceReferences[0], sourceId: 'ashby-acme', postedAt: '2026-07-19', providerTimestamp: { value: '2026-07-19', semantics: 'published' } }] })).toBe('Focus: AI/ML · Employer posted: Jul 19, 2026');
     expect(renderPushTemplate('{focus}{postedDetail}', { ...listing, title: 'Machine Learning Intern', sourceReferences: [{ ...listing.sourceReferences[0], postedAt: '2026-07-19', providerTimestamp: { value: '2026-07-19', semantics: 'published' } }] })).toBe('Focus: AI/ML · Source reported: Jul 19, 2026');
-    expect(renderPushTemplate('{focus}{postedDetail}', { ...listing, title: 'Machine Learning Intern', sourceReferences: [{ ...listing.sourceReferences[0], postedAt: '21m', providerTimestamp: { value: '21m', semantics: 'published' } }] })).toBe('Focus: AI/ML · Found by InternNotifs: Jan 1, 2026');
+    expect(renderPushTemplate('{focus}{postedDetail}', { ...listing, title: 'Machine Learning Intern', sourceReferences: [{ ...listing.sourceReferences[0], postedAt: '21m', providerTimestamp: { value: '21m', semantics: 'published' } }] })).toBe('Focus: AI/ML · Found by Ntern: Jan 1, 2026');
     expect(notificationSourceLabel(withSource(listing, 'greenhouse-vardaspace'))).toBe('Greenhouse');
     expect(notificationSourceLabel(withSource(listing, 'lever-palantir'))).toBe('Lever');
     expect(notificationSourceLabel(withSource(listing, 'ashby-etched'))).toBe('Ashby');

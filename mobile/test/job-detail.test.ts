@@ -49,6 +49,9 @@ describe('mobile job routes', () => {
     expect(app).toContain('easing: Easing.out(Easing.quad)');
     expect(app).toContain('easing: Easing.in(Easing.quad)');
     expect(app).toContain('style={[styles.sheetOverlay, { opacity: roleSheet.dimOpacity }]}');
+    expect(app).toContain('const queueSheet = useRoleSheetTransition(visible, onDismiss);');
+    expect(app).toContain('style={[styles.sheetOverlay, { opacity: queueSheet.dimOpacity }]}');
+    expect(app).not.toContain('animationType="slide"');
     expect(app).toContain('Platform.OS === "web" ? 40 : 72');
     expect(app).toContain('Platform.OS === "web" ? 180 : 240');
     expect(app).toContain('useLayoutEffect(() => {');
@@ -118,7 +121,7 @@ describe('mobile job trust and freshness', () => {
     expect(freshnessLabel('2026-08-01T08:00:00Z', now)).toMatch(/^Confirmed Aug 1, 2026$/);
   });
 
-  it('shows an employer publication time separately from InternNotifs discovery', () => {
+  it('shows an employer publication time separately from Ntern discovery', () => {
     const timing = postingTimingPresentation(
       [{
         sourceId: 'ashby-acme',
@@ -130,7 +133,7 @@ describe('mobile job trust and freshness', () => {
     );
     expect(timing).toMatchObject({ kind: 'employer-posted', verified: true });
     expect(timing.summary).toMatch(/^Employer posted Sep 22, 2025$/);
-    expect(timing.detail).toMatch(/^Employer posted Sep 22, 2025 · Verified employer date · Found by InternNotifs Aug 19, 2026$/);
+    expect(timing.detail).toMatch(/^Employer posted Sep 22, 2025 · Verified employer date · Found by Ntern Aug 19, 2026$/);
     expect(postingRecencyBadge(true, timing, new Date('2026-08-19T17:18:03.421Z'))).toBeUndefined();
   });
 
@@ -145,8 +148,8 @@ describe('mobile job trust and freshness', () => {
       new Date('2026-08-19T17:18:03.421Z'),
     );
     expect(timing).toMatchObject({ kind: 'found', verified: false });
-    expect(timing.summary).toBe('Found by InternNotifs 2h ago');
-    expect(timing.detail).toMatch(/^Original posting date unavailable · Found by InternNotifs Aug 19, 2026$/);
+    expect(timing.summary).toBe('Found by Ntern 2h ago');
+    expect(timing.detail).toMatch(/^Original posting date unavailable · Found by Ntern Aug 19, 2026$/);
     expect(postingRecencyBadge(true, timing, new Date('2026-08-19T17:18:03.421Z'))).toBe('New here');
   });
 
@@ -175,7 +178,7 @@ describe('mobile job trust and freshness', () => {
       new Date('2026-08-19T17:18:03.421Z'),
     );
     expect(timing.summary).toBe('Source reported Jul 19, 2026');
-    expect(timing.detail).toBe('Source reported Jul 19, 2026 · Not employer-verified · Found by InternNotifs Jul 20, 2026');
+    expect(timing.detail).toBe('Source reported Jul 19, 2026 · Not employer-verified · Found by Ntern Jul 20, 2026');
   });
 
   it('keeps the New badge for a recently published internship', () => {
@@ -200,7 +203,7 @@ describe('mobile job trust and freshness', () => {
       '2026-08-19T15:18:03.421Z',
       new Date('2026-08-19T17:18:03.421Z'),
     );
-    expect(timing.summary).toBe('Found by InternNotifs 2h ago');
+    expect(timing.summary).toBe('Found by Ntern 2h ago');
   });
 
   it('does not verify legacy official timestamps without publication semantics', () => {
@@ -210,7 +213,7 @@ describe('mobile job trust and freshness', () => {
       new Date('2026-08-19T17:18:03.421Z'),
     );
     expect(timing).toMatchObject({ kind: 'found', verified: false });
-    expect(timing.summary).toBe('Found by InternNotifs 2h ago');
+    expect(timing.summary).toBe('Found by Ntern 2h ago');
   });
 
   it('uses the previous visit for signed-in users and 72 hours for guests', () => {

@@ -472,7 +472,7 @@ export function renderPushTemplate(template: string, job: Internship, roleAbbrev
     : timing.kind === 'source-reported'
       ? 'Source reported'
       : timing.kind === 'found'
-        ? 'Found by InternNotifs'
+        ? 'Found by Ntern'
         : '';
   const focus = inferJobFocuses(job).join(' · ');
   const values: Record<string, string> = {
