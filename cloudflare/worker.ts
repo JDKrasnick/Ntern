@@ -31,7 +31,7 @@ import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADL
 import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, shadowExtractionSummary } from './shadow-extraction.js';
 import { handleShadowPublication } from './shadow-publication.js';
-import type { D1Database, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
+import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
 import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork, recordGmailFailure, type GmailWorkMessage } from './gmail.js';
 import { D1EmployerStore } from './employer-store.js';
 import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
@@ -48,7 +48,9 @@ import { destinationVerificationMessage, enqueueDueDestinationVerifications, pro
   sendAdmissionOperationalAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
+import { observeCatalogDelivery } from './d1-traffic-observation.js';
 import { resilientD1 } from './resilient-d1.js';
+export { D1TrafficController } from './d1-traffic-controller.js';
 import type { CatalogAdmissionResolver } from '../src/destination-verification.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import {
@@ -71,6 +73,7 @@ export interface Environment extends AuthEnvironment {
   GMAIL_QUEUE: Queue;
   DESTINATION_VERIFICATION_QUEUE: Queue;
   SHADOW_EXTRACTION_QUEUE: Queue;
+  D1_TRAFFIC_CONTROLLER?: DurableObjectNamespace;
   DESTINATION_BROWSER: BrowserWorker;
   GREENHOUSE_DLQ: Queue;
   LEVER_DLQ: Queue;
@@ -1489,6 +1492,17 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     for (const message of batch.messages) message.ack();
     return;
   }
+  const trafficObservations = new Map<string, Awaited<ReturnType<typeof observeCatalogDelivery>>>();
+  if (catalogProvider) {
+    for (const message of batch.messages) {
+      trafficObservations.set(message.id, await observeCatalogDelivery({
+        controller: env.D1_TRAFFIC_CONTROLLER, provider: catalogProvider, queue: batch.queue, messageId: message.id,
+      }));
+    }
+  }
+  const completeTraffic = async (messageId: string, outcome: 'success' | 'failure' | 'cancelled', error?: unknown) => {
+    await trafficObservations.get(messageId)?.complete(outcome, error);
+  };
   if (batch.queue.includes('destination-verification')) {
     await processDestinationVerificationBatch(batch, env);
     return;
@@ -1543,6 +1557,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           body: queued.body, error,
         });
         console.error(JSON.stringify({ command: 'github-poll-setup', messageId: queued.id, error: safeDiagnostic(error) }));
+        await completeTraffic(queued.id, 'failure', error);
         queued.retry({ delaySeconds: d1QueueRetryDelay(error, queued.attempts) });
       }
       return;
@@ -1569,7 +1584,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         const source = defaultSources.find((candidate) => candidate.id === sourceId);
         if (reviewedStructured) {
           const ran = await runStructuredSource(reviewedStructured, env, { forceRecovery: message.force === true });
-          if (ran) await resolveFailures(queued.id, queued.attempts);
+          if (ran) {
+            await resolveFailures(queued.id, queued.attempts);
+            await completeTraffic(queued.id, 'success');
+          } else {
+            await completeTraffic(queued.id, 'cancelled');
+          }
           continue;
         }
         if (!source) throw new Error(`Unknown reviewed source ${JSON.stringify(sourceId)}`);
@@ -1577,6 +1597,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         if (githubSourceRunBlocked(priorHealth, message.force)) {
           console.log(JSON.stringify({ event: 'source_poll_skipped', command: 'github-poll', sourceId: source.id,
             reason: priorHealth?.state === 'quarantined' ? 'quarantined' : priorHealth?.sourceStatus === 'paused' ? 'paused' : 'backoff' }));
+          await completeTraffic(queued.id, 'cancelled');
           continue;
         }
         const result = await withinMessageDeadline(runRuntimeCommand('poll', {
@@ -1614,6 +1635,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           await sendQueueMessageWithin(env.GITHUB_QUEUE, { sourceId: source.id });
         }
         await resolveFailures(queued.id, queued.attempts);
+        await completeTraffic(queued.id, 'success');
       } catch (error) {
         failed.add(record.messageId);
         const delay = d1QueueRetryDelay(error, queued.attempts);
@@ -1645,6 +1667,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           body: queued.body, error,
         });
         console.error(JSON.stringify({ command: 'github-poll', messageId: record.messageId, error: safeDiagnostic(error) }));
+        await completeTraffic(queued.id, 'failure', error);
       }
     }
     for (const message of batch.messages) {
@@ -1675,6 +1698,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       attempts: queued?.attempts, timestamp: queued?.timestamp, sourceId: parsed?.sourceId,
       sourceKind: catalogProvider, body: record.body, error,
     });
+    await completeTraffic(record.messageId, 'failure', error);
   };
   let registry: Awaited<ReturnType<typeof reviewedProviderRegistry>>;
   try {
@@ -1722,10 +1746,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   const failed = new Set(result.batchItemFailures.map(({ itemIdentifier }) => itemIdentifier));
   for (const message of batch.messages) {
     if (failed.has(message.id)) {
+      await completeTraffic(message.id, 'failure');
       const delay = overloadDelays.get(message.id);
       message.retry(delay ? { delaySeconds: delay } : undefined);
     }
     else {
+      await completeTraffic(message.id, 'success');
       // A first-delivery message has no prior failure row, so skip the extra
       // write. Only retried deliveries (attempts > 1) can carry one to resolve.
       if ((message.attempts ?? 0) > 1) {

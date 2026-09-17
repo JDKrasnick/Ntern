@@ -29,6 +29,7 @@
 | Headless application preparation | Planned | Isolated runner reuses proven mappings, supports live user handoff, and never bypasses verification or non-partner submission controls |
 | Trust and release readiness | In progress | Approved public policies and support routes are live, and the disclosure worksheet, consent, retention enforcement, and release checks are deployed; store-console entry, final archive reconciliation, and physical-device acceptance remain |
 | Cloudflare platform migration | In progress | Cloudflare infrastructure is live, the source backfill and grouped D1 projection are verified, the production mobile environment targets the Worker, and retained AWS rollback data is preserved |
+| D1-protected pipeline | In progress | Observation-only Durable Object permit controller and additive resumable-run schema are covered by local tests; owner-reviewed infrastructure, alerts, queue lanes, and R2 read-model parity remain pending |
 | Closed beta | Planned | 30–50 student test cohort and agreed success metrics |
 | Public release | Planned | TestFlight/Play validation complete and catalog reliability meets target |
 
