@@ -23,7 +23,7 @@ export async function shareDataExport(value: CompleteDataExport): Promise<void> 
     await Sharing.shareAsync(file.uri, {
       mimeType: 'application/json',
       UTI: 'public.json',
-      dialogTitle: 'Export InternNotifs data',
+      dialogTitle: 'Export Ntern data',
     });
   } finally {
     file.delete();

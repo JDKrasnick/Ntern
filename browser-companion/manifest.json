@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "InternNotifs Quick Fill",
+  "name": "Ntern Quick Fill",
   "version": "0.1.0",
   "description": "Fills reviewed contact fields on supported internship applications. It never submits an application.",
   "permissions": ["storage"],
@@ -14,7 +14,7 @@
     "https://jobs.ashbyhq.com/*"
   ],
   "action": {
-    "default_title": "InternNotifs Quick Fill",
+  "default_title": "Ntern Quick Fill",
     "default_popup": "popup.html"
   },
   "content_scripts": [

@@ -114,8 +114,8 @@ async function sendConfirmation(email: string, code: string, env: AuthEnvironmen
     body: JSON.stringify({
       from: env.AUTH_FROM_EMAIL,
       to: [email],
-      subject: 'Verify your InternNotifs email',
-      text: `Your InternNotifs verification code is ${code}. It expires in 30 minutes.`,
+      subject: 'Verify your Ntern email',
+      text: `Your Ntern verification code is ${code}. It expires in 30 minutes.`,
     }),
   });
   if (!response.ok) throw new Error('Could not send the verification email');

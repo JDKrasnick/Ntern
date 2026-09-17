@@ -51,7 +51,7 @@ async function main() {
   }
   if (command === 'smoke-push') {
     if (!process.env.EXPO_PUSH_TOKEN) throw new Error('EXPO_PUSH_TOKEN is required');
-    await new ExpoPushPublisher().publish(process.env.EXPO_PUSH_TOKEN, { title: 'InternNotifs', body: 'Push delivery is configured.', click: 'smoke-test' }); return;
+    await new ExpoPushPublisher().publish(process.env.EXPO_PUSH_TOKEN, { title: 'Ntern', body: 'Push delivery is configured.', click: 'smoke-test' }); return;
   }
   if (command === 'smoke-email') {
     if (!process.env.SES_FROM || !process.env.SES_TO) throw new Error('SES_FROM and SES_TO are required');

@@ -101,7 +101,7 @@ describe('public catalog and authenticated applicant workflow', () => {
 
     const preferences = await handler(event('student-a', 'PUT', '/me/preferences', {
       filter: { includeCategories: ['swe'] }, alertsEnabled: true, onboardingComplete: true,
-      alertSettings: { delivery: 'daily-digest', applicationReminders: true, followUpDays: 10 },
+      alertSettings: { delivery: 'daily-digest', timezone: 'America/New_York', applicationReminders: true, followUpDays: 10 },
     }));
     expect(body<{ alertSettings: { delivery: string } }>(preferences).alertSettings.delivery).toBe('daily-digest');
     expect((await handler(event('student-a', 'POST', '/me/devices', { token: 'not-an-expo-token', platform: 'ios' }))).statusCode).toBe(400);

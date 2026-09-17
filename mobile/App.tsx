@@ -250,6 +250,7 @@ type PushPreferences = {
 };
 type AlertSettings = {
   delivery: "immediate" | "daily-digest";
+  timezone?: string;
   quietHours?: { start: string; end: string; timezone: string };
   applicationReminders: boolean;
   followUpDays: number;
@@ -387,15 +388,14 @@ function useSheetEntranceOffset(visible: boolean) {
 
 function useRoleSheetTransition(visible: boolean, onDismiss: () => void) {
   const motionAllowed = useContext(MotionAllowedContext);
-  const isMobile = Platform.OS !== "web";
-  const entranceDistance = 72;
+  const entranceDistance = Platform.OS === "web" ? 40 : 72;
   const [modalVisible, setModalVisible] = useState(visible);
-  const dimOpacity = useRef(new Animated.Value(isMobile ? 0 : 1)).current;
+  const dimOpacity = useRef(new Animated.Value(0)).current;
   const sheetOffset = useRef(new Animated.Value(entranceDistance)).current;
   const closing = useRef(false);
 
   const animateClose = (afterClose?: () => void) => {
-    if (!isMobile || !motionAllowed) {
+    if (!motionAllowed) {
       dimOpacity.setValue(0);
       sheetOffset.setValue(entranceDistance);
       setModalVisible(false);
@@ -430,7 +430,7 @@ function useRoleSheetTransition(visible: boolean, onDismiss: () => void) {
       return;
     }
     setModalVisible(true);
-    if (!isMobile || !motionAllowed) {
+    if (!motionAllowed) {
       dimOpacity.setValue(1);
       sheetOffset.setValue(0);
       return;
@@ -453,7 +453,7 @@ function useRoleSheetTransition(visible: boolean, onDismiss: () => void) {
     ]);
     animation.start();
     return () => animation.stop();
-  }, [dimOpacity, entranceDistance, isMobile, motionAllowed, sheetOffset, visible]);
+  }, [dimOpacity, entranceDistance, motionAllowed, sheetOffset, visible]);
 
   return {
     modalVisible,
@@ -492,7 +492,7 @@ async function openOfficialApplication(
       applicationWindow.opener = null;
       onOpened?.();
     }
-    else Alert.alert("Pop-up blocked", "Allow pop-ups for InternNotifs, then try opening the application again.");
+    else Alert.alert("Pop-up blocked", "Allow pop-ups for Ntern, then try opening the application again.");
     return;
   }
 
@@ -565,14 +565,14 @@ function IdentityTrustLabel() {
 
 function openAppSettings() {
   void Linking.openSettings().catch(() => {
-    Alert.alert("Could not open Settings", "Open your device settings and select InternNotifs.");
+    Alert.alert("Could not open Settings", "Open your device settings and select Ntern.");
   });
 }
 
 function showNotificationPermissionHelp() {
   Alert.alert(
     "Notifications are off",
-    "Enable notifications for InternNotifs in your device settings, then try again.",
+    "Enable notifications for Ntern in your device settings, then try again.",
     [
       { text: "Not now", style: "cancel" },
       { text: "Open Settings", onPress: openAppSettings },
@@ -4154,7 +4154,7 @@ function EmployerPortal({ initialSection }: { initialSection: EmployerWorkspaceS
     return (
       <SafeAreaView style={styles.employerRoot}>
         <View style={styles.employerAuth}>
-          <Text style={styles.employerWordmark}>InternNotifs for employers</Text>
+          <Text style={styles.employerWordmark}>Ntern for employers</Text>
           <Text style={styles.employerPageTitle}>Manage trusted role sources.</Text>
           <Text style={styles.employerIntro}>Sign in with your verified account to claim an organization, connect official sources, and submit early-career roles.</Text>
           <SignIn onSession={async (idToken) => { await sessionStorage.set(idToken); setToken(idToken); }} />
@@ -4174,7 +4174,7 @@ function EmployerPortal({ initialSection }: { initialSection: EmployerWorkspaceS
       <View style={[styles.employerShell, wide && styles.employerShellWide]}>
         <View style={[styles.employerNav, wide ? styles.employerNavWide : styles.employerNavCompact]} accessibilityRole="tablist">
           <View style={[styles.employerBrandBlock, !wide && styles.employerBrandBlockCompact]}>
-            <Text style={styles.employerWordmark}>InternNotifs</Text>
+            <Text style={styles.employerWordmark}>Ntern</Text>
             <Text style={styles.employerWorkspaceLabel}>Employer workspace</Text>
           </View>
           {employerWorkspaceSections.map((item) => (
@@ -4278,7 +4278,7 @@ function EmployerPortal({ initialSection }: { initialSection: EmployerWorkspaceS
               {sources.map((source) => <View key={source.sourceId} style={[styles.employerRow, !wide && styles.employerRowCompact]}><View style={styles.employerRowCopy}><Text style={styles.employerRowTitle}>{source.provider}</Text><Text selectable style={styles.employerUrl}>{source.url}</Text>{source.lastSuccessfulAt ? <Text style={styles.employerHelp}>Last healthy sync {new Date(source.lastSuccessfulAt).toLocaleString()}</Text> : null}</View><EmployerStatus state={source.state} reason={source.reason} /></View>)}
               {!sources.length ? <Text style={styles.employerEmpty}>No official sources connected.</Text> : null}
               <Text style={styles.employerSectionTitle}>Connect a source</Text>
-              <Text style={styles.employerHelp}>Paste the exact HTTPS Greenhouse, Lever, Ashby, or reviewed structured careers URL. InternNotifs will not guess a board from a company name.</Text>
+              <Text style={styles.employerHelp}>Paste the exact HTTPS Greenhouse, Lever, Ashby, or reviewed structured careers URL. Ntern will not guess a board from a company name.</Text>
               <EmployerField label="Official source URL" value={sourceUrl} onChangeText={setSourceUrl} placeholder="https://boards.greenhouse.io/acme" />
               {!isVerified ? <Text style={styles.employerHelp}>Verify the organization before connecting a source.</Text> : null}
               <ActionButton label={busy ? "Connecting…" : "Connect source"} disabled={busy || !isVerified || !sourceUrl.startsWith("https://")} onPress={() => void perform(() => employerApi.connectSource(token, orgId!, sourceUrl), "Source submitted for review.")} />
@@ -4702,14 +4702,15 @@ function QueueSheet({
 }) {
   const next = nextAvailableQueueEntry(queue, jobs, 0);
   const nextJob = next ? resolveApplicationJob(next, jobs) : undefined;
+  const queueSheet = useRoleSheetTransition(visible, onDismiss);
   const available = queue
     .map((item) => ({ item, target: queueEntryTarget(item, jobs) }))
     .filter((entry): entry is { item: Application; target: { jobId: string; applyUrl: string } } => entry.target !== undefined);
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onDismiss}>
-      <View style={styles.sheetOverlay}>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close apply queue" style={styles.sheetDismissArea} onPress={onDismiss} />
-        <View style={styles.queueSheet}>
+    <Modal visible={queueSheet.modalVisible} transparent animationType="none" onRequestClose={queueSheet.dismiss}>
+      <Animated.View style={[styles.sheetOverlay, { opacity: queueSheet.dimOpacity }]}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close apply queue" style={styles.sheetDismissArea} onPress={queueSheet.dismiss} />
+        <Animated.View style={[styles.queueSheet, { transform: [{ translateY: queueSheet.sheetOffset }] }]}>
           <View style={styles.sheetHandle} />
           <Text style={styles.sheetTitle}>Apply queue · {queue.length}</Text>
           {queue.length === 0 ? (
@@ -4718,12 +4719,12 @@ function QueueSheet({
           <ActionButton
             label={nextJob ? `Apply next: ${nextJob.title} at ${nextJob.company}` : "Apply next"}
             disabled={!next}
-            onPress={() => { const target = next ? queueEntryTarget(next, jobs) : undefined; if (target) { onOpen(target); onDismiss(); } }}
+            onPress={() => { const target = next ? queueEntryTarget(next, jobs) : undefined; if (target) { onOpen(target); queueSheet.dismiss(); } }}
           />
           <QueueBulkButtons
             available={available.map((entry) => entry.target)}
-            onOpenFirst={() => { const target = next ? queueEntryTarget(next, jobs) : undefined; if (target) { onOpen(target); onDismiss(); } }}
-            onBulkOpen={(targets) => { onBulkOpen(targets); onDismiss(); }}
+            onOpenFirst={() => { const target = next ? queueEntryTarget(next, jobs) : undefined; if (target) { onOpen(target); queueSheet.dismiss(); } }}
+            onBulkOpen={(targets) => { onBulkOpen(targets); queueSheet.dismiss(); }}
           />
           <ScrollView style={styles.queueSheetList}>
             {queue.map((item, index) => {
@@ -4744,7 +4745,7 @@ function QueueSheet({
                     <TouchableOpacity
                       accessibilityRole="button"
                       accessibilityLabel={`Open application for ${job?.title ?? "saved role"}${job?.company ? ` at ${job.company}` : ""}`}
-                      onPress={() => { onOpen(target); onDismiss(); }}
+                      onPress={() => { onOpen(target); queueSheet.dismiss(); }}
                       style={styles.queueOpenButton}
                     >
                       <Text style={styles.queueOpenButtonText}>Open</Text>
@@ -4757,9 +4758,9 @@ function QueueSheet({
               );
             })}
           </ScrollView>
-          <ActionButton label="Open queue tab" variant="secondary" onPress={() => { onViewQueue(); onDismiss(); }} />
-        </View>
-      </View>
+          <ActionButton label="Open queue tab" variant="secondary" onPress={() => { onViewQueue(); queueSheet.dismiss(); }} />
+        </Animated.View>
+      </Animated.View>
     </Modal>
   );
 }
@@ -5065,7 +5066,7 @@ function Applications({
               <View accessibilityRole="alert" style={styles.catalogReviewNotice}>
                 <Ionicons name="shield-checkmark-outline" size={20} color={colors.muted} />
                 <Text style={styles.catalogReviewNoticeText}>
-                  {unavailableReason ?? "InternNotifs couldn’t verify the official role page and is reviewing it."}
+                  {unavailableReason ?? "Ntern couldn’t verify the official role page and is reviewing it."}
                 </Text>
               </View>
             ) : null}
@@ -5196,7 +5197,7 @@ function SettingsHome({
     <ScrollView style={styles.list} contentContainerStyle={styles.profileContent}>
       <Text style={[styles.hero, styles.profileHero]}>Settings</Text>
       <Text style={styles.intro}>
-        Keep your application details separate from how InternNotifs works for you.
+        Keep your application details separate from how Ntern works for you.
       </Text>
       <View style={styles.settingsList}>
         {settingsDestinations.map((destination) => (
@@ -5494,7 +5495,7 @@ function Profile({
           setJobPreferenceFeedback({
             kind: "error",
             message: registration.status === "denied"
-              ? "Notifications are off for InternNotifs. Enable them in your device settings, then try again."
+              ? "Notifications are off for Ntern. Enable them in your device settings, then try again."
               : "Push alerts require a physical iPhone or Android device.",
           });
           return;
@@ -6088,7 +6089,7 @@ function Profile({
         <>
       <Text style={styles.sectionTitle}>Gmail application detection</Text>
       <Text style={styles.muted}>
-        Optional. After you tap Apply, InternNotifs checks Gmail for that role after 5 minutes, 10 minutes, 30 minutes, and 24 hours. It reads the sender, subject, date, labels, and a limited portion of the message text to confirm the employer and role. Message text is not stored, attachments are not processed, and Gmail data is never used for AI or model training.
+        Optional. After you tap Apply, Ntern checks Gmail for that role after 5 minutes, 10 minutes, 30 minutes, and 24 hours. It reads the sender, subject, date, labels, and a limited portion of the message text to confirm the employer and role. Message text is not stored, attachments are not processed, and Gmail data is never used for AI or model training.
       </Text>
       {token ? gmailStatus.connected ? (
         <View style={styles.gmailConnection}>
@@ -6164,7 +6165,7 @@ function Profile({
           <Text style={styles.preferenceTitle}>Application reminders</Text>
           <Text style={styles.muted}>
             Confirm changes you make here and remind you to follow up. External
-            employer portals do not update InternNotifs automatically.
+            employer portals do not update Ntern automatically.
           </Text>
         </View>
         <Switch
@@ -6219,7 +6220,7 @@ function Profile({
       />
       <Text style={styles.preferenceTitle}>Live notification preview</Text>
       <View style={styles.notificationPreview}>
-        <Text style={styles.notificationPreviewApp}>INTERNNOTIFS</Text>
+        <Text style={styles.notificationPreviewApp}>NTERN</Text>
         <Text style={styles.notificationPreviewTitle}>
           {previewTemplate(titleTemplate, "{shortTitle} — {company}")}
         </Text>
@@ -6423,7 +6424,7 @@ function SignIn({
           keyboardShouldPersistTaps="handled"
         >
           <View style={styles.authBrand}>
-            <Text style={styles.eyebrow}>InternNotifs</Text>
+            <Text style={styles.eyebrow}>Ntern</Text>
             <Text style={styles.authName}>Save your search.</Text>
             <Text style={styles.authTagline}>
               Track roles and set alerts when you need them.

@@ -182,7 +182,7 @@ export function postingTimingPresentation(
       verified: publication.verified,
       summary: `${label} ${compactAge(publication.date, now)}`,
       detail: found
-        ? `${label} ${fullDate(publication.date)}${publication.verified ? ' · Verified employer date' : ' · Not employer-verified'} · Found by InternNotifs ${fullDate(found)}`
+        ? `${label} ${fullDate(publication.date)}${publication.verified ? ' · Verified employer date' : ' · Not employer-verified'} · Found by Ntern ${fullDate(found)}`
         : `${label} ${fullDate(publication.date)}${publication.verified ? ' · Verified employer date' : ' · Not employer-verified'}`,
     };
   }
@@ -190,9 +190,9 @@ export function postingTimingPresentation(
     kind: found ? 'found' as const : 'unknown' as const,
     ...(found ? { timestamp: found } : {}),
     verified: false,
-    summary: found ? `Found by InternNotifs ${compactAge(found, now)}` : 'Posting time unavailable',
+    summary: found ? `Found by Ntern ${compactAge(found, now)}` : 'Posting time unavailable',
     detail: found
-      ? `Original posting date unavailable · Found by InternNotifs ${fullDate(found)}`
+      ? `Original posting date unavailable · Found by Ntern ${fullDate(found)}`
       : 'Original posting date unavailable',
   };
 }
