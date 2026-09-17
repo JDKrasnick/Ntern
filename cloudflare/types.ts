@@ -40,6 +40,9 @@ export interface MessageBatch<T> {
   queue: string;
   messages: QueueMessage<T>[];
 }
+
+export interface DurableObjectStub { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>; }
+export interface DurableObjectNamespace { idFromName(name: string): unknown; get(id: unknown): DurableObjectStub; }
 export interface ScheduledController {
   cron: string;
   scheduledTime: number;

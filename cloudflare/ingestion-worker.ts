@@ -1,5 +1,6 @@
 import legacyWorker, { type Environment } from './worker.js';
 import { secretMatches } from './split.js';
+export { D1TrafficController } from './d1-traffic-controller.js';
 
 export interface IngestionEnvironment extends Partial<Environment> {
   INTERNAL_SERVICE_SECRET: string;

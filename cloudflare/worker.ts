@@ -31,7 +31,7 @@ import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADL
 import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, shadowExtractionSummary } from './shadow-extraction.js';
 import { handleShadowPublication } from './shadow-publication.js';
-import type { D1Database, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
+import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
 import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork, recordGmailFailure, type GmailWorkMessage } from './gmail.js';
 import { D1EmployerStore } from './employer-store.js';
 import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
@@ -49,6 +49,7 @@ import { destinationVerificationMessage, enqueueDueDestinationVerifications, pro
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
 import { resilientD1 } from './resilient-d1.js';
+export { D1TrafficController } from './d1-traffic-controller.js';
 import type { CatalogAdmissionResolver } from '../src/destination-verification.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import {
@@ -71,6 +72,7 @@ export interface Environment extends AuthEnvironment {
   GMAIL_QUEUE: Queue;
   DESTINATION_VERIFICATION_QUEUE: Queue;
   SHADOW_EXTRACTION_QUEUE: Queue;
+  D1_TRAFFIC_CONTROLLER?: DurableObjectNamespace;
   DESTINATION_BROWSER: BrowserWorker;
   GREENHOUSE_DLQ: Queue;
   LEVER_DLQ: Queue;
