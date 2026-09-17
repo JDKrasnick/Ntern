@@ -146,8 +146,8 @@ type StructuredIdentity = {
 type CatalogJob = Internship & { internshipIdentity?: StructuredIdentity; identity?: StructuredIdentity };
 export type BuiltGroup = { row: CatalogGroupRow; jobs: Internship[] };
 
-const RELEASE_SESSION_MS = 10 * 60_000;
-const RELEASE_MINIMUM_ROLES = 4;
+/** The role count that makes an employer's day a card rather than separate roles. */
+export const RELEASE_MINIMUM_ROLES = 4;
 const compact = (value: string) => value.trim().replace(/\s+/g, ' ');
 const folded = (value: string) => compact(value).toLocaleLowerCase('en-US');
 const unique = (values: string[]) => [...new Map(values.filter(Boolean).map((value) => [folded(value), compact(value)])).values()];
@@ -241,17 +241,34 @@ function disciplinesFor(job: Internship) {
   }).filter(Boolean) ?? inferJobFocuses(job));
 }
 
+/** The drop a role belongs to: one employer, one day. The identity is derived
+ * from those two facts alone, so the feed's card and an alert about the same drop
+ * agree even though each sees only part of the day's roles. */
+export function employerDropKey(job: Internship) {
+  const company = companyKey(job);
+  const visibleAt = catalogVisibleAt(job);
+  if (!company || !Number.isFinite(Date.parse(visibleAt))) return undefined;
+  return `${company}\u0000${visibleAt.slice(0, 10)}`;
+}
+
+/** The feed card id for a role's employer drop; alerts reuse it for the deep link. */
+export function employerDropGroupId(job: Internship) {
+  const key = employerDropKey(job);
+  return key ? `employer-release-${createHash('sha256').update(key).digest('base64url').slice(0, 20)}` : undefined;
+}
+
 function groupId(kind: CatalogGroupKind, jobs: Internship[]) {
   const chronological = [...jobs].sort((left, right) => timestamp(left) - timestamp(right));
   // A release can contain roles that also have a structured program identity.
-  // Keep its namespace tied to the observed employer burst so a remaining
+  // Keep its namespace tied to the observed employer drop so a remaining
   // program role cannot overwrite the release in a materialized projection.
   const programKey = kind === 'employer-release' ? undefined : safeProgramKey(chronological[0]!);
   const stable = programKey
     ? programKey
     : kind === 'employer-release'
-      ? `${companyKey(chronological[0]!) ?? chronological[0]!.company}\u0000${catalogVisibleAt(chronological[0]!)}`
+      ? employerDropKey(chronological[0]!) ?? `${companyKey(chronological[0]!) ?? chronological[0]!.company}\u0000${catalogVisibleAt(chronological[0]!)}`
       : chronological[0]!.jobId;
+  if (kind === 'employer-release' && !programKey) return `employer-release-${createHash('sha256').update(stable).digest('base64url').slice(0, 20)}`;
   return `${programKey ? 'program' : kind}-${createHash('sha256').update(stable).digest('base64url').slice(0, 20)}`;
 }
 
@@ -279,40 +296,33 @@ function summarize(kind: CatalogGroupKind, jobs: Internship[], stableGroupId?: s
   };
 }
 
-/** Groups each employer's roles into release sessions. A session of four or more
- * roles is one release card; the session is the window that starts at its first
- * role and runs for `RELEASE_SESSION_MS`. The window used to be eight seconds,
- * which split one employer's batch into several cards: a campus batch becomes
- * visible over a poll or two, and the roles left behind appeared as individual
- * cards beside a group that already contained their siblings (Visa's 15 roles
- * arrived in five waves across half an hour). The window is measured from the
- * session's first role rather than from the previous one so an employer that
- * publishes continuously cannot chain a whole day into one card. */
+/** Groups each employer's roles into drops. A drop is one employer's posting day:
+ * every role that employer makes visible in a UTC day belongs to the same card,
+ * and four roles make a drop a release card while a smaller drop stays
+ * individual, so an employer's two-role program still reads as a program card.
+ *
+ * The window used to be measured between consecutive roles (eight seconds, then
+ * ten minutes), which split one employer's batch into several cards: Visa's 15
+ * roles arrived in five waves and rendered as 8 cards, including a group that
+ * duplicated the individual cards beside it. Roles that arrive later now collapse
+ * into the drop that is already open, and the drop id depends only on the
+ * employer and the day, so the card grows in place instead of reordering. */
 function releaseGroups(jobs: Internship[]) {
   const releases: Internship[][] = [];
   const remaining = new Set(jobs);
-  const byCompany = new Map<string, Internship[]>();
+  const byDrop = new Map<string, Internship[]>();
   for (const job of jobs) {
-    const key = companyKey(job);
-    if (!key || !Number.isFinite(timestamp(job))) continue;
-    const matches = byCompany.get(key) ?? [];
-    matches.push(job); byCompany.set(key, matches);
+    const key = employerDropKey(job);
+    if (!key) continue;
+    const matches = byDrop.get(key) ?? [];
+    matches.push(job); byDrop.set(key, matches);
   }
-  for (const companyJobs of byCompany.values()) {
-    const ordered = companyJobs.sort((left, right) => timestamp(left) - timestamp(right));
-    for (let index = 0; index < ordered.length;) {
-      const anchor = timestamp(ordered[index]!);
-      let end = index + 1;
-      while (end < ordered.length && timestamp(ordered[end]!) - anchor <= RELEASE_SESSION_MS) end += 1;
-      const session = ordered.slice(index, end);
-      // Every role of a session belongs to its card, so a role can never be shown
-      // as an individual card beside the group that holds its siblings.
-      const release = session.filter((job) => remaining.has(job));
-      if (release.length >= RELEASE_MINIMUM_ROLES) {
-        releases.push(release);
-        release.forEach((job) => remaining.delete(job));
-      }
-      index = end;
+  for (const drop of byDrop.values()) {
+    // Every role of a drop belongs to its card, so a role can never be shown
+    // as an individual card beside the group that holds its siblings.
+    if (drop.length >= RELEASE_MINIMUM_ROLES) {
+      releases.push(drop);
+      drop.forEach((job) => remaining.delete(job));
     }
   }
   return { releases, remaining: [...remaining] };

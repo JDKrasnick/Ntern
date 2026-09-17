@@ -43,25 +43,36 @@ describe('grouped catalog domain', () => {
     expect(details.group.featuredRole.housing).toEqual(housing);
     expect(details.group.compensations).toEqual(['USD 8,500/month']);
   });
-  it('keeps an employer release together across a poll and leaves a distant role individual', () => {
-    // A campus batch becomes visible over a poll or two: the roles that arrive
-    // later belong to the same card instead of sitting beside it as individuals.
+  it('keeps a drop together, absorbing roles that arrive later and earlier in its window', () => {
     const at = (iso: string) => ({ firstSeenAt: iso, catalogVisibleAt: iso, lastSeenAt: iso });
-    const sameSession = groupCatalogJobs([
-      job('one', 0), job('two', 2), job('three', 4), job('four', 8),
-      job('later', 0, { ...at('2026-08-23T12:01:30.000Z'), season: 'fall-2027' }),
+    // Visa: a single role in the morning, the batch hours later, one more role
+    // after that — one card, and the group id stays anchored to the first role.
+    const drop = groupCatalogJobs([
+      job('morning', 0, at('2026-08-23T06:40:28.000Z')),
+      job('batch-one', 0, at('2026-08-23T14:37:52.000Z')),
+      job('batch-two', 0, at('2026-08-23T14:37:53.000Z')),
+      job('batch-three', 0, at('2026-08-23T14:49:44.000Z')),
+      job('batch-four', 0, at('2026-08-23T14:52:34.000Z')),
+      job('added-later', 0, { ...at('2026-08-23T15:07:50.000Z'), season: 'fall-2027' }),
     ]);
-    expect(sameSession).toHaveLength(1);
-    expect(sameSession[0]?.row).toMatchObject({ kind: 'employer-release', roleCount: 5, seasons: ['fall-2027', 'summer-2027'] });
+    expect(drop).toHaveLength(1);
+    expect(drop[0]?.row).toMatchObject({ kind: 'employer-release', roleCount: 6, seasons: ['fall-2027', 'summer-2027'] });
+    expect(drop[0]?.jobs.map((item) => item.jobId)).toEqual(['morning', 'batch-one', 'batch-two', 'batch-three', 'batch-four', 'added-later']);
 
-    const beyondSession = groupCatalogJobs([
+    // The id depends only on the employer and the day, so a card keeps its
+    // identity as roles arrive — the alert and the feed card stay the same object.
+    const withoutMorning = groupCatalogJobs(drop[0]!.jobs.slice(1));
+    expect(withoutMorning[0]?.row.groupId).toBe(drop[0]?.row.groupId);
+
+    // A role past the drop window opens the employer's next drop.
+    const beyondDrop = groupCatalogJobs([
       job('one', 0), job('two', 2), job('three', 4), job('four', 8),
-      job('next-wave', 0, at('2026-08-23T12:45:00.000Z')),
+      job('next-drop', 0, at('2026-08-24T13:00:00.000Z')),
     ]);
-    expect(beyondSession.map(({ row }) => [row.kind, row.roleCount])).toEqual([['individual', 1], ['employer-release', 4]]);
+    expect(beyondDrop.map(({ row }) => [row.kind, row.roleCount]).sort()).toEqual([['employer-release', 4], ['individual', 1]]);
   });
 
-  it('needs four roles in one session before it claims a card', () => {
+  it('needs four roles in one drop before it claims a card', () => {
     const groups = groupCatalogJobs([job('one', 0), job('two', 2), job('three', 4)]);
     expect(groups.map(({ row }) => row.kind)).toEqual(['individual', 'individual', 'individual']);
   });
@@ -158,7 +169,7 @@ describe('grouped catalog domain', () => {
     expect(groupCatalogJobs(original)[0]!.row.groupId).toBe(groupCatalogJobs([...original, job('three', 20, { internshipIdentity: programIdentity })])[0]!.row.groupId);
   });
 
-  it('keeps a structured employer release distinct from a program role outside its session', () => {
+  it('keeps a structured employer release distinct from a program role outside its drop', () => {
     const programIdentity = identity();
     const groups = groupCatalogJobs([
       job('one', 0, { internshipIdentity: programIdentity }),
@@ -167,13 +178,13 @@ describe('grouped catalog domain', () => {
       job('four', 3, { internshipIdentity: programIdentity }),
       job('five', 4, { internshipIdentity: programIdentity }),
       job('six', 5, { internshipIdentity: programIdentity }),
-      job('later', 0, { firstSeenAt: '2026-08-23T12:30:00.000Z', catalogVisibleAt: '2026-08-23T12:30:00.000Z', lastSeenAt: '2026-08-23T12:30:00.000Z', internshipIdentity: programIdentity }),
+      job('later', 0, { firstSeenAt: '2026-08-24T13:00:00.000Z', catalogVisibleAt: '2026-08-24T13:00:00.000Z', lastSeenAt: '2026-08-24T13:00:00.000Z', internshipIdentity: programIdentity }),
     ]);
     expect(groups.map(({ row }) => row.kind)).toEqual(['individual', 'employer-release']);
     expect(new Set(groups.map(({ row }) => row.groupId)).size).toBe(2);
   });
 
-  it('keeps the release namespace when its session absorbs a program role', () => {
+  it('keeps the release namespace when its drop absorbs a program role', () => {
     const programIdentity = identity();
     const release = [job('one', 0, { internshipIdentity: programIdentity }), job('two', 1, { internshipIdentity: programIdentity }),
       job('three', 2, { internshipIdentity: programIdentity }), job('four', 3, { internshipIdentity: programIdentity })];
@@ -188,8 +199,8 @@ describe('grouped catalog domain', () => {
     const at = (iso: string) => ({ firstSeenAt: iso, catalogVisibleAt: iso, lastSeenAt: iso });
     const jobs = [
       job('one', 0), job('two', 2), job('three', 4), job('four', 8),
-      job('session-tail', 0, at('2026-08-23T12:04:00.000Z')),
-      job('next-wave', 0, at('2026-08-23T12:45:00.000Z')),
+      job('drop-tail', 0, at('2026-08-23T12:04:00.000Z')),
+      job('next-drop', 0, at('2026-08-24T13:00:00.000Z')),
       job('other', 10, { company: 'Globex' }),
     ];
     const groups = groupCatalogJobs(jobs);
@@ -197,10 +208,10 @@ describe('grouped catalog domain', () => {
     for (const group of groups) for (const item of group.jobs) memberships.set(item.jobId, [...(memberships.get(item.jobId) ?? []), group.row.kind]);
 
     expect([...memberships.values()].every((kinds) => kinds.length === 1)).toBe(true);
-    // Group beats individual: the whole session sits in the release card, and only
-    // the role outside the session stays its own card.
-    expect(memberships.get('session-tail')).toEqual(['employer-release']);
-    expect(memberships.get('next-wave')).toEqual(['individual']);
+    // Group beats individual: the whole drop sits in the release card, and only
+    // the role outside the drop window stays its own card.
+    expect(memberships.get('drop-tail')).toEqual(['employer-release']);
+    expect(memberships.get('next-drop')).toEqual(['individual']);
 
     const filtered = filterCatalogGroups(groups, { status: 'open' });
     const filteredMemberships = new Map<string, number>();

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { MemoryInternshipStore, MemoryUserStore } from '../src/store.js';
+import { MemoryInternshipStore, MemoryReleaseStore, MemoryUserStore } from '../src/store.js';
+import { employerDropGroupId } from '../src/catalog-groups.js';
 import { compactRoleTitle, deliverDeferredExpoNotifications, drainPendingExpoNotifications, ExpoPushPublisher, MAX_LEGACY_PUSH_JOBS_PER_RUN, nextPushDeliveryAt, notificationDedupeKey, notificationSourceLabel, NtfyPublisher, renderPushTemplate, sendDigest, sendNewJobNotifications, sendPendingNotifications, summaryChunks, type PushMessage } from '../src/notifications.js';
 import type { Internship } from '../src/types.js';
 
@@ -145,5 +146,64 @@ describe('notifications', () => {
         matchedFilters: { reasons: [{ kind: 'default-all-technical', label: 'All technical roles' }], exclusionsApplied: false },
       },
     });
+  });
+
+  const dropAt = (iso: string) => ({ firstSeenAt: iso, catalogVisibleAt: iso, lastSeenAt: iso });
+  const visaRole = (index: number, iso: string, title = `Role ${index}`) => ({ ...job(index, 'Visa'), title, ...dropAt(iso) });
+  const capturePushes = (messages: PushMessage[]) => new ExpoPushPublisher('https://push.example.test', async (url, init) => {
+    if (String(url).includes('getReceipts')) return new Response(JSON.stringify({ data: {} }), { status: 200 });
+    messages.push(JSON.parse(String(init?.body)) as PushMessage);
+    return new Response(JSON.stringify({ data: { id: `ticket-${messages.length}`, status: 'ok' } }), { status: 200 });
+  });
+  const visaUser = async (users: MemoryUserStore, filter = {}) => {
+    await users.putPreferences({ userId: 'user-1', filter, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-09-17T00:00:00.000Z' });
+    await users.putDevice({ userId: 'user-1', token: 'ExponentPushToken[test]', platform: 'ios', active: true, createdAt: '2026-09-17T00:00:00.000Z', updatedAt: '2026-09-17T00:00:00.000Z' });
+  };
+
+  it('alerts once for an employer drop and afterwards only about the roles added to it', async () => {
+    const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
+    const publisher = capturePushes(messages);
+    await visaUser(users);
+    const wave = [visaRole(1, '2026-09-17T14:37:52.000Z'), visaRole(2, '2026-09-17T14:37:53.000Z'),
+      visaRole(3, '2026-09-17T14:49:44.000Z'), visaRole(4, '2026-09-17T14:52:34.000Z')];
+    const cardId = employerDropGroupId(wave[0]!)!;
+
+    await expect(sendNewJobNotifications(wave, users, publisher, () => new Date('2026-09-17T15:00:00.000Z'), undefined, { releases }))
+      .resolves.toMatchObject({ sent: 4, failed: 0 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      title: 'Visa posted 4 matching roles',
+      data: { destination: 'release', releaseId: cardId, url: `internnotifs://releases/${encodeURIComponent(cardId)}` },
+    });
+    expect(await releases.getRelease('user-1', cardId)).toMatchObject({ jobIds: ['j1', 'j2', 'j3', 'j4'], newJobIds: ['j1', 'j2', 'j3', 'j4'] });
+
+    const added = [visaRole(5, '2026-09-17T15:07:50.000Z'), visaRole(6, '2026-09-17T15:08:10.000Z')];
+    await expect(sendNewJobNotifications(added, users, publisher, () => new Date('2026-09-17T15:20:00.000Z'), undefined, { releases }))
+      .resolves.toMatchObject({ sent: 2, failed: 0 });
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({ title: '2 roles added to Visa' });
+    expect(await releases.getRelease('user-1', cardId)).toMatchObject({ jobIds: ['j1', 'j2', 'j3', 'j4', 'j5', 'j6'], newJobIds: ['j5', 'j6'] });
+
+    // Nothing new for this user: the drop does not alert twice about the same roles.
+    await expect(sendNewJobNotifications([...wave, ...added], users, publisher, () => new Date('2026-09-17T15:30:00.000Z'), undefined, { releases }))
+      .resolves.toMatchObject({ sent: 0 });
+    expect(messages).toHaveLength(2);
+  });
+
+  it('leaves the roles a user filtered out of the drop alert and out of its count', async () => {
+    const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
+    const publisher = capturePushes(messages);
+    await visaUser(users, { excludeKeywords: ['Quantum'] });
+    const wave = [visaRole(1, '2026-09-17T14:37:52.000Z'), visaRole(2, '2026-09-17T14:37:53.000Z'),
+      visaRole(3, '2026-09-17T14:38:10.000Z'), visaRole(4, '2026-09-17T14:39:00.000Z'),
+      visaRole(5, '2026-09-17T14:40:00.000Z', 'Quantum Research Intern')];
+    const cardId = employerDropGroupId(wave[0]!)!;
+
+    await expect(sendNewJobNotifications(wave, users, publisher, () => new Date('2026-09-17T15:00:00.000Z'), undefined, { releases }))
+      .resolves.toMatchObject({ sent: 4 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ title: 'Visa posted 4 matching roles' });
+    expect(await users.getReceipt('user-1', notificationDedupeKey(wave[4]!), 'ExponentPushToken[test]')).toBeUndefined();
+    expect(await releases.getRelease('user-1', cardId)).toMatchObject({ jobIds: ['j1', 'j2', 'j3', 'j4'] });
   });
 });

@@ -64,7 +64,8 @@
     "cloudflare:migrate:remote": "wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc",
     "terraform:fmt": "tofu -chdir=infra/cloudflare fmt -check -recursive",
     "terraform:validate": "tofu -chdir=infra/cloudflare validate",
-    "cdk": "cdk --app 'npx tsx infra/app.ts'"
+    "cdk": "cdk --app 'npx tsx infra/app.ts'",
+    "deploy:cloudflare": "npm run build:cloudflare && tsx scripts/deploy-cloudflare.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "^3.1090.0",

@@ -11,7 +11,7 @@ type ResourceChange = {
     after_unknown?: unknown;
   };
 };
-type Plan = {
+export type Plan = {
   resource_changes?: ResourceChange[];
 };
 

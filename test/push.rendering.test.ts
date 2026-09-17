@@ -25,6 +25,7 @@ describe('rendered native job alerts', () => {
       role(1, 'Software Engineering Intern', 'New York, NY'),
       role(2, 'Machine Learning Intern', 'Remote (US)'),
       role(3, 'Backend Engineering Intern', 'Austin, TX'),
+      role(4, 'Platform Engineering Intern', 'Seattle, WA'),
     ])], jobs).poll();
     const users = new MemoryUserStore();
     await users.putPreferences({ userId: 'student', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-07-19T00:00:00.000Z' });
@@ -35,11 +36,15 @@ describe('rendered native job alerts', () => {
       return new Response(JSON.stringify({ data: { id: `ticket-${payloads.length}`, status: 'ok' } }), { status: 200 });
     });
 
-    expect(await sendNewJobNotifications(polled.newJobs, users, publisher)).toEqual({ sent: 3, skipped: 0, failed: 0 });
-    const messages = new Map(payloads.map((payload) => [payload.data.jobId, payload]));
-    const byTitle = new Map(polled.newJobs.map((job) => [job.title, messages.get(job.jobId)]));
-    expect(byTitle.get('Software Engineering Intern')).toMatchObject({ title: 'SWE — Acme', body: 'New York, NY · summer-2027 · $50/hr\nFocus: SWE · Source reported: Jul 19, 2026\nSource: Job board\nhttps://careers.example.test/1\nIdentity unconfirmed' });
-    expect(byTitle.get('Machine Learning Intern')).toMatchObject({ title: 'ML — Acme', body: 'Remote — US · summer-2027 · $50/hr\nFocus: AI/ML · Source reported: Jul 19, 2026\nSource: Job board\nhttps://careers.example.test/2\nIdentity unconfirmed' });
-    expect(byTitle.get('Backend Engineering Intern')).toMatchObject({ title: 'Backend Engineering — Acme', body: 'Austin, TX · summer-2027 · $50/hr\nFocus: Backend/API · Source reported: Jul 19, 2026\nSource: Job board\nhttps://careers.example.test/3\nIdentity unconfirmed' });
+    // One employer, one day: the three roles arrive as a single drop alert, and
+    // the body still carries each role's own precise location.
+    expect(await sendNewJobNotifications(polled.newJobs, users, publisher)).toEqual({ sent: 4, skipped: 0, failed: 0 });
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]?.title).toBe('Acme posted 4 matching roles');
+    expect(payloads[0]?.body).toContain('New York, NY · summer-2027');
+    expect(payloads[0]?.body).toContain('Remote — US · summer-2027');
+    expect(payloads[0]?.body).toContain('Austin, TX · summer-2027');
+    expect(payloads[0]?.body).toContain('Focus: SWE, AI/ML, Backend/API');
+    expect(payloads[0]?.body).toContain('+1 more');
   });
 });
