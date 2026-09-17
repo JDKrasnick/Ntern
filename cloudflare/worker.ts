@@ -1565,8 +1565,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         const source = defaultSources.find((candidate) => candidate.id === sourceId);
         if (reviewedStructured) {
           const ran = await runStructuredSource(reviewedStructured, env, { forceRecovery: message.force === true });
-          if (ran) await resolveFailures(queued.id, queued.attempts);
-          await completeTraffic(queued.id, 'success');
+          if (ran) {
+            await resolveFailures(queued.id, queued.attempts);
+            await completeTraffic(queued.id, 'success');
+          } else {
+            await completeTraffic(queued.id, 'cancelled');
+          }
           continue;
         }
         if (!source) throw new Error(`Unknown reviewed source ${JSON.stringify(sourceId)}`);
