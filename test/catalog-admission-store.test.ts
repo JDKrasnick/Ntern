@@ -2,7 +2,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleCatalogAdmissionOperations } from '../cloudflare/catalog-admission-api.js';
-import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
+import { D1CatalogAdmissionStore, DESTINATION_VERIFICATION_LEASE_LIMIT } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { persistDestinationAdmission, reachabilityFromHttpStatus, type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
 import { evaluateCatalogAdmission } from '../src/catalog-admission.js';
@@ -445,8 +445,8 @@ describe('D1 catalog admission operations', () => {
     expect(database.prepare('SELECT count(*) AS count FROM destination_verification_schedule').get()).toEqual({ count: 1_100 });
     expect(database.prepare('SELECT count(*) AS count FROM destination_verification_schedule_sync').get()).toEqual({ count: 0 });
     budget.used = 0;
-    await expect(store.leaseDueVerifications('2026-09-02T00:00:00Z', 1_000)).resolves.toHaveLength(100);
-    expect(budget.used).toBe(101);
+    await expect(store.leaseDueVerifications('2026-09-02T00:00:00Z', 1_000)).resolves.toHaveLength(DESTINATION_VERIFICATION_LEASE_LIMIT);
+    expect(budget.used).toBe(DESTINATION_VERIFICATION_LEASE_LIMIT + 1);
   });
 
   it('leases due occurrence checks once and resumes after the lease expires', async () => {

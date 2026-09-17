@@ -20,7 +20,12 @@ import type {
 const TRUSTED_SOURCE = 'speedyapply-2027-swe';
 const STANDARD_SOURCE = sourceQualityPolicies.map((policy) => policy.id)
   .find((sourceId) => sourceAdmissionPolicy(sourceId).trust === 'standard')!;
-const INSPECTED_AT = '2026-09-10T00:00:00Z';
+// Evidence must stay inside its freshness window whenever the suite runs: the
+// columns a repair writes are derived from `catalogEligible(job)`, which stops
+// accepting a destination once `freshUntil` passes seven days after inspection.
+// A fixed anchor silently expired on 2026-09-17 and turned both publish
+// assertions below into failures.
+const INSPECTED_AT = new Date(Date.now() - 60 * 60_000).toISOString();
 const STORED_AT = '2026-09-12T00:00:00Z';
 const APPLICATION_URL = 'https://jobs.example.test/acme/software-intern';
 
