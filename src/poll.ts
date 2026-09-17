@@ -1614,17 +1614,14 @@ export class IngestionRunner {
             // breach, but the source keeps polling instead of quarantining: the
             // reviewed list's anomalies are caught per posting downstream.
             if (trustedPolicy.circuitBreaker === 'alert') {
-              // Withhold exactly as a pending migration does before ending the
-              // delivery: the pass is not evidence that the source advanced.
-              for (const listing of resolution.accepted) {
-                if (listing.trustedCommunityAlertQualification) {
-                  listing.trustedCommunityAlertQualification = {
-                    ...listing.trustedCommunityAlertQualification,
-                    catalogPublicationSuppressed: true,
-                  };
-                }
-                if (listing.admission) listing.admission = { ...listing.admission, catalogEligible: false, alertEligible: false };
-              }
+              // An aggregate breach alerts; it does not overturn a posting's own
+              // admission. Owner decision, 2026-09-17: admission is durable and
+              // nothing re-checks it afterwards, so the row's own evidence — the
+              // per-posting hiding above — is what withholds a role, not the
+              // list's aggregate shape. Suppressing every listing of a breaching
+              // pass is a post-admission re-check in disguise: replaying six
+              // lists on 2026-09-17 hid ~3,500 roles that were already live.
+              // Only notifications pause for the anomalous pass.
               resolution.alertEligible.clear();
               console.log(JSON.stringify({
                 event: 'trusted_community_circuit_alert',
@@ -1638,11 +1635,8 @@ export class IngestionRunner {
               // anomalies are caught per posting downstream. The pass falls
               // through rather than ending here: dropping the continuation and
               // the checkpoint left any list whose only breach is a
-              // not-yet-complete inspection floor permanently breaching, because
-              // every wake re-inspected the same bounded slice and coverage never
-              // climbed to its floor. Publication stays safe — every listing of
-              // this pass is suppressed above, and a bounded migration exposes
-              // nothing until one complete healthy pass clears it.
+              // not-yet-complete inspection floor re-inspecting the same bounded
+              // slice forever.
             } else {
               // A breaching pass is not evidence that the source advanced, so it
               // never self-enqueues and the throw fails the delivery for the
