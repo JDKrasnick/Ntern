@@ -43,13 +43,27 @@ describe('grouped catalog domain', () => {
     expect(details.group.featuredRole.housing).toEqual(housing);
     expect(details.group.compensations).toEqual(['USD 8,500/month']);
   });
-  it('uses an eight-second employer burst and does not absorb a later unrelated program', () => {
-    const jobs = [job('one', 0), job('two', 2), job('three', 4), job('four', 8), job('later', 20, { season: 'fall-2027' })];
-    const groups = groupCatalogJobs(jobs);
-    expect(groups).toHaveLength(2);
-    expect(groups[0]?.row).toMatchObject({ kind: 'individual', roleCount: 1, seasons: ['fall-2027'] });
-    expect(groups[1]?.row).toMatchObject({ kind: 'employer-release', roleCount: 4, titles: expect.any(Array) });
-    expect(groups[1]?.row.titles).toHaveLength(3);
+  it('keeps an employer release together across a poll and leaves a distant role individual', () => {
+    // A campus batch becomes visible over a poll or two: the roles that arrive
+    // later belong to the same card instead of sitting beside it as individuals.
+    const at = (iso: string) => ({ firstSeenAt: iso, catalogVisibleAt: iso, lastSeenAt: iso });
+    const sameSession = groupCatalogJobs([
+      job('one', 0), job('two', 2), job('three', 4), job('four', 8),
+      job('later', 0, { ...at('2026-08-23T12:01:30.000Z'), season: 'fall-2027' }),
+    ]);
+    expect(sameSession).toHaveLength(1);
+    expect(sameSession[0]?.row).toMatchObject({ kind: 'employer-release', roleCount: 5, seasons: ['fall-2027', 'summer-2027'] });
+
+    const beyondSession = groupCatalogJobs([
+      job('one', 0), job('two', 2), job('three', 4), job('four', 8),
+      job('next-wave', 0, at('2026-08-23T12:45:00.000Z')),
+    ]);
+    expect(beyondSession.map(({ row }) => [row.kind, row.roleCount])).toEqual([['individual', 1], ['employer-release', 4]]);
+  });
+
+  it('needs four roles in one session before it claims a card', () => {
+    const groups = groupCatalogJobs([job('one', 0), job('two', 2), job('three', 4)]);
+    expect(groups.map(({ row }) => row.kind)).toEqual(['individual', 'individual', 'individual']);
   });
 
   it('treats source decoration and corporate suffixes as the same employer without changing the display name', () => {
@@ -144,7 +158,7 @@ describe('grouped catalog domain', () => {
     expect(groupCatalogJobs(original)[0]!.row.groupId).toBe(groupCatalogJobs([...original, job('three', 20, { internshipIdentity: programIdentity })])[0]!.row.groupId);
   });
 
-  it('keeps a structured employer release distinct from a remaining program role', () => {
+  it('keeps a structured employer release distinct from a program role outside its session', () => {
     const programIdentity = identity();
     const groups = groupCatalogJobs([
       job('one', 0, { internshipIdentity: programIdentity }),
@@ -153,10 +167,46 @@ describe('grouped catalog domain', () => {
       job('four', 3, { internshipIdentity: programIdentity }),
       job('five', 4, { internshipIdentity: programIdentity }),
       job('six', 5, { internshipIdentity: programIdentity }),
-      job('later', 20, { internshipIdentity: programIdentity }),
+      job('later', 0, { firstSeenAt: '2026-08-23T12:30:00.000Z', catalogVisibleAt: '2026-08-23T12:30:00.000Z', lastSeenAt: '2026-08-23T12:30:00.000Z', internshipIdentity: programIdentity }),
     ]);
     expect(groups.map(({ row }) => row.kind)).toEqual(['individual', 'employer-release']);
     expect(new Set(groups.map(({ row }) => row.groupId)).size).toBe(2);
+  });
+
+  it('keeps the release namespace when its session absorbs a program role', () => {
+    const programIdentity = identity();
+    const release = [job('one', 0, { internshipIdentity: programIdentity }), job('two', 1, { internshipIdentity: programIdentity }),
+      job('three', 2, { internshipIdentity: programIdentity }), job('four', 3, { internshipIdentity: programIdentity })];
+    const withoutProgramRole = groupCatalogJobs(release)[0]!.row;
+    const absorbed = groupCatalogJobs([...release, job('later', 20, { internshipIdentity: programIdentity })]);
+    expect(absorbed).toHaveLength(1);
+    expect(absorbed[0]?.row).toMatchObject({ kind: 'employer-release', roleCount: 5 });
+    expect(absorbed[0]?.row.groupId).toBe(withoutProgramRole.groupId);
+  });
+
+  it('never places one role inside a group and on its own card at the same time', () => {
+    const at = (iso: string) => ({ firstSeenAt: iso, catalogVisibleAt: iso, lastSeenAt: iso });
+    const jobs = [
+      job('one', 0), job('two', 2), job('three', 4), job('four', 8),
+      job('session-tail', 0, at('2026-08-23T12:04:00.000Z')),
+      job('next-wave', 0, at('2026-08-23T12:45:00.000Z')),
+      job('other', 10, { company: 'Globex' }),
+    ];
+    const groups = groupCatalogJobs(jobs);
+    const memberships = new Map<string, string[]>();
+    for (const group of groups) for (const item of group.jobs) memberships.set(item.jobId, [...(memberships.get(item.jobId) ?? []), group.row.kind]);
+
+    expect([...memberships.values()].every((kinds) => kinds.length === 1)).toBe(true);
+    // Group beats individual: the whole session sits in the release card, and only
+    // the role outside the session stays its own card.
+    expect(memberships.get('session-tail')).toEqual(['employer-release']);
+    expect(memberships.get('next-wave')).toEqual(['individual']);
+
+    const filtered = filterCatalogGroups(groups, { status: 'open' });
+    const filteredMemberships = new Map<string, number>();
+    for (const group of filtered) for (const item of group.jobs) filteredMemberships.set(item.jobId, (filteredMemberships.get(item.jobId) ?? 0) + 1);
+    expect([...filteredMemberships.values()].every((count) => count === 1)).toBe(true);
+    expect(filteredMemberships.size).toBe(jobs.length);
   });
 
   it('does not combine different program types or evidence-poor seasons', () => {
