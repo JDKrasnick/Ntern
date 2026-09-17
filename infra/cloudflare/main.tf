@@ -11,13 +11,19 @@ locals {
   # enqueues ~218 messages per half-hour sweep at ~23s each, which the previous
   # concurrency of 2 could not retire inside the cadence. Keep in step with
   # wrangler.ingestion.jsonc; see docs/240-dispatch-backlog-cadence.md.
+  #
+  # destination-verification was the outlier on 2026-09-17: 7,572 scheduled
+  # occurrences with 6,114 due and none in flight, because one invocation at a
+  # batch of 5 could not re-inspect the shelf inside the seven-day window that
+  # keeps a role visible. Three concurrent invocations at ten per batch double
+  # the drain with room left for the schedule sync's own pages.
   consumer_max_concurrency = {
     greenhouse               = 6
     lever                    = 2
     ashby                    = 2
     github                   = 2
     gmail                    = 1
-    destination-verification = 1
+    destination-verification = 3
     shadow-extraction        = 1
   }
 
@@ -199,7 +205,7 @@ resource "cloudflare_queue_consumer" "ingestion" {
   script_name       = cloudflare_workers_script.ingestion.script_name
   dead_letter_queue = cloudflare_queue.dead_letter[each.key].queue_name
   settings = {
-    batch_size       = each.key == "destination-verification" ? 5 : 1
+    batch_size       = each.key == "destination-verification" ? 10 : 1
     max_concurrency  = lookup(local.consumer_max_concurrency, each.key, 1)
     max_retries      = each.key == "gmail" ? 5 : 2
     max_wait_time_ms = contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000

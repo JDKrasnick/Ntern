@@ -71,9 +71,9 @@ describe('Cloudflare deployment configuration', () => {
     expect(ingestion.vars.DESTINATION_VERIFICATION_QUEUE_ID).toBe('9b48a594d06a441e8b8ed45de0c430af');
     expect(consumer).toEqual({
       queue: 'intern-notifs-destination-verification',
-      max_batch_size: 5,
+      max_batch_size: 10,
       max_batch_timeout: 60,
-      max_concurrency: 1,
+      max_concurrency: 3,
       max_retries: 2,
       dead_letter_queue: 'intern-notifs-destination-verification-dlq',
     });
@@ -85,7 +85,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('{ name = "DESTINATION_VERIFICATION_QUEUE_ID", type = "plain_text"');
     // `tofu fmt` owns the alignment of this block, so match the assignment, not
     // its padding.
-    expect(terraform).toMatch(/batch_size\s+= each\.key == "destination-verification" \? 5 : 1/);
+    expect(terraform).toMatch(/batch_size\s+= each\.key == "destination-verification" \? 10 : 1/);
     expect(terraform).toContain('max_retries      = each.key == "gmail" ? 5 : 2');
     expect(terraform).toContain('max_wait_time_ms = contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000');
   });
