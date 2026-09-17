@@ -21,6 +21,15 @@ const deliveryReceiptLifetimeSeconds = 90 * 24 * 60 * 60;
 // returns.  Keep the last complete version available through a missed
 // maintenance run instead of falling back to a whole-catalog materialization.
 const catalogProjectionMaxAgeMs = 7 * 24 * 60 * 60 * 1_000;
+// D1 caps one RPC argument at 32 MiB, and a `batch()` sends every statement's
+// bound values inside a single argument. The projection is a copy of the whole
+// catalog, so its write is budgeted in bytes rather than statements: a quarter
+// of the ceiling leaves room for the RPC envelope, which inflates the JSON it
+// carries (a measured 40 MB batch crossed the wire as 70 MB).
+export const CATALOG_PROJECTION_BATCH_BYTES = 8 * 1024 * 1024;
+// One statement is also one RPC argument once it is sent, and a single group can
+// serialize to megabytes, so the per-statement payload needs its own budget.
+const CATALOG_PROJECTION_STATEMENT_BYTES = 4 * 1024 * 1024;
 const documentUploadLeaseSeconds = 15 * 60;
 // Occurrence rows are retained for every posting a source has ever listed, so a
 // per-source partition grows without bound. Reading it in one statement lets the
@@ -697,21 +706,46 @@ export class D1InternshipStore implements InternshipStore {
   async putCatalogProjection(groups: CatalogGroupDetails[], generatedAt: string): Promise<void> {
     const previous = await this.get<{ version: string }>('CATALOG_PROJECTION', 'CURRENT');
     const version = createHash('sha256').update(`${generatedAt}\0${groups.map((group) => group.group.groupId).join('\0')}`).digest('hex').slice(0, 20);
-    const statements: D1PreparedStatement[] = [];
-    for (let offset = 0; offset < groups.length; offset += 25) {
-      const chunk = groups.slice(offset, offset + 25);
-      const placeholders = chunk.map(() => `(?, ?, 'catalog-projection', ?, ?)`).join(', ');
-      statements.push(this.db.prepare(`
+    // One `batch()` is a single RPC call carrying every statement's bound value,
+    // and Cloudflare refuses a serialized argument over 32 MiB. The projection is
+    // a copy of the whole catalog, so neither a row count nor a statement count
+    // bounds the write: it crossed the ceiling in production and every refresh
+    // failed here, freezing the feed on the last good version. Rows are grouped
+    // into statements and statements into one `batch()` by payload bytes instead,
+    // budgeted well below the ceiling because the RPC envelope can inflate the
+    // JSON it carries. See docs/197-ingestion-resource-bounds.md.
+    const pending: D1PreparedStatement[] = [];
+    let pendingBytes = 0;
+    let rows: Array<{ sk: string; value: string; sortKey: string }> = [];
+    let rowsBytes = 0;
+    const flush = async () => {
+      if (!pending.length) return;
+      await this.db.batch(pending.splice(0, pending.length));
+      pendingBytes = 0;
+    };
+    const writeRows = async () => {
+      if (!rows.length) return;
+      const written = rows; const writtenBytes = rowsBytes;
+      rows = []; rowsBytes = 0;
+      if (pending.length && pendingBytes + writtenBytes > CATALOG_PROJECTION_BATCH_BYTES) await flush();
+      const placeholders = written.map(() => `(?, ?, 'catalog-projection', ?, ?)`).join(', ');
+      pending.push(this.db.prepare(`
         INSERT INTO catalog_items (pk, sk, kind, value, catalog_sort_key) VALUES ${placeholders}
         ON CONFLICT(pk, sk) DO UPDATE SET value = excluded.value, catalog_sort_key = excluded.catalog_sort_key
-      `).bind(...chunk.flatMap((details, index) => [
-        `CATALOG_PROJECTION#${version}`,
-        `GROUP#${details.group.groupId}`,
-        JSON.stringify(details),
-        String(offset + index).padStart(8, '0'),
-      ])));
+      `).bind(...written.flatMap((row) => [`CATALOG_PROJECTION#${version}`, row.sk, row.value, row.sortKey])));
+      pendingBytes += writtenBytes;
+    };
+    for (let index = 0; index < groups.length; index += 1) {
+      const value = JSON.stringify(groups[index]);
+      const row = { sk: `GROUP#${groups[index]!.group.groupId}`, value, sortKey: String(index).padStart(8, '0') };
+      const rowBytes = value.length + row.sk.length + 96;
+      // A statement binds four parameters per row, so D1's 100-parameter
+      // allowance caps the row count as well as the payload.
+      if (rows.length && (rows.length >= 25 || rowsBytes + rowBytes > CATALOG_PROJECTION_STATEMENT_BYTES)) await writeRows();
+      rows.push(row); rowsBytes += rowBytes;
     }
-    for (let offset = 0; offset < statements.length; offset += 50) await this.db.batch(statements.slice(offset, offset + 50));
+    await writeRows();
+    await flush();
     await this.put('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', { version, generatedAt, schemaVersion: 4 });
     // Projection versions are rebuildable caches. Deleting only the version
     // observed before this refresh keeps overlapping refreshes from deleting

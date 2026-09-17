@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { D1InternshipStore } from '../cloudflare/d1-store.js';
+import { D1InternshipStore, CATALOG_PROJECTION_BATCH_BYTES } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
 import type { Internship, InternshipIdentity } from '../src/types.js';
@@ -30,11 +30,17 @@ function job(jobId: string, title: string): Internship {
 
 type SqliteValue = string | number | bigint | null | Uint8Array;
 
-function sqliteD1(database: DatabaseSync, inspectRows?: (query: string, rows: unknown[]) => void): D1Database {
+function sqliteD1(
+  database: DatabaseSync,
+  inspectRows?: (query: string, rows: unknown[]) => void,
+  rpc?: { maxBatchBytes: number; batchBytes: number[] },
+): D1Database {
   const prepared = (query: string, values: unknown[] = []): D1PreparedStatement => {
     const statement: StatementSync = database.prepare(query);
     const bound = values as SqliteValue[];
+    const payload = query.length + values.reduce<number>((total, value) => total + String(value).length, 0);
     return {
+      __payload: payload,
       bind(...next: unknown[]) { return prepared(query, next); },
       async first<T>() { return (statement.get(...bound) as T | undefined) ?? null; },
       async all<T>() {
@@ -43,11 +49,20 @@ function sqliteD1(database: DatabaseSync, inspectRows?: (query: string, rows: un
         return { results };
       },
       async run() { return { meta: { changes: Number(statement.run(...bound).changes) } }; },
-    };
+    } as D1PreparedStatement & { __payload: number };
   };
   return {
     prepare(query: string) { return prepared(query); },
-    async batch(statements: D1PreparedStatement[]) { return Promise.all(statements.map((statement) => statement.run())); },
+    async batch(statements: D1PreparedStatement[]) {
+      // A production `batch()` is a single RPC call and D1 refuses an argument
+      // over 32 MiB, so the fake enforces the same ceiling on the bound payload.
+      const bytes = statements.reduce((total, statement) => total + (statement as D1PreparedStatement & { __payload: number }).__payload, 0);
+      rpc?.batchBytes.push(bytes);
+      if (rpc && bytes > rpc.maxBatchBytes) {
+        throw new Error(`D1_ERROR: Serialized RPC arguments or return values are limited to ${rpc.maxBatchBytes} bytes, but the size of this value was: ${bytes} bytes.`);
+      }
+      return Promise.all(statements.map((statement) => statement.run()));
+    },
   };
 }
 
@@ -100,6 +115,30 @@ describe('D1 filtered catalog projection', () => {
     }
   });
 
+  it('writes a projection larger than the D1 RPC ceiling in byte-bounded batches', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    // A live catalog whose serialized projection passed D1's 32 MiB per-RPC
+    // ceiling aborted every refresh on this write and froze the feed on its last
+    // good version, so the projection write has to bound itself by payload
+    // rather than by row or statement count.
+    const groups = Array.from({ length: 14 }, (_, index) => catalogGroupDetails(groupCatalogJobs([
+      job(`rpc-${index}`, `Software Engineering Intern ${'x'.repeat(900_000)}`),
+    ])[0]!));
+    const batchBytes: number[] = [];
+    try {
+      const store = new D1InternshipStore(sqliteD1(database, undefined, { maxBatchBytes: 32 * 1024 * 1024, batchBytes }));
+      await expect(store.putCatalogProjection(groups, '2026-09-17T00:00:00.000Z')).resolves.toBeUndefined();
+      expect(batchBytes.length).toBeGreaterThan(1);
+      expect(Math.max(...batchBytes)).toBeLessThanOrEqual(CATALOG_PROJECTION_BATCH_BYTES);
+      expect(batchBytes.reduce((total, bytes) => total + bytes, 0)).toBeGreaterThan(32 * 1024 * 1024);
+      expect(database.prepare("SELECT count(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 14 });
+      await expect(store.listCatalogProjection(undefined, 25)).resolves.toMatchObject({ groups: expect.arrayContaining([expect.objectContaining({ group: expect.objectContaining({ roleCount: 1 }) })]) });
+    } finally {
+      database.close();
+    }
+  });
+
   it('lists and filters the catalog through bounded composite-key pages', async () => {
     const database = new DatabaseSync(':memory:');
     database.exec(`
@@ -142,11 +181,17 @@ describe('D1 filtered catalog projection', () => {
       group: { ...template.group, groupId: `group-${index}` },
       roles: template.roles.map((role) => ({ ...role, jobId: `job-${index}` })),
     }));
-    const batchSizes: number[] = []; let maxBoundParameters = 0;
+    const batchSizes: number[] = []; const batchBytes: number[] = [];
+    let maxBoundParameters = 0;
     const database = {
       prepare() {
-        const statement: D1PreparedStatement = {
-          bind(...values: unknown[]) { maxBoundParameters = Math.max(maxBoundParameters, values.length); return statement; },
+        const statement: D1PreparedStatement & { __payload: number } = {
+          __payload: 0,
+          bind(...values: unknown[]) {
+            maxBoundParameters = Math.max(maxBoundParameters, values.length);
+            statement.__payload = values.reduce<number>((total, value) => total + String(value).length, 0);
+            return statement;
+          },
           async first<T>() { return null as T | null; },
           async all<T>() { return { results: [] as T[] }; },
           async run() { return { meta: { changes: 1 } }; },
@@ -155,15 +200,21 @@ describe('D1 filtered catalog projection', () => {
       },
       async batch(statements: D1PreparedStatement[]) {
         batchSizes.push(statements.length);
+        batchBytes.push(statements.reduce((total, statement) => total + (statement as D1PreparedStatement & { __payload: number }).__payload, 0));
         return statements.map(() => ({ meta: { changes: 1 } }));
       },
     } satisfies D1Database;
 
     await new D1InternshipStore(database).putCatalogProjection(groups, '2026-08-27T00:00:00.000Z');
 
-    expect(batchSizes).toEqual([50, 11]);
-    expect(batchSizes.reduce((total, size) => total + size, 0)).toBe(61);
+    // Statements stay inside D1's 100 bound-parameter allowance, each `batch()`
+    // inside the RPC argument ceiling, and the whole write inside the paid
+    // per-invocation query budget.
     expect(maxBoundParameters).toBeLessThanOrEqual(100);
+    expect(batchSizes.reduce((total, size) => total + size, 0)).toBe(61);
+    expect(batchSizes.length).toBeLessThan(61);
+    expect(Math.max(...batchBytes)).toBeLessThanOrEqual(CATALOG_PROJECTION_BATCH_BYTES);
+    expect(batchBytes.reduce((total, bytes) => total + bytes, 0)).toBeGreaterThan(3 * 1024 * 1024);
   });
 
   it('writes multi-row projection batches with stable global ordering', async () => {
