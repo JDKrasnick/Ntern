@@ -92,17 +92,16 @@ function containsUnknown(value: unknown): boolean {
 function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after)) return false;
   const controller = after.find((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER');
-  const beforeWithoutController = before.filter((binding) => !isRecord(binding) || binding.name !== 'D1_TRAFFIC_CONTROLLER');
   const afterWithoutController = after.filter((binding) => !isRecord(binding) || binding.name !== 'D1_TRAFFIC_CONTROLLER');
-  const addedController = beforeWithoutController.length === before.length
+  const addedController = !before.some((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER')
     && afterWithoutController.length + 1 === after.length
     && isRecord(controller)
     && controller.type === 'durable_object_namespace'
     && controller.class_name === 'D1TrafficController';
-  if (!addedController && before.length !== after.length) return false;
-  if (addedController) { before = beforeWithoutController; after = afterWithoutController; }
+  if (addedController) return isDeepStrictEqual(before, afterWithoutController);
+  if (before.length !== after.length) return false;
   let senderChanged = false;
-  const plainTextUpdate = before.length === after.length && before.every((binding, index) => {
+  const plainTextUpdate = before.every((binding, index) => {
     const nextBinding = after[index];
     if (!isRecord(binding) || !isRecord(nextBinding)) return false;
     if (binding.name !== nextBinding.name) return false;

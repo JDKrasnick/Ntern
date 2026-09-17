@@ -119,6 +119,16 @@ describe('Cloudflare deployment plan guard', () => {
       ...contentUpdate,
       after: { ...contentUpdate.after, bindings: [...worker.bindings, { name: 'UNRELATED', type: 'durable_object_namespace', class_name: 'D1TrafficController' }] },
     }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      after: {
+        ...contentUpdate.after,
+        bindings: [
+          { name: 'DB', type: 'd1', id: 'other-db' },
+          { name: 'D1_TRAFFIC_CONTROLLER', type: 'durable_object_namespace', class_name: 'D1TrafficController' },
+        ],
+      },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
   it('rejects unknown values in protected Worker fields', () => {
