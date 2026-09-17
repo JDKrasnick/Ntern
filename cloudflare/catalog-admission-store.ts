@@ -31,12 +31,10 @@ export const METADATA_REPAIR_RECORD_LIMIT = 250;
 // bounded so scheduling, leasing, queue bookkeeping, and metadata reservation
 // remain comfortably below the paid Workers 1,000-query ceiling.
 export const DESTINATION_SCHEDULE_SYNC_LIMIT = 250;
-// One daily verification per occurrence is the demand the shelf needs: at 7,572
-// scheduled occurrences a 100-row lease left a backlog that expired evidence
-// faster than it refreshed, hiding otherwise eligible roles. Two hundred per
-// sweep doubles the drain and still leaves room for the schedule sync's own
-// pages inside one invocation's query ceiling.
-export const DESTINATION_VERIFICATION_LEASE_LIMIT = 200;
+// Raised to 200 on 2026-09-17 to drain a verification backlog, then reverted when
+// admission became durable and scheduled re-checks were removed: the sweep no
+// longer leases anything, so only admission-time and manual checks use this path.
+export const DESTINATION_VERIFICATION_LEASE_LIMIT = 100;
 // One completed occurrence can require four reviewed-mapping lookups before
 // stageRepair performs its guarded reads and writes. Bound the composed stage
 // request, not just the eventual atomic apply batch.
