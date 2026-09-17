@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  IDENTITY_COVERAGE_RATCHET_TOLERANCE, identityCoverageFloor, nextIdentityCoverageBaseline,
-} from '../cloudflare/identity-coverage-ratchet.js';
+import { identityCoverageFloor, nextIdentityCoverageBaseline } from '../cloudflare/identity-coverage-ratchet.js';
 import { runScheduledPostingIdentityAudit } from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -41,9 +39,10 @@ describe('identity coverage ratchet', () => {
     expect(identityCoverageFloor(undefined, undefined)).toBe(0);
   });
 
-  it('tightens toward the best coverage seen and absorbs churn inside the tolerance', () => {
-    expect(identityCoverageFloor(0, 0.8)).toBeCloseTo(0.8 - IDENTITY_COVERAGE_RATCHET_TOLERANCE, 6);
-    // A backstop above the baseline still wins.
+  it('pads the floor by one percentage point of churn', () => {
+    // 12,904 occurrence rows today, so one point absorbs roughly 130 rows of
+    // ordinary movement. A backstop above the baseline still wins.
+    expect(identityCoverageFloor(0, 0.8)).toBeCloseTo(0.79, 6);
     expect(identityCoverageFloor(0.95, 0.8)).toBe(0.95);
   });
 
@@ -73,6 +72,16 @@ describe('identity coverage ratchet', () => {
       status: 'passed', confirmedCoverage: 0.9, coverageRegression: false,
     });
     expect(improvement.current()).toBe(0.9);
+  });
+
+  it('fails a pass that falls further than the padding below its baseline', async () => {
+    const slipping = baselineDb(0.8);
+    await expect(runScheduledPostingIdentityAudit({
+      DB: slipping.db as unknown as Environment['DB'],
+      IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'true',
+      IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0',
+    }, { audit: async () => planWithCoverage(0.789), log: () => undefined }))
+      .rejects.toThrow('integrity gate failed');
   });
 
   it('passes a pass that stays inside the tolerance of its baseline', async () => {

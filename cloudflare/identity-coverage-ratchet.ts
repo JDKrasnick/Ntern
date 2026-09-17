@@ -7,10 +7,21 @@ import type { D1Database } from './types.js';
  * rows have no provider-owned key to confirm (an intermediary host, a company
  * careers page, a search URL) — and a gate that is permanently red is not an
  * alarm. The ratchet keeps the invariant that matters: coverage may not fall
- * below the best value the catalog has already reached, minus a small tolerance
- * for day-to-day churn. It only ever tightens.
+ * below the best value the catalog has already reached, minus padding for
+ * day-to-day churn. It only ever tightens.
+ *
+ * The padding is one percentage point, which at the catalog's 12,904 occurrence
+ * rows absorbs roughly 130 rows of ordinary movement — a source dropping rows at
+ * the end of a season, a list gaining unconfirmable links — while a real
+ * regression, such as a route family breaking, costs far more than that. Steady
+ * erosion is still caught: the baseline only ratchets up, so small daily losses
+ * accumulate against it rather than resetting it.
+ *
+ * Accepting a permanently lower coverage is an explicit act, not a drift: lower
+ * the stored baseline row (`IDENTITY#COVERAGE_BASELINE`) deliberately when that
+ * is the intended state.
  */
-export const IDENTITY_COVERAGE_RATCHET_TOLERANCE = 0.002;
+export const IDENTITY_COVERAGE_RATCHET_TOLERANCE = 0.01;
 
 const BASELINE_PK = 'IDENTITY#COVERAGE_BASELINE';
 const BASELINE_KIND = 'identity-coverage-baseline';
