@@ -22,10 +22,18 @@ export class D1TrafficController {
   constructor(private readonly state: DurableObjectState) {}
   private async load(now = Date.now()): Promise<ControllerState> {
     const value = await this.state.storage.get<ControllerState>('state') ?? initialState();
-    for (const [id, permit] of Object.entries(value.permits)) if (Date.parse(permit.expiresAt) <= now) delete value.permits[id];
-    value.permitsInUse = { P0: 0, P1: 0, P2: 0 };
-    for (const permit of Object.values(value.permits)) value.permitsInUse[permit.priority] += 1;
-    value.failures = value.failures.filter((at) => at >= now - 5 * 60_000); value.recentPressure = value.failures.length;
+    let changed = false;
+    for (const [id, permit] of Object.entries(value.permits)) {
+      if (Date.parse(permit.expiresAt) <= now) { delete value.permits[id]; changed = true; }
+    }
+    const permitsInUse: Record<PipelinePriority, number> = { P0: 0, P1: 0, P2: 0 };
+    for (const permit of Object.values(value.permits)) permitsInUse[permit.priority] += 1;
+    if (JSON.stringify(value.permitsInUse) !== JSON.stringify(permitsInUse)) changed = true;
+    value.permitsInUse = permitsInUse;
+    const failures = value.failures.filter((at) => at >= now - 5 * 60_000);
+    if (failures.length !== value.failures.length || value.recentPressure !== failures.length) changed = true;
+    value.failures = failures; value.recentPressure = failures.length;
+    if (changed) await this.save(value);
     return value;
   }
   private async save(value: ControllerState): Promise<void> { await this.state.storage.put('state', value); }
