@@ -31,7 +31,12 @@ export const METADATA_REPAIR_RECORD_LIMIT = 250;
 // bounded so scheduling, leasing, queue bookkeeping, and metadata reservation
 // remain comfortably below the paid Workers 1,000-query ceiling.
 export const DESTINATION_SCHEDULE_SYNC_LIMIT = 250;
-export const DESTINATION_VERIFICATION_LEASE_LIMIT = 100;
+// One daily verification per occurrence is the demand the shelf needs: at 7,572
+// scheduled occurrences a 100-row lease left a backlog that expired evidence
+// faster than it refreshed, hiding otherwise eligible roles. Two hundred per
+// sweep doubles the drain and still leaves room for the schedule sync's own
+// pages inside one invocation's query ceiling.
+export const DESTINATION_VERIFICATION_LEASE_LIMIT = 200;
 // One completed occurrence can require four reviewed-mapping lookups before
 // stageRepair performs its guarded reads and writes. Bound the composed stage
 // request, not just the eventual atomic apply batch.
@@ -942,10 +947,26 @@ export class D1CatalogAdmissionStore {
       .bind(token, token, expectedJobs, plan.metadata_revision, token, token, expectedJobs, expectedOccurrences, plan.collection_snapshot, token, appliedAt);
     const updates = rows.results.map((row) => {
       const proposed = JSON.parse(row.proposed_value) as Internship;
-      return this.db.prepare(`UPDATE catalog_items SET value = ?, search_text = ?
+      // A metadata repair carries a re-evaluated admission, so it must refresh
+      // every derived column the way `putInternship` does. Writing only the value
+      // and search_text let eligibility and the browse column disagree: an
+      // eligible role whose catalog_state stayed NULL is invisible to the app.
+      const visible = proposed.technical !== false && catalogEligible(proposed);
+      const alertable = alertEligible(proposed);
+      return this.db.prepare(`UPDATE catalog_items SET value = ?, url_key = ?, fingerprint_key = ?,
+        sms_pending = ?, digest_pending = ?, catalog_state = ?, catalog_sort_key = ?, search_text = ?, source_classes = ?
         WHERE pk = ? AND sk = 'META' AND kind = 'internship' AND value = ?
           AND EXISTS (SELECT 1 FROM role_metadata_repair_guards WHERE token = ? AND ok = 1)`)
-        .bind(row.proposed_value, catalogSearchText(proposed), `JOB#${row.job_id}`, row.original_value, token);
+        .bind(
+          row.proposed_value, proposed.normalizedUrl, proposed.fingerprint,
+          proposed.notification.smsPending && alertable ? 1 : 0,
+          proposed.notification.digestPending && alertable ? 1 : 0,
+          visible ? (proposed.open ? 'OPEN' : 'CLOSED') : null,
+          visible ? (proposed.open ? openCatalogSortKey(proposed) : `${proposed.lastSeenAt}#${proposed.jobId}`) : null,
+          visible ? catalogSearchText(proposed) : null,
+          visible ? JSON.stringify(catalogSourceClasses(proposed)) : null,
+          `JOB#${row.job_id}`, row.original_value, token,
+        );
     });
     const results = await this.db.batch([guard, ...updates]);
     if (!results[0]?.meta.changes || updates.some((_, index) => results[index + 1]?.meta.changes !== 1)) {
