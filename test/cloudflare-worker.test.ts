@@ -6,7 +6,7 @@ import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.j
 import type { Queue } from '../cloudflare/types.js';
 import { catalogProviderIds, integrationRegistry } from '../src/integration-registry.js';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
-import { D1InternshipStore } from '../cloudflare/d1-store.js';
+import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import { D1EmployerStore } from '../cloudflare/employer-store.js';
 import { isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
 import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
@@ -239,6 +239,40 @@ describe('Cloudflare scheduled dispatch leases', () => {
       } as unknown as Environment);
       expect(sent).toEqual([expect.objectContaining({ sourceId: record.sourceId })]);
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"provider_dispatch_complete"'));
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('Cloudflare maintenance cron', () => {
+  it('rebuilds the catalog projection even when another maintenance step fails', async () => {
+    // The projection is the Roles feed's whole source of truth: while a failing
+    // verification or alert email could abort this cron before the refresh ran,
+    // the feed served a day-old snapshot whose groups duplicated live roles.
+    vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+    const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
+    const failing = vi.spyOn(D1CatalogAdmissionStore.prototype, 'listActiveIncidents').mockRejectedValue(new Error('Resend returned HTTP 422'));
+    vi.spyOn(D1InternshipStore.prototype, 'listPendingProviderShadowVerifications').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'pendingSms').mockResolvedValue([]);
+    vi.spyOn(D1UserStore.prototype, 'activeDevices').mockResolvedValue([]);
+    vi.spyOn(D1UserStore.prototype, 'activePreferences').mockResolvedValue([]);
+    vi.spyOn(D1UserStore.prototype, 'pendingReceipts').mockResolvedValue([]);
+    vi.spyOn(D1UserStore.prototype, 'retryableReceipts').mockResolvedValue([]);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await cloudflareWorker.scheduled({
+        cron: '9-59/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:09:00.000Z'),
+      } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) },
+        DESTINATION_VERIFICATION_QUEUE: queue(undefined),
+        DESTINATION_VERIFICATION_DLQ: queue(undefined),
+      } as unknown as Environment);
+      expect(failing).toHaveBeenCalled();
+      expect(projection).toHaveBeenCalledOnce();
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('"step":"admission_verification_warnings"'));
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
     } finally {
       vi.restoreAllMocks();
     }

@@ -1170,6 +1170,19 @@ async function recordScheduledDispatch(
     queued: dispatched.queued, inFlightSkipped: dispatched.inFlightSkipped.length, scheduledAt: now.toISOString() }));
 }
 
+/** Runs one scheduled responsibility in isolation. Several of them share the
+ * maintenance cron, and a thrown error used to abort the handler — which is how
+ * one failing step held the catalog projection on a day-old snapshot. The
+ * failure stays visible as an error-level event instead. */
+async function runScheduledStep<T>(step: string, run: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await run();
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'scheduled_step_failed', step, error: error instanceof Error ? error.message : String(error) }));
+    return undefined;
+  }
+}
+
 async function refreshCatalogProjection(store: D1InternshipStore) {
   const groups = groupCatalogJobs(await store.listCatalog(), { includeClosed: true }).map(catalogGroupDetails);
   const generatedAt = new Date().toISOString();
@@ -1375,10 +1388,17 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   }
   if (event.cron === '9-59/10 * * * *') {
     const observedAt = new Date(event.scheduledTime);
-    const admissionVerificationRetries = await enqueueDueDestinationVerifications(env, observedAt);
-    const providerShadowRecovery = await recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE);
-    const queueMetrics = env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined;
-    const deadLetterMetrics = env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined;
+    // This schedule owns several independent responsibilities, and publication is
+    // the only one the user sees: the catalog projection is the Roles feed's whole
+    // source of truth, so it is rebuilt first and no later step's failure may
+    // cancel it. While the refresh sat last, one failing verification email or
+    // alert held the feed on a day-old snapshot.
+    // See docs/197-ingestion-resource-bounds.md.
+    const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store));
+    const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
+    const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
+    const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
+    const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
     const queueAgeMs = queueMetrics?.oldestMessageTimestamp
       ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
@@ -1386,12 +1406,11 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),
     ];
-    await sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
+    await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
       signals: operationalSignals, observedAt: observedAt.toISOString(),
       details: `Destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}.`,
-    });
-    const projection = await refreshCatalogProjection(store);
-    const notifications = await drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher());
+    }));
+    const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher()));
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery }));
     return;
   }
