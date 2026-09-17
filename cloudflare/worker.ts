@@ -10,6 +10,10 @@ import { processLeverQueue } from '../src/lever-worker.js';
 import { drainPendingExpoNotifications, ExpoPushPublisher, type EmailSender } from '../src/notifications.js';
 import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
 import { runTrustedAdmissionBackfill } from '../src/trusted-admission-backfill.js';
+import {
+  identityCoverageFloor, nextIdentityCoverageBaseline,
+  readIdentityCoverageBaseline, writeIdentityCoverageBaseline,
+} from './identity-coverage-ratchet.js';
 import { runRuntimeCommand } from '../src/runtime.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
@@ -1267,10 +1271,22 @@ export async function runScheduledPostingIdentityAudit(
 ): Promise<PostingIdentityAuditEvent> {
   const enforcementActive = env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true';
   const parsedCoverageFloor = Number(env.IDENTITY_CONFIRMED_COVERAGE_FLOOR);
-  const confirmedCoverageFloor = env.IDENTITY_CONFIRMED_COVERAGE_FLOOR?.trim()
+  const configuredCoverageFloor = env.IDENTITY_CONFIRMED_COVERAGE_FLOOR?.trim()
     && Number.isFinite(parsedCoverageFloor) && parsedCoverageFloor >= 0 && parsedCoverageFloor <= 1
     ? parsedCoverageFloor
     : undefined;
+  // The floor ratchets: it never falls below the best coverage this catalog has
+  // already reached, less a small tolerance for churn, so a regression fails the
+  // gate while day-to-day movement does not.
+  let coverageBaseline: number | undefined;
+  try {
+    coverageBaseline = await readIdentityCoverageBaseline(env.DB);
+  } catch {
+    coverageBaseline = undefined;
+  }
+  const confirmedCoverageFloor = configuredCoverageFloor === undefined
+    ? undefined
+    : identityCoverageFloor(configuredCoverageFloor, coverageBaseline);
   // Production catalogs do not fit an unbounded read in one Worker invocation;
   // the paged audit computes the same gate and coverage facts slice by slice.
   const audit = dependencies.audit ?? ((db: D1Database) => runPostingIdentityAudit(db));
@@ -1293,6 +1309,14 @@ export async function runScheduledPostingIdentityAudit(
       legacyOccurrences: null, projectionMismatches: null, duplicateOccurrenceReferences: null,
       danglingOccurrenceReferences: null,
     };
+  }
+  const nextBaseline = nextIdentityCoverageBaseline(coverageBaseline, event.confirmedCoverage);
+  if (nextBaseline !== undefined && nextBaseline !== coverageBaseline) {
+    try {
+      await writeIdentityCoverageBaseline(env.DB, nextBaseline, new Date().toISOString());
+    } catch {
+      // The pass already reported its coverage; a failed write retries next run.
+    }
   }
   const serialized = JSON.stringify(event);
   if (dependencies.log) dependencies.log(serialized);

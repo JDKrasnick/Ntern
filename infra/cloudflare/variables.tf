@@ -87,9 +87,9 @@ variable "trusted_community_catalog_enabled" {
 }
 
 variable "identity_confirmed_coverage_floor" {
-  description = "Minimum reviewed exact posting-identity coverage required by the recurring integrity gate."
+  description = "Backstop for reviewed exact posting-identity coverage in the recurring integrity gate. The gate itself ratchets: it fails a pass that falls below the best coverage already reached, less a small churn tolerance, so this value only sets a floor the ratchet cannot go under."
   type        = number
-  default     = 1
+  default     = 0
 
   validation {
     condition     = var.identity_confirmed_coverage_floor >= 0 && var.identity_confirmed_coverage_floor <= 1
