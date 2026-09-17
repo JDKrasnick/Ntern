@@ -508,7 +508,7 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     });
   });
 
-  it('alerts on a circuit breach for a reviewed list, advancing without publishing and without quarantining', async () => {
+  it('alerts on a circuit breach for a reviewed list, advancing without suppressing its admissions or quarantining', async () => {
     const store = new MemoryInternshipStore();
     const adapter: SourceAdapter = {
       id: 'simplify-summer-2026',
@@ -538,12 +538,13 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
     // success counters stay put: a breaching pass is not evidence of advance.
     expect(breached.continuationSources).toEqual([adapter.id]);
     expect((await store.getCheckpoint(adapter.id))?.successfulFetches).toBe(checkpoint?.successfulFetches);
-    // Nothing a breaching pass saw may reach the catalog.
-    expect(breached.filteredJobs.every((job) => job.admission?.catalogEligible !== true)).toBe(true);
+    // An aggregate breach no longer suppresses what this pass admitted.
+    expect(breached.filteredJobs.every((job) => job.sourceReferences.every((reference) =>
+      reference.trustedCommunityAlertQualification?.catalogPublicationSuppressed !== true))).toBe(true);
     expect((await store.getSourceHealth(adapter.id))?.state).not.toBe('quarantined');
   });
 
-  it('alerts on incomplete inspection coverage, publishing nothing and quarantining nothing', async () => {
+  it('alerts on incomplete inspection coverage without withholding admitted roles or quarantining', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'simplify-summer-2026';
     const { minimumRawRows, minimumEligibleRows } = SIMPLIFY_TRUSTED_COMMUNITY_THRESHOLDS;
@@ -617,7 +618,11 @@ describe('trusted community source health', { timeout: 20_000 }, () => {
       contentHash: 'current-snapshot',
       successfulFetches: previous.successfulFetches,
     });
-    expect(await store.listCatalog()).toEqual([]);
+    // An aggregate breach no longer withholds the rows this pass inspected, so
+    // the shelf keeps the roles the per-posting inspection admitted.
+    const shelved = await store.listCatalog();
+    expect(shelved.length).toBeGreaterThan(0);
+    expect(shelved.every((job) => job.admission?.catalogEligible === true)).toBe(true);
     expect((await store.getSourceHealth(sourceId))?.state).not.toBe('quarantined');
   });
 
