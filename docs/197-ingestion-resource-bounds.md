@@ -368,3 +368,36 @@ Still open for the same class of coverage: roles from *manually reviewed provide
 boards* whose employer has no `employer_mappings` row (for example
 `greenhouse-genscript`), and the 2,093 open jobs withheld by
 `IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED=false`.
+
+### Recurrence: the projection write itself (2026-09-17)
+
+The freeze returned through the step that had been the remedy. `putCatalogProjection`
+chunked its `INSERT`s into batches of 50 statements — a bound on statement count,
+not on payload — while the projection is a copy of the whole catalog, so the write
+grew until it crossed D1's per-RPC argument ceiling and every refresh threw on it:
+
+```
+D1_ERROR: Serialized RPC arguments or return values are limited to 32MiB,
+but the size of this value was: 69751177 bytes
+  at D1InternshipStore.putCatalogProjection (d1-store.ts)
+  at refreshCatalogProjection (worker.ts)
+  at Object.scheduledHandler [as scheduled]   // cron 9-59/10 * * * *, 16:49:42Z, wall 86s
+```
+
+| Evidence | Value |
+| --- | --- |
+| Newest role in the served catalog | `2026-09-16T19:47:31Z` — the last refresh whose write fit, 21 h behind `/jobs` (`2026-09-17T15:21:44Z`) |
+| What the feed showed | a day-old `employer-release` card for IMC whose four member jobs no longer existed (`/jobs/<id>` returned 404) beside the live individual cards for the same four postings — a group that duplicated them |
+| Measured projection | 2,608 groups / 80.6 MiB serialized; the old batching sent 35–39 MiB per `batch()` before D1's envelope inflated it |
+| Cron outcome before the fix | `outcome: exception` with the D1 32 MiB error on every `9-59/10` run |
+
+Two changes: the write is budgeted in payload bytes (`CATALOG_PROJECTION_BATCH_BYTES`
+per `batch()` and a per-statement budget, so a single oversized group cannot pass
+either), and the maintenance cron rebuilds the projection *before* its remaining
+steps and isolates each one's failure, so a failing alert or verification email can
+no longer hold publication back.
+
+Still growing with the catalog: the projection carried 80.6 MiB on 2026-09-17 and
+is written in 11 batches. If that keeps climbing, the next step is a projection
+that ships only the groups a refresh changed rather than a full copy.
+
