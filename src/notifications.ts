@@ -4,7 +4,8 @@ import { evaluateJobFilter, inferJobFocuses, type FilterMatchReason, type JobFoc
 import { postingIdentityKey, score } from './core/normalize.js';
 import { platformFetch } from './core/platform-fetch.js';
 import type { DeliveryReceipt, Internship } from './types.js';
-import type { InternshipStore, UserStore } from './store.js';
+import type { InternshipStore, ReleaseStore, UserStore } from './store.js';
+import { employerDropGroupId, employerDropKey, RELEASE_MINIMUM_ROLES } from './catalog-groups.js';
 import { matchesJobFilter } from './core/filters.js';
 import { notificationSourceLabelFor } from './sources/source-label.js';
 import { publicApplicationUrl } from './core/application-url.js';
@@ -127,9 +128,37 @@ function nativePushMessage(job: Internship, filter: Parameters<typeof evaluateJo
   };
 }
 
+/** A drop's alert: the first one says what the employer posted, a later one says
+ * how many roles joined a drop the user has already heard about. The body keeps
+ * each role's own location (up to three, then a count) so the compact card still
+ * carries the precise detail the per-role alerts used to. */
+export function dropPushMessage(company: string, roles: Internship[], added: boolean): PushMessage {
+  const count = roles.length;
+  const aliases = defaultRoleAbbreviations;
+  const shown = roles.slice(0, 3).map((job) => renderPushTemplate('{location} · {season}', job, aliases).replace(/[\r\n]+/g, ' ').trim());
+  const focuses = [...new Set(roles.flatMap((job) => inferJobFocuses(job)))].slice(0, 3);
+  const unconfirmed = roles.filter((job) => job.postingIdentityStatus === 'unconfirmed').length;
+  const summary = [
+    `${count} role${count === 1 ? '' : 's'}`,
+    ...shown,
+    ...(count > shown.length ? [`+${count - shown.length} more`] : []),
+    focuses.length ? `Focus: ${focuses.join(', ')}` : '',
+  ].filter(Boolean).join('\n');
+  return {
+    title: added ? `${count} role${count === 1 ? '' : 's'} added to ${company}` : `${company} posted ${count} matching roles`,
+    body: [summary, unconfirmed ? `${unconfirmed} role${unconfirmed === 1 ? '' : 's'}: identity unconfirmed.` : ''].filter(Boolean).join('\n'),
+    click: safeClick(publicApplicationUrl(roles[0]!.applyUrl)),
+  };
+}
+
 /**
- * Delivers each new listing to matching opted-in users. Receipts are written before
- * sending so a poll retry cannot fan out duplicate pushes to the same device.
+ * One alert per employer drop instead of one per role. The first alert says what
+ * the employer posted; an alert for a drop the user already heard about says how
+ * many roles were added to it, and the drop's roles stay collapsed behind one
+ * card. Only roles matching the user's own filter are counted or delivered.
+ *
+ * Receipts remain per role: a role delivered once is never sent again, and a run
+ * that only sees already-delivered roles sends nothing.
  */
 export async function sendNewJobNotifications(
   jobs: Internship[],
@@ -137,63 +166,111 @@ export async function sendNewJobNotifications(
   publisher: ExpoPushPublisher,
   now: () => Date = () => new Date(),
   logger: NotificationDeliveryLogger = defaultDeliveryLogger,
-  options: { excludeUserIds?: ReadonlySet<string>; excludeAllUsers?: boolean } = {},
+  options: { excludeUserIds?: ReadonlySet<string>; excludeAllUsers?: boolean; releases?: ReleaseStore } = {},
 ): Promise<{ sent: number; skipped: number; failed: number }> {
   let sent = 0; let skipped = 0; let failed = 0;
   const devices = await users.activeDevices();
   const preferences = new Map<string, Awaited<ReturnType<UserStore['getPreferences']>>>();
-  for (const job of jobs) for (const device of devices) {
-    if (options.excludeAllUsers || options.excludeUserIds?.has(device.userId)) { skipped += 1; continue; }
-    let preference = preferences.get(device.userId);
-    if (!preference) { preference = await users.getPreferences(device.userId); preferences.set(device.userId, preference); }
-    if (!preference?.alertsEnabled || !preference.onboardingComplete || !matchesJobFilter(job, preference.filter)) { skipped += 1; continue; }
-    const message = nativePushMessage(job, preference.filter, preference.push);
-    const context = deliveryContext(job, device.userId, device.token, device.platform, message.title);
-    const dedupeKey = notificationDedupeKey(job);
-    // Check the old job-ID key during the rolling migration so a previously
-    // delivered role is not resent merely because its receipt key was hardened.
-    const existing = await users.getReceipt(device.userId, dedupeKey, device.token)
-      ?? await users.getReceipt(device.userId, job.jobId, device.token);
-    if (existing?.status === 'ok' || existing?.status === 'pending' || existing?.deliveryState === 'definitive-failure') {
-      emitDeliveryEvent(logger, { event: 'notification_skipped_duplicate', occurredAt: now().toISOString(), ...context, reason: `existing_${existing.status}_receipt` });
-      skipped += 1; continue;
-    }
-    const timestamp = now().toISOString(); const receipt: DeliveryReceipt = { userId: device.userId, jobId: job.jobId, dedupeKey, token: device.token, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, deliveryState: 'claimed', createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp };
-    if (!await users.claimReceipt(receipt)) {
-      emitDeliveryEvent(logger, { event: 'notification_skipped_duplicate', occurredAt: now().toISOString(), ...context, reason: 'concurrent_delivery_claim' });
-      skipped += 1; continue;
-    }
-    try {
-      const ticket = await publisher.publish(device.token, message);
-      // An ok response without a ticket is ambiguous: Expo may have accepted it,
-      // so the permanent claim remains but automated delivery never retries it.
-      const accepted = ticket.status === 'ok' && Boolean(ticket.id);
-      const ambiguous = ticket.status === 'ok' && !ticket.id;
-      const status = accepted || ambiguous ? 'pending' : 'error';
-      await users.putReceipt({ ...receipt, ticketId: ticket.id, status, deliveryState: accepted ? 'accepted' : ambiguous ? 'unknown' : 'definitive-failure', updatedAt: now().toISOString() });
-      if (accepted) { emitDeliveryEvent(logger, { event: 'notification_sent', occurredAt: now().toISOString(), ...context }); sent += 1; }
-      else {
-        emitDeliveryEvent(logger, { event: 'notification_failed', occurredAt: now().toISOString(), ...context, reason: ambiguous ? 'ambiguous_provider_acceptance' : ticket.details?.error ?? ticket.message ?? 'expo_ticket_error' });
-        failed += 1; if (ticket.details?.error === 'DeviceNotRegistered') await users.putDevice({ ...device, active: false, updatedAt: now().toISOString() });
+  const delivered = (receipt: DeliveryReceipt | undefined) => receipt?.status === 'ok' || receipt?.status === 'pending' || receipt?.deliveryState === 'definitive-failure';
+  // One drop per employer per day; the id matches the feed's card, so an alert
+  // and the card it points at always describe the same set of roles. A role whose
+  // timestamp cannot place it in a drop still alerts, on its own.
+  const byDrop = new Map<string, { dropId: string; company: string; roles: Internship[] }>();
+  for (const job of jobs) {
+    const key = employerDropKey(job);
+    const dropId = (key ? employerDropGroupId(job) : undefined) ?? `individual-${job.jobId}`;
+    const drop = byDrop.get(key ?? dropId) ?? { dropId, company: job.company, roles: [] };
+    drop.roles.push(job);
+    byDrop.set(key ?? dropId, drop);
+  }
+  for (const { dropId, company, roles } of byDrop.values()) {
+    // The feed renders a drop as one card only from RELEASE_MINIMUM_ROLES roles;
+    // below that (with no card already open for the day) every role keeps its own
+    // card, so it keeps its own alert and the two surfaces stay consistent.
+    const opensCard = roles.length >= RELEASE_MINIMUM_ROLES;
+    for (const device of devices) {
+      if (options.excludeAllUsers || options.excludeUserIds?.has(device.userId)) { skipped += roles.length; continue; }
+      let preference = preferences.get(device.userId);
+      if (!preference) { preference = await users.getPreferences(device.userId); preferences.set(device.userId, preference); }
+      if (!preference?.alertsEnabled || !preference.onboardingComplete) { skipped += roles.length; continue; }
+      const matching = roles.filter((job) => matchesJobFilter(job, preference.filter));
+      if (!matching.length) { skipped += roles.length; continue; }
+      // Check the old job-ID key during the rolling migration so a previously
+      // delivered role is not resent merely because its receipt key was hardened.
+      const existing = await Promise.all(matching.map(async (job) => (
+        await users.getReceipt(device.userId, notificationDedupeKey(job), device.token)
+        ?? await users.getReceipt(device.userId, job.jobId, device.token)
+      )));
+      const previous = options.releases ? await options.releases.getRelease(device.userId, dropId) : undefined;
+      const card = opensCard || Boolean(previous);
+      for (const batch of card ? [matching] : matching.map((job) => [job])) {
+        const fresh = batch.filter((job) => !delivered(existing[matching.indexOf(job)]));
+        if (!fresh.length) { skipped += batch.length; continue; }
+        const message = card
+          ? dropPushMessage(company, batch, Boolean(previous))
+          : nativePushMessage(batch[0]!, preference.filter, preference.push);
+        const context = deliveryContext(fresh[0]!, device.userId, device.token, device.platform, message.title);
+        const timestamp = now().toISOString();
+        const claimed: Array<{ job: Internship; receipt: DeliveryReceipt }> = [];
+        for (const job of fresh) {
+          const prior = existing[matching.indexOf(job)];
+          const receipt: DeliveryReceipt = { userId: device.userId, jobId: job.jobId, dedupeKey: notificationDedupeKey(job), token: device.token, status: 'pending', attempts: (prior?.attempts ?? 0) + 1, deliveryState: 'claimed', createdAt: prior?.createdAt ?? timestamp, updatedAt: timestamp };
+          if (await users.claimReceipt(receipt)) claimed.push({ job, receipt });
+        }
+        if (!claimed.length) {
+          emitDeliveryEvent(logger, { event: 'notification_skipped_duplicate', occurredAt: timestamp, ...context, reason: 'concurrent_delivery_claim' });
+          skipped += fresh.length; continue;
+        }
+        const releases = options.releases;
+        if (card && releases) {
+          // The card the alert points at: one release row per user and drop, its
+          // job set growing as the employer adds roles, so the app can open the
+          // same roles the alert was about.
+          const known = [...new Set([...(previous?.jobIds ?? []), ...matching.map((job) => job.jobId)])].sort();
+          await releases.putRelease({
+            releaseId: dropId, userId: device.userId,
+            jobIds: known, newJobIds: claimed.map(({ job }) => job.jobId).sort(),
+            createdAt: previous?.createdAt ?? timestamp,
+          });
+          message.data = { destination: 'release', releaseId: dropId, url: `internnotifs://releases/${encodeURIComponent(dropId)}` };
+          message.click = message.data.url;
+        }
+        try {
+          const ticket = await publisher.publish(device.token, message);
+          // An ok response without a ticket is ambiguous: Expo may have accepted it,
+          // so the permanent claim remains but automated delivery never retries it.
+          const accepted = ticket.status === 'ok' && Boolean(ticket.id);
+          const ambiguous = ticket.status === 'ok' && !ticket.id;
+          await Promise.all(claimed.map(({ receipt }) => users.putReceipt({
+            ...receipt, ticketId: ticket.id,
+            status: accepted || ambiguous ? 'pending' : 'error',
+            deliveryState: accepted ? 'accepted' : ambiguous ? 'unknown' : 'definitive-failure',
+            updatedAt: now().toISOString(),
+          })));
+          if (accepted) { emitDeliveryEvent(logger, { event: 'notification_sent', occurredAt: now().toISOString(), ...context }); sent += claimed.length; }
+          else {
+            emitDeliveryEvent(logger, { event: 'notification_failed', occurredAt: now().toISOString(), ...context, reason: ambiguous ? 'ambiguous_provider_acceptance' : ticket.details?.error ?? ticket.message ?? 'expo_ticket_error' });
+            failed += claimed.length; if (ticket.details?.error === 'DeviceNotRegistered') await users.putDevice({ ...device, active: false, updatedAt: now().toISOString() });
+          }
+        } catch (error) {
+          const failure = classifyExpoPushFailure(error);
+          const explicitHttpFailure = failure !== 'unknown';
+          await Promise.all(claimed.map(({ receipt }) => {
+            const retryable = failure === 'retryable' && (receipt.attempts ?? 1) < MAX_EXPO_PUSH_ATTEMPTS;
+            return users.putReceipt({
+              ...receipt,
+              status: explicitHttpFailure ? retryable ? 'retryable' : 'error' : 'pending',
+              deliveryState: explicitHttpFailure ? retryable ? 'claimed' : 'definitive-failure' : 'unknown',
+              lastErrorCode: error instanceof ExpoPushHttpError ? `ExpoHttp${error.status}` : 'TransportAmbiguous',
+              lastErrorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+              lastErrorAt: now().toISOString(),
+              updatedAt: now().toISOString(),
+            });
+          }));
+          emitDeliveryEvent(logger, { event: 'notification_failed', occurredAt: now().toISOString(), ...context, reason: error instanceof Error ? error.message.slice(0, 240) : 'unknown_transport_error' });
+          failed += claimed.length;
+        }
       }
-    } catch (error) {
-      const failure = classifyExpoPushFailure(error);
-      const explicitHttpFailure = failure !== 'unknown';
-      const retryable = failure === 'retryable' && (receipt.attempts ?? 1) < MAX_EXPO_PUSH_ATTEMPTS;
-      // Timeouts and connection failures cannot prove whether Expo accepted the
-      // request. Explicit HTTP responses did not yield a ticket and are safe to
-      // classify for bounded retry or permanent rejection.
-      await users.putReceipt({
-        ...receipt,
-        status: explicitHttpFailure ? retryable ? 'retryable' : 'error' : 'pending',
-        deliveryState: explicitHttpFailure ? retryable ? 'claimed' : 'definitive-failure' : 'unknown',
-        lastErrorCode: error instanceof ExpoPushHttpError ? `ExpoHttp${error.status}` : 'TransportAmbiguous',
-        lastErrorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
-        lastErrorAt: now().toISOString(),
-        updatedAt: now().toISOString(),
-      });
-      emitDeliveryEvent(logger, { event: 'notification_failed', occurredAt: now().toISOString(), ...context, reason: error instanceof Error ? error.message.slice(0, 240) : 'unknown_transport_error' });
-      failed += 1;
     }
   }
   return { sent, skipped, failed };
@@ -300,6 +377,7 @@ export async function drainPendingExpoNotifications(
   users: UserStore,
   publisher: ExpoPushPublisher,
   now: () => Date = () => new Date(),
+  releases?: ReleaseStore,
 ): Promise<{
   processed: number;
   deferred: number;
@@ -311,7 +389,7 @@ export async function drainPendingExpoNotifications(
   const [devices, preferences] = await Promise.all([users.activeDevices(), users.activePreferences()]);
   const readyUserIds = new Set(preferences.map((preference) => preference.userId));
   const hasReadyDevice = devices.some((device) => readyUserIds.has(device.userId));
-  const delivery = await sendNewJobNotifications(pending, users, publisher, now);
+  const delivery = await sendNewJobNotifications(pending, users, publisher, now, undefined, releases ? { releases } : {});
   // A device can be registered slightly before onboarding saves its alert
   // preferences. Do not consume the global legacy marker until at least one
   // fully opted-in device has evaluated the batch; receipts own delivery and

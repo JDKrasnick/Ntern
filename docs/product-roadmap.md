@@ -42,6 +42,7 @@
 - [x] Bound sparse grouped-catalog filter scans, reconcile legacy notification markers through durable Expo receipts, isolate iOS plain-text accessibility state from secure authentication fields, and make account switching/sign-out race-safe with server-side session revocation.
 - [x] Roll every configured GitHub board to its live 2027 repository contract, preserve source health across HTTP 304 responses, roll expired list-wide seasons forward, and defer or guardedly recover notification markers when no opted-in device exists.
 - [x] Move push tokens, alert filters, and notification wording to an anonymous installation identity so signing in, signing out, and account deletion do not control device notifications.
+- [x] Collapse one employer's posting day into a single catalog card and a single alert: roles that arrive later join the drop that is already open instead of becoming their own cards, a later alert reads "N roles added to <employer>" and opens that same card, and each user's card, count, and delivery hold only the roles their own filter matches.
 - [ ] Export any recoverable AWS development data after the suspended account is reactivated; do not block the source-backed development cutover on that export.
 
 - [ ] Continuously discover and verify the broadest practical employer set, then prioritize active sources by technical early-career relevance and international/student-friendly coverage.
