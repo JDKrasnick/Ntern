@@ -12,6 +12,8 @@ interface DurableObjectStorage { get<T>(key: string): Promise<T | undefined>; pu
 interface DurableObjectState { storage: DurableObjectStorage; }
 const DEFAULT_BUDGETS: Record<PipelinePriority, number> = { P0: 4, P1: 2, P2: 2 };
 const LEASE_MS = 30_000;
+// A later owner-reviewed rollout may add an explicit, default-off enforcement gate.
+const ENFORCEMENT_ENABLED = false;
 function initialState(): ControllerState { return { mode: 'observation', permitsInUse: { P0: 0, P1: 0, P2: 0 }, budgets: { ...DEFAULT_BUDGETS }, recentPressure: 0, permits: {}, failures: [], protectedSuccesses: 0 }; }
 function retryDelay(mode: ControllerMode, priority: PipelinePriority): number { return priority === 'P0' ? mode === 'open' ? 30 : 10 : mode === 'open' ? 300 : 60; }
 
@@ -29,7 +31,7 @@ export class D1TrafficController {
   private async save(value: ControllerState): Promise<void> { await this.state.storage.put('state', value); }
   async acquire(request: PermitRequest): Promise<{ permit?: Permit; retryAfterSeconds?: number; status: ControllerStatus }> {
     const state = await this.load(); const waitingP0 = request.priority !== 'P0' && state.permitsInUse.P0 >= state.budgets.P0;
-    const blocked = state.mode !== 'observation' && (waitingP0 || state.permitsInUse[request.priority] >= state.budgets[request.priority] || (state.mode === 'open' && request.priority !== 'P0'));
+    const blocked = ENFORCEMENT_ENABLED && state.mode !== 'observation' && (waitingP0 || state.permitsInUse[request.priority] >= state.budgets[request.priority] || (state.mode === 'open' && request.priority !== 'P0'));
     if (blocked) return { retryAfterSeconds: retryDelay(state.mode, request.priority), status: publicStatus(state) };
     const permit: Permit = { permitId: crypto.randomUUID(), expiresAt: new Date(Date.now() + LEASE_MS).toISOString(), fenced: true };
     state.permits[permit.permitId] = { ...request, ...permit }; state.permitsInUse[request.priority] += 1; await this.save(state);
