@@ -621,6 +621,8 @@ export const POSTING_PROVIDERS = [
   'janestreet',
   'goldman-sachs',
   'imc',
+  'icims',
+  'smartrecruiters',
   'unknown',
 ] as const;
 export type PostingProvider = typeof POSTING_PROVIDERS[number];

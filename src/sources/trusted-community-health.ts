@@ -56,7 +56,12 @@ export function trustedCommunityThresholds(baseline: TrustedCommunityBaseline): 
   return {
     minimumRawRows: Math.ceil(baseline.rawRows * 0.7),
     minimumEligibleRows: Math.ceil(baseline.eligibleRows * 0.7),
-    minimumInspectedCandidates: 100,
+    // The inspection floor is a ceiling on a family-sized board, not a count
+    // every list can reach: a list with 70 eligible rows can never inspect 100
+    // candidates, so the absolute 100 made every complete pass breach and left
+    // such a source permanently quarantined. Small lists keep the same 70% shape
+    // as the count floors above.
+    minimumInspectedCandidates: Math.max(1, Math.min(100, Math.ceil(inspected * 0.7))),
     minimumInspectionCoverage: 0.9,
     maximumDestinationFailureRate: Math.min(0.5, ratio(baseline.destinationFailures, inspected) + 0.1),
     maximumBrowserInspectionShare: Math.min(0.9, ratio(baseline.browserInspectionCandidates, inspected) + 0.1),

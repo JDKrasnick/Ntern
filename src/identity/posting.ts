@@ -102,6 +102,12 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
   if (host === 'imc.com' && (match = /^\/[a-z]{2}\/careers\/jobs\/(\d+)\/?$/i.exec(url.pathname))) {
     return { provider: 'imc', tenant: 'imc', postingId: match[1] };
   }
+  if (host === 'jobs.smartrecruiters.com' && (match = /^\/([^/]+)\/([a-z0-9]+)\/?$/i.exec(url.pathname))) {
+    return { provider: 'smartrecruiters', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
+  }
+  if (host.endsWith('.icims.com') && (match = /^\/jobs\/(\d+)(?:\/[^/]*)?\/job\/?$/i.exec(url.pathname))) {
+    return { provider: 'icims', tenant: host.slice(0, -'.icims.com'.length), postingId: match[1] };
+  }
   return { provider: 'unknown' };
 }
 
