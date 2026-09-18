@@ -1211,8 +1211,8 @@ export async function collectRoleMetadataInBackground(
   env: Pick<Environment, 'DB' | 'DESTINATION_VERIFICATION_QUEUE' | 'METADATA_SCHEDULED_COLLECTION_LIMIT'>,
   now: Date,
 ): Promise<{ queued: number }> {
-  const configured = Number(env.METADATA_SCHEDULED_COLLECTION_LIMIT ?? 100);
-  const limit = Number.isInteger(configured) ? Math.max(0, Math.min(configured, 200)) : 100;
+  const configured = Number(env.METADATA_SCHEDULED_COLLECTION_LIMIT ?? 50);
+  const limit = Number.isInteger(configured) ? Math.max(0, Math.min(configured, 200)) : 50;
   if (!limit) return { queued: 0 };
   const operations = new D1CatalogAdmissionStore(env.DB);
   // Reserving leases each candidate, so consecutive passes advance instead of
@@ -1435,11 +1435,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store));
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
-    // This schedule fires six times an hour; collection stages once, so a pass
-    // cannot monopolize the queue and each run's leases can settle first.
-    const metadataCollection = observedAt.getUTCMinutes() === 9
-      ? await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt))
-      : undefined;
+    // Bounded per pass and lease-protected, so running on every maintenance tick
+    // drains the backlog without overlapping work. Gating this on a specific
+    // minute made it depend on fragile clock arithmetic and unobservable.
+    const metadataCollection = await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt));
     const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
     const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
