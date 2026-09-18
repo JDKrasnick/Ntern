@@ -43,6 +43,26 @@ describe('grouped catalog domain', () => {
     expect(details.group.featuredRole.housing).toEqual(housing);
     expect(details.group.compensations).toEqual(['USD 8,500/month']);
   });
+  it('splits drops on the calendar day, not on a rolling window', () => {
+    const at = (iso: string) => ({ firstSeenAt: iso, catalogVisibleAt: iso, lastSeenAt: iso });
+    // A rolling employer's last role of the day and first role of the next day are
+    // separate instances, however close together they land.
+    const acrossMidnight = groupCatalogJobs([
+      job('late', 0, at('2026-08-23T23:59:30.000Z')), job('late-two', 0, at('2026-08-23T23:59:40.000Z')),
+      job('late-three', 0, at('2026-08-23T23:59:50.000Z')), job('late-four', 0, at('2026-08-23T23:59:59.000Z')),
+      job('early', 0, at('2026-08-24T00:00:05.000Z')),
+    ]);
+    expect(acrossMidnight.map(({ row }) => [row.kind, row.roleCount]).sort()).toEqual([['employer-release', 4], ['individual', 1]]);
+
+    // Everything inside one calendar day is one card, even hours apart.
+    const sameDay = groupCatalogJobs([
+      job('morning', 0, at('2026-08-23T06:40:28.000Z')), job('noon', 0, at('2026-08-23T12:00:00.000Z')),
+      job('afternoon', 0, at('2026-08-23T17:20:00.000Z')), job('night', 0, at('2026-08-23T22:05:00.000Z')),
+    ]);
+    expect(sameDay).toHaveLength(1);
+    expect(sameDay[0]?.row).toMatchObject({ kind: 'employer-release', roleCount: 4 });
+  });
+
   it('keeps a drop together, absorbing roles that arrive later and earlier in its window', () => {
     const at = (iso: string) => ({ firstSeenAt: iso, catalogVisibleAt: iso, lastSeenAt: iso });
     // Visa: a single role in the morning, the batch hours later, one more role
