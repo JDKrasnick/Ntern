@@ -190,6 +190,33 @@ describe('notifications', () => {
     expect(messages).toHaveLength(2);
   });
 
+  it('counts the drop day in the device timezone, not UTC', async () => {
+    const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
+    const publisher = capturePushes(messages);
+    await users.putPreferences({
+      userId: 'user-1', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-09-17T00:00:00.000Z',
+      alertSettings: { delivery: 'immediate', timezone: 'America/Los_Angeles', applicationReminders: false, followUpDays: 0 },
+    });
+    await users.putDevice({ userId: 'user-1', token: 'ExponentPushToken[test]', platform: 'ios', active: true, createdAt: '2026-09-17T00:00:00.000Z', updatedAt: '2026-09-17T00:00:00.000Z' });
+    // 23:30 and 02:00 UTC are one Los Angeles evening, and two UTC days.
+    const wave = [visaRole(1, '2026-09-17T23:30:00.000Z'), visaRole(2, '2026-09-18T02:00:00.000Z'),
+      visaRole(3, '2026-09-18T02:05:00.000Z'), visaRole(4, '2026-09-18T02:10:00.000Z')];
+
+    await expect(sendNewJobNotifications(wave, users, publisher, () => new Date('2026-09-18T02:20:00.000Z'), undefined, { releases }))
+      .resolves.toMatchObject({ sent: 4, failed: 0 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.title).toBe('Visa posted 4 matching roles');
+    expect(messages[0]?.data).toMatchObject({ releaseId: employerDropGroupId(wave[0]!, 0, 'America/Los_Angeles') });
+
+    // The same roles under a UTC viewer are two days, so nothing is added twice.
+    const utcUsers = new MemoryUserStore(); const utcMessages: PushMessage[] = [];
+    const utcPublisher = capturePushes(utcMessages);
+    await utcUsers.putPreferences({ userId: 'user-1', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-09-17T00:00:00.000Z' });
+    await utcUsers.putDevice({ userId: 'user-1', token: 'ExponentPushToken[test]', platform: 'ios', active: true, createdAt: '2026-09-17T00:00:00.000Z', updatedAt: '2026-09-17T00:00:00.000Z' });
+    await sendNewJobNotifications(wave, utcUsers, utcPublisher, () => new Date('2026-09-18T02:20:00.000Z'), undefined, { releases });
+    expect(utcMessages.length).toBeGreaterThan(1);
+  });
+
   it('leaves the roles a user filtered out of the drop alert and out of its count', async () => {
     const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
     const publisher = capturePushes(messages);
