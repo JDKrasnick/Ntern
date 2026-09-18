@@ -36,6 +36,7 @@ import { housingLabels, type DisplayHousingDetail } from "../shared/housing-disp
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, countActiveCatalogFilters, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
+import { advanceBelt, beltItems, type BeltItem } from "./src/newness-belt";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
@@ -811,16 +812,10 @@ function JobCard({
             <View style={styles.jobCompanyRow}>
               <View style={styles.jobCompanyLeft}>
                 <Text style={styles.company} numberOfLines={1}>{display.company}</Text>
-                {recencyBadge ? (
-                  <View style={styles.newSpark} accessibilityLabel={`${recencyBadge} role`}>
-                    <Ionicons name="sparkles-outline" size={13} color={colors.signal} />
-                    <Text style={styles.newSparkText}>{recencyBadge}</Text>
-                  </View>
-                ) : null}
               </View>
-              {job.disciplines?.length ? (
+              {job.disciplines?.length || recencyBadge ? (
                 <View style={styles.jobCardTopTags}>
-                  {job.disciplines.slice(0, 2).map((d) => {
+                  {job.disciplines?.slice(0, 2).map((d) => {
                     const s = disciplineStyleFor(d);
                     return (
                       <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
@@ -828,6 +823,14 @@ function JobCard({
                       </View>
                     );
                   })}
+                  {/* The marker closes the row so its position never depends on the
+                      company name or the discipline pill beside it. */}
+                  {recencyBadge ? (
+                    <View style={styles.newSpark} accessibilityLabel={`${recencyBadge} role`}>
+                      <Ionicons name="sparkles-outline" size={13} color={colors.signal} />
+                      <Text style={styles.newSparkText}>{recencyBadge}</Text>
+                    </View>
+                  ) : null}
                 </View>
               ) : null}
             </View>
@@ -1461,19 +1464,19 @@ function NewnessLane({
   const laneTileWidth = width < 600 ? Math.min(300, width - 76) : 320;
   const laneStep = laneTileWidth + 12;
   const roleCount = groups.reduce((total, group) => total + group.roleCount, 0);
-  const listRef = useRef<FlatList<CatalogGroupRow>>(null);
-  const [cycling, setCycling] = useState(true);
-  // A drag is a reader taking the wheel: hold off for a while instead of
-  // yanking the lane onward under their hand.
-  const heldUntil = useRef(0);
-  const autoCycles = cycling && attentive && motionAllowed && groups.length > 1;
+  const listRef = useRef<FlatList<BeltItem<CatalogGroupRow>>>(null);
   const laneWrapRef = useRef<View>(null);
-  const tweenRef = useRef(0);
-  const tweening = useRef(false);
-  const laneTarget = useRef(0);
-  // react-native-web ignores `scrollToOffset` for a horizontal list and its
-  // `behavior: 'smooth'` scroll never commits, so the web build tweens the
-  // scroller's own node and native keeps the list's own animation.
+  const [cycling, setCycling] = useState(true);
+  // A reader who scrolls takes the belt out of their way for a while.
+  const heldUntil = useRef(0);
+  const beltWritten = useRef(0);
+  const writing = useRef(false);
+  const autoCycles = cycling && attentive && motionAllowed && groups.length > 1;
+  const cycleLength = groups.length * laneStep;
+  const belt = useMemo(() => beltItems(groups), [groups]);
+  // react-native-web ignores `scrollToOffset` for a horizontal list, so the web
+  // build moves the scroller's own node and native keeps the list API. Native
+  // rounds the offset, so only write when the rounded pixel changes.
   const laneScroller = () => {
     // react-native-web renders a View as its DOM node; the scroller is the one
     // descendant that overflows sideways.
@@ -1481,68 +1484,44 @@ function NewnessLane({
     if (!wrap) return null;
     return Array.from(wrap.querySelectorAll<HTMLElement>("div")).find((node) => node.scrollWidth > node.clientWidth + 20) ?? null;
   };
-  const scrollLaneTo = (offset: number) => {
-    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(tweenRef.current);
-    laneTarget.current = offset;
+  const writeBelt = (offset: number) => {
     const scroller = typeof window === "undefined" ? null : laneScroller();
-    if (!scroller) {
-      listRef.current?.scrollToOffset({ offset, animated: true });
-      return;
+    writing.current = true;
+    if (scroller) {
+      scroller.scrollLeft = offset;
+    } else if (Math.round(offset) !== beltWritten.current) {
+      listRef.current?.scrollToOffset({ offset: Math.round(offset), animated: false });
+      beltWritten.current = Math.round(offset);
     }
-    const from = scroller.scrollLeft;
-    const started = Date.now();
-    tweening.current = true;
-    const step = () => {
-      const progress = Math.min(1, (Date.now() - started) / 760);
-      const eased = 1 - (1 - progress) ** 3;
-      scroller.scrollLeft = from + (offset - from) * eased;
-      if (progress < 1) {
-        tweenRef.current = requestAnimationFrame(step);
-        return;
-      }
-      tweenRef.current = 0;
-      // Let the trailing scroll events from this glide land before listening again.
-      setTimeout(() => { tweening.current = false; }, 200);
-    };
-    tweenRef.current = requestAnimationFrame(step);
+    writing.current = false;
   };
-  /** Any scroll the glide did not cause is the reader taking the wheel. */
+  /** Any scroll the belt did not cause is the reader taking the wheel. */
   const mountedAt = useRef(Date.now());
   const onLaneScroll = () => {
-    // The lane settles its own layout on mount; that is not the reader moving it.
-    if (tweening.current || Date.now() - mountedAt.current < 2000) return;
+    if (writing.current || Date.now() - mountedAt.current < 2000) return;
     const scroller = typeof window === "undefined" ? null : laneScroller();
-    if (!scroller || Math.abs(scroller.scrollLeft - laneTarget.current) < 8) return;
-    heldUntil.current = Date.now() + 12000;
-  };
-  useEffect(() => () => { if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(tweenRef.current); }, []);
-  /** The lane's meaningful resting offsets: one per tile, ending at the last full
-   * scroll — stepping past the scrollable range would silently do nothing. */
-  const laneStops = (max: number) => {
-    if (max <= 0) return [0];
-    const stops: number[] = [];
-    for (let offset = 0; offset <= max; offset += laneStep) stops.push(offset);
-    const last = stops[stops.length - 1]!;
-    if (last !== max && max - last > laneStep / 2) stops.push(max);
-    return stops;
+    const actual = scroller ? scroller.scrollLeft : undefined;
+    if (actual !== undefined && Math.abs(actual - beltWritten.current) < 2) return;
+    heldUntil.current = Date.now() + 8000;
   };
   useEffect(() => {
     if (!autoCycles) return;
-    let stop = 0;
-    const timer = setInterval(() => {
-      if (Date.now() < heldUntil.current) return;
-      const scroller = typeof window === "undefined" ? null : laneScroller();
-      // An unmeasured lane and a lane that already fits have one resting place;
-      // leave the stop where it is and try again on the next tick.
-      if (!scroller) return;
-      const max = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-      const stops = laneStops(max);
-      if (stops.length < 2) return;
-      stop = (stop + 1) % stops.length;
-      scrollLaneTo(stops[stop]!);
-    }, 4200);
-    return () => clearInterval(timer);
-  }, [autoCycles, groups.length, laneStep]);
+    let offset = laneScroller()?.scrollLeft ?? 0;
+    let last = Date.now();
+    let frame = 0;
+    const step = () => {
+      const now = Date.now();
+      const elapsed = now - last;
+      last = now;
+      if (now >= heldUntil.current) {
+        offset = advanceBelt(offset, elapsed, cycleLength);
+        writeBelt(offset);
+      }
+      frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [autoCycles, cycleLength, laneStep]);
   return (
     <View style={styles.catalogLane}>
       <View style={styles.catalogLaneHeader}>
@@ -1555,7 +1534,7 @@ function NewnessLane({
         {groups.length > 1 ? (
           <TouchableOpacity
             accessibilityRole="button"
-            accessibilityLabel={cycling ? "Stop the new roles from advancing" : "Let the new roles advance again"}
+            accessibilityLabel={cycling ? "Stop the new roles from moving" : "Let the new roles move again"}
             aria-pressed={!cycling}
             onPress={() => setCycling((current) => !current)}
             style={styles.catalogLaneControl}
@@ -1566,38 +1545,36 @@ function NewnessLane({
         ) : null}
       </View>
       <View ref={laneWrapRef}>
-      <FlatList
-        ref={listRef}
-        horizontal
-        data={groups}
-        keyExtractor={(group) => group.groupId}
-        showsHorizontalScrollIndicator={false}
-        snapToInterval={laneStep}
-        decelerationRate="fast"
-        onScrollBeginDrag={() => { heldUntil.current = Date.now() + 12000; }}
-        onScroll={onLaneScroll}
-        scrollEventThrottle={32}
-        onScrollToIndexFailed={() => undefined}
-        contentContainerStyle={styles.catalogLaneList}
-        renderItem={({ item }) => (
-          <View style={{ width: laneTileWidth }}>
-            <CatalogGroupItem
-              group={item}
-              presentation="lane"
-              status={status}
-              newJobIds={newJobIds}
-              applicationStatuses={applicationStatuses}
-              queuedJobIds={queuedJobIds}
-              queuingJobIds={queuingJobIds}
-              onOpenGroup={onOpenGroup}
-              onOpenRole={onOpenRole}
-              onAddToQueue={onAddToQueue}
-              onHideLocally={onHideLocally}
-              onRemoveFromQueue={onRemoveFromQueue}
-            />
-          </View>
-        )}
-      />
+        <FlatList<BeltItem<CatalogGroupRow>>
+          ref={listRef}
+          horizontal
+          data={belt}
+          keyExtractor={(item) => item.key}
+          showsHorizontalScrollIndicator={false}
+          onScrollBeginDrag={() => { heldUntil.current = Date.now() + 8000; }}
+          onScroll={onLaneScroll}
+          scrollEventThrottle={32}
+          onScrollToIndexFailed={() => undefined}
+          contentContainerStyle={styles.catalogLaneList}
+          renderItem={({ item }) => (
+            <View style={{ width: laneTileWidth }} accessibilityElementsHidden={item.decorative || undefined} importantForAccessibility={item.decorative ? "no-hide-descendants" : undefined}>
+              <CatalogGroupItem
+                group={item.group}
+                presentation="lane"
+                status={status}
+                newJobIds={newJobIds}
+                applicationStatuses={applicationStatuses}
+                queuedJobIds={queuedJobIds}
+                queuingJobIds={queuingJobIds}
+                onOpenGroup={onOpenGroup}
+                onOpenRole={onOpenRole}
+                onAddToQueue={onAddToQueue}
+                onHideLocally={onHideLocally}
+                onRemoveFromQueue={onRemoveFromQueue}
+              />
+            </View>
+          )}
+        />
       </View>
       {/* The lane is the top of the catalog, not the catalog: the rule keeps it
           from bleeding into the grid below. */}
