@@ -205,7 +205,12 @@ export function destinationVerificationMatchesReference(
   reference: SourceOccurrence,
   request: Pick<ScheduledDestinationVerification, 'candidateUrl' | 'providerIdentity'>,
 ): boolean {
-  if (reference.applyUrl !== request.candidateUrl) return false;
+  // Metadata collection targets the destination the occurrence's own admission
+  // verified, which is frequently a redirect or canonical form of the apply URL.
+  // Requiring byte-equality with `applyUrl` silently voided 328 of 1,476
+  // collectible roles, so accept that verified URL as well as the source URL.
+  const verifiedCandidate = reference.admission?.destination?.finalUrl ?? reference.admission?.destination?.candidateUrl;
+  if (reference.applyUrl !== request.candidateUrl && verifiedCandidate !== request.candidateUrl) return false;
   const current = providerIdentityForReference(reference, reference.admission?.destination);
   const equal = (left: string | undefined, right: string | undefined) => left?.toLowerCase() === right?.toLowerCase();
   return current.sourceId === request.providerIdentity.sourceId

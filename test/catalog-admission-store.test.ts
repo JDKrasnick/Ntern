@@ -2,7 +2,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleCatalogAdmissionOperations } from '../cloudflare/catalog-admission-api.js';
-import { D1CatalogAdmissionStore, DESTINATION_VERIFICATION_LEASE_LIMIT } from '../cloudflare/catalog-admission-store.js';
+import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, DESTINATION_VERIFICATION_LEASE_LIMIT } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { persistDestinationAdmission, reachabilityFromHttpStatus, type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
 import { collectRoleMetadataInBackground } from '../cloudflare/worker.js';
@@ -856,6 +856,30 @@ describe('D1 catalog admission operations', () => {
     expect(sent[0]).toMatchObject({ jobId: 'job-1', sourceId: 'workday-acme' });
     // Its lease now holds the next pass off rather than the stale deferral.
     await expect(collectRoleMetadataInBackground(env as never, new Date('2026-09-01T00:01:00Z'))).resolves.toEqual({ queued: 0 });
+  });
+
+  it('matches collection work sent for the destination the occurrence itself verified', () => {
+    const canonical = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Remote/Software-Intern_R12345';
+    const redirect = 'https://acme.wd1.myworkdayjobs.com/en-US/Acme_Careers/job/Remote/Software-Intern_R12345';
+    const verified = admission(true);
+    verified.destination = { ...verified.destination, classification: 'posting-detail', provider: 'workday',
+      tenant: 'acme', expectedPostingId: 'R12345', candidateUrl: redirect, finalUrl: redirect };
+    const reference = {
+      sourceId: 'workday-acme', provenance: 'official-ats' as const, externalId: 'R12345', document: 'R12345',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', row: 1, company: 'Acme',
+      title: 'Software Engineering Intern', location: 'Remote', seasons: undefined, season: 'summer-2027',
+      applyUrl: canonical, compensation: { raw: '' }, state: 'open' as const, admission: verified,
+    } as unknown as Parameters<typeof destinationVerificationMatchesReference>[0];
+    const providerIdentity = { provider: 'workday' as const, sourceId: 'workday-acme',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', tenant: 'acme', postingId: 'R12345' };
+
+    // Collection targets the verified destination, which is the apply URL here
+    // in everything but the locale segment its own admission recorded.
+    expect(destinationVerificationMatchesReference(reference, { candidateUrl: redirect, providerIdentity })).toBe(true);
+    expect(destinationVerificationMatchesReference(reference, { candidateUrl: canonical, providerIdentity })).toBe(true);
+    // An unrelated URL, or one from another posting, still cannot mutate it.
+    expect(destinationVerificationMatchesReference(reference, { candidateUrl: `${canonical}-other`, providerIdentity })).toBe(false);
+    expect(destinationVerificationMatchesReference(reference, { candidateUrl: redirect, providerIdentity: { ...providerIdentity, postingId: 'R99999' } })).toBe(false);
   });
 
   it('retires JSON-LD metadata that disappears from a refreshed exact page', async () => {
