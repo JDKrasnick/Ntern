@@ -5,7 +5,7 @@ import { postingIdentityKey, score } from './core/normalize.js';
 import { platformFetch } from './core/platform-fetch.js';
 import type { DeliveryReceipt, Internship, UserPreferences } from './types.js';
 import type { InternshipStore, ReleaseStore, UserStore } from './store.js';
-import { employerDropChunks, employerDropGroupId, employerDropKey, RELEASE_MINIMUM_ROLES } from './catalog-groups.js';
+import { employerDropChunks, employerDropGroupId, employerDropKey, RELEASE_MAXIMUM_ROLES, RELEASE_MINIMUM_ROLES } from './catalog-groups.js';
 import { matchesJobFilter } from './core/filters.js';
 import { notificationSourceLabelFor } from './sources/source-label.js';
 import { publicApplicationUrl } from './core/application-url.js';
@@ -234,8 +234,11 @@ export async function sendNewJobNotifications(
       // Keep notification cards under the catalog's cap too. Each chunk owns its
       // own release id, so a 45-role drop produces the same 20/20/5 cards and
       // deep links as the catalog rather than one oversized private release.
+      const releaseChunks = matching.length > RELEASE_MAXIMUM_ROLES
+        ? employerDropChunks(matching, timeZone)
+        : [{ roles: matching, groupId: employerDropGroupId(matching[0]!, 0, timeZone) }];
       const batches = opensCard
-        ? employerDropChunks(matching, timeZone).map(({ roles: batch, groupId }) => ({ batch, dropId: groupId! }))
+        ? releaseChunks.map(({ roles: batch, groupId }) => ({ batch, dropId: groupId! }))
         : previous ? [{ batch: matching, dropId }]
         : matching.map((job) => ({ batch: [job], dropId: `individual-${job.jobId}` }));
       for (const { batch, dropId: batchDropId } of batches) {
@@ -394,8 +397,11 @@ export async function deliverDeferredExpoNotifications(
     // back into a standalone role alert.
     const previous = releases ? await releases.getRelease(userId, dropId) : undefined;
     const timeZone = preference.alertSettings?.timezone;
+    const releaseChunks = deliverable.length > RELEASE_MAXIMUM_ROLES
+      ? employerDropChunks(deliverable.map(({ job }) => job), timeZone)
+      : [{ roles: deliverable.map(({ job }) => job), groupId: employerDropGroupId(deliverable[0]!.job, 0, timeZone) }];
     const batches = deliverable.length >= RELEASE_MINIMUM_ROLES
-      ? employerDropChunks(deliverable.map(({ job }) => job), timeZone).map(({ roles, groupId }) => ({
+      ? releaseChunks.map(({ roles, groupId }) => ({
         deliverable: roles.map((job) => deliverable.find((entry) => entry.job.jobId === job.jobId)!), dropId: groupId!,
       }))
       : [{ deliverable, dropId }];
