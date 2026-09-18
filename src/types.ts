@@ -138,6 +138,9 @@ export interface SourceCheckpoint {
   contentHash?: string;
   /** Algorithm used to calculate contentHash; missing values are legacy v1. */
   contentHashAlgorithmVersion?: number;
+  /** Last fetch read the board listing without descriptions because the board is
+   * larger than an isolate can parse with them (SpaceX, Anduril). */
+  contentOmitted?: boolean;
   /** Version of the reviewed admission configuration applied to this snapshot. */
   admissionConfigurationVersion?: string;
   /** Parser version applied after a successful full source reconciliation. */
