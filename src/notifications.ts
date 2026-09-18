@@ -380,12 +380,16 @@ export async function deliverDeferredExpoNotifications(
       skipped += 1;
     }
     if (!device || !preference || !deliverable.length) continue;
-    const card = deliverable.length >= RELEASE_MINIMUM_ROLES;
+    // A later quiet-hours batch can be smaller than the card threshold while
+    // still belonging to a release the user has already received. Keep that
+    // release's notification and deep link rather than turning the addition
+    // back into a standalone role alert.
+    const previous = releases ? await releases.getRelease(userId, dropId) : undefined;
+    const card = deliverable.length >= RELEASE_MINIMUM_ROLES || Boolean(previous);
     const message = card
-      ? dropPushMessage(company, deliverable.map(({ job }) => job), false)
+      ? dropPushMessage(company, deliverable.map(({ job }) => job), Boolean(previous))
       : nativePushMessage(deliverable[0]!.job, preference.filter, preference.push);
     if (card && releases) {
-      const previous = await releases.getRelease(userId, dropId);
       await releases.putRelease({
         releaseId: dropId, userId,
         jobIds: [...new Set([...(previous?.jobIds ?? []), ...deliverable.map(({ job }) => job.jobId)])].sort(),
