@@ -3565,7 +3565,11 @@ function AppContent() {
       delete updated.queuedAt;
       return updated;
     }));
-    if (isPendingApplicationId(queued.applicationId)) {
+    // A requeue request can still be in flight when the user opens the
+    // employer form. Defer the dequeue until that request has established the
+    // application ID, otherwise its later response can put the role back in
+    // the queue after the handoff.
+    if (isPendingApplicationId(queued.applicationId) || pendingQueueIds.current.has(jobId)) {
       dequeueAfterSave.current.add(jobId);
       return;
     }
@@ -3644,6 +3648,16 @@ function AppContent() {
       return undefined;
     }
   };
+  const dequeueAfterQueuedMutation = async (application: Application) => {
+    if (!dequeueAfterSave.current.has(application.jobId)) return application;
+    dequeueAfterSave.current.delete(application.jobId);
+    const dequeued = await api<Application>(`/me/applications/${encodeURIComponent(application.applicationId)}`, token, {
+      method: "PATCH",
+      body: JSON.stringify({ queued: false }),
+    });
+    setApplications((current) => current.map((item) => item.applicationId === dequeued.applicationId ? dequeued : item));
+    return dequeued;
+  };
   const addToQueue = (job: Job, options?: { silent?: boolean }) => {
     const existing = applications.find((item) => item.jobId === job.jobId);
     if (existing && existing.status !== "saved") return;
@@ -3665,6 +3679,7 @@ function AppContent() {
             body: JSON.stringify({ queued: true }),
           });
           setApplications((current) => current.map((item) => item.applicationId === requeued.applicationId ? requeued : item));
+          await dequeueAfterQueuedMutation(requeued);
           return;
         }
         const created = await api<Application>("/me/applications", token, {
@@ -3675,14 +3690,7 @@ function AppContent() {
           created,
           ...current.filter((item) => item.applicationId !== created.applicationId && item.applicationId !== pendingId && item.jobId !== created.jobId),
         ]);
-        if (dequeueAfterSave.current.has(job.jobId)) {
-          dequeueAfterSave.current.delete(job.jobId);
-          const dequeued = await api<Application>(`/me/applications/${encodeURIComponent(created.applicationId)}`, token, {
-            method: "PATCH",
-            body: JSON.stringify({ queued: false }),
-          });
-          setApplications((current) => current.map((item) => item.applicationId === dequeued.applicationId ? dequeued : item));
-        }
+        await dequeueAfterQueuedMutation(created);
         const alertSettings = preferences.alertSettings ?? defaultAlertSettings;
         if (preferences.alertsEnabled && alertSettings.applicationReminders) {
           void scheduleApplicationFollowUp(
@@ -3706,6 +3714,30 @@ function AppContent() {
         }
       } finally {
         endQueueTracking(job.jobId);
+      }
+    })();
+  };
+  const requeueApplication = (application: Application) => {
+    if (application.status !== "saved" || application.queuedAt !== undefined) return;
+    if (!beginQueueTracking(application.jobId)) return;
+    const timestamp = new Date().toISOString();
+    setApplications((current) => current.map((item) => item.applicationId === application.applicationId ? { ...item, queuedAt: timestamp } : item));
+    void (async () => {
+      try {
+        const requeued = await api<Application>(`/me/applications/${encodeURIComponent(application.applicationId)}`, token, {
+          method: "PATCH",
+          body: JSON.stringify({ queued: true }),
+        });
+        setApplications((current) => current.map((item) => item.applicationId === requeued.applicationId ? requeued : item));
+        await dequeueAfterQueuedMutation(requeued);
+      } catch (error) {
+        dequeueAfterSave.current.delete(application.jobId);
+        setApplications((current) => current.map((item) => item.applicationId === application.applicationId ? application : item));
+        const apps = await reconcileApplications();
+        const queued = apps?.some((item) => item.applicationId === application.applicationId && item.queuedAt !== undefined) ?? false;
+        if (!queued) Alert.alert("Could not update queue", error instanceof Error ? error.message : "Please try again.");
+      } finally {
+        endQueueTracking(application.jobId);
       }
     })();
   };
@@ -3777,6 +3809,7 @@ function AppContent() {
               alertSettings={preferences.alertSettings ?? defaultAlertSettings}
               alertsEnabled={preferences.alertsEnabled}
               onChanged={() => void load()}
+              onRequeueApplication={requeueApplication}
               onOpenOfficialApplication={openApplicationAndScheduleCheck}
               onBulkOpenQueue={openQueueBulk}
             />
@@ -4672,6 +4705,7 @@ function Applications({
   alertSettings,
   alertsEnabled,
   onChanged,
+  onRequeueApplication,
   onOpenOfficialApplication,
   onBulkOpenQueue,
 }: {
@@ -4682,6 +4716,7 @@ function Applications({
   alertSettings: AlertSettings;
   alertsEnabled: boolean;
   onChanged: () => void;
+  onRequeueApplication: (application: Application) => void;
   onOpenOfficialApplication: (job: Pick<Job, "jobId" | "applyUrl">) => void;
   onBulkOpenQueue?: (targets: Array<{ jobId: string; applyUrl: string }>) => void;
 }) {
@@ -4741,18 +4776,6 @@ function Applications({
       onChanged();
     })().catch((error) =>
       Alert.alert("Could not remove application", error instanceof Error ? error.message : "Please try again."),
-    );
-  };
-  const requeueInQueue = (item: Application) => {
-    if (isPendingApplicationId(item.applicationId)) return;
-    void (async () => {
-      await api(`/me/applications/${encodeURIComponent(item.applicationId)}`, token, {
-        method: "PATCH",
-        body: JSON.stringify({ queued: true }),
-      });
-      onChanged();
-    })().catch((error) =>
-      Alert.alert("Could not update queue", error instanceof Error ? error.message : "Please try again."),
     );
   };
   const queuedIds = new Set(queue.map((entry) => entry.applicationId));
@@ -4982,7 +5005,7 @@ function Applications({
                   compact
                   variant="secondary"
                   grow
-                  onPress={() => requeueInQueue(item)}
+                  onPress={() => onRequeueApplication(item)}
                 />
                 <ActionButton
                   label="Remove"
