@@ -1420,6 +1420,7 @@ function CatalogGroupItem({
 function NewnessLane({
   groups,
   since,
+  attentive = true,
   onOpenGroup,
   onOpenRole,
   onAddToQueue,
@@ -1430,25 +1431,129 @@ function NewnessLane({
   queuingJobIds,
   newJobIds,
   status,
-}: CatalogCardProps & { groups: CatalogGroupRow[]; since: string }) {
+}: CatalogCardProps & { groups: CatalogGroupRow[]; since: string; attentive?: boolean }) {
   const { width } = useWindowDimensions();
+  const motionAllowed = useContext(MotionAllowedContext);
   const laneTileWidth = width < 600 ? Math.min(300, width - 76) : 320;
+  const laneStep = laneTileWidth + 12;
   const roleCount = groups.reduce((total, group) => total + group.roleCount, 0);
+  const listRef = useRef<FlatList<CatalogGroupRow>>(null);
+  const [cycling, setCycling] = useState(true);
+  // A drag is a reader taking the wheel: hold off for a while instead of
+  // yanking the lane onward under their hand.
+  const heldUntil = useRef(0);
+  const autoCycles = cycling && attentive && motionAllowed && groups.length > 1;
+  const laneWrapRef = useRef<View>(null);
+  const tweenRef = useRef(0);
+  const tweening = useRef(false);
+  const laneTarget = useRef(0);
+  // react-native-web ignores `scrollToOffset` for a horizontal list and its
+  // `behavior: 'smooth'` scroll never commits, so the web build tweens the
+  // scroller's own node and native keeps the list's own animation.
+  const laneScroller = () => {
+    // react-native-web renders a View as its DOM node; the scroller is the one
+    // descendant that overflows sideways.
+    const wrap = laneWrapRef.current as unknown as HTMLElement | null;
+    if (!wrap) return null;
+    return Array.from(wrap.querySelectorAll<HTMLElement>("div")).find((node) => node.scrollWidth > node.clientWidth + 20) ?? null;
+  };
+  const scrollLaneTo = (offset: number) => {
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(tweenRef.current);
+    laneTarget.current = offset;
+    const scroller = typeof window === "undefined" ? null : laneScroller();
+    if (!scroller) {
+      listRef.current?.scrollToOffset({ offset, animated: true });
+      return;
+    }
+    const from = scroller.scrollLeft;
+    const started = Date.now();
+    tweening.current = true;
+    const step = () => {
+      const progress = Math.min(1, (Date.now() - started) / 760);
+      const eased = 1 - (1 - progress) ** 3;
+      scroller.scrollLeft = from + (offset - from) * eased;
+      if (progress < 1) {
+        tweenRef.current = requestAnimationFrame(step);
+        return;
+      }
+      tweenRef.current = 0;
+      // Let the trailing scroll events from this glide land before listening again.
+      setTimeout(() => { tweening.current = false; }, 200);
+    };
+    tweenRef.current = requestAnimationFrame(step);
+  };
+  /** Any scroll the glide did not cause is the reader taking the wheel. */
+  const mountedAt = useRef(Date.now());
+  const onLaneScroll = () => {
+    // The lane settles its own layout on mount; that is not the reader moving it.
+    if (tweening.current || Date.now() - mountedAt.current < 2000) return;
+    const scroller = typeof window === "undefined" ? null : laneScroller();
+    if (!scroller || Math.abs(scroller.scrollLeft - laneTarget.current) < 8) return;
+    heldUntil.current = Date.now() + 12000;
+  };
+  useEffect(() => () => { if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(tweenRef.current); }, []);
+  /** The lane's meaningful resting offsets: one per tile, ending at the last full
+   * scroll — stepping past the scrollable range would silently do nothing. */
+  const laneStops = (max: number) => {
+    if (max <= 0) return [0];
+    const stops: number[] = [];
+    for (let offset = 0; offset <= max; offset += laneStep) stops.push(offset);
+    const last = stops[stops.length - 1]!;
+    if (last !== max && max - last > laneStep / 2) stops.push(max);
+    return stops;
+  };
+  useEffect(() => {
+    if (!autoCycles) return;
+    let stop = 0;
+    const timer = setInterval(() => {
+      if (Date.now() < heldUntil.current) return;
+      const scroller = typeof window === "undefined" ? null : laneScroller();
+      // An unmeasured lane and a lane that already fits have one resting place;
+      // leave the stop where it is and try again on the next tick.
+      if (!scroller) return;
+      const max = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+      const stops = laneStops(max);
+      if (stops.length < 2) return;
+      stop = (stop + 1) % stops.length;
+      scrollLaneTo(stops[stop]!);
+    }, 4200);
+    return () => clearInterval(timer);
+  }, [autoCycles, groups.length, laneStep]);
   return (
     <View style={styles.catalogLane}>
       <View style={styles.catalogLaneHeader}>
-        <Text style={styles.catalogLaneTitle}>
-          {roleCount} new {roleCount === 1 ? "role" : "roles"} since {since}
-        </Text>
-        <Text style={styles.catalogLaneCaption}>Freshly matched your alerts</Text>
+        <View style={styles.catalogLaneHeading}>
+          <Text style={styles.catalogLaneTitle}>
+            {roleCount} new {roleCount === 1 ? "role" : "roles"} since {since}
+          </Text>
+          <Text style={styles.catalogLaneCaption}>Freshly matched your alerts</Text>
+        </View>
+        {groups.length > 1 ? (
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={cycling ? "Stop the new roles from advancing" : "Let the new roles advance again"}
+            aria-pressed={!cycling}
+            onPress={() => setCycling((current) => !current)}
+            style={styles.catalogLaneControl}
+          >
+            <Ionicons name={cycling ? "pause" : "play"} size={14} color={colors.muted} />
+            <Text style={styles.catalogLaneControlText}>{cycling ? "Pause" : "Play"}</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
+      <View ref={laneWrapRef}>
       <FlatList
+        ref={listRef}
         horizontal
         data={groups}
         keyExtractor={(group) => group.groupId}
         showsHorizontalScrollIndicator={false}
-        snapToInterval={laneTileWidth + 12}
+        snapToInterval={laneStep}
         decelerationRate="fast"
+        onScrollBeginDrag={() => { heldUntil.current = Date.now() + 12000; }}
+        onScroll={onLaneScroll}
+        scrollEventThrottle={32}
+        onScrollToIndexFailed={() => undefined}
         contentContainerStyle={styles.catalogLaneList}
         renderItem={({ item }) => (
           <View style={{ width: laneTileWidth }}>
@@ -1469,6 +1574,10 @@ function NewnessLane({
           </View>
         )}
       />
+      </View>
+      {/* The lane is the top of the catalog, not the catalog: the rule keeps it
+          from bleeding into the grid below. */}
+      <View style={styles.catalogLaneRule} />
     </View>
   );
 }
@@ -3146,6 +3255,7 @@ function CatalogScreen({
   newJobIds,
   newSinceLabel,
   dayZone,
+  attentive = true,
 }: {
   groups: CatalogGroupRow[];
   query: string;
@@ -3179,6 +3289,8 @@ function CatalogScreen({
   newSinceLabel?: string;
   /** The zone release days are read in; UTC unless the reader chose their own. */
   dayZone: string;
+  /** False while the surface is mounted but hidden, so nothing animates unseen. */
+  attentive?: boolean;
 }) {
   const { width } = useWindowDimensions();
   // The queue panel is a desktop workspace aid. Native keeps browsing focused;
@@ -3338,8 +3450,8 @@ function CatalogScreen({
           onEndReached={onLoadMore}
           onEndReachedThreshold={0.6}
           ListHeaderComponent={
-            laneGroups.length ? (
-              <NewnessLane groups={laneGroups} since={newSinceLabel ?? "your last visit"} {...cardProps} />
+            laneGroups.length && !searching ? (
+              <NewnessLane groups={laneGroups} since={newSinceLabel ?? "your last visit"} attentive={attentive} {...cardProps} />
             ) : null
           }
           renderItem={({ item: row }) => (
@@ -5072,6 +5184,7 @@ function GuestExperience({
                 newJobIds={newJobIds}
                 newSinceLabel={newSinceLabel}
                 dayZone={dayZone}
+                attentive={tab === "catalog"}
               />
             </View>
             {tab === "roles" ? (
@@ -7433,8 +7546,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     flexDirection: "row",
     gap: 6,
-    minHeight: 44,
-    paddingHorizontal: 12,
+    minHeight: 48,
+    paddingHorizontal: 16,
   },
   calendarTriggerOn: { backgroundColor: colors.signalSoft, borderColor: colors.separator },
   calendarTriggerText: { color: colors.ink, fontSize: 13, fontWeight: "700" },
@@ -7573,7 +7686,28 @@ const styles = StyleSheet.create({
   catalogGroupCountPill: { backgroundColor: colors.ink, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
   catalogGroupCountText: { color: colors.onDark, fontSize: 11, fontWeight: "800" },
   catalogLane: { marginBottom: 8, marginTop: 6 },
-  catalogLaneHeader: { alignItems: "baseline", flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 12 },
+  catalogLaneHeader: { alignItems: "flex-start", flexDirection: "row", gap: 12, justifyContent: "space-between", marginBottom: 14, paddingTop: 2 },
+  catalogLaneHeading: { flexShrink: 1, gap: 2 },
+  catalogLaneControl: {
+    alignItems: "center",
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    minHeight: 48,
+    paddingHorizontal: 14,
+  },
+  catalogLaneControlText: { color: colors.body, fontSize: 13, fontWeight: "700" },
+  /** Deliberate section separation: a hairline of ink, not the near-invisible
+   * separator colour, so the band below reads as a different list. */
+  catalogLaneRule: {
+    backgroundColor: colors.ink,
+    height: 1,
+    marginBottom: 22,
+    marginTop: 24,
+    opacity: 0.2,
+  },
   catalogLaneTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", lineHeight: 22 },
   catalogLaneCaption: { color: colors.muted, fontSize: 13, fontWeight: "600" },
   catalogLaneList: { gap: 12, paddingBottom: 4 },

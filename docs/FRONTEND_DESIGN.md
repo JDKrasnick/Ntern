@@ -175,8 +175,12 @@ Every screen follows these rules. They are as important as colors and type.
 ### Newness lane
 
 - Above the grid, and only when the launch release contains roles, show one horizontal lane of large tiles: **N new roles since <interval>** with **Freshly matched your alerts**. The lane is the top of the catalog, not a second product.
+- **A search hides the lane**, and with it the rule below: once a reader is looking for something specific, the release band is between them and their results. A day chosen in the release calendar keeps the lane — it still describes what is new.
+- **A hairline closes the lane before the grid starts.** The band below is a different list, and the reader should never have to infer that from spacing alone. Use a one-pixel line of ink at about 20% — the near-invisible `separator` colour reads as an accident, not a boundary.
+- The lane advances itself, one tile at a time, on a slow glide of about 760 ms every 4.2 s — a product display, not a ticker. Cycle over the offsets the lane can actually rest at, so a step never does nothing, and return to the start after the last one.
+- Auto-advance is a courtesy, never a cage: offer a **Pause** control beside the heading (48 pt, same as every other chip), hold off for twelve seconds after any scroll the reader makes themselves, and stop entirely under Reduce Motion, in a backgrounded tab, or while the surface is hidden. Never let it fight a reader's own dragging.
+- Never loop a second row, never autoplay sound or video, and never badge the lane with a count a reader cannot act on.
 - Lane tiles are the same tiles at the larger size: they spell out their actions and add the freshness line. Only roles that are genuinely in the release carry the **New here** marker; grid tiles never claim newness without it.
-- The lane is a snap scroller with a deliberate peek of the next tile. Never wrap it into a second row, never loop it automatically, and never badge it.
 - With no new roles the lane is simply absent: the search spine and the grid stand alone. Do not substitute an empty lane or a "nothing new" banner in the catalog — the Roles tab owns that message.
 
 ### Release calendar
