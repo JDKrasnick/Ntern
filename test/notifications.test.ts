@@ -190,6 +190,24 @@ describe('notifications', () => {
     expect(messages).toHaveLength(2);
   });
 
+  it('sends immediately even when the clock advances between reads', async () => {
+    // The cadence decision and the receipt's timestamp must come from one clock
+    // read: a read that advanced by a millisecond made every immediate alert look
+    // like it belonged to a later window and deferred it.
+    const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
+    const publisher = capturePushes(messages);
+    await visaUser(users);
+    let ticks = 0;
+    const advancingClock = () => new Date(Date.parse('2026-09-17T15:00:00.000Z') + ticks++);
+    const wave = [visaRole(1, '2026-09-17T14:37:52.000Z'), visaRole(2, '2026-09-17T14:37:53.000Z'),
+      visaRole(3, '2026-09-17T14:49:44.000Z'), visaRole(4, '2026-09-17T14:52:34.000Z')];
+
+    await expect(sendNewJobNotifications(wave, users, publisher, advancingClock, undefined, { releases }))
+      .resolves.toMatchObject({ sent: 4, failed: 0 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.title).toBe('Visa posted 4 matching roles');
+  });
+
   it('counts the drop day in the device timezone, not UTC', async () => {
     const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
     const publisher = capturePushes(messages);
