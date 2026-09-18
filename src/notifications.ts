@@ -239,10 +239,14 @@ export async function sendNewJobNotifications(
           ? dropPushMessage(company, batch, Boolean(previous))
           : nativePushMessage(batch[0]!, preference.filter, preference.push);
         const context = deliveryContext(fresh[0]!, device.userId, device.token, device.platform, message.title);
-        const timestamp = now().toISOString();
+        // One clock read decides both the receipt's time and its delivery window:
+        // two reads that straddle a millisecond made `deliverAfter` look later than
+        // the alert and deferred an otherwise immediate push.
+        const at = now();
+        const timestamp = at.toISOString();
         // Quiet hours and a daily digest defer the whole drop to one window, so a
         // card never arrives half-delivered.
-        const deliverAfter = nextPushDeliveryAt(now(), preference.alertSettings);
+        const deliverAfter = nextPushDeliveryAt(at, preference.alertSettings);
         const deferred = deliverAfter > timestamp;
         const claimed: Array<{ job: Internship; receipt: DeliveryReceipt }> = [];
         for (const job of fresh) {
