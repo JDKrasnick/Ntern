@@ -21,6 +21,30 @@ const MAX_FRAME_SECONDS = 0.12;
  * lane is never left sitting still. */
 export const BELT_QUIET_MS = 1200;
 
+type LaneGroup = { roleIds?: string[]; featuredRole?: { jobId: string } | null };
+
+/**
+ * What the lane leads with. Genuinely new roles when the release lens has them,
+ * otherwise the newest the catalog holds.
+ *
+ * The lens empties as soon as a reader opens the catalog, so leading with it
+ * alone meant the belt disappeared on the second visit and never came back for a
+ * reader who was simply caught up — or for a first-time reader, who has no lens
+ * at all. A belt that vanishes reads as broken, not as caught up.
+ */
+export function laneSelection<T extends LaneGroup>(
+  groups: T[],
+  newJobIds: ReadonlySet<string> | undefined,
+  latestCount = 6,
+): { groups: T[]; latest: boolean } {
+  if (newJobIds?.size) {
+    const fresh = groups.filter((group) => group.roleIds?.some((roleId) => newJobIds.has(roleId))
+      || Boolean(group.featuredRole && newJobIds.has(group.featuredRole.jobId)));
+    if (fresh.length) return { groups: fresh, latest: false };
+  }
+  return { groups: groups.slice(0, latestCount), latest: true };
+}
+
 export type BeltItem<T> = { key: string; group: T; decorative: boolean };
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, BELT_QUIET_MS, BELT_SPEED } from '../src/newness-belt';
+import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, laneSelection, BELT_QUIET_MS, BELT_SPEED } from '../src/newness-belt';
 
 const groups = [{ groupId: 'a' }, { groupId: 'b' }, { groupId: 'c' }];
 const laneStep = 332;
@@ -128,6 +128,50 @@ describe('the belt yielding to the reader', () => {
 
   it('never holds a reader who has not touched it', () => {
     expect(beltYields(60000, 0, false)).toBe(false);
+  });
+});
+
+describe('what the lane leads with', () => {
+  const groups = [
+    { groupId: 'a', roleIds: ['a1', 'a2'] },
+    { groupId: 'b', roleIds: ['b1'] },
+    { groupId: 'c', roleIds: ['c1'], featuredRole: { jobId: 'c1' } },
+  ];
+
+  it('leads with what is genuinely new when the lens has news', () => {
+    const lane = laneSelection(groups, new Set(['b1']));
+    expect(lane.groups.map((group) => group.groupId)).toEqual(['b']);
+    expect(lane.latest).toBe(false);
+  });
+
+  it('counts a group whose featured role is new', () => {
+    expect(laneSelection(groups, new Set(['c1'])).groups.map((group) => group.groupId)).toEqual(['c']);
+  });
+
+  it('still leads somewhere when the lens has nothing new', () => {
+    // The lens empties the moment a reader opens the catalog, and a first-time
+    // reader has no lens at all. Leading with the lens alone is what made the
+    // belt vanish on the second visit and never come back.
+    for (const lens of [undefined, new Set<string>()]) {
+      const lane = laneSelection(groups, lens);
+      expect(lane.groups.map((group) => group.groupId)).toEqual(['a', 'b', 'c']);
+      expect(lane.latest).toBe(true);
+    }
+  });
+
+  it('falls back when the lens names roles the catalog does not show', () => {
+    const lane = laneSelection(groups, new Set(['not-in-the-catalog']));
+    expect(lane.groups.map((group) => group.groupId)).toEqual(['a', 'b', 'c']);
+    expect(lane.latest).toBe(true);
+  });
+
+  it('leads with nothing when there is nothing to lead with', () => {
+    expect(laneSelection([], new Set(['b1']))).toEqual({ groups: [], latest: true });
+  });
+
+  it('keeps the fallback to the newest few', () => {
+    const many = Array.from({ length: 9 }, (_, index) => ({ groupId: `g${index}` }));
+    expect(laneSelection(many, undefined, 4).groups.map((group) => group.groupId)).toEqual(['g0', 'g1', 'g2', 'g3']);
   });
 });
 

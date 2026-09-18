@@ -173,7 +173,7 @@ Every screen follows these rules. They are as important as colors and type.
 
 ### Newness lane
 
-- Above the grid, and only when the launch release contains roles, show one horizontal lane of large tiles: **N new roles since <interval>** with **Freshly matched your alerts**. The lane is the top of the catalog, not a second product.
+- Above the grid, and whenever the catalog holds any roles, show one horizontal lane of large tiles: **N new roles since <interval>** with **Freshly matched your alerts** when the release has something new, and **Newest roles in the catalog** with **The latest we are tracking** when it does not. The lane is the top of the catalog, not a second product.
 - **A search hides the lane**, and with it the rule below: once a reader is looking for something specific, the release band is between them and their results. A day chosen in the release calendar keeps the lane — it still describes what is new.
 - **A hairline closes the lane before the grid starts.** The band below is a different list, and the reader should never have to infer that from spacing alone. Use a one-pixel line of ink at about 20% — the near-invisible `separator` colour reads as an accident, not a boundary.
 - The lane slides continuously at about 17 pt/s — unhurried but unmistakably moving: it never rests on a tile and never rewinds. It renders the release over and over, so when its offset passes one full copy it drops by exactly that length and lands on identical pixels; that is what makes the loop endless. Every copy after the first is decoration and must be hidden from assistive technology.
@@ -185,7 +185,7 @@ Every screen follows these rules. They are as important as colors and type.
 - The lane yields to the reader and takes itself back. While they are dragging it, or within about a second of their last scroll, it holds; once they stop it picks up again from wherever they left it, without a jump. Never hold for a fixed period: a timer keeps the lane still long after the reader has finished with it, and sets it moving again while their finger is still on it. The reader's position may sit anywhere in the copies, and the release repeats every cycle, so resume from that position modulo one cycle.
 - Never loop a second row, never autoplay sound or video, and never badge the lane with a count a reader cannot act on.
 - Lane tiles are the same tiles at the larger size: they spell out their actions and add the freshness line. Only roles that are genuinely in the release carry the **New here** marker; grid tiles never claim newness without it.
-- With no new roles the lane is simply absent: the search spine and the grid stand alone. Do not substitute an empty lane or a "nothing new" banner in the catalog — the Roles tab owns that message.
+- **The lane never vanishes while the catalog has roles.** Leading it with the launch release alone made it disappear the moment a reader opened the catalog — the lens empties on that visit — and then never return for a reader who was simply caught up, or for a first-time reader, who has no lens at all. A belt that disappears reads as broken, not as caught up, so fall back to the newest roles the catalog holds when the release has nothing new. Only an empty catalog, or an active search, leaves the lane off screen. The Roles tab still owns the "nothing new" message; do not put a banner in the lane's place.
 
 ### Release calendar
 

@@ -36,7 +36,7 @@ import { housingLabels, type DisplayHousingDetail } from "../shared/housing-disp
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
-import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, type BeltItem } from "./src/newness-belt";
+import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, laneSelection, type BeltItem } from "./src/newness-belt";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
@@ -1458,7 +1458,7 @@ function NewnessLane({
   queuingJobIds,
   newJobIds,
   status,
-}: CatalogCardProps & { groups: CatalogGroupRow[]; since: string; attentive?: boolean }) {
+}: CatalogCardProps & { groups: CatalogGroupRow[]; since?: string; attentive?: boolean }) {
   const { width } = useWindowDimensions();
   const motionAllowed = useContext(MotionAllowedContext);
   const laneTileWidth = width < 600 ? Math.min(300, width - 76) : 320;
@@ -1553,9 +1553,11 @@ function NewnessLane({
       <View style={styles.catalogLaneHeader}>
         <View style={styles.catalogLaneHeading}>
           <Text style={styles.catalogLaneTitle}>
-            {roleCount} new {roleCount === 1 ? "role" : "roles"} since {since}
+            {since
+              ? `${roleCount} new ${roleCount === 1 ? "role" : "roles"} since ${since}`
+              : "Newest roles in the catalog"}
           </Text>
-          <Text style={styles.catalogLaneCaption}>Freshly matched your alerts</Text>
+          <Text style={styles.catalogLaneCaption}>{since ? "Freshly matched your alerts" : "The latest we are tracking"}</Text>
         </View>
         {groups.length > 1 ? (
           <TouchableOpacity
@@ -3378,10 +3380,9 @@ function CatalogScreen({
     () => groups.filter((group) => !isHiddenGroup(group) || isUndoGroup(group)),
     [groups, hiddenJobIds, hiddenFeedbackJob],
   );
-  // A lane exists only when the launch inbox says something is genuinely new.
-  const laneGroups = newJobIds?.size
-    ? visibleGroups.filter((group) => group.roleIds?.some((roleId) => newJobIds.has(roleId)) || Boolean(group.featuredRole && newJobIds.has(group.featuredRole.jobId)))
-    : [];
+  // A lane exists whenever the catalog has anything to lead with: the release
+  // lens first, and the newest roles when the lens has nothing new.
+  const lane = useMemo(() => laneSelection(visibleGroups, newJobIds), [visibleGroups, newJobIds]);
   const rows = useMemo(() => {
     const chunked: CatalogGroupRow[][] = [];
     for (let index = 0; index < visibleGroups.length; index += columns) {
@@ -3528,8 +3529,8 @@ function CatalogScreen({
           onEndReached={onLoadMore}
           onEndReachedThreshold={0.6}
           ListHeaderComponent={
-            laneGroups.length && !searching ? (
-              <NewnessLane groups={laneGroups} since={newSinceLabel ?? "your last visit"} attentive={attentive} {...cardProps} />
+            lane.groups.length && !searching ? (
+              <NewnessLane groups={lane.groups} since={lane.latest ? undefined : newSinceLabel ?? "your last visit"} attentive={attentive} {...cardProps} />
             ) : null
           }
           renderItem={({ item: row }) => (
