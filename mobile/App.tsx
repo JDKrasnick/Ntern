@@ -3356,8 +3356,6 @@ function CatalogScreen({
     () => groups.filter((group) => !isHiddenGroup(group) || isUndoGroup(group)),
     [groups, hiddenJobIds, hiddenFeedbackJob],
   );
-  const roleCount = visibleGroups.reduce((total, group) => total + group.roleCount, 0);
-  const employerCount = new Set(visibleGroups.map((group) => group.company)).size;
   // A lane exists only when the launch inbox says something is genuinely new.
   const laneGroups = newJobIds?.size
     ? visibleGroups.filter((group) => group.roleIds?.some((roleId) => newJobIds.has(roleId)) || Boolean(group.featuredRole && newJobIds.has(group.featuredRole.jobId)))
@@ -3465,11 +3463,6 @@ function CatalogScreen({
               </TouchableOpacity>
             </View>
           ) : null}
-          <Text style={styles.catalogSummary} accessibilityLiveRegion="polite">
-            {loading
-              ? "Searching the catalog…"
-              : `${employerCount}${reachedEnd ? "" : "+"} ${employerCount === 1 ? "employer" : "employers"} · ${roleCount}${reachedEnd ? "" : "+"} ${roleCount === 1 ? "role" : "roles"}${searching ? ` for “${query.trim()}”` : ""}`}
-          </Text>
           {calendarOpen ? (
             <ReleaseCalendarPanel
               filters={filters}
@@ -7705,7 +7698,6 @@ const styles = StyleSheet.create({
   catalogTokenText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
   catalogTokenClear: { alignItems: "center", justifyContent: "center", minHeight: 34, paddingHorizontal: 8 },
   catalogTokenClearText: { color: colors.muted, fontSize: 13, fontWeight: "700", textDecorationLine: "underline" },
-  catalogSummary: { color: colors.muted, fontSize: 13, fontWeight: "600", marginTop: 10 },
   catalogGrid: {
     alignSelf: "center",
     maxWidth: 1120,
