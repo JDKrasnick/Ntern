@@ -3661,7 +3661,7 @@ function AppContent() {
   const addToQueue = (job: Job, options?: { silent?: boolean }) => {
     const existing = applications.find((item) => item.jobId === job.jobId);
     if (existing && existing.status !== "saved") return;
-    if (existing?.status === "saved" && existing.queuedAt) return;
+    if (existing?.status === "saved" && existing.queuedAt !== undefined) return;
     if (!beginQueueTracking(job.jobId)) return;
     const timestamp = new Date().toISOString();
     const pendingId = `pending-${job.jobId}`;
@@ -3810,6 +3810,7 @@ function AppContent() {
               alertsEnabled={preferences.alertsEnabled}
               onChanged={() => void load()}
               onRequeueApplication={requeueApplication}
+              queuingJobIds={queuingJobIds}
               onOpenOfficialApplication={openApplicationAndScheduleCheck}
               onBulkOpenQueue={openQueueBulk}
             />
@@ -4706,6 +4707,7 @@ function Applications({
   alertsEnabled,
   onChanged,
   onRequeueApplication,
+  queuingJobIds,
   onOpenOfficialApplication,
   onBulkOpenQueue,
 }: {
@@ -4717,6 +4719,7 @@ function Applications({
   alertsEnabled: boolean;
   onChanged: () => void;
   onRequeueApplication: (application: Application) => void;
+  queuingJobIds: Set<string>;
   onOpenOfficialApplication: (job: Pick<Job, "jobId" | "applyUrl">) => void;
   onBulkOpenQueue?: (targets: Array<{ jobId: string; applyUrl: string }>) => void;
 }) {
@@ -4919,6 +4922,7 @@ function Applications({
           ? job.availability
           : job?.open ? "available" : "closed";
         const unavailableReason = job && "unavailableReason" in job ? job.unavailableReason : undefined;
+        const queueMutationPending = queuingJobIds.has(item.jobId);
         if (queuedIds.has(item.applicationId)) {
           const canOpen = availability === "available" && Boolean(job?.applyUrl);
           return (
@@ -4931,7 +4935,7 @@ function Applications({
                   <Text style={styles.queueCompactCompany} numberOfLines={1}>{job?.company ?? "Saved role"}</Text>
                   <Text style={styles.queueCompactTitle} numberOfLines={2}>{job?.title ?? "Role details unavailable"}</Text>
                 </View>
-                {isPendingApplicationId(item.applicationId) ? (
+                {isPendingApplicationId(item.applicationId) || queueMutationPending ? (
                   <Text style={styles.queuePendingText}>Adding…</Text>
                 ) : (
                   <TouchableOpacity
@@ -4963,9 +4967,9 @@ function Applications({
                 <TouchableOpacity
                   accessibilityRole="button"
                   accessibilityLabel={`Mark ${roleName} as ${nextStatus}`}
-                  disabled={nextStatus === item.status || isPendingApplicationId(item.applicationId)}
+                  disabled={nextStatus === item.status || isPendingApplicationId(item.applicationId) || queueMutationPending}
                   onPress={() => advanceApplicationStatus(item, nextStatus, roleName)}
-                  style={[styles.queueCompactProgress, (nextStatus === item.status || isPendingApplicationId(item.applicationId)) && styles.queueCompactActionDisabled]}
+                  style={[styles.queueCompactProgress, (nextStatus === item.status || isPendingApplicationId(item.applicationId) || queueMutationPending) && styles.queueCompactActionDisabled]}
                 >
                   <Ionicons name="checkmark-circle-outline" size={17} color={colors.signal} />
                   <Text style={styles.queueCompactProgressText}>{nextStatus === "applied" ? "Mark applied" : `Mark ${nextStatus}`}</Text>
@@ -4998,13 +5002,14 @@ function Applications({
                 <Text style={styles.queuePendingText}>Adding…</Text>
               </View>
             ) : null}
-            {item.status === "saved" && !item.queuedAt && !isPendingApplicationId(item.applicationId) ? (
+            {item.status === "saved" && item.queuedAt === undefined && !isPendingApplicationId(item.applicationId) ? (
               <View style={[styles.applicationActionGap, styles.applicationActionRow]}>
                 <ActionButton
-                  label="Add to queue"
+                  label={queueMutationPending ? "Adding…" : "Add to queue"}
                   compact
                   variant="secondary"
                   grow
+                  disabled={queueMutationPending}
                   onPress={() => onRequeueApplication(item)}
                 />
                 <ActionButton
@@ -5012,6 +5017,7 @@ function Applications({
                   compact
                   variant="secondary"
                   grow
+                  disabled={queueMutationPending}
                   onPress={() => removeApplication(item)}
                 />
               </View>
@@ -5033,7 +5039,7 @@ function Applications({
               }
               compact
               variant="secondary"
-              disabled={nextStatus === item.status || isPendingApplicationId(item.applicationId)}
+              disabled={nextStatus === item.status || isPendingApplicationId(item.applicationId) || queueMutationPending}
               onPress={() => advanceApplicationStatus(item, nextStatus, roleName)}
             />
           </View>

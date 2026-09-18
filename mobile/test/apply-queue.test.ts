@@ -14,9 +14,10 @@ describe("sortApplyQueue", () => {
       entry({ jobId: "applied", status: "applied", queuedAt: "2026-09-01T00:00:00.000Z" }),
       entry({ jobId: "legacy", createdAt: "2026-09-02T00:00:00.000Z" }),
       entry({ jobId: "dequeued", createdAt: "2026-09-01T00:00:00.000Z" }),
+      entry({ jobId: "empty-timestamp", queuedAt: "", createdAt: "2026-09-01T00:00:00.000Z" }),
       entry({ jobId: "a", queuedAt: "2026-09-01T00:00:00.000Z", createdAt: "2026-09-01T00:00:00.000Z" }),
     ];
-    expect(sortApplyQueue(applications).map((item) => item.jobId)).toEqual(["a", "b"]);
+    expect(sortApplyQueue(applications).map((item) => item.jobId)).toEqual(["empty-timestamp", "a", "b"]);
   });
 });
 
