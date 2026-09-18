@@ -34,7 +34,7 @@ export function sortApplyQueue<T extends QueueEntry>(applications: T[]): T[] {
 /** A saved record is only "in queue" while it still carries a queue timestamp. */
 export function applicationStatusLabel(status: string, queuedAt?: string): string {
   if (status !== 'saved') return status.toUpperCase();
-  return queuedAt ? 'IN QUEUE' : 'AWAITING APPLY';
+  return queuedAt !== undefined ? 'IN QUEUE' : 'AWAITING APPLY';
 }
 
 export type ApplicationSection<T> = { title: 'To apply' | 'Tracking'; data: T[] };

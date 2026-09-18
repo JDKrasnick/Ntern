@@ -50,6 +50,7 @@ describe("applicationStatusLabel", () => {
   it("distinguishes a queued saved record from one awaiting apply", () => {
     expect(applicationStatusLabel("saved", undefined)).toBe("AWAITING APPLY");
     expect(applicationStatusLabel("saved", "2026-09-01T00:00:00.000Z")).toBe("IN QUEUE");
+    expect(applicationStatusLabel("saved", "")).toBe("IN QUEUE");
     expect(applicationStatusLabel("interview", undefined)).toBe("INTERVIEW");
   });
 });
