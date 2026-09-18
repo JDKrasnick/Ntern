@@ -704,8 +704,19 @@ export class D1InternshipStore implements InternshipStore {
       .sort(compareCatalogRecency).map(withEmployerCategory);
   }
   async putCatalogProjection(groups: CatalogGroupDetails[], generatedAt: string): Promise<void> {
-    const previous = await this.get<{ version: string }>('CATALOG_PROJECTION', 'CURRENT');
-    const version = createHash('sha256').update(`${generatedAt}\0${groups.map((group) => group.group.groupId).join('\0')}`).digest('hex').slice(0, 20);
+    const previous = await this.get<{ version: string; generatedAt: string }>('CATALOG_PROJECTION', 'CURRENT');
+    // Content-addressed, so an unchanged catalog costs one pointer write instead
+    // of rewriting every card: the refresh runs on a ten-minute cadence and D1's
+    // throughput is the constraint the ingestion queues queue behind, so ticks
+    // that change nothing must not spend it. The hash covers each card's payload,
+    // not just its id, because a role can change inside a card whose id is stable.
+    const version = createHash('sha256');
+    for (const group of groups) version.update(JSON.stringify(group)).update('\0');
+    const digest = version.digest('hex').slice(0, 20);
+    if (previous?.version === digest) {
+      await this.put('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', { version: digest, generatedAt, schemaVersion: 4 });
+      return;
+    }
     // One `batch()` is a single RPC call carrying every statement's bound value,
     // and Cloudflare refuses a serialized argument over 32 MiB. The projection is
     // a copy of the whole catalog, so neither a row count nor a statement count
@@ -732,7 +743,7 @@ export class D1InternshipStore implements InternshipStore {
       pending.push(this.db.prepare(`
         INSERT INTO catalog_items (pk, sk, kind, value, catalog_sort_key) VALUES ${placeholders}
         ON CONFLICT(pk, sk) DO UPDATE SET value = excluded.value, catalog_sort_key = excluded.catalog_sort_key
-      `).bind(...written.flatMap((row) => [`CATALOG_PROJECTION#${version}`, row.sk, row.value, row.sortKey])));
+      `).bind(...written.flatMap((row) => [`CATALOG_PROJECTION#${digest}`, row.sk, row.value, row.sortKey])));
       pendingBytes += writtenBytes;
     };
     for (let index = 0; index < groups.length; index += 1) {
@@ -746,11 +757,11 @@ export class D1InternshipStore implements InternshipStore {
     }
     await writeRows();
     await flush();
-    await this.put('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', { version, generatedAt, schemaVersion: 4 });
+    await this.put('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', { version: digest, generatedAt, schemaVersion: 4 });
     // Projection versions are rebuildable caches. Deleting only the version
     // observed before this refresh keeps overlapping refreshes from deleting
     // whichever version wins the pointer race.
-    if (previous?.version && previous.version !== version) {
+    if (previous?.version && previous.version !== digest) {
       await this.db.prepare("DELETE FROM catalog_items WHERE kind = 'catalog-projection' AND pk = ?")
         .bind(`CATALOG_PROJECTION#${previous.version}`).run();
     }

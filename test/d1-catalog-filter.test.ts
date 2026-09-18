@@ -139,6 +139,32 @@ describe('D1 filtered catalog projection', () => {
     }
   });
 
+  it('writes only the pointer when the projection content has not changed', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const batches: number[] = [];
+    try {
+      const store = new D1InternshipStore(sqliteD1(database, undefined, { maxBatchBytes: 32 * 1024 * 1024, batchBytes: batches }));
+      const details = [catalogGroupDetails(groupCatalogJobs([job('one', 'Software Engineering Intern')])[0]!)];
+      await store.putCatalogProjection(details, '2026-09-18T00:00:00.000Z');
+      const writesForFirstRefresh = batches.length;
+
+      // The next tick sees the same cards: the pointer is restated (readers cap a
+      // projection by its age) and not one card row is rewritten.
+      await store.putCatalogProjection(structuredClone(details), '2026-09-18T00:10:00.000Z');
+      expect(batches.length).toBe(writesForFirstRefresh);
+      expect(database.prepare("SELECT count(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 1 });
+
+      // A card that changes inside its stable id still rewrites.
+      const changed = structuredClone(details);
+      changed[0]!.group.titles = ['Renamed Intern'];
+      await store.putCatalogProjection(changed, '2026-09-18T00:20:00.000Z');
+      expect(batches.length).toBeGreaterThan(writesForFirstRefresh);
+    } finally {
+      database.close();
+    }
+  });
+
   it('lists and filters the catalog through bounded composite-key pages', async () => {
     const database = new DatabaseSync(':memory:');
     database.exec(`
