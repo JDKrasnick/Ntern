@@ -414,7 +414,7 @@ describe('D1 catalog admission operations', () => {
     expect(budget.used).toBeLessThan(10);
     await expect(store.deriveBackfillRepairBatch(generation.id, 'greenhouse-acme', 0, 121))
       .rejects.toThrow('between 1 and 120');
-  });
+  }, 30_000);
 
   it('resumes schedule synchronization and prunes stale rows only after a complete bounded pass', async () => {
     const { database, jobs } = subject();

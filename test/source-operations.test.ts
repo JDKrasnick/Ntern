@@ -208,6 +208,24 @@ describe('shared source operations', () => {
     expect(row).toMatchObject({ state: 'healthy', eligibleRows: 1 });
   });
 
+  it('shows that a board was read without its descriptions', async () => {
+    // SpaceX and Anduril answer with more than an isolate can parse once their
+    // descriptions are included, so their listings are read instead: the rows are
+    // complete and the extracted detail is what is missing.
+    const store = new MemoryInternshipStore();
+    const source = reviewedGreenhouseSources[0]!;
+    await store.putSourceHealth({
+      sourceId: source.id, provider: 'greenhouse', state: 'healthy', sourceStatus: 'active',
+      outcome: 'success_changed', lastAttemptAt: '2026-07-30T17:00:00.000Z', lastSuccessAt: '2026-07-30T17:00:00.000Z',
+      consecutiveFailures: 0, rawRows: 2497, eligibleRows: 4, contentOmitted: true, recentRuns: [],
+    } as never);
+
+    const response = await createSourceOperationsHandler(dependencies(store).value)(event('/operations/sources'));
+    const row = JSON.parse(response.body).sources.find(({ source: candidate }: { source: { sourceId: string } }) => candidate.sourceId === source.id);
+
+    expect(row).toMatchObject({ contentOmitted: true, rawRows: 2497 });
+  });
+
   it('tracks monthly monitoring checks for all provider fleets', async () => {
     const store = new MemoryInternshipStore();
     const setup = dependencies(store);

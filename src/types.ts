@@ -273,6 +273,9 @@ export interface SourceHealth {
   filteredRows?: number;
   filteredCount?: number;
   withheldRows?: number;
+  /** The source answered too large to read with descriptions and was read as a
+   * listing instead (Greenhouse boards above the isolate's parse ceiling). */
+  contentOmitted?: boolean;
   withheldCount?: number;
   applicationLinksChecked?: number;
   applicationLinkFailures?: number;

@@ -108,6 +108,10 @@ function publicSource(
     rawRows: health?.rawRows ?? checkpoint?.lastRawRowCount,
     eligibleRows: health?.eligibleRows ?? checkpoint?.lastRowCount,
     withheldRows: health?.withheldRows ?? checkpoint?.lastWithheldRowCount ?? 0,
+    // Rows are complete even when the board was too large to read with
+    // descriptions; the extracted detail is what is missing, so operators can see
+    // why a board's roles carry less metadata than the rest of the fleet.
+    contentOmitted: health?.contentOmitted ?? checkpoint?.contentOmitted === true,
     applicationLinksChecked: health?.applicationLinksChecked,
     applicationLinkFailures: health?.applicationLinkFailures,
     recentRuns: recentRuns.length,
