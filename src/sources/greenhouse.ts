@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { declaredBodyBytes, readBoundedJson } from '../core/bounded-body.js';
+import { readBoundedJson } from '../core/bounded-body.js';
 import { isTechnicalJob } from '../core/filters.js';
 import { parseCompensation } from '../core/normalize.js';
 import { platformFetch } from '../core/platform-fetch.js';
@@ -86,8 +86,8 @@ function boardBase(token: string): string {
   return `https://${GREENHOUSE_BOARD_API_HOST}/v1/boards/${encodeURIComponent(assertBoardToken(token))}`;
 }
 
-export function greenhouseJobsUrl(token: string): string {
-  return `${boardBase(token)}/jobs?content=true`;
+export function greenhouseJobsUrl(token: string, options: { content?: boolean } = {}): string {
+  return `${boardBase(token)}/jobs?content=${options.content === false ? 'false' : 'true'}`;
 }
 
 /**
@@ -351,11 +351,29 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       };
     }
     if (!response.ok) throw new SourceFetchError(`${this.id}: Greenhouse fetch failed (${response.status})`, 'http', response.status);
-    const contentLength = declaredBodyBytes(response);
-    if (contentLength !== undefined && contentLength > GREENHOUSE_RESPONSE_MAX_BYTES) {
-      throw new SourceFetchError(`${this.id}: Greenhouse response body exceeds ${GREENHOUSE_RESPONSE_MAX_BYTES} bytes`, 'capacity');
+    // A board whose descriptions do not fit is still readable without them: the
+    // listing carries the same jobs, their locations, and their application URLs
+    // at a fraction of the size — SpaceX answers with 27.8 MB of descriptions and
+    // 2.5 MB without, and its parsed form does not fit the isolate at all. Reading
+    // the listing keeps the source ingesting instead of failing as `capacity`
+    // twice and quarantining, and the first attempt still stops within one chunk
+    // of the ceiling so the oversized body is never retained.
+    let contentOmitted = false;
+    let payload: unknown;
+    try {
+      payload = (await readBoundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES, `${this.id}: Greenhouse`)).value;
+    } catch (error) {
+      if (!(error instanceof SourceFetchError) || error.category !== 'capacity') throw error;
+      contentOmitted = true;
+      await response.body?.cancel().catch(() => undefined);
+      response = await this.fetchImpl(greenhouseJobsUrl(this.options.source.boardToken, { content: false }), {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(GREENHOUSE_REQUEST_TIMEOUT_MS),
+      });
+      if (!response.ok) throw new SourceFetchError(`${this.id}: Greenhouse listing fetch failed (${response.status})`, 'http', response.status);
+      // A listing that does not fit either is still a capacity failure.
+      payload = (await readBoundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES, `${this.id}: Greenhouse listing`)).value;
     }
-    let payload: unknown = (await readBoundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES, `${this.id}: Greenhouse`)).value;
     if (!payload || typeof payload !== 'object' || !Array.isArray((payload as GreenhouseJobsResponse).jobs)) {
       throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
     }
@@ -408,6 +426,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
         contentHashAlgorithmVersion: GREENHOUSE_CONTENT_HASH_VERSION,
         lastSuccessAt: fetchedAt,
         successfulFetches: (previous?.successfulFetches ?? 0) + 1,
+        contentOmitted,
         lastRowCount: 0,
         lastRawCount: jobs.length,
         activeExternalIds: postings.map((posting) => posting.externalId),

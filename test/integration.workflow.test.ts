@@ -81,19 +81,21 @@ describe('mocked production workflow integration', () => {
     sesSend.mockRestore();
   });
 
-  it('records an oversized Greenhouse board as a retryable resource-limit failure', async () => {
+  // A board that cannot be read even as a listing is still unreadable: the
+  // listing fallback only rescues boards whose descriptions are the problem.
+  it('records a Greenhouse board that is unreadable even as a listing as a retryable resource-limit failure', async () => {
     const store = new MemoryInternshipStore();
     const adapter = new GreenhouseBoardAdapter({
       source: acmeSource,
-      fetchImpl: async () => new Response('{"jobs":[]}', {
-        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
-      }),
+      // A body that is genuinely over the ceiling both times: a declared length
+      // with a short body would fail as a chopped transfer instead.
+      fetchImpl: async () => new Response('x'.repeat(GREENHOUSE_RESPONSE_MAX_BYTES + 1)),
     });
 
     const result = await new Poller([adapter], store, () => new Date('2026-09-14T19:00:00.000Z')).poll();
     const health = await store.getSourceHealth(acmeSource.id);
 
-    expect(result.failures).toEqual([expect.stringContaining('response body exceeds')]);
+    expect(result.failures).toEqual([expect.stringContaining('exceeds')]);
     expect(health).toMatchObject({
       sourceId: acmeSource.id,
       outcome: 'resource_limit',
@@ -133,9 +135,9 @@ describe('mocked production workflow integration', () => {
     const store = new MemoryInternshipStore();
     const adapter = new GreenhouseBoardAdapter({
       source: acmeSource,
-      fetchImpl: async () => new Response('{"jobs":[]}', {
-        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
-      }),
+      // A body that is genuinely over the ceiling both times: a declared length
+      // with a short body would fail as a chopped transfer instead.
+      fetchImpl: async () => new Response('x'.repeat(GREENHOUSE_RESPONSE_MAX_BYTES + 1)),
     });
 
     await new Poller([adapter], store, () => new Date('2026-09-14T19:00:00.000Z')).poll();
