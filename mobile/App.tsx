@@ -603,6 +603,10 @@ type CardGestureOptions = {
  */
 function useCardGestures({ queueable, hideable, onQueue, onHide }: CardGestureOptions) {
   const motionAllowed = useContext(MotionAllowedContext);
+  // react-native-web has no native animated module, and an animation handed to the
+  // native driver there never calls its completion callback — which is where the
+  // hide and the swipe hand off to the list. Keep the driver on native only.
+  const driver = Platform.OS !== "web";
   const translateX = useRef(new Animated.Value(0)).current;
   const hideFade = useRef(new Animated.Value(1)).current;
   const hideScale = useRef(new Animated.Value(1)).current;
@@ -616,9 +620,9 @@ function useCardGestures({ queueable, hideable, onQueue, onHide }: CardGestureOp
       return;
     }
     Animated.parallel([
-      Animated.timing(hideFade, { toValue: 0, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
-      Animated.timing(hideScale, { toValue: 0.96, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
-      Animated.timing(hideTranslateY, { toValue: 6, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
+      Animated.timing(hideFade, { toValue: 0, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: driver }),
+      Animated.timing(hideScale, { toValue: 0.96, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: driver }),
+      Animated.timing(hideTranslateY, { toValue: 6, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: driver }),
     ]).start(() => onHide());
   };
   const handleQueue = () => {
@@ -634,7 +638,7 @@ function useCardGestures({ queueable, hideable, onQueue, onHide }: CardGestureOp
       toValue: 0,
       friction: 9,
       tension: 130,
-      useNativeDriver: true,
+      useNativeDriver: driver,
     }).start();
   };
   const panResponder = useMemo(
@@ -666,7 +670,7 @@ function useCardGestures({ queueable, hideable, onQueue, onHide }: CardGestureOp
               toValue: shouldQueue ? -108 : 108,
               duration: 100,
               easing: Easing.out(Easing.cubic),
-              useNativeDriver: true,
+              useNativeDriver: driver,
             }),
             Animated.delay(120),
           ]).start(() => {
@@ -3276,6 +3280,9 @@ function CatalogScreen({
   newSinceLabel,
   dayZone,
   attentive = true,
+  hiddenJobIds,
+  hiddenFeedbackJob,
+  onUndoHide,
 }: {
   groups: CatalogGroupRow[];
   query: string;
@@ -3311,6 +3318,10 @@ function CatalogScreen({
   dayZone: string;
   /** False while the surface is mounted but hidden, so nothing animates unseen. */
   attentive?: boolean;
+  /** Device-local hides, so a hidden card leaves this surface too. */
+  hiddenJobIds?: Set<string>;
+  hiddenFeedbackJob?: Job;
+  onUndoHide?: () => void;
 }) {
   const { width } = useWindowDimensions();
   // The queue panel is a desktop workspace aid. Native keeps browsing focused;
@@ -3330,19 +3341,31 @@ function CatalogScreen({
     : width >= 1400 ? 4 : width >= 840 ? 3 : 2;
   const tokens = catalogFilterTokens(filters);
   const searching = Boolean(query.trim());
-  const roleCount = groups.reduce((total, group) => total + group.roleCount, 0);
-  const employerCount = new Set(groups.map((group) => group.company)).size;
+  // A role hidden on this device leaves this surface too, and the card that was
+  // just hidden keeps its place so Undo is right where the reader was looking.
+  const isHiddenGroup = (group: CatalogGroupRow) => {
+    const hidden = hiddenJobIds;
+    if (!hidden?.size || !group.roleIds?.length) return false;
+    return group.roleIds.every((roleId) => hidden.has(roleId));
+  };
+  const isUndoGroup = (group: CatalogGroupRow) => Boolean(hiddenFeedbackJob && group.roleIds?.includes(hiddenFeedbackJob.jobId));
+  const visibleGroups = useMemo(
+    () => groups.filter((group) => !isHiddenGroup(group) || isUndoGroup(group)),
+    [groups, hiddenJobIds, hiddenFeedbackJob],
+  );
+  const roleCount = visibleGroups.reduce((total, group) => total + group.roleCount, 0);
+  const employerCount = new Set(visibleGroups.map((group) => group.company)).size;
   // A lane exists only when the launch inbox says something is genuinely new.
   const laneGroups = newJobIds?.size
-    ? groups.filter((group) => group.roleIds?.some((roleId) => newJobIds.has(roleId)) || Boolean(group.featuredRole && newJobIds.has(group.featuredRole.jobId)))
+    ? visibleGroups.filter((group) => group.roleIds?.some((roleId) => newJobIds.has(roleId)) || Boolean(group.featuredRole && newJobIds.has(group.featuredRole.jobId)))
     : [];
   const rows = useMemo(() => {
     const chunked: CatalogGroupRow[][] = [];
-    for (let index = 0; index < groups.length; index += columns) {
-      chunked.push(groups.slice(index, index + columns));
+    for (let index = 0; index < visibleGroups.length; index += columns) {
+      chunked.push(visibleGroups.slice(index, index + columns));
     }
     return chunked;
-  }, [columns, groups]);
+  }, [columns, visibleGroups]);
   const searchFieldRef = useRef<TextInput>(null);
   const openNextQueuedRole = () => {
     const target = queue
@@ -3486,7 +3509,15 @@ function CatalogScreen({
           }
           renderItem={({ item: row }) => (
             <View style={styles.catalogGridRow}>
-              {row.map((group) => <CatalogGroupItem key={group.groupId} group={group} presentation="grid" {...cardProps} />)}
+              {row.map((group) => (
+                isUndoGroup(group) && isHiddenGroup(group) ? (
+                  <View key={group.groupId} style={styles.catalogCell}>
+                    <HiddenRolePlaceholder onUndo={() => onUndoHide?.()} />
+                  </View>
+                ) : (
+                  <CatalogGroupItem key={group.groupId} group={group} presentation="grid" {...cardProps} />
+                )
+              ))}
               {row.length < columns
                 ? Array.from({ length: columns - row.length }, (_, index) => <View key={`catalog-filler-${index}`} style={styles.catalogCell} />)
                 : null}
@@ -4676,6 +4707,9 @@ function AppContent() {
               newJobIds={newCatalogJobIds}
               newSinceLabel={newSinceLabel}
               dayZone={dayZone}
+              hiddenJobIds={hiddenJobIds}
+              hiddenFeedbackJob={hiddenFeedbackJob}
+              onUndoHide={undoHideLocally}
             />
           ) : (
             <View style={styles.pageColumn}>
@@ -5215,6 +5249,9 @@ function GuestExperience({
                 newSinceLabel={newSinceLabel}
                 dayZone={dayZone}
                 attentive={tab === "catalog"}
+                hiddenJobIds={hiddenJobIds}
+                hiddenFeedbackJob={hiddenFeedbackJob}
+                onUndoHide={onUndoHide}
               />
             </View>
             {tab === "roles" ? (
