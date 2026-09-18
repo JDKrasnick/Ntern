@@ -114,6 +114,15 @@ export function catalogRequestState(
   };
 }
 
+/**
+ * The full catalog is the resting state. A query narrows it and so does any
+ * facet, so Reset belongs on screen whenever either is in play — a reader who
+ * typed a search has as much to undo as one who opened the filter sheet.
+ */
+export function catalogViewNarrowed(query: string, filters: CatalogFilterValues): boolean {
+  return query.trim().length > 0 || countActiveCatalogFilters(filters) > 0;
+}
+
 export function countActiveCatalogFilters(filters: CatalogFilterValues): number {
   return [
     filters.disciplines.length > 0,

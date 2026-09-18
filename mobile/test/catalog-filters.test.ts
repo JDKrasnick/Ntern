@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, countActiveCatalogFilters, emptyCatalogFilters, groupedCatalogParameters } from '../src/catalog-filters';
+import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, emptyCatalogFilters, groupedCatalogParameters } from '../src/catalog-filters';
 
 describe('catalog filter tokens', () => {
   it('names every active facet and clears only its own value', () => {
@@ -112,6 +112,16 @@ describe('grouped catalog request filters', () => {
       ...emptyCatalogFilters, disciplines: ['SWE'], seasons: ['summer-2027', 'fall-2026'],
       hasCompensation: true, jobStatus: 'closed',
     })).toBe(4);
+  });
+  it('offers a way back whenever the catalog is narrowed by anything', () => {
+    expect(catalogViewNarrowed('', emptyCatalogFilters)).toBe(false);
+    expect(catalogViewNarrowed('   ', emptyCatalogFilters)).toBe(false);
+    // A typed search narrows the catalog as surely as a facet does, so it needs
+    // the same way out; counting facets alone would leave a query with no Reset.
+    expect(catalogViewNarrowed('quant', emptyCatalogFilters)).toBe(true);
+    expect(catalogViewNarrowed('', { ...emptyCatalogFilters, disciplines: ['SWE'] })).toBe(true);
+    expect(catalogViewNarrowed('', { ...emptyCatalogFilters, day: '2026-09-18' })).toBe(true);
+    expect(catalogViewNarrowed('', { ...emptyCatalogFilters, jobStatus: 'closed' })).toBe(true);
   });
   it('labels closed cards as closed for both visible and accessibility copy', () => {
     expect(catalogGroupAvailabilityLabel({ kind: 'individual', roleCount: 1 }, 'closed')).toBe('1 closed role');

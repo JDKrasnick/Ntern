@@ -33,10 +33,10 @@ import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from 
 import { appendGroupedCatalogPage, catalogCardKind, type GroupedCatalogPage } from "./src/catalog";
 import { boundedCatalogText, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
-import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, countActiveCatalogFilters, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
+import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
-import { advanceBelt, beltCopies, beltItems, isReaderScroll, type BeltItem } from "./src/newness-belt";
+import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, type BeltItem } from "./src/newness-belt";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
@@ -1467,8 +1467,10 @@ function NewnessLane({
   const listRef = useRef<FlatList<BeltItem<CatalogGroupRow>>>(null);
   const laneWrapRef = useRef<View>(null);
   const [cycling, setCycling] = useState(true);
-  // A reader who scrolls takes the belt out of their way for a while.
-  const heldUntil = useRef(0);
+  // A reader who scrolls takes the belt out of their way, and gets it back as
+  // soon as they stop.
+  const readerScrollAt = useRef(0);
+  const dragging = useRef(false);
   const beltWritten = useRef(0);
   const writing = useRef(false);
   const autoCycles = cycling && attentive && motionAllowed && groups.length > 1;
@@ -1515,18 +1517,29 @@ function NewnessLane({
       mountedAt: mountedAt.current,
       now: Date.now(),
     })) return;
-    heldUntil.current = Date.now() + 8000;
+    readerScrollAt.current = Date.now();
   };
   useEffect(() => {
     if (!autoCycles) return;
-    let offset = laneScroller()?.scrollLeft ?? 0;
+    // The belt's own offset stays inside one cycle; the reader may have left the
+    // lane anywhere in the copies, and the release repeats every cycle, so
+    // normalising is what lets it pick up from their position without a jump.
+    const normalise = (position: number) => (cycleLength > 0 ? ((position % cycleLength) + cycleLength) % cycleLength : 0);
+    let offset = normalise(laneScroller()?.scrollLeft ?? 0);
     let last = Date.now();
     let frame = 0;
+    let yielded = false;
     const step = () => {
       const now = Date.now();
       const elapsed = now - last;
       last = now;
-      if (now >= heldUntil.current) {
+      if (beltYields(now, readerScrollAt.current, dragging.current)) {
+        yielded = true;
+      } else {
+        if (yielded) {
+          offset = normalise(laneScroller()?.scrollLeft ?? offset);
+          yielded = false;
+        }
         offset = advanceBelt(offset, elapsed, cycleLength);
         writeBelt(offset);
       }
@@ -1570,7 +1583,9 @@ function NewnessLane({
           initialNumToRender={belt.length}
           maxToRenderPerBatch={belt.length}
           removeClippedSubviews={false}
-          onScrollBeginDrag={() => { heldUntil.current = Date.now() + 8000; }}
+          onScrollBeginDrag={() => { dragging.current = true; readerScrollAt.current = Date.now(); }}
+          onScrollEndDrag={() => { dragging.current = false; readerScrollAt.current = Date.now(); }}
+          onMomentumScrollEnd={() => { dragging.current = false; readerScrollAt.current = Date.now(); }}
           onScroll={(event) => onLaneScroll(event?.nativeEvent?.contentOffset?.x)}
           scrollEventThrottle={32}
           onScrollToIndexFailed={() => undefined}
@@ -3343,6 +3358,13 @@ function CatalogScreen({
     ? (width >= 1660 ? 4 : 3)
     : width >= 1400 ? 4 : width >= 840 ? 3 : 2;
   const tokens = catalogFilterTokens(filters);
+  const narrowed = catalogViewNarrowed(query, filters);
+  // One way back to the whole catalog: the query and every facet at once, so a
+  // reader who narrowed with two things does not have to find two controls.
+  const resetView = () => {
+    onQueryChange("");
+    onFiltersChange(emptyCatalogFilters);
+  };
   const searching = Boolean(query.trim());
   // A role hidden on this device leaves this surface too, and the card that was
   // just hidden keeps its place so Undo is right where the reader was looking.
@@ -3444,7 +3466,7 @@ function CatalogScreen({
               </View>
             </View>
           </View>
-          {tokens.length ? (
+          {narrowed ? (
             <View style={styles.catalogTokenRow}>
               {tokens.map((token) => (
                 <TouchableOpacity
@@ -3458,8 +3480,15 @@ function CatalogScreen({
                   <Ionicons name="close" size={13} color={colors.signal} />
                 </TouchableOpacity>
               ))}
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Clear all filters" onPress={() => onFiltersChange(emptyCatalogFilters)} style={styles.catalogTokenClear}>
-                <Text style={styles.catalogTokenClearText}>Clear all</Text>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Reset search and filters"
+                accessibilityHint="Clears the search box and every filter, showing the whole catalog again"
+                onPress={resetView}
+                style={styles.catalogTokenReset}
+              >
+                <Ionicons name="refresh-outline" size={13} color={colors.muted} />
+                <Text style={styles.catalogTokenResetText}>Reset</Text>
               </TouchableOpacity>
             </View>
           ) : null}
@@ -7696,8 +7725,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   catalogTokenText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
-  catalogTokenClear: { alignItems: "center", justifyContent: "center", minHeight: 34, paddingHorizontal: 8 },
-  catalogTokenClearText: { color: colors.muted, fontSize: 13, fontWeight: "700", textDecorationLine: "underline" },
+  catalogTokenReset: {
+    alignItems: "center",
+    borderColor: colors.separator,
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    minHeight: 34,
+    paddingHorizontal: 12,
+  },
+  catalogTokenResetText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
   catalogGrid: {
     alignSelf: "center",
     maxWidth: 1120,

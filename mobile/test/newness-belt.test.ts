@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advanceBelt, beltCopies, beltItems, isReaderScroll, BELT_SPEED } from '../src/newness-belt';
+import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, BELT_QUIET_MS, BELT_SPEED } from '../src/newness-belt';
 
 const groups = [{ groupId: 'a' }, { groupId: 'b' }, { groupId: 'c' }];
 const laneStep = 332;
@@ -93,7 +93,6 @@ describe('belt copies', () => {
 
 describe('telling the reader from the belt', () => {
   const base = { writing: false, mountedAt: 0, now: 60000 };
-
   it('ignores the belt\'s own writes', () => {
     expect(isReaderScroll({ ...base, actual: 412, expected: 412 })).toBe(false);
     // a frame-landing late still reports a position we just wrote
@@ -111,6 +110,24 @@ describe('telling the reader from the belt', () => {
   it('sees a reader taking the wheel', () => {
     expect(isReaderScroll({ ...base, actual: 700, expected: 412 })).toBe(true);
     expect(isReaderScroll({ ...base, actual: 100, expected: 412 })).toBe(true);
+  });
+});
+
+describe('the belt yielding to the reader', () => {
+  it('holds for as long as they are dragging it', () => {
+    expect(beltYields(60000, 0, true)).toBe(true);
+    // even a drag that has lasted far longer than the quiet window
+    expect(beltYields(600000, 1000, true)).toBe(true);
+  });
+
+  it('holds just after a scroll and picks up once they stop', () => {
+    expect(beltYields(60000, 60000, false)).toBe(true);
+    expect(beltYields(60000, 60000 - BELT_QUIET_MS + 1, false)).toBe(true);
+    expect(beltYields(60000, 60000 - BELT_QUIET_MS, false)).toBe(false);
+  });
+
+  it('never holds a reader who has not touched it', () => {
+    expect(beltYields(60000, 0, false)).toBe(false);
   });
 });
 

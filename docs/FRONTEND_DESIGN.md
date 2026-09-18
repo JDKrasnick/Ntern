@@ -57,8 +57,7 @@ The content starts 42 pt below the safe area, with a 20 pt gutter on both sides.
 
 ```text
 [ ⌕ Search roles, companies, locations              ✕ ]
-[ Filter roles 3 ]  [ Summer 2027 ✕ ] [ SWE ✕ ]  Clear all
-5 employers · 6 roles
+[ Filter roles 3 ]  [ Summer 2027 ✕ ] [ SWE ✕ ]  [ ⟳ Reset ]
 
 6 new roles since Thu    Freshly matched your alerts
 ┌───────────────────────┐ ┌───────────────────────┐ ┌─────────
@@ -165,8 +164,8 @@ Every screen follows these rules. They are as important as colors and type.
 
 - The Catalog tab is search-first. A pinned query field owns the top of the screen: a leading search icon, a trailing clear control, and a placeholder that names what is searchable (*Search roles, companies, locations*). Focus is visible as a 2 pt teal border; the caret and text selection are teal.
 - Keep the field on the whole row at every width, with the filter control beside it; below 560 pt the filter control drops to its own line so the placeholder is never truncated.
-- Show the live result count under the field — employers and roles, plus the query when there is one. A query narrows the grid and the newness lane together; there is no separate search screen.
-- Active facets appear as removable teal tokens under the field, in the same words the filter sheet uses, followed by one quiet **Clear all**. Removing a token must leave every other facet untouched. When nothing matches, the empty state names the query and offers **Clear search** or **Clear filters** rather than a dead end.
+- Do not show a result count. A line reading *16 employers · 24 roles* between the filters and the grid states what the tiles already say, and the grid shows skeleton tiles while the first page arrives, so nothing needs a sentence to cover loading.
+- Active facets appear as removable teal tokens under the field, in the same words the filter sheet uses, followed by one **Reset**. Removing a token must leave every other facet untouched. Reset appears whenever the catalog is narrowed — by a typed query as much as by a facet — and clears both at once, so a reader who narrowed with two things does not have to hunt for two controls. It is also how a short, filtered list gets its scroll back: clearing the narrowing restores the full catalog. When nothing matches, the empty state names the query and offers **Clear search** or **Clear filters** rather than a dead end.
 - Results are a dense tile grid, not one tall column: 2 columns below 840 pt, 3 up to 1400 pt, 4 above, and 3 when the desktop queue sidebar is open. Compensate a row that is not full with invisible cells so tiles keep one width.
 - A tile is the compact form of a role card: discipline pill and **New here** marker, employer, role (up to three lines), location and season, compensation when known, the identity/closed notices, then a footer that names its own actions (**Hide**, **Queue**, or **In queue**). Tiles in a row are equal height and their footers align; use 14 pt radius and 13 pt padding for this denser form.
 - The tile surface keeps the card vocabulary: white surface, one-pixel soft border, teal employer text, ink role text, muted meta. A tap opens the role or the employer group exactly as the tall card does, and queue and hide mean the same thing in both forms.
@@ -181,8 +180,9 @@ Every screen follows these rules. They are as important as colors and type.
 - One frame's travel is capped at 120 ms, so an app returning from the background resumes where it left off instead of lurching forward by the time it was away.
 - **The lane must always hold at least one cycle of content more than the window shows.** A scroller cannot travel past the end of the content it has measured, so a lane that renders fewer copies than the window needs will stall against that edge for the rest of every lap and read as slowing down — not as stopped, which is what makes it so easy to misread. Size the copies from the window width and keep a spare for the cells a virtualized list has not laid out yet.
 - Hide those copies with `aria-hidden` as well as `accessibilityElementsHidden`: the latter is iOS-only and never reaches the web DOM, where the lane otherwise announces the release once per copy.
-- A scroll event is the reader taking the wheel only when it did not come from the belt's own write, and never during the first two seconds while the list settles its own layout. Getting this wrong holds the lane for eight seconds after every frame it writes, which is the same slowdown by another route.
-- Auto-slide is a courtesy, never a cage: offer a **Pause** control beside the heading (48 pt, same as every other chip), hold off for eight seconds after any scroll the reader makes themselves, and stop entirely under Reduce Motion, in a backgrounded tab, or while the surface is hidden. Never let it fight a reader's own dragging.
+- A scroll event is the reader taking the wheel only when it did not come from the belt's own write, and never during the first two seconds while the list settles its own layout. Getting this wrong makes the belt yield after every frame it writes, which is the lane sitting still by another route.
+- Auto-slide is a courtesy, never a cage: offer a **Pause** control beside the heading (48 pt, same as every other chip), and stop entirely under Reduce Motion, in a backgrounded tab, or while the surface is hidden. Never let it fight a reader's own dragging.
+- The lane yields to the reader and takes itself back. While they are dragging it, or within about a second of their last scroll, it holds; once they stop it picks up again from wherever they left it, without a jump. Never hold for a fixed period: a timer keeps the lane still long after the reader has finished with it, and sets it moving again while their finger is still on it. The reader's position may sit anywhere in the copies, and the release repeats every cycle, so resume from that position modulo one cycle.
 - Never loop a second row, never autoplay sound or video, and never badge the lane with a count a reader cannot act on.
 - Lane tiles are the same tiles at the larger size: they spell out their actions and add the freshness line. Only roles that are genuinely in the release carry the **New here** marker; grid tiles never claim newness without it.
 - With no new roles the lane is simply absent: the search spine and the grid stand alone. Do not substitute an empty lane or a "nothing new" banner in the catalog — the Roles tab owns that message.
@@ -191,7 +191,7 @@ Every screen follows these rules. They are as important as colors and type.
 
 - The catalog's release days are a calendar question, not a filter-sheet question. A small **Dates** control sits at the top right of the search spine and opens the month grid. Above 560 pt it floats over the grid; below that it expands in place under the spine, because a panel anchored to a control that sits mid-row hangs off a phone's screen edge. Either way it is not a modal and the grid never reflows around it.
 - A day has a *release* only when roles became visible that day. Days with releases show that day's role count; days without are inert and visibly quiet. Never offer an empty day as a choice.
-- Selecting a day fills it, closes the calendar, and narrows the catalog to that day's roles. The choice joins the other facets as one removable token, so **Clear all** and the sheet stay the single place a reader un-narrows the list.
+- Selecting a day fills it, closes the calendar, and narrows the catalog to that day's roles. The choice joins the other facets as one removable token, so **Reset** and the sheet stay the single place a reader un-narrows the list.
 - The day is read in **UTC** by default, so a role's release day is the same day for everyone and matches what alerts and release cards call it. The footer states which calendar is in force, and it never shows a bare count without saying what the count is.
 - **App & account → Release calendar dates** offers **UTC** or **Device time**. Device time is the reader's own clock, so a role that lands after local midnight counts toward the next day; changing it re-reads the calendar and any selected day.
 - Choosing a day that holds nothing for the current facets is not a dead end: the empty state names the day and offers **Clear day**.

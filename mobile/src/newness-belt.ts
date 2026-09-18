@@ -16,6 +16,11 @@ export const BELT_SPEED = 16;
  * lurch forward by however long it was away. */
 const MAX_FRAME_SECONDS = 0.12;
 
+/** How long the belt waits after the reader's last scroll before taking over
+ * again. Long enough not to fight the tail of a flick, short enough that the
+ * lane is never left sitting still. */
+export const BELT_QUIET_MS = 1200;
+
 export type BeltItem<T> = { key: string; group: T; decorative: boolean };
 
 /**
@@ -48,6 +53,17 @@ export function advanceBelt(offset: number, elapsedMs: number, cycleLength: numb
   const seconds = Math.max(0, Math.min(MAX_FRAME_SECONDS, elapsedMs / 1000));
   const next = offset + speed * seconds;
   return next >= cycleLength ? next - cycleLength : next;
+}
+
+/**
+ * Whether the belt stands down for the reader. It yields for as long as they are
+ * scrolling and picks up again once they stop, rather than for a fixed period:
+ * a timer keeps the lane still after the reader has finished with it, and starts
+ * moving again while their finger is still on it.
+ */
+export function beltYields(now: number, lastReaderScrollAt: number, dragging: boolean, quietMs = BELT_QUIET_MS) {
+  if (dragging) return true;
+  return now - lastReaderScrollAt < quietMs;
 }
 
 /** How close a reported scroll position has to be to the one the belt wrote to
