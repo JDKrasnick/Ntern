@@ -185,7 +185,7 @@ Every screen follows these rules. They are as important as colors and type.
 
 ### Release calendar
 
-- The catalog's release days are a calendar question, not a filter-sheet question. A small **Dates** control sits at the top right of the search spine and opens a month grid over the grid — it never reflows the catalog and never becomes a modal.
+- The catalog's release days are a calendar question, not a filter-sheet question. A small **Dates** control sits at the top right of the search spine and opens the month grid. Above 560 pt it floats over the grid; below that it expands in place under the spine, because a panel anchored to a control that sits mid-row hangs off a phone's screen edge. Either way it is not a modal and the grid never reflows around it.
 - A day has a *release* only when roles became visible that day. Days with releases show that day's role count; days without are inert and visibly quiet. Never offer an empty day as a choice.
 - Selecting a day fills it, closes the calendar, and narrows the catalog to that day's roles. The choice joins the other facets as one removable token, so **Clear all** and the sheet stay the single place a reader un-narrows the list.
 - The day is read in **UTC** by default, so a role's release day is the same day for everyone and matches what alerts and release cards call it. The footer states which calendar is in force, and it never shows a bare count without saying what the count is.

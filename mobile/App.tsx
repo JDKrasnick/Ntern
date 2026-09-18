@@ -907,26 +907,54 @@ type ReleaseDayCount = { day: string; roles: number; employers: number };
  * one-tap filter to the day a reader picks. Counts come from the same rule the
  * filter uses, so a filled day always has something to show.
  */
-function ReleaseCalendar({
+/** The release-day control. The panel it opens is rendered by the search block
+ * rather than by this control, so a phone can expand it in place instead of
+ * floating a card off a control that sits mid-row. */
+function ReleaseCalendarTrigger({ open, selectedDay, onToggle }: { open: boolean; selectedDay?: string; onToggle: () => void }) {
+  return (
+    <TouchableOpacity
+      accessibilityRole="button"
+      accessibilityLabel={selectedDay ? `Release day ${releaseDayLabel(selectedDay)}. Change release day` : "Filter by release day"}
+      aria-expanded={open}
+      onPress={onToggle}
+      style={[styles.calendarTrigger, Boolean(selectedDay) && styles.calendarTriggerOn]}
+    >
+      <Ionicons name="calendar-outline" size={17} color={selectedDay ? colors.signal : colors.ink} />
+      <Text style={[styles.calendarTriggerText, Boolean(selectedDay) && styles.calendarTriggerTextOn]} numberOfLines={1}>
+        {selectedDay ? releaseDayLabel(selectedDay) : "Dates"}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+/**
+ * The release calendar: which days the catalog actually published roles, and a
+ * one-tap filter to the day a reader picks. Counts come from the same rule the
+ * filter uses, so a filled day always has something to show.
+ */
+function ReleaseCalendarPanel({
   filters,
   zone,
   selectedDay,
+  inline,
   onSelectDay,
+  onClose,
 }: {
   filters: CatalogFilterValues;
   zone: string;
   selectedDay?: string;
+  /** In place under the search spine, instead of a card floating off the control. */
+  inline: boolean;
   onSelectDay: (day: string | undefined) => void;
+  onClose: () => void;
 }) {
   const { width } = useWindowDimensions();
-  const [open, setOpen] = useState(false);
   const [month, setMonth] = useState(() => monthOf(selectedDay ?? calendarToday()));
   const [days, setDays] = useState<ReleaseDayCount[]>([]);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const today = calendarToday();
   useEffect(() => {
-    if (!open) return;
     let active = true;
     const range = monthRange(month);
     const params = catalogDayIndexParameters(filters, { ...range, dayZone: zone });
@@ -948,102 +976,94 @@ function ReleaseCalendar({
     return () => {
       active = false;
     };
-  }, [filters, month, open, zone]);
+  }, [filters, month, zone]);
   const counts = useMemo(() => new Map(days.map((entry) => [entry.day, entry])), [days]);
   const selected = selectedDay ? counts.get(selectedDay) : undefined;
   const cells = monthCells(month);
   const popoverWidth = Math.min(320, width - 40);
-  return (
-    <View style={styles.calendarAnchor}>
-      <TouchableOpacity
-        accessibilityRole="button"
-        accessibilityLabel={selectedDay ? `Release day ${releaseDayLabel(selectedDay)}. Change release day` : "Filter by release day"}
-        aria-expanded={open}
-        onPress={() => setOpen((current) => !current)}
-        style={[styles.calendarTrigger, Boolean(selectedDay) && styles.calendarTriggerOn]}
-      >
-        <Ionicons name="calendar-outline" size={17} color={selectedDay ? colors.signal : colors.ink} />
-        <Text style={[styles.calendarTriggerText, Boolean(selectedDay) && styles.calendarTriggerTextOn]} numberOfLines={1}>
-          {selectedDay ? releaseDayLabel(selectedDay) : "Dates"}
-        </Text>
-      </TouchableOpacity>
-      {open ? (
-        <>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close release calendar" onPress={() => setOpen(false)} style={styles.calendarScrim} />
-          <View style={[styles.calendarPopover, { width: popoverWidth }]} accessibilityLabel="Release calendar">
-            <View style={styles.calendarHeader}>
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous month" onPress={() => setMonth((current) => shiftMonth(current, -1))} style={styles.calendarMonthButton}>
-                <Ionicons name="chevron-back" size={18} color={colors.ink} />
-              </TouchableOpacity>
-              <Text style={styles.calendarMonth} accessibilityLiveRegion="polite">{monthLabel(month)}</Text>
+  const panel = (
+    <>
+      <View style={styles.calendarHeader}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous month" onPress={() => setMonth((current) => shiftMonth(current, -1))} style={styles.calendarMonthButton}>
+          <Ionicons name="chevron-back" size={18} color={colors.ink} />
+        </TouchableOpacity>
+        <Text style={styles.calendarMonth} accessibilityLiveRegion="polite">{monthLabel(month)}</Text>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Next month"
+          disabled={shiftMonth(month, 1) > monthOf(today)}
+          onPress={() => setMonth((current) => shiftMonth(current, 1))}
+          style={styles.calendarMonthButton}
+        >
+          <Ionicons name="chevron-forward" size={18} color={shiftMonth(month, 1) > monthOf(today) ? colors.border : colors.ink} />
+        </TouchableOpacity>
+      </View>
+      <View style={styles.calendarWeekdays}>
+        {weekdayInitials.map((initial, index) => (
+          <Text key={`${initial}-${index}`} style={styles.calendarWeekday}>{initial}</Text>
+        ))}
+      </View>
+      <View style={styles.calendarGrid}>
+        {cells.map((cell, index) => {
+          if (!cell) return <View key={`blank-${index}`} style={styles.calendarCell} />;
+          const entry = counts.get(cell.day);
+          const isSelected = selectedDay === cell.day;
+          const isToday = cell.day === today;
+          if (!entry) {
+            return (
+              <View key={cell.day} style={styles.calendarCell}>
+                <View style={[styles.calendarDay, styles.calendarDayEmpty, isToday && styles.calendarDayToday]}>
+                  <Text style={styles.calendarDayMutedText}>{cell.dayOfMonth}</Text>
+                </View>
+              </View>
+            );
+          }
+          return (
+            <View key={cell.day} style={styles.calendarCell}>
               <TouchableOpacity
                 accessibilityRole="button"
-                accessibilityLabel="Next month"
-                disabled={shiftMonth(month, 1) > monthOf(today)}
-                onPress={() => setMonth((current) => shiftMonth(current, 1))}
-                style={styles.calendarMonthButton}
+                aria-pressed={isSelected}
+                accessibilityLabel={`${releaseDayLabel(cell.day)}, ${entry.roles} ${entry.roles === 1 ? "role" : "roles"} released`}
+                onPress={() => {
+                  onSelectDay(isSelected ? undefined : cell.day);
+                  onClose();
+                }}
+                style={[styles.calendarDay, isToday && styles.calendarDayToday, isSelected && styles.calendarDaySelected]}
               >
-                <Ionicons name="chevron-forward" size={18} color={shiftMonth(month, 1) > monthOf(today) ? colors.border : colors.ink} />
+                <Text style={[styles.calendarDayText, isSelected && styles.calendarDayTextSelected]}>{cell.dayOfMonth}</Text>
+                <Text style={[styles.calendarDayCount, isSelected && styles.calendarDayTextSelected]}>{entry.roles}</Text>
               </TouchableOpacity>
             </View>
-            <View style={styles.calendarWeekdays}>
-              {weekdayInitials.map((initial, index) => (
-                <Text key={`${initial}-${index}`} style={styles.calendarWeekday}>{initial}</Text>
-              ))}
-            </View>
-            <View style={styles.calendarGrid}>
-              {cells.map((cell, index) => {
-                if (!cell) return <View key={`blank-${index}`} style={styles.calendarCell} />;
-                const entry = counts.get(cell.day);
-                const isSelected = selectedDay === cell.day;
-                const isToday = cell.day === today;
-                if (!entry) {
-                  return (
-                    <View key={cell.day} style={styles.calendarCell}>
-                      <View style={[styles.calendarDay, styles.calendarDayEmpty, isToday && styles.calendarDayToday]}>
-                        <Text style={styles.calendarDayMutedText}>{cell.dayOfMonth}</Text>
-                      </View>
-                    </View>
-                  );
-                }
-                return (
-                  <View key={cell.day} style={styles.calendarCell}>
-                    <TouchableOpacity
-                      accessibilityRole="button"
-                      aria-pressed={isSelected}
-                      accessibilityLabel={`${releaseDayLabel(cell.day)}, ${entry.roles} ${entry.roles === 1 ? "role" : "roles"} released`}
-                      onPress={() => {
-                        onSelectDay(isSelected ? undefined : cell.day);
-                        setOpen(false);
-                      }}
-                      style={[styles.calendarDay, isToday && styles.calendarDayToday, isSelected && styles.calendarDaySelected]}
-                    >
-                      <Text style={[styles.calendarDayText, isSelected && styles.calendarDayTextSelected]}>{cell.dayOfMonth}</Text>
-                      <Text style={[styles.calendarDayCount, isSelected && styles.calendarDayTextSelected]}>{entry.roles}</Text>
-                    </TouchableOpacity>
-                  </View>
-                );
-              })}
-            </View>
-            <View style={styles.calendarFooter}>
-              <Text style={styles.calendarZone} accessibilityLabel={`Release days are read in ${zone}`}>
-                {zone === UTC_ZONE ? "UTC days" : `Device days · ${zone}`}
-              </Text>
-              {loading ? <Text style={styles.calendarFooterNote}>Checking days…</Text> : null}
-              {!loading && failed ? <Text style={styles.calendarFooterNote}>Days unavailable</Text> : null}
-              {!loading && !failed ? <Text style={styles.calendarFooterNote}>Number = roles released</Text> : null}
-            </View>
-            {selected ? (
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Clear release day" onPress={() => { onSelectDay(undefined); setOpen(false); }} style={styles.calendarClear}>
-                <Text style={styles.calendarClearText}>
-                  Showing {releaseDayLabel(selected.day)} · {selected.roles} {selected.roles === 1 ? "role" : "roles"} — clear
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-        </>
+          );
+        })}
+      </View>
+      <View style={styles.calendarFooter}>
+        <Text style={styles.calendarZone} accessibilityLabel={`Release days are read in ${zone}`}>
+          {zone === UTC_ZONE ? "UTC days" : `Device days · ${zone}`}
+        </Text>
+        {loading ? <Text style={styles.calendarFooterNote}>Checking days…</Text> : null}
+        {!loading && failed ? <Text style={styles.calendarFooterNote}>Days unavailable</Text> : null}
+        {!loading && !failed ? <Text style={styles.calendarFooterNote}>Number = roles released</Text> : null}
+      </View>
+      {selected ? (
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Clear release day" onPress={() => { onSelectDay(undefined); onClose(); }} style={styles.calendarClear}>
+          <Text style={styles.calendarClearText}>
+            Showing {releaseDayLabel(selected.day)} · {selected.roles} {selected.roles === 1 ? "role" : "roles"} — clear
+          </Text>
+        </TouchableOpacity>
       ) : null}
-    </View>
+    </>
+  );
+  if (inline) {
+    return <View style={styles.calendarInlinePanel} accessibilityLabel="Release calendar">{panel}</View>;
+  }
+  return (
+    <>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close release calendar" onPress={onClose} style={styles.calendarScrim} />
+      <View style={[styles.calendarPopover, { width: popoverWidth }]} accessibilityLabel="Release calendar">
+        {panel}
+      </View>
+    </>
   );
 }
 
@@ -3300,6 +3320,7 @@ function CatalogScreen({
   const [queueOpen, setQueueOpen] = useState(false);
   const [sheetVisible, setSheetVisible] = useState(false);
   const [queryFocused, setQueryFocused] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   // Below this width the query field needs the whole row; the filter control
   // drops to its own line rather than truncating the placeholder.
   const stackedSearch = width < 560;
@@ -3388,11 +3409,10 @@ function CatalogScreen({
             <View style={[styles.catalogSearchControls, stackedSearch && styles.catalogSearchControlsStacked]}>
               <FilterBar activeCount={countActiveCatalogFilters(filters)} onOpen={() => setSheetVisible(true)} />
               <View style={styles.catalogSearchControlTail}>
-                <ReleaseCalendar
-                  filters={filters}
-                  zone={dayZone}
+                <ReleaseCalendarTrigger
+                  open={calendarOpen}
                   selectedDay={filters.day}
-                  onSelectDay={(day) => onFiltersChange({ ...filters, day })}
+                  onToggle={() => setCalendarOpen((current) => !current)}
                 />
                 {!showQueueSidebar && showQueueFixture && queueCount !== undefined ? (
                   <QueuePillButton count={queueCount} expanded={queueOpen} onPress={() => setQueueOpen((open) => !open)} />
@@ -3424,6 +3444,16 @@ function CatalogScreen({
               ? "Searching the catalog…"
               : `${employerCount}${reachedEnd ? "" : "+"} ${employerCount === 1 ? "employer" : "employers"} · ${roleCount}${reachedEnd ? "" : "+"} ${roleCount === 1 ? "role" : "roles"}${searching ? ` for “${query.trim()}”` : ""}`}
           </Text>
+          {calendarOpen ? (
+            <ReleaseCalendarPanel
+              filters={filters}
+              zone={dayZone}
+              selectedDay={filters.day}
+              inline={stackedSearch}
+              onSelectDay={(day) => onFiltersChange({ ...filters, day })}
+              onClose={() => setCalendarOpen(false)}
+            />
+          ) : null}
         </View>
         {!showQueueSidebar && showQueueFixture && queueOpen ? (
           <QueuePanel
@@ -7553,6 +7583,15 @@ const styles = StyleSheet.create({
   calendarTriggerText: { color: colors.ink, fontSize: 13, fontWeight: "700" },
   calendarTriggerTextOn: { color: colors.signal },
   calendarScrim: { backgroundColor: "transparent", bottom: -400, left: -400, position: "absolute", right: -400, top: -400 },
+  calendarInlinePanel: {
+    alignSelf: "flex-start",
+    backgroundColor: colors.surface,
+    borderColor: colors.separator,
+    borderRadius: 16,
+    borderWidth: 1,
+    marginTop: 10,
+    padding: 12,
+  },
   calendarPopover: {
     backgroundColor: colors.surface,
     borderColor: colors.separator,
