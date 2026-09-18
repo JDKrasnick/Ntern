@@ -10,7 +10,7 @@
 /** Points per second. Unhurried but unmistakably moving: a card takes about half
  * a minute to cross the lane, so the belt reads as drift rather than as a
  * carousel in a hurry. */
-export const BELT_SPEED = 14;
+export const BELT_SPEED = 16;
 
 /** The longest frame a stalled belt will honour, so a backgrounded app does not
  * lurch forward by however long it was away. */
