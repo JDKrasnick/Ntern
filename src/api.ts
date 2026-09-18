@@ -8,8 +8,9 @@ import { EmployerIntegrationRegistry } from './providers.js';
 import { assistanceAvailability } from './application-assistance.js';
 import { createApplicationSession, transitionApplicationSession, type ApplicationFieldDraft, type ApplicationSession, type ApplicationSessionEvent } from './application-automation.js';
 import { companyCoverage } from '../coverage/summary.js';
-import { catalogGroupDetails, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs,
+import { catalogGroupDetails, employerDropDay, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs,
   type CatalogGroupDetails, type CatalogGroupFilter } from './catalog-groups.js';
+import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
@@ -49,6 +50,7 @@ function catalogFilter(parameters: Record<string, string> | undefined): CatalogG
     ...(list('education', 'educationLevel', 'educationLevels')?.length ? { educationLevels: list('education', 'educationLevel', 'educationLevels') } : {}),
     ...(list('workMode', 'workModes')?.length ? { workModes: list('workMode', 'workModes') } : {}),
     ...(list('location', 'locations')?.length ? { locations: list('location', 'locations') } : {}),
+    ...(isCalendarDay(parameters?.day) ? { day: parameters!.day, dayZone: dayZone(parameters?.dayZone) } : {}),
   };
 }
 
@@ -99,6 +101,9 @@ function eligibleProjectedGroup(details: CatalogGroupDetails, at = new Date()): 
 
 async function projectedCatalogPage(store: InternshipStore, cursor: string | undefined, limit: number, filter: CatalogGroupFilter) {
   const isDefaultBrowse = filter.status === 'open' && Object.keys(filter).length === 1;
+  // A release day is a calendar rule over each role, not a projection column, so a
+  // day-filtered request reads the catalog instead of a page of projection rows.
+  if (filter.day) return undefined;
   if (!store.listCatalogProjection) return undefined;
   if (!isDefaultBrowse && store.listCatalogProjectionFiltered) {
     // A filtered or searched request reads the matching groups in SQL instead of
@@ -461,13 +466,48 @@ export function createApiHandler(dependencies: ApiDependencies) {
         const nextOffset = requestedOffset + page.length;
         return reply(200, { groups: page, ...(nextOffset < grouped.length ? { cursor: String(nextOffset) } : {}) });
       }
+      if (method === 'GET' && path === '/catalog/days') {
+        const from = event.queryStringParameters?.from;
+        const to = event.queryStringParameters?.to;
+        if ((from && !isCalendarDay(from)) || (to && !isCalendarDay(to))) return reply(400, { message: 'from and to must be YYYY-MM-DD' });
+        const zone = dayZone(event.queryStringParameters?.dayZone);
+        // The index describes every release day, so it never applies the day filter
+        // it exists to offer; every other facet still narrows what it counts.
+        const filter = {
+          ...catalogFilter(event.queryStringParameters),
+          ...(!identityUnconfirmedPublicationEnabled ? { postingIdentityConfirmedOnly: true } : {}),
+        };
+        delete filter.day;
+        const groups = filterCatalogGroups(
+          groupCatalogJobs(await completeCatalog(dependencies.jobs, identityUnconfirmedPublicationEnabled), { includeClosed: true }),
+          filter,
+        );
+        const days = new Map<string, { day: string; roles: number; employers: Set<string> }>();
+        for (const group of groups) {
+          for (const job of group.jobs) {
+            const day = employerDropDay(job, zone);
+            if (!day || (from && day < from) || (to && day > to)) continue;
+            const entry = days.get(day) ?? { day, roles: 0, employers: new Set<string>() };
+            entry.roles += 1;
+            entry.employers.add(job.company);
+            days.set(day, entry);
+          }
+        }
+        return reply(200, {
+          zone,
+          days: [...days.values()]
+            .sort((left, right) => left.day.localeCompare(right.day))
+            .map(({ day, roles, employers }) => ({ day, roles, employers: employers.size })),
+        });
+      }
       const catalogGroupMatch = path.match(/^\/catalog\/groups\/([^/]+)$/);
       if (method === 'GET' && catalogGroupMatch) {
         const status = event.queryStringParameters?.status;
         if (status && status !== 'open' && status !== 'closed') return reply(400, { message: 'status must be open or closed' });
         const groupId = decodeURIComponent(catalogGroupMatch[1]!);
         const projected = await dependencies.jobs.getCatalogProjectionGroup?.(groupId);
-        if (projected) {
+        // A day filter is a per-role calendar rule the projection cannot answer.
+        if (projected && !catalogFilter(event.queryStringParameters).day) {
           const eligible = eligibleProjectedGroup(projected);
           const filtered = eligible ? filterCatalogGroupDetails([eligible], {
             ...catalogFilter(event.queryStringParameters),

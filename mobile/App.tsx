@@ -33,7 +33,9 @@ import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from 
 import { appendGroupedCatalogPage, catalogCardKind, type GroupedCatalogPage } from "./src/catalog";
 import { boundedCatalogText, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
-import { catalogGroupAvailabilityLabel, countActiveCatalogFilters, educationFilterOptions, emptyCatalogFilters, groupedCatalogParameters, seasonFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
+import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, countActiveCatalogFilters, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
+import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
+import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
@@ -287,11 +289,6 @@ const nextApplicationStatuses: Record<string, Application["status"]> = {
   withdrawn: "withdrawn",
 };
 const categories = ["ai-ml", "grad", "swe", "quant", "product", "design"];
-const employerCategoryLabels: Record<EmployerCategory, string> = {
-  faang: "FAANG",
-  startup: "Startups",
-  normal: "Normal",
-};
 const pushPlaceholders = [
   "{title}",
   "{shortTitle}",
@@ -590,6 +587,121 @@ function hasGreenhouseQuickApply(url: string) {
     return false;
   }
 }
+type CardGestureOptions = {
+  /** Swipe left queues the role. */
+  queueable: boolean;
+  /** Swipe right hides the role on this device. */
+  hideable: boolean;
+  onQueue?: () => void;
+  onHide?: () => void;
+};
+
+/**
+ * The one swipe-and-hide behaviour behind every role card: swipe left to queue,
+ * swipe right to hide, with the same reachable accessibility actions. Cards own
+ * their own composition, never a private copy of this gesture.
+ */
+function useCardGestures({ queueable, hideable, onQueue, onHide }: CardGestureOptions) {
+  const motionAllowed = useContext(MotionAllowedContext);
+  const translateX = useRef(new Animated.Value(0)).current;
+  const hideFade = useRef(new Animated.Value(1)).current;
+  const hideScale = useRef(new Animated.Value(1)).current;
+  const hideTranslateY = useRef(new Animated.Value(0)).current;
+  const [isHiding, setIsHiding] = useState(false);
+  const handleHide = () => {
+    if (isHiding || !onHide) return;
+    setIsHiding(true);
+    if (!motionAllowed) {
+      onHide();
+      return;
+    }
+    Animated.parallel([
+      Animated.timing(hideFade, { toValue: 0, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
+      Animated.timing(hideScale, { toValue: 0.96, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
+      Animated.timing(hideTranslateY, { toValue: 6, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
+    ]).start(() => onHide());
+  };
+  const handleQueue = () => {
+    if (isHiding || !onQueue) return;
+    onQueue();
+  };
+  const resetPosition = () => {
+    if (!motionAllowed) {
+      translateX.setValue(0);
+      return;
+    }
+    Animated.spring(translateX, {
+      toValue: 0,
+      friction: 9,
+      tension: 130,
+      useNativeDriver: true,
+    }).start();
+  };
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gesture) =>
+          ((queueable && gesture.dx < -8) || (hideable && gesture.dx > 8))
+          && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+        onPanResponderMove: (_, gesture) => {
+          translateX.setValue(
+            Math.max(queueable ? -116 : 0, Math.min(hideable ? 116 : 0, gesture.dx)),
+          );
+        },
+        onPanResponderRelease: (_, gesture) => {
+          const shouldQueue = queueable && (gesture.dx < -84 || gesture.vx < -0.7);
+          const shouldHide = hideable && (gesture.dx > 84 || gesture.vx > 0.7);
+          if (!shouldQueue && !shouldHide) {
+            resetPosition();
+            return;
+          }
+          if (shouldQueue) onQueue?.();
+          if (!motionAllowed) {
+            translateX.setValue(0);
+            if (shouldHide) onHide?.();
+            return;
+          }
+          Animated.sequence([
+            Animated.timing(translateX, {
+              toValue: shouldQueue ? -108 : 108,
+              duration: 100,
+              easing: Easing.out(Easing.cubic),
+              useNativeDriver: true,
+            }),
+            Animated.delay(120),
+          ]).start(() => {
+            if (shouldHide) onHide?.();
+            else resetPosition();
+          });
+        },
+        onPanResponderTerminate: resetPosition,
+      }),
+    [hideable, isHiding, motionAllowed, onHide, onQueue, queueable, translateX],
+  );
+  const queueProgress = translateX.interpolate({
+    inputRange: [-108, -36, 0],
+    outputRange: [1, 0.32, 0],
+    extrapolate: "clamp",
+  });
+  const hideProgress = translateX.interpolate({
+    inputRange: [0, 36, 108],
+    outputRange: [0, 0.32, 1],
+    extrapolate: "clamp",
+  });
+  return {
+    isHiding,
+    handleHide,
+    handleQueue,
+    translateX,
+    panHandlers: queueable || hideable ? panResponder.panHandlers : {},
+    queueProgress,
+    hideProgress,
+    hideFade,
+    hideScale,
+    hideTranslateY,
+  };
+}
+
 function JobCard({
   job,
   onOpen,
@@ -614,107 +726,31 @@ function JobCard({
   onRemoveFromQueue?: () => void;
 }) {
   const display = presentCatalogRole(job);
-  const motionAllowed = useContext(MotionAllowedContext);
   const { width } = useWindowDimensions();
   const compactMobile = width < 600;
   const source = sourcePresentation(job.sourceReferences);
-  const translateX = useRef(new Animated.Value(0)).current;
-  const hideFade = useRef(new Animated.Value(1)).current;
-  const hideScale = useRef(new Animated.Value(1)).current;
-  const hideTranslateY = useRef(new Animated.Value(0)).current;
   const canAddToQueue = Boolean(onAddToQueue) && !isAddingToQueue && (!applicationStatus || (applicationStatus === "saved" && !(isQueued ?? true)));
-  const [isHiding, setIsHiding] = useState(false);
   const inQueue = isQueued ?? applicationStatus === "saved";
   const queueProgressLabel = inQueue ? "Removing…" : "Adding…";
   const canHideLocally = Boolean(onHideLocally);
   const postingTiming = postingTimingPresentation(job.sourceReferences, job.firstSeenAt);
   const recencyBadge = postingRecencyBadge(isNew, postingTiming);
-  const handleHide = () => {
-    if (isHiding || !onHideLocally) return;
-    setIsHiding(true);
-    if (!motionAllowed) {
-      onHideLocally();
-      return;
-    }
-    Animated.parallel([
-      Animated.timing(hideFade, { toValue: 0, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
-      Animated.timing(hideScale, { toValue: 0.96, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
-      Animated.timing(hideTranslateY, { toValue: 6, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
-    ]).start(() => onHideLocally());
-  };
-  const handleAddToQueue = () => {
-    if (isHiding || !onAddToQueue) return;
-    onAddToQueue();
-  };
+  const {
+    isHiding,
+    handleHide,
+    handleQueue,
+    translateX,
+    panHandlers,
+    queueProgress,
+    hideProgress,
+    hideFade,
+    hideScale,
+    hideTranslateY,
+  } = useCardGestures({ queueable: canAddToQueue, hideable: canHideLocally, onQueue: onAddToQueue, onHide: onHideLocally });
   const handleRemoveFromQueue = () => {
     if (isHiding || !onRemoveFromQueue) return;
     onRemoveFromQueue();
   };
-  const resetPosition = () => {
-    if (!motionAllowed) {
-      translateX.setValue(0);
-      return;
-    }
-    Animated.spring(translateX, {
-      toValue: 0,
-      friction: 9,
-      tension: 130,
-      useNativeDriver: true,
-    }).start();
-  };
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gesture) =>
-          ((canAddToQueue && gesture.dx < -8) || (canHideLocally && gesture.dx > 8))
-          && Math.abs(gesture.dx) > Math.abs(gesture.dy),
-        onPanResponderMove: (_, gesture) => {
-          translateX.setValue(
-            Math.max(canAddToQueue ? -116 : 0, Math.min(canHideLocally ? 116 : 0, gesture.dx)),
-          );
-        },
-        onPanResponderRelease: (_, gesture) => {
-          const shouldSave = canAddToQueue && (gesture.dx < -84 || gesture.vx < -0.7);
-          const shouldHide = canHideLocally && (gesture.dx > 84 || gesture.vx > 0.7);
-          if (!shouldSave && !shouldHide) {
-            resetPosition();
-            return;
-          }
-          if (shouldSave) {
-            onAddToQueue?.();
-          }
-          if (!motionAllowed) {
-            translateX.setValue(0);
-            if (shouldHide) onHideLocally?.();
-            return;
-          }
-          Animated.sequence([
-            Animated.timing(translateX, {
-              toValue: shouldSave ? -108 : 108,
-              duration: 100,
-              easing: Easing.out(Easing.cubic),
-              useNativeDriver: true,
-            }),
-            Animated.delay(120),
-          ]).start(() => {
-            if (shouldHide) onHideLocally?.();
-            else resetPosition();
-          });
-        },
-        onPanResponderTerminate: resetPosition,
-      }),
-    [canHideLocally, canAddToQueue, hideFade, hideScale, hideTranslateY, isHiding, motionAllowed, onHideLocally, onAddToQueue, translateX],
-  );
-  const saveActionProgress = translateX.interpolate({
-    inputRange: [-108, -36, 0],
-    outputRange: [1, 0.32, 0],
-    extrapolate: "clamp",
-  });
-  const hideActionProgress = translateX.interpolate({
-    inputRange: [0, 36, 108],
-    outputRange: [0, 0.32, 1],
-    extrapolate: "clamp",
-  });
 
   return (
     <Animated.View style={{ opacity: hideFade, transform: [{ scale: hideScale }, { translateY: hideTranslateY }] }}>
@@ -722,7 +758,7 @@ function JobCard({
         {canAddToQueue || isAddingToQueue ? (
           <Animated.View
             pointerEvents="none"
-            style={[styles.swipeSaveAction, { opacity: saveActionProgress }]}
+            style={[styles.swipeSaveAction, { opacity: queueProgress }]}
           >
             <Ionicons name="bookmark" size={20} color="#FFFFFF" />
             <Text style={styles.swipeSaveActionText}>{isAddingToQueue ? queueProgressLabel : "Mark"}</Text>
@@ -731,14 +767,14 @@ function JobCard({
         {canHideLocally ? (
           <Animated.View
             pointerEvents="none"
-            style={[styles.swipeHideAction, { opacity: hideActionProgress }]}
+            style={[styles.swipeHideAction, { opacity: hideProgress }]}
           >
             <Ionicons name="eye-off-outline" size={20} color={colors.onDark} />
             <Text style={styles.swipeHideActionText}>Hide</Text>
           </Animated.View>
         ) : null}
         <Animated.View
-          {...(canAddToQueue || canHideLocally ? panResponder.panHandlers : {})}
+          {...panHandlers}
           style={{ transform: [{ translateX }] }}
         >
           <TouchableOpacity
@@ -761,7 +797,7 @@ function JobCard({
               ]
             }
             onAccessibilityAction={(event) => {
-              if (event.nativeEvent.actionName === "queue") handleAddToQueue();
+              if (event.nativeEvent.actionName === "queue") handleQueue();
               if (event.nativeEvent.actionName === "removeFromQueue") handleRemoveFromQueue();
               if (event.nativeEvent.actionName === "hide") handleHide();
             }}
@@ -823,7 +859,7 @@ function JobCard({
                   </View>
                 ) : null}
                 {canAddToQueue ? (
-                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" accessibilityHint="Adds this role to the apply queue" onPress={handleAddToQueue} style={styles.webQueueButtonCompact}>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" accessibilityHint="Adds this role to the apply queue" onPress={handleQueue} style={styles.webQueueButtonCompact}>
                     <Ionicons name="bookmark" size={14} color={colors.ink} />
                     <Text style={styles.webQueueButtonText}>Queue</Text>
                   </TouchableOpacity>
@@ -864,6 +900,579 @@ function catalogRoleJob(role: CatalogGroupRole): Job {
   };
 }
 
+type ReleaseDayCount = { day: string; roles: number; employers: number };
+
+/**
+ * The release calendar: which days the catalog actually published roles, and a
+ * one-tap filter to the day a reader picks. Counts come from the same rule the
+ * filter uses, so a filled day always has something to show.
+ */
+function ReleaseCalendar({
+  filters,
+  zone,
+  selectedDay,
+  onSelectDay,
+}: {
+  filters: CatalogFilterValues;
+  zone: string;
+  selectedDay?: string;
+  onSelectDay: (day: string | undefined) => void;
+}) {
+  const { width } = useWindowDimensions();
+  const [open, setOpen] = useState(false);
+  const [month, setMonth] = useState(() => monthOf(selectedDay ?? calendarToday()));
+  const [days, setDays] = useState<ReleaseDayCount[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const today = calendarToday();
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const range = monthRange(month);
+    const params = catalogDayIndexParameters(filters, { ...range, dayZone: zone });
+    setLoading(true);
+    void api<{ days: ReleaseDayCount[] }>(`/catalog/days?${params.toString()}`, "")
+      .then((response) => {
+        if (!active) return;
+        setDays(response.days);
+        setFailed(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setDays([]);
+        setFailed(true);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [filters, month, open, zone]);
+  const counts = useMemo(() => new Map(days.map((entry) => [entry.day, entry])), [days]);
+  const selected = selectedDay ? counts.get(selectedDay) : undefined;
+  const cells = monthCells(month);
+  const popoverWidth = Math.min(320, width - 40);
+  return (
+    <View style={styles.calendarAnchor}>
+      <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel={selectedDay ? `Release day ${releaseDayLabel(selectedDay)}. Change release day` : "Filter by release day"}
+        aria-expanded={open}
+        onPress={() => setOpen((current) => !current)}
+        style={[styles.calendarTrigger, Boolean(selectedDay) && styles.calendarTriggerOn]}
+      >
+        <Ionicons name="calendar-outline" size={17} color={selectedDay ? colors.signal : colors.ink} />
+        <Text style={[styles.calendarTriggerText, Boolean(selectedDay) && styles.calendarTriggerTextOn]} numberOfLines={1}>
+          {selectedDay ? releaseDayLabel(selectedDay) : "Dates"}
+        </Text>
+      </TouchableOpacity>
+      {open ? (
+        <>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close release calendar" onPress={() => setOpen(false)} style={styles.calendarScrim} />
+          <View style={[styles.calendarPopover, { width: popoverWidth }]} accessibilityLabel="Release calendar">
+            <View style={styles.calendarHeader}>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous month" onPress={() => setMonth((current) => shiftMonth(current, -1))} style={styles.calendarMonthButton}>
+                <Ionicons name="chevron-back" size={18} color={colors.ink} />
+              </TouchableOpacity>
+              <Text style={styles.calendarMonth} accessibilityLiveRegion="polite">{monthLabel(month)}</Text>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Next month"
+                disabled={shiftMonth(month, 1) > monthOf(today)}
+                onPress={() => setMonth((current) => shiftMonth(current, 1))}
+                style={styles.calendarMonthButton}
+              >
+                <Ionicons name="chevron-forward" size={18} color={shiftMonth(month, 1) > monthOf(today) ? colors.border : colors.ink} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.calendarWeekdays}>
+              {weekdayInitials.map((initial, index) => (
+                <Text key={`${initial}-${index}`} style={styles.calendarWeekday}>{initial}</Text>
+              ))}
+            </View>
+            <View style={styles.calendarGrid}>
+              {cells.map((cell, index) => {
+                if (!cell) return <View key={`blank-${index}`} style={styles.calendarCell} />;
+                const entry = counts.get(cell.day);
+                const isSelected = selectedDay === cell.day;
+                const isToday = cell.day === today;
+                if (!entry) {
+                  return (
+                    <View key={cell.day} style={styles.calendarCell}>
+                      <View style={[styles.calendarDay, styles.calendarDayEmpty, isToday && styles.calendarDayToday]}>
+                        <Text style={styles.calendarDayMutedText}>{cell.dayOfMonth}</Text>
+                      </View>
+                    </View>
+                  );
+                }
+                return (
+                  <View key={cell.day} style={styles.calendarCell}>
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      aria-pressed={isSelected}
+                      accessibilityLabel={`${releaseDayLabel(cell.day)}, ${entry.roles} ${entry.roles === 1 ? "role" : "roles"} released`}
+                      onPress={() => {
+                        onSelectDay(isSelected ? undefined : cell.day);
+                        setOpen(false);
+                      }}
+                      style={[styles.calendarDay, isToday && styles.calendarDayToday, isSelected && styles.calendarDaySelected]}
+                    >
+                      <Text style={[styles.calendarDayText, isSelected && styles.calendarDayTextSelected]}>{cell.dayOfMonth}</Text>
+                      <Text style={[styles.calendarDayCount, isSelected && styles.calendarDayTextSelected]}>{entry.roles}</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
+            </View>
+            <View style={styles.calendarFooter}>
+              <Text style={styles.calendarZone} accessibilityLabel={`Release days are read in ${zone}`}>
+                {zone === UTC_ZONE ? "UTC days" : `Device days · ${zone}`}
+              </Text>
+              {loading ? <Text style={styles.calendarFooterNote}>Checking days…</Text> : null}
+              {!loading && failed ? <Text style={styles.calendarFooterNote}>Days unavailable</Text> : null}
+              {!loading && !failed ? <Text style={styles.calendarFooterNote}>Number = roles released</Text> : null}
+            </View>
+            {selected ? (
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Clear release day" onPress={() => { onSelectDay(undefined); setOpen(false); }} style={styles.calendarClear}>
+                <Text style={styles.calendarClearText}>
+                  Showing {releaseDayLabel(selected.day)} · {selected.roles} {selected.roles === 1 ? "role" : "roles"} — clear
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+type CatalogPresentation = "grid" | "lane";
+
+type CatalogCardProps = {
+  status: "open" | "closed";
+  applicationStatuses?: Map<string, string>;
+  queuedJobIds?: Set<string>;
+  queuingJobIds?: Set<string>;
+  /** Roles that appeared since the last visit; the tiles mark only these. */
+  newJobIds?: Set<string>;
+  onOpenGroup: (group: CatalogGroupRow) => void;
+  onOpenRole: (job: Job) => void;
+  onAddToQueue?: (job: Job) => void | Promise<boolean>;
+  onHideLocally?: (job: Job) => void;
+  onRemoveFromQueue?: (job: Job) => void;
+};
+
+function CatalogTileSkeleton({ count = 6, columns = 2 }: { count?: number; columns?: number }) {
+  const rows: number[][] = [];
+  for (let index = 0; index < count; index += columns) {
+    rows.push(Array.from({ length: Math.min(columns, count - index) }, (_, offset) => index + offset));
+  }
+  return (
+    <View accessibilityRole="progressbar" accessibilityLabel="Loading internships">
+      {rows.map((row) => (
+        <View key={row[0]} style={styles.catalogGridRow}>
+          {row.map((index) => (
+            <View key={index} style={styles.catalogTileSkeleton}>
+              <Skeleton width={64} height={18} />
+              <Skeleton width={150} height={13} />
+              <Skeleton width={200} height={16} />
+              <Skeleton width={170} height={13} />
+              <Skeleton width={90} height={13} />
+            </View>
+          ))}
+          {row.length < columns
+            ? Array.from({ length: columns - row.length }, (_, index) => <View key={`skeleton-filler-${index}`} style={styles.catalogCell} />)
+            : null}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+/**
+ * One role in the catalog grid or the newness lane: the same queue, hide and
+ * swipe behaviour every role card carries, composed compactly so several roles
+ * share one screen instead of one tall card per row.
+ */
+function CatalogTile({
+  job,
+  presentation,
+  isNew = false,
+  applicationStatuses,
+  queuedJobIds,
+  queuingJobIds,
+  onOpenRole,
+  onAddToQueue,
+  onHideLocally,
+  onRemoveFromQueue,
+}: CatalogCardProps & { job: Job; presentation: CatalogPresentation; isNew?: boolean }) {
+  const lane = presentation === "lane";
+  const display = presentCatalogRole(job);
+  const source = sourcePresentation(job.sourceReferences);
+  const timing = postingTimingPresentation(job.sourceReferences, job.firstSeenAt);
+  const recencyBadge = postingRecencyBadge(isNew, timing);
+  const applicationStatus = applicationStatuses?.get(job.jobId);
+  const isQueued = queuedJobIds?.has(job.jobId);
+  const queuing = Boolean(queuingJobIds?.has(job.jobId));
+  const inQueue = isQueued ?? applicationStatus === "saved";
+  const canAddToQueue = Boolean(onAddToQueue) && !queuing && (!applicationStatus || (applicationStatus === "saved" && !isQueued));
+  const canHideLocally = Boolean(onHideLocally);
+  const {
+    handleHide,
+    handleQueue,
+    translateX,
+    panHandlers,
+    queueProgress,
+    hideProgress,
+    hideFade,
+    hideScale,
+    hideTranslateY,
+  } = useCardGestures({
+    queueable: canAddToQueue,
+    hideable: canHideLocally,
+    onQueue: () => onAddToQueue?.(job),
+    onHide: () => onHideLocally?.(job),
+  });
+  const handleRemoveFromQueue = () => {
+    if (!onRemoveFromQueue) return;
+    onRemoveFromQueue(job);
+  };
+  return (
+    <Animated.View style={[styles.catalogCell, { opacity: hideFade, transform: [{ scale: hideScale }, { translateY: hideTranslateY }] }]}>
+      <View style={[styles.swipeCard, styles.catalogCellStack]}>
+        {canAddToQueue || queuing ? (
+          <Animated.View pointerEvents="none" style={[styles.swipeSaveAction, { opacity: queueProgress }]}>
+            <Ionicons name="bookmark" size={18} color="#FFFFFF" />
+            <Text style={styles.swipeSaveActionText}>{queuing ? (inQueue ? "Removing…" : "Adding…") : "Mark"}</Text>
+          </Animated.View>
+        ) : null}
+        {canHideLocally ? (
+          <Animated.View pointerEvents="none" style={[styles.swipeHideAction, { opacity: hideProgress }]}>
+            <Ionicons name="eye-off-outline" size={18} color={colors.onDark} />
+            <Text style={styles.swipeHideActionText}>Hide</Text>
+          </Animated.View>
+        ) : null}
+        <Animated.View {...panHandlers} style={[styles.catalogCellStack, { transform: [{ translateX }] }]}>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={`${recencyBadge ? `${recencyBadge} role, ` : ""}${display.title} at ${display.company}, ${display.location}, ${display.season}, ${timing.summary}${source.primary ? `, ${source.primary}` : ""}${job.postingIdentityStatus === "unconfirmed" ? ", identity unconfirmed" : ""}${applicationStatus ? `, ${applicationStatus}` : ""}`}
+            accessibilityHint={
+              canAddToQueue && canHideLocally
+                ? "Swipe left to add this role to the apply queue, or swipe right to hide it on this device."
+                : canAddToQueue
+                  ? "Swipe left to add this role to the queue and apply later."
+                  : canHideLocally
+                    ? "Swipe right to hide this role on this device."
+                    : undefined
+            }
+            accessibilityActions={
+              [
+                ...(canAddToQueue ? [{ name: "queue", label: "Add to apply queue" }] : []),
+                ...(inQueue && onRemoveFromQueue ? [{ name: "removeFromQueue", label: "Remove from queue" }] : []),
+                ...(canHideLocally ? [{ name: "hide", label: "Hide on this device" }] : []),
+              ]
+            }
+            onAccessibilityAction={(event) => {
+              if (event.nativeEvent.actionName === "queue") handleQueue();
+              if (event.nativeEvent.actionName === "removeFromQueue") handleRemoveFromQueue();
+              if (event.nativeEvent.actionName === "hide") handleHide();
+            }}
+            activeOpacity={0.85}
+            style={[styles.catalogTile, lane && styles.catalogTileLane]}
+            onPress={() => onOpenRole(job)}
+          >
+            <View style={styles.catalogTileTop}>
+              {job.disciplines?.length ? (
+                <View style={styles.catalogTileTags}>
+                  {job.disciplines.slice(0, lane ? 2 : 1).map((entry) => {
+                    const style = disciplineStyleFor(entry);
+                    return (
+                      <View key={entry} style={[styles.disciplinePill, { backgroundColor: style.backgroundColor, borderColor: style.borderColor }]}>
+                        <Text style={[styles.disciplinePillText, { color: style.color }]}>{style.label}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              ) : <View />}
+              {recencyBadge ? (
+                <View style={styles.catalogTileNew} accessibilityLabel={`${recencyBadge} role`}>
+                  <Ionicons name="sparkles-outline" size={12} color={colors.signal} />
+                  <Text style={styles.catalogTileNewText}>{recencyBadge}</Text>
+                </View>
+              ) : null}
+            </View>
+            <Text style={styles.catalogTileCompany} numberOfLines={1}>{display.company}</Text>
+            <Text style={[styles.catalogTileTitle, lane && styles.catalogTileTitleLane]} numberOfLines={lane ? 2 : 3}>{display.title}</Text>
+            <Text style={styles.catalogTileMeta} numberOfLines={2}>{display.location} · {display.season}</Text>
+            {display.compensation ? <Text style={styles.catalogTileComp} numberOfLines={1}>{display.compensation}</Text> : null}
+            {lane ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
+            {!job.open ? <Text style={styles.closedStatus}>Closed</Text> : null}
+            <View style={styles.catalogTileFooter}>
+              <View style={styles.catalogTileState}>
+                {!inQueue && applicationStatus ? <Text style={styles.catalogTileStateText}>{applicationStatus.toUpperCase()}</Text> : null}
+                {job.postingIdentityStatus === "unconfirmed" ? (
+                  <Ionicons name="shield-outline" size={13} color={colors.muted} accessibilityLabel="Identity unconfirmed" />
+                ) : null}
+              </View>
+              <View style={styles.catalogTileActions}>
+                {canHideLocally ? (
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={styles.catalogTileAction}>
+                    <Ionicons name="eye-off-outline" size={16} color={colors.muted} />
+                    <Text style={styles.catalogTileActionText} numberOfLines={1}>Hide</Text>
+                  </TouchableOpacity>
+                ) : null}
+                {queuing ? (
+                  <View style={styles.catalogTileAction}>
+                    <Text style={styles.catalogTileActionText}>{inQueue ? "Removing…" : "Adding…"}</Text>
+                  </View>
+                ) : null}
+                {!queuing && inQueue && onRemoveFromQueue ? (
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Remove from queue" onPress={handleRemoveFromQueue} style={[styles.catalogTileAction, styles.catalogTileActionActive]}>
+                    <Ionicons name="bookmark" size={16} color={colors.signal} />
+                    <Text style={styles.catalogTileActionActiveText} numberOfLines={1}>In queue</Text>
+                  </TouchableOpacity>
+                ) : null}
+                {canAddToQueue ? (
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" accessibilityHint="Adds this role to the apply queue" onPress={handleQueue} style={styles.catalogTileAction}>
+                    <Ionicons name="bookmark-outline" size={16} color={colors.ink} />
+                    <Text style={[styles.catalogTileActionText, styles.catalogTileActionStrong]} numberOfLines={1}>Queue</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            </View>
+          </TouchableOpacity>
+        </Animated.View>
+      </View>
+    </Animated.View>
+  );
+}
+
+/**
+ * An employer group with several roles. Queue and hide act on the featured role,
+ * exactly as the tall group card does, so the actions mean the same thing in both.
+ */
+function CatalogGroupTile({
+  group,
+  presentation,
+  status,
+  applicationStatuses,
+  queuedJobIds,
+  queuingJobIds,
+  onOpenGroup,
+  onAddToQueue,
+  onHideLocally,
+  onRemoveFromQueue,
+}: CatalogCardProps & { group: CatalogGroupRow; presentation: CatalogPresentation }) {
+  const lane = presentation === "lane";
+  const featuredRole = group.featuredRole;
+  const featuredJob = featuredRole ? catalogRoleJob(featuredRole) : undefined;
+  const applicationStatus = featuredJob ? applicationStatuses?.get(featuredJob.jobId) : undefined;
+  const isQueued = featuredJob ? queuedJobIds?.has(featuredJob.jobId) : undefined;
+  const queuing = Boolean(featuredJob && queuingJobIds?.has(featuredJob.jobId));
+  const inQueue = isQueued ?? applicationStatus === "saved";
+  const canAddToQueue = Boolean(featuredJob && onAddToQueue) && !queuing && (!applicationStatus || (applicationStatus === "saved" && !isQueued));
+  const canHideLocally = Boolean(featuredJob && onHideLocally);
+  const {
+    handleHide,
+    handleQueue,
+    translateX,
+    panHandlers,
+    queueProgress,
+    hideProgress,
+    hideFade,
+    hideScale,
+    hideTranslateY,
+  } = useCardGestures({
+    queueable: canAddToQueue,
+    hideable: canHideLocally,
+    onQueue: () => featuredJob && onAddToQueue?.(featuredJob),
+    onHide: () => featuredJob && onHideLocally?.(featuredJob),
+  });
+  const handleRemoveFromQueue = () => {
+    if (featuredJob && onRemoveFromQueue) onRemoveFromQueue(featuredJob);
+  };
+  const groupCompany = boundedCatalogText(group.company, 160);
+  const groupTitles = group.titles.map((title) => boundedCatalogText(title, 240)).filter(Boolean);
+  const groupLocation = compactLocations(group.locations);
+  const compensation = (group.compensations ?? []).filter(Boolean);
+  const availability = catalogGroupAvailabilityLabel(group, status);
+  const timing = featuredRole
+    ? postingTimingPresentation(featuredRole.sourceReferences ?? [], featuredRole.firstSeenAt ?? featuredRole.visibleAt)
+    : undefined;
+  return (
+    <Animated.View style={[styles.catalogCell, { opacity: hideFade, transform: [{ scale: hideScale }, { translateY: hideTranslateY }] }]}>
+      <View style={[styles.swipeCard, styles.catalogCellStack]}>
+        {canAddToQueue || queuing ? (
+          <Animated.View pointerEvents="none" style={[styles.swipeSaveAction, { opacity: queueProgress }]}>
+            <Ionicons name="bookmark" size={18} color="#FFFFFF" />
+            <Text style={styles.swipeSaveActionText}>{queuing ? (inQueue ? "Removing…" : "Adding…") : "Mark"}</Text>
+          </Animated.View>
+        ) : null}
+        {canHideLocally ? (
+          <Animated.View pointerEvents="none" style={[styles.swipeHideAction, { opacity: hideProgress }]}>
+            <Ionicons name="eye-off-outline" size={18} color={colors.onDark} />
+            <Text style={styles.swipeHideActionText}>Hide</Text>
+          </Animated.View>
+        ) : null}
+        <Animated.View {...panHandlers} style={[styles.catalogCellStack, { transform: [{ translateX }] }]}>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={`${groupCompany}, ${availability}, ${boundedCatalogText(groupTitles.join(", "), 480)}${group.unconfirmedRoleCount ? `, ${group.unconfirmedRoleCount} ${group.unconfirmedRoleCount === 1 ? "role has" : "roles have"} unconfirmed identity` : ""}`}
+            accessibilityHint="Opens every role in this group"
+            onPress={() => onOpenGroup(group)}
+            activeOpacity={0.85}
+            style={[styles.catalogTile, lane && styles.catalogTileLane]}
+          >
+            <View style={styles.catalogTileTop}>
+              <View style={styles.catalogTileTags}>
+                <View style={styles.catalogGroupCountPill}>
+                  <Text style={styles.catalogGroupCountText}>{group.roleCount} roles</Text>
+                </View>
+                {group.disciplines?.slice(0, lane ? 2 : 1).map((entry) => {
+                  const style = disciplineStyleFor(entry);
+                  return (
+                    <View key={entry} style={[styles.disciplinePill, { backgroundColor: style.backgroundColor, borderColor: style.borderColor }]}>
+                      <Text style={[styles.disciplinePillText, { color: style.color }]}>{style.label}</Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+            <Text style={styles.catalogTileCompany} numberOfLines={1}>{groupCompany}</Text>
+            <Text style={[styles.catalogTileTitle, lane && styles.catalogTileTitleLane]} numberOfLines={lane ? 3 : 4}>{groupTitles.join(" · ")}</Text>
+            <Text style={styles.catalogTileMeta} numberOfLines={2}>
+              {[groupLocation, group.seasons.map(seasonLabel).join(" · ")].filter(Boolean).join("  •  ")}
+            </Text>
+            {compensation.length ? (
+              <Text style={styles.catalogTileComp} numberOfLines={1}>
+                {compensation.slice(0, 2).join(" · ")}{compensation.length > 2 ? ` +${compensation.length - 2}` : ""}
+              </Text>
+            ) : null}
+            {lane && timing ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
+            {group.unconfirmedRoleCount ? (
+              <Text style={styles.catalogTileNotice} numberOfLines={1}>
+                {group.unconfirmedRoleCount} {group.unconfirmedRoleCount === 1 ? "role" : "roles"} unconfirmed
+              </Text>
+            ) : null}
+            <View style={styles.catalogTileFooter}>
+              <View style={styles.catalogTileState}>
+                {inQueue ? <Text style={styles.catalogTileStateText}>In queue</Text> : null}
+              </View>
+              <View style={styles.catalogTileActions}>
+                {canHideLocally ? (
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={styles.catalogTileAction}>
+                    <Ionicons name="eye-off-outline" size={16} color={colors.muted} />
+                    <Text style={styles.catalogTileActionText} numberOfLines={1}>Hide</Text>
+                  </TouchableOpacity>
+                ) : null}
+                {queuing ? (
+                  <View style={styles.catalogTileAction}>
+                    <Text style={styles.catalogTileActionText}>{inQueue ? "Removing…" : "Adding…"}</Text>
+                  </View>
+                ) : null}
+                {!queuing && inQueue && onRemoveFromQueue ? (
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Remove from queue" onPress={handleRemoveFromQueue} style={[styles.catalogTileAction, styles.catalogTileActionActive]}>
+                    <Ionicons name="bookmark" size={16} color={colors.signal} />
+                    <Text style={styles.catalogTileActionActiveText} numberOfLines={1}>In queue</Text>
+                  </TouchableOpacity>
+                ) : null}
+                {canAddToQueue ? (
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" accessibilityHint="Adds this role to the apply queue" onPress={handleQueue} style={styles.catalogTileAction}>
+                    <Ionicons name="bookmark-outline" size={16} color={colors.ink} />
+                    <Text style={[styles.catalogTileActionText, styles.catalogTileActionStrong]} numberOfLines={1}>Queue</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            </View>
+          </TouchableOpacity>
+        </Animated.View>
+      </View>
+    </Animated.View>
+  );
+}
+
+/** Dispatches a catalog row to the tile that matches its shape. */
+function CatalogGroupItem({
+  group,
+  presentation,
+  newJobIds,
+  ...card
+}: CatalogCardProps & { group: CatalogGroupRow; presentation: CatalogPresentation }) {
+  if (catalogCardKind(group) === "role" && group.featuredRole) {
+    return (
+      <CatalogTile
+        job={catalogRoleJob(group.featuredRole)}
+        presentation={presentation}
+        isNew={Boolean(newJobIds?.has(group.featuredRole.jobId))}
+        newJobIds={newJobIds}
+        {...card}
+      />
+    );
+  }
+  return <CatalogGroupTile group={group} presentation={presentation} newJobIds={newJobIds} {...card} />;
+}
+
+/**
+ * What appeared since your last visit, in the same tiles as the grid so the lane
+ * reads as the top of one catalog rather than a separate feed.
+ */
+function NewnessLane({
+  groups,
+  since,
+  onOpenGroup,
+  onOpenRole,
+  onAddToQueue,
+  onHideLocally,
+  onRemoveFromQueue,
+  applicationStatuses,
+  queuedJobIds,
+  queuingJobIds,
+  newJobIds,
+  status,
+}: CatalogCardProps & { groups: CatalogGroupRow[]; since: string }) {
+  const { width } = useWindowDimensions();
+  const laneTileWidth = width < 600 ? Math.min(300, width - 76) : 320;
+  const roleCount = groups.reduce((total, group) => total + group.roleCount, 0);
+  return (
+    <View style={styles.catalogLane}>
+      <View style={styles.catalogLaneHeader}>
+        <Text style={styles.catalogLaneTitle}>
+          {roleCount} new {roleCount === 1 ? "role" : "roles"} since {since}
+        </Text>
+        <Text style={styles.catalogLaneCaption}>Freshly matched your alerts</Text>
+      </View>
+      <FlatList
+        horizontal
+        data={groups}
+        keyExtractor={(group) => group.groupId}
+        showsHorizontalScrollIndicator={false}
+        snapToInterval={laneTileWidth + 12}
+        decelerationRate="fast"
+        contentContainerStyle={styles.catalogLaneList}
+        renderItem={({ item }) => (
+          <View style={{ width: laneTileWidth }}>
+            <CatalogGroupItem
+              group={item}
+              presentation="lane"
+              status={status}
+              newJobIds={newJobIds}
+              applicationStatuses={applicationStatuses}
+              queuedJobIds={queuedJobIds}
+              queuingJobIds={queuingJobIds}
+              onOpenGroup={onOpenGroup}
+              onOpenRole={onOpenRole}
+              onAddToQueue={onAddToQueue}
+              onHideLocally={onHideLocally}
+              onRemoveFromQueue={onRemoveFromQueue}
+            />
+          </View>
+        )}
+      />
+    </View>
+  );
+}
+
 function CatalogGroupCard({
   group,
   onOpenGroup,
@@ -888,61 +1497,21 @@ function CatalogGroupCard({
   isQueued?: boolean;
   onRemoveFromQueue?: () => void;
 }) {
-  const motionAllowed = useContext(MotionAllowedContext);
-  const hideFade = useRef(new Animated.Value(1)).current;
-  const hideScale = useRef(new Animated.Value(1)).current;
-  const hideTranslateY = useRef(new Animated.Value(0)).current;
-  const [isHiding, setIsHiding] = useState(false);
-  const translateX = useRef(new Animated.Value(0)).current;
   const inQueue = isQueued ?? applicationStatus === "saved";
   const queueProgressLabel = inQueue ? "Removing…" : "Adding…";
   const canAddToQueue = Boolean(onAddToQueue) && !isAddingToQueue && (!applicationStatus || (applicationStatus === "saved" && !inQueue));
   const canHideLocally = Boolean(onHideLocally);
-  const handleHide = () => {
-    if (isHiding || !onHideLocally) return;
-    setIsHiding(true);
-    if (!motionAllowed) { onHideLocally(); return; }
-    Animated.parallel([
-      Animated.timing(hideFade, { toValue: 0, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
-      Animated.timing(hideScale, { toValue: 0.96, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
-      Animated.timing(hideTranslateY, { toValue: 6, duration: 200, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
-    ]).start(() => onHideLocally());
-  };
-  const handleAddToQueue = () => {
-    if (isHiding || !onAddToQueue) return;
-    onAddToQueue();
-  };
-  const resetPosition = () => {
-    if (!motionAllowed) { translateX.setValue(0); return; }
-    Animated.spring(translateX, { toValue: 0, friction: 9, tension: 130, useNativeDriver: true }).start();
-  };
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gesture) =>
-          ((canAddToQueue && gesture.dx < -8) || (canHideLocally && gesture.dx > 8)) && Math.abs(gesture.dx) > Math.abs(gesture.dy),
-        onPanResponderMove: (_, gesture) => {
-          translateX.setValue(Math.max(canAddToQueue ? -116 : 0, Math.min(canHideLocally ? 116 : 0, gesture.dx)));
-        },
-        onPanResponderRelease: (_, gesture) => {
-          const shouldSave = canAddToQueue && (gesture.dx < -84 || gesture.vx < -0.7);
-          const shouldHide = canHideLocally && (gesture.dx > 84 || gesture.vx > 0.7);
-          if (!shouldSave && !shouldHide) { resetPosition(); return; }
-          if (shouldSave) {
-            onAddToQueue?.();
-          }
-          if (!motionAllowed) { translateX.setValue(0); if (shouldHide) onHideLocally?.(); return; }
-          Animated.sequence([
-            Animated.timing(translateX, { toValue: shouldSave ? -108 : 108, duration: 100, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-            Animated.delay(120),
-          ]).start(() => { if (shouldHide) onHideLocally?.(); else resetPosition(); });
-        },
-        onPanResponderTerminate: resetPosition,
-      }),
-    [canHideLocally, canAddToQueue, motionAllowed, onHideLocally, onAddToQueue, translateX],
-  );
-  const saveActionProgress = translateX.interpolate({ inputRange: [-108, -36, 0], outputRange: [1, 0.32, 0], extrapolate: "clamp" });
-  const hideActionProgress = translateX.interpolate({ inputRange: [0, 36, 108], outputRange: [0, 0.32, 1], extrapolate: "clamp" });
+  const {
+    handleHide,
+    handleQueue,
+    translateX,
+    panHandlers,
+    queueProgress,
+    hideProgress,
+    hideFade,
+    hideScale,
+    hideTranslateY,
+  } = useCardGestures({ queueable: canAddToQueue, hideable: canHideLocally, onQueue: onAddToQueue, onHide: onHideLocally });
   if (catalogCardKind(group) === "role") {
     const job = catalogRoleJob(group.featuredRole);
     return <JobCard job={job} onOpen={() => onOpenRole(job)} onAddToQueue={onAddToQueue} isAddingToQueue={isAddingToQueue} onHideLocally={onHideLocally} applicationStatus={applicationStatus} isQueued={isQueued} onRemoveFromQueue={onRemoveFromQueue} />;
@@ -965,18 +1534,18 @@ function CatalogGroupCard({
     <Animated.View style={{ opacity: hideFade, transform: [{ scale: hideScale }, { translateY: hideTranslateY }] }}>
       <View style={styles.swipeCard}>
         {canAddToQueue || isAddingToQueue ? (
-          <Animated.View pointerEvents="none" style={[styles.swipeSaveAction, { opacity: saveActionProgress }]}>
+          <Animated.View pointerEvents="none" style={[styles.swipeSaveAction, { opacity: queueProgress }]}>
             <Ionicons name="bookmark" size={20} color="#FFFFFF" />
             <Text style={styles.swipeSaveActionText}>{isAddingToQueue ? queueProgressLabel : "Mark"}</Text>
           </Animated.View>
         ) : null}
         {canHideLocally ? (
-          <Animated.View pointerEvents="none" style={[styles.swipeHideAction, { opacity: hideActionProgress }]}>
+          <Animated.View pointerEvents="none" style={[styles.swipeHideAction, { opacity: hideProgress }]}>
             <Ionicons name="eye-off-outline" size={20} color={colors.onDark} />
             <Text style={styles.swipeHideActionText}>Hide</Text>
           </Animated.View>
         ) : null}
-        <Animated.View {...(canAddToQueue || canHideLocally ? panResponder.panHandlers : {})} style={{ transform: [{ translateX }] }}>
+        <Animated.View {...panHandlers} style={{ transform: [{ translateX }] }}>
           <TouchableOpacity
             accessibilityRole="button"
             accessibilityLabel={`${groupCompany}, ${label}, ${boundedCatalogText(groupTitles.join(", "), 480)}${group.unconfirmedRoleCount ? `, ${group.unconfirmedRoleCount} ${group.unconfirmedRoleCount === 1 ? "role has" : "roles have"} unconfirmed identity` : ""}`}
@@ -1041,7 +1610,7 @@ function CatalogGroupCard({
                   </View>
                 ) : null}
                 {canAddToQueue ? (
-                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" accessibilityHint="Adds this role to the apply queue" onPress={handleAddToQueue} style={styles.webQueueButtonCompact}>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" accessibilityHint="Adds this role to the apply queue" onPress={handleQueue} style={styles.webQueueButtonCompact}>
                     <Ionicons name="bookmark" size={14} color={colors.ink} />
                     <Text style={styles.webQueueButtonText}>Queue</Text>
                   </TouchableOpacity>
@@ -1619,12 +2188,6 @@ function RequirementFilter({
   );
 }
 
-const disciplineChipOptions: ChipOption[] = (() => {
-  const order = ['software', 'ai-ml', 'data', 'infrastructure-cloud', 'security', 'quant', 'product', 'technical-design'] as const;
-  const byTag = new Map(allDisciplineStyles().map(({ tag, style }) => [tag, style] as const));
-  return order.filter((tag) => byTag.has(tag)).map((tag) => ({ value: byTag.get(tag)!.filterValue, label: byTag.get(tag)!.label }));
-})();
-
 function toggleChipValue(selected: string[], value: string): string[] {
   return selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value];
 }
@@ -1900,8 +2463,8 @@ function FilterSheet({
             <JobStatusFilter status={filters.jobStatus} onChange={(jobStatus) => set({ jobStatus })} />
             <Text style={styles.filterLabel}>Source</Text>
             <View style={styles.companyFilter} accessibilityRole="radiogroup" accessibilityLabel="Source">
-              {([['all', 'All'], ['direct', 'Direct'], ['community', 'Community'], ['corroborated', 'Direct + community']] as const).map(([value, label]) => (
-                <TouchableOpacity key={value} accessibilityRole="radio" aria-checked={filters.sourceFilter === value} style={[styles.chip, filters.sourceFilter === value && styles.chipOn]} onPress={() => set({ sourceFilter: value })}>
+              {sourceFilterOptions.map(({ value, label }) => (
+                <TouchableOpacity key={value} accessibilityRole="radio" aria-checked={filters.sourceFilter === value} style={[styles.chip, filters.sourceFilter === value && styles.chipOn]} onPress={() => set({ sourceFilter: value as CatalogFilterValues["sourceFilter"] })}>
                   <Text style={[styles.chipLabel, filters.sourceFilter === value && styles.chipLabelOn]}>{label}</Text>
                 </TouchableOpacity>
               ))}
@@ -2497,14 +3060,6 @@ function LaunchInbox({
   );
 }
 
-function CatalogInitialLoading() {
-  return (
-    <View accessibilityRole="progressbar" accessibilityLabel="Loading internships" style={styles.catalogInitialLoading}>
-      {[0, 1, 2].map((index) => <LoadingRoleCard key={index} index={index} />)}
-    </View>
-  );
-}
-
 function CatalogPaginationFooter({
   loading,
   error,
@@ -2545,6 +3100,21 @@ function CatalogPaginationFooter({
   return null;
 }
 
+/**
+ * CATALOG SURFACE CONTRACT
+ * THESIS: the query field is the spine. A pinned search bar with live counts sits
+ * above a dense tile grid; the category default — one tall card per row in a
+ * half-empty column — is refused.
+ * OWN-WORLD: the product's existing palette and type (ink, signal, muted on
+ * surface; 12–17 pt), sharing the queue, hide and swipe vocabulary of every role
+ * card so an action means one thing everywhere.
+ * FIRST VIEWPORT: query, active-facet tokens, result count, then the lane of new
+ * roles, then the grid.
+ * SIGNATURE: the newness lane — what appeared since your last visit leads the
+ * catalog, and a query narrows the lane and the grid together.
+ * RISK: density. Two columns on a phone can crowd long employer names, so tiles
+ * wrap to three lines of title before they truncate.
+ */
 function CatalogScreen({
   groups,
   query,
@@ -2573,6 +3143,9 @@ function CatalogScreen({
   queueJobs,
   onOpenQueuedRole,
   onBulkOpenQueue,
+  newJobIds,
+  newSinceLabel,
+  dayZone,
 }: {
   groups: CatalogGroupRow[];
   query: string;
@@ -2601,17 +3174,45 @@ function CatalogScreen({
   queueJobs?: Job[];
   onOpenQueuedRole?: (target: { jobId: string; applyUrl: string }) => void;
   onBulkOpenQueue?: (targets: Array<{ jobId: string; applyUrl: string }>) => void;
+  /** Roles that appeared since the last visit, offered as the catalog's first lane. */
+  newJobIds?: Set<string>;
+  newSinceLabel?: string;
+  /** The zone release days are read in; UTC unless the reader chose their own. */
+  dayZone: string;
 }) {
   const { width } = useWindowDimensions();
-  // The queue panel is a desktop workspace aid. Native keeps Roles focused on
-  // browsing; queued roles remain one tap away in the Queue tab.
+  // The queue panel is a desktop workspace aid. Native keeps browsing focused;
+  // queued roles remain one tap away in the Queue tab.
   const showQueueFixture = Platform.OS === "web" && queue !== undefined;
   const showQueueSidebar = Platform.OS === "web" && width >= 1280 && queue !== undefined;
-  const pushQueueToEdge = showQueueSidebar && width >= 1400;
+  const pushQueueToEdge = showQueueSidebar && width >= 1460;
   const queueEdgeOffset = 32 + Math.max(0, (width - 1440) / 2);
-  const roleFocusOffset = 28 + Math.min(68, Math.max(0, (width - 1440) / 4));
   const [queueOpen, setQueueOpen] = useState(false);
   const [sheetVisible, setSheetVisible] = useState(false);
+  const [queryFocused, setQueryFocused] = useState(false);
+  // Below this width the query field needs the whole row; the filter control
+  // drops to its own line rather than truncating the placeholder.
+  const stackedSearch = width < 560;
+  // The sidebar costs about a third of the window, so it caps the grid at three.
+  const columns = showQueueSidebar
+    ? (width >= 1660 ? 4 : 3)
+    : width >= 1400 ? 4 : width >= 840 ? 3 : 2;
+  const tokens = catalogFilterTokens(filters);
+  const searching = Boolean(query.trim());
+  const roleCount = groups.reduce((total, group) => total + group.roleCount, 0);
+  const employerCount = new Set(groups.map((group) => group.company)).size;
+  // A lane exists only when the launch inbox says something is genuinely new.
+  const laneGroups = newJobIds?.size
+    ? groups.filter((group) => group.roleIds?.some((roleId) => newJobIds.has(roleId)) || Boolean(group.featuredRole && newJobIds.has(group.featuredRole.jobId)))
+    : [];
+  const rows = useMemo(() => {
+    const chunked: CatalogGroupRow[][] = [];
+    for (let index = 0; index < groups.length; index += columns) {
+      chunked.push(groups.slice(index, index + columns));
+    }
+    return chunked;
+  }, [columns, groups]);
+  const searchFieldRef = useRef<TextInput>(null);
   const openNextQueuedRole = () => {
     const target = queue
       ?.map((item) => queueEntryTarget(item, queueJobs ?? []))
@@ -2622,47 +3223,108 @@ function CatalogScreen({
     ?.map((item) => queueEntryTarget(item, queueJobs ?? []))
     .filter((item): item is { jobId: string; applyUrl: string } => item !== undefined) ?? [];
   useWebKeyboardShortcuts([
+    { key: "/", onPress: () => searchFieldRef.current?.focus() },
     { key: "n", onPress: openNextQueuedRole, enabled: Boolean(availableQueuedTargets.length && onOpenQueuedRole) },
     { key: "5", onPress: () => onBulkOpenQueue?.(selectBulkTargets(availableQueuedTargets, 5)), enabled: Boolean(onBulkOpenQueue && availableQueuedTargets.length >= 5) },
     { key: "t", onPress: () => onBulkOpenQueue?.(selectBulkTargets(availableQueuedTargets, 10)), enabled: Boolean(onBulkOpenQueue && availableQueuedTargets.length >= 10) },
     { key: "h", onPress: () => onBulkOpenQueue?.(selectBulkTargets(availableQueuedTargets, "half")), enabled: Boolean(onBulkOpenQueue && availableQueuedTargets.length >= 2) },
     { key: "a", onPress: () => onBulkOpenQueue?.(selectBulkTargets(availableQueuedTargets, "all")), enabled: Boolean(onBulkOpenQueue && availableQueuedTargets.length >= 2) },
   ]);
+  const cardProps: CatalogCardProps = {
+    status: filters.jobStatus,
+    applicationStatuses,
+    queuedJobIds,
+    queuingJobIds,
+    newJobIds,
+    onOpenGroup,
+    onOpenRole,
+    onAddToQueue,
+    onHideLocally,
+    onRemoveFromQueue,
+  };
   return (
     <View style={[styles.roleWorkspace, showQueueSidebar && styles.roleWorkspaceWide]}>
-      <View style={[styles.roleFeedColumn, showQueueSidebar && styles.roleFeedColumnWide, showQueueSidebar && { transform: [{ translateX: roleFocusOffset }] }]}>
-        <View style={[styles.roleFeedControls, showQueueSidebar && styles.roleFeedControlsWide]}>
-          <View style={styles.feedSearchRow}>
-            <PlainTextInput
-              key="catalog-search"
-              value={query}
-              onChangeText={onQueryChange}
-              accessibilityLabel="Search roles, companies, and locations"
-              autoComplete="off"
-              secureTextEntry={false}
-              textContentType="none"
-              placeholder="Search roles, companies, locations"
-              placeholderTextColor={colors.placeholder}
-              style={[styles.feedSearch, styles.feedSearchFlex]}
-            />
-            {!showQueueSidebar && showQueueFixture && queueCount !== undefined ? (
-              <QueuePillButton count={queueCount} expanded={queueOpen} onPress={() => setQueueOpen((open) => !open)} />
-            ) : null}
+      <View style={[styles.roleFeedColumn, showQueueSidebar && styles.catalogColumnWide]}>
+        <View style={[styles.catalogSearchBlock, showQueueSidebar && styles.catalogSearchBlockWide]}>
+          <View style={[styles.catalogSearchRow, stackedSearch && styles.catalogSearchRowStacked]}>
+            <View style={[styles.catalogSearchField, queryFocused && styles.catalogSearchFieldFocused]}>
+              <Ionicons name="search-outline" size={17} color={colors.muted} />
+              <TextInput
+                ref={searchFieldRef}
+                value={query}
+                onChangeText={onQueryChange}
+                accessibilityLabel="Search roles, companies, and locations"
+                autoComplete="off"
+                autoCorrect={false}
+                secureTextEntry={false}
+                textContentType="none"
+                returnKeyType="search"
+                placeholder="Search roles, companies, locations"
+                placeholderTextColor={colors.placeholder}
+                selectionColor={colors.signal}
+                onFocus={() => setQueryFocused(true)}
+                onBlur={() => setQueryFocused(false)}
+                onKeyPress={(event) => {
+                  if (event.nativeEvent.key === "Escape") onQueryChange("");
+                }}
+                style={styles.catalogSearchInput}
+              />
+              {query ? (
+                <TouchableOpacity accessibilityRole="button" accessibilityLabel="Clear search" onPress={() => onQueryChange("")} style={styles.catalogSearchClear}>
+                  <Ionicons name="close-circle" size={17} color={colors.muted} />
+                </TouchableOpacity>
+              ) : null}
+            </View>
+            <View style={[styles.catalogSearchControls, stackedSearch && styles.catalogSearchControlsStacked]}>
+              <FilterBar activeCount={countActiveCatalogFilters(filters)} onOpen={() => setSheetVisible(true)} />
+              <View style={styles.catalogSearchControlTail}>
+                <ReleaseCalendar
+                  filters={filters}
+                  zone={dayZone}
+                  selectedDay={filters.day}
+                  onSelectDay={(day) => onFiltersChange({ ...filters, day })}
+                />
+                {!showQueueSidebar && showQueueFixture && queueCount !== undefined ? (
+                  <QueuePillButton count={queueCount} expanded={queueOpen} onPress={() => setQueueOpen((open) => !open)} />
+                ) : null}
+              </View>
+            </View>
           </View>
-          {!showQueueSidebar && showQueueFixture && queueOpen ? (
-            <QueuePanel
-              queue={queue}
-              jobs={queueJobs ?? []}
-              onOpenQueuedRole={onOpenQueuedRole}
-              onBulkOpenQueue={onBulkOpenQueue}
-              onViewAll={onOpenQueue}
-              onCollapse={() => setQueueOpen(false)}
-            />
+          {tokens.length ? (
+            <View style={styles.catalogTokenRow}>
+              {tokens.map((token) => (
+                <TouchableOpacity
+                  key={token.key}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove filter ${token.label}`}
+                  onPress={() => onFiltersChange({ ...filters, ...token.patch })}
+                  style={styles.catalogToken}
+                >
+                  <Text style={styles.catalogTokenText}>{token.label}</Text>
+                  <Ionicons name="close" size={13} color={colors.signal} />
+                </TouchableOpacity>
+              ))}
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Clear all filters" onPress={() => onFiltersChange(emptyCatalogFilters)} style={styles.catalogTokenClear}>
+                <Text style={styles.catalogTokenClearText}>Clear all</Text>
+              </TouchableOpacity>
+            </View>
           ) : null}
-          <View style={styles.queuePillRow}>
-            <FilterBar activeCount={countActiveCatalogFilters(filters)} onOpen={() => setSheetVisible(true)} />
-          </View>
+          <Text style={styles.catalogSummary} accessibilityLiveRegion="polite">
+            {loading
+              ? "Searching the catalog…"
+              : `${employerCount}${reachedEnd ? "" : "+"} ${employerCount === 1 ? "employer" : "employers"} · ${roleCount}${reachedEnd ? "" : "+"} ${roleCount === 1 ? "role" : "roles"}${searching ? ` for “${query.trim()}”` : ""}`}
+          </Text>
         </View>
+        {!showQueueSidebar && showQueueFixture && queueOpen ? (
+          <QueuePanel
+            queue={queue}
+            jobs={queueJobs ?? []}
+            onOpenQueuedRole={onOpenQueuedRole}
+            onBulkOpenQueue={onBulkOpenQueue}
+            onViewAll={onOpenQueue}
+            onCollapse={() => setQueueOpen(false)}
+          />
+        ) : null}
         <FilterSheet
           visible={sheetVisible}
           filters={filters}
@@ -2671,47 +3333,60 @@ function CatalogScreen({
         />
         <FlatList
           style={styles.roleFeedList}
-          data={groups}
-          extraData={[applicationStatuses, queuingJobIds]}
-          keyExtractor={(group) => group.groupId}
-          contentContainerStyle={[styles.feedListContent, showQueueSidebar && styles.feedListContentWide]}
+          data={rows}
+          extraData={[applicationStatuses, queuingJobIds, filters.jobStatus]}
+          keyExtractor={(row) => row[0]?.groupId ?? "catalog-row"}
+          contentContainerStyle={[styles.catalogGrid, showQueueSidebar && styles.feedListContentWide]}
           onEndReached={onLoadMore}
           onEndReachedThreshold={0.6}
-          renderItem={({ item }) => {
-            const featuredJob = item.featuredRole ? catalogRoleJob(item.featuredRole) : undefined;
-            const isSaving = featuredJob ? queuingJobIds?.has(featuredJob.jobId) : false;
-            const applicationStatus = featuredJob ? applicationStatuses?.get(featuredJob.jobId) : undefined;
-            return (
-              <CatalogGroupCard
-                group={item}
-                status={filters.jobStatus}
-                onOpenGroup={() => onOpenGroup(item)}
-                onOpenRole={onOpenRole}
-                onAddToQueue={featuredJob && onAddToQueue ? () => { void onAddToQueue(featuredJob); } : undefined}
-                isAddingToQueue={isSaving}
-                onHideLocally={featuredJob && onHideLocally ? () => onHideLocally(featuredJob) : undefined}
-                applicationStatus={applicationStatus}
-                isQueued={featuredJob ? queuedJobIds?.has(featuredJob.jobId) : undefined}
-                onRemoveFromQueue={featuredJob && onRemoveFromQueue ? () => onRemoveFromQueue(featuredJob) : undefined}
-              />
-            );
-          }}
+          ListHeaderComponent={
+            laneGroups.length ? (
+              <NewnessLane groups={laneGroups} since={newSinceLabel ?? "your last visit"} {...cardProps} />
+            ) : null
+          }
+          renderItem={({ item: row }) => (
+            <View style={styles.catalogGridRow}>
+              {row.map((group) => <CatalogGroupItem key={group.groupId} group={group} presentation="grid" {...cardProps} />)}
+              {row.length < columns
+                ? Array.from({ length: columns - row.length }, (_, index) => <View key={`catalog-filler-${index}`} style={styles.catalogCell} />)
+                : null}
+            </View>
+          )}
           ListEmptyComponent={
-            loading ? <CatalogInitialLoading /> : error ? (
+            loading ? (
+              <CatalogTileSkeleton count={columns * 2} columns={columns} />
+            ) : error ? (
               <View style={styles.catalogUnavailable}>
-                <EmptyState
-                  eyebrow="Catalog unavailable"
-                  title="Your latest opportunities will appear here."
-                  description="We couldn't refresh the catalog right now. Check your connection and try again."
-                />
-                <ActionButton label="Try again" onPress={onRetry} />
+                <Text style={styles.catalogEmptyTitle}>The catalog didn’t load.</Text>
+                <Text style={styles.catalogEmptyCopy}>We couldn’t reach the catalog just now. Check your connection and try again.</Text>
+                <View style={styles.catalogEmptyAction}>
+                  <ActionButton label="Try again" onPress={onRetry} />
+                </View>
               </View>
             ) : (
-              <EmptyState
-                eyebrow="Search"
-                title="Nothing fits that search yet."
-                description="Try a company, role, or location with fewer terms."
-              />
+              <View style={styles.catalogUnavailable}>
+                <Text style={styles.catalogEmptyTitle}>
+                  {filters.day
+                    ? `No open roles were released on ${releaseDayLabel(filters.day)}.`
+                    : searching ? `Nothing matches “${query.trim()}” yet.` : "No roles match these filters."}
+                </Text>
+                <Text style={styles.catalogEmptyCopy}>
+                  {filters.day
+                    ? "Pick another day in the calendar, or clear the day to see the whole catalog."
+                    : tokens.length
+                      ? "Remove a filter to widen the search."
+                      : "Try a company, a role, or a location with fewer terms."}
+                </Text>
+                <View style={styles.catalogEmptyAction}>
+                  {filters.day ? (
+                    <ActionButton label="Clear day" variant="secondary" onPress={() => onFiltersChange({ ...filters, day: undefined })} />
+                  ) : searching ? (
+                    <ActionButton label="Clear search" variant="secondary" onPress={() => onQueryChange("")} />
+                  ) : tokens.length ? (
+                    <ActionButton label="Clear filters" variant="secondary" onPress={() => onFiltersChange(emptyCatalogFilters)} />
+                  ) : null}
+                </View>
+              </View>
             )
           }
           ListFooterComponent={
@@ -2719,7 +3394,7 @@ function CatalogScreen({
               loading={loadingMore}
               error={moreError}
               reachedEnd={reachedEnd}
-              searching={Boolean(query.trim())}
+              searching={searching}
               onRetry={onRetryLoadMore}
             />
           }
@@ -2873,6 +3548,8 @@ function AppContent() {
   const sessionRequestId = useRef(0);
   const privateRequestId = useRef(0);
   const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "profile">("roles");
+  // Release days default to UTC; a reader can ask for their own zone instead.
+  const { zone: dayZone } = useDayZone();
   const [queueSheetVisible, setQueueSheetVisible] = useState(false);
   const [preferences, setPreferences] = useState<Preference>();
   const [preferenceError, setPreferenceError] = useState<string>();
@@ -3024,7 +3701,7 @@ function AppContent() {
     setCatalogError(undefined);
     setCatalogMoreError(undefined);
     const catalogQuery = query.trim();
-    const params = groupedCatalogParameters({ query: catalogQuery, source: catalogFilters.sourceFilter, status: catalogFilters.jobStatus, employerCategory: catalogFilters.employerFilter, disciplines: catalogFilters.disciplines, seasons: catalogFilters.seasons, workModes: catalogFilters.workModes, educationLevels: catalogFilters.educationLevels, hasCompensation: catalogFilters.hasCompensation, hideUsCitizenshipRequired: catalogFilters.hideUsCitizenshipRequired, hideAdvancedDegreeRequired: catalogFilters.hideAdvancedDegreeRequired });
+    const params = groupedCatalogParameters(catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }));
     void api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "")
       .then((page) => {
         if (catalogRequestGeneration.current !== requestGeneration) return;
@@ -3057,7 +3734,7 @@ function AppContent() {
         catalogRequestInFlight.current = false;
       }
     };
-  }, [catalogRefresh, query, catalogFilters]);
+  }, [catalogRefresh, query, catalogFilters, dayZone]);
   const loadNextCatalogPage = (retry = false) => {
     const cursor = catalogCursorRef.current;
     if (!cursor || catalogRequestInFlight.current || (!retry && catalogMoreError)) return;
@@ -3067,7 +3744,7 @@ function AppContent() {
     setCatalogMoreError(undefined);
     const catalogQuery = query.trim();
     const params = groupedCatalogParameters(
-      { query: catalogQuery, source: catalogFilters.sourceFilter, status: catalogFilters.jobStatus, employerCategory: catalogFilters.employerFilter, disciplines: catalogFilters.disciplines, seasons: catalogFilters.seasons, workModes: catalogFilters.workModes, educationLevels: catalogFilters.educationLevels, hasCompensation: catalogFilters.hasCompensation, hideUsCitizenshipRequired: catalogFilters.hideUsCitizenshipRequired, hideAdvancedDegreeRequired: catalogFilters.hideAdvancedDegreeRequired },
+      catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }),
       { cursor },
     );
     void api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "")
@@ -3339,10 +4016,7 @@ function AppContent() {
     const requestGeneration = groupRequestGuard.current.begin(groupId);
     setSelectedGroupLoading(true);
     setSelectedGroupError(undefined);
-    const params = groupedCatalogParameters({
-      query: query.trim(), source: catalogFilters.sourceFilter, status: catalogFilters.jobStatus,
-      employerCategory: catalogFilters.employerFilter, disciplines: catalogFilters.disciplines, seasons: catalogFilters.seasons, workModes: catalogFilters.workModes, educationLevels: catalogFilters.educationLevels, hasCompensation: catalogFilters.hasCompensation, hideUsCitizenshipRequired: catalogFilters.hideUsCitizenshipRequired, hideAdvancedDegreeRequired: catalogFilters.hideAdvancedDegreeRequired,
-    });
+    const params = groupedCatalogParameters(catalogRequestState(catalogFilters, { query, dayZone }));
     params.delete("limit");
     void api<CatalogGroupDetails>(`/catalog/groups/${encodeURIComponent(groupId)}?${params.toString()}`, "")
       .then((details) => {
@@ -3438,6 +4112,13 @@ function AppContent() {
       ...jobs.filter((job) => !newJobs.some((newJob) => newJob.jobId === job.jobId)),
     ];
   }, [catalogFilters.jobStatus, jobs, launchInbox]);
+  // The catalog's newness lane reads the same release the Roles tab shows, so
+  // "new" means one thing across both surfaces.
+  const newCatalogJobIds = useMemo(
+    () => new Set(catalogFilters.jobStatus === "open" ? launchInbox?.jobs.map((job) => job.jobId) ?? [] : []),
+    [catalogFilters.jobStatus, launchInbox],
+  );
+  const newSinceLabel = launchInbox ? launchInterval(launchInbox.previousOpenedAt) : "your last visit";
   const applicationStatuses = useMemo(
     () => new Map(applications.map((application) => [application.jobId, application.status])),
     [applications],
@@ -3506,6 +4187,9 @@ function AppContent() {
         inbox={launchInbox}
         applicationStatuses={applicationStatuses}
         queuingJobIds={queuingJobIds}
+        newJobIds={newCatalogJobIds}
+        newSinceLabel={newSinceLabel}
+        dayZone={dayZone}
         catalogInitialLoading={catalogInitialLoading}
         catalogError={catalogError}
         catalogLoadingMore={catalogLoadingMore}
@@ -3843,6 +4527,9 @@ function AppContent() {
               queueJobs={catalogJobs}
               onOpenQueuedRole={openApplicationAndScheduleCheck}
               onBulkOpenQueue={openQueueBulk}
+              newJobIds={newCatalogJobIds}
+              newSinceLabel={newSinceLabel}
+              dayZone={dayZone}
             />
           ) : (
             <Profile
@@ -4251,6 +4938,9 @@ function GuestExperience({
   inbox,
   applicationStatuses,
   queuingJobIds,
+  newJobIds,
+  newSinceLabel,
+  dayZone,
   catalogInitialLoading,
   catalogError,
   catalogLoadingMore,
@@ -4286,6 +4976,9 @@ function GuestExperience({
   inbox?: LaunchInbox;
   applicationStatuses: Map<string, string>;
   queuingJobIds: Set<string>;
+  newJobIds?: Set<string>;
+  newSinceLabel?: string;
+  dayZone: string;
   catalogInitialLoading: boolean;
   catalogError?: string;
   catalogLoadingMore: boolean;
@@ -4370,6 +5063,9 @@ function GuestExperience({
                 onOpenRole={onOpenJob}
                 onAddToQueue={async () => { openAccount(); return false; }}
                 onHideLocally={onHideLocally as unknown as (job: Job) => void}
+                newJobIds={newJobIds}
+                newSinceLabel={newSinceLabel}
+                dayZone={dayZone}
               />
             </View>
             {tab === "roles" ? (
@@ -5161,6 +5857,7 @@ function Profile({
   onSignOut?: () => void;
   onSignIn: () => void;
 }) {
+  const { setting: dayZoneSetting, setSetting: setDayZoneSetting } = useDayZone();
   const [destination, setDestination] = useState<SettingsDestination>("home");
   const [profile, setProfile] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
@@ -5701,6 +6398,23 @@ function Profile({
               <View style={styles.spacer} />
             </>
           ) : null}
+          <Text style={styles.profileSectionLabel}>Release calendar dates</Text>
+          <Text style={styles.muted}>
+            Which calendar the catalog's release days belong to. Alerts and release cards use UTC days.
+          </Text>
+          <ChoiceOption
+            label="UTC"
+            description="The same day for everyone reading the catalog."
+            selected={dayZoneSetting === "utc"}
+            onPress={() => setDayZoneSetting("utc")}
+          />
+          <ChoiceOption
+            label="Device time"
+            description={`Your own clock (${deviceTimeZone()}). A role that lands after local midnight counts as the next day.`}
+            selected={dayZoneSetting === "device"}
+            onPress={() => setDayZoneSetting("device")}
+          />
+          <View style={styles.spacer} />
         </>
       ) : null}
       {destination === "user-info" ? token ? (
@@ -6674,7 +7388,190 @@ const styles = StyleSheet.create({
     width: "100%",
   },
   applicationsListContent: { paddingBottom: 44, paddingTop: 20 },
-  catalogInitialLoading: { paddingTop: 12 },
+  catalogSearchBlock: {
+    alignSelf: "center",
+    maxWidth: 1120,
+    paddingBottom: 10,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    position: "relative",
+    width: "100%",
+    // The release calendar hangs off this block; keep it above the scrollable grid.
+    zIndex: 20,
+  },
+  catalogSearchBlockWide: { maxWidth: undefined, paddingHorizontal: 0 },
+  catalogColumnWide: { maxWidth: 1080 },
+  catalogSearchRow: { alignItems: "center", flexDirection: "row", gap: 8 },
+  catalogSearchRowStacked: { alignItems: "stretch", flexDirection: "column", gap: 10 },
+  catalogSearchControls: { alignItems: "center", flexDirection: "row", gap: 8 },
+  catalogSearchControlsStacked: { justifyContent: "space-between" },
+  catalogSearchControlTail: { alignItems: "center", flexDirection: "row", gap: 8 },
+  calendarAnchor: { position: "relative", zIndex: 20 },
+  calendarTrigger: {
+    alignItems: "center",
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    minHeight: 44,
+    paddingHorizontal: 12,
+  },
+  calendarTriggerOn: { backgroundColor: colors.signalSoft, borderColor: colors.separator },
+  calendarTriggerText: { color: colors.ink, fontSize: 13, fontWeight: "700" },
+  calendarTriggerTextOn: { color: colors.signal },
+  calendarScrim: { backgroundColor: "transparent", bottom: -400, left: -400, position: "absolute", right: -400, top: -400 },
+  calendarPopover: {
+    backgroundColor: colors.surface,
+    borderColor: colors.separator,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    position: "absolute",
+    right: 0,
+    top: 52,
+    shadowColor: "#0F172A",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    zIndex: 30,
+  },
+  calendarHeader: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
+  calendarMonthButton: { alignItems: "center", height: 40, justifyContent: "center", width: 40 },
+  calendarMonth: { color: colors.ink, fontSize: 15, fontWeight: "800" },
+  calendarWeekdays: { flexDirection: "row", marginTop: 4 },
+  calendarWeekday: { color: colors.muted, fontSize: 11, fontWeight: "700", textAlign: "center", width: `${100 / 7}%` },
+  calendarGrid: { flexDirection: "row", flexWrap: "wrap", marginTop: 2 },
+  calendarCell: { alignItems: "center", justifyContent: "center", paddingVertical: 2, width: `${100 / 7}%` },
+  calendarDay: {
+    alignItems: "center",
+    borderColor: "transparent",
+    borderRadius: 10,
+    borderWidth: 1,
+    height: 38,
+    justifyContent: "center",
+    width: 38,
+  },
+  calendarDayEmpty: { opacity: 0.45 },
+  calendarDayToday: { borderColor: colors.signal },
+  calendarDaySelected: { backgroundColor: colors.ink, borderColor: colors.ink },
+  calendarDayText: { color: colors.ink, fontSize: 13, fontWeight: "700", lineHeight: 15 },
+  calendarDayMutedText: { color: colors.muted, fontSize: 13, fontWeight: "600", lineHeight: 15 },
+  calendarDayCount: { color: colors.signal, fontSize: 10, fontWeight: "800", lineHeight: 12 },
+  calendarDayTextSelected: { color: colors.onDark },
+  calendarFooter: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", justifyContent: "space-between", marginTop: 8, paddingTop: 8 },
+  calendarZone: { color: colors.body, fontSize: 12, fontWeight: "700" },
+  calendarFooterNote: { color: colors.muted, fontSize: 11, fontWeight: "600" },
+  calendarClear: { alignItems: "center", justifyContent: "center", minHeight: 40, paddingTop: 6 },
+  calendarClearText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
+  catalogSearchField: {
+    alignItems: "center",
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 12,
+    borderWidth: 1,
+    flex: 1,
+    flexDirection: "row",
+    gap: 8,
+    minHeight: 52,
+    paddingHorizontal: 14,
+  },
+  catalogSearchFieldFocused: { borderColor: colors.signal, borderWidth: 2, paddingHorizontal: 13 },
+  catalogSearchInput: { color: colors.ink, flex: 1, fontSize: 16, minHeight: 48, paddingVertical: 0 },
+  catalogSearchClear: { alignItems: "center", height: 44, justifyContent: "center", width: 30 },
+  catalogTokenRow: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  catalogToken: {
+    alignItems: "center",
+    backgroundColor: colors.signalSoft,
+    borderColor: colors.separator,
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    minHeight: 34,
+    paddingHorizontal: 12,
+  },
+  catalogTokenText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
+  catalogTokenClear: { alignItems: "center", justifyContent: "center", minHeight: 34, paddingHorizontal: 8 },
+  catalogTokenClearText: { color: colors.muted, fontSize: 13, fontWeight: "700", textDecorationLine: "underline" },
+  catalogSummary: { color: colors.muted, fontSize: 13, fontWeight: "600", marginTop: 10 },
+  catalogGrid: {
+    alignSelf: "center",
+    maxWidth: 1120,
+    paddingBottom: 28,
+    paddingHorizontal: 20,
+    width: "100%",
+  },
+  catalogGridRow: { alignItems: "stretch", flexDirection: "row", gap: 12, marginBottom: 12 },
+  catalogCell: { flex: 1, minWidth: 0 },
+  catalogCellStack: { flexGrow: 1 },
+  catalogTile: {
+    backgroundColor: colors.surface,
+    borderColor: colors.separator,
+    borderRadius: 14,
+    borderWidth: 1,
+    flexGrow: 1,
+    padding: 13,
+  },
+  catalogTileLane: { padding: 16 },
+  catalogTileTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", minHeight: 22 },
+  catalogTileTags: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
+  catalogTileNew: { alignItems: "center", flexDirection: "row", flexShrink: 0, gap: 3 },
+  catalogTileNewText: { color: colors.signal, fontSize: 11, fontWeight: "800" },
+  catalogTileCompany: { color: colors.signal, fontSize: 13, fontWeight: "700", lineHeight: 18, marginTop: 8 },
+  catalogTileTitle: { color: colors.ink, fontSize: 15, fontWeight: "700", lineHeight: 20, marginTop: 2 },
+  catalogTileTitleLane: { fontSize: 17, lineHeight: 22 },
+  catalogTileMeta: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 4 },
+  catalogTileComp: { color: colors.ink, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 3 },
+  catalogTileTiming: { color: colors.muted, fontSize: 12, lineHeight: 16, marginTop: 3 },
+  catalogTileNotice: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },
+  catalogTileFooter: {
+    alignItems: "center",
+    borderTopColor: colors.separator,
+    borderTopWidth: 1,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 10,
+    paddingTop: 8,
+  },
+  catalogTileState: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
+  catalogTileStateText: { color: colors.signal, fontSize: 11, fontWeight: "800", letterSpacing: 0.4 },
+  catalogTileActions: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 4, justifyContent: "flex-end" },
+  catalogTileAction: {
+    alignItems: "center",
+    borderRadius: 10,
+    flexDirection: "row",
+    gap: 5,
+    justifyContent: "center",
+    minHeight: 44,
+    minWidth: 44,
+    paddingHorizontal: 6,
+  },
+  catalogTileActionActive: { backgroundColor: colors.signalSoft },
+  catalogTileActionText: { color: colors.ink, fontSize: 12, fontWeight: "700" },
+  catalogTileActionActiveText: { color: colors.signal, fontSize: 12, fontWeight: "700" },
+  catalogTileActionStrong: { fontWeight: "800" },
+  catalogGroupCountPill: { backgroundColor: colors.ink, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  catalogGroupCountText: { color: colors.onDark, fontSize: 11, fontWeight: "800" },
+  catalogLane: { marginBottom: 8, marginTop: 6 },
+  catalogLaneHeader: { alignItems: "baseline", flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 12 },
+  catalogLaneTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", lineHeight: 22 },
+  catalogLaneCaption: { color: colors.muted, fontSize: 13, fontWeight: "600" },
+  catalogLaneList: { gap: 12, paddingBottom: 4 },
+  catalogTileSkeleton: {
+    backgroundColor: colors.surface,
+    borderColor: colors.separator,
+    borderRadius: 14,
+    borderWidth: 1,
+    flex: 1,
+    gap: 8,
+    minWidth: 0,
+    padding: 13,
+  },
+  catalogEmptyTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", lineHeight: 22 },
+  catalogEmptyCopy: { color: colors.muted, fontSize: 14, lineHeight: 20, marginTop: 6 },
+  catalogEmptyAction: { marginTop: 4, maxWidth: 280 },
   catalogPagination: { alignItems: "center", minHeight: 52, justifyContent: "center", paddingVertical: 12 },
   catalogPaginationText: { color: colors.muted, fontSize: 14, lineHeight: 20, textAlign: "center" },
   catalogPaginationRetry: { alignItems: "center", justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },
@@ -7006,39 +7903,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     marginBottom: 12,
   },
-  feedSearch: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 10,
-    color: colors.ink,
-    fontSize: 16,
-    minHeight: 52,
-    paddingHorizontal: 14,
-    marginTop: 12,
-    marginBottom: 0,
-  },
-  feedSearchRow: { alignItems: "center", flexDirection: "row", gap: 8, marginTop: 12 },
-  feedSearchFlex: { flex: 1, marginTop: 0 },
   roleWorkspace: { flex: 1, minHeight: 0, width: "100%" },
   roleWorkspaceWide: {
     alignSelf: "center",
     flexDirection: "row",
     gap: 24,
-    maxWidth: 1240,
+    maxWidth: 1440,
     paddingLeft: 76,
     paddingRight: 20,
   },
   roleFeedColumn: { flex: 1, minHeight: 0, minWidth: 0 },
-  roleFeedColumnWide: { maxWidth: 760 },
-  roleFeedList: { flex: 1 },
-  roleFeedControls: {
-    alignSelf: "center",
-    maxWidth: 760,
-    paddingHorizontal: 20,
-    width: "100%",
-  },
-  roleFeedControlsWide: { maxWidth: undefined, paddingHorizontal: 0 },
+  roleFeedList: { flex: 1, zIndex: 0 },
   feedListContentWide: { maxWidth: undefined, paddingHorizontal: 0 },
   queueSidebar: { flex: 1, maxWidth: 288, minWidth: 252, paddingTop: 12 },
   catalogSourceFilters: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12, marginTop: 12 },
@@ -7282,7 +8157,6 @@ const styles = StyleSheet.create({
   saveFeedbackError: { backgroundColor: colors.dangerSoft, borderColor: colors.dangerBorder },
   saveFeedbackText: { color: colors.body, fontSize: 14, lineHeight: 20 },
   saveFeedbackRetry: { color: colors.signal, fontSize: 14, fontWeight: "700", marginTop: 8 },
-  queuePillRow: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", marginTop: 10 },
   hiddenRolePlaceholder: {
     alignItems: "center",
     borderColor: colors.separator,

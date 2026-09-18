@@ -53,24 +53,28 @@ We’ll ask for notification permission next.
 
 The content starts 42 pt below the safe area, with a 20 pt gutter on both sides. The chips wrap naturally, but every chip keeps a 48 pt minimum height. The action is full-width and visually grounded.
 
-### Focused Editorial sample: role feed
+### Focused Editorial sample: catalog grid
 
 ```text
-[ Search roles, companies, locations                    ]
-[ Filter roles ]
+[ ⌕ Search roles, companies, locations              ✕ ]
+[ Filter roles 3 ]  [ Summer 2027 ✕ ] [ SWE ✕ ]  Clear all
+5 employers · 6 roles
 
-┌──────────────────────────────────────────────────────┐
-│ Datadog                                               │
-│ Software Engineering Intern                           │
-│ New York, NY · Summer 2027                            │
-│ $52–$58 / hour                                        │
-│ [ APPLIED ]                                           │
-└──────────────────────────────────────────────────────┘
+6 new roles since Thu    Freshly matched your alerts
+┌───────────────────────┐ ┌───────────────────────┐ ┌─────────
+│ SWE           ●New here│ │ AI/ML        ●New here│ │ Quant
+│ Acme Robotics          │ │ Acme Robotics         │ │ Northst…
+│ Software Eng. Intern   │ │ Machine Learning Int. │ │ Quantitat…
+│ Austin, TX · summer-27 │ │ Austin, TX · summer-27│ │ New York…
+│ $45/hour               │ │ $45/hour              │ │ $45/hour
+│ Found by Ntern 10h ago │ │ Found by Ntern 10h ago│ │ Found by…
+│ In queue        Hide  Queue │ │            Hide  Queue │ │    Hide  
+└───────────────────────┘ └───────────────────────┘ └─────────
 
-[ ▣ Roles ]                 [ ♧ Saved ]              [ ◯ Profile ]
+[▣ Roles]        [▤ Queue]        [⌕ Catalog]        [◯ Profile]
 ```
 
-Navigation, search, headers, and cards all align to the same 20 pt edge. Cards are 16 pt radius, use a one-pixel slate border, and have a 12 pt gap—no floating/shadow-heavy treatment.
+Navigation, search, headers, tokens, the newness lane, and tiles all align to the same 20 pt edge. Tiles are 14 pt radius with a one-pixel slate border and a 12 pt gap—no floating or shadow-heavy treatment. The grid shows two columns on a phone, three on a tablet, and four on a wide desktop, and every tile footer names its own action.
 
 ### Focused Editorial sample: settings
 
@@ -156,6 +160,34 @@ Every screen follows these rules. They are as important as colors and type.
 - Selected: pale teal surface with teal border and dark-teal label.
 - Excluded: pale red surface with red border; reserve this state for explicit exclusions only.
 
+### Catalog search and grid
+
+- The Catalog tab is search-first. A pinned query field owns the top of the screen: a leading search icon, a trailing clear control, and a placeholder that names what is searchable (*Search roles, companies, locations*). Focus is visible as a 2 pt teal border; the caret and text selection are teal.
+- Keep the field on the whole row at every width, with the filter control beside it; below 560 pt the filter control drops to its own line so the placeholder is never truncated.
+- Show the live result count under the field — employers and roles, plus the query when there is one. A query narrows the grid and the newness lane together; there is no separate search screen.
+- Active facets appear as removable teal tokens under the field, in the same words the filter sheet uses, followed by one quiet **Clear all**. Removing a token must leave every other facet untouched. When nothing matches, the empty state names the query and offers **Clear search** or **Clear filters** rather than a dead end.
+- Results are a dense tile grid, not one tall column: 2 columns below 840 pt, 3 up to 1400 pt, 4 above, and 3 when the desktop queue sidebar is open. Compensate a row that is not full with invisible cells so tiles keep one width.
+- A tile is the compact form of a role card: discipline pill and **New here** marker, employer, role (up to three lines), location and season, compensation when known, the identity/closed notices, then a footer that names its own actions (**Hide**, **Queue**, or **In queue**). Tiles in a row are equal height and their footers align; use 14 pt radius and 13 pt padding for this denser form.
+- The tile surface keeps the card vocabulary: white surface, one-pixel soft border, teal employer text, ink role text, muted meta. A tap opens the role or the employer group exactly as the tall card does, and queue and hide mean the same thing in both forms.
+- On the web, `/` focuses the query field and `Esc` clears it.
+
+### Newness lane
+
+- Above the grid, and only when the launch release contains roles, show one horizontal lane of large tiles: **N new roles since <interval>** with **Freshly matched your alerts**. The lane is the top of the catalog, not a second product.
+- Lane tiles are the same tiles at the larger size: they spell out their actions and add the freshness line. Only roles that are genuinely in the release carry the **New here** marker; grid tiles never claim newness without it.
+- The lane is a snap scroller with a deliberate peek of the next tile. Never wrap it into a second row, never loop it automatically, and never badge it.
+- With no new roles the lane is simply absent: the search spine and the grid stand alone. Do not substitute an empty lane or a "nothing new" banner in the catalog — the Roles tab owns that message.
+
+### Release calendar
+
+- The catalog's release days are a calendar question, not a filter-sheet question. A small **Dates** control sits at the top right of the search spine and opens a month grid over the grid — it never reflows the catalog and never becomes a modal.
+- A day has a *release* only when roles became visible that day. Days with releases show that day's role count; days without are inert and visibly quiet. Never offer an empty day as a choice.
+- Selecting a day fills it, closes the calendar, and narrows the catalog to that day's roles. The choice joins the other facets as one removable token, so **Clear all** and the sheet stay the single place a reader un-narrows the list.
+- The day is read in **UTC** by default, so a role's release day is the same day for everyone and matches what alerts and release cards call it. The footer states which calendar is in force, and it never shows a bare count without saying what the count is.
+- **App & account → Release calendar dates** offers **UTC** or **Device time**. Device time is the reader's own clock, so a role that lands after local midnight counts toward the next day; changing it re-reads the calendar and any selected day.
+- Choosing a day that holds nothing for the current facets is not a dead end: the empty state names the day and offers **Clear day**.
+- The index request carries every other active facet, so the counts describe what the reader would actually see.
+
 ### Card
 
 - White surface, 16 pt radius, 16 pt internal padding.
@@ -164,27 +196,28 @@ Every screen follows these rules. They are as important as colors and type.
 - Company is teal metadata, role is ink, and location/season is muted body text.
 - When the signed-in user has an application record for the role, display its current status in a compact teal pill. Opening the employer form does not immediately create or change that record. For signed-in users it creates a short-lived, role-specific Gmail check intent; show **APPLIED** only after a manual status change or a confirmed Gmail detection. Continue to show later statuses such as assessment or interview.
 
-### Save for web
+### Queue from a role card
 
-- On the signed-in mobile feed, a deliberate left swipe on an unsaved role reveals a teal bookmark action and saves the role to the shared **Saved** queue. The card returns to its resting position, then shows its **SAVED** status; do not remove it from the feed.
-- The reveal uses a short 100 ms follow-through and 120 ms hold before the card settles back. With Reduce Motion enabled, save immediately without movement.
-- Saving never opens the employer form. The same account-backed role is available in the responsive web app’s **Saved** queue, where **Open official application** is the clear primary handoff. Keep status changes explicit; opening a form alone must not mark a role applied.
-- If a saved role remains open but fails catalog admission, preserve its title, employer, location, season, and application history. Replace the handoff with the quiet shield notice **InternNotifs couldn’t verify the official role page and is reviewing it.** Do not expose the unverified URL or application-assistance action. Closed roles keep the established closed state instead.
-- Expose the same action to assistive technology as **Save for web**, with a hint that it can be applied to later in the web app.
+- The only role-level action is adding the role to the apply queue; there is no separate "save for later". A deliberate left swipe on a role that is not queued reveals a teal bookmark action and adds it. The card returns to its resting position and shows its **In queue** state; do not remove it from the list.
+- The reveal uses a short 100 ms follow-through and 120 ms hold before the card settles back. With Reduce Motion enabled, queue immediately without movement.
+- Queuing never opens the employer form. **Open official application** remains the clear primary handoff wherever the queue is listed, and the same account-backed record is available in the responsive web app's queue panel. Keep status changes explicit; opening a form alone must not mark a role applied.
+- **Remove from queue** deletes the record; **Add to queue** restores it for a record that is saved but not queued. Do not offer the delete action for a record that already carries an application status.
+- If a queued role remains open but fails catalog admission, preserve its title, employer, location, season, and application history. Replace the handoff with the quiet shield notice **Ntern couldn't verify the official role page and is reviewing it.** Do not expose the unverified URL or application-assistance action. Closed roles keep the established closed state instead.
+- Expose the actions to assistive technology as **Add to apply queue** and **Remove from queue**, with a hint that the role can be applied to later.
 
 ### Hide from feed
 
-- A deliberate right swipe hides a role on the current device only. Reveal a subdued **Hide** action, then remove the card after its short follow-through; this must never remove the role from the catalog, Saved queue, or alerts.
-- Replace the card in place with a quiet, static **Role hidden on this device · Undo** row. It is not a popup or toast: it remains in the role’s list position for the current session, so Undo is immediate. Hidden roles are also listed in Profile and can be restored individually.
-- Expose **Hide on this device** as an assistive-technology action. A card with both actions must describe left swipe for Save and right swipe for Hide.
+- A deliberate right swipe hides a role on the current device only. Reveal a subdued **Hide** action, then remove the card after its short follow-through; this must never remove the role from the catalog, the apply queue, or alerts.
+- Replace the card in place with a quiet, static **Role hidden on this device · Undo** row. It is not a popup or toast: it remains in the role's list position for the current session, so Undo is immediate. Hidden roles are also listed in Profile and can be restored individually.
+- Expose **Hide on this device** as an assistive-technology action. A card with both actions must describe left swipe to queue and right swipe to hide.
 
-### New and seen roles
+### New roles
 
-- For the active signed-in session, keep roles returned by the launch-inbox endpoint above the normal feed in a **New roles** group.
-- After the last new card, show a quiet rule divider reading **You’re all caught up**, then label the remainder **Seen roles**.
-- Do not use a modal, an alert, or a persistent badge for this boundary. If there are no new roles, omit both labels and render the same simple search/filter-and-list landing page.
+- The Roles tab is the new-matches surface: it renders the launch inbox itself when the release contains roles, and a quiet empty state that links to the Catalog when it does not. Do not re-open the catalog behind the inbox or split the feed into new and seen sections.
+- Cards use the existing role-detail sheet and official-form handoff, and the one secondary action is **Browse the catalog**.
 - Give each new card a small, one-time arrival moment: an 8 pt lift, a soft teal sheen that fades within 420 ms, and a compact sparkle-plus-**New** marker beside the company. Stagger only the first five cards by 80 ms; never loop, pulse, or use a full-card neon treatment.
 - Honor the device Reduce Motion preference by showing the card and static **New** marker without movement. The treatment uses opacity and transforms so it stays smooth without making the list feel busy.
+- The Catalog tab carries the same release forward in its newness lane, so "new" means one thing across both surfaces.
 
 ### Posting identity certainty
 
@@ -210,8 +243,8 @@ Every screen follows these rules. They are as important as colors and type.
 ### Loading states
 
 - Use static, layout-matched skeletons instead of activity wheels or progress bars.
-- A loading feed includes the tab row, search field, section copy, and three job-card shapes.
-- Let those three card shapes reveal from top to bottom: each starts 10 pt lower, then rises and fades in once over 240 ms, with a 100 ms stagger. Keep the surrounding chrome still, and never loop the animation or add a shimmer sweep.
+- A loading catalog keeps the search spine still and shows tile-shaped skeletons in the same column count the resolved grid will use, so the layout does not jump.
+- Let the app-loading shapes reveal from top to bottom: each starts 10 pt lower, then rises and fades in once over 240 ms, with a 100 ms stagger. Keep the surrounding chrome still, and never loop the animation or add a shimmer sweep.
 - Respect Reduce Motion: show the completed skeleton layout immediately when it is enabled. The real roles should replace the shapes without an additional transition, keeping loading quick and legible.
 - A loading profile uses headline, field-label, input, and button shapes in the same 20 pt content column as the completed form.
 - Skeletons use `#E2E8F0`; buttons may use the slightly darker `#CBD5E1`. They are announced as loading content for assistive technology, but contain no visible loading text.
@@ -230,6 +263,7 @@ Notification presentation and application follow-up settings live in **App & acc
 
 1. Wording templates with a dark live notification preview.
 2. Application reminders and a follow-up interval.
+3. The release calendar's date zone (UTC or device time) — a device-local display choice, not an account preference.
 
 Onboarding must always offer **Continue without alerts**. It may request notification permission only after the user deliberately enables the alert switch and confirms the setup action. If permission is denied, preserve the role preferences, show an inline explanation with a retry action, and never block access to the feed.
 

@@ -1,5 +1,86 @@
 import { describe, expect, it } from 'vitest';
-import { catalogGroupAvailabilityLabel, countActiveCatalogFilters, emptyCatalogFilters, groupedCatalogParameters } from '../src/catalog-filters';
+import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, countActiveCatalogFilters, emptyCatalogFilters, groupedCatalogParameters } from '../src/catalog-filters';
+
+describe('catalog filter tokens', () => {
+  it('names every active facet and clears only its own value', () => {
+    const filters = {
+      ...emptyCatalogFilters,
+      seasons: ['summer-2027', 'fall-2026'],
+      disciplines: ['SWE', 'Quant/Fintech'],
+      employerFilter: 'startup' as const,
+      hasCompensation: true,
+      hideUsCitizenshipRequired: true,
+    };
+    const tokens = catalogFilterTokens(filters);
+
+    expect(tokens.map((token) => token.label)).toEqual([
+      'Summer 2027', 'Fall 2026', 'SWE', 'Quant', 'Startups', 'Pay listed', 'No U.S. citizenship requirement',
+    ]);
+    expect(tokens[0].patch).toEqual({ seasons: ['fall-2026'] });
+    expect(tokens[2].patch).toEqual({ disciplines: ['Quant/Fintech'] });
+    expect(tokens[4].patch).toEqual({ employerFilter: 'all' });
+    expect(tokens[5].patch).toEqual({ hasCompensation: false });
+
+    const afterClearingOneSeason = { ...filters, ...tokens[0].patch };
+    expect(afterClearingOneSeason.seasons).toEqual(['fall-2026']);
+    expect(afterClearingOneSeason.disciplines).toEqual(['SWE', 'Quant/Fintech']);
+    expect(afterClearingOneSeason.employerFilter).toBe('startup');
+  });
+
+  it('lists nothing for the default filters', () => {
+    expect(catalogFilterTokens(emptyCatalogFilters)).toEqual([]);
+    expect(countActiveCatalogFilters(emptyCatalogFilters)).toBe(0);
+  });
+});
+
+describe('release day requests', () => {
+  it('sends the chosen day and the zone it was read in', () => {
+    const filters = { ...emptyCatalogFilters, day: '2026-09-18' };
+    const params = groupedCatalogParameters(catalogRequestState(filters, { dayZone: 'America/Los_Angeles' }));
+    expect(params.get('day')).toBe('2026-09-18');
+    expect(params.get('dayZone')).toBe('America/Los_Angeles');
+    // Client facet names become the request's names.
+    const named = groupedCatalogParameters(catalogRequestState({ ...filters, employerFilter: 'startup', sourceFilter: 'direct', jobStatus: 'closed' }));
+    expect(named.get('status')).toBe('closed');
+    expect(named.get('source')).toBe('direct');
+    expect(named.get('employerCategory')).toBe('startup');
+    // No day, no zone parameter.
+    const plain = groupedCatalogParameters(catalogRequestState(emptyCatalogFilters, { dayZone: 'UTC' }));
+    expect(plain.get('day')).toBeNull();
+    expect(plain.get('dayZone')).toBeNull();
+  });
+
+  it('defaults a day to UTC when the reader has not chosen a zone', () => {
+    const params = groupedCatalogParameters(catalogRequestState({ ...emptyCatalogFilters, day: '2026-09-18' }));
+    expect(params.get('dayZone')).toBe('UTC');
+  });
+
+  it('asks for a month of release days without the day it would filter by', () => {
+    const params = catalogDayIndexParameters(
+      { ...emptyCatalogFilters, day: '2026-09-18', disciplines: ['SWE'] },
+      { from: '2026-09-01', to: '2026-09-30', dayZone: 'Asia/Tokyo' },
+    );
+    expect(params.get('day')).toBeNull();
+    expect(params.get('dayZone')).toBe('Asia/Tokyo');
+    expect(params.get('from')).toBe('2026-09-01');
+    expect(params.get('to')).toBe('2026-09-30');
+    expect(params.get('limit')).toBeNull();
+    // Every other facet still narrows the days that get counted.
+    expect(params.get('disciplines')).toBe('SWE');
+  });
+
+  it('shows the day as a removable token and counts it once', () => {
+    const filters = { ...emptyCatalogFilters, day: '2026-09-18', seasons: ['summer-2027'] };
+    const tokens = catalogFilterTokens(filters);
+    expect(tokens[0]?.key).toBe('day:2026-09-18');
+    expect(tokens[0]?.label).toMatch(/Sep/);
+    expect(tokens[0]?.label).toMatch(/18/);
+    expect(countActiveCatalogFilters(filters)).toBe(2);
+    // Clearing the day keeps every other facet.
+    expect({ ...filters, ...tokens[0]?.patch }).toMatchObject({ day: undefined, seasons: ['summer-2027'] });
+    expect(countActiveCatalogFilters({ ...filters, ...tokens[0]?.patch })).toBe(1);
+  });
+});
 
 describe('grouped catalog request filters', () => {
   it('carries the same filters from a catalog row into group details', () => {

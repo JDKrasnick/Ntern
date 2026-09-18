@@ -68,6 +68,7 @@
 - [x] Add the signed-in “new since last open” inbox with a calm first-open baseline, saved-filter matching, and count-led mobile launch screen.
 - [x] Add signed-in swipe-left save for later, synced to the responsive web Saved queue and official-form handoff.
 - [x] Replace the Saved tab with a searchable Catalog tab, make Roles the new-matches feed, and retire save-for-later: adding to the apply queue is the only role action, the tracker lives in the Queue tab, and Profile shows the raw application records.
+- [x] Add a release calendar to the Catalog tab: a month grid of the days that actually published roles, a one-tap day filter that joins the other facets, UTC days by default, and an App & account setting to read days on the device clock instead.
 - [x] Add local swipe-right hide with Undo and Profile-based restore.
 - [x] Add cursor-based endless scrolling through every role in the selected availability catalog.
 - [x] Let notification recipients leave grouped new-match releases for the full catalog from either the release footer or the Roles tab.

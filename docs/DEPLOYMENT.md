@@ -1031,7 +1031,9 @@ consolidated. Record notification/outbox counts before and after and require
 them to be unchanged. Verify both canonical and sampled
 legacy job IDs through `GET /jobs/{jobId}`, representative Greenhouse standard,
 `gh_jid`, DRW/Roblox custom-host, and Lever hosted/`apply` URLs, saved
-applications, releases, `GET /catalog?limit=1`, and one returned
+applications, releases, `GET /catalog?limit=1`, `GET /catalog/days?from=<first
+of the current month>&to=<today>` (it must return the release days the calendar
+fills, with `zone: "UTC"` unless a zone was requested), and one returned
 `/catalog/groups/{groupId}`. Never put the operations secret in Git,
 documentation, or shell history.
 

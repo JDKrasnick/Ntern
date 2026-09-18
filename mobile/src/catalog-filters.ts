@@ -1,3 +1,5 @@
+import { allDisciplineStyles } from '../../shared/discipline-display';
+import { DEFAULT_DAY_ZONE } from '../../shared/zone-day';
 export type GroupedCatalogFilterState = {
   query?: string;
   source: 'all' | 'direct' | 'community' | 'corroborated';
@@ -10,6 +12,9 @@ export type GroupedCatalogFilterState = {
   hasCompensation?: boolean;
   hideUsCitizenshipRequired: boolean;
   hideAdvancedDegreeRequired: boolean;
+  /** A `YYYY-MM-DD` release day, read in `dayZone`. */
+  day?: string;
+  dayZone?: string;
 };
 
 export type ChipOption = { value: string; label: string };
@@ -49,6 +54,10 @@ export function groupedCatalogParameters(
   if (state.workModes?.length) params.set('workModes', state.workModes.join(','));
   if (state.educationLevels?.length) params.set('educationLevels', state.educationLevels.join(','));
   if (state.hasCompensation) params.set('hasCompensation', 'true');
+  if (state.day) {
+    params.set('day', state.day);
+    if (state.dayZone) params.set('dayZone', state.dayZone);
+  }
   if (state.hideUsCitizenshipRequired) params.set('hideUsCitizenshipRequired', 'true');
   if (state.hideAdvancedDegreeRequired) params.set('hideAdvancedDegreeRequired', 'true');
   return params;
@@ -65,6 +74,8 @@ export type CatalogFilterValues = {
   hasCompensation: boolean;
   hideUsCitizenshipRequired: boolean;
   hideAdvancedDegreeRequired: boolean;
+  /** The release day the reader picked in the calendar, as `YYYY-MM-DD`. */
+  day?: string;
 };
 
 export const emptyCatalogFilters: CatalogFilterValues = {
@@ -80,6 +91,29 @@ export const emptyCatalogFilters: CatalogFilterValues = {
   hideAdvancedDegreeRequired: false,
 };
 
+/** The client's filter state as the request shape the catalog API takes. */
+export function catalogRequestState(
+  filters: CatalogFilterValues,
+  options: { query?: string; dayZone?: string } = {},
+): GroupedCatalogFilterState {
+  const query = options.query?.trim();
+  const day = filters.day;
+  return {
+    ...(query ? { query } : {}),
+    source: filters.sourceFilter,
+    status: filters.jobStatus,
+    employerCategory: filters.employerFilter,
+    disciplines: filters.disciplines,
+    seasons: filters.seasons,
+    workModes: filters.workModes,
+    educationLevels: filters.educationLevels,
+    hasCompensation: filters.hasCompensation,
+    hideUsCitizenshipRequired: filters.hideUsCitizenshipRequired,
+    hideAdvancedDegreeRequired: filters.hideAdvancedDegreeRequired,
+    ...(day ? { day, dayZone: options.dayZone ?? DEFAULT_DAY_ZONE } : {}),
+  };
+}
+
 export function countActiveCatalogFilters(filters: CatalogFilterValues): number {
   return [
     filters.disciplines.length > 0,
@@ -92,7 +126,105 @@ export function countActiveCatalogFilters(filters: CatalogFilterValues): number 
     filters.hasCompensation,
     filters.hideUsCitizenshipRequired,
     filters.hideAdvancedDegreeRequired,
+    Boolean(filters.day),
   ].filter(Boolean).length;
+}
+
+export const employerCategoryLabels: Record<'faang' | 'startup' | 'normal', string> = {
+  faang: 'FAANG',
+  startup: 'Startups',
+  normal: 'Normal',
+};
+
+export const sourceFilterOptions: ChipOption[] = [
+  { value: 'all', label: 'All' },
+  { value: 'direct', label: 'Direct' },
+  { value: 'community', label: 'Community' },
+  { value: 'corroborated', label: 'Direct + community' },
+];
+
+/** Disciplines in the order a student is most likely to look for them. */
+export const disciplineChipOptions: ChipOption[] = (() => {
+  const order = ['software', 'ai-ml', 'data', 'infrastructure-cloud', 'security', 'quant', 'product', 'technical-design'] as const;
+  const byTag = new Map(allDisciplineStyles().map(({ tag, style }) => [tag, style] as const));
+  return order.filter((tag) => byTag.has(tag)).map((tag) => ({ value: byTag.get(tag)!.filterValue, label: byTag.get(tag)!.label }));
+})();
+
+export type CatalogFilterToken = {
+  key: string;
+  label: string;
+  /** Applied over the current filters, so clearing one facet never disturbs another. */
+  patch: Partial<CatalogFilterValues>;
+};
+
+function optionLabel(options: ChipOption[], value: string) {
+  return options.find((option) => option.value === value)?.label ?? value;
+}
+
+/** A release day as a reader reads it: `Fri, Sep 18`. Parsed as UTC so the label
+ * never moves a day that was computed in the reader's own zone. */
+export function releaseDayLabel(day: string) {
+  const parsed = new Date(`${day}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.valueOf())) return day;
+  return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }).format(parsed);
+}
+
+/** Parameters for the release-day index that fills the calendar. */
+export function catalogDayIndexParameters(
+  filters: CatalogFilterValues,
+  range: { from: string; to: string; dayZone: string },
+) {
+  const params = groupedCatalogParameters(catalogRequestState({ ...filters, day: undefined }, { dayZone: range.dayZone }));
+  params.delete('limit');
+  params.set('from', range.from);
+  params.set('to', range.to);
+  params.set('dayZone', range.dayZone);
+  return params;
+}
+
+/** One removable token per active facet, in the order the filter sheet lists them. */
+export function catalogFilterTokens(filters: CatalogFilterValues): CatalogFilterToken[] {
+  return [
+    ...(filters.day
+      ? [{ key: `day:${filters.day}`, label: releaseDayLabel(filters.day), patch: { day: undefined } }]
+      : []),
+    ...filters.seasons.map((season) => ({
+      key: `season:${season}`,
+      label: optionLabel(seasonFilterOptions, season),
+      patch: { seasons: filters.seasons.filter((value) => value !== season) },
+    })),
+    ...filters.disciplines.map((discipline) => ({
+      key: `discipline:${discipline}`,
+      label: optionLabel(disciplineChipOptions, discipline),
+      patch: { disciplines: filters.disciplines.filter((value) => value !== discipline) },
+    })),
+    ...filters.workModes.map((mode) => ({
+      key: `workMode:${mode}`,
+      label: optionLabel(workModeFilterOptions, mode),
+      patch: { workModes: filters.workModes.filter((value) => value !== mode) },
+    })),
+    ...filters.educationLevels.map((level) => ({
+      key: `education:${level}`,
+      label: optionLabel(educationFilterOptions, level),
+      patch: { educationLevels: filters.educationLevels.filter((value) => value !== level) },
+    })),
+    ...(filters.employerFilter !== 'all'
+      ? [{ key: 'employer', label: employerCategoryLabels[filters.employerFilter], patch: { employerFilter: 'all' as const } }]
+      : []),
+    ...(filters.jobStatus !== 'open'
+      ? [{ key: 'status', label: 'Closed roles', patch: { jobStatus: 'open' as const } }]
+      : []),
+    ...(filters.sourceFilter !== 'all'
+      ? [{ key: 'source', label: optionLabel(sourceFilterOptions.slice(1), filters.sourceFilter), patch: { sourceFilter: 'all' as const } }]
+      : []),
+    ...(filters.hasCompensation ? [{ key: 'compensation', label: 'Pay listed', patch: { hasCompensation: false } }] : []),
+    ...(filters.hideUsCitizenshipRequired
+      ? [{ key: 'citizenship', label: 'No U.S. citizenship requirement', patch: { hideUsCitizenshipRequired: false } }]
+      : []),
+    ...(filters.hideAdvancedDegreeRequired
+      ? [{ key: 'degree', label: 'No advanced degree', patch: { hideAdvancedDegreeRequired: false } }]
+      : []),
+  ];
 }
 
 export function catalogGroupAvailabilityLabel(
