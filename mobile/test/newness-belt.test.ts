@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advanceBelt, beltItems, BELT_SPEED } from '../src/newness-belt';
+import { advanceBelt, beltCopies, beltItems, isReaderScroll, BELT_SPEED } from '../src/newness-belt';
 
 const groups = [{ groupId: 'a' }, { groupId: 'b' }, { groupId: 'c' }];
 const laneStep = 332;
@@ -50,11 +50,75 @@ describe('the new-roles belt', () => {
   });
 });
 
+describe('belt copies', () => {
+  it('always leaves a full cycle to travel plus a window to fill', () => {
+    const cases = [[390, 5], [1440, 5], [1440, 2], [2160, 3], [390, 12], [390, 1]] as const;
+    for (const [viewport, groupCount] of cases) {
+      const cycle = groupCount * 312;
+      const copies = beltCopies(viewport, cycle);
+      expect(copies).toBeGreaterThanOrEqual(2);
+      expect(copies * cycle).toBeGreaterThanOrEqual(cycle + viewport);
+    }
+  });
+
+  it('asks for more copies when a couple would run out mid-cycle', () => {
+    // Two copies of a short release on a wide screen leave 1328 pt for a belt that
+    // needs to travel 664 and fill 1440 more: it would stall against the end, which
+    // is exactly what reads as slowing down.
+    expect(beltCopies(1440, 664)).toBe(5);
+    expect(beltCopies(390, 1560)).toBe(3);
+  });
+
+  it('keeps a spare copy for the cells a list has not laid out yet', () => {
+    // The minimum for the window, plus one: a virtualized list measures only what
+    // it has rendered, so the travel must fit inside the copies the list shows.
+    const viewport = 1080;
+    const cycle = 1660;
+    const minimum = Math.ceil((cycle + viewport) / cycle);
+    expect(beltCopies(viewport, cycle)).toBe(minimum + 1);
+    expect(beltCopies(viewport, cycle) * cycle - viewport).toBeGreaterThan(cycle);
+  });
+
+  it('stands down when there is nothing to cycle through', () => {
+    expect(beltCopies(1440, 0)).toBe(1);
+  });
+
+  it('keeps every copy after the first out of the accessibility tree', () => {
+    const belt = beltItems(groups, 3);
+    expect(belt).toHaveLength(groups.length * 3);
+    expect(new Set(belt.map((item) => item.key)).size).toBe(belt.length);
+    expect(belt.map((item) => item.decorative)).toEqual([false, false, false, true, true, true, true, true, true]);
+  });
+});
+
+describe('telling the reader from the belt', () => {
+  const base = { writing: false, mountedAt: 0, now: 60000 };
+
+  it('ignores the belt\'s own writes', () => {
+    expect(isReaderScroll({ ...base, actual: 412, expected: 412 })).toBe(false);
+    // a frame-landing late still reports a position we just wrote
+    expect(isReaderScroll({ ...base, actual: 415.5, expected: 412 })).toBe(false);
+  });
+
+  it('ignores the list settling its layout after mount', () => {
+    expect(isReaderScroll({ ...base, now: 800, actual: 900, expected: 0 })).toBe(false);
+  });
+
+  it('ignores events while a write is in flight', () => {
+    expect(isReaderScroll({ ...base, writing: true, actual: 900, expected: 0 })).toBe(false);
+  });
+
+  it('sees a reader taking the wheel', () => {
+    expect(isReaderScroll({ ...base, actual: 700, expected: 412 })).toBe(true);
+    expect(isReaderScroll({ ...base, actual: 100, expected: 412 })).toBe(true);
+  });
+});
+
 describe('belt content', () => {
   it('renders the release twice so a wrap lands on identical pixels', () => {
     const belt = beltItems(groups);
     expect(belt).toHaveLength(groups.length * 2);
-    expect(belt.map((item) => item.key)).toEqual(['a', 'b', 'c', 'a#loop', 'b#loop', 'c#loop']);
+    expect(belt.map((item) => item.key)).toEqual(['a', 'b', 'c', 'a#loop1', 'b#loop1', 'c#loop1']);
     expect(belt.map((item) => item.decorative)).toEqual([false, false, false, true, true, true]);
     // The second copy is the same content, one full copy along.
     expect(belt.slice(groups.length).map((item) => item.group)).toEqual(groups);

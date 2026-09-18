@@ -36,7 +36,7 @@ import { housingLabels, type DisplayHousingDetail } from "../shared/housing-disp
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, countActiveCatalogFilters, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
-import { advanceBelt, beltItems, type BeltItem } from "./src/newness-belt";
+import { advanceBelt, beltCopies, beltItems, isReaderScroll, type BeltItem } from "./src/newness-belt";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
@@ -1473,7 +1473,11 @@ function NewnessLane({
   const writing = useRef(false);
   const autoCycles = cycling && attentive && motionAllowed && groups.length > 1;
   const cycleLength = groups.length * laneStep;
-  const belt = useMemo(() => beltItems(groups), [groups]);
+  // Enough copies that the scroller can never run out of content mid-cycle, which
+  // is what made the belt appear to slow down: it hit the end of the rendered
+  // content and crept until more tiles mounted.
+  const copies = beltCopies(width, cycleLength);
+  const belt = useMemo(() => beltItems(groups, copies), [groups, copies]);
   // react-native-web ignores `scrollToOffset` for a horizontal list, so the web
   // build moves the scroller's own node and native keeps the list API. Native
   // rounds the offset, so only write when the rounded pixel changes.
@@ -1487,21 +1491,30 @@ function NewnessLane({
   const writeBelt = (offset: number) => {
     const scroller = typeof window === "undefined" ? null : laneScroller();
     writing.current = true;
+    // Record what we wrote on every platform: the scroll events our own write
+    // raises are told apart from a reader's drag by comparing against this.
+    const rounded = Math.round(offset);
+    const changed = rounded !== Math.round(beltWritten.current);
+    beltWritten.current = offset;
     if (scroller) {
       scroller.scrollLeft = offset;
-    } else if (Math.round(offset) !== beltWritten.current) {
-      listRef.current?.scrollToOffset({ offset: Math.round(offset), animated: false });
-      beltWritten.current = Math.round(offset);
+    } else if (changed) {
+      listRef.current?.scrollToOffset({ offset: rounded, animated: false });
     }
     writing.current = false;
   };
   /** Any scroll the belt did not cause is the reader taking the wheel. */
   const mountedAt = useRef(Date.now());
-  const onLaneScroll = () => {
-    if (writing.current || Date.now() - mountedAt.current < 2000) return;
+  const onLaneScroll = (position?: number) => {
     const scroller = typeof window === "undefined" ? null : laneScroller();
-    const actual = scroller ? scroller.scrollLeft : undefined;
-    if (actual !== undefined && Math.abs(actual - beltWritten.current) < 2) return;
+    const actual = position ?? scroller?.scrollLeft ?? 0;
+    if (!isReaderScroll({
+      actual,
+      expected: beltWritten.current,
+      writing: writing.current,
+      mountedAt: mountedAt.current,
+      now: Date.now(),
+    })) return;
     heldUntil.current = Date.now() + 8000;
   };
   useEffect(() => {
@@ -1551,8 +1564,14 @@ function NewnessLane({
           data={belt}
           keyExtractor={(item) => item.key}
           showsHorizontalScrollIndicator={false}
+          // Fixed-width cells: telling the list so keeps its content size complete
+          // from the first frame instead of growing as tiles come into view.
+          getItemLayout={(_, index) => ({ length: laneStep, offset: laneStep * index, index })}
+          initialNumToRender={belt.length}
+          maxToRenderPerBatch={belt.length}
+          removeClippedSubviews={false}
           onScrollBeginDrag={() => { heldUntil.current = Date.now() + 8000; }}
-          onScroll={onLaneScroll}
+          onScroll={(event) => onLaneScroll(event?.nativeEvent?.contentOffset?.x)}
           scrollEventThrottle={32}
           onScrollToIndexFailed={() => undefined}
           contentContainerStyle={styles.catalogLaneList}
