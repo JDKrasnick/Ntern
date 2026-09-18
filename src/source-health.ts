@@ -170,6 +170,7 @@ export function successfulSourceHealth(input: {
     consecutiveFailures: 0,
     ...(input.etag ? { etag: input.etag } : {}),
     ...(input.contentHash ? { contentHash: input.contentHash, snapshotHash: input.contentHash } : {}),
+    ...(input.contentOmitted !== undefined ? { contentOmitted: input.contentOmitted } : {}),
     durationMs,
     ...(input.rawRows !== undefined ? { rawRows: input.rawRows, rawCount: input.rawRows } : {}),
     ...(input.validRows !== undefined ? { validRows: input.validRows, validCount: input.validRows } : {}),
