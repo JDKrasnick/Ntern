@@ -10,7 +10,7 @@ describe('the new-roles belt', () => {
     // Frames shorter than the stall clamp: a hundred milliseconds moves a tenth
     // of a second's worth of belt.
     expect(advanceBelt(0, 100, cycleLength)).toBeCloseTo(BELT_SPEED * 0.1, 6);
-    expect(advanceBelt(100, 50, cycleLength)).toBeCloseTo(101, 6);
+    expect(advanceBelt(100, 50, cycleLength)).toBeCloseTo(100 + BELT_SPEED * 0.05, 6);
     expect(advanceBelt(100, 0, cycleLength)).toBe(100);
   });
 
@@ -18,8 +18,8 @@ describe('the new-roles belt', () => {
     // A frame short enough to be honoured: 100 ms of travel from one point below
     // the end crosses the cycle, so the belt continues from the leftover rather
     // than restarting at 0 — that is what makes the loop look endless.
-    expect(advanceBelt(cycleLength - 1, 100, cycleLength)).toBeCloseTo(1, 6);
-    expect(advanceBelt(cycleLength - 0.5, 100, cycleLength)).toBeCloseTo(1.5, 6);
+    expect(advanceBelt(cycleLength - 1, 100, cycleLength)).toBeCloseTo(BELT_SPEED * 0.1 - 1, 6);
+    expect(advanceBelt(cycleLength - 0.5, 100, cycleLength)).toBeCloseTo(BELT_SPEED * 0.1 - 0.5, 6);
     // Starting a whole copy lower lands on the same pixel, which is why the
     // second copy exists.
     expect(advanceBelt(1658, 100, cycleLength)).toBeCloseTo(advanceBelt(1658 - cycleLength, 100, cycleLength) + 0, 6);

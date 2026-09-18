@@ -7,8 +7,9 @@
  * by exactly that length and the pixels on screen are identical.
  */
 
-/** Points per second. Slow enough to read a card as it passes, fast enough to see. */
-export const BELT_SPEED = 20;
+/** Points per second. Unhurried: a card takes the better part of a minute to cross
+ * the lane, so the belt reads as drift rather than as a carousel in a hurry. */
+export const BELT_SPEED = 10;
 
 /** The longest frame a stalled belt will honour, so a backgrounded app does not
  * lurch forward by however long it was away. */
