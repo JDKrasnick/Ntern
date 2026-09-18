@@ -27,6 +27,8 @@ mobile/.env.local
 SOURCES.md
 # Design-skill state, review captures, and surface briefs.
 .impeccable/
+# Scratch QA captures and throwaway scripts.
+tmp/
 # Local employer catalog and internal tiering decisions.
 EMPLOYERS.json
 # Regenerated discovery artifacts. They publish nothing, so they are not evidence
