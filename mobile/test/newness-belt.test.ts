@@ -170,7 +170,7 @@ describe('what the lane leads with', () => {
   });
 
   it('keeps the fallback to the newest few', () => {
-    const many = Array.from({ length: 9 }, (_, index) => ({ groupId: `g${index}` }));
+    const many = Array.from({ length: 9 }, (_, index) => ({ groupId: `g${index}`, roleIds: [] }));
     expect(laneSelection(many, undefined, 4).groups.map((group) => group.groupId)).toEqual(['g0', 'g1', 'g2', 'g3']);
   });
 });
