@@ -52,7 +52,19 @@ class AppDelegate: ExpoAppDelegate {
 }
 
 class ReactNativeDelegate: ExpoReactNativeFactoryDelegate {
-  // Extension point for config-plugins
+  // The system launch storyboard and React launch overlay both use this canvas.
+  // Set it on the native root as well: Expo may dismiss the native splash a
+  // frame before JavaScript paints its overlay, and the default root color can
+  // otherwise briefly show through during a cold launch.
+  override func customize(_ rootView: UIView) {
+    rootView.backgroundColor = UIColor(
+      red: 248.0 / 255.0,
+      green: 250.0 / 255.0,
+      blue: 252.0 / 255.0,
+      alpha: 1
+    )
+    super.customize(rootView)
+  }
 
   override func sourceURL(for bridge: RCTBridge) -> URL? {
     // needed to return the correct URL for expo-dev-client.
