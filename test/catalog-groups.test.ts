@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { catalogEducation, catalogGroupDetails, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs } from '../src/catalog-groups.js';
+import { catalogEducation, catalogGroupDetails, employerDropKey, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs } from '../src/catalog-groups.js';
 import type { EducationEvidenceStatus, Internship, InternshipIdentity, InternshipProgramType, SeasonEvidenceStatus } from '../src/types.js';
 
 type IdentityJob = Internship & { internshipIdentity?: Record<string, unknown> };
@@ -43,6 +43,34 @@ describe('grouped catalog domain', () => {
     expect(details.group.featuredRole.housing).toEqual(housing);
     expect(details.group.compensations).toEqual(['USD 8,500/month']);
   });
+  it('does not let the migration timestamp invent an employer day', () => {
+    // 235 of one employer's open roles carry the DynamoDB import timestamp — that is
+    // the import, not a posting day, so a reported posting date groups them and a row
+    // without one stays its own card rather than swelling an import-day card.
+    const migrated = (index: number, reported?: string) => job(`migrated-${index}`, 0, {
+      company: 'TikTok',
+      catalogRecency: 'baseline',
+      catalogVisibleAt: '2026-08-25T02:47:09.000Z',
+      firstSeenAt: '2026-08-25T02:47:09.000Z',
+      sourceReferences: [{
+        sourceId: 'community-list', document: 'README.md', sourceUrl: 'https://example.test', row: index,
+        company: 'TikTok', title: `Role ${index}`, location: 'NYC', season: 'summer-2027',
+        applyUrl: `https://apply.example.test/${index}`, compensation: { raw: '' }, state: 'open',
+        ...(reported ? { postedAt: reported } : {}),
+      }],
+    });
+    const unreported = groupCatalogJobs([migrated(1), migrated(2), migrated(3), migrated(4)]);
+    expect(unreported.map(({ row }) => row.kind)).toEqual(['individual', 'individual', 'individual', 'individual']);
+
+    const reported = groupCatalogJobs([migrated(5, '2026-04-24'), migrated(6, '2026-04-24'), migrated(7, '2026-04-24'), migrated(8, '2026-04-24')]);
+    expect(reported).toHaveLength(1);
+    expect(reported[0]?.row).toMatchObject({ kind: 'employer-release', roleCount: 4 });
+
+    // The day it reports is the day it groups under, not the import day.
+    expect(employerDropKey(migrated(9, '2026-04-24'))).toContain('2026-04-24');
+    expect(employerDropKey(migrated(10))).toBeUndefined();
+  });
+
   it('splits drops on the calendar day, not on a rolling window', () => {
     const at = (iso: string) => ({ firstSeenAt: iso, catalogVisibleAt: iso, lastSeenAt: iso });
     // A rolling employer's last role of the day and first role of the next day are
