@@ -1046,15 +1046,12 @@ export class D1ReleaseStore implements ReleaseStore {
 
   async putRelease(release: CatalogRelease): Promise<void> {
     const deletionOwner = deletedUserTombstoneKey(release.userId).pk;
-    const result = await this.db.prepare(`
+    await this.db.prepare(`
       INSERT INTO user_items (user_id, item_key, kind, value)
       SELECT ?, ?, 'catalog-release', ?
       WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
-      ON CONFLICT(user_id, item_key) DO NOTHING
-    `).bind(release.userId, `RELEASE#${release.releaseId}`, JSON.stringify(release), deletionOwner).run();
-    if (result.meta.changes > 0) return;
-    const existing = await this.getRelease(release.userId, release.releaseId);
-    if (!existing && await this.db.prepare("SELECT 1 AS present FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE'").bind(deletionOwner).first()) return;
-    if (JSON.stringify(existing) !== JSON.stringify(release)) throw new Error(`Release identity conflict for ${release.releaseId}`);
+      ON CONFLICT(user_id, item_key) DO UPDATE SET value = excluded.value
+      WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+    `).bind(release.userId, `RELEASE#${release.releaseId}`, JSON.stringify(release), deletionOwner, deletionOwner).run();
   }
 }

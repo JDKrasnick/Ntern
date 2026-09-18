@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { describe, expect, it, vi } from 'vitest';
-import { D1UserStore } from '../cloudflare/d1-store.js';
+import { D1ReleaseStore, D1UserStore } from '../cloudflare/d1-store.js';
 import { documentContent, type Environment } from '../cloudflare/worker.js';
 import { createApiHandler } from '../src/api.js';
 import { MemoryInternshipStore } from '../src/store.js';
@@ -41,6 +41,20 @@ function event(userId: string) {
 }
 
 describe('D1 account deletion barrier', () => {
+  it("updates a user's release as an employer drop grows", async () => {
+    const database = new DatabaseSync(':memory:');
+    accountSchema(database);
+    const releases = new D1ReleaseStore(sqliteD1(database));
+
+    await releases.putRelease({ releaseId: 'acme-day', userId: 'student', jobIds: ['one', 'two', 'three', 'four'], newJobIds: ['one', 'two', 'three', 'four'], createdAt: '2026-09-17T15:00:00.000Z' });
+    await releases.putRelease({ releaseId: 'acme-day', userId: 'student', jobIds: ['five', 'four', 'one', 'three', 'two'], newJobIds: ['five'], createdAt: '2026-09-17T15:00:00.000Z' });
+
+    expect(await releases.getRelease('student', 'acme-day')).toEqual({
+      releaseId: 'acme-day', userId: 'student', jobIds: ['five', 'four', 'one', 'three', 'two'], newJobIds: ['five'], createdAt: '2026-09-17T15:00:00.000Z',
+    });
+    database.close();
+  });
+
   it('deletes an application only within its owner partition', async () => {
     const database = new DatabaseSync(':memory:');
     accountSchema(database);
