@@ -124,6 +124,9 @@ export function successfulSourceHealth(input: {
   eligibleRows?: number;
   filteredRows?: number;
   withheldRows?: number;
+  /** The board was read as a listing because its descriptions exceed the isolate's
+   * parse ceiling (SpaceX, Anduril), so rows are complete but less annotated. */
+  contentOmitted?: boolean;
 }): SourceHealth {
   const durationMs = Math.max(0, Date.parse(input.completedAt) - Date.parse(input.startedAt));
   const outcome = input.outcome ?? 'success_changed';
