@@ -200,29 +200,28 @@ export async function sendNewJobNotifications(
 ): Promise<{ sent: number; skipped: number; failed: number }> {
   let sent = 0; let skipped = 0; let failed = 0;
   const devices = await users.activeDevices();
-  const preferences = new Map<string, Awaited<ReturnType<UserStore['getPreferences']>>>();
   const delivered = (receipt: DeliveryReceipt | undefined) => receipt?.status === 'ok' || receipt?.status === 'pending' || receipt?.status === 'deferred' || receipt?.deliveryState === 'definitive-failure';
-  // One drop per employer per day; the id matches the feed's card, so an alert
-  // and the card it points at always describe the same set of roles. A role whose
-  // timestamp cannot place it in a drop still alerts, on its own.
-  const byDrop = new Map<string, { dropId: string; company: string; roles: Internship[] }>();
-  for (const job of jobs) {
-    const key = employerDropKey(job);
-    const dropId = (key ? employerDropGroupId(job) : undefined) ?? `individual-${job.jobId}`;
-    const drop = byDrop.get(key ?? dropId) ?? { dropId, company: job.company, roles: [] };
-    drop.roles.push(job);
-    byDrop.set(key ?? dropId, drop);
-  }
-  for (const { dropId, company, roles } of byDrop.values()) {
-    // The feed renders a drop as one card only from RELEASE_MINIMUM_ROLES roles;
-    // below that (with no card already open for the day) every role keeps its own
-    // card, so it keeps its own alert and the two surfaces stay consistent.
-    const opensCard = roles.length >= RELEASE_MINIMUM_ROLES;
-    for (const device of devices) {
-      if (options.excludeAllUsers || options.excludeUserIds?.has(device.userId)) { skipped += roles.length; continue; }
-      let preference = preferences.get(device.userId);
-      if (!preference) { preference = await users.getPreferences(device.userId); preferences.set(device.userId, preference); }
-      if (!preference?.alertsEnabled || !preference.onboardingComplete) { skipped += roles.length; continue; }
+  for (const device of devices) {
+    if (options.excludeAllUsers || options.excludeUserIds?.has(device.userId)) { skipped += jobs.length; continue; }
+    const preference = await users.getPreferences(device.userId);
+    if (!preference?.alertsEnabled || !preference.onboardingComplete) { skipped += jobs.length; continue; }
+    // One drop per employer per calendar day, counted in the viewer's own zone: a
+    // role that lands after their midnight belongs to their next day. A role whose
+    // timestamp cannot place it in a drop still alerts, on its own.
+    const timeZone = preference.alertSettings?.timezone;
+    const byDrop = new Map<string, { dropId: string; company: string; roles: Internship[] }>();
+    for (const job of jobs) {
+      const key = employerDropKey(job, timeZone);
+      const dropId = (key ? employerDropGroupId(job, 0, timeZone) : undefined) ?? `individual-${job.jobId}`;
+      const drop = byDrop.get(key ?? dropId) ?? { dropId, company: job.company, roles: [] };
+      drop.roles.push(job);
+      byDrop.set(key ?? dropId, drop);
+    }
+    for (const { dropId, company, roles } of byDrop.values()) {
+      // The feed renders a drop as one card only from RELEASE_MINIMUM_ROLES roles;
+      // below that (with no card already open for the day) every role keeps its own
+      // card, so it keeps its own alert and the two surfaces stay consistent.
+      const opensCard = roles.length >= RELEASE_MINIMUM_ROLES;
       const matching = roles.filter((job) => matchesJobFilter(job, preference.filter));
       if (!matching.length) { skipped += roles.length; continue; }
       // Check the old job-ID key during the rolling migration so a previously
@@ -240,10 +239,14 @@ export async function sendNewJobNotifications(
           ? dropPushMessage(company, batch, Boolean(previous))
           : nativePushMessage(batch[0]!, preference.filter, preference.push);
         const context = deliveryContext(fresh[0]!, device.userId, device.token, device.platform, message.title);
-        const timestamp = now().toISOString();
+        // One clock read decides both the receipt's time and its delivery window:
+        // two reads that straddle a millisecond made `deliverAfter` look later than
+        // the alert and deferred an otherwise immediate push.
+        const at = now();
+        const timestamp = at.toISOString();
         // Quiet hours and a daily digest defer the whole drop to one window, so a
         // card never arrives half-delivered.
-        const deliverAfter = nextPushDeliveryAt(now(), preference.alertSettings);
+        const deliverAfter = nextPushDeliveryAt(at, preference.alertSettings);
         const deferred = deliverAfter > timestamp;
         const claimed: Array<{ job: Internship; receipt: DeliveryReceipt }> = [];
         for (const job of fresh) {
@@ -346,16 +349,19 @@ export async function deliverDeferredExpoNotifications(
   // One push per device and employer drop, so a quiet-hours or daily-digest user
   // receives the same single card the immediate path would have sent.
   const byDrop = new Map<string, { dropId: string; company: string; due: Array<{ receipt: DeliveryReceipt; job: Internship }> }>();
+  const zones = new Map<string, string | undefined>();
   for (const receipt of await users.deferredReceipts()) {
     if (!receipt.deliverAfter || Date.parse(receipt.deliverAfter) > now().getTime()) { skipped += 1; continue; }
     const job = await jobs.getJob(receipt.jobId);
+    if (!zones.has(receipt.userId)) zones.set(receipt.userId, (await users.getPreferences(receipt.userId))?.alertSettings?.timezone);
+    const timeZone = zones.get(receipt.userId);
     if (!job) {
       await users.putReceipt({ ...receipt, status: 'error', deliveryState: 'definitive-failure', updatedAt: now().toISOString() });
       skipped += 1;
       continue;
     }
-    const key = employerDropKey(job);
-    const dropId = (key ? employerDropGroupId(job) : undefined) ?? `individual-${job.jobId}`;
+    const key = employerDropKey(job, timeZone);
+    const dropId = (key ? employerDropGroupId(job, 0, timeZone) : undefined) ?? `individual-${job.jobId}`;
     const groupKey = `${receipt.userId}\u0000${receipt.token}\u0000${key ?? dropId}`;
     const drop = byDrop.get(groupKey) ?? { dropId, company: job.company, due: [] };
     drop.due.push({ receipt, job });
