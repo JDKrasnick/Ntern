@@ -1,3 +1,5 @@
+import { educationLevelLabels, educationLevels, type EducationLevel } from '../../shared/education-display';
+
 export type GroupedCatalogFilterState = {
   query?: string;
   source: 'all' | 'direct' | 'community' | 'corroborated';
@@ -6,13 +8,15 @@ export type GroupedCatalogFilterState = {
   disciplines?: string[];
   seasons?: string[];
   workModes?: string[];
-  educationLevels?: string[];
   hasCompensation?: boolean;
   hideUsCitizenshipRequired: boolean;
-  hideAdvancedDegreeRequired: boolean;
+  /** The reader's own level; roles that state a different audience are hidden. */
+  educationLevel: EducationLevel;
 };
 
 export type ChipOption = { value: string; label: string };
+/** Education chips carry the level itself so a single-select can stay typed. */
+export type EducationChipOption = { value: EducationLevel; label: string };
 
 /** Grounded in live catalog data: Summer 2027 dominates; these four cover dated roles. */
 export const seasonFilterOptions: ChipOption[] = [
@@ -28,12 +32,13 @@ export const workModeFilterOptions: ChipOption[] = [
   { value: 'onsite', label: 'On-site' },
 ];
 
-export const educationFilterOptions: ChipOption[] = [
-  { value: 'undergraduate', label: 'Undergrad' },
-  { value: 'masters', label: 'Masters' },
-  { value: 'mba', label: 'MBA' },
-  { value: 'doctoral', label: 'Doctoral' },
-];
+/**
+ * The level the reader is studying. Undergraduate leads because the catalog's
+ * audience is early-career, and it is what an unconfigured install browses as.
+ */
+export const defaultEducationLevel: EducationLevel = 'undergraduate';
+
+export const educationFilterOptions: EducationChipOption[] = educationLevels.map((value) => ({ value, label: educationLevelLabels[value] }));
 
 export function groupedCatalogParameters(
   state: GroupedCatalogFilterState,
@@ -47,10 +52,9 @@ export function groupedCatalogParameters(
   if (state.disciplines?.length) params.set('disciplines', state.disciplines.join(','));
   if (state.seasons?.length) params.set('seasons', state.seasons.join(','));
   if (state.workModes?.length) params.set('workModes', state.workModes.join(','));
-  if (state.educationLevels?.length) params.set('educationLevels', state.educationLevels.join(','));
   if (state.hasCompensation) params.set('hasCompensation', 'true');
   if (state.hideUsCitizenshipRequired) params.set('hideUsCitizenshipRequired', 'true');
-  if (state.hideAdvancedDegreeRequired) params.set('hideAdvancedDegreeRequired', 'true');
+  params.set('educationLevel', state.educationLevel);
   return params;
 }
 
@@ -58,40 +62,69 @@ export type CatalogFilterValues = {
   disciplines: string[];
   seasons: string[];
   workModes: string[];
-  educationLevels: string[];
   employerFilter: 'all' | 'faang' | 'startup' | 'normal';
   jobStatus: 'open' | 'closed';
   sourceFilter: 'all' | 'direct' | 'community' | 'corroborated';
   hasCompensation: boolean;
   hideUsCitizenshipRequired: boolean;
-  hideAdvancedDegreeRequired: boolean;
+  educationLevel: EducationLevel;
 };
+
+const employerFilterValues = ['all', 'faang', 'startup', 'normal'] as const;
+const sourceFilterValues = ['all', 'direct', 'community', 'corroborated'] as const;
+const jobStatusValues = ['open', 'closed'] as const;
 
 export const emptyCatalogFilters: CatalogFilterValues = {
   disciplines: [],
   seasons: [],
   workModes: [],
-  educationLevels: [],
   employerFilter: 'all',
   jobStatus: 'open',
   sourceFilter: 'all',
   hasCompensation: false,
   hideUsCitizenshipRequired: false,
-  hideAdvancedDegreeRequired: false,
+  educationLevel: defaultEducationLevel,
 };
+
+function storedList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function chosenOption<T extends string>(value: unknown, options: readonly T[], fallback: T): T {
+  return options.find((option) => option === value) ?? fallback;
+}
+
+/**
+ * Stored filters are a user-editable blob on the device, so every field is
+ * validated and an unrecognized one falls back instead of breaking browse.
+ */
+export function parseCatalogFilters(value: unknown): CatalogFilterValues | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return {
+    disciplines: storedList('disciplines' in value ? value.disciplines : undefined),
+    seasons: storedList('seasons' in value ? value.seasons : undefined),
+    workModes: storedList('workModes' in value ? value.workModes : undefined),
+    employerFilter: chosenOption('employerFilter' in value ? value.employerFilter : undefined, employerFilterValues, 'all'),
+    jobStatus: chosenOption('jobStatus' in value ? value.jobStatus : undefined, jobStatusValues, 'open'),
+    sourceFilter: chosenOption('sourceFilter' in value ? value.sourceFilter : undefined, sourceFilterValues, 'all'),
+    hasCompensation: 'hasCompensation' in value && value.hasCompensation === true,
+    hideUsCitizenshipRequired: 'hideUsCitizenshipRequired' in value && value.hideUsCitizenshipRequired === true,
+    educationLevel: chosenOption('educationLevel' in value ? value.educationLevel : undefined, educationLevels, defaultEducationLevel),
+  };
+}
 
 export function countActiveCatalogFilters(filters: CatalogFilterValues): number {
   return [
     filters.disciplines.length > 0,
     filters.seasons.length > 0,
     filters.workModes.length > 0,
-    filters.educationLevels.length > 0,
     filters.employerFilter !== 'all',
     filters.jobStatus !== 'open',
     filters.sourceFilter !== 'all',
     filters.hasCompensation,
     filters.hideUsCitizenshipRequired,
-    filters.hideAdvancedDegreeRequired,
+    // The default level is how browse starts, so it is not a chosen filter.
+    filters.educationLevel !== defaultEducationLevel,
   ].filter(Boolean).length;
 }
 

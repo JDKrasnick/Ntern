@@ -73,14 +73,32 @@ describe('job filters', () => {
     expect(matchesJobFilter(listing('Software Engineering Intern', 'https://example.com/excluded', 'Google'), parseJobFilter({ excludeEmployerCategories: ['faang'] }))).toBe(false);
     expect(() => parseJobFilter({ includeEmployerCategories: ['selective'] })).toThrow('unsupported employer category');
   });
-  it('filters explicit U.S.-citizenship and advanced-degree requirements without adding a sponsorship filter', () => {
+  it('filters explicit U.S.-citizenship and stated-audience requirements without adding a sponsorship filter', () => {
     const citizenship = { ...listing('Software Engineering Intern', 'https://example.com/citizenship'), requirements: { requiresUsCitizenship: true, advancedDegreeRequired: false } };
-    const advancedDegree = { ...listing('Research Intern', 'https://example.com/degree'), requirements: { requiresUsCitizenship: false, advancedDegreeRequired: true } };
-    const filter = parseJobFilter({ excludeUsCitizenshipRequired: true, excludeAdvancedDegreeRequired: true });
+    const filter = parseJobFilter({ excludeUsCitizenshipRequired: true, educationLevel: 'undergraduate' });
     expect(matchesJobFilter(citizenship, filter)).toBe(false);
-    expect(matchesJobFilter(advancedDegree, filter)).toBe(false);
     expect(matchesJobFilter(listing('Software Engineering Intern', 'https://example.com/eligible'), filter)).toBe(true);
     expect(() => parseJobFilter({ excludeUsCitizenshipRequired: 'yes' })).toThrow('must be a boolean');
+    expect(() => parseJobFilter({ educationLevel: 'postdoc' })).toThrow('educationLevel must be one of');
+  });
+  it('withholds a role that states a different audience and keeps one that never said', () => {
+    const audience = (levels: string[], evidenceStatus: 'explicit' | 'unspecified') => ({
+      internshipIdentity: { education: { levels, evidenceStatus, provenance: [] } },
+    });
+    const filter = parseJobFilter({ educationLevel: 'undergraduate' });
+    const graduateOnly = { ...listing('Research Intern', 'https://example.com/phd'), ...audience(['masters', 'doctoral'], 'explicit') };
+    const openToBoth = { ...listing('Research Intern', 'https://example.com/bsms'), ...audience(['undergraduate', 'masters'], 'explicit') };
+    const unstated = { ...listing('Software Engineering Intern', 'https://example.com/none'), ...audience([], 'unspecified') };
+    expect(matchesJobFilter(graduateOnly, filter)).toBe(false);
+    expect(matchesJobFilter(openToBoth, filter)).toBe(true);
+    expect(matchesJobFilter(unstated, filter)).toBe(true);
+    // A graduate reader is not turned away by the role an undergraduate cannot take.
+    expect(matchesJobFilter(graduateOnly, parseJobFilter({ educationLevel: 'masters' }))).toBe(true);
+  });
+  it('treats the legacy badge as a graduate requirement that only rules out an undergraduate', () => {
+    const badge = { ...listing('Firmware Intern', 'https://example.com/badge'), requirements: { requiresUsCitizenship: false, advancedDegreeRequired: true } };
+    expect(matchesJobFilter(badge, parseJobFilter({ educationLevel: 'undergraduate' }))).toBe(false);
+    expect(matchesJobFilter(badge, parseJobFilter({ educationLevel: 'masters' }))).toBe(true);
   });
   it('derives specific focus labels from role keywords without an LLM', () => {
     expect(inferJobFocuses(listing('Cloud Infrastructure Software Engineering Intern', 'https://example.com/cloud'))).toEqual(['Cloud/Infra']);

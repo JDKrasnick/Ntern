@@ -804,7 +804,18 @@ export class D1InternshipStore implements InternshipStore {
       values.push(...filter.employerCategories);
     }
     if (filter.hideUsCitizenshipRequired) roleClauses.push("coalesce(json_extract(role.value, '$.requiresUsCitizenship'), 0) = 0");
-    if (filter.hideAdvancedDegreeRequired) roleClauses.push("coalesce(json_extract(role.value, '$.advancedDegreeRequired'), 0) = 0");
+    // Mirrors educationExcludesLevel: a stated audience that omits the reader's
+    // level hides the role, and the legacy badge only ever rules out an
+    // undergraduate because it does not say which graduate degree it means.
+    if (filter.educationLevel) {
+      roleClauses.push(`NOT (
+        (coalesce(json_extract(role.value, '$.education.evidence'), 'unspecified') = 'explicit'
+          AND json_array_length(coalesce(json_extract(role.value, '$.education.levels'), '[]')) > 0
+          AND NOT EXISTS (SELECT 1 FROM json_each(role.value, '$.education.levels') AS level WHERE lower(level.value) = ?))
+        OR (coalesce(json_extract(role.value, '$.advancedDegreeRequired'), 0) = 1 AND ? = 'undergraduate')
+      )`);
+      values.push(filter.educationLevel.toLowerCase(), filter.educationLevel.toLowerCase());
+    }
     if (filter.postingIdentityConfirmedOnly) roleClauses.push("coalesce(json_extract(role.value, '$.postingIdentityStatus'), 'legacy') <> 'unconfirmed'");
     if (filter.hasCompensation) roleClauses.push("trim(coalesce(json_extract(role.value, '$.compensation.raw'), '')) <> ''");
     const exactArrayFilter = (path: string, requested: string[]) => {

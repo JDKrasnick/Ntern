@@ -7,7 +7,8 @@ import { canonicalCompanyKey } from './core/normalize.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { employerCategory, type EmployerCategory } from './core/employers.js';
 import { occurrenceProvenance } from './sources/provenance.js';
-import type { Internship } from './types.js';
+import { educationExcludesLevel } from './identity/enrichment.js';
+import type { EducationLevel, Internship } from './types.js';
 import { allDisciplineStyles, disciplineKey, disciplineSearchVariants } from '../shared/discipline-display.js';
 
 const DISCIPLINE_FILTER_VALUES: Record<string, string> = Object.fromEntries(
@@ -106,7 +107,11 @@ export interface CatalogGroupFilter {
   status?: 'open' | 'closed';
   employerCategories?: EmployerCategory[];
   hideUsCitizenshipRequired?: boolean;
-  hideAdvancedDegreeRequired?: boolean;
+  /**
+   * The reader's own level. A role whose stated audience omits it is hidden;
+   * silence and contradiction never hide anything.
+   */
+  educationLevel?: EducationLevel;
   /** Keep only roles whose stored compensation text is non-empty. */
   hasCompensation?: boolean;
   postingIdentityConfirmedOnly?: boolean;
@@ -455,6 +460,12 @@ function includesFolded(values: string[], requested: string[]) {
   return requested.some((value) => available.includes(folded(value)));
 }
 
+/** The reader's level turns a role away only when the employer stated a different one. */
+function excludesReader(education: CatalogEducationSummary, level: EducationLevel | undefined, advancedDegreeRequired: boolean): boolean {
+  if (!level) return false;
+  return educationExcludesLevel({ levels: education.levels, evidenceStatus: education.evidence, advancedDegreeRequired, level });
+}
+
 export function filterCatalogGroups(groups: BuiltGroup[], filter: CatalogGroupFilter): BuiltGroup[] {
   const query = folded(filter.query ?? '');
   return groups.flatMap((group) => {
@@ -464,7 +475,7 @@ export function filterCatalogGroups(groups: BuiltGroup[], filter: CatalogGroupFi
         && (!filter.status || job.open === (filter.status === 'open'))
         && (!filter.employerCategories?.length || filter.employerCategories.includes(job.employerCategory ?? employerCategory(job.company)))
         && (!filter.hideUsCitizenshipRequired || !job.requirements?.requiresUsCitizenship)
-        && (!filter.hideAdvancedDegreeRequired || !job.requirements?.advancedDegreeRequired)
+        && !excludesReader(education, filter.educationLevel, Boolean(job.requirements?.advancedDegreeRequired))
         && (!filter.source || filter.source === 'all' || catalogSourceClasses(job).includes(filter.source))
         && (!filter.hasCompensation || Boolean(job.compensation?.raw?.trim()))
         && (!filter.disciplines?.length || disciplinesMatch(disciplinesFor(job), filter.disciplines))
@@ -494,7 +505,7 @@ export function filterCatalogGroupDetails(groups: CatalogGroupDetails[], filter:
       && (!filter.status || role.open === (filter.status === 'open'))
       && (!filter.employerCategories?.length || filter.employerCategories.includes(role.employerCategory))
       && (!filter.hideUsCitizenshipRequired || !role.requiresUsCitizenship)
-      && (!filter.hideAdvancedDegreeRequired || !role.advancedDegreeRequired)
+      && !excludesReader(role.education, filter.educationLevel, role.advancedDegreeRequired)
       && (!filter.postingIdentityConfirmedOnly || role.postingIdentityStatus !== 'unconfirmed')
       && (!filter.source || credibilityMatches(role.sourceCredibility, filter.source))
       && (!filter.disciplines?.length || disciplinesMatch(role.disciplines, filter.disciplines))

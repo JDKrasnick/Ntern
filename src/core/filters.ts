@@ -1,4 +1,6 @@
-import type { RawListing } from '../types.js';
+import type { EducationLevel, RawListing } from '../types.js';
+import { educationLevels } from '../../shared/education-display.js';
+import { educationAudienceOf, educationExcludesLevel } from '../identity/enrichment.js';
 import { employerCategories, employerCategory, type EmployerCategory } from './employers.js';
 
 export const jobCategories = ['ai-ml', 'grad', 'swe', 'quant', 'product', 'design'] as const;
@@ -20,9 +22,20 @@ export interface JobFilter {
   excludeEmployerCategories?: EmployerCategory[];
   /** Hide listings whose source explicitly requires U.S. citizenship. */
   excludeUsCitizenshipRequired?: boolean;
-  /** Hide listings whose source explicitly marks an advanced degree as required. */
-  excludeAdvancedDegreeRequired?: boolean;
+  /**
+   * The reader's own level. A role whose stated audience omits it is hidden; an
+   * employer that never stated an audience is never hidden.
+   */
+  educationLevel?: EducationLevel;
 }
+
+export function isEducationLevel(value: unknown): value is EducationLevel {
+  return educationLevels.some((level) => level === value);
+}
+
+/** Fields any filterable listing carries; the education audience lives in its identity. */
+export type FilterableListing = Pick<RawListing, 'company' | 'title' | 'location' | 'season' | 'requirements'>
+  & { internshipIdentity?: unknown; roleMetadata?: unknown };
 
 export type FilterMatchReasonKind = 'category' | 'keyword' | 'company-type' | 'default-all-technical';
 export interface FilterMatchReason { kind: FilterMatchReasonKind; label: string; }
@@ -212,7 +225,7 @@ export function inferJobFocuses(listing: Pick<RawListing, 'title'>): JobFocus[] 
   return matched.length ? matched : /\b(software|swe|engineer|developer)\b/i.test(value) ? ['SWE'] : [];
 }
 
-export function evaluateJobFilter(listing: Pick<RawListing, 'company' | 'title' | 'location' | 'season' | 'requirements'>, filter?: JobFilter): JobFilterEvaluation {
+export function evaluateJobFilter(listing: FilterableListing, filter?: JobFilter): JobFilterEvaluation {
   const value = terms(listing);
   const categories = classifyJob(listing);
   const companyCategory = employerCategory(listing.company);
@@ -221,8 +234,15 @@ export function evaluateJobFilter(listing: Pick<RawListing, 'company' | 'title' 
     requiresUsCitizenship: /🇺🇸|\b(?:requires?|must be)\s+(?:a\s+)?(?:u\.?s\.?|united states)\s+citizen(?:ship)?\b/i.test(value),
     advancedDegreeRequired: /🎓|\b(?:advanced degree|master'?s|ph\.?d\.?|mba)\b/i.test(value)
   };
-  const exclusionsApplied = Boolean(activeFilter.excludeKeywords?.length || activeFilter.excludeCategories?.length || activeFilter.excludeEmployerCategories?.length || activeFilter.excludeUsCitizenshipRequired || activeFilter.excludeAdvancedDegreeRequired);
-  const excluded = [...(activeFilter.excludeKeywords ?? []).map((keyword) => matchesKeyword(value, keyword)), ...(activeFilter.excludeCategories ?? []).map((category) => categories.includes(category)), ...(activeFilter.excludeEmployerCategories ?? []).map((category) => companyCategory === category), Boolean(activeFilter.excludeUsCitizenshipRequired && requirements.requiresUsCitizenship), Boolean(activeFilter.excludeAdvancedDegreeRequired && requirements.advancedDegreeRequired)].some(Boolean);
+  const audience = educationAudienceOf(listing);
+  const excludedByAudience = activeFilter.educationLevel
+    ? educationExcludesLevel({
+      levels: audience?.levels, evidenceStatus: audience?.evidenceStatus,
+      advancedDegreeRequired: requirements.advancedDegreeRequired, level: activeFilter.educationLevel,
+    })
+    : false;
+  const exclusionsApplied = Boolean(activeFilter.excludeKeywords?.length || activeFilter.excludeCategories?.length || activeFilter.excludeEmployerCategories?.length || activeFilter.excludeUsCitizenshipRequired || activeFilter.educationLevel);
+  const excluded = [...(activeFilter.excludeKeywords ?? []).map((keyword) => matchesKeyword(value, keyword)), ...(activeFilter.excludeCategories ?? []).map((category) => categories.includes(category)), ...(activeFilter.excludeEmployerCategories ?? []).map((category) => companyCategory === category), Boolean(activeFilter.excludeUsCitizenshipRequired && requirements.requiresUsCitizenship), excludedByAudience].some(Boolean);
   if (excluded) return { matches: false, reasons: [], exclusionsApplied };
   const keywordReasons = (activeFilter.includeKeywords ?? []).filter((keyword) => matchesKeyword(value, keyword)).map((keyword) => ({ kind: 'keyword' as const, label: keyword.trim() }));
   const categoryReasons = (activeFilter.includeCategories ?? []).filter((category) => categories.includes(category)).map((category) => ({ kind: 'category' as const, label: categoryLabels[category] }));
@@ -236,7 +256,7 @@ export function evaluateJobFilter(listing: Pick<RawListing, 'company' | 'title' 
   return { matches: true, reasons: reasons.filter((reason, index) => reasons.findIndex((candidate) => candidate.kind === reason.kind && candidate.label.toLowerCase() === reason.label.toLowerCase()) === index), exclusionsApplied };
 }
 
-export function matchesJobFilter(listing: Pick<RawListing, 'company' | 'title' | 'location' | 'season' | 'requirements'>, filter?: JobFilter) {
+export function matchesJobFilter(listing: FilterableListing, filter?: JobFilter) {
   return evaluateJobFilter(listing, filter).matches;
 }
 
@@ -260,6 +280,11 @@ function booleanValue(value: unknown, name: string): boolean | undefined {
   if (typeof value !== 'boolean') throw new Error(`jobFilter.${name} must be a boolean`);
   return value;
 }
+function educationLevelValue(value: unknown): EducationLevel | undefined {
+  if (value === undefined) return undefined;
+  if (!isEducationLevel(value)) throw new Error(`jobFilter.educationLevel must be one of ${educationLevels.join(', ')}`);
+  return value;
+}
 
 export function parseJobFilter(value: unknown): JobFilter | undefined {
   if (value === undefined) return undefined;
@@ -272,7 +297,7 @@ export function parseJobFilter(value: unknown): JobFilter | undefined {
   const includeEmployerCategories = employerCategoryList(config.includeEmployerCategories, 'includeEmployerCategories');
   const excludeEmployerCategories = employerCategoryList(config.excludeEmployerCategories, 'excludeEmployerCategories');
   const excludeUsCitizenshipRequired = booleanValue(config.excludeUsCitizenshipRequired, 'excludeUsCitizenshipRequired');
-  const excludeAdvancedDegreeRequired = booleanValue(config.excludeAdvancedDegreeRequired, 'excludeAdvancedDegreeRequired');
+  const educationLevel = educationLevelValue(config.educationLevel);
   return {
     ...(includeKeywords !== undefined ? { includeKeywords } : {}),
     ...(includeCategories !== undefined ? { includeCategories } : {}),
@@ -281,6 +306,6 @@ export function parseJobFilter(value: unknown): JobFilter | undefined {
     ...(includeEmployerCategories !== undefined ? { includeEmployerCategories } : {}),
     ...(excludeEmployerCategories !== undefined ? { excludeEmployerCategories } : {}),
     ...(excludeUsCitizenshipRequired !== undefined ? { excludeUsCitizenshipRequired } : {}),
-    ...(excludeAdvancedDegreeRequired !== undefined ? { excludeAdvancedDegreeRequired } : {})
+    ...(educationLevel !== undefined ? { educationLevel } : {})
   };
 }
