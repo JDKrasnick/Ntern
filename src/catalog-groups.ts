@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { inferJobFocuses } from './core/filters.js';
 import { catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
 import { catalogVisibleAt, compareCatalogRecency } from './catalog-recency.js';
+import { canonicalPostingTiming } from './core/posting-time.js';
 import { canonicalCompanyKey } from './core/normalize.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { employerCategory, type EmployerCategory } from './core/employers.js';
@@ -241,14 +242,20 @@ function disciplinesFor(job: Internship) {
   }).filter(Boolean) ?? inferJobFocuses(job));
 }
 
-/** The drop a role belongs to: one employer, one day. The identity is derived
- * from those two facts alone, so the feed's card and an alert about the same drop
- * agree even though each sees only part of the day's roles. */
+/** The day a role counts toward. A role the catalog observed live belongs to the
+ * day it became visible. A row the DynamoDB migration imported carries the import
+ * timestamp in that field — one employer's whole back-catalogue landed in a single
+ * minute, which rendered as a 235-role card — so it belongs to the day its source
+ * reported posting it, and to no day at all when the source never said, which
+ * keeps the import from inventing a posting day. */
 export function employerDropKey(job: Internship) {
   const company = companyKey(job);
-  const visibleAt = catalogVisibleAt(job);
-  if (!company || !Number.isFinite(Date.parse(visibleAt))) return undefined;
-  return `${company}\u0000${visibleAt.slice(0, 10)}`;
+  if (!company) return undefined;
+  const timing = canonicalPostingTiming(job);
+  const day = job.catalogRecency === 'baseline'
+    ? timing.kind === 'source-reported' || timing.kind === 'employer-posted' ? timing.timestamp?.slice(0, 10) : undefined
+    : catalogVisibleAt(job).slice(0, 10);
+  return day && /^\d{4}-\d{2}-\d{2}$/.test(day) ? `${company}\u0000${day}` : undefined;
 }
 
 /** The feed card id for a role's employer drop; alerts reuse it for the deep link. */
