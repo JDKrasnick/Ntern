@@ -134,6 +134,7 @@ Every screen follows these rules. They are as important as colors and type.
 5. Use `KeyboardAvoidingView` plus a scroll view for every form. The submit action must remain reachable with the keyboard open.
 6. Do not rely on a placeholder as a label. A visible label is required for profile and preference fields; onboarding may pair an obvious field label with a concise placeholder.
 7. Allow text to wrap rather than force long role or company names into fixed-height rows.
+8. Every tab renders one shared content column: centered, capped at 1120 pt, with the 20 pt gutter inside it, so switching tabs never moves the left edge. Row and text surfaces cap themselves at 760 pt *inside* that column and stay left-aligned, never re-centered. Only the catalog's queue sidebar changes the composition, and it keeps the same left edge by narrowing the feed column beside it. A tab whose body scrolls fills the column's height, so its list scrolls inside the column rather than growing past the viewport.
 
 ## Component recipes
 
@@ -144,7 +145,7 @@ Every screen follows these rules. They are as important as colors and type.
 - Every tab combines a familiar icon with a short text label. Use a filled briefcase for the selected Roles tab, albums for Queue, search for Catalog, and person for Profile.
 - Active tab: ink icon and label; inactive tabs: muted outline icon and label. Do not use a bottom-rule-only state or blue system buttons for navigation.
 - A tab bar is for moving among these four top-level areas, never for inline actions. Keep it visible while switching sections.
-- At 700 pt or wider, replace the bottom bar with the same four destinations in a compact left navigation rail; keep the primary content column centered and no wider than 760 pt.
+- At 700 pt or wider, replace the bottom bar with the same four destinations in a compact left navigation rail; keep the shared content column (rule 8) centered beside it.
 
 ### Input
 

@@ -3185,8 +3185,6 @@ function CatalogScreen({
   // queued roles remain one tap away in the Queue tab.
   const showQueueFixture = Platform.OS === "web" && queue !== undefined;
   const showQueueSidebar = Platform.OS === "web" && width >= 1280 && queue !== undefined;
-  const pushQueueToEdge = showQueueSidebar && width >= 1460;
-  const queueEdgeOffset = 32 + Math.max(0, (width - 1440) / 2);
   const [queueOpen, setQueueOpen] = useState(false);
   const [sheetVisible, setSheetVisible] = useState(false);
   const [queryFocused, setQueryFocused] = useState(false);
@@ -3401,7 +3399,7 @@ function CatalogScreen({
         />
       </View>
       {showQueueSidebar && queue ? (
-        <View style={[styles.queueSidebar, pushQueueToEdge && { transform: [{ translateX: queueEdgeOffset }] }]}>
+        <View style={styles.queueSidebar}>
           <QueuePanel
             queue={queue}
             jobs={queueJobs ?? []}
@@ -3434,6 +3432,7 @@ function AppLoadingSkeleton() {
           </View>
         ) : null}
         <View style={styles.appMain}>
+          <View style={styles.pageColumn}>
           <View style={styles.skeletonPage}>
             <View style={styles.loadingTitleGroup}>
               <Skeleton width={94} height={12} />
@@ -3447,6 +3446,7 @@ function AppLoadingSkeleton() {
               <Skeleton width={248} height={14} />
             </View>
             {[0, 1, 2].map((index) => <LoadingRoleCard key={index} index={index} />)}
+          </View>
           </View>
         </View>
         {!usesNavigationRail ? (
@@ -4456,7 +4456,8 @@ function AppContent() {
         {usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} rail badgeCount={applyQueue.length} /> : null}
         <View style={styles.appMain}>
           {tab === "roles" ? (
-            launchInbox ? (
+            <View style={styles.pageColumn}>
+            {launchInbox ? (
               <LaunchInbox
                 inbox={launchInbox}
                 onOpen={openCatalogJob}
@@ -4483,8 +4484,10 @@ function AppContent() {
                 />
                 <ActionButton label="Browse the catalog" onPress={() => changeTab("catalog")} />
               </View>
-            )
+            )}
+            </View>
           ) : tab === "queue" ? (
+            <View style={styles.pageColumn}>
             <Applications
               applications={applications}
               queue={applyQueue}
@@ -4498,6 +4501,7 @@ function AppContent() {
               onOpenOfficialApplication={openApplicationAndScheduleCheck}
               onBulkOpenQueue={openQueueBulk}
             />
+            </View>
           ) : tab === "catalog" ? (
             <CatalogScreen
               groups={catalogGroups}
@@ -4532,6 +4536,7 @@ function AppContent() {
               dayZone={dayZone}
             />
           ) : (
+            <View style={styles.pageColumn}>
             <Profile
               token={token}
               preferences={preferences}
@@ -4544,6 +4549,7 @@ function AppContent() {
               }}
               onSignIn={() => undefined}
             />
+            </View>
           )}
         </View>
         {!usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} badgeCount={applyQueue.length} /> : null}
@@ -5069,7 +5075,8 @@ function GuestExperience({
               />
             </View>
             {tab === "roles" ? (
-              inbox ? (
+              <View style={styles.pageColumn}>
+              {inbox ? (
                 <LaunchInbox
                   inbox={inbox}
                   onOpen={onOpenJob}
@@ -5092,21 +5099,26 @@ function GuestExperience({
                   />
                   <ActionButton label="Browse the catalog" onPress={() => setTab("catalog")} />
                 </View>
-              )
+              )}
+              </View>
             ) : tab === "queue" ? (
-              <AccountGate
-                feature="track applications"
-                onSignIn={openAccount}
-              />
+              <View style={styles.pageColumn}>
+                <AccountGate
+                  feature="track applications"
+                  onSignIn={openAccount}
+                />
+              </View>
             ) : tab === "profile" ? (
-              <Profile
-                preferences={preferences}
-                applications={[]}
-                hiddenJobs={hiddenJobs}
-                onRestoreHiddenRole={onRestoreHiddenRole}
-                onPreferencesChanged={onPreferencesChanged}
-                onSignIn={openAccount}
-              />
+              <View style={styles.pageColumn}>
+                <Profile
+                  preferences={preferences}
+                  applications={[]}
+                  hiddenJobs={hiddenJobs}
+                  onRestoreHiddenRole={onRestoreHiddenRole}
+                  onPreferencesChanged={onPreferencesChanged}
+                  onSignIn={openAccount}
+                />
+              </View>
             ) : null}
           </View>
           {!usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} /> : null}
@@ -7274,10 +7286,8 @@ const styles = StyleSheet.create({
     borderTopColor: colors.separator,
   },
   skeletonPage: {
-    alignSelf: "center",
     flex: 1,
     maxWidth: 760,
-    paddingHorizontal: 20,
     paddingTop: 20,
     width: "100%",
   },
@@ -7380,10 +7390,17 @@ const styles = StyleSheet.create({
   inboxViewAllInline: { alignSelf: "auto", marginTop: 0 },
   inboxSectionLabel: { color: colors.signal, fontSize: 12, fontWeight: "700", letterSpacing: 1, marginTop: 28 },
   list: { flex: 1 },
-  feedListContent: {
+  /** One content column for every tab: same gutter, same left edge, and a height
+   * the lists inside can actually scroll in. */
+  pageColumn: {
     alignSelf: "center",
-    maxWidth: 760,
+    flex: 1,
+    maxWidth: 1120,
     paddingHorizontal: 20,
+    width: "100%",
+  },
+  feedListContent: {
+    maxWidth: 760,
     paddingBottom: 28,
     width: "100%",
   },
@@ -7399,8 +7416,9 @@ const styles = StyleSheet.create({
     // The release calendar hangs off this block; keep it above the scrollable grid.
     zIndex: 20,
   },
-  catalogSearchBlockWide: { maxWidth: undefined, paddingHorizontal: 0 },
-  catalogColumnWide: { maxWidth: 1080 },
+  catalogSearchBlockWide: { maxWidth: undefined },
+  /** Beside the queue sidebar the feed column keeps the shared column's left edge. */
+  catalogColumnWide: { flexBasis: "auto", flexGrow: 0, flexShrink: 1, maxWidth: 844, width: "100%" },
   catalogSearchRow: { alignItems: "center", flexDirection: "row", gap: 8 },
   catalogSearchRowStacked: { alignItems: "stretch", flexDirection: "column", gap: 10 },
   catalogSearchControls: { alignItems: "center", flexDirection: "row", gap: 8 },
@@ -7577,11 +7595,9 @@ const styles = StyleSheet.create({
   catalogPaginationRetry: { alignItems: "center", justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },
   catalogPaginationRetryText: { color: colors.signal, fontSize: 14, fontWeight: "700" },
   profileContent: {
-    alignSelf: "center",
     maxWidth: 760,
-    paddingHorizontal: 20,
-    paddingTop: 24,
     paddingBottom: 44,
+    paddingTop: 24,
     width: "100%",
   },
   settingsList: { borderTopColor: colors.separator, borderTopWidth: 1 },
@@ -7908,14 +7924,13 @@ const styles = StyleSheet.create({
     alignSelf: "center",
     flexDirection: "row",
     gap: 24,
+    justifyContent: "center",
     maxWidth: 1440,
-    paddingLeft: 76,
-    paddingRight: 20,
   },
   roleFeedColumn: { flex: 1, minHeight: 0, minWidth: 0 },
   roleFeedList: { flex: 1, zIndex: 0 },
-  feedListContentWide: { maxWidth: undefined, paddingHorizontal: 0 },
-  queueSidebar: { flex: 1, maxWidth: 288, minWidth: 252, paddingTop: 12 },
+  feedListContentWide: { maxWidth: undefined },
+  queueSidebar: { flexGrow: 0, flexShrink: 0, paddingTop: 12, width: 252 },
   catalogSourceFilters: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12, marginTop: 12 },
   filterRegion: { marginTop: 12, marginBottom: 12 },
   filterBar: { flexDirection: "row", alignItems: "center", minHeight: 48 },
@@ -8355,7 +8370,7 @@ const styles = StyleSheet.create({
   errorText: { color: colors.danger, fontSize: 14, lineHeight: 20, marginBottom: 12 },
   buttonGap: { height: 12 },
   spacer: { height: 24 },
-  gate: { flex: 1, justifyContent: "flex-start", paddingHorizontal: 20, paddingTop: 32 },
+  gate: { flex: 1, justifyContent: "flex-start", maxWidth: 760, paddingTop: 32, width: "100%" },
   gateTitle: {
     color: colors.ink,
     fontSize: 28,
