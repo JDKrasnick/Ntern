@@ -5,7 +5,7 @@ import { postingIdentityKey, score } from './core/normalize.js';
 import { platformFetch } from './core/platform-fetch.js';
 import type { DeliveryReceipt, Internship, UserPreferences } from './types.js';
 import type { InternshipStore, ReleaseStore, UserStore } from './store.js';
-import { employerDropGroupId, employerDropKey, RELEASE_MINIMUM_ROLES } from './catalog-groups.js';
+import { employerDropChunks, employerDropGroupId, employerDropKey, RELEASE_MAXIMUM_ROLES, RELEASE_MINIMUM_ROLES } from './catalog-groups.js';
 import { matchesJobFilter } from './core/filters.js';
 import { notificationSourceLabelFor } from './sources/source-label.js';
 import { publicApplicationUrl } from './core/application-url.js';
@@ -231,12 +231,23 @@ export async function sendNewJobNotifications(
         ?? await users.getReceipt(device.userId, job.jobId, device.token)
       )));
       const previous = options.releases ? await options.releases.getRelease(device.userId, dropId) : undefined;
-      const card = opensCard || Boolean(previous);
-      for (const batch of card ? [matching] : matching.map((job) => [job])) {
+      // Keep notification cards under the catalog's cap too. Each chunk owns its
+      // own release id, so a 45-role drop produces the same 20/20/5 cards and
+      // deep links as the catalog rather than one oversized private release.
+      const releaseChunks = matching.length > RELEASE_MAXIMUM_ROLES
+        ? employerDropChunks(matching, timeZone)
+        : [{ roles: matching, groupId: employerDropGroupId(matching[0]!, 0, timeZone) }];
+      const batches = opensCard
+        ? releaseChunks.map(({ roles: batch, groupId }) => ({ batch, dropId: groupId! }))
+        : previous ? [{ batch: matching, dropId }]
+        : matching.map((job) => ({ batch: [job], dropId: `individual-${job.jobId}` }));
+      for (const { batch, dropId: batchDropId } of batches) {
+        const batchPrevious = batchDropId === dropId ? previous : options.releases ? await options.releases.getRelease(device.userId, batchDropId) : undefined;
+        const card = opensCard || Boolean(batchPrevious);
         const fresh = batch.filter((job) => !delivered(existing[matching.indexOf(job)]));
         if (!fresh.length) { skipped += batch.length; continue; }
         const message = card
-          ? dropPushMessage(company, batch, Boolean(previous))
+          ? dropPushMessage(company, batch, Boolean(batchPrevious))
           : nativePushMessage(batch[0]!, preference.filter, preference.push);
         const context = deliveryContext(fresh[0]!, device.userId, device.token, device.platform, message.title);
         // One clock read decides both the receipt's time and its delivery window:
@@ -267,13 +278,13 @@ export async function sendNewJobNotifications(
           // The card the alert points at: one release row per user and drop, its
           // job set growing as the employer adds roles, so the app can open the
           // same roles the alert was about.
-          const known = [...new Set([...(previous?.jobIds ?? []), ...matching.map((job) => job.jobId)])].sort();
+          const known = [...new Set([...(batchPrevious?.jobIds ?? []), ...batch.map((job) => job.jobId)])].sort();
           await releases.putRelease({
-            releaseId: dropId, userId: device.userId,
+            releaseId: batchDropId, userId: device.userId,
             jobIds: known, newJobIds: claimed.map(({ job }) => job.jobId).sort(),
-            createdAt: previous?.createdAt ?? timestamp,
+            createdAt: batchPrevious?.createdAt ?? timestamp,
           });
-          message.data = { destination: 'release', releaseId: dropId, url: `internnotifs://releases/${encodeURIComponent(dropId)}` };
+          message.data = { destination: 'release', releaseId: batchDropId, url: `internnotifs://releases/${encodeURIComponent(batchDropId)}` };
           message.click = message.data.url;
         }
         try {
@@ -385,55 +396,67 @@ export async function deliverDeferredExpoNotifications(
     // release's notification and deep link rather than turning the addition
     // back into a standalone role alert.
     const previous = releases ? await releases.getRelease(userId, dropId) : undefined;
-    const card = deliverable.length >= RELEASE_MINIMUM_ROLES || Boolean(previous);
-    const message = card
-      ? dropPushMessage(company, deliverable.map(({ job }) => job), Boolean(previous))
-      : nativePushMessage(deliverable[0]!.job, preference.filter, preference.push);
-    if (card && releases) {
-      await releases.putRelease({
-        releaseId: dropId, userId,
-        jobIds: [...new Set([...(previous?.jobIds ?? []), ...deliverable.map(({ job }) => job.jobId)])].sort(),
-        newJobIds: deliverable.map(({ job }) => job.jobId).sort(),
-        createdAt: previous?.createdAt ?? now().toISOString(),
-      });
-      message.data = { destination: 'release', releaseId: dropId, url: `internnotifs://releases/${encodeURIComponent(dropId)}` };
-      message.click = message.data.url;
-    }
-    const attemptedAt = now().toISOString();
-    try {
-      const ticket = await publisher.publish(device.token, message);
-      const accepted = ticket.status === 'ok' && Boolean(ticket.id);
-      const invalid = ticket.details?.error === 'DeviceNotRegistered';
-      await Promise.all(deliverable.map(({ receipt }) => {
-        const attempts = (receipt.attempts ?? 0) + 1;
-        return users.putReceipt({
-          ...receipt, ticketId: ticket.id, attempts,
-          status: accepted ? 'pending' : invalid || attempts >= MAX_EXPO_PUSH_ATTEMPTS ? 'error' : 'retryable',
-          deliveryState: accepted ? 'accepted' : invalid || attempts >= MAX_EXPO_PUSH_ATTEMPTS ? 'definitive-failure' : 'claimed',
-          ...(!accepted ? { lastErrorCode: ticket.details?.error ?? 'ExpoRejected', lastErrorMessage: ticket.message?.slice(0, 500), lastErrorAt: attemptedAt } : {}),
-          updatedAt: attemptedAt,
+    const timeZone = preference.alertSettings?.timezone;
+    const releaseChunks = deliverable.length > RELEASE_MAXIMUM_ROLES
+      ? employerDropChunks(deliverable.map(({ job }) => job), timeZone)
+      : [{ roles: deliverable.map(({ job }) => job), groupId: employerDropGroupId(deliverable[0]!.job, 0, timeZone) }];
+    const batches = deliverable.length >= RELEASE_MINIMUM_ROLES
+      ? releaseChunks.map(({ roles, groupId }) => ({
+        deliverable: roles.map((job) => deliverable.find((entry) => entry.job.jobId === job.jobId)!), dropId: groupId!,
+      }))
+      : [{ deliverable, dropId }];
+    for (const { deliverable: batch, dropId: batchDropId } of batches) {
+      const batchPrevious = batchDropId === dropId ? previous : releases ? await releases.getRelease(userId, batchDropId) : undefined;
+      const card = batch.length >= RELEASE_MINIMUM_ROLES || Boolean(batchPrevious);
+      const message = card
+        ? dropPushMessage(company, batch.map(({ job }) => job), Boolean(batchPrevious))
+        : nativePushMessage(batch[0]!.job, preference.filter, preference.push);
+      if (card && releases) {
+        await releases.putRelease({
+          releaseId: batchDropId, userId,
+          jobIds: [...new Set([...(batchPrevious?.jobIds ?? []), ...batch.map(({ job }) => job.jobId)])].sort(),
+          newJobIds: batch.map(({ job }) => job.jobId).sort(),
+          createdAt: batchPrevious?.createdAt ?? now().toISOString(),
         });
-      }));
-      if (accepted) sent += deliverable.length;
-      else {
-        if (invalid) await users.putDevice({ ...device, active: false, updatedAt: attemptedAt });
-        failed += deliverable.length;
+        message.data = { destination: 'release', releaseId: batchDropId, url: `internnotifs://releases/${encodeURIComponent(batchDropId)}` };
+        message.click = message.data.url;
       }
-    } catch (error) {
-      const failure = classifyExpoPushFailure(error);
-      await Promise.all(deliverable.map(({ receipt }) => {
-        const attempts = (receipt.attempts ?? 0) + 1;
-        const retryable = failure === 'retryable' && attempts < MAX_EXPO_PUSH_ATTEMPTS;
-        return users.putReceipt({
-          ...receipt, attempts,
-          status: failure === 'unknown' ? 'deferred' : retryable ? 'retryable' : 'error',
-          deliveryState: failure === 'unknown' ? 'deferred' : retryable ? 'claimed' : 'definitive-failure',
-          lastErrorCode: error instanceof ExpoPushHttpError ? `ExpoHttp${error.status}` : 'TransportAmbiguous',
-          lastErrorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
-          lastErrorAt: attemptedAt, updatedAt: attemptedAt,
-        });
-      }));
-      failed += deliverable.length;
+      const attemptedAt = now().toISOString();
+      try {
+        const ticket = await publisher.publish(device.token, message);
+        const accepted = ticket.status === 'ok' && Boolean(ticket.id);
+        const invalid = ticket.details?.error === 'DeviceNotRegistered';
+        await Promise.all(batch.map(({ receipt }) => {
+          const attempts = (receipt.attempts ?? 0) + 1;
+          return users.putReceipt({
+            ...receipt, ticketId: ticket.id, attempts,
+            status: accepted ? 'pending' : invalid || attempts >= MAX_EXPO_PUSH_ATTEMPTS ? 'error' : 'retryable',
+            deliveryState: accepted ? 'accepted' : invalid || attempts >= MAX_EXPO_PUSH_ATTEMPTS ? 'definitive-failure' : 'claimed',
+            ...(!accepted ? { lastErrorCode: ticket.details?.error ?? 'ExpoRejected', lastErrorMessage: ticket.message?.slice(0, 500), lastErrorAt: attemptedAt } : {}),
+            updatedAt: attemptedAt,
+          });
+        }));
+        if (accepted) sent += batch.length;
+        else {
+          if (invalid) await users.putDevice({ ...device, active: false, updatedAt: attemptedAt });
+          failed += batch.length;
+        }
+      } catch (error) {
+        const failure = classifyExpoPushFailure(error);
+        await Promise.all(batch.map(({ receipt }) => {
+          const attempts = (receipt.attempts ?? 0) + 1;
+          const retryable = failure === 'retryable' && attempts < MAX_EXPO_PUSH_ATTEMPTS;
+          return users.putReceipt({
+            ...receipt, attempts,
+            status: failure === 'unknown' ? 'deferred' : retryable ? 'retryable' : 'error',
+            deliveryState: failure === 'unknown' ? 'deferred' : retryable ? 'claimed' : 'definitive-failure',
+            lastErrorCode: error instanceof ExpoPushHttpError ? `ExpoHttp${error.status}` : 'TransportAmbiguous',
+            lastErrorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+            lastErrorAt: attemptedAt, updatedAt: attemptedAt,
+          });
+        }));
+        failed += batch.length;
+      }
     }
   }
   return { sent, skipped, failed };

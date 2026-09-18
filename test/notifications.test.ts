@@ -190,6 +190,26 @@ describe('notifications', () => {
     expect(messages).toHaveLength(2);
   });
 
+  it('splits 21- and 45-role notifications into the catalog card sizes', async () => {
+    for (const [count, expectedSizes] of [[21, [17, 4]], [45, [20, 20, 5]]] as const) {
+      const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
+      await visaUser(users);
+      const wave = Array.from({ length: count }, (_, index) => visaRole(index + 1, `2026-09-17T14:${String(index).padStart(2, '0')}:00.000Z`));
+
+      await expect(sendNewJobNotifications(wave, users, capturePushes(messages), () => new Date('2026-09-17T15:00:00.000Z'), undefined, { releases }))
+        .resolves.toMatchObject({ sent: count, failed: 0 });
+
+      const releaseIds = messages.map((message) => {
+        expect(message.data?.destination).toBe('release');
+        if (!message.data || message.data.destination !== 'release') throw new Error('Expected a release notification');
+        return message.data.releaseId;
+      });
+      const sizes = await Promise.all(releaseIds.map((releaseId) => releases.getRelease('user-1', releaseId).then((release) => release?.jobIds.length)));
+      expect(sizes).toEqual(expectedSizes);
+      expect(new Set(releaseIds).size).toBe(expectedSizes.length);
+    }
+  });
+
   it('keeps a quiet-hours addition on the release card that was already delivered', async () => {
     const jobs = new MemoryInternshipStore(); const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
     const publisher = capturePushes(messages);
