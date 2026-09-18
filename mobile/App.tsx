@@ -1576,7 +1576,14 @@ function NewnessLane({
           onScrollToIndexFailed={() => undefined}
           contentContainerStyle={styles.catalogLaneList}
           renderItem={({ item }) => (
-            <View style={{ width: laneTileWidth }} accessibilityElementsHidden={item.decorative || undefined} importantForAccessibility={item.decorative ? "no-hide-descendants" : undefined}>
+            <View
+              style={{ width: laneTileWidth }}
+              // Every copy after the first is the same release again: a screen
+              // reader must meet each employer once, not once per copy.
+              aria-hidden={item.decorative || undefined}
+              accessibilityElementsHidden={item.decorative || undefined}
+              importantForAccessibility={item.decorative ? "no-hide-descendants" : undefined}
+            >
               <CatalogGroupItem
                 group={item.group}
                 presentation="lane"
