@@ -15,7 +15,7 @@ export type JobNotificationData = {
 export type AppDestination =
   | { kind: 'job'; jobId: string; reasons: FilterMatchReason[]; exclusionsApplied: boolean }
   | { kind: 'release'; releaseId: string }
-  | { kind: 'saved' };
+  | { kind: 'queue' };
 
 export type JobRouteState = 'idle' | 'loading' | 'missing' | 'error';
 
@@ -40,7 +40,9 @@ function filterContext(value: unknown) {
 }
 
 export function destinationFromNotification(data: JobNotificationData): AppDestination | undefined {
-  if (typeof data.applicationId === 'string' || data.destination === 'saved') return { kind: 'saved' };
+  // Follow-up reminders already scheduled on devices (up to followUpDays ahead)
+  // still carry destination 'saved', so that string keeps routing to the queue.
+  if (typeof data.applicationId === 'string' || data.destination === 'saved') return { kind: 'queue' };
   if (data.destination === 'release' && typeof data.releaseId === 'string' && data.releaseId) return { kind: 'release', releaseId: data.releaseId };
   if (typeof data.jobId !== 'string' || !data.jobId) return undefined;
   return { kind: 'job', jobId: data.jobId, ...filterContext(data.matchedFilters) };

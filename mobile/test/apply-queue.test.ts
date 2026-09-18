@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextAvailableQueueEntry, queueEntryTarget, selectBulkTargets, sortApplyQueue, type QueueEntry } from "../src/application";
+import { applicationSections, applicationStatusLabel, nextAvailableQueueEntry, queueEntryTarget, selectBulkTargets, sortApplyQueue, type QueueEntry } from "../src/application";
 
 const entry = (overrides: Partial<QueueEntry> & { jobId: string }): QueueEntry => ({
   applicationId: `app-${overrides.jobId}`,
@@ -17,6 +17,40 @@ describe("sortApplyQueue", () => {
       entry({ jobId: "a", queuedAt: "2026-09-01T00:00:00.000Z", createdAt: "2026-09-01T00:00:00.000Z" }),
     ];
     expect(sortApplyQueue(applications).map((item) => item.jobId)).toEqual(["a", "b"]);
+  });
+});
+
+describe("applicationSections", () => {
+  const queued = entry({ jobId: "queued", queuedAt: "2026-09-01T00:00:00.000Z" });
+  const awaitingApply = entry({ jobId: "awaiting" });
+  const applied = entry({ jobId: "applied", status: "applied" });
+  const interviewing = entry({ jobId: "interview", status: "interview" });
+
+  it("partitions records without loss or duplication", () => {
+    const applications = [queued, awaitingApply, applied, interviewing];
+    const sections = applicationSections(applications, sortApplyQueue(applications));
+
+    expect(sections.map((section) => section.title)).toEqual(["To apply", "Tracking"]);
+    expect(sections[0].data.map((item) => item.jobId)).toEqual(["queued"]);
+    expect(sections[1].data.map((item) => item.jobId)).toEqual(["awaiting", "applied", "interview"]);
+    expect(sections.flatMap((section) => section.data).length).toBe(applications.length);
+  });
+
+  it("returns no sections for an empty account", () => {
+    expect(applicationSections([], [])).toEqual([]);
+  });
+
+  it("hides a section that has no records", () => {
+    expect(applicationSections([queued], [queued]).map((section) => section.title)).toEqual(["To apply"]);
+    expect(applicationSections([awaitingApply], []).map((section) => section.title)).toEqual(["Tracking"]);
+  });
+});
+
+describe("applicationStatusLabel", () => {
+  it("distinguishes a queued saved record from one awaiting apply", () => {
+    expect(applicationStatusLabel("saved", undefined)).toBe("AWAITING APPLY");
+    expect(applicationStatusLabel("saved", "2026-09-01T00:00:00.000Z")).toBe("IN QUEUE");
+    expect(applicationStatusLabel("interview", undefined)).toBe("INTERVIEW");
   });
 });
 

@@ -136,11 +136,11 @@ Every screen follows these rules. They are as important as colors and type.
 ### Bottom tab navigation
 
 - Fixed at the bottom of the app content, with a one-pixel top separator and safe-area space below it.
-- Three equal-width, 52 pt minimum targets: Roles, Saved, and Profile.
-- Every tab combines a familiar icon with a short text label. Use a filled briefcase for the selected Roles tab, bookmark for Saved, and person for Profile.
+- Four equal-width, 52 pt minimum targets: Roles, Queue, Catalog, and Profile.
+- Every tab combines a familiar icon with a short text label. Use a filled briefcase for the selected Roles tab, albums for Queue, search for Catalog, and person for Profile.
 - Active tab: ink icon and label; inactive tabs: muted outline icon and label. Do not use a bottom-rule-only state or blue system buttons for navigation.
-- A tab bar is for moving among these three top-level areas, never for inline actions. Keep it visible while switching sections.
-- At 700 pt or wider, replace the bottom bar with the same three destinations in a compact left navigation rail; keep the primary content column centered and no wider than 760 pt.
+- A tab bar is for moving among these four top-level areas, never for inline actions. Keep it visible while switching sections.
+- At 700 pt or wider, replace the bottom bar with the same four destinations in a compact left navigation rail; keep the primary content column centered and no wider than 760 pt.
 
 ### Input
 

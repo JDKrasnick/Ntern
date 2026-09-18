@@ -61,7 +61,7 @@ describe('mobile job routes', () => {
 
   it('parses compatible notification payloads and encoded app URLs', () => {
     expect(destinationFromNotification({ jobId: 'legacy/job' })).toEqual({ kind: 'job', jobId: 'legacy/job', reasons: [], exclusionsApplied: false });
-    expect(destinationFromNotification({ applicationId: 'application-1', destination: 'saved' })).toEqual({ kind: 'saved' });
+    expect(destinationFromNotification({ applicationId: 'application-1', destination: 'saved' })).toEqual({ kind: 'queue' });
     expect(destinationFromNotification({ destination: 'release', releaseId: 'release/1' })).toEqual({ kind: 'release', releaseId: 'release/1' });
     const url = jobDeepLink('role/with spaces');
     expect(url).toBe('internnotifs://jobs/role%2Fwith%20spaces');

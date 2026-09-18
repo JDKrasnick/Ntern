@@ -35,7 +35,7 @@ export async function notifyApplicationProgress(
 ) {
   if (!(await existingAlertPermission())) return;
   await Notifications.scheduleNotificationAsync({
-    content: { title, body, data: { applicationId, destination: 'saved' } },
+    content: { title, body, data: { applicationId } },
     trigger: null,
   });
 }
@@ -55,7 +55,7 @@ export async function scheduleApplicationFollowUp(
     content: {
       title: 'Application follow-up',
       body: `Check in on ${roleName} and update your progress.`,
-      data: { applicationId, destination: 'saved' },
+      data: { applicationId },
     },
     trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: trigger },
   });
