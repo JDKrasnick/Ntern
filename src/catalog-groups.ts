@@ -338,6 +338,21 @@ function summarize(kind: CatalogGroupKind, jobs: Internship[], stableGroupId?: s
  * duplicated the individual cards beside it. Roles that arrive later now collapse
  * into the drop that is already open, and the drop id depends only on the
  * employer and the day, so the card grows in place instead of reordering. */
+/** Splits an employer drop into the same bounded cards used by the catalog and
+ * notification deep links. The final card borrows from its predecessor so a
+ * large drop never produces an unhelpfully tiny card. */
+export function employerDropChunks(drop: Internship[], timeZone?: string): Array<{ roles: Internship[]; groupId?: string }> {
+  const ordered = [...drop].sort((left, right) => timestamp(left) - timestamp(right) || left.jobId.localeCompare(right.jobId));
+  const chunks: Internship[][] = [];
+  for (let index = 0; index < ordered.length; index += RELEASE_MAXIMUM_ROLES) chunks.push(ordered.slice(index, index + RELEASE_MAXIMUM_ROLES));
+  const tail = chunks[chunks.length - 1];
+  if (chunks.length > 1 && tail && tail.length < RELEASE_MINIMUM_ROLES) {
+    const donor = chunks[chunks.length - 2]!;
+    tail.unshift(...donor.splice(donor.length - (RELEASE_MINIMUM_ROLES - tail.length), RELEASE_MINIMUM_ROLES - tail.length));
+  }
+  return chunks.map((roles, index) => ({ roles, groupId: employerDropGroupId(roles[0]!, index, timeZone) }));
+}
+
 function releaseGroups(jobs: Internship[]): { releases: Array<{ roles: Internship[]; groupId?: string }>; remaining: Internship[] } {
   const releases: Array<{ roles: Internship[]; groupId?: string }> = [];
   const remaining = new Set(jobs);
@@ -355,18 +370,10 @@ function releaseGroups(jobs: Internship[]): { releases: Array<{ roles: Internshi
     // migrated employer — is split into consecutive cards so one card stays
     // scannable and its payload stays small.
     if (drop.length < RELEASE_MINIMUM_ROLES) continue;
-    const ordered = [...drop].sort((left, right) => timestamp(left) - timestamp(right) || left.jobId.localeCompare(right.jobId));
-    const chunks: Internship[][] = [];
-    for (let index = 0; index < ordered.length; index += RELEASE_MAXIMUM_ROLES) chunks.push(ordered.slice(index, index + RELEASE_MAXIMUM_ROLES));
-    const tail = chunks[chunks.length - 1]!;
-    if (chunks.length > 1 && tail.length < RELEASE_MINIMUM_ROLES) {
-      const donor = chunks[chunks.length - 2]!;
-      tail.unshift(...donor.splice(donor.length - (RELEASE_MINIMUM_ROLES - tail.length), RELEASE_MINIMUM_ROLES - tail.length));
+    for (const release of employerDropChunks(drop)) {
+      releases.push(release);
+      release.roles.forEach((job) => remaining.delete(job));
     }
-    chunks.forEach((chunk, index) => {
-      releases.push({ roles: chunk, groupId: employerDropGroupId(chunk[0]!, index) });
-      chunk.forEach((job) => remaining.delete(job));
-    });
   }
   return { releases, remaining: [...remaining] };
 }
