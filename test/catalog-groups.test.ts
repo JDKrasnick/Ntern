@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { catalogEducation, catalogGroupDetails, employerDropKey, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs } from '../src/catalog-groups.js';
+import { catalogEducation, catalogGroupDetails, employerDropGroupId, employerDropKey, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs } from '../src/catalog-groups.js';
 import type { EducationEvidenceStatus, Internship, InternshipIdentity, InternshipProgramType, SeasonEvidenceStatus } from '../src/types.js';
 
 type IdentityJob = Internship & { internshipIdentity?: Record<string, unknown> };
@@ -43,6 +43,34 @@ describe('grouped catalog domain', () => {
     expect(details.group.featuredRole.housing).toEqual(housing);
     expect(details.group.compensations).toEqual(['USD 8,500/month']);
   });
+  it('splits a day bigger than the card cap into consecutive cards', () => {
+    const at = (seconds: number) => ({ firstSeenAt: `2026-08-23T12:${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.000Z`, catalogVisibleAt: `2026-08-23T12:${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.000Z`, lastSeenAt: `2026-08-23T12:00:00.000Z` });
+    const day = (count: number) => Array.from({ length: count }, (_, index) => job(`role-${index}`, 0, at(index)));
+    const fortyFive = groupCatalogJobs(day(45));
+    expect(fortyFive.map(({ row }) => row.kind)).toEqual(['employer-release', 'employer-release', 'employer-release']);
+    expect(fortyFive.map(({ row }) => row.roleCount).sort((a, b) => b - a)).toEqual([20, 20, 5]);
+    expect(new Set(fortyFive.map(({ row }) => row.groupId)).size).toBe(3);
+
+    // A tail under the four-role minimum borrows from the card before it.
+    const twentyOne = groupCatalogJobs(day(21));
+    expect(twentyOne.map(({ row }) => row.roleCount).sort((a, b) => b - a)).toEqual([17, 4]);
+
+    // Twenty roles or fewer keep the single card, and its identity, they had before.
+    const twenty = groupCatalogJobs(day(20));
+    expect(twenty).toHaveLength(1);
+    expect(twenty[0]?.row).toMatchObject({ roleCount: 20 });
+  });
+
+  it('counts an employer day in the viewer timezone when one is given', () => {
+    const job_ = job('late', 0, { catalogVisibleAt: '2026-09-18T02:00:00.000Z', firstSeenAt: '2026-09-18T02:00:00.000Z' });
+    const other = job('earlier', 0, { catalogVisibleAt: '2026-09-17T23:30:00.000Z', firstSeenAt: '2026-09-17T23:30:00.000Z' });
+    expect(employerDropKey(job_)).toBe('acme\u00002026-09-18');
+    expect(employerDropKey(job_, 'America/Los_Angeles')).toBe('acme\u00002026-09-17');
+    expect(employerDropKey(other, 'America/Los_Angeles')).toBe(employerDropKey(job_, 'America/Los_Angeles'));
+    expect(employerDropGroupId(job_, 0, 'America/Los_Angeles')).not.toBe(employerDropGroupId(job_));
+    expect(employerDropGroupId(job_, 1)).not.toBe(employerDropGroupId(job_));
+  });
+
   it('does not let the migration timestamp invent an employer day', () => {
     // 235 of one employer's open roles carry the DynamoDB import timestamp — that is
     // the import, not a posting day, so a reported posting date groups them and a row

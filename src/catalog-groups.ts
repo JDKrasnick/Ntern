@@ -149,6 +149,8 @@ export type BuiltGroup = { row: CatalogGroupRow; jobs: Internship[] };
 
 /** The role count that makes an employer's day a card rather than separate roles. */
 export const RELEASE_MINIMUM_ROLES = 4;
+/** Roles per card: a bigger discovery day is split into consecutive cards. */
+export const RELEASE_MAXIMUM_ROLES = 20;
 const compact = (value: string) => value.trim().replace(/\s+/g, ' ');
 const folded = (value: string) => compact(value).toLocaleLowerCase('en-US');
 const unique = (values: string[]) => [...new Map(values.filter(Boolean).map((value) => [folded(value), compact(value)])).values()];
@@ -248,20 +250,42 @@ function disciplinesFor(job: Internship) {
  * minute, which rendered as a 235-role card — so it belongs to the day its source
  * reported posting it, and to no day at all when the source never said, which
  * keeps the import from inventing a posting day. */
-export function employerDropKey(job: Internship) {
+export function employerDropKey(job: Internship, timeZone?: string) {
   const company = companyKey(job);
   if (!company) return undefined;
   const timing = canonicalPostingTiming(job);
   const day = job.catalogRecency === 'baseline'
-    ? timing.kind === 'source-reported' || timing.kind === 'employer-posted' ? timing.timestamp?.slice(0, 10) : undefined
-    : catalogVisibleAt(job).slice(0, 10);
-  return day && /^\d{4}-\d{2}-\d{2}$/.test(day) ? `${company}\u0000${day}` : undefined;
+    ? timing.kind === 'source-reported' || timing.kind === 'employer-posted' ? dayInZone(timing.timestamp, timeZone) : undefined
+    : dayInZone(catalogVisibleAt(job), timeZone);
+  return day ? `${company}\u0000${day}` : undefined;
+}
+
+const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** The calendar day an instant falls on, in the viewer's zone when one is given. */
+function dayInZone(timestamp: string | undefined, timeZone?: string) {
+  if (!timestamp || !Number.isFinite(Date.parse(timestamp))) return undefined;
+  const day = timeZone ? dayFormatter(timeZone).format(new Date(timestamp)) : timestamp.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : undefined;
+}
+
+function dayFormatter(timeZone: string) {
+  const existing = dayFormatters.get(timeZone);
+  if (existing) return existing;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    dayFormatters.set(timeZone, formatter);
+    return formatter;
+  } catch {
+    // An unusable zone falls back to UTC rather than dropping the role.
+    return dayFormatters.get('UTC') ?? new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' });
+  }
 }
 
 /** The feed card id for a role's employer drop; alerts reuse it for the deep link. */
-export function employerDropGroupId(job: Internship) {
-  const key = employerDropKey(job);
-  return key ? `employer-release-${createHash('sha256').update(key).digest('base64url').slice(0, 20)}` : undefined;
+export function employerDropGroupId(job: Internship, chunk = 0, timeZone?: string) {
+  const key = employerDropKey(job, timeZone);
+  return key ? `employer-release-${createHash('sha256').update(chunk > 0 ? `${key}#${chunk}` : key).digest('base64url').slice(0, 20)}` : undefined;
 }
 
 function groupId(kind: CatalogGroupKind, jobs: Internship[]) {
@@ -314,8 +338,8 @@ function summarize(kind: CatalogGroupKind, jobs: Internship[], stableGroupId?: s
  * duplicated the individual cards beside it. Roles that arrive later now collapse
  * into the drop that is already open, and the drop id depends only on the
  * employer and the day, so the card grows in place instead of reordering. */
-function releaseGroups(jobs: Internship[]) {
-  const releases: Internship[][] = [];
+function releaseGroups(jobs: Internship[]): { releases: Array<{ roles: Internship[]; groupId?: string }>; remaining: Internship[] } {
+  const releases: Array<{ roles: Internship[]; groupId?: string }> = [];
   const remaining = new Set(jobs);
   const byDrop = new Map<string, Internship[]>();
   for (const job of jobs) {
@@ -326,11 +350,23 @@ function releaseGroups(jobs: Internship[]) {
   }
   for (const drop of byDrop.values()) {
     // Every role of a drop belongs to its card, so a role can never be shown
-    // as an individual card beside the group that holds its siblings.
-    if (drop.length >= RELEASE_MINIMUM_ROLES) {
-      releases.push(drop);
-      drop.forEach((job) => remaining.delete(job));
+    // as an individual card beside the group that holds its siblings. A day with
+    // more than RELEASE_MAXIMUM_ROLES roles — a large discovery batch, or a
+    // migrated employer — is split into consecutive cards so one card stays
+    // scannable and its payload stays small.
+    if (drop.length < RELEASE_MINIMUM_ROLES) continue;
+    const ordered = [...drop].sort((left, right) => timestamp(left) - timestamp(right) || left.jobId.localeCompare(right.jobId));
+    const chunks: Internship[][] = [];
+    for (let index = 0; index < ordered.length; index += RELEASE_MAXIMUM_ROLES) chunks.push(ordered.slice(index, index + RELEASE_MAXIMUM_ROLES));
+    const tail = chunks[chunks.length - 1]!;
+    if (chunks.length > 1 && tail.length < RELEASE_MINIMUM_ROLES) {
+      const donor = chunks[chunks.length - 2]!;
+      tail.unshift(...donor.splice(donor.length - (RELEASE_MINIMUM_ROLES - tail.length), RELEASE_MINIMUM_ROLES - tail.length));
     }
+    chunks.forEach((chunk, index) => {
+      releases.push({ roles: chunk, groupId: employerDropGroupId(chunk[0]!, index) });
+      chunk.forEach((job) => remaining.delete(job));
+    });
   }
   return { releases, remaining: [...remaining] };
 }
@@ -350,7 +386,7 @@ export function groupCatalogJobs(jobs: Internship[], options: { includeClosed?: 
   }
   grouped.push(...programs.values());
   return [
-    ...releases.map((roles) => ({ row: summarize('employer-release', roles), jobs: roles })),
+    ...releases.map(({ roles, groupId: stableGroupId }) => ({ row: summarize('employer-release', roles, stableGroupId), jobs: roles })),
     ...grouped.map((roles) => ({ row: summarize(roles.length > 1 ? 'program-group' : 'individual', roles), jobs: roles })),
     ...unsafe.map((job) => ({ row: summarize('individual', [job]), jobs: [job] })),
   ].sort((left, right) => right.row.updatedAt.localeCompare(left.row.updatedAt));
