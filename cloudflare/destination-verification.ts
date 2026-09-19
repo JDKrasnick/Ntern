@@ -768,7 +768,11 @@ export async function processDestinationVerificationBatch(
             evidenceHash: result.destination.evidenceHash ?? createHash('sha256').update(JSON.stringify(result.destination)).digest('hex'),
             classification: result.destination.classification, value: result.destination, observedAt: inspectedAt });
         }
-        const retryTransientFailure = Boolean(browserError && reachability !== 'gone');
+        // A staged collection pass is best-effort. A host that refuses a headless
+        // fetch must not consume the platform's retries and land in the dead-letter
+        // queue: the acquisition's own retry window re-offers the role by itself,
+        // and a transient refusal says nothing about the catalog's health.
+        const retryTransientFailure = Boolean(browserError && reachability !== 'gone' && !message.metadataBackfillToken);
         if (!candidateOnly && message.occurrenceKey) {
           if (retryTransientFailure) {
             if (message.leaseToken) {
