@@ -480,6 +480,30 @@ describe('provider-neutral role metadata', () => {
       .toMatchObject([{ minAmount: 28.25, maxAmount: 31.5, currency: 'XXX', period: 'hourly' }]);
   });
 
+  it('joins a table whose Min/Max labels sit above their values, in either word order', () => {
+    // Cooper Health publishes its iCIMS fact table as a label line above the
+    // value, so segmentation on newlines made the two ends of one range look
+    // like two competing point values.
+    const icims = 'Salary Min ($)\nUSD $25.00\nSalary Max ($)\nUSD $42.50';
+    expect(extractCompensationRanges(icims, { provenance: field, requirePayContext: true }))
+      .toMatchObject([{ minAmount: 25, maxAmount: 42.5, currency: 'USD', period: 'unknown' }]);
+    // The same table without a parseable currency code on both ends stays apart.
+    const mixed = extractCompensationRanges('Salary Min ($)\nUSD $25.00\nSalary Max ($)\nCAD $42.50', { provenance: field, requirePayContext: true });
+    expect(mixed).not.toEqual(expect.arrayContaining([expect.objectContaining({ minAmount: 25, maxAmount: 42.5 })]));
+    // A numeric-only pair still joins and keeps its unknown period.
+    expect(extractCompensationRanges('Pay Minimum\n$19.73\nPay Maximum\n$33.05', { provenance: field, requirePayContext: true }))
+      .toMatchObject([{ minAmount: 19.73, maxAmount: 33.05, currency: 'XXX', period: 'unknown' }]);
+    // An explicit currency code on both ends joins too. The alternation was
+    // grouped so `\s*` applied to every code, not only the last one, which had
+    // silently split these pairs into two competing point values.
+    expect(extractCompensationRanges('Minimum Salary USD $28.25\nMaximum Salary USD $31.50', { provenance: field, requirePayContext: true }))
+      .toMatchObject([{ minAmount: 28.25, maxAmount: 31.5, currency: 'USD', period: 'unknown' }]);
+    expect(extractCompensationRanges('Salary / Rate Minimum: USD $105,000\nSalary / Rate Maximum: USD $110,000', { provenance: field }))
+      .toMatchObject([{ minAmount: 105000, maxAmount: 110000, currency: 'USD', period: 'unknown' }]);
+    // Differing codes still stay apart: both ends must state the same notation.
+    expect(extractCompensationRanges('Minimum Salary USD $28.25\nMaximum Salary CAD $31.50', { provenance: field, requirePayContext: true }))
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ minAmount: 28.25, maxAmount: 31.5 })]));
+  });
   it('does not borrow cadence or merge incompatible salary endpoints', () => {
     const input = { provenance: field, requirePayContext: true };
     for (const tail of [
