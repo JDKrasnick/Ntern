@@ -1,8 +1,8 @@
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import { describe, expect, it, vi } from 'vitest';
-import { NtfyPublisher, sendDigest, sendPendingNotifications, SesEmailSender, type EmailSender, type PushMessage, type PushPublisher } from '../src/notifications.js';
+import { drainPendingExpoNotifications, ExpoPushPublisher, NtfyPublisher, sendDigest, sendPendingNotifications, SesEmailSender, type EmailSender, type PushMessage, type PushPublisher } from '../src/notifications.js';
 import { Poller } from '../src/poll.js';
-import { MemoryInternshipStore } from '../src/store.js';
+import { MemoryInternshipStore, MemoryReleaseStore, MemoryUserStore } from '../src/store.js';
 import { GREENHOUSE_RESPONSE_MAX_BYTES, GreenhouseBoardAdapter } from '../src/sources/greenhouse.js';
 import type { RawListing, SourceAdapter, SourceCheckpoint, SourceFetchResult } from '../src/types.js';
 import { acmeSource } from './fixtures/greenhouse.js';
@@ -32,6 +32,42 @@ class RecorderEmail implements EmailSender {
 }
 
 describe('mocked production workflow integration', () => {
+  it('keeps a deferred later employer-drop role on its original release through poll and drain', async () => {
+    const store = new MemoryInternshipStore(); const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
+    const roles = (count: number) => Array.from({ length: count }, (_, index) => ({
+      ...row(index + 1, 'drop'), company: 'Visa', title: `Software Intern ${index + 1}`,
+      postedAt: '2026-07-18', fetchedAt: '2026-07-18T12:00:00.000Z',
+    }));
+    const publisher = new ExpoPushPublisher('https://push.example.test', async (url, init) => {
+      if (String(url).includes('getReceipts')) return new Response(JSON.stringify({ data: {} }), { status: 200 });
+      messages.push(JSON.parse(String(init?.body)) as PushMessage);
+      return new Response(JSON.stringify({ data: { id: `ticket-${messages.length}`, status: 'ok' } }), { status: 200 });
+    });
+    await users.putPreferences({ userId: 'user-1', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-07-18T12:00:00.000Z' });
+    await users.putDevice({ userId: 'user-1', token: 'ExponentPushToken[test]', platform: 'ios', active: true, createdAt: '2026-07-18T12:00:00.000Z', updatedAt: '2026-07-18T12:00:00.000Z' });
+
+    await new Poller([new FixtureAdapter('drop', [])], store, () => new Date('2026-07-18T12:00:00.000Z')).poll();
+    await new Poller([new FixtureAdapter('drop', roles(4))], store, () => new Date('2026-07-18T12:05:00.000Z')).poll();
+    await expect(drainPendingExpoNotifications(store, users, publisher, () => new Date('2026-07-18T12:06:00.000Z'), releases))
+      .resolves.toMatchObject({ delivery: { sent: 4, failed: 0 } });
+    expect(messages[0]).toMatchObject({ title: 'Visa posted 4 matching roles', data: { destination: 'release' } });
+
+    await users.putPreferences({
+      userId: 'user-1', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-07-18T22:00:00.000Z',
+      alertSettings: { delivery: 'immediate', timezone: 'UTC', applicationReminders: false, followUpDays: 0, quietHours: { start: '22:00', end: '08:00', timezone: 'UTC' } },
+    });
+    await new Poller([new FixtureAdapter('drop', roles(5))], store, () => new Date('2026-07-18T22:30:00.000Z')).poll();
+    await expect(drainPendingExpoNotifications(store, users, publisher, () => new Date('2026-07-18T22:30:00.000Z'), releases))
+      .resolves.toMatchObject({ delivery: { sent: 0 }, delayedDelivery: { sent: 0 } });
+    await expect(drainPendingExpoNotifications(store, users, publisher, () => new Date('2026-07-19T08:00:00.000Z'), releases))
+      .resolves.toMatchObject({ delayedDelivery: { sent: 1, failed: 0 } });
+
+    expect(messages).toHaveLength(2);
+    const originalReleaseId = messages[0]?.data?.destination === 'release' ? messages[0].data.releaseId : undefined;
+    expect(originalReleaseId).toEqual(expect.any(String));
+    expect(messages[1]).toMatchObject({ title: '1 role added to Visa', data: { destination: 'release', releaseId: originalReleaseId } });
+  });
+
   it('quietly baselines, deduplicates, retries push failures, and digests only after SES acceptance', async () => {
     const store = new MemoryInternshipStore();
     const baseline = row(1);
@@ -81,19 +117,21 @@ describe('mocked production workflow integration', () => {
     sesSend.mockRestore();
   });
 
-  it('records an oversized Greenhouse board as a retryable resource-limit failure', async () => {
+  // A board that cannot be read even as a listing is still unreadable: the
+  // listing fallback only rescues boards whose descriptions are the problem.
+  it('records a Greenhouse board that is unreadable even as a listing as a retryable resource-limit failure', async () => {
     const store = new MemoryInternshipStore();
     const adapter = new GreenhouseBoardAdapter({
       source: acmeSource,
-      fetchImpl: async () => new Response('{"jobs":[]}', {
-        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
-      }),
+      // A body that is genuinely over the ceiling both times: a declared length
+      // with a short body would fail as a chopped transfer instead.
+      fetchImpl: async () => new Response('x'.repeat(GREENHOUSE_RESPONSE_MAX_BYTES + 1)),
     });
 
     const result = await new Poller([adapter], store, () => new Date('2026-09-14T19:00:00.000Z')).poll();
     const health = await store.getSourceHealth(acmeSource.id);
 
-    expect(result.failures).toEqual([expect.stringContaining('response body exceeds')]);
+    expect(result.failures).toEqual([expect.stringContaining('exceeds')]);
     expect(health).toMatchObject({
       sourceId: acmeSource.id,
       outcome: 'resource_limit',
@@ -133,9 +171,9 @@ describe('mocked production workflow integration', () => {
     const store = new MemoryInternshipStore();
     const adapter = new GreenhouseBoardAdapter({
       source: acmeSource,
-      fetchImpl: async () => new Response('{"jobs":[]}', {
-        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
-      }),
+      // A body that is genuinely over the ceiling both times: a declared length
+      // with a short body would fail as a chopped transfer instead.
+      fetchImpl: async () => new Response('x'.repeat(GREENHOUSE_RESPONSE_MAX_BYTES + 1)),
     });
 
     await new Poller([adapter], store, () => new Date('2026-09-14T19:00:00.000Z')).poll();

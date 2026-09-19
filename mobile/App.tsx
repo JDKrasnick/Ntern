@@ -33,10 +33,12 @@ import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from 
 import { appendGroupedCatalogPage, catalogCardKind, type GroupedCatalogPage } from "./src/catalog";
 import { boundedCatalogText, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
-import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
+import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
 import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, laneSelection, type BeltItem } from "./src/newness-belt";
+import { loadCatalogFilters, saveCatalogFilters } from "./src/catalog-filter-storage";
+import { type EducationLevel } from "../shared/education-display";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
@@ -105,7 +107,6 @@ type Job = {
   compensation: { raw: string };
   housing?: DisplayHousingDetail[];
   employerCategory?: EmployerCategory;
-  requirements?: { requiresUsCitizenship: boolean; advancedDegreeRequired: boolean };
   disciplines?: string[];
   open: boolean;
   firstSeenAt: string;
@@ -243,7 +244,8 @@ type JobFilter = {
   includeEmployerCategories?: EmployerCategory[];
   excludeEmployerCategories?: EmployerCategory[];
   excludeUsCitizenshipRequired?: boolean;
-  excludeAdvancedDegreeRequired?: boolean;
+  /** The reader's own level; alerts for roles that state a different audience are withheld. */
+  educationLevel?: EducationLevel;
 };
 type PushPreferences = {
   titleTemplate?: string;
@@ -290,6 +292,12 @@ const nextApplicationStatuses: Record<string, Application["status"]> = {
   withdrawn: "withdrawn",
 };
 const categories = ["ai-ml", "grad", "swe", "quant", "product", "design"];
+const educationLevelChoices: Array<{ value: EducationLevel; label: string; description: string }> = [
+  { value: "undergraduate", label: "Undergraduate", description: "Bachelor's, associate, or four-year degree roles." },
+  { value: "masters", label: "Master's", description: "Master's programs and graduate-student roles." },
+  { value: "mba", label: "MBA", description: "Roles open to MBA candidates." },
+  { value: "doctoral", label: "PhD", description: "Doctoral and PhD-candidate roles." },
+];
 const pushPlaceholders = [
   "{title}",
   "{shortTitle}",
@@ -892,10 +900,6 @@ function catalogRoleJob(role: CatalogGroupRole): Job {
     compensation: role.compensation ?? { raw: "" },
     housing: role.housing,
     employerCategory: role.employerCategory,
-    requirements: {
-      requiresUsCitizenship: Boolean(role.requiresUsCitizenship),
-      advancedDegreeRequired: Boolean(role.advancedDegreeRequired),
-    },
     disciplines: role.disciplines,
     open: role.open,
     firstSeenAt: role.firstSeenAt ?? role.visibleAt,
@@ -2311,34 +2315,34 @@ function JobStatusFilter({
   );
 }
 
-function RequirementFilter({
-  hideUsCitizenshipRequired,
-  hideAdvancedDegreeRequired,
-  onHideUsCitizenshipRequiredChange,
-  onHideAdvancedDegreeRequiredChange,
+function SingleChipFilter<T extends string>({
+  label,
+  options,
+  selected,
+  onChange,
 }: {
-  hideUsCitizenshipRequired: boolean;
-  hideAdvancedDegreeRequired: boolean;
-  onHideUsCitizenshipRequiredChange: (value: boolean) => void;
-  onHideAdvancedDegreeRequiredChange: (value: boolean) => void;
+  label: string;
+  options: Array<{ value: T; label: string }>;
+  selected: T;
+  onChange: (next: T) => void;
 }) {
-  const options = [
-    { key: "citizenship", label: "Hide U.S. citizenship", selected: hideUsCitizenshipRequired, onPress: () => onHideUsCitizenshipRequiredChange(!hideUsCitizenshipRequired) },
-    { key: "advanced-degree", label: "Hide advanced degree", selected: hideAdvancedDegreeRequired, onPress: () => onHideAdvancedDegreeRequiredChange(!hideAdvancedDegreeRequired) },
-  ];
   return (
-    <View style={styles.companyFilter}>
-      {options.map((option) => (
-        <TouchableOpacity
-          key={option.key}
-          accessibilityRole="checkbox"
-          aria-checked={option.selected}
-          style={[styles.chip, option.selected && styles.chipOn]}
-          onPress={option.onPress}
-        >
-          <Text style={[styles.chipLabel, option.selected && styles.chipLabelOn]}>{option.label}</Text>
-        </TouchableOpacity>
-      ))}
+    <View style={styles.companyFilter} accessibilityRole="radiogroup" accessibilityLabel={label}>
+      {options.map((option) => {
+        const active = selected === option.value;
+        return (
+          <TouchableOpacity
+            key={option.value}
+            accessibilityRole="radio"
+            accessibilityLabel={`${label}: ${option.label}`}
+            aria-checked={active}
+            style={[styles.chip, active && styles.chipOn]}
+            onPress={() => onChange(option.value)}
+          >
+            <Text style={[styles.chipLabel, active && styles.chipLabelOn]}>{option.label}</Text>
+          </TouchableOpacity>
+        );
+      })}
     </View>
   );
 }
@@ -2598,8 +2602,6 @@ function FilterSheet({
             <MultiChipFilter label="Season" options={seasonFilterOptions} selected={filters.seasons} onChange={(seasons) => set({ seasons })} />
             <Text style={styles.filterLabel}>Work mode</Text>
             <MultiChipFilter label="Work mode" options={workModeFilterOptions} selected={filters.workModes} onChange={(workModes) => set({ workModes })} />
-            <Text style={styles.filterLabel}>Education</Text>
-            <MultiChipFilter label="Education" options={educationFilterOptions} selected={filters.educationLevels} onChange={(educationLevels) => set({ educationLevels })} />
             <Text style={styles.filterLabel}>Pay</Text>
             <View style={styles.companyFilter}>
               <TouchableOpacity
@@ -2624,13 +2626,26 @@ function FilterSheet({
                 </TouchableOpacity>
               ))}
             </View>
-            <Text style={styles.filterLabel}>Requirements</Text>
-            <RequirementFilter
-              hideUsCitizenshipRequired={filters.hideUsCitizenshipRequired}
-              hideAdvancedDegreeRequired={filters.hideAdvancedDegreeRequired}
-              onHideUsCitizenshipRequiredChange={(hideUsCitizenshipRequired) => set({ hideUsCitizenshipRequired })}
-              onHideAdvancedDegreeRequiredChange={(hideAdvancedDegreeRequired) => set({ hideAdvancedDegreeRequired })}
+            <Text style={styles.filterLabel}>I'm studying</Text>
+            <SingleChipFilter
+              label="I'm studying"
+              options={educationFilterOptions}
+              selected={filters.educationLevel}
+              onChange={(educationLevel) => set({ educationLevel })}
             />
+            <Text style={styles.filterNote}>Roles that state a different level are hidden; roles that state none are still shown.</Text>
+            <Text style={styles.filterLabel}>Also hide</Text>
+            <View style={styles.companyFilter}>
+              <TouchableOpacity
+                accessibilityRole="checkbox"
+                accessibilityLabel="Hide roles requiring U.S. citizenship"
+                aria-checked={filters.hideUsCitizenshipRequired}
+                style={[styles.chip, filters.hideUsCitizenshipRequired && styles.chipOn]}
+                onPress={() => set({ hideUsCitizenshipRequired: !filters.hideUsCitizenshipRequired })}
+              >
+                <Text style={[styles.chipLabel, filters.hideUsCitizenshipRequired && styles.chipLabelOn]}>U.S. citizenship required</Text>
+              </TouchableOpacity>
+            </View>
           </ScrollView>
           <View style={styles.filterSheetActions}>
             <View style={styles.filterSheetApply}>
@@ -3770,6 +3785,17 @@ function AppContent() {
   const [hiddenFeedbackJob, setHiddenFeedbackJob] = useState<Job>();
   const [query, setQuery] = useState("");
   const [catalogFilters, setCatalogFilters] = useState<CatalogFilterValues>(emptyCatalogFilters);
+  const [catalogFiltersHydrated, setCatalogFiltersHydrated] = useState(false);
+  useEffect(() => {
+    void loadCatalogFilters().then((stored) => {
+      if (stored) setCatalogFilters(stored);
+      setCatalogFiltersHydrated(true);
+    });
+  }, []);
+  useEffect(() => {
+    // Saving before the stored filters load would overwrite them with the defaults.
+    if (catalogFiltersHydrated) void saveCatalogFilters(catalogFilters);
+  }, [catalogFilters, catalogFiltersHydrated]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string>();
   const [selectedGroup, setSelectedGroup] = useState<CatalogGroupDetails>();
@@ -3893,6 +3919,9 @@ function AppContent() {
     };
   }, []);
   useEffect(() => {
+    // The stored level decides eligibility, so the first request waits for it
+    // instead of fetching the default view and immediately replacing it.
+    if (!catalogFiltersHydrated) return;
     const requestGeneration = ++catalogRequestGeneration.current;
     catalogRequestInFlight.current = true;
     catalogCursorRef.current = undefined;
@@ -3935,7 +3964,7 @@ function AppContent() {
         catalogRequestInFlight.current = false;
       }
     };
-  }, [catalogRefresh, query, catalogFilters, dayZone]);
+  }, [catalogRefresh, query, catalogFilters, dayZone, catalogFiltersHydrated, token]);
   const loadNextCatalogPage = (retry = false) => {
     const cursor = catalogCursorRef.current;
     if (!cursor || catalogRequestInFlight.current || (!retry && catalogMoreError)) return;
@@ -6104,8 +6133,8 @@ function Profile({
   const [excludeUsCitizenshipRequired, setExcludeUsCitizenshipRequired] = useState(
     preferences.filter.excludeUsCitizenshipRequired ?? false,
   );
-  const [excludeAdvancedDegreeRequired, setExcludeAdvancedDegreeRequired] = useState(
-    preferences.filter.excludeAdvancedDegreeRequired ?? false,
+  const [readerEducationLevel, setReaderEducationLevel] = useState<EducationLevel>(
+    preferences.filter.educationLevel ?? defaultEducationLevel,
   );
   const [delivery, setDelivery] = useState<AlertSettings["delivery"]>(
     preferences.alertSettings?.delivery ?? defaultAlertSettings.delivery,
@@ -6195,7 +6224,7 @@ function Profile({
       setAlertsEnabled(preferences.alertsEnabled);
       setIncludeEmployerCategories(preferences.filter.includeEmployerCategories ?? []);
       setExcludeUsCitizenshipRequired(preferences.filter.excludeUsCitizenshipRequired ?? false);
-      setExcludeAdvancedDegreeRequired(preferences.filter.excludeAdvancedDegreeRequired ?? false);
+      setReaderEducationLevel(preferences.filter.educationLevel ?? defaultEducationLevel);
       setDelivery(preferences.alertSettings?.delivery ?? defaultAlertSettings.delivery);
       setQuietStart(preferences.alertSettings?.quietHours?.start ?? "22:00");
       setQuietEnd(preferences.alertSettings?.quietHours?.end ?? "08:00");
@@ -6349,7 +6378,7 @@ function Profile({
             excludeKeywords: commaList(excludeKeywords),
             includeEmployerCategories,
             excludeUsCitizenshipRequired,
-            excludeAdvancedDegreeRequired,
+            educationLevel: readerEducationLevel,
           },
           alertsEnabled,
           delivery,
@@ -6783,21 +6812,21 @@ function Profile({
           thumbColor={colors.onDark}
         />
       </View>
-      <View style={styles.preferenceRow}>
-        <View style={styles.preferenceCopy}>
-          <Text style={styles.preferenceTitle}>Advanced degree required</Text>
-          <Text style={styles.muted}>Hide roles marked for a master’s, PhD, or MBA.</Text>
-        </View>
-        <Switch
-          value={excludeAdvancedDegreeRequired}
-          onValueChange={(value) => {
-            markJobPreferencesDirty();
-            setExcludeAdvancedDegreeRequired(value);
-          }}
-          accessibilityLabel="Hide roles requiring an advanced degree"
-          trackColor={{ false: colors.border, true: colors.signal }}
-          thumbColor={colors.onDark}
-        />
+      <Text style={styles.preferenceTitle}>Level you're studying</Text>
+      <Text style={styles.muted}>Roles that state a different audience are left out of your alerts.</Text>
+      <View style={styles.choiceGroup} accessibilityRole="radiogroup">
+        {educationLevelChoices.map((choice) => (
+          <ChoiceOption
+            key={choice.value}
+            label={choice.label}
+            description={choice.description}
+            selected={readerEducationLevel === choice.value}
+            onPress={() => {
+              markJobPreferencesDirty();
+              setReaderEducationLevel(choice.value);
+            }}
+          />
+        ))}
       </View>
       <Text style={styles.preferenceTitle}>Delivery timing</Text>
       <View style={styles.choiceGroup} accessibilityRole="radiogroup">
@@ -8265,6 +8294,8 @@ const styles = StyleSheet.create({
   coverageRoleCount: { color: colors.body, fontSize: 13, fontWeight: "600" },
   coverageAsOf: { color: colors.muted, fontSize: 12, marginTop: 12 },
   filterLabel: { color: colors.body, fontSize: 13, fontWeight: "700", marginBottom: 8 },
+  /** Belongs to the control above it, so it sits closer to that than to the next section. */
+  filterNote: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: -12, marginBottom: 16 },
   companyFilter: {
     flexDirection: "row",
     flexWrap: "wrap",

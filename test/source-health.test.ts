@@ -5,6 +5,15 @@ import { SourceFetchError } from '../src/sources/source-error.js';
 import type { SourceHealth } from '../src/types.js';
 
 describe('source health', () => {
+  it('retains the listing-fallback diagnostic on a successful run', () => {
+    expect(successfulSourceHealth({
+      sourceId: 'greenhouse-spacex',
+      startedAt: '2026-09-18T12:00:00.000Z',
+      completedAt: '2026-09-18T12:00:01.000Z',
+      contentOmitted: true,
+    })).toMatchObject({ contentOmitted: true });
+  });
+
   it('keeps temporary transport failures degraded and retains the last success', () => {
     const previous = successfulSourceHealth({
       sourceId: 'greenhouse-acme',

@@ -108,6 +108,8 @@ export interface Environment extends AuthEnvironment {
   SHADOW_EXTRACTION_QUEUE_NAME?: string;
   ADMISSION_QUEUE_AGE_ALERT_HOURS?: string;
   ADMISSION_STALE_ALERT_THRESHOLD?: string;
+  /** Staged metadata collections per scheduled pass; 0 disables scheduled collection. */
+  METADATA_SCHEDULED_COLLECTION_LIMIT?: string;
   GMAIL_ENABLED?: string;
   SHADOW_EXTRACTION_ENABLED?: string;
   SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS?: string;
@@ -1197,6 +1199,39 @@ async function refreshCatalogProjection(store: D1InternshipStore) {
   };
 }
 
+/**
+ * Metadata collection has no other trigger, so a field the employer's own API
+ * states plainly could stay blank until an operator remembered to ask — which is
+ * how a third of the catalog sat unspecified. This stages evidence on a schedule
+ * in the same staging-only mode the operations endpoint uses: a backfill token
+ * makes the batch consumer stop before any catalog, admission, or notification
+ * write, so the guarded repair still owns every publication.
+ */
+export async function collectRoleMetadataInBackground(
+  env: Pick<Environment, 'DB' | 'DESTINATION_VERIFICATION_QUEUE' | 'METADATA_SCHEDULED_COLLECTION_LIMIT'>,
+  now: Date,
+): Promise<{ queued: number }> {
+  const configured = Number(env.METADATA_SCHEDULED_COLLECTION_LIMIT ?? 50);
+  const limit = Number.isInteger(configured) ? Math.max(0, Math.min(configured, 200)) : 50;
+  if (!limit) return { queued: 0 };
+  const operations = new D1CatalogAdmissionStore(env.DB);
+  // Reserving leases each candidate, so consecutive passes advance instead of
+  // re-offering the same slice while its messages are still in flight.
+  const candidates = await operations.metadataVerificationCandidates(limit, {
+    observedBefore: new Date(now.getTime() - ROLE_METADATA_REVALIDATION_MS).toISOString(),
+    reserveAt: now.toISOString(),
+  });
+  if (!candidates.length) return { queued: 0 };
+  const metadataBackfillToken = `scheduled-${crypto.randomUUID()}`;
+  await sendQueueMessages(env.DESTINATION_VERIFICATION_QUEUE, candidates.map((candidate) => destinationVerificationMessage({
+    ...candidate,
+    reason: 'historical-backfill',
+    metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
+    metadataBackfillToken,
+  })));
+  return { queued: candidates.length };
+}
+
 /** Recovery is deliberately bounded and best-effort: a temporarily unavailable
  * downstream queue must not make unrelated scheduled maintenance fail. */
 export async function recoverPendingProviderShadowHandoffs(
@@ -1400,6 +1435,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store));
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
+    // Bounded per pass and lease-protected, so running on every maintenance tick
+    // drains the backlog without overlapping work. Gating this on a specific
+    // minute made it depend on fragile clock arithmetic and unobservable.
+    const metadataCollection = await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt));
     const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
     const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
@@ -1414,7 +1453,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       details: `Destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}.`,
     }));
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
-    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery }));
+    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
   }
   if (event.cron === '*/5 * * * *') {

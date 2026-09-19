@@ -196,31 +196,50 @@ describe('GreenhouseBoardAdapter', () => {
     await expect(new GreenhouseBoardAdapter({ source: acmeSource, fetchImpl: async () => new Response('{', { status: 200 }) }).fetch()).rejects.toThrow('malformed JSON');
     await expect(new GreenhouseBoardAdapter({ source: acmeSource, fetchImpl: async () => jsonResponse({ jobs: 'nope' }) }).fetch()).rejects.toThrow('shape was invalid');
   });
-  it('rejects an oversized declared Greenhouse response before reading it', async () => {
+  it('reads an oversized board as a listing instead of failing it as capacity', async () => {
+    // The board the provider describes as too large to parse with descriptions,
+    // and whose listing fits comfortably: the source keeps ingesting.
+    const requested: string[] = [];
     const adapter = new GreenhouseBoardAdapter({
       source: acmeSource,
-      fetchImpl: async () => new Response('{"jobs":[]}', {
-        headers: { 'content-length': String(GREENHOUSE_RESPONSE_MAX_BYTES + 1) },
-      }),
+      fetchImpl: async (input) => {
+        requested.push(String(input));
+        return String(input).includes('content=false')
+          ? jsonResponse(acmeJobsResponse)
+          : chunkedBoardResponse(GREENHOUSE_RESPONSE_MAX_BYTES + 4 * 65_536).response;
+      },
     });
-    await expect(adapter.fetch()).rejects.toThrow('response body exceeds');
+    const result = await adapter.fetch();
+    expect(requested[1]).toContain('content=false');
+    expect(result.checkpoint.contentOmitted).toBe(true);
+    expect(result.listings.length).toBeGreaterThan(0);
+  });
+
+  it('still fails as capacity when even the listing does not fit', async () => {
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async () => chunkedBoardResponse(GREENHOUSE_RESPONSE_MAX_BYTES + 4 * 65_536).response,
+    });
+    await expect(adapter.fetch()).rejects.toMatchObject({ category: 'capacity', message: expect.stringContaining('listing') });
   });
   // Both sizes below are the measured production boards: `spacex` at 27,849,116 B
   // and `andurilindustries` at 40,679,935 B, each now over the response ceiling.
   it.each([
     ['spacex', PRODUCTION_GREENHOUSE_BOARD_BYTES.spacex],
     ['andurilindustries', PRODUCTION_GREENHOUSE_BOARD_BYTES.anduril],
-  ])('stops reading the measured %s board as soon as the streamed body crosses the ceiling', async (_board, boardBytes) => {
-    const { response, pulled } = chunkedBoardResponse(boardBytes);
-    const adapter = new GreenhouseBoardAdapter({ source: acmeSource, fetchImpl: async () => response });
-    await expect(adapter.fetch()).rejects.toMatchObject({
-      category: 'capacity',
-      message: expect.stringContaining('response body exceeds'),
+  ])('stops reading the measured %s board early, then reads its listing', async (_board, boardBytes) => {
+    const oversized = chunkedBoardResponse(boardBytes);
+    const adapter = new GreenhouseBoardAdapter({
+      source: acmeSource,
+      fetchImpl: async (input) => (String(input).includes('content=false') ? jsonResponse(acmeJobsResponse) : oversized.response),
     });
-    // Nothing declared the length, so only the streaming guard can stop this
-    // body: it gives up within one chunk of the ceiling instead of retaining
-    // the whole board and parsing it.
-    expect(pulled()).toBeLessThan(GREENHOUSE_RESPONSE_MAX_BYTES + 2 * 65_536);
+    const result = await adapter.fetch();
+    expect(result.checkpoint.contentOmitted).toBe(true);
+    // Nothing declared the length, so only the streaming guard can stop the first
+    // body: it gives up within one chunk of the ceiling instead of retaining the
+    // whole board and parsing it.
+    expect(oversized.pulled()).toBeLessThan(GREENHOUSE_RESPONSE_MAX_BYTES + 2 * 65_536);
+    expect(result.listings.length).toBeGreaterThan(0);
   });
   it('keeps the captured pre-#197 content hash for the fixture board and reports the repeat fetch unchanged', async () => {
     // Literal captured from the implementation before `projectionHash` was folded

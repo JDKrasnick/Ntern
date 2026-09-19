@@ -190,6 +190,54 @@ describe('notifications', () => {
     expect(messages).toHaveLength(2);
   });
 
+  it('splits 21- and 45-role notifications into the catalog card sizes', async () => {
+    for (const [count, expectedSizes] of [[21, [17, 4]], [45, [20, 20, 5]]] as const) {
+      const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
+      await visaUser(users);
+      const wave = Array.from({ length: count }, (_, index) => visaRole(index + 1, `2026-09-17T14:${String(index).padStart(2, '0')}:00.000Z`));
+
+      await expect(sendNewJobNotifications(wave, users, capturePushes(messages), () => new Date('2026-09-17T15:00:00.000Z'), undefined, { releases }))
+        .resolves.toMatchObject({ sent: count, failed: 0 });
+
+      const releaseIds = messages.map((message) => {
+        expect(message.data?.destination).toBe('release');
+        if (!message.data || message.data.destination !== 'release') throw new Error('Expected a release notification');
+        return message.data.releaseId;
+      });
+      const sizes = await Promise.all(releaseIds.map((releaseId) => releases.getRelease('user-1', releaseId).then((release) => release?.jobIds.length)));
+      expect(sizes).toEqual(expectedSizes);
+      expect(new Set(releaseIds).size).toBe(expectedSizes.length);
+    }
+  });
+
+  it('keeps a quiet-hours addition on the release card that was already delivered', async () => {
+    const jobs = new MemoryInternshipStore(); const users = new MemoryUserStore(); const releases = new MemoryReleaseStore(); const messages: PushMessage[] = [];
+    const publisher = capturePushes(messages);
+    await visaUser(users);
+    const initial = [visaRole(1, '2026-09-17T14:37:52.000Z'), visaRole(2, '2026-09-17T14:37:53.000Z'),
+      visaRole(3, '2026-09-17T14:49:44.000Z'), visaRole(4, '2026-09-17T14:52:34.000Z')];
+    const cardId = employerDropGroupId(initial[0]!)!;
+    await sendNewJobNotifications(initial, users, publisher, () => new Date('2026-09-17T15:00:00.000Z'), undefined, { releases });
+
+    await users.putPreferences({
+      userId: 'user-1', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-09-17T22:00:00.000Z',
+      alertSettings: { delivery: 'immediate', timezone: 'UTC', applicationReminders: false, followUpDays: 0, quietHours: { start: '22:00', end: '08:00', timezone: 'UTC' } },
+    });
+    const added = visaRole(5, '2026-09-17T22:30:00.000Z');
+    await jobs.putInternship(added);
+    await expect(sendNewJobNotifications([added], users, publisher, () => new Date('2026-09-17T22:30:00.000Z'), undefined, { releases }))
+      .resolves.toMatchObject({ sent: 0, skipped: 1, failed: 0 });
+
+    await expect(deliverDeferredExpoNotifications(jobs, users, publisher, () => new Date('2026-09-18T08:00:00.000Z'), releases))
+      .resolves.toMatchObject({ sent: 1, failed: 0 });
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      title: '1 role added to Visa',
+      data: { destination: 'release', releaseId: cardId, url: `internnotifs://releases/${encodeURIComponent(cardId)}` },
+    });
+    expect(await releases.getRelease('user-1', cardId)).toMatchObject({ jobIds: ['j1', 'j2', 'j3', 'j4', 'j5'], newJobIds: ['j5'] });
+  });
+
   it('sends immediately even when the clock advances between reads', async () => {
     // The cadence decision and the receipt's timestamp must come from one clock
     // read: a read that advanced by a millisecond made every immediate alert look

@@ -1,5 +1,8 @@
 import type { JobFilter } from './core/filters.js';
 import type { EmployerCategory } from './core/employers.js';
+import type { EducationLevel } from '../shared/education-display.js';
+
+export type { EducationLevel };
 
 export type ApplicationStatus =
   | 'saved' | 'applied' | 'assessment' | 'interview' | 'offer' | 'rejected' | 'withdrawn';
@@ -138,6 +141,9 @@ export interface SourceCheckpoint {
   contentHash?: string;
   /** Algorithm used to calculate contentHash; missing values are legacy v1. */
   contentHashAlgorithmVersion?: number;
+  /** Last fetch read the board listing without descriptions because the board is
+   * larger than an isolate can parse with them (SpaceX, Anduril). */
+  contentOmitted?: boolean;
   /** Version of the reviewed admission configuration applied to this snapshot. */
   admissionConfigurationVersion?: string;
   /** Parser version applied after a successful full source reconciliation. */
@@ -270,6 +276,9 @@ export interface SourceHealth {
   filteredRows?: number;
   filteredCount?: number;
   withheldRows?: number;
+  /** The source answered too large to read with descriptions and was read as a
+   * listing instead (Greenhouse boards above the isolate's parse ceiling). */
+  contentOmitted?: boolean;
   withheldCount?: number;
   applicationLinksChecked?: number;
   applicationLinkFailures?: number;
@@ -563,7 +572,6 @@ export interface SeasonIdentity {
   provenance: FieldProvenance[];
 }
 
-export type EducationLevel = 'undergraduate' | 'masters' | 'mba' | 'doctoral';
 export type MinimumDegree = 'none' | 'high-school' | 'associates' | 'bachelors' | 'masters' | 'doctoral';
 export type EducationEvidenceStatus = 'explicit' | 'unspecified' | 'conflicting';
 

@@ -1836,6 +1836,7 @@ export class IngestionRunner {
         } : batch.processed.counts;
         const successHealth: SourceHealth = {
           ...successfulSourceHealth({
+            contentOmitted: result.checkpoint.contentOmitted === true,
             sourceId: connector.id,
             provider,
             region: regionFor(provider),
