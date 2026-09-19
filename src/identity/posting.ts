@@ -148,7 +148,7 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
     return { provider: 'microsoft', tenant: 'microsoft', postingId: match[1]! };
   }
   if (host === 'ats.rippling.com'
-      && (match = /^\/([a-z0-9-]+)\/jobs\/([a-f0-9-]{8,})\/?$/i.exec(url.pathname))) {
+      && (match = /^\/([a-z0-9-]+)\/jobs\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\/?$/i.exec(url.pathname))) {
     return { provider: 'rippling', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
   }
   if (host.endsWith('.eightfold.ai')

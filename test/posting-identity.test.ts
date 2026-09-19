@@ -180,6 +180,7 @@ describe('posting identity', () => {
       'https://careers.acme.eightfold.ai/careers',
       'https://careers.example.test/openings?gh_jid=100',
       'https://career4.successfactors.com/careers?career_job_req_id=169295',
+      'https://ats.rippling.com/acme/jobs/--------',
       'https://www.amazon.jobs/en/jobs/123software-engineer',
     ]) expect(providerPostingReference(url)).toEqual({ provider: 'unknown' });
   });

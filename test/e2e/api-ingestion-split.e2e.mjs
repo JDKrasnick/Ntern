@@ -312,7 +312,9 @@ test('repairs a new provider-route duplicate through the compiled API Worker and
     lastSeenAt: '2026-09-19T00:00:00.000Z', notification: { smsPending: false, digestPending: false },
   });
   const olderUrl = 'https://apply.workable.com/acme-e2e/j/ABC123DEF';
-  const newerUrl = `${olderUrl}/`;
+  // The non-tracking query keeps the canonical URLs distinct, so this merge
+  // depends on the scoped provider identity rather than URL canonicalization.
+  const newerUrl = `${olderUrl}/?department=engineering`;
   for (const value of [
     makeJob('workable-e2e-old', olderUrl, '2026-09-17T00:00:00.000Z'),
     makeJob('workable-e2e-new', newerUrl, '2026-09-18T00:00:00.000Z'),
