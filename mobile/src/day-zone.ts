@@ -10,7 +10,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
  */
 export type DayZoneSetting = 'utc' | 'device';
 
-const UTC_ZONE = 'UTC';
+export const UTC_ZONE = 'UTC';
 const storageKey = 'internnotifs.calendar-day-zone.v1';
 
 const listeners = new Set<(setting: DayZoneSetting) => void>();
@@ -59,7 +59,7 @@ export function dayZoneSetting() {
   return current;
 }
 
-/** The setting plus the zone it resolves to, shared by release-day requests and settings. */
+/** The setting plus the zone it resolves to, shared by the calendar and settings. */
 export function useDayZone() {
   const [setting, setSetting] = useState<DayZoneSetting>(current);
   useEffect(() => {
