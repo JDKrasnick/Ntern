@@ -1,5 +1,5 @@
 import { earlyCareerRequirements, hasLifecycleTitleSignal, htmlToText, inferSeason, inferWorkMode } from '../core/early-career.js';
-import { assessTechnicalRole } from '../core/filters.js';
+import { assessTechnicalRole, technicalScopeFor } from '../core/filters.js';
 import { parseCompensation } from '../core/normalize.js';
 import { isTruncatedTitle, repairTitle } from '../core/role-title.js';
 import { buildInternshipIdentity } from '../identity/enrichment.js';
@@ -159,6 +159,7 @@ export function processPosting(
       ? { shadowContentHash: normalizeExactPostingDescription(title, shadowDescription).contentHash }
       : {}),
     technical: assessment.technical,
+    ...(technicalScopeFor({ company, title: classificationTitle, location, season }, content) ? { technicalScope: technicalScopeFor({ company, title: classificationTitle, location, season }, content) } : {}),
     ...(title === sourceTitle ? {} : { titleRepaired: true }),
     providerIdentity: {
       provider: posting.providerIdentity?.provider

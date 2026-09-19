@@ -59,7 +59,7 @@ including saved applications, résumés, and reusable profile data.
 The initial audience includes domestic and international undergraduate and
 graduate students pursuing software engineering, AI/ML, data,
 infrastructure/cloud, security, quantitative, product, and technical design
-roles.
+roles. Browse also includes general engineering, discipline engineering, and hands-on technical pathways after the same admission and official-destination checks. Existing alert preferences stay on the original technical scope until a reader explicitly opts into the expanded engineering categories.
 
 ## Open source admission
 
