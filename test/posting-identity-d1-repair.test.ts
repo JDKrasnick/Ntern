@@ -225,6 +225,49 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it('merges SmartRecruiters presentation variants through the scoped provider identity', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const bareUrl = 'https://jobs.smartrecruiters.com/Acme/744000139649345';
+    const sluggedUrl = `${bareUrl}-software-engineer-intern`;
+    await store.putInternship(job('smartrecruiters-old', bareUrl, '2026-08-01T00:00:00.000Z', [
+      occurrence('community-list', 'smartrecruiters-old', bareUrl),
+    ]));
+    await store.putInternship(job('smartrecruiters-new', sluggedUrl, '2026-08-02T00:00:00.000Z', [
+      occurrence('community-list', 'smartrecruiters-new', sluggedUrl),
+    ]));
+
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({
+      duplicateGroups: 1, duplicateJobs: 1, eligibleDuplicateGroups: 1,
+      unresolvedDuplicateGroups: 0, conflicts: [], presentationDisagreements: [],
+    });
+    expect(dry.samples).toEqual([expect.objectContaining({
+      canonicalJobId: 'smartrecruiters-old', duplicateJobIds: ['smartrecruiters-new'],
+      providerIdentity: 'smartrecruiters:acme:744000139649345',
+    })]);
+
+    const applied = await runPostingIdentityRepair(db, {
+      apply: true, scope: 'identity', repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    expect(applied).toMatchObject({ duplicateJobs: 1 });
+    expect(await store.getJob('smartrecruiters-old')).toMatchObject({
+      jobId: 'smartrecruiters-old',
+      postingIdentity: {
+        provider: 'smartrecruiters', tenant: 'acme', providerPostingId: '744000139649345',
+      },
+      sourceReferences: expect.arrayContaining([
+        expect.objectContaining({ externalId: 'smartrecruiters-old' }),
+        expect.objectContaining({ externalId: 'smartrecruiters-new' }),
+      ]),
+    });
+    expect(await store.getJob('smartrecruiters-new')).toMatchObject({ jobId: 'smartrecruiters-old' });
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
+      expectedChanges: 0, duplicateGroups: 0, duplicateJobs: 0, conflicts: [],
+    });
+    sqlite.close();
+  });
+
   it('finds historical provider duplicates while keeping bad duplicate signals and regular postings separate', async () => {
     const { db } = await historicalDatabase();
     const first = await runPostingIdentityRepair(db); const second = await runPostingIdentityRepair(db);

@@ -124,12 +124,27 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
       && (match = /^\/job\/([^/]+)\/[^/]+\/(\d+)\/?$/i.exec(url.pathname))) {
     return { provider: 'successfactors', tenant: host, postingId: match[2]! };
   }
+  if (host.endsWith('.successfactors.com')
+      && /^\/careers\/?$/i.test(url.pathname)
+      && url.searchParams.get('career_ns')?.toLowerCase() === 'job_listing'
+      && /^[a-z0-9-]+$/i.test(url.searchParams.get('company') ?? '')
+      && /^\d+$/.test(url.searchParams.get('career_job_req_id') ?? '')) {
+    return {
+      provider: 'successfactors',
+      tenant: url.searchParams.get('company')!.toLowerCase(),
+      postingId: url.searchParams.get('career_job_req_id')!,
+    };
+  }
   if (host === 'apply.workable.com'
       && (match = /^\/([a-z0-9-]+)\/j\/([a-z0-9]+)\/?$/i.exec(url.pathname))) {
     return { provider: 'workable', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
   }
   if ((host === 'jobs.careers.microsoft.com' || host === 'careers.microsoft.com')
       && (match = /^\/(?:v2\/)?(?:global\/)?[a-z]{2}(?:-[a-z]{2})?\/job\/(\d+)\/?$/i.exec(url.pathname))) {
+    return { provider: 'microsoft', tenant: 'microsoft', postingId: match[1]! };
+  }
+  if (host === 'apply.careers.microsoft.com'
+      && (match = /^\/careers\/job\/(\d+)\/?$/i.exec(url.pathname))) {
     return { provider: 'microsoft', tenant: 'microsoft', postingId: match[1]! };
   }
   if (host === 'ats.rippling.com'
@@ -141,15 +156,15 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
     return { provider: 'eightfold', tenant: host, postingId: match[1]!.toLowerCase() };
   }
   if (host === 'recruiting.paylocity.com'
-      && (match = /^\/recruiting\/jobs\/Details\/(\d+)\/([a-z0-9-]+)\/?$/i.exec(url.pathname))) {
-    return { provider: 'paylocity', tenant: match[2]!.toLowerCase(), postingId: match[1]! };
+      && (match = /^\/recruiting\/jobs\/Details\/(\d+)(?:\/[a-z0-9-]+)?\/?$/i.exec(url.pathname))) {
+    return { provider: 'paylocity', tenant: host, postingId: match[1]! };
   }
   if (host === 'jobs.jobvite.com'
       && (match = /^\/([a-z0-9-]+)\/job\/([a-z0-9]+)\/?$/i.exec(url.pathname))) {
     return { provider: 'jobvite', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
   }
   if (host === 'amazon.jobs'
-      && (match = /^\/[a-z]{2}(?:-[a-z]{2})?\/jobs\/(\d+)\/?(?:[^/]*)?$/i.exec(url.pathname))) {
+      && (match = /^\/[a-z]{2}(?:-[a-z]{2})?\/jobs\/(\d+)(?:\/[^/]+)?\/?$/i.exec(url.pathname))) {
     return { provider: 'amazon', tenant: 'amazon', postingId: match[1]! };
   }
   if (host === 'google.com'

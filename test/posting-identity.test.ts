@@ -155,11 +155,14 @@ describe('posting identity', () => {
     ['EU Greenhouse', 'https://job-boards.eu.greenhouse.io/Acme/jobs/101', 'provider:greenhouse:acme:101'],
     ['SmartRecruiters slug', 'https://jobs.smartrecruiters.com/Acme/744000139649345-software-engineer', 'provider:smartrecruiters:acme:744000139649345'],
     ['SuccessFactors', 'https://jobs.successfactors.com/job/London/Software-Intern/123456', 'provider:successfactors:jobs.successfactors.com:123456'],
+    ['SuccessFactors tenant query', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=colgate&selected_lang=nl-NL&career_job_req_id=169295', 'provider:successfactors:colgate:169295'],
     ['Workable', 'https://apply.workable.com/Acme/j/ABC123DEF/', 'provider:workable:acme:abc123def'],
     ['Microsoft', 'https://jobs.careers.microsoft.com/global/en/job/1891234', 'provider:microsoft:microsoft:1891234'],
+    ['Microsoft current', 'https://apply.careers.microsoft.com/careers/job/1970393556862170', 'provider:microsoft:microsoft:1970393556862170'],
     ['Rippling', 'https://ats.rippling.com/acme/jobs/123e4567-e89b-12d3-a456-426614174000', 'provider:rippling:acme:123e4567-e89b-12d3-a456-426614174000'],
     ['Eightfold', 'https://careers.acme.eightfold.ai/careers/job/REQ-42', 'provider:eightfold:careers.acme.eightfold.ai:req-42'],
-    ['Paylocity', 'https://recruiting.paylocity.com/recruiting/jobs/Details/12345/Acme', 'provider:paylocity:acme:12345'],
+    ['Paylocity slug', 'https://recruiting.paylocity.com/recruiting/jobs/Details/12345/Acme', 'provider:paylocity:recruiting.paylocity.com:12345'],
+    ['Paylocity current', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4341435', 'provider:paylocity:recruiting.paylocity.com:4341435'],
     ['Jobvite', 'https://jobs.jobvite.com/Acme/job/ABC123', 'provider:jobvite:acme:abc123'],
     ['Amazon', 'https://www.amazon.jobs/en/jobs/2891234/software-development-engineer-intern', 'provider:amazon:amazon:2891234'],
     ['Google', 'https://www.google.com/about/careers/applications/jobs/results/123456789-software-engineering-intern', 'provider:google:google:123456789'],
@@ -176,6 +179,8 @@ describe('posting identity', () => {
       'https://jobs.jobvite.com/acme/job/',
       'https://careers.acme.eightfold.ai/careers',
       'https://careers.example.test/openings?gh_jid=100',
+      'https://career4.successfactors.com/careers?career_job_req_id=169295',
+      'https://www.amazon.jobs/en/jobs/123software-engineer',
     ]) expect(providerPostingReference(url)).toEqual({ provider: 'unknown' });
   });
 

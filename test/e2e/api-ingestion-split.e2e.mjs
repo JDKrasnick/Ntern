@@ -298,6 +298,61 @@ test('honors a one-job audit batch through the compiled API Worker', async () =>
   });
 });
 
+test('repairs a new provider-route duplicate through the compiled API Worker and public catalog', async () => {
+  const database = await runtime.getD1Database('DB', apiWorkerName);
+  const makeJob = (jobId, applyUrl, firstSeenAt) => ({
+    jobId, company: 'Acme', title: 'Software Engineering Intern', location: 'New York', season: 'summer-2027',
+    applyUrl, normalizedUrl: applyUrl, fingerprint: `fingerprint-${jobId}`, compensation: { raw: '' },
+    sourceReferences: [{
+      sourceId: 'community-list', externalId: jobId, document: jobId, sourceUrl: 'https://example.test/source', row: 1,
+      company: 'Acme', title: 'Software Engineering Intern', location: 'New York', season: 'summer-2027',
+      applyUrl, compensation: { raw: '' }, state: 'open',
+    }],
+    open: true, technical: true, firstSeenAt, catalogVisibleAt: firstSeenAt,
+    lastSeenAt: '2026-09-19T00:00:00.000Z', notification: { smsPending: false, digestPending: false },
+  });
+  const olderUrl = 'https://apply.workable.com/acme-e2e/j/ABC123DEF';
+  const newerUrl = `${olderUrl}/`;
+  for (const value of [
+    makeJob('workable-e2e-old', olderUrl, '2026-09-17T00:00:00.000Z'),
+    makeJob('workable-e2e-new', newerUrl, '2026-09-18T00:00:00.000Z'),
+  ]) {
+    await database.prepare('INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, ?, ?, ?)')
+      .bind(`JOB#${value.jobId}`, 'META', 'internship', JSON.stringify(value)).run();
+  }
+
+  const previewResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({ scope: 'identity' }),
+  });
+  assert.equal(previewResponse.status, 200);
+  const preview = await previewResponse.json();
+  assert.equal(preview.duplicateGroups, 1);
+  assert.equal(preview.duplicateJobs, 1);
+  assert.deepEqual(preview.conflicts, []);
+  assert.ok(preview.samples.some((sample) => sample.canonicalJobId === 'workable-e2e-old'
+    && sample.duplicateJobIds.includes('workable-e2e-new')
+    && sample.providerIdentity === 'workable:acme-e2e:abc123def'));
+
+  const applyResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({
+      apply: true, scope: 'identity', repairToken: preview.repairToken,
+      expectedChanges: preview.expectedChanges, expectedDuplicateJobs: preview.duplicateJobs,
+    }),
+  });
+  const applied = await applyResponse.json();
+  assert.equal(applyResponse.status, 200, JSON.stringify(applied));
+  assert.equal(applied.verification.expectedChanges, 0);
+  assert.equal(applied.verification.duplicateJobs, 0);
+
+  const catalogResponse = await api.fetch('https://api.example.test/jobs');
+  assert.equal(catalogResponse.status, 200);
+  const catalog = await catalogResponse.json();
+  assert.ok(catalog.jobs.some((job) => job.jobId === 'workable-e2e-old'));
+  assert.ok(!catalog.jobs.some((job) => job.jobId === 'workable-e2e-new'));
+});
+
 test('runs a dev account through signup, verification, sign-in, and private reads', async () => {
   const email = `review-${randomUUID()}@example.test`;
   const password = 'Review-only password 175!';
