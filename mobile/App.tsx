@@ -1485,13 +1485,15 @@ function NewnessLane({
   // rounds the offset, so only write when the rounded pixel changes.
   const laneScroller = () => {
     // react-native-web renders a View as its DOM node; the scroller is the one
-    // descendant that overflows sideways.
+    // descendant that overflows sideways. Native has no DOM: React Native defines
+    // `window`, so this must be gated on the platform, not on the global.
+    if (Platform.OS !== "web") return null;
     const wrap = laneWrapRef.current as unknown as HTMLElement | null;
     if (!wrap) return null;
     return Array.from(wrap.querySelectorAll<HTMLElement>("div")).find((node) => node.scrollWidth > node.clientWidth + 20) ?? null;
   };
   const writeBelt = (offset: number) => {
-    const scroller = typeof window === "undefined" ? null : laneScroller();
+    const scroller = laneScroller();
     writing.current = true;
     // Record what we wrote on every platform: the scroll events our own write
     // raises are told apart from a reader's drag by comparing against this.
@@ -1508,7 +1510,7 @@ function NewnessLane({
   /** Any scroll the belt did not cause is the reader taking the wheel. */
   const mountedAt = useRef(Date.now());
   const onLaneScroll = (position?: number) => {
-    const scroller = typeof window === "undefined" ? null : laneScroller();
+    const scroller = laneScroller();
     const actual = position ?? scroller?.scrollLeft ?? 0;
     if (!isReaderScroll({
       actual,

@@ -63,11 +63,17 @@ export function beltCopies(viewportWidth: number, cycleLength: number) {
  * onto, and is decoration, so assistive technology is told to ignore it. */
 export function beltItems<T extends { groupId: string }>(groups: T[], copies = 2): Array<BeltItem<T>> {
   if (groups.length < 2) return groups.map((group) => ({ key: group.groupId, group, decorative: false }));
-  return Array.from({ length: copies }, (_, copy) => groups.map((group) => ({
-    key: copy === 0 ? group.groupId : `${group.groupId}#loop${copy}`,
-    group,
-    decorative: copy > 0,
-  }))).flat();
+  const items: Array<BeltItem<T>> = [];
+  for (let copy = 0; copy < copies; copy += 1) {
+    for (const group of groups) {
+      items.push({
+        key: copy === 0 ? group.groupId : `${group.groupId}#loop${copy}`,
+        group,
+        decorative: copy > 0,
+      });
+    }
+  }
+  return items;
 }
 
 /** One frame of belt travel: advance, and wrap by exactly one copy when the
