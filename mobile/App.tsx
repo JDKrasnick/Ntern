@@ -7829,7 +7829,7 @@ const styles = StyleSheet.create({
   catalogGroupCountPill: { backgroundColor: colors.ink, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
   catalogGroupCountText: { color: colors.onDark, fontSize: 11, fontWeight: "800" },
   catalogLane: { marginBottom: 6, marginTop: 4 },
-  catalogLaneHeader: { alignItems: "flex-start", flexDirection: "row", gap: 12, justifyContent: "space-between", marginBottom: 10, paddingTop: 2 },
+  catalogLaneHeader: { alignItems: "flex-start", flexDirection: "row", gap: 12, justifyContent: "space-between", marginBottom: 14, paddingTop: 2 },
   catalogLaneHeading: { flexShrink: 1, gap: 2 },
   catalogLaneControl: {
     alignItems: "center",
