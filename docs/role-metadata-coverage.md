@@ -68,37 +68,51 @@ from 14/60 to 143/150 — shows the opposite:
 | Never mentions a degree | 69 | 48% |
 
 Misses by host: Workday 23, iCIMS 5, Greenhouse 1, and none across 19 Oracle,
-8 Ashby, 2 SmartRecruiters and 1 Lever. Roughly **20% of the 1,917 stored open
-unspecified roles — about 380 — state a level that is currently discarded**, and
-about 65 of those state a graduate-only audience that an undergraduate should not
-be shown. This is the same class of defect v16 fixed, reached through a different
-cause.
+8 Ashby, 2 SmartRecruiters and 1 Lever. Roughly **20% of the stored open
+unspecified roles state a level that is discarded**, and a subset of those state a
+graduate-only audience that an undergraduate should not be shown. This is the same
+class of defect v16 fixed, reached through a different cause.
 
 The cause is acquisition, not classification. Metadata API collection targets a
 role only when its occurrence has a destination admission classified
 `posting-detail`/`application-form`, or a confirmed posting identity
-(`metadataCollectionTarget`, `cloudflare/catalog-admission-store.ts:118`). Two
-further gates compound it: a role is re-collected only after
-`ROLE_METADATA_REVALIDATION_MS` (30 days), and iCIMS has no acquisition path at
-all. Among the 1,917 stored open unspecified roles:
+(`metadataCollectionTarget`, `cloudflare/catalog-admission-store.ts:118`), and the
+role is re-collected only after `ROLE_METADATA_REVALIDATION_MS` (30 days).
 
-| Destination classification / identity | Roles | Collectible via provider API |
-| --- | ---: | --- |
-| `posting-detail` + confirmed | 587 | yes |
-| `application-form` + confirmed | 558 | yes |
-| `posting-detail` / `application-form` + unconfirmed | 169 | yes |
-| no destination + confirmed identity | 30 | yes |
-| no destination + unconfirmed | 220 | no |
-| `aggregate-board` | 178 | no |
-| `blocked-uninspectable` | 132 | no |
-| `unresolved` | 43 | no |
-| `gone` | 4 | no |
+Current snapshot (2026-09-19, 5,681 open internships, 4,269 of them unspecified):
+applying the real predicate across every reference splits them **3,613
+collectible / 656 structurally uncollectible**. By first reference the blocked
+classes are: no destination + unconfirmed 227, `blocked-uninspectable` 160,
+`aggregate-board` 153, `unresolved` 139, `gone` 5. Earlier revisions of this file
+reported 1,344 / 567 of 1,917 — a smaller catalog, and a first-reference count
+rather than the predicate.
 
-So 1,344 unspecified roles are collectible by design and 567 are structurally
-blocked today. Running the production acquisition code against 40 unspecified
-Workday roles acquired 28 (real text, 2–10 KB) and found a level in 8 of them —
-20%, independently reproducing the audit above. The text is reachable; it is not
-being read.
+Two acquisition routes were added since that measurement:
+
+- **iCIMS** (143 open unspecified roles). It publishes no open JSON detail
+  endpoint, and its plain job URL is a client-rendered shell: across 25 live
+  postings the plain URL carried the description 0 times while the frame route
+  (`?in_iframe=1&mobile=false`) carried it 23 times. `metadataApiRoute` now routes
+  the reviewed identity to that frame URL, the acquirer accepts HTML for that one
+  route, and the parser reads the `JobContent` region with the posting id as its
+  identity check. Measured through the real acquirer over 25 live production
+  identities: 25 acquired, 13 (52%) state a level. Remaining iCIMS gaps: 40 roles
+  where the identity handed to the acquirer is `github`/`unknown`, and 26 with no
+  collection target at all.
+- **Field-less page evidence with an available API route** now returns to the
+  24-hour window instead of the 30-day one, the deferrals already written are
+  re-claimed, and a bounded staged collection runs on every maintenance tick.
+
+Blocked classes are not a code gap but a review one. `metadataCollectionTarget`
+also accepts a **confirmed posting identity**, and the unreviewed URL families are
+enumerated by `reviewFamilyKey` (`src/posting-identity-repair.ts:1099`, surfaced by
+`npm run audit:posting-identity`). Among unspecified roles the largest families are
+`careers.qorvo.com/job/:segment/:number` (49), `careers.amd.com/jobs/:number?icims`
+(69 across three variants), `app.careerpuck.com` (32), `jobs.l3harris.com` (20),
+`jobs.smartrecruiters.com` (33), `apply.workable.com` (32) and
+`careers.garmin.com/jobs/:number?icims` (15). Confirming a family unlocks
+candidacy; the route still needs a recognisable provider host, so vanity domains
+such as `careers.amd.com` additionally need their redirect target resolved.
 
 This is not a routing rule keyed to source identity: the same community source
 holds roles both with and without API evidence, and 363 roles on already-supported
