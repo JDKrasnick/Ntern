@@ -1,5 +1,6 @@
+import { allDisciplineStyles } from '../../shared/discipline-display';
 import { DEFAULT_DAY_ZONE } from '../../shared/zone-day';
-import { educationLevels, type EducationLevel } from '../../shared/education-display';
+import { educationLevelLabels, educationLevels, type EducationLevel } from '../../shared/education-display';
 export type GroupedCatalogFilterState = {
   query?: string;
   source: 'all' | 'direct' | 'community' | 'corroborated';
@@ -17,11 +18,31 @@ export type GroupedCatalogFilterState = {
   educationLevel: EducationLevel;
 };
 
+export type ChipOption = { value: string; label: string };
+/** Education chips carry the level itself so a single-select can stay typed. */
+export type EducationChipOption = { value: EducationLevel; label: string };
+
+/** Grounded in live catalog data: Summer 2027 dominates; these four cover dated roles. */
+export const seasonFilterOptions: ChipOption[] = [
+  { value: 'summer-2027', label: 'Summer 2027' },
+  { value: 'fall-2026', label: 'Fall 2026' },
+  { value: 'winter-2027', label: 'Winter 2027' },
+  { value: 'spring-2027', label: 'Spring 2027' },
+];
+
+export const workModeFilterOptions: ChipOption[] = [
+  { value: 'remote', label: 'Remote' },
+  { value: 'hybrid', label: 'Hybrid' },
+  { value: 'onsite', label: 'On-site' },
+];
+
 /**
  * The level the reader is studying. Undergraduate leads because the catalog's
  * audience is early-career, and it is what an unconfigured install browses as.
  */
 export const defaultEducationLevel: EducationLevel = 'undergraduate';
+
+export const educationFilterOptions: EducationChipOption[] = educationLevels.map((value) => ({ value, label: educationLevelLabels[value] }));
 
 export function groupedCatalogParameters(
   state: GroupedCatalogFilterState,
@@ -54,7 +75,7 @@ export type CatalogFilterValues = {
   sourceFilter: 'all' | 'direct' | 'community' | 'corroborated';
   hasCompensation: boolean;
   hideUsCitizenshipRequired: boolean;
-  /** The release day a reader narrowed to, as `YYYY-MM-DD`. */
+  /** The release day the reader picked in the calendar, as `YYYY-MM-DD`. */
   day?: string;
   educationLevel: EducationLevel;
 };
@@ -97,6 +118,15 @@ export function catalogRequestState(
   };
 }
 
+/**
+ * The full catalog is the resting state. A query narrows it and so does any
+ * facet, so Reset belongs on screen whenever either is in play — a reader who
+ * typed a search has as much to undo as one who opened the filter sheet.
+ */
+export function catalogViewNarrowed(query: string, filters: CatalogFilterValues): boolean {
+  return query.trim().length > 0 || countActiveCatalogFilters(filters) > 0;
+}
+
 function storedList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
@@ -125,11 +155,113 @@ export function parseCatalogFilters(value: unknown): CatalogFilterValues | undef
   };
 }
 
+export function countActiveCatalogFilters(filters: CatalogFilterValues): number {
+  return [
+    filters.disciplines.length > 0,
+    filters.seasons.length > 0,
+    filters.workModes.length > 0,
+    filters.employerFilter !== 'all',
+    filters.jobStatus !== 'open',
+    filters.sourceFilter !== 'all',
+    filters.hasCompensation,
+    filters.hideUsCitizenshipRequired,
+    Boolean(filters.day),
+    // The default level is how browse starts, so it is not a chosen filter.
+    filters.educationLevel !== defaultEducationLevel,
+  ].filter(Boolean).length;
+}
+
 export const employerCategoryLabels: Record<'faang' | 'startup' | 'normal', string> = {
   faang: 'FAANG',
   startup: 'Startups',
   normal: 'Normal',
 };
+
+export const sourceFilterOptions: ChipOption[] = [
+  { value: 'all', label: 'All' },
+  { value: 'direct', label: 'Direct' },
+  { value: 'community', label: 'Community' },
+  { value: 'corroborated', label: 'Direct + community' },
+];
+
+/** Disciplines in the order a student is most likely to look for them. */
+export const disciplineChipOptions: ChipOption[] = (() => {
+  const order = ['software', 'ai-ml', 'data', 'infrastructure-cloud', 'security', 'quant', 'product', 'technical-design'] as const;
+  const byTag = new Map(allDisciplineStyles().map(({ tag, style }) => [tag, style] as const));
+  return order.filter((tag) => byTag.has(tag)).map((tag) => ({ value: byTag.get(tag)!.filterValue, label: byTag.get(tag)!.label }));
+})();
+
+export type CatalogFilterToken = {
+  key: string;
+  label: string;
+  /** Applied over the current filters, so clearing one facet never disturbs another. */
+  patch: Partial<CatalogFilterValues>;
+};
+
+function optionLabel(options: ChipOption[], value: string) {
+  return options.find((option) => option.value === value)?.label ?? value;
+}
+
+/** A release day as a reader reads it: `Fri, Sep 18`. Parsed as UTC so the label
+ * never moves a day that was computed in the reader's own zone. */
+export function releaseDayLabel(day: string) {
+  const parsed = new Date(`${day}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.valueOf())) return day;
+  return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }).format(parsed);
+}
+
+/** Parameters for the release-day index that fills the calendar. */
+export function catalogDayIndexParameters(
+  filters: CatalogFilterValues,
+  range: { from: string; to: string; dayZone: string },
+) {
+  const params = groupedCatalogParameters(catalogRequestState({ ...filters, day: undefined }, { dayZone: range.dayZone }));
+  params.delete('limit');
+  params.set('from', range.from);
+  params.set('to', range.to);
+  params.set('dayZone', range.dayZone);
+  return params;
+}
+
+/** One removable token per active facet, in the order the filter sheet lists them. */
+export function catalogFilterTokens(filters: CatalogFilterValues): CatalogFilterToken[] {
+  return [
+    ...(filters.day
+      ? [{ key: `day:${filters.day}`, label: releaseDayLabel(filters.day), patch: { day: undefined } }]
+      : []),
+    ...filters.seasons.map((season) => ({
+      key: `season:${season}`,
+      label: optionLabel(seasonFilterOptions, season),
+      patch: { seasons: filters.seasons.filter((value) => value !== season) },
+    })),
+    ...filters.disciplines.map((discipline) => ({
+      key: `discipline:${discipline}`,
+      label: optionLabel(disciplineChipOptions, discipline),
+      patch: { disciplines: filters.disciplines.filter((value) => value !== discipline) },
+    })),
+    ...filters.workModes.map((mode) => ({
+      key: `workMode:${mode}`,
+      label: optionLabel(workModeFilterOptions, mode),
+      patch: { workModes: filters.workModes.filter((value) => value !== mode) },
+    })),
+    ...(filters.educationLevel !== defaultEducationLevel
+      ? [{ key: `education:${filters.educationLevel}`, label: optionLabel(educationFilterOptions, filters.educationLevel), patch: { educationLevel: defaultEducationLevel } }]
+      : []),
+    ...(filters.employerFilter !== 'all'
+      ? [{ key: 'employer', label: employerCategoryLabels[filters.employerFilter], patch: { employerFilter: 'all' as const } }]
+      : []),
+    ...(filters.jobStatus !== 'open'
+      ? [{ key: 'status', label: 'Closed roles', patch: { jobStatus: 'open' as const } }]
+      : []),
+    ...(filters.sourceFilter !== 'all'
+      ? [{ key: 'source', label: optionLabel(sourceFilterOptions.slice(1), filters.sourceFilter), patch: { sourceFilter: 'all' as const } }]
+      : []),
+    ...(filters.hasCompensation ? [{ key: 'compensation', label: 'Pay listed', patch: { hasCompensation: false } }] : []),
+    ...(filters.hideUsCitizenshipRequired
+      ? [{ key: 'citizenship', label: 'No U.S. citizenship requirement', patch: { hideUsCitizenshipRequired: false } }]
+      : []),
+  ];
+}
 
 export function catalogGroupAvailabilityLabel(
   group: { kind: 'program-group' | 'employer-release' | 'individual'; roleCount: number },

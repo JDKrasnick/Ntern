@@ -20,6 +20,24 @@ import {
 } from '../src/job-detail.js';
 
 describe('mobile job routes', () => {
+  it('opens a grouped role through the immediate catalog-card path', () => {
+    const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+    const handler = /const openGroupedRole = \(job: Job\) => \{(?<body>[\s\S]*?)\n  \};/.exec(app);
+
+    expect(app).toContain('onPress={() => onOpenRole(catalogRoleJob(item))}');
+    expect(handler?.groups?.body).toContain('openCatalogJob(job);');
+    expect(handler?.groups?.body).not.toContain('presentDestination');
+    expect(handler?.groups?.body).not.toContain('InteractionManager');
+  });
+
+  it('keeps the grouped sheet stable with role-shaped loading placeholders', () => {
+    const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+
+    expect(app).toContain('<CatalogGroupLoadingSkeleton />');
+    expect(app).toContain('accessibilityLabel="Loading grouped roles"');
+    expect(app).not.toContain('<Text style={styles.catalogPaginationText}>Loading roles…</Text>');
+  });
+
   it('fades the role-sheet dim on mobile and web while using a quadratic sheet transition', () => {
     const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 
