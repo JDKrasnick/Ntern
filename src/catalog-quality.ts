@@ -43,13 +43,21 @@ function canonicalLocation(value: string): string {
   return clean;
 }
 
+function removeRepeatedOuterLocationComponent(value: string): string {
+  const parts = value.split(/\s*,\s*/u).filter(Boolean);
+  if (parts.length < 3) return value;
+  const first = parts[0]!.toLocaleLowerCase('en-US');
+  const last = parts.at(-1)!.toLocaleLowerCase('en-US');
+  return first === last ? parts.slice(1).join(', ') : value;
+}
+
 export function normalizeLocations(values: readonly string[]): string[] {
   const result: string[] = [];
   const seen = new Set<string>();
   for (const input of values) {
     for (const part of input.split(/\s*(?:\n|\||;|•|\s\/\s)\s*/u)) {
       if (!part || COUNT_LOCATION.test(part)) continue;
-      const location = canonicalLocation(part);
+      const location = removeRepeatedOuterLocationComponent(canonicalLocation(part));
       if (!location || COUNT_LOCATION.test(location)) continue;
       const key = location.toLocaleLowerCase('en-US');
       if (!seen.has(key)) { seen.add(key); result.push(location); }
