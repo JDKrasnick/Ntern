@@ -29,7 +29,7 @@ import type {
 // Increment whenever a parser change can produce a different result from an
 // unchanged artifact. This makes the collection scheduler revisit both a
 // previous negative result and an already-enriched posting.
-export const ROLE_METADATA_EXTRACTION_VERSION = 16;
+export const ROLE_METADATA_EXTRACTION_VERSION = 17;
 export const VERIFIED_PAGE_METADATA_SOURCES = ['official-json-ld', 'official-page'] as const;
 const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
   // Exact-role detail retrieval owns its own slot; a later board-list poll
@@ -547,6 +547,22 @@ export function extractCompensationRanges(
     .sort((left, right) => key(left).localeCompare(key(right)));
 }
 
+/**
+ * A pay label can either describe the amount or limit it. "Hourly Pay Range"
+ * merely names what follows, while "Hourly Pay Range (CA Only)" and "SF Bay Area
+ * Hourly Rate" restrict who it applies to. Only a remainder that still names a
+ * place or a level withholds the range from the USD scalar; otherwise a purely
+ * descriptive label was silently discarding a global, well-formed hourly rate.
+ */
+function payScopeFromLabel(label: string | undefined): string | undefined {
+  if (!label) return undefined;
+  const remainder = label
+    .replace(/\b(?:hourly|daily|weekly|biweekly|monthly|annual|yearly|salary|salaries|pay|rate|range|estimated|estimate|base|compensation|wage|stipend|co-?op|intern(?:ship)?|per|hour|year|month|week|day|only)\b/giu, ' ')
+    .replace(/[\s:;,.()[\]{}·/\\–—-]+/gu, ' ')
+    .trim();
+  return remainder || undefined;
+}
+
 export function compensationFromRanges(ranges: readonly CompensationRange[]): Compensation {
   // `ranges` is the additive public contract. Retain every explicit amount,
   // including native currencies and nonstandard/unknown periods. The old USD
@@ -555,11 +571,18 @@ export function compensationFromRanges(ranges: readonly CompensationRange[]): Co
   const raw = boundedText(compensationLabels({ ranges: projected }).join(' · '), 160);
   const result: Compensation = { raw, ...(projected.length ? { ranges: projected } : {}) };
   const supported = projected.filter((range) => range.currency === 'USD' && ['hourly', 'annual'].includes(range.period));
-  const global = supported.filter((range) => !range.applicabilityLabel && !range.applicableLocations?.length && !range.applicableEducationLevels?.length);
+  const global = supported.filter((range) => !payScopeFromLabel(range.applicabilityLabel)
+    && !range.applicableLocations?.length && !range.applicableEducationLevels?.length);
   const hourly = global.filter((range) => range.period === 'hourly');
   const annual = global.filter((range) => range.period === 'annual');
-  if (hourly.length === 1) { result.minHourlyUSD = hourly[0]!.minAmount; result.maxHourlyUSD = hourly[0]!.maxAmount; }
-  if (annual.length === 1) { result.minAnnualUSD = annual[0]!.minAmount; result.maxAnnualUSD = annual[0]!.maxAmount; }
+  // Two sources quoting the same band agree, so they still yield a scalar; two
+  // sources quoting different bands do not, and no winner is invented.
+  if (hourly.length && hourly.every((range) => range.minAmount === hourly[0]!.minAmount && range.maxAmount === hourly[0]!.maxAmount)) {
+    result.minHourlyUSD = hourly[0]!.minAmount; result.maxHourlyUSD = hourly[0]!.maxAmount;
+  }
+  if (annual.length && annual.every((range) => range.minAmount === annual[0]!.minAmount && range.maxAmount === annual[0]!.maxAmount)) {
+    result.minAnnualUSD = annual[0]!.minAmount; result.maxAnnualUSD = annual[0]!.maxAmount;
+  }
   return result;
 }
 

@@ -504,6 +504,33 @@ describe('provider-neutral role metadata', () => {
     expect(extractCompensationRanges('Minimum Salary USD $28.25\nMaximum Salary CAD $31.50', { provenance: field, requirePayContext: true }))
       .not.toEqual(expect.arrayContaining([expect.objectContaining({ minAmount: 28.25, maxAmount: 31.5 })]));
   });
+  it('promotes a global band behind a descriptive pay label but not behind a scoping one', () => {
+    const global = (label: string) => compensationFromRanges([{ minAmount: 26, maxAmount: 35, currency: 'USD', period: 'hourly',
+      sourceText: 'Hourly Pay Range: USD 26-35/hour', applicabilityLabel: label, provenance: [field] }]);
+    // These name the amount, not who it applies to.
+    for (const label of ['Hourly Pay Range', 'Hourly Rate:', 'Estimated Hourly Pay Range', 'Base Hourly Pay', 'Co-op Hourly Pay Range', 'Annual Salary Range']) {
+      expect(global(label)).toMatchObject({ minHourlyUSD: 26, maxHourlyUSD: 35 });
+    }
+    // These limit it, and the label is the only thing that says so: the parsed
+    // range carries no applicableLocations for any of them.
+    for (const label of ['Hourly Pay Range (CA Only)', 'SF Bay Area Hourly Rate', 'Bellevue, Washington Hourly Rate']) {
+      expect(global(label).minHourlyUSD).toBeUndefined();
+    }
+    // A scoped range stays excluded even when it sits beside a global one.
+    expect(compensationFromRanges([
+      { minAmount: 26, maxAmount: 35, currency: 'USD', period: 'hourly', sourceText: 'global', applicabilityLabel: 'Hourly Pay Range', provenance: [field] },
+      { minAmount: 40, maxAmount: 42, currency: 'USD', period: 'hourly', sourceText: 'bay area', applicabilityLabel: 'SF Bay Area Hourly Rate', provenance: [field] },
+    ])).toMatchObject({ minHourlyUSD: 26, maxHourlyUSD: 35 });
+  });
+  it('promotes when two sources quote the same band and abstains when they disagree', () => {
+    const range = (minAmount: number, maxAmount: number) => ({ minAmount, maxAmount, currency: 'USD' as const,
+      period: 'hourly' as const, sourceText: `${minAmount}-${maxAmount}/hour`, provenance: [field] });
+    // Two sources, one band: a scalar is safe.
+    expect(compensationFromRanges([range(30, 36), range(30, 36)])).toMatchObject({ minHourlyUSD: 30, maxHourlyUSD: 36 });
+    // Two sources, two bands: no winner is invented.
+    expect(compensationFromRanges([range(26, 35), range(30, 36)])).toMatchObject({ ranges: expect.any(Array) });
+    expect(compensationFromRanges([range(26, 35), range(30, 36)]).minHourlyUSD).toBeUndefined();
+  });
   it('does not borrow cadence or merge incompatible salary endpoints', () => {
     const input = { provenance: field, requirePayContext: true };
     for (const tail of [
