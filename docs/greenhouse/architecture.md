@@ -7,36 +7,32 @@ The source is [architecture.mmd](architecture.mmd); a scalable
 
 ## Deployment boundary
 
-Greenhouse monitoring is deployed as the independent
-`InternNotifsGreenhouse` CDK stack. It owns the scheduler, dispatcher, queues,
-worker, and alarms, while importing the retained internships and user tables
-by name from the existing `InternNotifs` stack. This separation permits a
-Greenhouse-only deployment without modifying the lifecycle of the public API,
-operations API, authentication, or durable data resources.
+Greenhouse monitoring runs in the `intern-notifs-ingestion` Worker. That Worker
+owns Cron dispatch, the Greenhouse Queue consumer, and ingestion observability;
+both Workers share D1 through explicit bindings, while the public API Worker
+owns no provider schedules or consumers.
 
-Use the exact deployment procedure in
-[`../DEPLOYMENT.md`](../DEPLOYMENT.md#greenhouse-monitoring-deployment). Do not
-deploy the main stack as a substitute for a Greenhouse-only change.
+Use the exact two-Worker OpenTofu procedure in
+[`../DEPLOYMENT.md`](../DEPLOYMENT.md#api-and-ingestion-deployment-boundary).
+Never deploy a bare Wrangler configuration as a provider-only shortcut.
 
 ## Runtime flow
 
-EventBridge invokes a small dispatcher every thirty minutes. The dispatcher
+Cloudflare Cron Triggers invoke the dispatcher every thirty minutes. The dispatcher
 creates one FIFO message for every reviewed Greenhouse board. Each board ID is
 its own message group, which prevents overlapping work for the same board while
 allowing different boards to run concurrently.
 
-Lambda automatically scales with queue backlog up to four worker invocations.
-Each invocation receives at most ten messages and processes up to four board
-groups concurrently. Records within one board group remain sequential, and
-partial-batch responses return the failed record plus later records from that
-same board to SQS.
+The Cloudflare Queue consumer receives one board per batch and scales to six
+consumer invocations. Per-source leases prevent overlap, and failed messages
+retry twice before reaching the Greenhouse DLQ.
 
 Published boards run every thirty minutes whether their current snapshot is
 active or quiet. Shadow boards run every three hours; their first checks are
 staggered across dispatcher windows. A pause or provider backoff overrides both
 cadences.
 
-Shadow and published boards deliberately use different DynamoDB checkpoint
+Shadow and published boards deliberately use different D1 checkpoint
 keys. Shadow polling validates API shape, role mapping, source quality, and
 eligible application links but never writes jobs or sends alerts. When a board
 is promoted, it has no published checkpoint, so its first catalog run becomes a
@@ -64,11 +60,9 @@ Browser Rendering work runs through the destination-verification queue and DLQ,
 retains bounded evidence and attempts in D1, retries incidents daily, and samples
 reviewed host rules weekly.
 
-Every published provider worker reads the shared
-grouped-notification cohort from SSM and excludes those users from its legacy
-direct sender; the grouped pipeline is their sole delivery path. The existing
-general notifier continues to reconcile push receipts and the optional ntfy
-fallback.
+Published provider work records catalog and delivery state in D1. Scheduled
+maintenance reconciles Expo receipts and the optional ntfy fallback without the
+retired SSM cohort or a provider-specific deployment stack.
 
 ## Capacity and failure boundaries
 
@@ -82,7 +76,7 @@ fallback.
   fifteen seconds per board fetch, which covers headers and the whole body.
 - Queue retention: one day.
 - Dead-letter retention: fourteen days.
-- Dead-letter threshold: four receives.
+- Dead-letter threshold: three total attempts.
 
-CloudWatch alarms cover worker invocation errors, queue work older than ten
-minutes, and any message arriving in the Greenhouse dead-letter queue.
+Worker observability and the operations API surface invocation failures, stale
+sources, queue age, and any message arriving in the Greenhouse DLQ.

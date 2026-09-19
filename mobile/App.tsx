@@ -31,7 +31,7 @@ import * as Notifications from "expo-notifications";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
-import { appendGroupedCatalogPage, catalogCardKind, type GroupedCatalogPage } from "./src/catalog";
+import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
 import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
@@ -177,19 +177,6 @@ type CatalogGroupRole = {
   postingIdentityStatus?: "confirmed" | "unconfirmed";
 };
 type CatalogGroupDetails = { group: CatalogGroupRow; roles: CatalogGroupRole[] };
-
-/**
- * A quick local preview keeps catalog search responsive while the full catalog
- * lookup runs. The server remains authoritative; this only narrows roles that
- * are already on the device.
- */
-function catalogSearchPreviewMatches(group: CatalogGroupRow, query: string) {
-  const terms = query.trim().toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  if (!terms.length) return true;
-  const words = [group.company, ...group.titles, group.featuredRole.company, group.featuredRole.title]
-    .join(" ").toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  return terms.every((term) => words.some((word) => word.startsWith(term)));
-}
 
 /** Let a reader finish a word before asking D1, while local results react at once. */
 function useDebouncedValue<T>(value: T, delayMs: number) {
@@ -3591,7 +3578,7 @@ function CatalogScreen({
                     ? "Pick another day in the calendar, or clear the day to see the whole catalog."
                     : tokens.length
                       ? "Remove a filter to widen the search."
-                      : "Try a company, a role, or a location with fewer terms."}
+                      : "Try a company or role with fewer terms."}
                 </Text>
                 <View style={styles.catalogEmptyAction}>
                   {filters.day ? (
@@ -3916,12 +3903,14 @@ function AppContent() {
   useEffect(() => {
     // Update the on-device preview with every keypress, but wait briefly before
     // turning that keypress into a remote catalog request.
-    if (!catalogFiltersHydrated || countActiveCatalogFilters(catalogFilters) > 0) return;
-    catalogRequestGeneration.current += 1;
-    const preview = query.trim()
-      ? catalogBrowsePreviewRef.current.filter((group) => catalogSearchPreviewMatches(group, query))
-      : catalogBrowsePreviewRef.current;
-    if (preview.length || query.trim()) {
+    if (!catalogFiltersHydrated) return;
+    const preview = beginCatalogQueryChange(
+      catalogRequestGeneration,
+      catalogBrowsePreviewRef.current,
+      query,
+      countActiveCatalogFilters(catalogFilters) > 0,
+    );
+    if (preview) {
       catalogGroupsRef.current = preview;
       setCatalogGroups(preview);
     }
@@ -3957,12 +3946,10 @@ function AppContent() {
         // Older deployed API versions used substring matching over locations.
         // Keep the client result aligned with the current employer/role search
         // contract while that response is being refreshed.
-        const matchingGroups = catalogQuery
-          ? page.groups.filter((group) => catalogSearchPreviewMatches(group, catalogQuery))
-          : page.groups;
-        catalogGroupsRef.current = matchingGroups;
+        const matchingPage = filterGroupedCatalogPage(page, catalogQuery);
+        catalogGroupsRef.current = matchingPage.groups;
         catalogCursorRef.current = page.cursor;
-        setCatalogGroups(matchingGroups);
+        setCatalogGroups(matchingPage.groups);
         setNextCatalogCursor(page.cursor);
         if (!catalogQuery && countActiveCatalogFilters(catalogFilters) === 0) {
           catalogBrowsePreviewRef.current = page.groups;
@@ -3999,11 +3986,14 @@ function AppContent() {
     setCatalogLoadingMore(true);
     setCatalogMoreError(undefined);
     const catalogQuery = query.trim();
-    const params = groupedCatalogParameters(
-      catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }),
-      { cursor },
-    );
-    void api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "")
+    const fetchPage = (pageCursor: string) => {
+      const params = groupedCatalogParameters(
+        catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }),
+        { cursor: pageCursor },
+      );
+      return api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "");
+    };
+    void nextMatchingGroupedCatalogPage(cursor, catalogQuery, fetchPage)
       .then((page) => {
         if (catalogRequestGeneration.current !== requestGeneration) return;
         const nextGroups = appendGroupedCatalogPage(catalogGroupsRef.current, page);

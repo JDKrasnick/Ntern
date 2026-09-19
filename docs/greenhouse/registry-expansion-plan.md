@@ -97,13 +97,13 @@ What already exists:
 - ETag and content-hash checkpoints;
 - per-company fixtures and approval artifacts;
 - a read-only live contract;
-- a half-hour EventBridge dispatcher with published boards checked every
+- a half-hour Cloudflare Cron dispatcher with published boards checked every
   thirty minutes and shadow boards staggered across three-hour checks;
-- a FIFO SQS work queue with per-board ordering and deduplication;
-- batches of ten with maximum worker concurrency four;
+- a provider-specific Cloudflare Queue with per-board leases and deduplication;
+- batches of one with maximum consumer concurrency six;
 - isolated scheduled shadow checkpoints and link checks;
 - a status-driven published path with a quiet first catalog baseline;
-- partial-batch retries, a dedicated dead-letter queue, and CloudWatch alarms.
+- bounded retries, a dedicated dead-letter queue, and Worker observability.
 
 What is still missing:
 

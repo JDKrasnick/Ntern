@@ -86,11 +86,11 @@ Official reference: [Greenhouse Job Board API](https://developers.greenhouse.io/
 
 ## Queued fetch and update cycle
 
-EventBridge dispatches published boards every thirty minutes, including boards
+Cloudflare Cron Triggers dispatch published boards every thirty minutes, including boards
 with no currently eligible roles. Shadow boards run every three hours. Each
-board is one FIFO SQS message; Lambda receives batches of ten, processes up to
-four independent board groups per invocation, and scales to at most four
-concurrent workers.
+board is one Cloudflare Queue message; the consumer receives batches of one and
+scales to at most six concurrent invocations. Durable source leases prevent
+overlap for the same board.
 
 1. Load the board's last successful hash, row count, success time, and active role IDs.
 2. Build the request from the stored provider and board token only. Use the fixed `boards-api.greenhouse.io` host, encode the token as one path segment, and reject configuration that contains a URL, slash, query string, or unknown provider.
@@ -98,8 +98,8 @@ concurrent workers.
 4. Discard prospects and convert the response to the common role shape. The shared lifecycle classifier admits technical internships, co-ops, apprenticeships, new-grad programs, and explicitly entry-level titles; generic and merely junior titles remain excluded.
 5. For every new or changed application URL, require HTTPS, reject aggregators, require an expected host or reviewed exception, then validate resolution with `HEAD` and a small ranged `GET` fallback.
 6. Commit the complete successful snapshot and new source state together. Only then calculate role additions, edits, omissions, and closures.
-7. Retry only failed SQS records. After four receives, move a persistent failure
-   to the Greenhouse dead-letter queue and alarm.
+7. Retry failed Queue messages twice. Then move a persistent failure
+   to the Greenhouse dead-letter queue and surface its depth through operations.
 
 ## Catalog and notification behavior
 

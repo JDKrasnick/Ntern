@@ -20,7 +20,7 @@
 | Milestone | Status | Exit criteria |
 | --- | --- | --- |
 | Catalog definition | In progress | Continuous employer discovery, source rules, taxonomy, and reliability targets operate without an owner-selected roster |
-| Official source adapters | In progress | SQS-backed Greenhouse, Lever, and Ashby runtimes poll reviewed boards; Ashby is collecting production shadow evidence before per-board promotion, while SmartRecruiters remains planned |
+| Official source adapters | In progress | Cloudflare Queue-backed Greenhouse, Lever, and Ashby runtimes poll reviewed boards; Ashby is collecting production shadow evidence before per-board promotion, while SmartRecruiters remains planned |
 | Catalog operations | In progress | Standardized ingestion, shared source-quality gates, durable source health, private live dashboard, source-candidate review queue, and bounded Firecrawl research workflow operate |
 | Verified employer channel (#113) | In progress | D1 trust/publishing controls, web employer workspace, reviewed registry, provenance, direct submissions, reports, and operator queues are implemented behind a disabled rollout flag; production migration, dashboard enablement, and pilot remain |
 | Mobile discovery MVP | In progress | Filtered feed, native deep-link alerts, official-form handoff, and tracker are polished |
@@ -28,7 +28,7 @@
 | Human-reviewed application assistance | In progress | Headed pilot fills a supported official form, pauses for unknowns and verification, and leaves final submission to the user |
 | Headless application preparation | Planned | Isolated runner reuses proven mappings, supports live user handoff, and never bypasses verification or non-partner submission controls |
 | Trust and release readiness | In progress | Approved public policies and support routes are live, and the disclosure worksheet, consent, retention enforcement, and release checks are deployed; store-console entry, final archive reconciliation, and physical-device acceptance remain |
-| Cloudflare platform migration | In progress | Cloudflare infrastructure is live, the source backfill and grouped D1 projection are verified, the production mobile environment targets the Worker, and retained AWS rollback data is preserved |
+| Cloudflare platform migration | Complete | Cloudflare infrastructure is live, the source backfill and grouped D1 projection are verified, every EAS environment targets the Worker, and retired AWS deployment paths are removed |
 | D1-protected pipeline | In progress | Observation-only Durable Object permit controller and additive resumable-run schema are covered by local tests; owner-reviewed infrastructure, alerts, queue lanes, and R2 read-model parity remain pending |
 | Closed beta | Planned | 30–50 student test cohort and agreed success metrics |
 | Public release | Planned | TestFlight/Play validation complete and catalog reliability meets target |
@@ -38,13 +38,11 @@
 ### Codex
 
 - [x] Implement the Cloudflare replacement substrate with Workers, D1, R2, Queues, Cron Triggers, provider v5 Terraform, Cloudflare-native mobile authentication, and local end-to-end smoke coverage.
-- [x] Provision the Cloudflare account, apply remote D1 migrations and Worker secrets, verify the source backfill, and cut the production mobile environment over with an AWS rollback window.
+- [x] Provision the Cloudflare account, apply remote D1 migrations and Worker secrets, verify the source backfill, cut every mobile environment over, and retire AWS deployment paths.
 - [x] Bound sparse grouped-catalog filter scans, reconcile legacy notification markers through durable Expo receipts, isolate iOS plain-text accessibility state from secure authentication fields, and make account switching/sign-out race-safe with server-side session revocation.
 - [x] Roll every configured GitHub board to its live 2027 repository contract, preserve source health across HTTP 304 responses, roll expired list-wide seasons forward, and defer or guardedly recover notification markers when no opted-in device exists.
 - [x] Move push tokens, alert filters, and notification wording to an anonymous installation identity so signing in, signing out, and account deletion do not control device notifications.
 - [x] Collapse one employer's posting day into a single catalog card and a single alert: roles that arrive later join the drop that is already open instead of becoming their own cards, a later alert reads "N roles added to <employer>" and opens that same card, and each user's card, count, and delivery hold only the roles their own filter matches.
-- [ ] Export any recoverable AWS development data after the suspended account is reactivated; do not block the source-backed development cutover on that export.
-
 - [ ] Continuously discover and verify the broadest practical employer set, then prioritize active sources by technical early-career relevance and international/student-friendly coverage.
 - [x] Implement issue #113's staged verified-employer channel behind `EMPLOYER_PORTAL_ENABLED`, including organization roles, domain challenges and human review, immutable audits, D1-reviewed source registry, metadata proposals, direct submissions, public employer provenance, reports, quarantine/revocation, and explicit automatic-publishing enablement.
 - [x] Land #107's bounded JSON-LD, job-sitemap, and explicit embedded-payload connector with reviewed D1 admission, shadow polling, complete-snapshot reconciliation, public-host enforcement, and `official-structured` provenance; the measured employer pilot remains part of the #113 rollout.
@@ -95,7 +93,7 @@
   - [x] Implement and deploy housing support/cost evidence and detail display, broader metadata correctness checks, additional pay formats, and explicitly reviewed omissions with atomic evidence/review guards (migrations 0018–0019). V9 corrects adjacent pay/benefit attribution found during production collection. Historical publication requires the remaining rollout gates below.
   - [x] Preserve accepted metadata during mixed-version refresh, require full source re-extraction after parser/preprocessing changes, report and gate deferred projections, retain source pay-tier boundaries, and recover exact Greenhouse APIs after staged browser inspection without cross-job admission writes. Runtime `fba716c` is deployed; failed destinations and source refreshes still require production validation.
   - [x] Fix live QA findings: v10 excludes Varda's cell-phone reimbursement from salary without dropping wages/housing; web controls expose accessible states, inactive guest screens leave the keyboard order, and company coverage wraps at 320px. Runtime `eee0205` and web `9e55df6` are deployed; fresh v10 collection and historical publication remain gated.
-  - [x] Check all three EAS API environments and local mobile configuration against the Cloudflare Worker; correct development/preview targets while retaining AWS rollback resources. Native binaries require a separately approved rebuild.
+  - [x] Check all three EAS API environments and local mobile configuration against the Cloudflare Worker and correct development/preview targets. Native binaries require a separately approved rebuild.
   - [x] Complete the initial 100-role blind sample and 30-role holdout with independently adjudicated evidence and explicit unresolved cases; add v12 authority/currency regressions and bounded large-cohort D1 audits/repairs. Validate native live housing/pay and the large-text Apply layout on iPhone Simulator.
   - [x] Correct explicit housing cadence, application-scoped rolling/numeric deadlines, role-scoped work modes and yearless publication timestamps in v13; preserve unknowns, negations and conditions with regression fixtures.
   - [x] Add field-level production evaluations and make exact-revision shadow receipts project reviewed location/work-mode evidence without changing notifications; schema v5 canonicalizes work modes and treats absent fields in truncated inputs as incomplete.
@@ -122,7 +120,7 @@
 - [x] Audit 25 representative employers through the GitHub Markdown ingestion and poller pipeline.
 - [x] Add a provider-neutral company-coverage snapshot, public search API, and responsive web disclosure seeded from live internship evidence and reviewed ATS registries.
 - [x] Implement the Greenhouse source adapter, admission gates, deterministic fixtures, and live contract tests.
-- [x] Add the SQS-backed Greenhouse shadow/published runner with thirty-minute published polling, three-hour shadow polling, bounded per-board concurrency, isolated retries, alarms, and a quiet promotion baseline.
+- [x] Add the Cloudflare Queue-backed Greenhouse shadow/published runner with thirty-minute published polling, three-hour shadow polling, bounded per-board concurrency, isolated retries, telemetry, and a quiet promotion baseline.
 - [x] Publish the 166-board API-responsive Greenhouse inventory and admit 20 additional ownership-verified boards to production shadow monitoring, with current board identities, observed host allowlists, and per-source quiet baselines.
 - [x] Add a private operations dashboard for all official Greenhouse sources with per-run volume, withheld rows, redacted diagnostics, queue/DLQ and alarm status, plus deterministic quarantine and recovery.
 - [x] Add bounded 512-KiB application-page evidence, quarantine-enforced scheduling, protected selective operations for all six Cloudflare DLQs, and exact GitHub queue failure attribution.
@@ -134,7 +132,7 @@
   - [ ] Deploy the Worker/Terraform binding update and update the separately deployed private monitoring console to render `providers`, unavailable integrations, and only advertised controls before closing #28.
 - [ ] Add the Greenhouse batch re-probe and post-publication ownership-review workflow described in [`greenhouse/registry-expansion-plan.md`](greenhouse/registry-expansion-plan.md).
 - [x] Implement Lever source adapter, ETag checkpoints, technical-role mapping, and deterministic fixtures for Palantir, PlusAI, Hermeus, and Xsolla.
-- [x] Add the SQS-backed Lever shadow/published runner with thirty-minute published polling, three-hour shadow polling, bounded per-board concurrency, isolated retries, alarms, and quiet promotion.
+- [x] Add the Cloudflare Queue-backed Lever shadow/published runner with thirty-minute published polling, three-hour shadow polling, bounded per-board concurrency, isolated retries, telemetry, and quiet promotion.
 - [x] Standardize Greenhouse, Lever, general Markdown, and Quant Markdown behind neutral complete snapshots, shared processing, stable source occurrences, two-success closure reconciliation, deterministic outbox IDs, and durable source health.
 - [x] Complete Lever monitoring with shadow and published health, regional metrics, freshness incidents, bounded backoff, shared operator controls, dashboards, and recovery runbooks.
 - [x] Verify ETag behavior across representative Greenhouse and Lever boards, repair Greenhouse 304 classification, remove Lever's ineffective conditional path, and emit sanitized conditional-request metrics.
@@ -149,7 +147,7 @@
 - [x] Add Ashby application-assistance route detection and headed-browser workflows after runtime promotion; this remains separate from source ingestion. Published reviewed boards are eligible automatically.
 - [x] Add human-readable source tags to default internship notifications for community job boards and published Greenhouse, Lever, and Ashby sources.
 - [x] Add job freshness, verified employer-posted versus unverified source-reported versus InternNotifs-found timing across mobile, responsive web, and alerts, official/community provenance labels to role details and every catalog or saved-role card, filter-match explanations, hybrid New/New here status, and duplicate-safe notification deep links, including closed and unavailable states.
-- [x] Add migration-safe structured internship/posting identity, conservative ATS alias reconciliation, grouped catalog/release APIs, permanent delivery-claim semantics, quiet-hours release modeling, and the reusable encrypted SNS/SQS notification construct.
+- [x] Add migration-safe structured internship/posting identity, conservative ATS alias reconciliation, grouped catalog/release APIs, permanent delivery-claim semantics, quiet-hours release modeling, and the reusable notification pipeline that preceded the Cloudflare cutover.
 - [ ] Activate the grouped notification construct with production batch workers, TestFlight-owner allowlisting, Firehose/Athena audit exports, and measured 15-second p95 delivery before disabling the legacy direct sender globally.
   - [x] Wire the production stream, aggregation, flush, personalized push/email, receipt, release-deep-link, and materialized catalog workers in infrastructure.
   - [ ] Execute the guarded identity/receipt migration, deploy to an owner-only cohort, export delivery audits, and measure the 15-second p95 gate.
@@ -174,10 +172,7 @@
 
 - [x] Recreate the official reference icon as an editable vector and configure matching website favicon, Apple touch icon, and native iOS assets for the next TestFlight build.
 
-- [ ] Reactivate AWS account `628031636041` long enough to export retained development data and approve the final Cloudflare cutover; do not delete retained resources during migration.
-
 - [ ] Connect a GitHub account/repository with permission to create a GitHub Project and issues.
-- [ ] Create a deploy-only AWS role or Identity Center permission set; stop using root credentials for deployment.
 - [ ] Decide the default geographic emphasis for discovery ranking and the mobile experience; do not gate source verification on a hand-selected roster.
 - [x] Approve the live privacy, terms, retention, and source/correction policies and confirm `onlinestuff309@gmail.com` as the public support mailbox on 2026-08-26.
 - [ ] Enroll in Apple Developer Program and Google Play Console when beta builds are ready.

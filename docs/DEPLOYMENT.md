@@ -70,8 +70,8 @@ workflow artifacts.
 Supply the Cloudflare R2 S3-compatible endpoint and bucket-scoped credentials
 through the operator environment. OpenTofu uses `AWS_*` variable names solely
 because its R2 state backend is S3-compatible; these are Cloudflare R2
-credentials, not credentials for the retained AWS account. Use a dedicated
-shell so they cannot be confused with legacy AWS access:
+credentials, not credentials for another cloud provider. Use a dedicated
+shell so the S3-compatible variable names are not mistaken for AWS access:
 
 ```bash
 export AWS_ACCESS_KEY_ID='bucket-scoped R2 access key ID'
@@ -513,7 +513,7 @@ baseline.
 
 On failure, keep the additive schema and evidence history. Revert the Worker
 and configuration through OpenTofu, then use superseding review decisions and
-a new guarded repair. Do not delete operational records or deploy retained AWS
+a new guarded repair. Do not delete operational records or revive retired infrastructure
 stacks.
 
 ### Issue #231 production foundation (2026-09-14)
@@ -606,15 +606,15 @@ resume safely; source and delivery history remain intact.
 Never delete qualification evidence, source occurrences, identity decisions,
 notification tombstones, outbox rows, saves, or delivery history.
 
-Greenhouse, Lever, and Ashby use dedicated half-hour EventBridge schedules,
-dispatcher Lambdas, FIFO work queues, two-minute workers, and dead-letter
-queues. Published boards are checked every thirty minutes whether active or
-quiet; shadow boards are staggered across three-hour checks. See
+Greenhouse, Lever, and Ashby use provider-specific Cloudflare Queues and
+staggered Cron triggers in the ingestion Worker. Published boards are checked
+every thirty minutes whether active or quiet; shadow boards are staggered
+across three-hour checks. See
 [`greenhouse/architecture.md`](greenhouse/architecture.md) for the complete
 shadow, promotion, retry, and alarm flow.
 
-The seven GitHub community feeds run through the general poll Lambda every ten
-minutes. Shadow checkpoints remain isolated and cannot publish jobs or
+The seven GitHub community feeds run through their own Queue on the ingestion
+Worker. Shadow checkpoints remain isolated and cannot publish jobs or
 notifications.
 
 The direct-provider discovery-latency objective is a normal maximum of thirty
@@ -677,104 +677,6 @@ local iOS build. Expo Doctor's generic `appConfigFieldsNotSyncedCheck` is
 disabled for this documented manually managed workflow; its package-version
 and all other checks remain enabled.
 
-## Catalog index audit and repair
-
-The public catalog reads DynamoDB's `openJobsIndex`, so the stored job state and
-the sparse open/closed index attributes must agree. A daily scheduled audit
-checks every canonical job and emits `InternNotifs/Catalog / CatalogIndexMismatchCount`.
-The `CatalogIndexMismatchAlarm` warns on any mismatch or a missing daily audit.
-
-Resolve the retained production table from the stack output; never copy a
-generated physical table name into scripts or documentation:
-
-```bash
-export AWS_PROFILE=intern-notifs
-INTERNSHIPS_TABLE="$(aws cloudformation describe-stacks \
-  --stack-name InternNotifs \
-  --query 'Stacks[0].Outputs[?OutputKey==`InternshipsTableName`].OutputValue | [0]' \
-  --output text)"
-export INTERNSHIPS_TABLE
-```
-
-The command is read-only by default. Record its exact `mismatches`, `byKind`,
-and `repairToken` result before making changes:
-
-```bash
-npm run audit:catalog-index
-```
-
-Repair is deliberately guarded by that count and token. It rescans the whole
-table and refuses to write if the affected records or their relevant state
-changed between commands. Each index repair is also a narrow conditional update,
-so a concurrent catalog write is preserved and makes the repair stop for a fresh
-audit instead of being overwritten:
-
-```bash
-npm run migrate:open-index -- --repair --expected-mismatches EXACT_COUNT --expected-repair-token EXACT_TOKEN
-npm run audit:catalog-index
-```
-
-After deploying catalog search, backfill the normalized search text and source
-classes once so roles imported before the release are searchable immediately:
-
-```bash
-npm run migrate:catalog-search -- --apply
-```
-
-The final audit must report zero mismatches. It verifies that open technical
-jobs use `openPk=OPEN` and `recency-rank#catalogVisibleAt#jobId` as `openSk`,
-closed technical jobs use `closedPk=CLOSED` and `lastSeenAt#jobId` as `closedSk`,
-and nontechnical jobs use neither sparse index. Finally, paginate `GET /jobs` to
-exhaustion and confirm the repaired job IDs occur in the response; preserve each
-returned `cursor` as the next request's `cursor` query parameter.
-
-### 2026-08-09 Ashby catalog-recency repair
-
-Run this one-time repair after deploying catalog-recency-aware code. It selects
-only quiet, unnotified jobs created on 2026-08-09 whose first exact source
-attachment is one of the reviewed Ashby sources. An Ashby occurrence later
-attached to an existing community job is not a candidate.
-
-The default mode is read-only. Save the exact `candidates`, `candidateJobIds`,
-and deterministic `repairToken` output:
-
-```bash
-npm run migrate:catalog-recency
-```
-
-Review every candidate, then apply only with the dry-run guards. Each write is a
-narrow conditional update and stops if the job, its source attachments, its
-notification state, or its timestamps changed concurrently:
-
-```bash
-npm run migrate:catalog-recency -- --apply --expected-count EXACT_COUNT --expected-repair-token EXACT_TOKEN
-npm run migrate:catalog-recency
-```
-
-After an unrestricted apply, the second dry run must report zero candidates.
-
-If review finds any same-day role that was not part of an initial baseline,
-rerun the dry run with the exact approved subset by repeating
-`--candidate-job-id JOB_ID` for every approved job. Use the count and token from
-that narrowed dry run, and repeat the same job-ID arguments on apply. The command
-rejects IDs that are no longer candidates, so a typo or stale selection cannot
-silently broaden the repair.
-
-```bash
-npm run migrate:catalog-recency -- --candidate-job-id JOB_1 --candidate-job-id JOB_2
-npm run migrate:catalog-recency -- --apply --candidate-job-id JOB_1 --candidate-job-id JOB_2 \
-  --expected-count 2 --expected-repair-token NARROWED_TOKEN
-```
-
-After a narrowed apply, an unrestricted dry run must list exactly the reviewed
-and intentionally excluded IDs; the approved IDs are no longer candidates.
-Next run the catalog-index audit and guarded open-index repair described above so
-all legacy normal rows receive explicit metadata and ranked keys. Verify
-`GET /jobs` page by page: normal roles must appear newest-first before all
-baseline roles. Also verify a signed-in opening interval does not return any
-repaired baseline job IDs. Production execution is an operator action separate
-from deployment and this code change.
-
 ### Posting identity D1 repair
 
 Deploy migrations `0010_posting_identity.sql`,
@@ -788,8 +690,7 @@ approvals use the same provider-neutral registry.
 Unrecognized URL families remain source-local and enter the sanitized review
 queue; they do not mint cross-source aliases. Legacy IDs can resolve through
 permanent one-hop aliases only after guarded consolidation. The operational
-repair runs only against active D1; retained DynamoDB resources are
-rollback/export sources and must not receive this repair.
+repair runs only against active D1.
 
 The default command calls the protected Worker endpoint in read-only mode. It
 builds identity from reviewed source occurrences, provider IDs, and active
@@ -1038,206 +939,21 @@ text, card/detail/Saved labels, grouped unconfirmed counts, and individual and
 grouped push copy on iOS and Android. The owner performs physical-device QA and
 approves both the guarded production manifest and the flag change.
 
-After the infrastructure deployment, wait for `CatalogGroupProjectionSchedule`
-or invoke the notifier once with `{"command":"refresh-catalog-groups"}`. Verify
-`GET /catalog?limit=1` and one returned `/catalog/groups/{groupId}` before
-enabling an owner cohort.
-Set the deployment parameter to a comma-separated list of reviewed Cognito user
-IDs for that cohort. The main stack publishes the same versioned cohort to
-`/intern-notifs/grouped-notification-user-ids`; the Greenhouse, Lever, and Ashby
-workers read that parameter so a cohort user cannot receive both legacy and
-grouped delivery. Leave it blank to keep every user on legacy delivery; use `*`
-only after cohort measurement approves the global cutover. Every legacy and
-grouped sender reads this same SSM value at runtime. First deploy the new code
-with an empty cohort, then deploy all three provider stacks. Wait for in-flight
-poll and delivery queues to drain before the final parameter-only activation so
-one discovery event cannot straddle the cohort boundary:
+After the Cloudflare deployment, wait for the next ingestion Cron cycle and
+maintenance pass. Verify `GET /catalog?limit=1`, one returned
+`/catalog/groups/{groupId}`, and the resulting release and receipt records
+before enabling publication. Cloudflare does not use the retired SSM cohort or
+provider-specific stack activation procedure.
 
-```bash
-npm run cdk -- deploy InternNotifs --parameters GroupedNotificationUserIds=
-npm run cdk -- deploy InternNotifsGreenhouse InternNotifsLever InternNotifsAshby
-npm run cdk -- deploy InternNotifs --parameters GroupedNotificationUserIds=OWNER_COGNITO_USER_ID
-```
+## Provider monitoring verification
 
-## Notification delivery log
-
-Delivery receipts are the durable record of attempted Expo pushes. Reconstruct
-the privacy-safe delivery timeline by resolving the retained tables from the
-`InternNotifs` stack, then running:
-
-```bash
-export AWS_PROFILE=intern-notifs
-export INTERNSHIPS_TABLE="$(aws cloudformation describe-stacks --stack-name InternNotifs --query 'Stacks[0].Outputs[?OutputKey==`InternshipsTableName`].OutputValue | [0]' --output text)"
-export USERS_TABLE="$(aws cloudformation describe-stacks --stack-name InternNotifs --query 'Stacks[0].Outputs[?OutputKey==`UserDataTableName`].OutputValue | [0]' --output text)"
-npm run notifications:log -- --since 2026-08-11T00:00:00.000Z
-```
-
-Use `--company TikTok` for a case-insensitive company filter and `--limit 100`
-to bound returned entries. The report includes current receipt status, the full
-role identity, the title users saw, source IDs, strong duplicate application
-identities, softer cross-location role families, and repeated rendered titles.
-It deliberately excludes user IDs, push tokens, and Expo ticket IDs.
-
-New deployments also emit structured `notification_sent`,
-`notification_failed`, `notification_skipped_duplicate`,
-`push_receipt_confirmed`, and `push_receipt_failed` CloudWatch events. The
-`recipientKey` is a short one-way hash used only to correlate delivery events.
-
-Delivery deduplication uses a confidence ladder. Known Greenhouse, Lever,
-Ashby, Workday, TikTok, and ByteDance URLs are keyed by provider and immutable
-posting ID, then protected by a conditional DynamoDB claim. Unknown providers
-fall back to the fully normalized application URL. Employer/title/season role
-families intentionally remain diagnostic-only so regional requisitions are not
-silently discarded.
-
-## Legacy AWS rollback/export reference
-
-AWS is not an active deployment target. The commands in this legacy reference
-are for an owner-approved export or rollback recovery only; ordinary deployment,
-operations, and verification use Cloudflare. Do not run these commands unless
-the owner explicitly authorizes legacy AWS work.
-
-```bash
-aws sts get-caller-identity
-```
-
-From the repository root:
-
-```bash
-npm install
-npm run lint
-npm run typecheck
-npm test
-npx cdk deploy -c githubRepository=JDKrasnick/intern-notifs -c emailAddress=DEPLOYMENT_EMAIL
-```
-
-The deployment email and SSM runtime configuration are operational values; retrieve them from the approved AWS/EAS configuration, not from source control. The stack retains durable data resources. Never use destructive CDK commands or replace retained tables/buckets without explicit approval.
-
-### Greenhouse monitoring deployment
-
-Deploy Greenhouse monitoring independently. The stack imports the retained
-tables from `InternNotifs` and owns only the Greenhouse scheduler, dispatcher,
-queues, worker, alarms, and the source-health operations API.
-
-```bash
-INTERNSHIPS_TABLE="$(aws cloudformation describe-stacks \
-  --stack-name InternNotifs \
-  --query 'Stacks[0].Outputs[?OutputKey==`InternshipsTableName`].OutputValue | [0]' \
-  --output text)"
-USERS_TABLE="$(aws cloudformation describe-stacks \
-  --stack-name InternNotifs \
-  --query 'Stacks[0].Outputs[?OutputKey==`UserDataTableName`].OutputValue | [0]' \
-  --output text)"
-
-npx cdk diff InternNotifsGreenhouse \
-  -c target=greenhouse \
-  -c internshipsTableName="$INTERNSHIPS_TABLE" \
-  -c usersTableName="$USERS_TABLE" \
-  -c emailAddress=DEPLOYMENT_EMAIL
-
-npx cdk deploy InternNotifsGreenhouse \
-  -c target=greenhouse \
-  -c internshipsTableName="$INTERNSHIPS_TABLE" \
-  -c usersTableName="$USERS_TABLE" \
-  -c emailAddress=DEPLOYMENT_EMAIL
-```
-
-Review the diff before deploying. A Greenhouse-only diff must not replace or
-delete resources in `InternNotifs`. The architecture and operating limits are
-documented in
-[`greenhouse/architecture.md`](greenhouse/architecture.md).
-
-The stack also creates a retained operations secret and a rate-limited,
-server-to-server operations API. The private Sites dashboard stores that API
-key as `OPERATIONS_API_KEY`; it is never exposed to the browser. Each worker
-attempt records raw, eligible, and withheld row counts plus a redacted
-diagnostic and the 25 most recent runs. The dashboard lists every official
-source, including sources with no current jobs.
-
-Operator sign-in uses the dedicated `OperationsUserPoolClientId` owned by the
-durable `InternNotifs` stack. Configure the Sites dashboard's
-`OPERATIONS_CLIENT_ID` from that output. Do not reuse the mobile client or move
-the operations client into a provider monitoring stack; either change can break
-dashboard sign-in during an otherwise unrelated monitoring deployment.
-
-The stack sends one combined Greenhouse, Lever, and main-pipeline monitoring reminder at
-9:00 AM America/New_York every Monday. The email uses the existing verified
-deployment address and includes current dead-letter depth, failed extractions,
-stale or quarantined sources, all application alarms, legacy notification
-backlog, and queue depth. The shared dashboard includes the same main-pipeline
-alarms, including a warning when a poll exceeds three minutes. It is suppressed
-after the shared monthly checklist is complete and resumes automatically in the
-next calendar month.
-
-Quarantine is deterministic and conservative: identity/schema failures and
-permanent 401/403/404 responses quarantine immediately; broad link, quality, or
-empty-response failures quarantine after two consecutive attempts. A clean
-attempt restores the source. Zero eligible internships, unrelated jobs, and
-single transient transport failures do not quarantine a source.
-
-### Lever monitoring deployment
-
-Reuse the table names resolved above, then deploy the independent Lever
-scheduler, dispatcher, queues, worker, and alarms:
-
-```bash
-npx cdk diff InternNotifsLever \
-  -c target=lever \
-  -c internshipsTableName="$INTERNSHIPS_TABLE" \
-  -c usersTableName="$USERS_TABLE"
-
-npx cdk deploy InternNotifsLever \
-  -c target=lever \
-  -c internshipsTableName="$INTERNSHIPS_TABLE" \
-  -c usersTableName="$USERS_TABLE"
-```
-
-A Lever-only diff must not replace or delete resources in `InternNotifs`.
-
-The Lever stack publishes its work and dead-letter queue URLs under
-`/intern-notifs/operations/lever/` in Parameter Store. The existing shared
-operations API reads those parameters, so `monitoring.jdkrasnick.com` shows
-Greenhouse and Lever sources together and can replay one source without a
-provider-specific console. Deploy `InternNotifsGreenhouse` after this change to
-grant the shared API access to the Lever queue parameters and action route.
-
-After both monitoring stacks are deployed, confirm:
-
-- the `InternNotifs-Lever` CloudWatch dashboard is present;
-- the active-source freshness alarm has data within one scheduler cycle;
-- `GET /operations/sources` lists Greenhouse, Lever, Ashby, and GitHub in `providers`, with live fleet telemetry or an explicit unavailable reason;
-- the separately deployed shared operations pane renders those provider sections and only the `sourceActions` and `workflows` each provider advertises;
-- pause, resume, and replay work for one shadow source from each provider;
-- the monthly monitoring checklist persists after a refresh; and
-- a test invocation of the monitoring reminder reaches the deployment address.
-
-### Ashby monitoring deployment
-
-Ashby is a separate retained-table stack. Review the admission manifest before
-deployment; every source must be reviewed and must enter in `shadow`:
-
-```bash
-npm run ashby:manifest
-
-npx cdk diff InternNotifsAshby \
-  -c target=ashby \
-  -c internshipsTableName="$INTERNSHIPS_TABLE" \
-  -c usersTableName="$USERS_TABLE"
-
-npx cdk deploy InternNotifsAshby \
-  -c target=ashby \
-  -c internshipsTableName="$INTERNSHIPS_TABLE" \
-  -c usersTableName="$USERS_TABLE"
-```
-
-An Ashby-only diff must not replace or delete resources in `InternNotifs`. The
-stack publishes queue URLs under `/intern-notifs/operations/ashby/`. Redeploy
-`InternNotifsGreenhouse` after the Ashby stack so the shared operations Lambda
-has the expanded queue IAM policy and includes Ashby sources.
-
-Use [`ashby-monitoring-runbook.md`](ashby-monitoring-runbook.md) for shadow
-verification, recovery, per-board promotion, and rollback. Do not promote a
-board merely because deployment succeeded.
+Greenhouse, Lever, Ashby, and GitHub ingestion share the
+`intern-notifs-ingestion` Worker, D1, and provider-specific Cloudflare Queues.
+Deploy them together through the reviewed OpenTofu plan described above. After
+deployment, verify `GET /operations/sources` reports every provider, exercise
+pause, recover, resume, and replay on one shadow source, and compare every queue
+and DLQ depth before and after the test. Provider admission manifests remain
+required; deployment success alone never promotes a source.
 
 ## EAS environments
 

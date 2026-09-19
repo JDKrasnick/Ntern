@@ -4,9 +4,9 @@ on:
     paths: &greenhouse_paths
       - 'src/sources/greenhouse*'
       - 'src/greenhouse-*'
-      - 'infra/intern-notifs-stack.ts'
-      - 'infra/greenhouse-monitoring-stack.ts'
-      - 'infra/app.ts'
+      - 'cloudflare/ingestion-worker.ts'
+      - 'wrangler.ingestion.jsonc'
+      - 'infra/cloudflare/**'
       - 'docs/greenhouse/**'
       - 'src/sources/index.ts'
       - 'src/sources/quality.ts'

@@ -4,8 +4,9 @@ on:
     paths: &lever_paths
       - 'src/sources/lever*'
       - 'src/lever-*'
-      - 'infra/lever-monitoring-stack.ts'
-      - 'infra/app.ts'
+      - 'cloudflare/ingestion-worker.ts'
+      - 'wrangler.ingestion.jsonc'
+      - 'infra/cloudflare/**'
       - 'docs/lever-*'
       - 'src/sources/index.ts'
       - 'src/sources/quality.ts'

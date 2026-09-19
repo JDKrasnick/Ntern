@@ -1,9 +1,8 @@
 # Ashby monitoring runbook
 
-The `InternNotifsAshby` stack is an independently deployable polling plane over
-the retained internship and user tables. It owns a staggered half-hour
-scheduler, dispatcher, encrypted FIFO work queue, worker, work DLQ, scheduler
-DLQ, four alarms, a dashboard, and operations-discovery parameters.
+Ashby polling runs in the `intern-notifs-ingestion` Worker on staggered Cron
+dispatch. It uses the provider-specific Ashby Queue and DLQ, D1 checkpoints and
+source health, Worker observability, and the shared operations API.
 
 ## Admission before deployment
 
@@ -78,7 +77,7 @@ unique clean snapshot run IDs spanning at least 24 hours, their counts and link
 results, stable identity and host approvals, and the named quiet-baseline
 approval. Then change only that individually qualified source from `shadow` to
 `published`, review the config diff, rerun the manifest and focused tests, and
-deploy `InternNotifsAshby`. The manifest rejects publication when this evidence
+deploy the ingestion Worker through OpenTofu. The manifest rejects publication when this evidence
 is absent or incomplete. A single deployment may contain several independently
 approved promotions.
 
@@ -125,5 +124,5 @@ preserve per-source ordering.
 To roll back publication, change the affected source back to `shadow` and deploy
 Ashby. This stops catalog writes without blocking other boards. Do not delete
 shared tables, checkpoints, or source occurrences. If the entire fleet is
-unsafe, disable the Ashby schedule or pause all Ashby sources, then redeploy or
-roll back only `InternNotifsAshby`.
+unsafe, pause all Ashby sources, then deploy a reviewed ingestion-Worker rollback
+through OpenTofu without changing the API Worker or durable data.
