@@ -1,0 +1,73 @@
+name: One-off role-metadata publication
+
+# Manual, guarded publication of the evidence the metadata collection stages.
+# Collection writes staged evidence and never a public job; this is the step that
+# publishes it. Runs in the deploy environment so the operations key stays in the
+# repository's secret store rather than on a workstation.
+#
+# The dry-run is the preview and its own gate: it stages the repair plan and
+# returns 409 while any conflict, deferred projection, or incomplete collection
+# coverage remains. `apply` is only attempted on a 200 dry-run, and only with the
+# exact token and counts that dry-run produced, so the endpoint's own
+# token/count guards stay in force. A dry-run changes no public job.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Publish the staged evidence (true), or preview only (false)
+        required: true
+        default: 'false'
+      cursor:
+        description: Optional collection cursor for a probe run; empty means none
+        required: false
+        default: ''
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: cloudflare-workers-production
+      url: https://intern-notifs.jdkrasnick.workers.dev
+    env:
+      OPERATIONS_SHARED_SECRET: ${{ secrets.OPERATIONS_SHARED_SECRET }}
+      CATALOG_API_URL: ${{ vars.PUBLIC_API_URL }}
+      APPLY: ${{ inputs.apply }}
+      CURSOR: ${{ inputs.cursor }}
+    steps:
+      - name: Preview, then publish only when the preview is clean
+        shell: bash
+        run: |
+          set -uo pipefail
+          test -n "$OPERATIONS_SHARED_SECRET" || { echo 'OPERATIONS_SHARED_SECRET is unavailable'; exit 1; }
+          call() {
+            curl -sS -o /tmp/body -w '%{http_code}' -X POST "$CATALOG_API_URL/internal/role-metadata/backfill" \
+              -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
+              -H 'Content-Type: application/json' -d "$1" || echo 000
+          }
+          if test -n "$CURSOR"; then payload="{\"action\":\"dry-run\",\"cursor\":\"$CURSOR\"}"; else payload='{"action":"dry-run"}'; fi
+          status=$(call "$payload")
+          echo "=== dry-run status=$status"
+          cat /tmp/body | jq . 2>/dev/null || cat /tmp/body
+          if test "$status" != 200; then
+            echo '::notice::Dry-run reported blockers; nothing published. The endpoint returns 409 while conflicts, deferred projections, or incomplete collection coverage remain.'
+            exit 0
+          fi
+          token=$(jq -r '.repairToken // empty' /tmp/body)
+          expected_jobs=$(jq -r '.expectedJobs // empty' /tmp/body)
+          expected_occurrences=$(jq -r '.expectedOccurrences // empty' /tmp/body)
+          echo "repairToken present: $(test -n "$token" && echo yes || echo no); expectedJobs=$expected_jobs expectedOccurrences=$expected_occurrences"
+          if test "$APPLY" != true; then echo 'Preview only; set apply=true to publish.'; exit 0; fi
+          test -n "$token" || { echo '::error::Dry-run returned no repair token'; exit 1; }
+          status=$(call "{\"action\":\"apply\",\"repairToken\":\"$token\",\"expectedJobs\":${expected_jobs:-0},\"expectedOccurrences\":${expected_occurrences:-0}}")
+          echo "=== apply status=$status"
+          cat /tmp/body | jq . 2>/dev/null || cat /tmp/body
+          test "$status" = 200 || { echo '::error::Apply did not succeed'; exit 1; }
+      - name: Report coverage after the publish
+        if: ${{ inputs.apply == 'true' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          curl -sS -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
+            "$CATALOG_API_URL/internal/role-metadata/audit" | jq '{collectionCoverage, deferredProjections, verificationOutcomes}' 2>/dev/null \
+            || echo 'Audit unavailable; re-run the workflow to inspect.'
