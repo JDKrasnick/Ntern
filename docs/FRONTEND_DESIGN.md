@@ -53,28 +53,6 @@ We’ll ask for notification permission next.
 
 The content starts 42 pt below the safe area, with a 20 pt gutter on both sides. The chips wrap naturally, but every chip keeps a 48 pt minimum height. The action is full-width and visually grounded.
 
-### Focused Editorial sample: catalog grid
-
-```text
-[ ⌕ Search roles, companies, locations              ✕ ]
-[ Filter roles 3 ]  [ Summer 2027 ✕ ] [ SWE ✕ ]  [ ⟳ Reset ]
-
-6 new roles since Thu    Freshly matched your alerts
-┌───────────────────────┐ ┌───────────────────────┐ ┌─────────
-│ SWE           ●New here│ │ AI/ML        ●New here│ │ Quant
-│ Acme Robotics          │ │ Acme Robotics         │ │ Northst…
-│ Software Eng. Intern   │ │ Machine Learning Int. │ │ Quantitat…
-│ Austin, TX · summer-27 │ │ Austin, TX · summer-27│ │ New York…
-│ $45/hour               │ │ $45/hour              │ │ $45/hour
-│ Found by Ntern 10h ago │ │ Found by Ntern 10h ago│ │ Found by…
-│ In queue        Hide  Queue │ │            Hide  Queue │ │    Hide  
-└───────────────────────┘ └───────────────────────┘ └─────────
-
-[▣ Roles]        [▤ Queue]        [⌕ Catalog]        [◯ Profile]
-```
-
-Navigation, search, headers, tokens, the newness lane, and tiles all align to the same 20 pt edge. Tiles are 14 pt radius with a one-pixel slate border and a 12 pt gap—no floating or shadow-heavy treatment. The grid shows two columns on a phone, three on a tablet, and four on a wide desktop, and every tile footer names its own action.
-
 ### Focused Editorial sample: settings
 
 ```text
@@ -133,15 +111,15 @@ Every screen follows these rules. They are as important as colors and type.
 5. Use `KeyboardAvoidingView` plus a scroll view for every form. The submit action must remain reachable with the keyboard open.
 6. Do not rely on a placeholder as a label. A visible label is required for profile and preference fields; onboarding may pair an obvious field label with a concise placeholder.
 7. Allow text to wrap rather than force long role or company names into fixed-height rows.
-8. Every tab renders one shared content column: centered, capped at 1120 pt, with the 20 pt gutter inside it, so switching tabs never moves the left edge. Row and text surfaces cap themselves at 760 pt *inside* that column and stay left-aligned, never re-centered. Only the catalog's queue sidebar changes the composition, and it keeps the same left edge by narrowing the feed column beside it. A tab whose body scrolls fills the column's height, so its list scrolls inside the column rather than growing past the viewport.
+8. Every tab renders one shared content column: centered, capped at 1120 pt, with the 20 pt gutter inside it, so switching tabs never moves the left edge. Row and text surfaces cap themselves at 760 pt *inside* that column and stay left-aligned, never re-centered. A tab whose body scrolls fills the column's height, so its list scrolls inside the column rather than growing past the viewport.
 
 ## Component recipes
 
 ### Bottom tab navigation
 
 - Fixed at the bottom of the app content, with a one-pixel top separator and safe-area space below it.
-- Four equal-width, 52 pt minimum targets: Roles, Queue, Catalog, and Profile.
-- Every tab combines a familiar icon with a short text label. Use a filled briefcase for the selected Roles tab, albums for Queue, search for Catalog, and person for Profile.
+- Four equal-width, 52 pt minimum targets: Roles, Queue, Discover, and Profile.
+- Every tab combines a familiar icon with a short text label. Use a filled briefcase for the selected Roles tab, albums for Queue, layers for Discover, and person for Profile.
 - Active tab: ink icon and label; inactive tabs: muted outline icon and label. Do not use a bottom-rule-only state or blue system buttons for navigation.
 - A tab bar is for moving among these four top-level areas, never for inline actions. Keep it visible while switching sections.
 - At 700 pt or wider, replace the bottom bar with the same four destinations in a compact left navigation rail; keep the shared content column (rule 8) centered beside it.
@@ -159,44 +137,6 @@ Every screen follows these rules. They are as important as colors and type.
 - Neutral: white surface, slate border, body-colored label.
 - Selected: pale teal surface with teal border and dark-teal label.
 - Excluded: pale red surface with red border; reserve this state for explicit exclusions only.
-
-### Catalog search and grid
-
-- The Catalog tab is search-first. A pinned query field owns the top of the screen: a leading search icon, a trailing clear control, and a placeholder that names what is searchable (*Search roles, companies, locations*). Focus is visible as a 2 pt teal border; the caret and text selection are teal.
-- Keep the field on the whole row at every width, with the filter control beside it; below 560 pt the filter control drops to its own line so the placeholder is never truncated.
-- Do not show a result count. A line reading *16 employers · 24 roles* between the filters and the grid states what the tiles already say, and the grid shows skeleton tiles while the first page arrives, so nothing needs a sentence to cover loading.
-- Active facets appear as removable teal tokens under the field, in the same words the filter sheet uses, followed by one **Reset**. Removing a token must leave every other facet untouched. Reset appears whenever the catalog is narrowed — by a typed query as much as by a facet — and clears both at once, so a reader who narrowed with two things does not have to hunt for two controls. It is also how a short, filtered list gets its scroll back: clearing the narrowing restores the full catalog. When nothing matches, the empty state names the query and offers **Clear search** or **Clear filters** rather than a dead end.
-- Results are a dense tile grid, not one tall column: 2 columns below 840 pt, 3 up to 1400 pt, 4 above, and 3 when the desktop queue sidebar is open. Compensate a row that is not full with invisible cells so tiles keep one width.
-- A tile is the compact form of a role card: discipline pill and **New here** marker, employer, role (up to three lines), location and season, compensation when known, the identity/closed notices, then a footer that names its own actions (**Hide**, **Queue**, or **In queue**). Tiles in a row are equal height and their footers align; use 14 pt radius and 13 pt padding for this denser form.
-- The tile surface keeps the card vocabulary: white surface, one-pixel soft border, teal employer text, ink role text, muted meta. A tap opens the role or the employer group exactly as the tall card does, and queue and hide mean the same thing in both forms.
-- On the web, `/` focuses the query field and `Esc` clears it.
-
-### Newness lane
-
-- Above the grid, and whenever the catalog holds any roles, show one horizontal lane of large tiles: **N new roles since <interval>** with **Freshly matched your alerts** when the release has something new, and **Newest roles in the catalog** with **The latest we are tracking** when it does not. The lane is the top of the catalog, not a second product.
-- **A search hides the lane**, and with it the rule below: once a reader is looking for something specific, the release band is between them and their results. A day chosen in the release calendar keeps the lane — it still describes what is new.
-- **A hairline closes the lane before the grid starts.** The band below is a different list, and the reader should never have to infer that from spacing alone. Use a one-pixel line of ink at about 20% — the near-invisible `separator` colour reads as an accident, not a boundary.
-- The lane slides continuously at about 45 pt/s — brisk and visibly in motion: it never rests on a tile and never rewinds. It renders the release over and over, so when its offset passes one full copy it drops by exactly that length and lands on identical pixels; that is what makes the loop endless. Every copy after the first is decoration and must be hidden from assistive technology.
-- One frame's travel is capped at 120 ms, so an app returning from the background resumes where it left off instead of lurching forward by the time it was away.
-- **Size the lane cards so the next one reads as a card, not as a sliver.** The band is the content column, so on a phone a card of about 232 pt leaves roughly a third of its neighbour in view; at 300 pt that neighbour was a strip of clipped words. The band plus its heading is the largest single block above the grid, and every point it gives back is another row the reader can see — measured at 393×852, trimming tile padding and the lane's own gaps moved the grid from 1.0 to about 1.25 visible rows.
-- **The lane must always hold at least one cycle of content more than the window shows.** A scroller cannot travel past the end of the content it has measured, so a lane that renders fewer copies than the window needs will stall against that edge for the rest of every lap and read as slowing down — not as stopped, which is what makes it so easy to misread. Size the copies from the window width and keep a spare for the cells a virtualized list has not laid out yet.
-- Hide those copies with `aria-hidden` as well as `accessibilityElementsHidden`: the latter is iOS-only and never reaches the web DOM, where the lane otherwise announces the release once per copy.
-- A scroll event is the reader taking the wheel only when it did not come from the belt's own write, and never during the first two seconds while the list settles its own layout. Getting this wrong makes the belt yield after every frame it writes, which is the lane sitting still by another route.
-- Auto-slide is a courtesy, never a cage: offer a **Pause** control beside the heading (48 pt, same as every other chip), and stop entirely under Reduce Motion, in a backgrounded tab, or while the surface is hidden. Never let it fight a reader's own dragging.
-- The lane yields to the reader and takes itself back. While they are dragging it, or within about a second of their last scroll, it holds; once they stop it picks up again from wherever they left it, without a jump. Never hold for a fixed period: a timer keeps the lane still long after the reader has finished with it, and sets it moving again while their finger is still on it. The reader's position may sit anywhere in the copies, and the release repeats every cycle, so resume from that position modulo one cycle.
-- Never loop a second row, never autoplay sound or video, and never badge the lane with a count a reader cannot act on.
-- Lane tiles are the same tiles at the larger size: they spell out their actions and add the freshness line. Only roles that are genuinely in the release carry the **New here** marker; grid tiles never claim newness without it.
-- **The lane never vanishes while the catalog has roles.** Leading it with the launch release alone made it disappear the moment a reader opened the catalog — the lens empties on that visit — and then never return for a reader who was simply caught up, or for a first-time reader, who has no lens at all. A belt that disappears reads as broken, not as caught up, so fall back to the newest roles the catalog holds when the release has nothing new. Only an empty catalog, or an active search, leaves the lane off screen. The Roles tab still owns the "nothing new" message; do not put a banner in the lane's place.
-
-### Release calendar
-
-- The catalog's release days are a calendar question, not a filter-sheet question. A small **Dates** control sits at the top right of the search spine and opens the month grid. Above 560 pt it floats over the grid; below that it expands in place under the spine, because a panel anchored to a control that sits mid-row hangs off a phone's screen edge. Either way it is not a modal and the grid never reflows around it.
-- A day has a *release* only when roles became visible that day. Days with releases show that day's role count; days without are inert and visibly quiet. Never offer an empty day as a choice.
-- Selecting a day fills it, closes the calendar, and narrows the catalog to that day's roles. The choice joins the other facets as one removable token, so **Reset** and the sheet stay the single place a reader un-narrows the list.
-- The day is read in **UTC** by default, so a role's release day is the same day for everyone and matches what alerts and release cards call it. The footer states which calendar is in force, and it never shows a bare count without saying what the count is.
-- **App & account → Release calendar dates** offers **UTC** or **Device time**. Device time is the reader's own clock, so a role that lands after local midnight counts toward the next day; changing it re-reads the calendar and any selected day.
-- Choosing a day that holds nothing for the current facets is not a dead end: the empty state names the day and offers **Clear day**.
-- The index request carries every other active facet, so the counts describe what the reader would actually see.
 
 ### Card
 
@@ -223,11 +163,10 @@ Every screen follows these rules. They are as important as colors and type.
 
 ### New roles
 
-- The Roles tab is the new-matches surface: it renders the launch inbox itself when the release contains roles, and a quiet empty state that links to the Catalog when it does not. Do not re-open the catalog behind the inbox or split the feed into new and seen sections.
+- The Roles tab is the new-matches surface: it renders the launch inbox itself when the release contains roles, and a quiet empty state whose **Review roles** action opens the Discover tab when it does not. Do not re-open the inbox behind another surface or split the feed into new and seen sections.
 - Cards use the existing role-detail sheet and official-form handoff, and the one secondary action is **Browse the catalog**.
 - Give each new card a small, one-time arrival moment: an 8 pt lift, a soft teal sheen that fades within 420 ms, and a compact sparkle-plus-**New** marker. Stagger only the first five cards by 80 ms; never loop, pulse, or use a full-card neon treatment. The marker closes the employer's row, after any discipline pills, so its position never depends on how long the employer's name is — a marker that rides the name is the one ragged edge a reader notices.
 - Honor the device Reduce Motion preference by showing the card and static **New** marker without movement. The treatment uses opacity and transforms so it stays smooth without making the list feel busy.
-- The Catalog tab carries the same release forward in its newness lane, so "new" means one thing across both surfaces.
 
 ### Posting identity certainty
 
@@ -253,7 +192,6 @@ Every screen follows these rules. They are as important as colors and type.
 ### Loading states
 
 - Use static, layout-matched skeletons instead of activity wheels or progress bars.
-- A loading catalog keeps the search spine still and shows tile-shaped skeletons in the same column count the resolved grid will use, so the layout does not jump.
 - Let the app-loading shapes reveal from top to bottom: each starts 10 pt lower, then rises and fades in once over 240 ms, with a 100 ms stagger. Keep the surrounding chrome still, and never loop the animation or add a shimmer sweep.
 - Respect Reduce Motion: show the completed skeleton layout immediately when it is enabled. The real roles should replace the shapes without an additional transition, keeping loading quick and legible.
 - A loading profile uses headline, field-label, input, and button shapes in the same 20 pt content column as the completed form.
