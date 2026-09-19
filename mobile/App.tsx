@@ -36,6 +36,7 @@ import { housingLabels, type DisplayHousingDetail } from "../shared/housing-disp
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
+import { discoveryDeck } from "./src/discovery";
 import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, laneSelection, type BeltItem } from "./src/newness-belt";
 import { loadCatalogFilters, saveCatalogFilters } from "./src/catalog-filter-storage";
 import { type EducationLevel } from "../shared/education-display";
@@ -2786,8 +2787,8 @@ function TabNavigation({
   rail = false,
   badgeCount = 0,
 }: {
-  active: "roles" | "queue" | "catalog" | "profile";
-  onChange: (tab: "roles" | "queue" | "catalog" | "profile") => void;
+  active: "roles" | "queue" | "catalog" | "discover" | "profile";
+  onChange: (tab: "roles" | "queue" | "catalog" | "discover" | "profile") => void;
   rail?: boolean;
   badgeCount?: number;
 }) {
@@ -2795,6 +2796,7 @@ function TabNavigation({
     { key: "roles", label: "Roles", icon: "briefcase-outline", activeIcon: "briefcase" },
     { key: "queue", label: "Queue", accessibilityLabel: "Apply queue", icon: "albums-outline", activeIcon: "albums" },
     { key: "catalog", label: "Catalog", accessibilityLabel: "Catalog search", icon: "search-outline", activeIcon: "search" },
+    { key: "discover", label: "Discover", accessibilityLabel: "Discover roles", icon: "layers-outline", activeIcon: "layers" },
     { key: "profile", label: "Profile", icon: "person-outline", activeIcon: "person" },
   ] as const;
   return (
@@ -3753,6 +3755,96 @@ function ProfileLoadingSkeleton() {
   );
 }
 
+/** A guest has no queue and no application records; stable identities so the
+ * deck's memo does not see a new Set on every render. */
+const EMPTY_JOB_IDS: Set<string> = new Set();
+const EMPTY_APPLICATION_STATUSES: Map<string, string> = new Map();
+
+/**
+ * The swipe section: the open roles nobody has decided on yet, one card at a
+ * time, acted on by the same gestures every other card already uses — left
+ * queues the role, right skips it on this device.
+ *
+ * Nothing is stored for the deck itself. It is the open roles minus whatever the
+ * reader has already decided, so a decision takes its own card away and the next
+ * one rises with no pointer to keep, and no way for the deck to disagree with the
+ * queue or the hidden list.
+ */
+function SwipeDeck({
+  jobs,
+  applicationStatuses,
+  queuedJobIds,
+  hiddenJobIds,
+  queuingJobIds,
+  onOpenRole,
+  onAddToQueue,
+  onHideLocally,
+  queueCount,
+  onOpenQueue,
+}: {
+  jobs: Job[];
+  applicationStatuses: Map<string, string>;
+  queuedJobIds: Set<string>;
+  hiddenJobIds: Set<string>;
+  queuingJobIds: Set<string>;
+  onOpenRole: (job: Job) => void;
+  onAddToQueue: (job: Job) => void;
+  onHideLocally: (job: Job) => void;
+  queueCount: number;
+  onOpenQueue: () => void;
+}) {
+  const remaining = useMemo(
+    () => jobs.filter((job) => job.open !== false && !hiddenJobIds.has(job.jobId) && !queuedJobIds.has(job.jobId)),
+    [jobs, hiddenJobIds, queuedJobIds],
+  );
+  const top = remaining[0];
+  return (
+    <View style={styles.deckScreen}>
+      <View style={styles.deckHeader}>
+        <View style={styles.deckHeading}>
+          <Text style={styles.deckTitle}>Decide as you go</Text>
+          <Text style={styles.deckCaption}>
+            {top ? `${remaining.length} left · swipe left to queue, right to skip` : "Nothing left to review"}
+          </Text>
+        </View>
+        {queueCount ? <QueuePillButton count={queueCount} expanded={false} onPress={onOpenQueue} /> : null}
+      </View>
+      {top ? (
+        <View style={styles.deckStage}>
+          {remaining.length > 1 ? (
+            <View
+              style={[styles.deckBehind, { transform: [{ scale: 0.97 }, { translateY: 10 }] }]}
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+              aria-hidden
+            />
+          ) : null}
+          <View style={styles.deckCard}>
+            <JobCard
+              job={top}
+              onOpen={() => onOpenRole(top)}
+              applicationStatus={applicationStatuses.get(top.jobId)}
+              isQueued={queuedJobIds.has(top.jobId)}
+              onAddToQueue={() => onAddToQueue(top)}
+              isAddingToQueue={queuingJobIds.has(top.jobId)}
+              onHideLocally={() => onHideLocally(top)}
+            />
+          </View>
+        </View>
+      ) : (
+        <View style={styles.deckEmpty}>
+          <EmptyState
+            eyebrow="Nothing waiting"
+            title="You're caught up."
+            description="Every open role has been queued or skipped on this device. New roles land here as we find them."
+          />
+          <ActionButton label="Open the queue" variant="secondary" onPress={onOpenQueue} />
+        </View>
+      )}
+    </View>
+  );
+}
+
 function AppContent() {
   const { width } = useWindowDimensions();
   const usesNavigationRail = width >= 700;
@@ -3763,7 +3855,7 @@ function AppContent() {
   const [sessionRecoveryMessage, setSessionRecoveryMessage] = useState<string>();
   const sessionRequestId = useRef(0);
   const privateRequestId = useRef(0);
-  const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "profile">("roles");
+  const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "discover" | "profile">("roles");
   // Release days default to UTC; a reader can ask for their own zone instead.
   const { zone: dayZone } = useDayZone();
   const [queueSheetVisible, setQueueSheetVisible] = useState(false);
@@ -3812,6 +3904,28 @@ function AppContent() {
   const pendingDestination = useRef<AppDestination | undefined>(undefined);
   const [launchInbox, setLaunchInbox] = useState<LaunchInbox>();
   const [launchLoaded, setLaunchLoaded] = useState(false);
+  const [deckCatalogRoles, setDeckCatalogRoles] = useState<Job[]>([]);
+  const deckCatalogRequestId = useRef(0);
+  // The deck's wider half: one page of the newest open roles, browsed with the
+  // same defaults the catalog itself opens with. A page that fails to arrive
+  // leaves the deck with the new matches alone, which is still a deck.
+  const deckCatalogParameters = useMemo(
+    () => groupedCatalogParameters(catalogRequestState(emptyCatalogFilters, { dayZone }), { limit: 50 }).toString(),
+    [dayZone],
+  );
+  const loadDeckCatalogRoles = () => {
+    const requestId = ++deckCatalogRequestId.current;
+    void api<{ groups: CatalogGroupRow[] }>(`/catalog?${deckCatalogParameters}`, "")
+      .then((page) => {
+        if (deckCatalogRequestId.current !== requestId) return;
+        setDeckCatalogRoles(page.groups.map((group) => catalogRoleJob(group.featuredRole)));
+      })
+      .catch(() => {
+        if (deckCatalogRequestId.current !== requestId) return;
+        setDeckCatalogRoles([]);
+      });
+  };
+  useEffect(() => { loadDeckCatalogRoles(); }, [deckCatalogParameters]);
   const launchRequestToken = useRef<string | undefined>(undefined);
   const launchRequestId = useRef(0);
   const legacyAlertMigrationToken = useRef<string | undefined>(undefined);
@@ -3820,7 +3934,7 @@ function AppContent() {
   const catalogRequestGeneration = useRef(0);
   const catalogRequestInFlight = useRef(false);
   const groupRequestGuard = useRef(createLatestRequestGuard());
-  const changeTab = (nextTab: "roles" | "queue" | "catalog" | "profile") => {
+  const changeTab = (nextTab: "roles" | "queue" | "catalog" | "discover" | "profile") => {
     setTab(nextTab);
   };
   const clearPrivateState = () => {
@@ -3882,6 +3996,9 @@ function AppContent() {
   useEffect(() => {
     const refresh = () => {
       void recoverSession();
+      // The catalog the deck pools from moves while the app sits in the
+      // background; it refreshes on the same beat as the session.
+      loadDeckCatalogRoles();
     };
     const interval = setInterval(refresh, 45 * 60 * 1_000);
     const appStateSubscription = AppState.addEventListener("change", (state) => {
@@ -3891,7 +4008,7 @@ function AppContent() {
       clearInterval(interval);
       appStateSubscription.remove();
     };
-  }, []);
+  }, [deckCatalogParameters]);
   useEffect(() => {
     let active = true;
     void responseCache.get<string[]>(hiddenRolesCacheKey).then((cached) => {
@@ -4342,6 +4459,16 @@ function AppContent() {
       ...jobs.filter((job) => !newJobs.some((newJob) => newJob.jobId === job.jobId)),
     ];
   }, [catalogFilters.jobStatus, jobs, launchInbox]);
+  const deckJobs = useMemo(
+    () => discoveryDeck(catalogJobs, deckCatalogRoles),
+    [catalogJobs, deckCatalogRoles],
+  );
+  // A guest fetches the same public catalog page; its new matches are the inbox
+  // roles it already has.
+  const guestDeckJobs = useMemo(
+    () => discoveryDeck(launchInbox?.jobs ?? [], deckCatalogRoles),
+    [launchInbox, deckCatalogRoles],
+  );
   // The catalog's newness lane reads the same release the Roles tab shows, so
   // "new" means one thing across both surfaces.
   const newCatalogJobIds = useMemo(
@@ -4415,6 +4542,7 @@ function AppContent() {
         query={query}
         onQueryChange={setQuery}
         inbox={launchInbox}
+        deckJobs={guestDeckJobs}
         applicationStatuses={applicationStatuses}
         queuingJobIds={queuingJobIds}
         newJobIds={newCatalogJobIds}
@@ -4768,6 +4896,21 @@ function AppContent() {
               hiddenFeedbackJob={hiddenFeedbackJob}
               onUndoHide={undoHideLocally}
             />
+          ) : tab === "discover" ? (
+            <View style={styles.pageColumn}>
+              <SwipeDeck
+                jobs={deckJobs}
+                applicationStatuses={applicationStatuses}
+                queuedJobIds={queuedJobIds}
+                hiddenJobIds={hiddenJobIds}
+                queuingJobIds={queuingJobIds}
+                onOpenRole={openCatalogJob}
+                onAddToQueue={(job) => addToQueue(job)}
+                onHideLocally={hideLocally}
+                queueCount={applyQueue.length}
+                onOpenQueue={() => setQueueSheetVisible(true)}
+              />
+            </View>
           ) : (
             <View style={styles.pageColumn}>
             <Profile
@@ -5175,6 +5318,7 @@ function GuestExperience({
   query,
   onQueryChange,
   inbox,
+  deckJobs,
   applicationStatuses,
   queuingJobIds,
   newJobIds,
@@ -5213,6 +5357,7 @@ function GuestExperience({
   query: string;
   onQueryChange: (value: string) => void;
   inbox?: LaunchInbox;
+  deckJobs: Job[];
   applicationStatuses: Map<string, string>;
   queuingJobIds: Set<string>;
   newJobIds?: Set<string>;
@@ -5238,7 +5383,7 @@ function GuestExperience({
 }) {
   const { width } = useWindowDimensions();
   const usesNavigationRail = width >= 700;
-  const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "profile">("catalog");
+  const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "discover" | "profile">("catalog");
   const [showAccount, setShowAccount] = useState(false);
   const openAccount = () => {
     setShowAccount(true);
@@ -5311,6 +5456,22 @@ function GuestExperience({
                 onUndoHide={onUndoHide}
               />
             </View>
+            {tab === "discover" ? (
+              <View style={styles.pageColumn}>
+                <SwipeDeck
+                  jobs={deckJobs}
+                  applicationStatuses={EMPTY_APPLICATION_STATUSES}
+                  queuedJobIds={EMPTY_JOB_IDS}
+                  hiddenJobIds={hiddenJobIds}
+                  queuingJobIds={EMPTY_JOB_IDS}
+                  onOpenRole={onOpenJob}
+                  onAddToQueue={() => { openAccount(); }}
+                  onHideLocally={onHideLocally}
+                  queueCount={0}
+                  onOpenQueue={openAccount}
+                />
+              </View>
+            ) : null}
             {tab === "roles" ? (
               <View style={styles.pageColumn}>
               {inbox ? (
@@ -7662,6 +7823,25 @@ const styles = StyleSheet.create({
   catalogSearchControlsStacked: { justifyContent: "space-between" },
   catalogSearchControlTail: { alignItems: "center", flexDirection: "row", gap: 8 },
   calendarAnchor: { position: "relative", zIndex: 20 },
+  deckScreen: { flex: 1, gap: 14, minHeight: 0, width: "100%" },
+  deckHeader: { alignItems: "flex-start", flexDirection: "row", gap: 12, justifyContent: "space-between", paddingHorizontal: 20, paddingTop: 16 },
+  deckHeading: { flexShrink: 1, gap: 2 },
+  deckTitle: { color: colors.ink, fontSize: 20, fontWeight: "800", lineHeight: 26 },
+  deckCaption: { color: colors.muted, fontSize: 13, fontWeight: "600", lineHeight: 18 },
+  deckStage: { flex: 1, justifyContent: "flex-start", minHeight: 0, paddingHorizontal: 20 },
+  deckBehind: {
+    backgroundColor: colors.surface,
+    borderColor: colors.separator,
+    borderRadius: 14,
+    borderWidth: 1,
+    bottom: 0,
+    left: 20,
+    position: "absolute",
+    right: 20,
+    top: 0,
+  },
+  deckCard: { flex: 1, minHeight: 0 },
+  deckEmpty: { flex: 1, gap: 16, justifyContent: "center", paddingHorizontal: 20 },
   calendarTrigger: {
     alignItems: "center",
     backgroundColor: colors.surface,
