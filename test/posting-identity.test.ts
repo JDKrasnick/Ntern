@@ -157,14 +157,17 @@ describe('posting identity', () => {
     ['SuccessFactors', 'https://jobs.successfactors.com/job/London/Software-Intern/123456', 'provider:successfactors:jobs.successfactors.com:123456'],
     ['SuccessFactors tenant query', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=colgate&selected_lang=nl-NL&career_job_req_id=169295', 'provider:successfactors:colgate:169295'],
     ['Workable', 'https://apply.workable.com/activate-interactive-pte-ltd/j/1AD6CF565A/', 'provider:workable:activate-interactive-pte-ltd:1ad6cf565a'],
+    ['Workable apply', 'https://apply.workable.com/connectprep/j/D1C67258C0/apply', 'provider:workable:connectprep:d1c67258c0'],
     ['Microsoft', 'https://jobs.careers.microsoft.com/global/en/job/1891234', 'provider:microsoft:microsoft:1891234'],
     ['Microsoft current', 'https://apply.careers.microsoft.com/careers/job/1970393556862170', 'provider:microsoft:microsoft:1970393556862170'],
     ['Rippling', 'https://ats.rippling.com/4ag/jobs/71d97d10-87f2-4f53-88b7-97f27f392d24', 'provider:rippling:4ag:71d97d10-87f2-4f53-88b7-97f27f392d24'],
+    ['Rippling locale', 'https://ats.rippling.com/en-GB/greengas/jobs/b2938290-cc66-4f54-9888-bbe286c1d9b6', 'provider:rippling:greengas:b2938290-cc66-4f54-9888-bbe286c1d9b6'],
     ['Eightfold', 'https://bostonscientific.eightfold.ai/careers/job/563602813483103', 'provider:eightfold:bostonscientific.eightfold.ai:563602813483103'],
     ['Paylocity slug', 'https://recruiting.paylocity.com/recruiting/jobs/Details/12345/Acme', 'provider:paylocity:recruiting.paylocity.com:12345'],
     ['Paylocity current', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4341435', 'provider:paylocity:recruiting.paylocity.com:4341435'],
     ['Jobvite', 'https://jobs.jobvite.com/aarete/job/oBXLAfwD', 'provider:jobvite:aarete:obxlafwd'],
     ['Amazon', 'https://amazon.jobs/en/jobs/10394156/2026-fall-applied-science-internship-automated-reasoning-united-states-phd-student-science-recruiting', 'provider:amazon:amazon:10394156'],
+    ['Amazon apply', 'https://www.amazon.jobs/jobs/10418355/apply', 'provider:amazon:amazon:10418355'],
     ['Google', 'https://www.google.com/about/careers/applications/jobs/results/100028133205254854', 'provider:google:google:100028133205254854'],
   ])('recognizes a scoped immutable %s route', (_name, url, exactKey) => {
     expect(resolvePostingIdentityDecision({ sourceId: 'community', externalId: 'role', applicationUrl: url,
@@ -181,6 +184,7 @@ describe('posting identity', () => {
     ['SuccessFactors missing tenant', 'https://career4.successfactors.com/careers?career_ns=job_listing&career_job_req_id=169295'],
     ['SuccessFactors arbitrary query id', 'https://career4.successfactors.com/careers?company=colgate&id=169295'],
     ['Workable aggregate board', 'https://apply.workable.com/acme/'],
+    ['Workable title id', 'https://apply.workable.com/acme/j/software-engineer/apply'],
     ['Microsoft nonnumeric id', 'https://apply.careers.microsoft.com/careers/job/software-engineer'],
     ['Rippling malformed id', 'https://ats.rippling.com/acme/jobs/--------'],
     ['Eightfold aggregate board', 'https://careers.acme.eightfold.ai/careers'],
@@ -203,7 +207,7 @@ describe('posting identity', () => {
     ['EU Greenhouse', 'https://job-boards.eu.greenhouse.io/acme/jobs/101', 'https://job-boards.eu.greenhouse.io/other/jobs/101'],
     ['SmartRecruiters', 'https://jobs.smartrecruiters.com/acme/744000139649345', 'https://jobs.smartrecruiters.com/other/744000139649345'],
     ['SuccessFactors', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=acme&career_job_req_id=101', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=other&career_job_req_id=101'],
-    ['Workable', 'https://apply.workable.com/acme/j/ABC123DEF', 'https://apply.workable.com/other/j/ABC123DEF'],
+    ['Workable', 'https://apply.workable.com/acme/j/ABC123DEF0', 'https://apply.workable.com/other/j/ABC123DEF0'],
     ['Rippling', 'https://ats.rippling.com/acme/jobs/123e4567-e89b-12d3-a456-426614174000', 'https://ats.rippling.com/other/jobs/123e4567-e89b-12d3-a456-426614174000'],
     ['Eightfold', 'https://careers.acme.eightfold.ai/careers/job/REQ-42', 'https://careers.other.eightfold.ai/careers/job/REQ-42'],
     ['Jobvite', 'https://jobs.jobvite.com/acme/job/ABC123', 'https://jobs.jobvite.com/other/job/ABC123'],
@@ -215,12 +219,12 @@ describe('posting identity', () => {
   });
 
   it('keeps identical provider IDs on different tenants from merging', () => {
-    const acme = buildPostingIdentity({ applicationUrl: 'https://apply.workable.com/acme/j/ABC123DEF' });
-    const other = buildPostingIdentity({ applicationUrl: 'https://apply.workable.com/other/j/ABC123DEF' });
+    const acme = buildPostingIdentity({ applicationUrl: 'https://apply.workable.com/acme/j/ABC123DEF0' });
+    const other = buildPostingIdentity({ applicationUrl: 'https://apply.workable.com/other/j/ABC123DEF0' });
     expect(acme.canonicalJobId).not.toBe(other.canonicalJobId);
     const combined = buildPostingIdentity({
-      applicationUrl: 'https://apply.workable.com/acme/j/ABC123DEF',
-      observedUrls: ['https://apply.workable.com/other/j/ABC123DEF'],
+      applicationUrl: 'https://apply.workable.com/acme/j/ABC123DEF0',
+      observedUrls: ['https://apply.workable.com/other/j/ABC123DEF0'],
     });
     expect(resolvePostingAliases(combined, new Map())).toMatchObject({ outcome: 'quarantine', reason: 'provider-scope-mismatch' });
   });

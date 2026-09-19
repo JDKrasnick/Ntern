@@ -311,7 +311,7 @@ test('passes real expanded-family roles and blocks malformed roles through repai
     open: true, technical: true, firstSeenAt, catalogVisibleAt: firstSeenAt,
     lastSeenAt: '2026-09-19T00:00:00.000Z', notification: { smsPending: false, digestPending: false },
   });
-  const olderUrl = 'https://apply.workable.com/acme-e2e/j/ABC123DEF';
+  const olderUrl = 'https://apply.workable.com/acme-e2e/j/ABC123DEF0';
   // The non-tracking query keeps the canonical URLs distinct, so this merge
   // depends on the scoped provider identity rather than URL canonicalization.
   const newerUrl = `${olderUrl}/?department=engineering`;
@@ -320,12 +320,15 @@ test('passes real expanded-family roles and blocks malformed roles through repai
     ['smartrecruiters', 'https://jobs.smartrecruiters.com/ALTEN/744000142128541-ingenieur-developpeur-frontend-h-f-', 'https://jobs.smartrecruiters.com/ALTEN/software-engineer-intern'],
     ['successfactors', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=colgate&career_job_req_id=169295', 'https://career4.successfactors.com/careers?career_ns=job_listing&career_job_req_id=169295'],
     ['workable', 'https://apply.workable.com/activate-interactive-pte-ltd/j/1AD6CF565A/', 'https://apply.workable.com/activate-interactive-pte-ltd/'],
+    ['workable-apply', 'https://apply.workable.com/connectprep/j/D1C67258C0/apply', 'https://apply.workable.com/connectprep/j/software-engineer/apply'],
     ['microsoft', 'https://apply.careers.microsoft.com/careers/job/1970393556862170', 'https://apply.careers.microsoft.com/careers/job/software-engineer'],
     ['rippling', 'https://ats.rippling.com/4ag/jobs/71d97d10-87f2-4f53-88b7-97f27f392d24', 'https://ats.rippling.com/4ag/jobs/--------'],
+    ['rippling-locale', 'https://ats.rippling.com/en-GB/greengas/jobs/b2938290-cc66-4f54-9888-bbe286c1d9b6', 'https://ats.rippling.com/en-GB/greengas/jobs/software-engineer'],
     ['eightfold', 'https://bostonscientific.eightfold.ai/careers/job/563602813483103', 'https://bostonscientific.eightfold.ai/careers'],
     ['paylocity', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4341435', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/software-engineer'],
     ['jobvite', 'https://jobs.jobvite.com/aarete/job/oBXLAfwD', 'https://jobs.jobvite.com/aarete/job/'],
     ['amazon', 'https://amazon.jobs/en/jobs/10394156/2026-fall-applied-science-internship', 'https://amazon.jobs/en/jobs/10394156software-engineer'],
+    ['amazon-apply', 'https://www.amazon.jobs/jobs/10418355/apply', 'https://www.amazon.jobs/jobs/10418355software-engineer/apply'],
     ['google', 'https://www.google.com/about/careers/applications/jobs/results/100028133205254854', 'https://www.google.com/about/careers/applications/jobs/results/software-engineer'],
   ];
   const matrixJobs = familyCases.flatMap(([family, goodUrl, badUrl]) => [
@@ -352,7 +355,7 @@ test('passes real expanded-family roles and blocks malformed roles through repai
   assert.deepEqual(preview.conflicts, []);
   assert.ok(preview.samples.some((sample) => sample.canonicalJobId === 'workable-e2e-old'
     && sample.duplicateJobIds.includes('workable-e2e-new')
-    && sample.providerIdentity === 'workable:acme-e2e:abc123def'));
+    && sample.providerIdentity === 'workable:acme-e2e:abc123def0'));
 
   const applyResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },

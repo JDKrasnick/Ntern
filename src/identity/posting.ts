@@ -136,7 +136,7 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
     };
   }
   if (host === 'apply.workable.com'
-      && (match = /^\/([a-z0-9-]+)\/j\/([a-z0-9]+)\/?$/i.exec(url.pathname))) {
+      && (match = /^\/([a-z0-9-]+)\/j\/([a-f0-9]{10})(?:\/apply)?\/?$/i.exec(url.pathname))) {
     return { provider: 'workable', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
   }
   if ((host === 'jobs.careers.microsoft.com' || host === 'careers.microsoft.com')
@@ -148,7 +148,7 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
     return { provider: 'microsoft', tenant: 'microsoft', postingId: match[1]! };
   }
   if (host === 'ats.rippling.com'
-      && (match = /^\/([a-z0-9-]+)\/jobs\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\/?$/i.exec(url.pathname))) {
+      && (match = /^\/(?:[a-z]{2}-[a-z]{2}\/)?([a-z0-9-]+)\/jobs\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\/?$/i.exec(url.pathname))) {
     return { provider: 'rippling', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
   }
   if (host.endsWith('.eightfold.ai')
@@ -164,7 +164,7 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
     return { provider: 'jobvite', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
   }
   if (host === 'amazon.jobs'
-      && (match = /^\/[a-z]{2}(?:-[a-z]{2})?\/jobs\/(\d+)(?:\/[^/]+)?\/?$/i.exec(url.pathname))) {
+      && (match = /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?jobs\/(\d+)(?:\/[^/]+)?\/?$/i.exec(url.pathname))) {
     return { provider: 'amazon', tenant: 'amazon', postingId: match[1]! };
   }
   if (host === 'google.com'
