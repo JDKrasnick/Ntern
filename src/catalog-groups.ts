@@ -7,6 +7,7 @@ import { canonicalCompanyKey } from './core/normalize.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { employerCategory, type EmployerCategory } from './core/employers.js';
 import { occurrenceProvenance } from './sources/provenance.js';
+import { DEFAULT_DAY_ZONE, dayZone, zoneDay } from '../shared/zone-day.js';
 import { educationExcludesLevel } from './identity/enrichment.js';
 import type { EducationLevel, Internship } from './types.js';
 import { allDisciplineStyles, disciplineKey, disciplineSearchVariants } from '../shared/discipline-display.js';
@@ -93,6 +94,10 @@ export interface CatalogGroupRole {
   sourceReferences: Internship['sourceReferences'];
   applicationUrlValidatedAt?: string;
   invalidApplicationUrl?: string;
+  /** The day this role released, per the catalog's day rule; absent when it has none. */
+  releaseDay?: string;
+  /** Present when that day came from the observed instant, so a reader's zone can re-read it. */
+  releaseDayObserved?: true;
   postingIdentityStatus?: Internship['postingIdentityStatus'];
 }
 
@@ -115,6 +120,9 @@ export interface CatalogGroupFilter {
   /** Keep only roles whose stored compensation text is non-empty. */
   hasCompensation?: boolean;
   postingIdentityConfirmedOnly?: boolean;
+  /** Keep only roles released on this calendar day, as read in `dayZone`. */
+  day?: string;
+  dayZone?: string;
 }
 
 /** A durable release already contains the job set matched for one user. */
@@ -255,36 +263,23 @@ function disciplinesFor(job: Internship) {
  * minute, which rendered as a 235-role card — so it belongs to the day its source
  * reported posting it, and to no day at all when the source never said, which
  * keeps the import from inventing a posting day. */
+export function employerDropDay(job: Internship, zone = DEFAULT_DAY_ZONE): string | undefined {
+  const timing = canonicalPostingTiming(job);
+  // A reported posting date is a date, not an instant, so no zone moves it.
+  const day = job.catalogRecency === 'baseline'
+    ? timing.kind === 'source-reported' || timing.kind === 'employer-posted' ? timing.timestamp?.slice(0, 10) : undefined
+    : zoneDay(catalogVisibleAt(job), zone);
+  return day && /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : undefined;
+}
+
+/** The employer-and-day key behind a release card. Without a zone the day is UTC,
+ * so a card keeps one identity for every reader; alerts pass the viewer's zone to
+ * count the day their own clock was on. */
 export function employerDropKey(job: Internship, timeZone?: string) {
   const company = companyKey(job);
   if (!company) return undefined;
-  const timing = canonicalPostingTiming(job);
-  const day = job.catalogRecency === 'baseline'
-    ? timing.kind === 'source-reported' || timing.kind === 'employer-posted' ? dayInZone(timing.timestamp, timeZone) : undefined
-    : dayInZone(catalogVisibleAt(job), timeZone);
+  const day = employerDropDay(job, dayZone(timeZone));
   return day ? `${company}\u0000${day}` : undefined;
-}
-
-const dayFormatters = new Map<string, Intl.DateTimeFormat>();
-
-/** The calendar day an instant falls on, in the viewer's zone when one is given. */
-function dayInZone(timestamp: string | undefined, timeZone?: string) {
-  if (!timestamp || !Number.isFinite(Date.parse(timestamp))) return undefined;
-  const day = timeZone ? dayFormatter(timeZone).format(new Date(timestamp)) : timestamp.slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : undefined;
-}
-
-function dayFormatter(timeZone: string) {
-  const existing = dayFormatters.get(timeZone);
-  if (existing) return existing;
-  try {
-    const formatter = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
-    dayFormatters.set(timeZone, formatter);
-    return formatter;
-  } catch {
-    // An unusable zone falls back to UTC rather than dropping the role.
-    return dayFormatters.get('UTC') ?? new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' });
-  }
 }
 
 /** The feed card id for a role's employer drop; alerts reuse it for the deep link. */
@@ -434,9 +429,14 @@ export function catalogGroupDetails(group: BuiltGroup): CatalogGroupDetails {
 
 function catalogGroupRole(job: Internship): CatalogGroupRole {
   const identityProgramType = provenancedText(identityFor(job)?.programType) as Internship['programType'];
+  const releaseDay = employerDropDay(job);
   return {
     jobId: job.jobId, company: job.company, title: titleFor(job), location: job.location, season: seasonFor(job),
     locations: locationsFor(job), visibleAt: catalogVisibleAt(job),
+    ...(releaseDay ? { releaseDay } : {}),
+    // A day read from an instant can be re-read in the reader's own zone; a
+    // reported posting date cannot.
+    ...(releaseDay && job.catalogRecency !== 'baseline' ? { releaseDayObserved: true as const } : {}),
     education: catalogEducation(job), disciplines: disciplinesFor(job), workModes: workModesFor(job),
     sourceCredibility: sourceCredibility(job), provenanceLabels: provenanceLabels(job), detailUrl: `/jobs/${encodeURIComponent(job.jobId)}`,
     officialApplyUrl: publicApplicationUrl(job.applyUrl), applicationUrlValidated: Boolean(job.applicationUrlValidatedAt), open: job.open,
@@ -478,6 +478,7 @@ export function filterCatalogGroups(groups: BuiltGroup[], filter: CatalogGroupFi
         && !excludesReader(education, filter.educationLevel, Boolean(job.requirements?.advancedDegreeRequired))
         && (!filter.source || filter.source === 'all' || catalogSourceClasses(job).includes(filter.source))
         && (!filter.hasCompensation || Boolean(job.compensation?.raw?.trim()))
+        && (!filter.day || employerDropDay(job, filter.dayZone) === filter.day)
         && (!filter.disciplines?.length || disciplinesMatch(disciplinesFor(job), filter.disciplines))
         && (!filter.seasons?.length || includesFolded([seasonFor(job)], filter.seasons))
         // Unspecified education matches every audience but remains visibly unspecified.
@@ -494,6 +495,13 @@ function credibilityMatches(value: CatalogGroupRole['sourceCredibility'], source
   if (source === 'corroborated') return value === 'corroborated';
   if (source === 'direct') return value === 'official' || value === 'corroborated';
   return value === 'community' || value === 'corroborated';
+}
+
+/** A materialized role's release day, re-read in the requested zone when the day
+ * came from an observed instant. Keeps this path and the live-job path in step. */
+function materializedReleaseDay(role: CatalogGroupRole, zone?: string) {
+  if (!role.releaseDay) return undefined;
+  return role.releaseDayObserved ? zoneDay(role.visibleAt, zone) : role.releaseDay;
 }
 
 /** Filters a materialized projection without loading full catalog job records. */
@@ -513,6 +521,7 @@ export function filterCatalogGroupDetails(groups: CatalogGroupDetails[], filter:
       && (!filter.educationLevels?.length || role.education.evidence === 'unspecified' || includesFolded(role.education.levels, filter.educationLevels))
       && (!filter.workModes?.length || includesFolded(role.workModes, filter.workModes))
       && (!filter.hasCompensation || Boolean(role.compensation?.raw?.trim()))
+      && (!filter.day || materializedReleaseDay(role, filter.dayZone) === filter.day)
       && (!filter.locations?.length || filter.locations.some((location) => folded((role.locations ?? role.location.split(/\s*(?:;|\||\n)\s*/)).join(' ')).includes(folded(location)))));
     if (!roles.length) return [];
     return [{

@@ -53,25 +53,6 @@ We’ll ask for notification permission next.
 
 The content starts 42 pt below the safe area, with a 20 pt gutter on both sides. The chips wrap naturally, but every chip keeps a 48 pt minimum height. The action is full-width and visually grounded.
 
-### Focused Editorial sample: role feed
-
-```text
-[ Search roles, companies, locations                    ]
-[ Filter roles ]
-
-┌──────────────────────────────────────────────────────┐
-│ Datadog                                               │
-│ Software Engineering Intern                           │
-│ New York, NY · Summer 2027                            │
-│ $52–$58 / hour                                        │
-│ [ APPLIED ]                                           │
-└──────────────────────────────────────────────────────┘
-
-[ ▣ Roles ]                 [ ♧ Saved ]              [ ◯ Profile ]
-```
-
-Navigation, search, headers, and cards all align to the same 20 pt edge. Cards are 16 pt radius, use a one-pixel slate border, and have a 12 pt gap—no floating/shadow-heavy treatment.
-
 ### Focused Editorial sample: settings
 
 ```text
@@ -130,17 +111,18 @@ Every screen follows these rules. They are as important as colors and type.
 5. Use `KeyboardAvoidingView` plus a scroll view for every form. The submit action must remain reachable with the keyboard open.
 6. Do not rely on a placeholder as a label. A visible label is required for profile and preference fields; onboarding may pair an obvious field label with a concise placeholder.
 7. Allow text to wrap rather than force long role or company names into fixed-height rows.
+8. Every tab renders one shared content column: centered, capped at 1120 pt, with the 20 pt gutter inside it, so switching tabs never moves the left edge. Row and text surfaces cap themselves at 760 pt *inside* that column and stay left-aligned, never re-centered. A tab whose body scrolls fills the column's height, so its list scrolls inside the column rather than growing past the viewport.
 
 ## Component recipes
 
 ### Bottom tab navigation
 
 - Fixed at the bottom of the app content, with a one-pixel top separator and safe-area space below it.
-- Three equal-width, 52 pt minimum targets: Roles, Saved, and Profile.
-- Every tab combines a familiar icon with a short text label. Use a filled briefcase for the selected Roles tab, bookmark for Saved, and person for Profile.
+- Four equal-width, 52 pt minimum targets: Roles, Queue, Discover, and Profile.
+- Every tab combines a familiar icon with a short text label. Use a filled briefcase for the selected Roles tab, albums for Queue, layers for Discover, and person for Profile.
 - Active tab: ink icon and label; inactive tabs: muted outline icon and label. Do not use a bottom-rule-only state or blue system buttons for navigation.
-- A tab bar is for moving among these three top-level areas, never for inline actions. Keep it visible while switching sections.
-- At 700 pt or wider, replace the bottom bar with the same three destinations in a compact left navigation rail; keep the primary content column centered and no wider than 760 pt.
+- A tab bar is for moving among these four top-level areas, never for inline actions. Keep it visible while switching sections.
+- At 700 pt or wider, replace the bottom bar with the same four destinations in a compact left navigation rail; keep the shared content column (rule 8) centered beside it.
 
 ### Input
 
@@ -164,26 +146,26 @@ Every screen follows these rules. They are as important as colors and type.
 - Company is teal metadata, role is ink, and location/season is muted body text.
 - When the signed-in user has an application record for the role, display its current status in a compact teal pill. Opening the employer form does not immediately create or change that record. For signed-in users it creates a short-lived, role-specific Gmail check intent; show **APPLIED** only after a manual status change or a confirmed Gmail detection. Continue to show later statuses such as assessment or interview.
 
-### Save for web
+### Queue from a role card
 
-- On the signed-in mobile feed, a deliberate left swipe on an unsaved role reveals a teal bookmark action and saves the role to the shared **Saved** queue. The card returns to its resting position, then shows its **SAVED** status; do not remove it from the feed.
-- The reveal uses a short 100 ms follow-through and 120 ms hold before the card settles back. With Reduce Motion enabled, save immediately without movement.
-- Saving never opens the employer form. The same account-backed role is available in the responsive web app’s **Saved** queue, where **Open official application** is the clear primary handoff. Keep status changes explicit; opening a form alone must not mark a role applied.
-- If a saved role remains open but fails catalog admission, preserve its title, employer, location, season, and application history. Replace the handoff with the quiet shield notice **InternNotifs couldn’t verify the official role page and is reviewing it.** Do not expose the unverified URL or application-assistance action. Closed roles keep the established closed state instead.
-- Expose the same action to assistive technology as **Save for web**, with a hint that it can be applied to later in the web app.
+- The only role-level action is adding the role to the apply queue; there is no separate "save for later". A deliberate left swipe on a role that is not queued reveals a teal bookmark action and adds it. The card returns to its resting position and shows its **In queue** state; do not remove it from the list.
+- The reveal uses a short 100 ms follow-through and 120 ms hold before the card settles back. With Reduce Motion enabled, queue immediately without movement.
+- Queuing never opens the employer form. **Open official application** remains the clear primary handoff wherever the queue is listed, and the same account-backed record is available in the responsive web app's queue panel. Keep status changes explicit; opening a form alone must not mark a role applied.
+- **Remove from queue** deletes the record; **Add to queue** restores it for a record that is saved but not queued. Do not offer the delete action for a record that already carries an application status.
+- If a queued role remains open but fails catalog admission, preserve its title, employer, location, season, and application history. Replace the handoff with the quiet shield notice **Ntern couldn't verify the official role page and is reviewing it.** Do not expose the unverified URL or application-assistance action. Closed roles keep the established closed state instead.
+- Expose the actions to assistive technology as **Add to apply queue** and **Remove from queue**, with a hint that the role can be applied to later.
 
 ### Hide from feed
 
-- A deliberate right swipe hides a role on the current device only. Reveal a subdued **Hide** action, then remove the card after its short follow-through; this must never remove the role from the catalog, Saved queue, or alerts.
-- Replace the card in place with a quiet, static **Role hidden on this device · Undo** row. It is not a popup or toast: it remains in the role’s list position for the current session, so Undo is immediate. Hidden roles are also listed in Profile and can be restored individually.
-- Expose **Hide on this device** as an assistive-technology action. A card with both actions must describe left swipe for Save and right swipe for Hide.
+- A deliberate right swipe hides a role on the current device only. Reveal a subdued **Hide** action, then remove the card after its short follow-through; this must never remove the role from the catalog, the apply queue, or alerts.
+- Replace the card in place with a quiet, static **Role hidden on this device · Undo** row. It is not a popup or toast: it remains in the role's list position for the current session, so Undo is immediate. Hidden roles are also listed in Profile and can be restored individually.
+- Expose **Hide on this device** as an assistive-technology action. A card with both actions must describe left swipe to queue and right swipe to hide.
 
-### New and seen roles
+### New roles
 
-- For the active signed-in session, keep roles returned by the launch-inbox endpoint above the normal feed in a **New roles** group.
-- After the last new card, show a quiet rule divider reading **You’re all caught up**, then label the remainder **Seen roles**.
-- Do not use a modal, an alert, or a persistent badge for this boundary. If there are no new roles, omit both labels and render the same simple search/filter-and-list landing page.
-- Give each new card a small, one-time arrival moment: an 8 pt lift, a soft teal sheen that fades within 420 ms, and a compact sparkle-plus-**New** marker beside the company. Stagger only the first five cards by 80 ms; never loop, pulse, or use a full-card neon treatment.
+- The Roles tab is the new-matches surface: it renders the launch inbox itself when the release contains roles, and a quiet empty state whose **Review roles** action opens the Discover tab when it does not. Do not re-open the inbox behind another surface or split the feed into new and seen sections.
+- Cards use the existing role-detail sheet and official-form handoff, and the one secondary action is **Browse the catalog**.
+- Give each new card a small, one-time arrival moment: an 8 pt lift, a soft teal sheen that fades within 420 ms, and a compact sparkle-plus-**New** marker. Stagger only the first five cards by 80 ms; never loop, pulse, or use a full-card neon treatment. The marker closes the employer's row, after any discipline pills, so its position never depends on how long the employer's name is — a marker that rides the name is the one ragged edge a reader notices.
 - Honor the device Reduce Motion preference by showing the card and static **New** marker without movement. The treatment uses opacity and transforms so it stays smooth without making the list feel busy.
 
 ### Posting identity certainty
@@ -210,8 +192,7 @@ Every screen follows these rules. They are as important as colors and type.
 ### Loading states
 
 - Use static, layout-matched skeletons instead of activity wheels or progress bars.
-- A loading feed includes the tab row, search field, section copy, and three job-card shapes.
-- Let those three card shapes reveal from top to bottom: each starts 10 pt lower, then rises and fades in once over 240 ms, with a 100 ms stagger. Keep the surrounding chrome still, and never loop the animation or add a shimmer sweep.
+- Let the app-loading shapes reveal from top to bottom: each starts 10 pt lower, then rises and fades in once over 240 ms, with a 100 ms stagger. Keep the surrounding chrome still, and never loop the animation or add a shimmer sweep.
 - Respect Reduce Motion: show the completed skeleton layout immediately when it is enabled. The real roles should replace the shapes without an additional transition, keeping loading quick and legible.
 - A loading profile uses headline, field-label, input, and button shapes in the same 20 pt content column as the completed form.
 - Skeletons use `#E2E8F0`; buttons may use the slightly darker `#CBD5E1`. They are announced as loading content for assistive technology, but contain no visible loading text.
@@ -230,6 +211,7 @@ Notification presentation and application follow-up settings live in **App & acc
 
 1. Wording templates with a dark live notification preview.
 2. Application reminders and a follow-up interval.
+3. The release calendar's date zone (UTC or device time) — a device-local display choice, not an account preference.
 
 Onboarding must always offer **Continue without alerts**. It may request notification permission only after the user deliberately enables the alert switch and confirms the setup action. If permission is denied, preserve the role preferences, show an inline explanation with a retry action, and never block access to the feed.
 

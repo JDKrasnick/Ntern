@@ -192,4 +192,46 @@ describe('grouped catalog API', () => {
     );
     expect(details).toMatchObject({ group: { roleCount: 1 }, roles: [{ jobId: 'closed', open: false }] });
   });
+
+  it('indexes release days in the requested zone and narrows the catalog to one of them', async () => {
+    const jobs = new MemoryInternshipStore();
+    const at = (id: string, iso: string) => jobs.putInternship({
+      ...job(id, 0), catalogVisibleAt: iso, firstSeenAt: iso, lastSeenAt: iso,
+    });
+    await at('evening', '2026-09-17T20:00:00.000Z');
+    await at('after-midnight', '2026-09-18T01:00:00.000Z');
+    await at('morning', '2026-09-18T06:00:00.000Z');
+    await at('afternoon', '2026-09-18T20:00:00.000Z');
+    await at('next-utc-day', '2026-09-19T02:00:00.000Z');
+    // A projection exists, and a day-filtered request must still read the catalog.
+    await jobs.putCatalogProjection(
+      groupCatalogJobs(await jobs.listCatalog()).map(catalogGroupDetails),
+      new Date().toISOString(),
+    );
+    const handler = createApiHandler({ jobs, users: new MemoryUserStore() });
+    type Index = { zone: string; days: Array<{ day: string; roles: number; employers: number }> };
+    const range = { from: '2026-09-01', to: '2026-09-30' };
+    const utc = body<Index>(await handler(event('GET', '/catalog/days', { ...range, dayZone: 'UTC' })));
+    expect(utc.zone).toBe('UTC');
+    expect(utc.days).toEqual([
+      { day: '2026-09-17', roles: 1, employers: 1 },
+      { day: '2026-09-18', roles: 3, employers: 1 },
+      { day: '2026-09-19', roles: 1, employers: 1 },
+    ]);
+    // The reader's own zone re-reads the same releases: September 18 in Los Angeles
+    // holds what UTC calls the evening of the 18th and the small hours of the 19th.
+    const pacific = body<Index>(await handler(event('GET', '/catalog/days', { ...range, dayZone: 'America/Los_Angeles' })));
+    expect(pacific.zone).toBe('America/Los_Angeles');
+    expect(pacific.days).toEqual([
+      { day: '2026-09-17', roles: 3, employers: 1 },
+      { day: '2026-09-18', roles: 2, employers: 1 },
+    ]);
+    expect(body<Index>(await handler(event('GET', '/catalog/days', { ...range, dayZone: 'Not/AZone' }))).zone).toBe('UTC');
+    expect(await handler(event('GET', '/catalog/days', { from: '2026-09-31' }))).toMatchObject({ statusCode: 400 });
+
+    const day = body<{ groups: Array<{ roleIds: string[] }> }>(await handler(event('GET', '/catalog', { day: '2026-09-18', dayZone: 'America/Los_Angeles' })));
+    expect(day.groups.flatMap((group) => group.roleIds).sort()).toEqual(['afternoon', 'next-utc-day']);
+    const emptyDay = body<{ groups: unknown[] }>(await handler(event('GET', '/catalog', { day: '2026-09-30' })));
+    expect(emptyDay.groups).toEqual([]);
+  });
 });

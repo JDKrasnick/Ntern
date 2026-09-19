@@ -17,17 +17,17 @@ describe('cross-platform accessibility state contract', () => {
     );
   });
 
-  it('only saves a role after an explicit save interaction', () => {
+  it('only queues a role after an explicit queue interaction', () => {
     const source = ts.createSourceFile('App.tsx', readFileSync(new URL('../App.tsx', import.meta.url), 'utf8'),
       ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-    const automaticSaveEffects: string[] = [];
+    const automaticQueueCalls: string[] = [];
     const visit = (node: ts.Node) => {
       if (ts.isCallExpression(node) && node.expression.getText(source) === 'useEffect') {
         const effect = node.arguments[0];
         if (effect) {
           const inspectEffect = (child: ts.Node) => {
-            if (ts.isCallExpression(child) && child.expression.getText(source) === 'saveForWeb') {
-              automaticSaveEffects.push(child.getText(source));
+            if (ts.isCallExpression(child) && child.expression.getText(source) === 'addToQueue') {
+              automaticQueueCalls.push(child.getText(source));
             }
             ts.forEachChild(child, inspectEffect);
           };
@@ -37,17 +37,7 @@ describe('cross-platform accessibility state contract', () => {
       ts.forEachChild(node, visit);
     };
     visit(source);
-    expect(automaticSaveEffects).toEqual([]);
-  });
-
-  it('refreshes virtualized role cards when save state changes', () => {
-    const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
-    expect(app.match(/extraData=\{\[applicationStatuses, savingJobIds\]\}/g)).toHaveLength(3);
-  });
-
-  it('names an in-progress removal as unsaving', () => {
-    const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
-    expect(app.match(/isSaved(?:ForWeb)? \? "Unsaving…" : "Saving…"/g)).toHaveLength(3);
+    expect(automaticQueueCalls).toEqual([]);
   });
 
   it('lets the primary application label wrap without overlapping its icon at large text sizes', () => {

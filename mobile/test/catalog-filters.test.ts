@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { catalogGroupAvailabilityLabel, countActiveCatalogFilters, emptyCatalogFilters, groupedCatalogParameters, parseCatalogFilters } from '../src/catalog-filters';
+import { catalogGroupAvailabilityLabel, catalogRequestState, emptyCatalogFilters, groupedCatalogParameters, parseCatalogFilters } from '../src/catalog-filters';
+
+describe('release day requests', () => {
+  it('sends the chosen day and the zone it was read in', () => {
+    const filters = { ...emptyCatalogFilters, day: '2026-09-18' };
+    const params = groupedCatalogParameters(catalogRequestState(filters, { dayZone: 'America/Los_Angeles' }));
+    expect(params.get('day')).toBe('2026-09-18');
+    expect(params.get('dayZone')).toBe('America/Los_Angeles');
+    // Client facet names become the request's names.
+    const named = groupedCatalogParameters(catalogRequestState({ ...filters, employerFilter: 'startup', sourceFilter: 'direct', jobStatus: 'closed' }));
+    expect(named.get('status')).toBe('closed');
+    expect(named.get('source')).toBe('direct');
+    expect(named.get('employerCategory')).toBe('startup');
+    // No day, no zone parameter.
+    const plain = groupedCatalogParameters(catalogRequestState(emptyCatalogFilters, { dayZone: 'UTC' }));
+    expect(plain.get('day')).toBeNull();
+    expect(plain.get('dayZone')).toBeNull();
+  });
+
+  it('defaults a day to UTC when the reader has not chosen a zone', () => {
+    const params = groupedCatalogParameters(catalogRequestState({ ...emptyCatalogFilters, day: '2026-09-18' }));
+    expect(params.get('dayZone')).toBe('UTC');
+  });
+
+});
 
 describe('grouped catalog request filters', () => {
   it('carries the same filters from a catalog row into group details', () => {
@@ -24,15 +48,6 @@ describe('grouped catalog request filters', () => {
       limit: '25', status: 'open', disciplines: 'SWE,Quant/Fintech', seasons: 'summer-2027',
       workModes: 'remote', hasCompensation: 'true', educationLevel: 'undergraduate',
     });
-  });
-  it('counts every active filter section exactly once', () => {
-    expect(countActiveCatalogFilters(emptyCatalogFilters)).toBe(0);
-    expect(countActiveCatalogFilters({
-      ...emptyCatalogFilters, disciplines: ['SWE'], seasons: ['summer-2027', 'fall-2026'],
-      hasCompensation: true, jobStatus: 'closed',
-    })).toBe(4);
-    // The level browse starts at is not a filter the reader chose.
-    expect(countActiveCatalogFilters({ ...emptyCatalogFilters, educationLevel: 'masters' })).toBe(1);
   });
   it('keeps a reader studying at another level after a relaunch', () => {
     const roundTripped = parseCatalogFilters(JSON.parse(JSON.stringify({ ...emptyCatalogFilters, educationLevel: 'masters', disciplines: ['SWE'] })));
