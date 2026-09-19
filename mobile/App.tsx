@@ -7804,7 +7804,10 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     flexDirection: "row",
     justifyContent: "space-between",
-    marginTop: 8,
+    // Sit on the card's floor so the actions line up across a row whatever the
+    // card above them says. Cards without a pay line were floating their buttons
+    // fifty points higher than their neighbours.
+    marginTop: "auto",
     paddingTop: 6,
   },
   catalogTileState: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
