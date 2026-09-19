@@ -35,7 +35,6 @@ import { boundedCatalogText, compactLocations, presentCatalogRole, seasonLabel }
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
 import { catalogGroupAvailabilityLabel, catalogRequestState, defaultEducationLevel, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, type CatalogFilterValues } from "./src/catalog-filters";
 import { deviceTimeZone, useDayZone } from "./src/day-zone";
-import { discoveryDeck } from "./src/discovery";
 import { loadCatalogFilters, saveCatalogFilters } from "./src/catalog-filter-storage";
 import { type EducationLevel } from "../shared/education-display";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
@@ -2438,28 +2437,6 @@ function AppContent() {
   const pendingDestination = useRef<AppDestination | undefined>(undefined);
   const [launchInbox, setLaunchInbox] = useState<LaunchInbox>();
   const [launchLoaded, setLaunchLoaded] = useState(false);
-  const [deckCatalogRoles, setDeckCatalogRoles] = useState<Job[]>([]);
-  const deckCatalogRequestId = useRef(0);
-  // The deck's wider half: one page of the newest open roles, browsed with the
-  // same defaults the catalog itself opens with. A page that fails to arrive
-  // leaves the deck with the new matches alone, which is still a deck.
-  const deckCatalogParameters = useMemo(
-    () => groupedCatalogParameters(catalogRequestState(emptyCatalogFilters, { dayZone }), { limit: 50 }).toString(),
-    [dayZone],
-  );
-  const loadDeckCatalogRoles = () => {
-    const requestId = ++deckCatalogRequestId.current;
-    void api<{ groups: CatalogGroupRow[] }>(`/catalog?${deckCatalogParameters}`, "")
-      .then((page) => {
-        if (deckCatalogRequestId.current !== requestId) return;
-        setDeckCatalogRoles(page.groups.map((group) => catalogRoleJob(group.featuredRole)));
-      })
-      .catch(() => {
-        if (deckCatalogRequestId.current !== requestId) return;
-        setDeckCatalogRoles([]);
-      });
-  };
-  useEffect(() => { loadDeckCatalogRoles(); }, [deckCatalogParameters]);
   const launchRequestToken = useRef<string | undefined>(undefined);
   const launchRequestId = useRef(0);
   const legacyAlertMigrationToken = useRef<string | undefined>(undefined);
@@ -2526,9 +2503,6 @@ function AppContent() {
   useEffect(() => {
     const refresh = () => {
       void recoverSession();
-      // The catalog the deck pools from moves while the app sits in the
-      // background; it refreshes on the same beat as the session.
-      loadDeckCatalogRoles();
     };
     const interval = setInterval(refresh, 45 * 60 * 1_000);
     const appStateSubscription = AppState.addEventListener("change", (state) => {
@@ -2538,7 +2512,7 @@ function AppContent() {
       clearInterval(interval);
       appStateSubscription.remove();
     };
-  }, [deckCatalogParameters]);
+  }, []);
   useEffect(() => {
     let active = true;
     void responseCache.get<string[]>(hiddenRolesCacheKey).then((cached) => {
@@ -2890,16 +2864,6 @@ function AppContent() {
       ...jobs.filter((job) => !newJobs.some((newJob) => newJob.jobId === job.jobId)),
     ];
   }, [catalogFilters.jobStatus, jobs, launchInbox]);
-  const deckJobs = useMemo(
-    () => discoveryDeck(catalogJobs, deckCatalogRoles),
-    [catalogJobs, deckCatalogRoles],
-  );
-  // A guest fetches the same public catalog page; its new matches are the inbox
-  // roles it already has.
-  const guestDeckJobs = useMemo(
-    () => discoveryDeck(launchInbox?.jobs ?? [], deckCatalogRoles),
-    [launchInbox, deckCatalogRoles],
-  );
   const applicationStatuses = useMemo(
     () => new Map(applications.map((application) => [application.jobId, application.status])),
     [applications],
@@ -2961,7 +2925,6 @@ function AppContent() {
         onModalDismissedRoute={finishDetailDismissal}
         onRetryRoute={retryRoutedJob}
         inbox={launchInbox}
-        deckJobs={guestDeckJobs}
         applicationStatuses={applicationStatuses}
         queuingJobIds={queuingJobIds}
         hiddenJobIds={hiddenJobIds}
@@ -3271,7 +3234,7 @@ function AppContent() {
           ) : tab === "discover" ? (
             <View style={styles.pageColumn}>
               <SwipeDeck
-                jobs={deckJobs}
+                jobs={catalogJobs}
                 applicationStatuses={applicationStatuses}
                 queuedJobIds={queuedJobIds}
                 hiddenJobIds={hiddenJobIds}
@@ -3685,7 +3648,6 @@ function GuestExperience({
   onModalDismissedRoute,
   onRetryRoute,
   inbox,
-  deckJobs,
   applicationStatuses,
   queuingJobIds,
   hiddenJobIds,
@@ -3708,7 +3670,6 @@ function GuestExperience({
   onModalDismissedRoute: () => void;
   onRetryRoute: () => void;
   inbox?: LaunchInbox;
-  deckJobs: Job[];
   applicationStatuses: Map<string, string>;
   queuingJobIds: Set<string>;
   hiddenJobIds: Set<string>;
@@ -3766,7 +3727,7 @@ function GuestExperience({
             {tab === "discover" ? (
               <View style={styles.pageColumn}>
                 <SwipeDeck
-                  jobs={deckJobs}
+                  jobs={inbox?.jobs ?? []}
                   applicationStatuses={EMPTY_APPLICATION_STATUSES}
                   queuedJobIds={EMPTY_JOB_IDS}
                   hiddenJobIds={hiddenJobIds}
