@@ -1558,22 +1558,20 @@ function NewnessLane({
   }, [autoCycles, cycleLength, laneStep]);
   return (
     <View style={styles.catalogLane}>
-      <View style={styles.catalogLaneHeader}>
-        <View style={styles.catalogLaneHeading}>
-          <Text style={styles.catalogLaneTitle}>
-            {since
-              ? `${roleCount} new ${roleCount === 1 ? "role" : "roles"} since ${since}`
-              : "Newest roles in the catalog"}
-          </Text>
-          <Text style={styles.catalogLaneCaption}>{since ? "Freshly matched your alerts" : "The latest we are tracking"}</Text>
-        </View>
+      <Text style={styles.catalogLaneTitle}>
+        {since
+          ? `${roleCount} new ${roleCount === 1 ? "role" : "roles"} since ${since}`
+          : "Newest roles in the catalog"}
+      </Text>
+      <View style={styles.catalogLaneSubRow}>
+        <Text style={styles.catalogLaneCaption}>{since ? "Freshly matched your alerts" : "The latest we are tracking"}</Text>
         {groups.length > 1 ? (
           <TouchableOpacity
             accessibilityRole="button"
             accessibilityLabel={cycling ? "Stop the new roles from moving" : "Let the new roles move again"}
             aria-pressed={!cycling}
             onPress={() => setCycling((current) => !current)}
-            style={styles.catalogLaneControl}
+            style={[styles.catalogLaneControl, styles.catalogLaneControlCompact]}
           >
             <Ionicons name={cycling ? "pause" : "play"} size={14} color={colors.muted} />
             <Text style={styles.catalogLaneControlText}>{cycling ? "Pause" : "Play"}</Text>
@@ -7829,8 +7827,8 @@ const styles = StyleSheet.create({
   catalogGroupCountPill: { backgroundColor: colors.ink, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
   catalogGroupCountText: { color: colors.onDark, fontSize: 11, fontWeight: "800" },
   catalogLane: { marginBottom: 6, marginTop: 10 },
-  catalogLaneHeader: { alignItems: "flex-start", flexDirection: "row", gap: 12, justifyContent: "space-between", marginBottom: 14, paddingTop: 6 },
-  catalogLaneHeading: { flexShrink: 1, gap: 2 },
+  catalogLaneSubRow: { alignItems: "center", flexDirection: "row", gap: 10, justifyContent: "space-between", marginTop: 2 },
+  catalogLaneControlCompact: { minHeight: 30, paddingHorizontal: 10 },
   catalogLaneControl: {
     alignItems: "center",
     borderColor: colors.border,
