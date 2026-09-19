@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boundedCatalogText, compactLocations, presentCatalogRole, seasonLabel } from "../src/catalog-quality.js";
+import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "../src/catalog-quality.js";
 
 describe("catalog presentation hardening", () => {
   it("uses explicit currency, period and applicability on every role surface", () => {
@@ -20,6 +20,13 @@ describe("catalog presentation hardening", () => {
   it("summarizes at most twelve locations", () => {
     const locations = Array.from({ length: 15 }, (_, index) => `Location ${index + 1}`);
     expect(compactLocations(locations)).toBe("Location 1 · Location 2 + 10 more");
+  });
+
+  it("keeps compact cards to a stable role and location summary", () => {
+    expect(compactCatalogTitle("Market Analysis Intern - Computer science/data analytics")).toBe("Market Analysis Intern - Computer science/data analytics");
+    expect(compactCatalogTitle("Data & AI Internship Program - She/He/They with an unusually long eligibility suffix")).toMatch(/…$/u);
+    expect(compactCatalogLocation(["Katowice, Silesia Business Park Bldg C, Poland", "Remote — US"])).toBe("Katowice, Poland");
+    expect(compactCatalogLocation(["US-IL-Niles"])).toBe("US-IL-Niles");
   });
 
   it("uses bounded values for visible and accessibility copy", () => {
