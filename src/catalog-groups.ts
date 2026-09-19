@@ -10,6 +10,7 @@ import { occurrenceProvenance } from './sources/provenance.js';
 import { educationExcludesLevel } from './identity/enrichment.js';
 import type { EducationLevel, Internship } from './types.js';
 import { allDisciplineStyles, disciplineKey, disciplineSearchVariants } from '../shared/discipline-display.js';
+import { classifyJob, type JobCategory } from './core/filters.js';
 
 const DISCIPLINE_FILTER_VALUES: Record<string, string> = Object.fromEntries(
   allDisciplineStyles().map(({ tag, style }) => [tag, style.filterValue]),
@@ -243,10 +244,19 @@ function workModesFor(job: Internship) {
 function disciplinesFor(job: Internship) {
   const identity = identityFor(job);
   const structured = identity?.disciplineTags ?? identity?.disciplines;
-  return unique(structured?.map((item) => {
+  const metadata = structured?.map((item) => {
     const value = typeof item === 'string' ? item : item.value ?? '';
     return DISCIPLINE_FILTER_VALUES[value] ?? value;
-  }).filter(Boolean) ?? inferJobFocuses(job));
+  }).filter(Boolean) ?? inferJobFocuses(job);
+  const categoryDiscipline: Partial<Record<JobCategory, string>> = {
+    'ai-ml': 'AI/ML', swe: 'SWE', quant: 'Quant/Fintech', product: 'Product', design: 'Design',
+    'general-engineering': 'Engineering', mechanical: 'Mechanical', electrical: 'Electrical', aerospace: 'Aerospace', civil: 'Civil',
+    'chemical-materials': 'Chemical & materials', 'industrial-manufacturing': 'Manufacturing', biomedical: 'Biomedical',
+    'environmental-energy': 'Environment & energy', 'systems-test': 'Systems & test', 'technical-operations': 'Technical operations',
+  };
+  return unique([...metadata, ...classifyJob(job)
+    .filter((category) => ['general-engineering', 'mechanical', 'electrical', 'aerospace', 'civil', 'chemical-materials', 'industrial-manufacturing', 'biomedical', 'environmental-energy', 'systems-test', 'technical-operations'].includes(category))
+    .flatMap((category) => categoryDiscipline[category] ?? [])]);
 }
 
 /** The day a role counts toward. A role the catalog observed live belongs to the

@@ -595,7 +595,7 @@ export interface EducationAudience {
   provenance: FieldProvenance[];
 }
 
-export type DisciplineTag = 'software' | 'ai-ml' | 'data' | 'infrastructure-cloud' | 'security' | 'quant' | 'product' | 'technical-design';
+export type DisciplineTag = 'software' | 'ai-ml' | 'data' | 'infrastructure-cloud' | 'security' | 'quant' | 'product' | 'technical-design' | 'general-engineering' | 'mechanical' | 'electrical' | 'aerospace' | 'civil' | 'chemical-materials' | 'industrial-manufacturing' | 'biomedical' | 'environmental-energy' | 'systems-test' | 'technical-operations';
 export type WorkMode = 'remote' | 'hybrid' | 'onsite' | 'unspecified';
 
 export interface InternshipLocation {
@@ -865,6 +865,7 @@ export interface SourceOccurrence extends SourceReference {
   trustedCommunityAlertQualification?: TrustedCommunityAlertQualification;
   /** Source-local classification retained so job eligibility is independent of poll order. */
   technical?: boolean;
+  technicalScope?: 'legacy' | 'expanded';
   company: string;
   title: string;
   location: string;
@@ -1088,6 +1089,8 @@ export interface Internship {
   sourceReferences: SourceOccurrence[];
   /** Persisted preprocessing result used by indexes and queries. */
   technical?: boolean;
+  /** Missing values predate the engineering expansion and remain legacy-scoped. */
+  technicalScope?: 'legacy' | 'expanded';
   open: boolean;
   /** Admission is independent from source lifecycle. Missing means legacy/unclassified. */
   admission?: CatalogAdmission;

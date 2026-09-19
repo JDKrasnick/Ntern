@@ -65,6 +65,7 @@
   - [ ] Review the production candidate set, approve the exact guarded repair token/count, apply it, and verify unchanged job IDs, first-seen timestamps, recency, source references, and notification state.
   - [ ] Verify browse, detail, Saved/unavailable behavior, grouped results, and official handoff on physical iOS, physical Android, and production web, then observe a real seven-day custom-route grace transition before closing #120. Record the release candidate and private evidence with [`release-candidate-validation.md`](release-candidate-validation.md).
 - [x] Add internal source-aware filtering (FAANG, verified startups/YC, normal, U.S.-citizenship requirement, stated education audience, and open/closed status) to catalog ingestion, alerts, and mobile discovery. The degree control became the reader's own education level in extraction v16; see [the coverage audit](role-metadata-coverage.md#latest-implementation-extraction-v16--2026-09-18).
+- [x] Expand browse taxonomy to general engineering and hands-on technical pathways while retaining explicit per-installation consent before an expanded-only role can alert an existing reader. Production audit, human review, and guarded reclassification remain rollout gates.
 - [x] Add the signed-in “new since last open” inbox with a calm first-open baseline, saved-filter matching, and count-led mobile launch screen.
 - [x] Add signed-in swipe-left save for later, synced to the responsive web Saved queue and official-form handoff.
 - [x] Add local swipe-right hide with Undo and Profile-based restore.

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { employerCategory } from '../core/employers.js';
-import { isTechnicalJob, matchesJobFilter, type JobFilter } from '../core/filters.js';
+import { isTechnicalJob, matchesJobFilter, technicalScopeFor, type JobFilter } from '../core/filters.js';
 import { fingerprint, jobId, normalizeUrl } from '../core/normalize.js';
 import { normalizeInternship, normalizeListing } from '../catalog-quality.js';
 import { isOfficialOccurrence } from '../sources/provenance.js';
@@ -250,6 +250,7 @@ function create(listing: ProcessedListing, externalId: string, now: string, base
     ...(admission ? { admission } : {}),
     ...(authoritativeClosure ? { invalidApplicationUrl: normalizedUrl } : {}),
     technical: listing.technical ?? isTechnicalJob(listing),
+    ...(listing.technicalScope ?? technicalScopeFor(listing) ? { technicalScope: listing.technicalScope ?? technicalScopeFor(listing) } : {}),
     open: !authoritativeClosure && listing.state === 'open' && seasonAllowsOpen(listing.season, listing.internshipIdentity, [reference], now),
     firstSeenAt: now,
     ...(admission?.catalogEligible === false ? {} : {

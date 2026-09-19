@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateJobFilter, inferJobFocuses, isTechnicalJob, matchesJobFilter, parseJobFilter } from '../src/core/filters.js';
+import { evaluateJobFilter, inferJobFocuses, isTechnicalJob, matchesJobFilter, parseJobFilter, technicalScopeFor } from '../src/core/filters.js';
 import { employerCategory } from '../src/core/employers.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import { Poller } from '../src/poll.js';
@@ -110,6 +110,27 @@ describe('job filters', () => {
     expect(isTechnicalJob(listing('Software Engineering Intern', 'https://example.com/swe'))).toBe(true);
     expect(isTechnicalJob(listing('Human Resources Intern', 'https://example.com/hr'))).toBe(false);
   });
+  it('classifies expanded engineering titles without widening legacy alerts', () => {
+    const mechanical = listing('Mechanical Engineering Intern', 'https://example.com/mechanical');
+    const sales = listing('Sales Engineer Intern', 'https://example.com/sales');
+    expect(isTechnicalJob(mechanical)).toBe(true);
+    expect(technicalScopeFor(mechanical)).toBe('expanded');
+    expect(isTechnicalJob(sales)).toBe(false);
+    expect(matchesJobFilter({ ...mechanical, technicalScope: 'expanded' }, {})).toBe(false);
+    expect(matchesJobFilter({ ...mechanical, technicalScope: 'expanded' }, parseJobFilter({ includeExpandedTechnical: true }))).toBe(true);
+    expect(parseJobFilter({ includeCategories: ['mechanical'] })).toEqual({ includeCategories: ['mechanical'], includeExpandedTechnical: true });
+  });
+  it('recognizes every expanded discipline and rejects commercial collisions', () => {
+    const titles = [
+      'Engineering Rotation Intern', 'Thermal Engineering Co-op', 'RF Engineer Intern', 'Propulsion Intern',
+      'Structural Analysis Intern', 'Materials Engineering Intern', 'Manufacturing Intern', 'Biomedical Engineering Intern',
+      'Renewable Energy Intern', 'Validation Engineer Intern', 'Engineering Technician Apprentice',
+    ];
+    for (const title of titles) expect(technicalScopeFor(listing(title, `https://example.com/${title}`)), title).toBe('expanded');
+    for (const title of ['Supply Chain Engineering Intern', 'Facilities Engineer Intern', 'Customer Support Technician']) {
+      expect(isTechnicalJob(listing(title, `https://example.com/${title}`)), title).toBe(false);
+    }
+  });
   it('admits technical domains the six coarse categories never named', () => {
     for (const title of ['Data Engineer Intern', 'Cybersecurity Analyst Intern', 'Hardware Engineer (FPGA/ASIC) Intern',
       'Platform Engineer Intern', 'Network Engineer Intern', 'Windows Engineer Intern', 'IT Operations Intern',
@@ -119,8 +140,7 @@ describe('job filters', () => {
   });
   it('lets a business function outrank a technical word it merely shares', () => {
     for (const title of ['AI Marketing Intern', 'Talent Acquisition Technology Intern', 'Platform Campaign Project Intern',
-      'Technical Recruiting Intern - AI & Automation', 'Supply Chain Intern', 'Administrative Business Partner - Security',
-      'Structural Engineer Intern', 'Intern - Mechanical Engineer']) {
+      'Technical Recruiting Intern - AI & Automation', 'Supply Chain Intern', 'Administrative Business Partner - Security']) {
       expect(isTechnicalJob(listing(title, 'https://example.com/role')), title).toBe(false);
     }
   });

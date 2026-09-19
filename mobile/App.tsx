@@ -238,6 +238,7 @@ type JobFilter = {
   includeKeywords?: string[];
   excludeCategories?: string[];
   excludeKeywords?: string[];
+  includeExpandedTechnical?: boolean;
   includeEmployerCategories?: EmployerCategory[];
   excludeEmployerCategories?: EmployerCategory[];
   excludeUsCitizenshipRequired?: boolean;
@@ -288,7 +289,8 @@ const nextApplicationStatuses: Record<string, Application["status"]> = {
   rejected: "rejected",
   withdrawn: "withdrawn",
 };
-const categories = ["ai-ml", "grad", "swe", "quant", "product", "design"];
+const categories = ["ai-ml", "grad", "swe", "quant", "product", "design", "general-engineering", "mechanical", "electrical", "aerospace", "civil", "chemical-materials", "industrial-manufacturing", "biomedical", "environmental-energy", "systems-test", "technical-operations"];
+const categoryLabel = (category: string) => category.replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 const employerCategoryLabels: Record<EmployerCategory, string> = {
   faang: "FAANG",
   startup: "Startups",
@@ -4566,6 +4568,7 @@ function Onboarding({
         body: JSON.stringify({
           filter: {
             includeCategories: selected,
+            includeExpandedTechnical: selected.some((category) => ["general-engineering", "mechanical", "electrical", "aerospace", "civil", "chemical-materials", "industrial-manufacturing", "biomedical", "environmental-energy", "systems-test", "technical-operations"].includes(category)),
             includeKeywords: keywords
               .split(",")
               .map((item) => item.trim())
@@ -5256,6 +5259,7 @@ function Profile({
   const [excludeCategories, setExcludeCategories] = useState<string[]>(
     preferences.filter.excludeCategories ?? [],
   );
+  const [includeExpandedTechnical, setIncludeExpandedTechnical] = useState(preferences.filter.includeExpandedTechnical ?? false);
   const [includeKeywords, setIncludeKeywords] = useState(
     (preferences.filter.includeKeywords ?? []).join(", "),
   );
@@ -5356,6 +5360,7 @@ function Profile({
     if (sync.jobPreferences) {
       setIncludeCategories(preferences.filter.includeCategories ?? []);
       setExcludeCategories(preferences.filter.excludeCategories ?? []);
+      setIncludeExpandedTechnical(preferences.filter.includeExpandedTechnical ?? false);
       setIncludeKeywords((preferences.filter.includeKeywords ?? []).join(", "));
       setExcludeKeywords((preferences.filter.excludeKeywords ?? []).join(", "));
       setAlertsEnabled(preferences.alertsEnabled);
@@ -5512,6 +5517,7 @@ function Profile({
             includeCategories,
             includeKeywords: commaList(includeKeywords),
             excludeCategories,
+            includeExpandedTechnical,
             excludeKeywords: commaList(excludeKeywords),
             includeEmployerCategories,
             excludeUsCitizenshipRequired,
@@ -5993,6 +5999,17 @@ function Profile({
         autoCapitalize="none"
       />
       <Text style={styles.preferenceTitle}>Include role categories</Text>
+      <TouchableOpacity
+        style={[styles.chip, includeExpandedTechnical && styles.chipOn]}
+        accessibilityRole="checkbox"
+        aria-checked={includeExpandedTechnical}
+        onPress={() => {
+          markJobPreferencesDirty();
+          setIncludeExpandedTechnical((value) => !value);
+        }}
+      >
+        <Text style={[styles.chipLabel, includeExpandedTechnical && styles.chipLabelOn]}>Include engineering and technical roles</Text>
+      </TouchableOpacity>
       <View style={styles.chips}>
         {categories.map((category) => (
           <TouchableOpacity
@@ -6005,7 +6022,10 @@ function Profile({
             aria-checked={includeCategories.includes(category)}
             onPress={() => {
               markJobPreferencesDirty();
-              toggleCategory(category, includeCategories, setIncludeCategories);
+              toggleCategory(category, includeCategories, (next) => {
+                setIncludeCategories(next);
+                if (["general-engineering", "mechanical", "electrical", "aerospace", "civil", "chemical-materials", "industrial-manufacturing", "biomedical", "environmental-energy", "systems-test", "technical-operations"].includes(category)) setIncludeExpandedTechnical(true);
+              });
             }}
           >
             <Text
@@ -6014,7 +6034,7 @@ function Profile({
                 includeCategories.includes(category) && styles.chipLabelOn,
               ]}
             >
-              {category.toUpperCase()}
+              {categoryLabel(category)}
             </Text>
           </TouchableOpacity>
         ))}
@@ -6053,7 +6073,7 @@ function Profile({
                 excludeCategories.includes(category) && styles.chipLabelExclude,
               ]}
             >
-              {category.toUpperCase()}
+              {categoryLabel(category)}
             </Text>
           </TouchableOpacity>
         ))}
