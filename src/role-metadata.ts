@@ -422,8 +422,8 @@ export function extractCompensationRanges(
     .replace(/\b((?:primary location\s+)?full[ -]time\s+(?:salary|pay)\s+range)\s*:\s*\n\s*(?=[$€£])/giu, '$1: ')
     // Adjacent employer min/max fields describe one range, not two offers.
     // Require the same label and currency notation on both endpoints.
-    .replace(new RegExp(String.raw`\b(salary\s*\/\s*rate)\s+minimum\s*:\s*((?:${CURRENCY_CODE}\s*)?[$€£])\s*(${MONEY_AMOUNT})\s*\n\s*\1\s+maximum\s*:\s*\2\s*(${MONEY_AMOUNT})`, 'giu'), '$1: $2$3 - $2$4')
-    .replace(new RegExp(String.raw`\bminimum\s+(pay|salary)\s*:?\s*((?:${CURRENCY_CODE}\s*)?[$€£])\s*(${MONEY_AMOUNT})\s*\n\s*maximum\s+\1\s*:?\s*\2\s*(${MONEY_AMOUNT})`, 'giu'),
+    .replace(new RegExp(String.raw`\b(salary\s*\/\s*rate)\s+minimum\s*:\s*((?:(?:${CURRENCY_CODE})\s*)?[$€£])\s*(${MONEY_AMOUNT})\s*\n\s*\1\s+maximum\s*:\s*\2\s*(${MONEY_AMOUNT})`, 'giu'), '$1: $2$3 - $2$4')
+    .replace(new RegExp(String.raw`\bminimum\s+(pay|salary)\s*:?\s*((?:(?:${CURRENCY_CODE})\s*)?[$€£])\s*(${MONEY_AMOUNT})\s*\n\s*maximum\s+\1\s*:?\s*\2\s*(${MONEY_AMOUNT})`, 'giu'),
       (matched: string, label: string, currency: string, first: string, second: string, offset: number, full: string) => {
         // Rendered employer fact tables may state cadence in a separate field.
         // Only carry an explicit Hourly value through bounded metadata rows;
@@ -432,13 +432,19 @@ export function extractCompensationRanges(
         const hourly = /^\s*\n(?:(?:Line of Business|Banner Name|Education Level|Required License and Certification|Job Schedule|Job Category|Job Identification|Locations)[^\n$€£]{0,200}\n){0,8}Hourly or Salaried\s*:?\s*Hourly(?:\n|$)/iu.test(trailingFields);
         return `${label}: ${currency}${first} - ${currency}${second}${hourly ? '/hour' : ''}`;
       })
-    .replace(new RegExp(String.raw`\bpay range\s*[-–—]\s*start\s*:\s*((?:${CURRENCY_CODE}\s*)?[$€£])\s*(${MONEY_AMOUNT})\s*\n\s*pay range\s*[-–—]\s*end\s*:\s*\1\s*(${MONEY_AMOUNT})`, 'giu'), 'Pay range: $1$2 - $1$3')
+    .replace(new RegExp(String.raw`\bpay range\s*[-–—]\s*start\s*:\s*((?:(?:${CURRENCY_CODE})\s*)?[$€£])\s*(${MONEY_AMOUNT})\s*\n\s*pay range\s*[-–—]\s*end\s*:\s*\1\s*(${MONEY_AMOUNT})`, 'giu'), 'Pay range: $1$2 - $1$3')
+    // Rendered fact tables put the label on its own line above its value, as
+    // iCIMS does with "Salary Min ($)" then "USD $25.00". Text is segmented on
+    // newlines, so without this the two ends become two competing point values
+    // and reconciliation refuses to invent a winner. Both ends must carry the
+    // same currency notation, exactly as the inline forms above require.
+    .replace(new RegExp(String.raw`\b(?:salary|pay|wage|compensation)\s+min(?:imum)?\s*(?:\([^)\n]{0,24}\))?\s*:?\s*\n\s*((?:(?:${CURRENCY_CODE})\s*)?[$€£])\s*(${MONEY_AMOUNT})\s*\n\s*(?:salary|pay|wage|compensation)\s+max(?:imum)?\s*(?:\([^)\n]{0,24}\))?\s*:?\s*\n\s*\1\s*(${MONEY_AMOUNT})`, 'giu'), 'Salary: $1$2 - $1$3')
     .replace(new RegExp(String.raw`([$€£]\s*${MONEY_AMOUNT})\s+through\s+(?=[$€£]\s*\d)`, 'giu'), '$1 - ')
     .replace(/\bD\.C\./gu, 'DC')
     .replace(new RegExp(String.raw`([$€£]?\s*${MONEY_AMOUNT}\s*[kK]?)\s+(${CURRENCY_CODE})(?=\s*(?:[-–—]|to)\s*)`, 'giu'), '$2 $1')
     .replace(/([-–—]|\bto\b)\s*(?:maximum|max\.?)\s*(?=[$€£\d])/giu, '$1 ')
     .replace(/(\d)\s+MIN\s*(?=[-–—])/giu, '$1 ')
-    .replace(new RegExp(String.raw`\bbetween\s+((?:${CURRENCY_CODE}\s*)?[$€£]\s*${MONEY_AMOUNT}\s*[kK]?)\s+and\s+(?=(?:${CURRENCY_CODE}\s*)?[$€£]\s*\d)`, 'giu'), 'between $1 - ');
+    .replace(new RegExp(String.raw`\bbetween\s+((?:(?:${CURRENCY_CODE})\s*)?[$€£]\s*${MONEY_AMOUNT}\s*[kK]?)\s+and\s+(?=(?:(?:${CURRENCY_CODE})\s*)?[$€£]\s*\d)`, 'giu'), 'between $1 - ');
   const payContext = /\b(?:salary|pays?|compensation|base rate|market range|hourly rate|annual range|hiring range|internships? (?:is|are) paid)\b/iu;
   const segments = normalized.split(/(?<=[.;\n])\s+|\s*[;\n]\s*/u).filter(Boolean).flatMap(segment => {
     // Inline degree tiers are separate disclosures, not range endpoints. Keep
