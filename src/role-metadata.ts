@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { compensationLabels } from '../shared/compensation-display.js';
 import { metadataDescriptionText } from './core/metadata-text.js';
 import { boundedText, locationSummary, normalizeLocations } from './catalog-quality.js';
-import { mergeEducationEvidence, mergeProvenance } from './identity/enrichment.js';
+import { educationAudienceLevels, mergeEducationEvidence, mergeProvenance } from './identity/enrichment.js';
 import type {
   ApplicationDeadline,
   Compensation,
@@ -29,7 +29,7 @@ import type {
 // Increment whenever a parser change can produce a different result from an
 // unchanged artifact. This makes the collection scheduler revisit both a
 // previous negative result and an already-enriched posting.
-export const ROLE_METADATA_EXTRACTION_VERSION = 15;
+export const ROLE_METADATA_EXTRACTION_VERSION = 16;
 export const VERIFIED_PAGE_METADATA_SOURCES = ['official-json-ld', 'official-page'] as const;
 const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
   // Exact-role detail retrieval owns its own slot; a later board-list poll
@@ -229,15 +229,6 @@ function provenance(input: ExtractRoleMetadataInput, artifactHash: string, evide
   };
 }
 
-function educationLevels(value: string): EducationLevel[] {
-  const levels: EducationLevel[] = [];
-  if (/\b(?:bs|bsc|b\.s\.|ba|b\.a\.|bachelor(?:['’]s|s)?|undergrad(?:uate)?|college student)\b/iu.test(value)) levels.push('undergraduate');
-  if (/\b(?:ms|msc|m\.s\.|ma|m\.a\.|master(?:['’]s|s)?|graduate student)\b/iu.test(value)) levels.push('masters');
-  if (/\bm\.?b\.?a\.?\b/iu.test(value)) levels.push('mba');
-  if (/\b(?:ph\.?d\.?|doctoral?|doctorate)\b/iu.test(value)) levels.push('doctoral');
-  return levels;
-}
-
 function minimumDegree(value: string): MinimumDegree | undefined {
   const clauses = value.split(/(?<=[.!?;])\s+|\n+/u).filter(clause =>
     !/\b(?:not required|no\s+(?:[\w’'-]+\s+){0,3}degree\s+(?:is\s+)?required)\b/iu.test(clause));
@@ -265,6 +256,18 @@ function minimumDegree(value: string): MinimumDegree | undefined {
   if (required("associate(?:['’]s|s)?")) return 'associates';
   if (/\bhigh school diploma\s+(?:is\s+)?required\b|\bminimum[^.;]{0,30}\bhigh school\b/iu.test(value)) return 'high-school';
   return undefined;
+}
+
+// A pay row is a label, not prose: "Masters $50/hour" states its own audience in
+// two words, so the clause and preference rules that govern descriptions do not
+// apply here.
+function payTierEducationLevels(segment: string): EducationLevel[] {
+  const levels: EducationLevel[] = [];
+  if (/\b(?:undergrad(?:uate)?s?|bachelor(?:['’]s|s)?|college student|university student)\b/iu.test(segment)) levels.push('undergraduate');
+  if (/\b(?:master['’]s|masters|graduate student)\b/iu.test(segment) || /(?<![\w.])(?:MSc|MS|M\.S\.|MA|M\.A\.)(?![\w.])/u.test(segment)) levels.push('masters');
+  if (/\bm\.?b\.?a\.?s?\b/iu.test(segment)) levels.push('mba');
+  if (/\b(?:ph\.?\s?d\.?(?!\w)|doctorate|doctoral|doctorates)\b/iu.test(segment)) levels.push('doctoral');
+  return levels;
 }
 
 const MONTH: Record<string, string> = {
@@ -362,7 +365,7 @@ function applicability(segment: string, knownLocations: readonly string[]): Pick
   const compensationLabel = prefix && /\b(?:salary|pay|compensation|wages?|earnings?|rate|range)\b/iu.test(prefix)
     && !/\bfull[ -]time\b/iu.test(prefix);
   const genericHeading = prefix && /^(?:base|required skills|additional requirements|what we offer|requirements|qualifications)$/iu.test(prefix);
-  const levels = educationLevels(segment);
+  const levels = payTierEducationLevels(segment);
   const educationTier = EDUCATION_PAY_ROW.exec(segment)?.[1];
   return {
     ...(explicitLocation ? { applicableLocations: normalizeLocations([explicitLocation]) } : locations.length ? { applicableLocations: normalizeLocations(locations) } : {}),
@@ -743,7 +746,7 @@ export function extractRoleMetadataEvidence(input: ExtractRoleMetadataInput): Ro
     }
     compensationRanges.push(...sectionRanges);
   }
-  const levels = educationLevels(text);
+  const levels = educationAudienceLevels(text);
   const housing = input.titleOnly ? [] : extractHousingDetails(text, { provenance: field('housing-explicit'), knownLocations: normalizedLocations });
   const window = graduationWindow(text);
   const degree = minimumDegree(text);
@@ -765,7 +768,7 @@ export function extractRoleMetadataEvidence(input: ExtractRoleMetadataInput): Ro
   const excerpts: Partial<Record<RoleMetadataField, string>> = {};
   if (compensationRanges.length) excerpts.compensation = boundedText([...new Set(compensationRanges.map((range) => range.sourceText))].join(' · '), 240);
   if (housing.length) excerpts.housing = housing[0]!.sourceText;
-  if (education) excerpts.education = fieldExcerpt(text, /\b(?:bachelor|undergrad|master|graduate student|mba|ph\.?d\.?|doctoral?|graduat(?:e|ing|ion)|class of)\b/iu);
+  if (education) excerpts.education = fieldExcerpt(text, /\b(?:bachelor|undergrad|four[ -]?year|master|graduate student|mba|ph\.?d\.?|doctoral?|graduat(?:e|ing|ion)|class of)\b/iu);
   if (applicationDeadline) excerpts['application-deadline'] = fieldExcerpt(input.artifact.text ?? input.artifact.deadline ?? '', /\b(?:deadline|closes?|apply by|rolling)\b/iu);
   return {
     schemaVersion: 1, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, artifactHash,

@@ -20,7 +20,8 @@ import type {
   RoleMetadataEvidence,
   RoleMetadataOmission,
 } from '../src/types.js';
-import { projectRoleMetadata, reconcileRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataReviewFingerprint, ROLE_METADATA_EXTRACTION_VERSION, unsupportedMetadataCurrencies, unsupportedMetadataPeriods } from '../src/role-metadata.js';
+import { projectRoleMetadata, reconcileRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceHasFields, roleMetadataReviewFingerprint, ROLE_METADATA_EXTRACTION_VERSION, unsupportedMetadataCurrencies, unsupportedMetadataPeriods } from '../src/role-metadata.js';
+import { metadataApiRoute } from '../src/metadata-acquisition.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 
 export const ATOMIC_REPAIR_RECORD_LIMIT = 900;
@@ -204,7 +205,12 @@ export function destinationVerificationMatchesReference(
   reference: SourceOccurrence,
   request: Pick<ScheduledDestinationVerification, 'candidateUrl' | 'providerIdentity'>,
 ): boolean {
-  if (reference.applyUrl !== request.candidateUrl) return false;
+  // Metadata collection targets the destination the occurrence's own admission
+  // verified, which is frequently a redirect or canonical form of the apply URL.
+  // Requiring byte-equality with `applyUrl` silently voided 328 of 1,476
+  // collectible roles, so accept that verified URL as well as the source URL.
+  const verifiedCandidate = reference.admission?.destination?.finalUrl ?? reference.admission?.destination?.candidateUrl;
+  if (reference.applyUrl !== request.candidateUrl && verifiedCandidate !== request.candidateUrl) return false;
   const current = providerIdentityForReference(reference, reference.admission?.destination);
   const equal = (left: string | undefined, right: string | undefined) => left?.toLowerCase() === right?.toLowerCase();
   return current.sourceId === request.providerIdentity.sourceId
@@ -582,9 +588,13 @@ export class D1CatalogAdmissionStore {
         .all<{ job_id: string; source_id: string; lease_until: string; retry_after: string; version: number | null }>(),
     ]);
     const now = options.reserveAt ?? new Date().toISOString();
-    const unavailable = new Set(reservations.results.filter((item) => item.lease_until > now
-      || (item.retry_after > now && (item.version === null || item.version >= ROLE_METADATA_EXTRACTION_VERSION)))
-      .map((item) => `${item.job_id}\0${item.source_id}`));
+    // A row deferred by the old "reaching a page counts as complete" rule can sit
+    // out a full month even though its provider API was never read. Field-less
+    // evidence with an available API route is therefore due again after a day,
+    // whatever deferral it carries; once the API supplies fields the normal
+    // window applies, so this is self-limiting rather than a standing exemption.
+    const providerApiRetryBefore = new Date(Date.parse(now) - 24 * 60 * 60_000).toISOString();
+    const reservationsByKey = new Map(reservations.results.map((item) => [`${item.job_id}\0${item.source_id}`, item]));
     const latest = new Map<string, { observedAt: string; artifactHash: string }>();
     for (const item of [...attempts.results, ...evidence.results]) {
       const key = `${item.job_id}\0${item.source_id}`;
@@ -592,7 +602,7 @@ export class D1CatalogAdmissionStore {
       if (!previous || item.observed_at > previous.observedAt) latest.set(key, { observedAt: item.observed_at, artifactHash: item.artifact_hash });
     }
     const candidates: Array<{ jobId: string; sourceId: string; externalId: string; candidateUrl: string;
-      providerIdentity: ProviderIdentity; metadataArtifactHash?: string }> = [];
+      providerIdentity: ProviderIdentity; metadataArtifactHash?: string; bypassDeferral?: true }> = [];
     // Match collectionCoverage's open-role cohort, including withheld roles.
     // Metadata collection must not require or grant catalog admission.
     for await (const page of this.catalogInternshipPages(100, true)) {
@@ -600,7 +610,7 @@ export class D1CatalogAdmissionStore {
         const job = JSON.parse(row.value) as Internship;
         for (const reference of job.sourceReferences) {
           const key = `${job.jobId}\0${reference.sourceId}`;
-          if (unavailable.has(key) || (options.after && key <= options.after)) continue;
+          if (options.after && key <= options.after) continue;
           const target = metadataCollectionTarget(reference);
           if (!target || !reference.externalId) continue;
           const current = reference.metadataEvidence?.some((item) => ['official-page', 'official-json-ld'].includes(item.sourceClass)
@@ -608,11 +618,22 @@ export class D1CatalogAdmissionStore {
           if (options.requireProjectedEvidence && !current) continue;
           const observation = latest.get(key);
           if (!observation && options.includeUnobserved === false) continue;
-          if (observation && (!options.observedBefore || observation.observedAt > options.observedBefore)) continue;
+          const evidence = reference.metadataEvidence ?? [];
+          const providerApiUnused = !evidence.some((item) => item.sourceClass === 'official-api' || item.sourceClass === 'official-ats')
+            && !evidence.some(roleMetadataEvidenceHasFields)
+            && Boolean(metadataApiRoute(target.providerIdentity, target.candidateUrl));
+          const reservation = reservationsByKey.get(key);
+          if (reservation?.lease_until && reservation.lease_until > now) continue;
+          const deferred = Boolean(reservation && reservation.retry_after > now
+            && (reservation.version === null || reservation.version >= ROLE_METADATA_EXTRACTION_VERSION));
+          const bypassDeferral = deferred && providerApiUnused && Boolean(observation && observation.observedAt <= providerApiRetryBefore);
+          if (deferred && !bypassDeferral) continue;
+          if (!bypassDeferral && observation && (!options.observedBefore || observation.observedAt > options.observedBefore)) continue;
           candidates.push({
             jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId,
             ...target,
             ...(observation ? { metadataArtifactHash: observation.artifactHash } : {}),
+            ...(bypassDeferral ? { bypassDeferral: true as const } : {}),
           });
         }
       }
@@ -646,12 +667,16 @@ export class D1CatalogAdmissionStore {
       if (selected.length >= limit) break;
       if (options.reserveAt) {
         const lease = new Date(Date.parse(options.reserveAt) + 30 * 60_000).toISOString();
+        // `bypass` re-claims a row whose deferral predates the field-less rule;
+        // a live lease still wins, so two passes never collect the same key.
         const reserved = await this.db.prepare(`INSERT INTO role_metadata_acquisition(job_id, source_id, lease_until)
           VALUES (?, ?, ?) ON CONFLICT(job_id, source_id) DO UPDATE SET lease_until=excluded.lease_until
           WHERE role_metadata_acquisition.lease_until <= ? AND (role_metadata_acquisition.retry_after <= ?
-            OR coalesce(json_extract(role_metadata_acquisition.report, '$.extractionVersion'), ?) < ?)`)
+            OR coalesce(json_extract(role_metadata_acquisition.report, '$.extractionVersion'), ?) < ?
+            OR ? = 1)`)
           .bind(candidate.jobId, candidate.sourceId, lease, options.reserveAt, options.reserveAt,
-            ROLE_METADATA_EXTRACTION_VERSION, ROLE_METADATA_EXTRACTION_VERSION).run();
+            ROLE_METADATA_EXTRACTION_VERSION, ROLE_METADATA_EXTRACTION_VERSION,
+            candidate.bypassDeferral ? 1 : 0).run();
         if (reserved.meta?.changes !== 1) continue;
       }
       selected.push(candidate);

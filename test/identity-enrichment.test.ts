@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildInternshipIdentity,
+  educationAudienceLevels,
   educationAudienceLabel,
   educationAudienceMatches,
   deriveTitleFields,
@@ -36,6 +37,32 @@ describe('provider-neutral field enrichment', () => {
       education: { levels: ['masters', 'undergraduate'], evidenceStatus: 'explicit' },
       locations: [{ name: 'New York, NY', workMode: 'hybrid' }, { name: 'Remote', workMode: 'hybrid' }],
     });
+  });
+
+  it('reads the audience an employer states rather than every degree word on the page', () => {
+    // Live Clearwater Analytics posting: the requirement is a four-year degree,
+    // and "Master's" is a typo'd action verb in the bullet above it.
+    expect(educationAudienceLevels("Master's\nthe team's business domain basics within 1 month and detailed knowledge within 3.\nCurrent students pursuing a four-year degree in Computer Science or related field."))
+      .toEqual(['undergraduate']);
+    expect(educationAudienceLevels('You will master complex distributed systems and master our tooling.')).toEqual([]);
+    expect(educationAudienceLevels('Mastery of Python and SQL required.')).toEqual([]);
+    expect(educationAudienceLevels("Master's or PhD degree required in Computer Science.")).toEqual(['doctoral', 'masters']);
+    expect(educationAudienceLevels('Must be enrolled in a graduate program.')).toEqual(['masters']);
+    expect(educationAudienceLevels('This role is for graduate students only.')).toEqual(['masters']);
+    expect(educationAudienceLevels("Currently pursuing a Bachelor's, Master's, or PhD degree in Electrical Engineering."))
+      .toEqual(['doctoral', 'masters', 'undergraduate']);
+    expect(educationAudienceLevels("2027 Leadership Development Program Intern (Master's)")).toEqual(['masters']);
+    // A latency measurement is not a degree.
+    expect(educationAudienceLevels('Latency under 5 ms.')).toEqual([]);
+  });
+
+  it('never turns a stated preference or a waived requirement into an audience', () => {
+    expect(educationAudienceLevels("Master's degree preferred.")).toEqual([]);
+    expect(educationAudienceLevels('Pursuing an MBA is a plus.')).toEqual([]);
+    expect(educationAudienceLevels("No Master's degree is required.")).toEqual([]);
+    // One clause's preference must not demote another clause's requirement.
+    expect(educationAudienceLevels('MS preferred, BS required.')).toEqual(['undergraduate']);
+    expect(educationAudienceLevels("A Master's degree is not required. A Bachelor's degree is required.")).toEqual(['undergraduate']);
   });
 
   it('prefers official structured evidence and retains corroboration for the winning value', () => {

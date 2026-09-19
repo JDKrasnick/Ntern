@@ -93,6 +93,48 @@ export function educationAudienceLabel(audience: EducationAudience): string {
   return audience.levels.join(', ');
 }
 
+/** The stated audience a filter needs; every field is validated before it is read. */
+export interface StatedEducationAudience {
+  levels: string[];
+  evidenceStatus?: string;
+}
+
+/**
+ * Roles carry the audience inside the identity they were built from, and older
+ * stored records hold that identity untyped. Reconciled official-page evidence
+ * replaces the identity's own scan, so the first holder that states levels wins.
+ */
+export function educationAudienceOf(job: { internshipIdentity?: unknown; roleMetadata?: unknown }): StatedEducationAudience | undefined {
+  for (const holder of [job.internshipIdentity, job.roleMetadata]) {
+    if (!holder || typeof holder !== 'object' || !('education' in holder)) continue;
+    const education = holder.education;
+    if (!education || typeof education !== 'object' || !('levels' in education) || !Array.isArray(education.levels)) continue;
+    const evidence = 'evidenceStatus' in education ? education.evidenceStatus : undefined;
+    return {
+      levels: education.levels.filter((level): level is string => typeof level === 'string'),
+      ...(typeof evidence === 'string' ? { evidenceStatus: evidence } : {}),
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Whether stated evidence turns this reader away. Silence and contradiction never
+ * exclude — the employer simply did not say — and a reader is only ever excluded
+ * by evidence about their own level. The legacy badge records a graduate
+ * requirement without saying which degree, so it can only rule out an
+ * undergraduate.
+ */
+export function educationExcludesLevel(input: {
+  levels?: readonly string[];
+  evidenceStatus?: string;
+  advancedDegreeRequired?: boolean;
+  level: EducationLevel;
+}): boolean {
+  if (input.evidenceStatus === 'explicit' && input.levels?.length) return !input.levels.includes(input.level);
+  return Boolean(input.advancedDegreeRequired) && input.level === 'undergraduate';
+}
+
 /** Light display cleanup preserves the employer's wording rather than replacing it with tags. */
 export function cleanDisplayTitle(officialTitle: string): string {
   return officialTitle.normalize('NFKC').replace(/^\p{Extended_Pictographic}[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\s]*/u, '').replace(/\s+/g, ' ').trim();
@@ -167,12 +209,84 @@ function programType(title: string, provenance: FieldProvenance): ProvenancedVal
   return { value, provenance: [{ ...provenance, evidenceCode: `program-type-${value}` }] };
 }
 
+// A sentence carries the audience statement; a segment (list punctuation) carries
+// one alternative. Splitting on both keeps "MS preferred, BS required" from
+// reading its requirement clause as a preference.
+const EDUCATION_SENTENCE_SPLIT = /\s*\n+\s*|(?<=[.!?])\s+/u;
+const EDUCATION_SEGMENT_SPLIT = /\s*[;|]\s*|\s*,\s*|\s+\/\s+/u;
+/** Text that demotes a degree to a nice-to-have; it never states who may apply. */
+const DEGREE_PREFERRED_ONLY = /\b(?:preferred|preferably|a plus|nice to have|desirable|ideally|bonus|advantage(?:ous)?)\b/iu;
+/** Text that withdraws the requirement instead of stating an audience. */
+const DEGREE_WAIVED = /\b(?:not required|need not|no\s+(?:[\w’'-]+\s+){0,3}degree\s+(?:is\s+)?required)\b/iu;
+/** Evidence that a bare degree word states an audience rather than an action. */
+const DEGREE_CONTEXT = /\b(?:degrees?|program(?:me)?s?|students?|candidates?|studies|thesis|course(?:work)?|standing|education|qualifications?|pursuing|enrolled|enrolment|enrollment|open to|eligible|eligibility|requirements?|required|must|class of|applicants?)\b/iu;
+
+// Case matters for the two-letter forms: "5 ms latency" is not a Master's, and
+// "our MA office" is not a degree. A lowercase form only counts with degree
+// context, and a period-separated form keeps its own spelling.
+const DEGREE_NOUN = String.raw`degrees?|program(?:me)?s?|students?|candidates?|studies|thesis|course(?:work)?|level`;
+const EDUCATION_AUDIENCE_PATTERNS: Record<EducationLevel, readonly RegExp[]> = {
+  undergraduate: [
+    /\b(?:undergrad(?:uate)?s?|bachelor(?:['’]s|s)?(?:\s+degree)?|college students?|university students?|four[ -]?year degree|4[ -]?year degree)\b/iu,
+    /(?<![\w.])(?:BSc|BS|B\.S\.|BA|B\.A\.)(?![\w.])/u,
+    new RegExp(String.raw`(?<![\w.])(?:bsc|bs|ba)(?![\w.])\s+(?:${DEGREE_NOUN}|in\s+\w+)`, 'iu'),
+  ],
+  masters: [
+    new RegExp(String.raw`\bmaster['’]s\s+(?:${DEGREE_NOUN}|of\s+\w+|in\s+\w+)`, 'iu'),
+    new RegExp(String.raw`\bmasters\s+(?:${DEGREE_NOUN}|of\s+\w+|in\s+\w+)`, 'iu'),
+    new RegExp(String.raw`\bmaster\s+(?:of|${DEGREE_NOUN})`, 'iu'),
+    new RegExp(String.raw`\bgraduate\s+(?:students?|program(?:me)?s?|degree|level|coursework)`, 'iu'),
+    /(?<![\w.])(?:MSc|MS|M\.S\.)(?![\w.])/u,
+    /(?<![\w.])(?:MA|M\.A\.)(?![\w.])/u,
+    new RegExp(String.raw`(?<![\w.])(?:msc|ms|ma)(?![\w.])\s+(?:${DEGREE_NOUN}|in\s+\w+)`, 'iu'),
+  ],
+  mba: [/\bm\.?b\.?a\.?s?\b/iu],
+  doctoral: [/\b(?:ph\.?\s?d\.?(?!\w)|doctorate|doctoral|doctorates)\b/iu],
+};
+/**
+ * A degree word with nothing after it. "Master the team's domain" and "Master's
+ * the team's domain" are instructions, so an unqualified form only counts when
+ * the next token continues a degree phrase and the sentence states an audience.
+ */
+const MASTERS_UNQUALIFIED = /(?<![\w.'’])master['’]?s?\b/giu;
+const MASTERS_CONTINUATION = new RegExp(String.raw`^\s*(?:$|[,;)]|\/|or\b|and\b|in\b|of\b|preferred\b|required\b|${DEGREE_NOUN})`, 'iu');
+
+function unqualifiedMastersAudience(segment: string, sentenceHasContext: boolean): boolean {
+  for (const match of segment.matchAll(MASTERS_UNQUALIFIED)) {
+    const index = match.index ?? 0;
+    if (!MASTERS_CONTINUATION.test(segment.slice(index + match[0].length))) continue;
+    // "(Master's)" labels a level; a bare mention needs the sentence to say why.
+    if (sentenceHasContext || segment.slice(0, index).trimEnd().endsWith('(')) return true;
+  }
+  return false;
+}
+
+/**
+ * The levels an employer says may apply, not every degree word on the page.
+ * Descriptions use these words as ordinary English too — "Master the team's
+ * domain", "Master's degree preferred", "No Master's degree is required" — and
+ * none of those turns away an undergraduate. Over-reporting a level hides a role
+ * the reader could apply to, so an unclear mention is dropped, not guessed.
+ */
+export function educationAudienceLevels(value: string): EducationLevel[] {
+  if (!value) return [];
+  const levels = new Set<EducationLevel>();
+  for (const sentence of value.split(EDUCATION_SENTENCE_SPLIT)) {
+    if (!sentence.trim()) continue;
+    const sentenceHasContext = DEGREE_CONTEXT.test(sentence);
+    for (const segment of sentence.split(EDUCATION_SEGMENT_SPLIT)) {
+      if (!segment.trim() || DEGREE_PREFERRED_ONLY.test(segment) || DEGREE_WAIVED.test(segment)) continue;
+      for (const [level, patterns] of Object.entries(EDUCATION_AUDIENCE_PATTERNS) as Array<[EducationLevel, readonly RegExp[]]>) {
+        if (patterns.some((pattern) => pattern.test(segment))) levels.add(level);
+      }
+      if (unqualifiedMastersAudience(segment, sentenceHasContext)) levels.add('masters');
+    }
+  }
+  return [...levels].sort();
+}
+
 function educationEvidence(content: string, provenance: FieldProvenance): EducationAudience {
-  const levels: EducationLevel[] = [];
-  if (/\b(?:undergraduate|undergrad|bachelor(?:['’]s|s)?(?: degree)?|college student|university student)\b/i.test(content)) levels.push('undergraduate');
-  if (/\b(?:master(?:['’]s|s)?(?: degree)?|graduate student)\b/i.test(content)) levels.push('masters');
-  if (/\bmba\b/i.test(content)) levels.push('mba');
-  if (/\b(?:ph\.?d\.?|doctoral?|doctorate)\b/i.test(content)) levels.push('doctoral');
+  const levels = educationAudienceLevels(content);
   return mergeEducationEvidence([{ ...(levels.length ? { levels } : {}), provenance: [provenance] }]);
 }
 

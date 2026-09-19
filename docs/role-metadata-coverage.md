@@ -1,6 +1,153 @@
 # Employer metadata coverage audit — 2026-09-05
 
-## Latest implementation: extraction v14 — 2026-09-07
+## Latest implementation: extraction v16 — 2026-09-18
+
+Extraction v16 replaces the keyword degree census with an employer-audience scan
+and lets the reader's own level decide eligibility. **Not yet deployed, and no
+historical re-extraction has been run.** Every stored `education.levels` value
+therefore reflects v15 behaviour until its source refreshes.
+
+Why: an audit of the live projection (`CATALOG_PROJECTION#e1fd888f53bbe59a1761`)
+found **637 open roles whose stated audience excludes undergraduates**. Only 296
+of them carried the `advancedDegreeRequired` badge, so the previous "hide advanced
+degree" toggle could not hide the other **341** — including NVIDIA *Developer
+Technology Engineering Intern - AI - 2027* (`masters` + `doctoral`), The Home
+Depot *Software Engineer Intern* (`doctoral`), and Clearwater Analytics *Software
+Development Intern* (`masters`).
+
+The old scan also misread prose. Clearwater Analytics *Gen AI Intern* was stored
+as `masters` because the description contains the typo'd action bullet
+`Master's the team's business domain basics within 1 month`, while its actual
+requirement — `Current students pursuing a four-year degree in Computer Science`
+— went unrecognized. The role is undergraduate-eligible and was excluded from
+undergraduates.
+
+What changed:
+
+- `educationAudienceLevels` (`src/identity/enrichment.ts`) is now the one audience
+  scan used by both role metadata and the posting identity. It works at sentence
+  and list-segment scope so `MS preferred, BS required` keeps its requirement, and
+  it drops preference-only mentions (`preferred`, `a plus`, `desirable`) and waived
+  requirements (`not required`, `no ... degree required`).
+- An unqualified `master`/`Master's` counts only when the next token continues a
+  degree phrase and the sentence states an audience, which rejects the verb
+  readings (`Master the team's domain`, `mastering distributed systems`) while
+  keeping `(Master's)`, `Master's, or PhD degree`, and `Master's in CS`.
+- Two-letter forms are case-sensitive (`5 ms latency` is not a Master's) and
+  require degree context when lowercase. `four-year degree`, `4-year degree`,
+  plural `graduate students`, and `graduate program` are recognized.
+- Pay rows are labels, not prose, so `payTierEducationLevels` keeps its own scan.
+- `ROLE_METADATA_EXTRACTION_VERSION` is 16, which makes the collection scheduler
+  revisit every previously-enriched posting.
+
+Eligibility now follows the stated audience rather than a badge, in the catalog
+projection read, the in-memory catalog filter, and alert preferences alike:
+unstated or conflicting evidence never hides a role, a stated audience that omits
+the reader's level does, and the legacy badge only rules out an undergraduate
+because it never says which graduate degree it means.
+
+Corpus evidence so far: 17 audience-scan cases including the Clearwater posting
+verbatim, SQL/JS parity over stated/unstated/conflicting audiences, and the
+existing 1,794 passing backend tests. Production re-extraction, the
+undergraduate-eligible retention check, and physical-device validation remain
+open.
+
+### Why roles stay unspecified (measured 2026-09-18)
+
+**Correction.** An earlier version of this section claimed the unspecified share
+was not an extraction gap, based on a 60-role audit in which only 14 pages were
+actually reachable. That audit was too small to support the claim and the claim
+was wrong. A provider-aware audit — reading each posting's description from the
+provider's own API instead of scraping a rendered page, which raised resolution
+from 14/60 to 143/150 — shows the opposite:
+
+| Outcome | Roles | Share |
+| --- | ---: | ---: |
+| Posting names a level the scan does not extract | 29 | 20% |
+| Discusses a degree without naming a level (correctly unspecified) | 45 | 31% |
+| Never mentions a degree | 69 | 48% |
+
+Misses by host: Workday 23, iCIMS 5, Greenhouse 1, and none across 19 Oracle,
+8 Ashby, 2 SmartRecruiters and 1 Lever. Roughly **20% of the 1,917 stored open
+unspecified roles — about 380 — state a level that is currently discarded**, and
+about 65 of those state a graduate-only audience that an undergraduate should not
+be shown. This is the same class of defect v16 fixed, reached through a different
+cause.
+
+The cause is acquisition, not classification. Metadata API collection targets a
+role only when its occurrence has a destination admission classified
+`posting-detail`/`application-form`, or a confirmed posting identity
+(`metadataCollectionTarget`, `cloudflare/catalog-admission-store.ts:118`). Two
+further gates compound it: a role is re-collected only after
+`ROLE_METADATA_REVALIDATION_MS` (30 days), and iCIMS has no acquisition path at
+all. Among the 1,917 stored open unspecified roles:
+
+| Destination classification / identity | Roles | Collectible via provider API |
+| --- | ---: | --- |
+| `posting-detail` + confirmed | 587 | yes |
+| `application-form` + confirmed | 558 | yes |
+| `posting-detail` / `application-form` + unconfirmed | 169 | yes |
+| no destination + confirmed identity | 30 | yes |
+| no destination + unconfirmed | 220 | no |
+| `aggregate-board` | 178 | no |
+| `blocked-uninspectable` | 132 | no |
+| `unresolved` | 43 | no |
+| `gone` | 4 | no |
+
+So 1,344 unspecified roles are collectible by design and 567 are structurally
+blocked today. Running the production acquisition code against 40 unspecified
+Workday roles acquired 28 (real text, 2–10 KB) and found a level in 8 of them —
+20%, independently reproducing the audit above. The text is reachable; it is not
+being read.
+
+This is not a routing rule keyed to source identity: the same community source
+holds roles both with and without API evidence, and 363 roles on already-supported
+providers have no extraction attempt recorded at all.
+
+Not a lever: JSON-LD `educationRequirements` and `qualifications` (valid
+`JobPosting` properties we do not read) appeared on **0 of 66** sampled postings,
+and only 8 unspecified roles carry a degree word in the title.
+
+### What was fixed (2026-09-18)
+
+Two defects let this accumulate silently, and neither was a classification gap:
+
+- **Reaching a page was treated as finishing an acquisition.**
+  `persistDestinationAdmission` granted the full `ROLE_METADATA_REVALIDATION_MS`
+  (30 day) window whenever the page was complete and the destination classified
+  `posting-detail`/`application-form` — even when the page yielded no fields at
+  all, which is the case for every role in this cohort. A provider API that would
+  have supplied the text therefore went unread for a month. Evidence that
+  produced no fields while a provider API route exists now returns on the
+  24-hour window; a page that did answer keeps the full window.
+- **Collection had no trigger.** `metadataVerificationCandidates` was reachable
+  only through `POST /internal/role-metadata/backfill`, and
+  `leaseDueVerifications`/`syncVerificationSchedule` are referenced only by tests.
+  Every role was therefore collected exactly once, by hand, and then parked. A
+  scheduled step now stages a bounded collection each hour in the same
+  staging-only mode the operations endpoint uses — a backfill token makes the
+  batch consumer stop before any catalog, admission, or notification write — and
+  is bounded by `METADATA_SCHEDULED_COLLECTION_LIMIT` (default 100 per pass,
+  `0` disables scheduled collection).
+- **The month-long deferrals already written stayed in force.** Correcting the
+  rule as it is written would only have helped future acquisitions, leaving the
+  1,314 already-parked roles waiting out their full window. Candidate selection
+  now treats field-less evidence with an available provider API route as due
+  after a day whatever deferral the row carries. The exemption is self-limiting:
+  it ends as soon as the API supplies fields, which returns the role to the
+  normal window.
+
+Publishing the staged evidence still runs through the guarded repair workflow
+with its exact token and count checks, so neither fix changes a public job on its
+own.
+
+A posting that names no level stays visible to every reader, so these misses do
+not hide roles — they mislabel them, and they leave graduate-only roles on an
+undergraduate's feed. The filter sheet states the rule directly so the reader is
+not left guessing: roles that state a different level are hidden, roles that state
+none are still shown.
+
+## Earlier implementation: extraction v14 — 2026-09-07
 
 Worker source `31f278f`, version `155ddb09-e5c6-4d5e-aa27-814cba5e0498`,
 is deployed with source-processing revision 2 and production flags preserved.

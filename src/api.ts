@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { DeleteObjectCommand, GetObjectCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { jobCategories, matchesJobFilter, parseJobFilter } from './core/filters.js';
+import { isEducationLevel, jobCategories, matchesJobFilter, parseJobFilter } from './core/filters.js';
 import { DynamoInternshipStore, DynamoReleaseStore, DynamoUserStore, type InternshipStore, type ReleaseStore, type UserStore } from './store.js';
 import { ACCOUNT_EXPORT_SCHEMA_VERSION, type AccountDataExport, type ApplicantProfile, type ApplicationRecord, type ApplicationStatus, type DeviceToken, type Internship, type OccurrenceProvenance, type UserPreferences } from './types.js';
 import { EmployerIntegrationRegistry } from './providers.js';
@@ -42,11 +42,11 @@ function catalogFilter(parameters: Record<string, string> | undefined): CatalogG
     status: parameters?.status === 'closed' ? 'closed' : 'open',
     ...(list('employerCategory', 'employerCategories')?.length ? { employerCategories: list('employerCategory', 'employerCategories') as CatalogGroupFilter['employerCategories'] } : {}),
     ...(parameters?.hideUsCitizenshipRequired === 'true' ? { hideUsCitizenshipRequired: true } : {}),
-    ...(parameters?.hideAdvancedDegreeRequired === 'true' ? { hideAdvancedDegreeRequired: true } : {}),
+    ...(isEducationLevel(parameters?.educationLevel) ? { educationLevel: parameters.educationLevel } : {}),
     ...(parameters?.hasCompensation === 'true' ? { hasCompensation: true } : {}),
     ...(list('discipline', 'disciplines')?.length ? { disciplines: list('discipline', 'disciplines') } : {}),
     ...(list('season', 'seasons')?.length ? { seasons: list('season', 'seasons') } : {}),
-    ...(list('education', 'educationLevel', 'educationLevels')?.length ? { educationLevels: list('education', 'educationLevel', 'educationLevels') } : {}),
+    ...(list('education', 'educationLevels')?.length ? { educationLevels: list('education', 'educationLevels') } : {}),
     ...(list('workMode', 'workModes')?.length ? { workModes: list('workMode', 'workModes') } : {}),
     ...(list('location', 'locations')?.length ? { locations: list('location', 'locations') } : {}),
   };

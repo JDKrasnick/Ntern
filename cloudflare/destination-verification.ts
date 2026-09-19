@@ -278,7 +278,15 @@ export async function persistDestinationAdmission(input: {
   const sourceReferences = job.sourceReferences.map((item) => item === reference ? enrichedReference : item);
   const projected = projectRoleMetadata({ ...job, sourceReferences, admission: deriveCanonicalAdmission(sourceReferences, inspectedAt) });
   const complete = Boolean(apiEvidence.length || (pageComplete && ['posting-detail', 'application-form'].includes(destination.classification)));
-  const retryAfter = new Date(Date.parse(inspectedAt) + (complete ? ROLE_METADATA_REVALIDATION_MS : 24 * 60 * 60_000)).toISOString();
+  // Reaching a page is not the same as finishing an acquisition. When the page
+  // yielded no fields and the employer publishes an API we never read, the role
+  // must come back on the short window: otherwise a provider route that would
+  // have supplied the text stays unused for a month, which is how a role keeps a
+  // blank field its own API states plainly.
+  const providerApiUnused = !extracted.some(roleMetadataEvidenceHasFields)
+    && Boolean(metadataApiRoute(message.providerIdentity, message.candidateUrl));
+  const retryAfter = new Date(Date.parse(inspectedAt)
+    + (complete && !providerApiUnused ? ROLE_METADATA_REVALIDATION_MS : 24 * 60 * 60_000)).toISOString();
   const baselineFields = metadataFieldOutcomes({ evidence: complete ? extracted : [], conflicts: projected.conflicts,
     acquired: Boolean(apiEvidence.length || (evidence && ['posting-detail', 'application-form'].includes(destination.classification))), complete });
   const baseline = shadowBaseline(baselineFields);

@@ -1,5 +1,8 @@
 import type { JobFilter } from './core/filters.js';
 import type { EmployerCategory } from './core/employers.js';
+import type { EducationLevel } from '../shared/education-display.js';
+
+export type { EducationLevel };
 
 export type ApplicationStatus =
   | 'saved' | 'applied' | 'assessment' | 'interview' | 'offer' | 'rejected' | 'withdrawn';
@@ -569,7 +572,6 @@ export interface SeasonIdentity {
   provenance: FieldProvenance[];
 }
 
-export type EducationLevel = 'undergraduate' | 'masters' | 'mba' | 'doctoral';
 export type MinimumDegree = 'none' | 'high-school' | 'associates' | 'bachelors' | 'masters' | 'doctoral';
 export type EducationEvidenceStatus = 'explicit' | 'unspecified' | 'conflicting';
 

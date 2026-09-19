@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { D1InternshipStore, CATALOG_PROJECTION_BATCH_BYTES } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
-import type { Internship, InternshipIdentity } from '../src/types.js';
+import type { EducationLevel, Internship, InternshipIdentity } from '../src/types.js';
 
 function job(jobId: string, title: string): Internship {
   return {
@@ -405,7 +405,7 @@ describe('D1 filtered catalog projection', () => {
       query: 'machine',
       employerCategories: ['normal'],
       hideUsCitizenshipRequired: true,
-      hideAdvancedDegreeRequired: true,
+      educationLevel: 'undergraduate',
     });
 
     expect(page).toMatchObject({
@@ -415,6 +415,63 @@ describe('D1 filtered catalog projection', () => {
     expect(prepared).toHaveLength(2);
     expect(prepared[1]!.query).toContain("json_each(projection.value, '$.roles')");
     expect(prepared[1]!.query).toContain("json_extract(role.value, '$.employerCategory') IN (?)");
-    expect(prepared[1]!.values).toEqual(expect.arrayContaining(['%machine%', 'normal', 2, 0]));
+    expect(prepared[1]!.query).toContain("json_extract(role.value, '$.education.levels')");
+    expect(prepared[1]!.values).toEqual(expect.arrayContaining(['%machine%', 'normal', 2, 0, 'undergraduate']));
+  });
+
+  it('hides roles whose stated audience omits the reader level and keeps unstated ones', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (
+        pk TEXT NOT NULL,
+        sk TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        value TEXT NOT NULL,
+        catalog_sort_key TEXT,
+        PRIMARY KEY (pk, sk)
+      )
+    `);
+    const provenance = [{ source: 'official-ats' as const, sourceId: 'test', evidenceCode: 'education-requirement' }];
+    const identity = (title: string, levels: EducationLevel[], evidenceStatus: 'explicit' | 'unspecified'): InternshipIdentity => ({
+      company: { canonicalId: 'acme', displayName: { value: 'Acme', provenance } },
+      programType: { value: 'internship', provenance },
+      season: { term: 'summer', year: 2027, evidenceStatus: 'explicit', provenance },
+      education: { levels, evidenceStatus, provenance },
+      title: {
+        official: { value: title, provenance },
+        display: { value: title, provenance },
+        search: { value: title.toLowerCase(), provenance },
+      },
+      disciplines: [{ value: 'software', provenance }],
+      locations: [],
+    });
+    const groups = groupCatalogJobs([
+      { ...job('undergrad', 'Software Engineering Intern'), internshipIdentity: identity('Software Engineering Intern', ['undergraduate'], 'explicit') },
+      { ...job('masters-only', 'Machine Learning Intern'), internshipIdentity: identity('Machine Learning Intern', ['masters'], 'explicit') },
+      { ...job('doctoral-only', 'Research Intern'), internshipIdentity: identity('Research Intern', ['doctoral'], 'explicit') },
+      { ...job('graduate', 'Systems Intern'), internshipIdentity: identity('Systems Intern', ['doctoral', 'masters'], 'explicit') },
+      { ...job('unstated', 'Platform Intern'), internshipIdentity: identity('Platform Intern', [], 'unspecified') },
+      { ...job('badge', 'Firmware Intern'), requirements: { requiresUsCitizenship: false, advancedDegreeRequired: true } },
+    ]).map(catalogGroupDetails);
+    const generatedAt = new Date().toISOString();
+    const insert = database.prepare('INSERT INTO catalog_items (pk, sk, kind, value, catalog_sort_key) VALUES (?, ?, ?, ?, ?)');
+    insert.run('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', JSON.stringify({ version: 'version-a', generatedAt, schemaVersion: 4 }), null);
+    groups.forEach((details, index) => {
+      insert.run('CATALOG_PROJECTION#version-a', `GROUP#${details.group.groupId}`, 'catalog-projection', JSON.stringify(details), String(index).padStart(8, '0'));
+    });
+
+    const store = new D1InternshipStore(sqliteD1(database));
+    const visibleTo = async (educationLevel: 'undergraduate' | 'masters') => {
+      const page = await store.listCatalogProjectionFiltered(undefined, 50, { status: 'open', educationLevel });
+      return page!.groups.flatMap((entry) => entry.roles.map((role) => role.jobId)).sort();
+    };
+    try {
+      expect(await visibleTo('undergraduate')).toEqual(['undergrad', 'unstated']);
+      // The badge states a graduate requirement without naming the degree, so it
+      // only ever turns an undergraduate away.
+      expect(await visibleTo('masters')).toEqual(['badge', 'graduate', 'masters-only', 'unstated']);
+    } finally {
+      database.close();
+    }
   });
 });

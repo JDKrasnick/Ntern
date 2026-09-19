@@ -2,9 +2,11 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleCatalogAdmissionOperations } from '../cloudflare/catalog-admission-api.js';
-import { D1CatalogAdmissionStore, DESTINATION_VERIFICATION_LEASE_LIMIT } from '../cloudflare/catalog-admission-store.js';
+import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, DESTINATION_VERIFICATION_LEASE_LIMIT } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { persistDestinationAdmission, reachabilityFromHttpStatus, type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
+import { collectRoleMetadataInBackground } from '../cloudflare/worker.js';
+import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import { evaluateCatalogAdmission } from '../src/catalog-admission.js';
 import { classifyDestination, matchingBrowserDestination } from '../src/destination-verification.js';
 import { processPosting } from '../src/ingestion/processor.js';
@@ -393,6 +395,9 @@ describe('D1 catalog admission operations', () => {
     expect(zero).toMatchObject({ changed: 0, occurrencesChanged: 0 });
   });
 
+  // This test's contract is the D1 query budget asserted below, not a wall clock:
+  // it serializes 1,100 source references, so the default five-second timeout
+  // fails on contention alone while the budget assertion still holds.
   it('freezes more than 1,000 legacy occurrences without exceeding the D1 invocation query budget', async () => {
     const { database, jobs } = subject();
     const current = job();
@@ -732,6 +737,149 @@ describe('D1 catalog admission operations', () => {
       catalogEligible: true, alertEligible: true }, sourceReferences: [{ admission: { postingAttribution: 'attributed' } }] });
     expect(await jobs.getJob(current.jobId)).toMatchObject({ catalogVisibleAt: current.catalogVisibleAt,
       notification: { smsPending: false, digestPending: false } });
+  });
+
+  it('re-asks an unread provider API instead of parking the role for a month', async () => {
+    const { admission: operations, jobs, database } = subject();
+    const workdayUrl = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Remote/Software-Intern_R12345';
+    const reference = {
+      sourceId: 'workday-acme', provenance: 'official-ats' as const, externalId: 'R12345', document: 'R12345',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', row: 1, company: 'Acme',
+      title: 'Software Engineering Intern', location: 'Remote', locations: ['Remote'], season: 'summer-2027',
+      applyUrl: workdayUrl, compensation: { raw: '' }, state: 'open' as const,
+    };
+    const current = { ...job(), sourceReferences: [reference] };
+    await jobs.putInternship(current);
+    await jobs.putSourceOccurrence({ sourceId: reference.sourceId, externalId: reference.externalId, jobId: current.jobId,
+      occurrence: reference, present: true, consecutiveOmissions: 0, changedSnapshotHash: 'snapshot',
+      changedAt: '2026-08-28T00:00:00Z', firstObservedAt: '2026-08-28T00:00:00Z', firstObservedAtPrecision: 'exact' });
+    const message: DestinationVerificationMessage = { version: 1, jobId: current.jobId, sourceId: reference.sourceId,
+      externalId: reference.externalId, providerIdentity: { provider: 'workday', sourceId: reference.sourceId,
+        sourceUrl: reference.sourceUrl, tenant: 'acme', postingId: 'R12345' },
+      candidateUrl: workdayUrl, reason: 'daily-retry', queuedAt: '2026-08-28T00:00:00Z' };
+    const pageEvidence = {
+      url: workdayUrl, title: reference.title, contentExcerpt: `${reference.title} ${'Role details. '.repeat(30)}`,
+      postingIdPresent: true, applicationFormPresent: true,
+      confidence: { score: 100, level: 'high' as const, recommendation: 'alert-eligible' as const, signals: ['browser-visible evidence'] },
+    };
+    const retryAfterFor = () => (database.prepare('SELECT retry_after FROM role_metadata_acquisition WHERE job_id = ? AND source_id = ?')
+      .get(current.jobId, reference.sourceId) as { retry_after: string }).retry_after;
+
+    // The page carries no fields, so the employer's own API is still owed a read.
+    await persistDestinationAdmission({ jobs, operations, message, job: current, reference, reachability: 'live',
+      inspectedAt: '2026-08-28T00:00:00Z', browserVisible: true, evidence: pageEvidence });
+    expect(retryAfterFor()).toBe('2026-08-29T00:00:00.000Z');
+
+    // A page that did answer settles the role for the full revalidation window.
+    const answered = (await jobs.getJob(current.jobId))!;
+    await persistDestinationAdmission({ jobs, operations, message: { ...message, queuedAt: '2026-08-29T00:00:00Z' },
+      job: answered, reference: answered.sourceReferences[0]!, reachability: 'live',
+      inspectedAt: '2026-08-29T00:00:00Z', browserVisible: true,
+      evidence: { ...pageEvidence, contentExcerpt: `${reference.title}. The hourly rate is $40 - $50 per hour.` } });
+    expect(retryAfterFor()).toBe('2026-09-28T00:00:00.000Z');
+    expect(await jobs.getJob(current.jobId)).toMatchObject({ compensation: { raw: '$40–50/hour' } });
+  });
+
+  it('stages scheduled metadata collection so an unread provider API cannot be forgotten', async () => {
+    const { db, jobs } = subject();
+    const workdayUrl = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Remote/Software-Intern_R12345';
+    // `metadataCollectionTarget` reads the provider identity from the verified
+    // destination, so an unresolved destination has no API route to collect.
+    const verified = admission(true);
+    verified.destination = { ...verified.destination, classification: 'posting-detail', provider: 'workday',
+      tenant: 'acme', expectedPostingId: 'R12345', candidateUrl: workdayUrl };
+    const reference = {
+      sourceId: 'workday-acme', provenance: 'official-ats' as const, externalId: 'R12345', document: 'R12345',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', row: 1, company: 'Acme',
+      title: 'Software Engineering Intern', location: 'Remote', locations: ['Remote'], season: 'summer-2027',
+      applyUrl: workdayUrl, compensation: { raw: '' }, state: 'open' as const, admission: verified,
+    };
+    await jobs.putInternship({ ...job(), sourceReferences: [reference] });
+    const sent: Array<Record<string, unknown>> = [];
+    const env = { DB: db, METADATA_SCHEDULED_COLLECTION_LIMIT: '5',
+      DESTINATION_VERIFICATION_QUEUE: { async sendBatch(messages: Array<{ body: unknown }>) {
+        for (const message of messages) sent.push(message.body as Record<string, unknown>);
+      } } };
+
+    await expect(collectRoleMetadataInBackground(env as never, new Date('2026-09-01T00:00:00Z'))).resolves.toEqual({ queued: 1 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ reason: 'historical-backfill', jobId: 'job-1', sourceId: 'workday-acme',
+      candidateUrl: workdayUrl, metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
+      providerIdentity: { provider: 'workday', tenant: 'acme', postingId: 'R12345' } });
+    // The token is what keeps a scheduled pass staging-only.
+    expect(String(sent[0]!.metadataBackfillToken)).toMatch(/^scheduled-/);
+
+    // Reserving leases the candidate, so the next pass takes the next slice.
+    const second = await collectRoleMetadataInBackground({ ...env, METADATA_SCHEDULED_COLLECTION_LIMIT: '5' } as never,
+      new Date('2026-09-01T00:05:00Z'));
+    expect(second).toEqual({ queued: 0 });
+
+    const disabled = await collectRoleMetadataInBackground({ ...env, METADATA_SCHEDULED_COLLECTION_LIMIT: '0' } as never,
+      new Date('2026-09-02T00:05:00Z'));
+    expect(disabled).toEqual({ queued: 0 });
+  });
+
+  it('re-claims a role parked by a month-long deferral when its provider API was never read', async () => {
+    const { database, db, jobs } = subject();
+    const workdayUrl = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Remote/Software-Intern_R12345';
+    const verified = admission(true);
+    verified.destination = { ...verified.destination, classification: 'posting-detail', provider: 'workday',
+      tenant: 'acme', expectedPostingId: 'R12345', candidateUrl: workdayUrl };
+    // A page that answered nothing, which is what every role in the unstated
+    // cohort holds, plus the month-long deferral the old rule granted it.
+    const pageEvidence = { schemaVersion: 1 as const, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, artifactHash: 'hash-1',
+      sourceClass: 'official-page' as const, sourceId: 'workday-acme', sourceUrl: workdayUrl,
+      observedAt: '2026-08-28T00:00:00Z', exactPosting: true as const };
+    const reference = {
+      sourceId: 'workday-acme', provenance: 'official-ats' as const, externalId: 'R12345', document: 'R12345',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', row: 1, company: 'Acme',
+      title: 'Software Engineering Intern', location: 'Remote', locations: ['Remote'], season: 'summer-2027',
+      applyUrl: workdayUrl, compensation: { raw: '' }, state: 'open' as const, admission: verified,
+      metadataEvidence: [pageEvidence],
+    };
+    await jobs.putInternship({ ...job(), sourceReferences: [reference] });
+    database.prepare(`INSERT INTO role_metadata_evidence
+      (job_id, source_class, source_id, source_url, artifact_hash, extraction_version, evidence, observed_at, is_current)
+      VALUES ('job-1', 'official-page', 'workday-acme', ?, 'hash-1', ?, ?, '2026-08-28T00:00:00Z', 1)`)
+      .run(workdayUrl, ROLE_METADATA_EXTRACTION_VERSION, JSON.stringify(pageEvidence));
+    database.prepare(`INSERT INTO role_metadata_acquisition (job_id, source_id, lease_until, retry_after, observed_at, report)
+      VALUES ('job-1', 'workday-acme', '', '2026-10-20T00:00:00Z', '2026-08-28T00:00:00Z', ?)`)
+      .run(JSON.stringify({ extractionVersion: ROLE_METADATA_EXTRACTION_VERSION }));
+    const sent: Array<Record<string, unknown>> = [];
+    const env = { DB: db, METADATA_SCHEDULED_COLLECTION_LIMIT: '5',
+      DESTINATION_VERIFICATION_QUEUE: { async sendBatch(messages: Array<{ body: unknown }>) {
+        for (const message of messages) sent.push(message.body as Record<string, unknown>);
+      } } };
+
+    await expect(collectRoleMetadataInBackground(env as never, new Date('2026-09-01T00:00:00Z'))).resolves.toEqual({ queued: 1 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ jobId: 'job-1', sourceId: 'workday-acme' });
+    // Its lease now holds the next pass off rather than the stale deferral.
+    await expect(collectRoleMetadataInBackground(env as never, new Date('2026-09-01T00:01:00Z'))).resolves.toEqual({ queued: 0 });
+  });
+
+  it('matches collection work sent for the destination the occurrence itself verified', () => {
+    const canonical = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Remote/Software-Intern_R12345';
+    const redirect = 'https://acme.wd1.myworkdayjobs.com/en-US/Acme_Careers/job/Remote/Software-Intern_R12345';
+    const verified = admission(true);
+    verified.destination = { ...verified.destination, classification: 'posting-detail', provider: 'workday',
+      tenant: 'acme', expectedPostingId: 'R12345', candidateUrl: redirect, finalUrl: redirect };
+    const reference = {
+      sourceId: 'workday-acme', provenance: 'official-ats' as const, externalId: 'R12345', document: 'R12345',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', row: 1, company: 'Acme',
+      title: 'Software Engineering Intern', location: 'Remote', seasons: undefined, season: 'summer-2027',
+      applyUrl: canonical, compensation: { raw: '' }, state: 'open' as const, admission: verified,
+    } as unknown as Parameters<typeof destinationVerificationMatchesReference>[0];
+    const providerIdentity = { provider: 'workday' as const, sourceId: 'workday-acme',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', tenant: 'acme', postingId: 'R12345' };
+
+    // Collection targets the verified destination, which is the apply URL here
+    // in everything but the locale segment its own admission recorded.
+    expect(destinationVerificationMatchesReference(reference, { candidateUrl: redirect, providerIdentity })).toBe(true);
+    expect(destinationVerificationMatchesReference(reference, { candidateUrl: canonical, providerIdentity })).toBe(true);
+    // An unrelated URL, or one from another posting, still cannot mutate it.
+    expect(destinationVerificationMatchesReference(reference, { candidateUrl: `${canonical}-other`, providerIdentity })).toBe(false);
+    expect(destinationVerificationMatchesReference(reference, { candidateUrl: redirect, providerIdentity: { ...providerIdentity, postingId: 'R99999' } })).toBe(false);
   });
 
   it('retires JSON-LD metadata that disappears from a refreshed exact page', async () => {

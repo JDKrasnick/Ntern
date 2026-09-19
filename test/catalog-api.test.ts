@@ -157,7 +157,7 @@ describe('grouped catalog API', () => {
     await jobs.putInternship({ ...job('closed', 20), open: false, employerCategory: 'startup' });
     const handler = createApiHandler({ jobs, users: new MemoryUserStore() });
     const filtered = body<{ groups: Array<{ roleIds: string[] }> }>(await handler(event('GET', '/catalog', {
-      employerCategory: 'startup', hideUsCitizenshipRequired: 'true', hideAdvancedDegreeRequired: 'true',
+      employerCategory: 'startup', hideUsCitizenshipRequired: 'true', educationLevel: 'undergraduate',
     }))).groups;
     expect(filtered).toEqual([]);
     const closed = body<{ groups: Array<{ roleIds: string[] }> }>(await handler(event('GET', '/catalog', {

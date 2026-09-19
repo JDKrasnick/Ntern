@@ -12,6 +12,20 @@ import { unstable_splitSqlQuery as splitSqlQuery } from 'wrangler';
 const { Response } = globalThis;
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
+/**
+ * Fixtures must track the extraction version the workers actually run: a stale
+ * copy here leaves seeded catalog rows looking out of date, so the poller
+ * re-resolves them instead of reusing and the reuse assertions fail.
+ */
+async function readExtractionVersion() {
+  const source = await readFile(join(repositoryRoot, 'src/role-metadata.ts'), 'utf8');
+  const match = /ROLE_METADATA_EXTRACTION_VERSION = (\d+)/.exec(source);
+  if (!match) throw new Error('ROLE_METADATA_EXTRACTION_VERSION not found in src/role-metadata.ts');
+  return Number(match[1]);
+}
+const roleMetadataExtractionVersion = await readExtractionVersion();
+/** Mirrors src/poll.ts: applicationPageMetadataVersion = ROLE_METADATA_EXTRACTION_VERSION + 1. */
+const applicationPageMetadataVersion = roleMetadataExtractionVersion + 1;
 const apiWorkerName = 'intern-notifs-e2e-api';
 const ingestionWorkerName = 'intern-notifs-e2e-ingestion';
 const internalServiceSecret = 'e2e-internal-service-secret';
@@ -533,8 +547,6 @@ test('keeps a production-scale scheduled cycle recoverable without direct dead l
   const leverSite = 'palantir';
   const ashbySourceId = 'ashby-pylon-labs';
   const ashbyBoardKey = 'pylon-labs';
-  // Mirrors src/poll.ts: applicationPageMetadataVersion = ROLE_METADATA_EXTRACTION_VERSION + 1.
-  const applicationPageMetadataVersion = 16;
   const sourceIds = [githubSourceId, greenhouseSourceId, leverSourceId, ashbySourceId];
 
   const documents = new Map(githubDocuments.map((document) => [
@@ -659,7 +671,7 @@ test('keeps a production-scale scheduled cycle recoverable without direct dead l
   seedSource(githubSourceId, {
     sourceId: githubSourceId, successfulFetches: 1, lastSuccessAt: seededAt, contentHash: 'e2e-github-content-hash',
     lastRowCount: githubRows, lastRawCount: githubRows, activeExternalIds: githubActiveExternalIds,
-    metadataExtractionVersion: 15, metadataProcessingRevision: 2,
+    metadataExtractionVersion: roleMetadataExtractionVersion, metadataProcessingRevision: 2,
   });
   seedSource(greenhouseSourceId, {
     sourceId: greenhouseSourceId, successfulFetches: 1, lastSuccessAt: seededAt, contentHash: 'e2e-greenhouse-content-hash',
