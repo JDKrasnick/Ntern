@@ -151,6 +151,45 @@ describe('posting identity', () => {
     })).toMatchObject({ decision: { status: 'confirmed', exactKey: 'provider:icims:careers-springswindowfashions:12891' } });
   });
 
+  it.each([
+    ['EU Greenhouse', 'https://job-boards.eu.greenhouse.io/Acme/jobs/101', 'provider:greenhouse:acme:101'],
+    ['SmartRecruiters slug', 'https://jobs.smartrecruiters.com/Acme/744000139649345-software-engineer', 'provider:smartrecruiters:acme:744000139649345'],
+    ['SuccessFactors', 'https://jobs.successfactors.com/job/London/Software-Intern/123456', 'provider:successfactors:jobs.successfactors.com:123456'],
+    ['Workable', 'https://apply.workable.com/Acme/j/ABC123DEF/', 'provider:workable:acme:abc123def'],
+    ['Microsoft', 'https://jobs.careers.microsoft.com/global/en/job/1891234', 'provider:microsoft:microsoft:1891234'],
+    ['Rippling', 'https://ats.rippling.com/acme/jobs/123e4567-e89b-12d3-a456-426614174000', 'provider:rippling:acme:123e4567-e89b-12d3-a456-426614174000'],
+    ['Eightfold', 'https://careers.acme.eightfold.ai/careers/job/REQ-42', 'provider:eightfold:careers.acme.eightfold.ai:req-42'],
+    ['Paylocity', 'https://recruiting.paylocity.com/recruiting/jobs/Details/12345/Acme', 'provider:paylocity:acme:12345'],
+    ['Jobvite', 'https://jobs.jobvite.com/Acme/job/ABC123', 'provider:jobvite:acme:abc123'],
+    ['Amazon', 'https://www.amazon.jobs/en/jobs/2891234/software-development-engineer-intern', 'provider:amazon:amazon:2891234'],
+    ['Google', 'https://www.google.com/about/careers/applications/jobs/results/123456789-software-engineering-intern', 'provider:google:google:123456789'],
+  ])('recognizes a scoped immutable %s route', (_name, url, exactKey) => {
+    expect(resolvePostingIdentityDecision({ sourceId: 'community', externalId: 'role', applicationUrl: url,
+      observedAt: '2026-09-19T00:00:00.000Z' })).toMatchObject({
+      decision: { status: 'confirmed', exactKey, evidenceKind: 'immutable-provider-id' },
+    });
+  });
+
+  it('does not turn arbitrary identifiers or provider query parameters into claims', () => {
+    for (const url of [
+      'https://apply.workable.com/acme/',
+      'https://jobs.jobvite.com/acme/job/',
+      'https://careers.acme.eightfold.ai/careers',
+      'https://careers.example.test/openings?gh_jid=100',
+    ]) expect(providerPostingReference(url)).toEqual({ provider: 'unknown' });
+  });
+
+  it('keeps identical provider IDs on different tenants from merging', () => {
+    const acme = buildPostingIdentity({ applicationUrl: 'https://apply.workable.com/acme/j/ABC123DEF' });
+    const other = buildPostingIdentity({ applicationUrl: 'https://apply.workable.com/other/j/ABC123DEF' });
+    expect(acme.canonicalJobId).not.toBe(other.canonicalJobId);
+    const combined = buildPostingIdentity({
+      applicationUrl: 'https://apply.workable.com/acme/j/ABC123DEF',
+      observedUrls: ['https://apply.workable.com/other/j/ABC123DEF'],
+    });
+    expect(resolvePostingAliases(combined, new Map())).toMatchObject({ outcome: 'quarantine', reason: 'provider-scope-mismatch' });
+  });
+
   it('confirms a scoped Oracle Cloud route and keeps its sites apart', () => {
     expect(resolvePostingIdentityDecision({
       sourceId: 'community', externalId: 'role',

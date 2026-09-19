@@ -636,6 +636,15 @@ export const POSTING_PROVIDERS = [
   'icims',
   'oracle',
   'smartrecruiters',
+  'successfactors',
+  'workable',
+  'microsoft',
+  'rippling',
+  'eightfold',
+  'paylocity',
+  'jobvite',
+  'amazon',
+  'google',
   'unknown',
 ] as const;
 export type PostingProvider = typeof POSTING_PROVIDERS[number];

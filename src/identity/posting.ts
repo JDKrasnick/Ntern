@@ -36,7 +36,7 @@ export function canonicalizePostingUrl(input: string): string {
   if (host === 'jobs.ashbyhq.com' && (match = /^\/([^/]+)\/([^/]+)(?:\/application)?\/?$/i.exec(url.pathname))) {
     url.pathname = `/${match[1]!.toLowerCase()}/${match[2]!.toLowerCase()}`;
     url.searchParams.delete('embed');
-  } else if ((host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io')
+  } else if ((host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io' || host === 'job-boards.eu.greenhouse.io')
       && (match = /^\/([^/]+)\/jobs\/(\d+)\/?$/i.exec(url.pathname))) {
     url.hostname = 'job-boards.greenhouse.io';
     url.pathname = `/${match[1]!.toLowerCase()}/jobs/${match[2]}`;
@@ -44,6 +44,9 @@ export function canonicalizePostingUrl(input: string): string {
   } else if ((host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io')
       && /^\d+$/.test(url.searchParams.get('gh_jid') ?? '')
       && (match = /^\/([^/]+)\/?$/i.exec(url.pathname))) {
+    // This is the one query-form Greenhouse presentation we accept: its host
+    // and board path both scope the public ID. Custom-host gh_jid parameters
+    // are parsed only by reviewedProviderUrlReference after host review.
     const postingId = url.searchParams.get('gh_jid')!;
     url.hostname = 'job-boards.greenhouse.io';
     url.pathname = `/${match[1]!.toLowerCase()}/jobs/${postingId}`;
@@ -66,7 +69,7 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
   const url = new URL(canonicalizePostingUrl(input));
   const host = url.hostname.replace(/^www\./, '');
   let match: RegExpExecArray | null;
-  if ((host === 'job-boards.greenhouse.io' || host === 'boards.greenhouse.io') && (match = /^\/([^/]+)\/jobs\/(\d+)\/?$/i.exec(url.pathname))) {
+  if ((host === 'job-boards.greenhouse.io' || host === 'boards.greenhouse.io' || host === 'job-boards.eu.greenhouse.io') && (match = /^\/([^/]+)\/jobs\/(\d+)\/?$/i.exec(url.pathname))) {
     return { provider: 'greenhouse', tenant: match[1]!.toLowerCase(), postingId: match[2] };
   }
   if (host === 'jobs.lever.co' && (match = /^\/([^/]+)\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:\/apply)?\/?$/i.exec(url.pathname))) {
@@ -102,7 +105,7 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
   if (host === 'imc.com' && (match = /^\/[a-z]{2}\/careers\/jobs\/(\d+)\/?$/i.exec(url.pathname))) {
     return { provider: 'imc', tenant: 'imc', postingId: match[1] };
   }
-  if (host === 'jobs.smartrecruiters.com' && (match = /^\/([^/]+)\/([a-z0-9]+)\/?$/i.exec(url.pathname))) {
+  if (host === 'jobs.smartrecruiters.com' && (match = /^\/([^/]+)\/([a-z0-9]+)(?:-[^/]+)?\/?$/i.exec(url.pathname))) {
     return { provider: 'smartrecruiters', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
   }
   if (host.endsWith('.icims.com') && (match = /^\/jobs\/(\d+)(?:\/[^/]*)?\/job\/?$/i.exec(url.pathname))) {
@@ -113,6 +116,45 @@ export function providerPostingReference(input: string): ProviderPostingReferenc
     // The candidate-experience site scopes the id: one pod can carry the same
     // posting id under two sites, so the scope is host plus site.
     return { provider: 'oracle', tenant: `${host}/${match[1]!.toLowerCase()}`, postingId: match[2]! };
+  }
+  // These routes are provider-owned and each carries both a stable tenant/host
+  // scope and a provider-issued posting identifier.  Do not generalize them to
+  // lookalike paths: a title slug, query parameter, or bare host is never an ID.
+  if (host === 'jobs.successfactors.com'
+      && (match = /^\/job\/([^/]+)\/[^/]+\/(\d+)\/?$/i.exec(url.pathname))) {
+    return { provider: 'successfactors', tenant: host, postingId: match[2]! };
+  }
+  if (host === 'apply.workable.com'
+      && (match = /^\/([a-z0-9-]+)\/j\/([a-z0-9]+)\/?$/i.exec(url.pathname))) {
+    return { provider: 'workable', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
+  }
+  if ((host === 'jobs.careers.microsoft.com' || host === 'careers.microsoft.com')
+      && (match = /^\/(?:v2\/)?(?:global\/)?[a-z]{2}(?:-[a-z]{2})?\/job\/(\d+)\/?$/i.exec(url.pathname))) {
+    return { provider: 'microsoft', tenant: 'microsoft', postingId: match[1]! };
+  }
+  if (host === 'ats.rippling.com'
+      && (match = /^\/([a-z0-9-]+)\/jobs\/([a-f0-9-]{8,})\/?$/i.exec(url.pathname))) {
+    return { provider: 'rippling', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
+  }
+  if (host.endsWith('.eightfold.ai')
+      && (match = /^\/careers\/job\/([a-z0-9-]+)\/?$/i.exec(url.pathname))) {
+    return { provider: 'eightfold', tenant: host, postingId: match[1]!.toLowerCase() };
+  }
+  if (host === 'recruiting.paylocity.com'
+      && (match = /^\/recruiting\/jobs\/Details\/(\d+)\/([a-z0-9-]+)\/?$/i.exec(url.pathname))) {
+    return { provider: 'paylocity', tenant: match[2]!.toLowerCase(), postingId: match[1]! };
+  }
+  if (host === 'jobs.jobvite.com'
+      && (match = /^\/([a-z0-9-]+)\/job\/([a-z0-9]+)\/?$/i.exec(url.pathname))) {
+    return { provider: 'jobvite', tenant: match[1]!.toLowerCase(), postingId: match[2]!.toLowerCase() };
+  }
+  if (host === 'amazon.jobs'
+      && (match = /^\/[a-z]{2}(?:-[a-z]{2})?\/jobs\/(\d+)\/?(?:[^/]*)?$/i.exec(url.pathname))) {
+    return { provider: 'amazon', tenant: 'amazon', postingId: match[1]! };
+  }
+  if (host === 'google.com'
+      && (match = /^\/about\/careers\/applications\/jobs\/results\/(\d+)(?:-[^/]*)?\/?$/i.exec(url.pathname))) {
+    return { provider: 'google', tenant: 'google', postingId: match[1]! };
   }
   return { provider: 'unknown' };
 }
