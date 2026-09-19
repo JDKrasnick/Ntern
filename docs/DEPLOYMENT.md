@@ -1,14 +1,11 @@
 # Deployment and operations runbook
 
-> Cloudflare is the active backend. Retained AWS resources are rollback/export-only,
-> must not be deployed or modified during ordinary operations, and must not be
-> deleted. The replacement Worker and Terraform configuration are documented
-> in [`cloudflare-migration.md`](cloudflare-migration.md).
+> Cloudflare is the only backend. The Worker and Terraform configuration are
+> documented in [`cloudflare-migration.md`](cloudflare-migration.md).
 
 ## Architecture
 
-InternNotifs is an Expo mobile app with a Cloudflare Worker backend. Retained
-AWS resources are rollback/export infrastructure, not active application targets.
+InternNotifs is an Expo mobile app with a Cloudflare Worker backend.
 
 | Area | Service / implementation |
 | --- | --- |
@@ -663,11 +660,7 @@ superseded DLQ messages. Retain disposition and queue-failure metadata for 30 da
 - EAS project ID: `b9b09ef1-a482-4875-a5f4-ff963488cd3e`
 - iOS bundle ID: `com.internnotifs.app`
 - App Store Connect app ID: `6792557963`
-- AWS Region: `us-east-1`
 - Active development API: `https://intern-notifs.jdkrasnick.workers.dev`
-- Retained AWS API rollback origin: `https://5dx7gpfa7d.execute-api.us-east-1.amazonaws.com`
-- Cognito operations client: the `OperationsUserPoolClientId` output from `InternNotifs`
-- Runtime configuration parameter: `/intern-notifs/runtime-config`
 
 These are not credentials. Do not record Apple private keys, API keys, Expo tokens, password values, or personal Apple Account emails here.
 
