@@ -1465,7 +1465,9 @@ function NewnessLane({
 }: CatalogCardProps & { groups: CatalogGroupRow[]; since?: string; attentive?: boolean }) {
   const { width } = useWindowDimensions();
   const motionAllowed = useContext(MotionAllowedContext);
-  const laneTileWidth = width < 600 ? Math.min(300, width - 76) : 320;
+  // A phone shows a card of about two thirds the band, so the next card reads as
+  // another card rather than as a sliver of clipped text.
+  const laneTileWidth = width < 600 ? Math.min(232, width - 120) : 320;
   const laneStep = laneTileWidth + 12;
   const roleCount = groups.reduce((total, group) => total + group.roleCount, 0);
   const listRef = useRef<FlatList<BeltItem<CatalogGroupRow>>>(null);
@@ -7786,14 +7788,14 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     padding: 11,
   },
-  catalogTileLane: { padding: 16 },
+  catalogTileLane: { padding: 12 },
   catalogTileTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", minHeight: 22 },
   catalogTileTags: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
   catalogTileNew: { alignItems: "center", flexDirection: "row", flexShrink: 0, gap: 3 },
   catalogTileNewText: { color: colors.signal, fontSize: 11, fontWeight: "800" },
   catalogTileCompany: { color: colors.signal, fontSize: 13, fontWeight: "700", lineHeight: 18, marginTop: 6 },
   catalogTileTitle: { color: colors.ink, fontSize: 15, fontWeight: "700", lineHeight: 19, marginTop: 2 },
-  catalogTileTitleLane: { fontSize: 17, lineHeight: 22 },
+  catalogTileTitleLane: { fontSize: 15, lineHeight: 19 },
   catalogTileMeta: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 3 },
   catalogTileComp: { color: colors.ink, fontSize: 12, fontWeight: "700", lineHeight: 16, marginTop: 2 },
   catalogTileTiming: { color: colors.muted, fontSize: 12, lineHeight: 16, marginTop: 3 },
