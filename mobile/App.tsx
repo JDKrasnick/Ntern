@@ -7647,7 +7647,7 @@ const styles = StyleSheet.create({
   catalogSearchBlock: {
     alignSelf: "center",
     maxWidth: 1120,
-    paddingBottom: 8,
+    paddingBottom: 16,
     paddingHorizontal: 20,
     paddingTop: 12,
     position: "relative",
@@ -7828,8 +7828,8 @@ const styles = StyleSheet.create({
   catalogTileActionStrong: { fontWeight: "800" },
   catalogGroupCountPill: { backgroundColor: colors.ink, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
   catalogGroupCountText: { color: colors.onDark, fontSize: 11, fontWeight: "800" },
-  catalogLane: { marginBottom: 6, marginTop: 4 },
-  catalogLaneHeader: { alignItems: "flex-start", flexDirection: "row", gap: 12, justifyContent: "space-between", marginBottom: 14, paddingTop: 2 },
+  catalogLane: { marginBottom: 6, marginTop: 10 },
+  catalogLaneHeader: { alignItems: "flex-start", flexDirection: "row", gap: 12, justifyContent: "space-between", marginBottom: 14, paddingTop: 6 },
   catalogLaneHeading: { flexShrink: 1, gap: 2 },
   catalogLaneControl: {
     alignItems: "center",

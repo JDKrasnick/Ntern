@@ -7,10 +7,9 @@
  * by exactly that length and the pixels on screen are identical.
  */
 
-/** Points per second. Unhurried but unmistakably moving: a card takes about half
- * a minute to cross the lane, so the belt reads as drift rather than as a
- * carousel in a hurry. */
-export const BELT_SPEED = 17;
+/** Points per second. A steady conveyor: the release reads as continuously in
+ * motion rather than as a carousel being nudged along. */
+export const BELT_SPEED = 45;
 
 /** The longest frame a stalled belt will honour, so a backgrounded app does not
  * lurch forward by however long it was away. */
