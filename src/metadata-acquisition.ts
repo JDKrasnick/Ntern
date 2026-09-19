@@ -17,6 +17,13 @@ const description = (value: unknown) => typeof value === 'string' ? metadataDesc
 const strings = (value: unknown) => Array.isArray(value) ? value.map(text).filter(Boolean) : [];
 const periods: Record<string, string> = { 'per-hour-wage': 'hour', 'per-day-wage': 'day', 'per-week-salary': 'week', 'per-month-salary': 'month', 'per-year-salary': 'year',
   'bi-week-salary': 'biweekly', 'semi-month-salary': 'semimonthly', 'bi-month-salary': 'bimonthly', 'one-time': 'one-time' };
+// These vanity hosts expose an exact numeric iCIMS posting in the public URL,
+// while the job body lives on a separately named official iCIMS tenant. Keep
+// the relationship reviewed and explicit: a query flag or numeric path on an
+// arbitrary employer domain is never enough to select an iCIMS host.
+const REVIEWED_ICIMS_VANITY_TENANTS: Readonly<Record<string, string>> = {
+  'careers.garmin.com': 'careers-garmin',
+};
 
 /** Only reviewed/extracted provider identities can select a fixed public API host.
  * A company name, title, or employer-domain URL is never a tenant guess. */
@@ -43,6 +50,14 @@ export function metadataApiRoute(identity: ProviderIdentity, candidateUrl?: stri
       if (url.hostname === 'jobs.smartrecruiters.com' && smart) return {
         method: 'smartrecruiters-api', url: `https://api.smartrecruiters.com/v1/companies/${smart[1]}/postings/${smart[2]}`,
         identity: { ...identity, tenant: smart[1], postingId: smart[2] },
+      };
+      const icimsTenant = REVIEWED_ICIMS_VANITY_TENANTS[url.hostname];
+      const icimsVanity = /^\/jobs\/(\d+)\/?$/u.exec(url.pathname);
+      if (icimsTenant && icimsVanity && url.searchParams.get('icims') === '1'
+        && url.searchParams.getAll('icims').length === 1) return {
+        method: 'icims-page',
+        url: `https://${icimsTenant}.icims.com/jobs/${icimsVanity[1]}/job?in_iframe=1&mobile=false`,
+        identity: { ...identity, provider: 'icims', tenant: icimsTenant, postingId: icimsVanity[1] },
       };
       const workday = /^\/((?:[a-z]{2}-[A-Z]{2}\/)?)([a-z0-9_-]+)\/job\/(.+)$/iu.exec(url.pathname);
       if (provider === 'workday' && tenant && postingId && workday

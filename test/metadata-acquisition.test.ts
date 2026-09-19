@@ -238,6 +238,22 @@ describe('identity-bound public metadata APIs', () => {
     expect(result?.artifact?.text).not.toContain('iCIMS_JobContent');
     expect(educationAudienceLevels(`${result!.artifact!.title}\n${result!.artifact!.text}`)).toEqual(['undergraduate']);
   });
+  it('recovers the reviewed Garmin vanity URL as its exact official iCIMS frame', () => {
+    const github = identity('github', 'README.md:https://careers.garmin.com/jobs/19643?icims=1');
+    expect(metadataApiRoute(github, 'https://careers.garmin.com/jobs/19643?icims=1&utm_source=Simplify&ref=Simplify')).toEqual({
+      method: 'icims-page',
+      url: 'https://careers-garmin.icims.com/jobs/19643/job?in_iframe=1&mobile=false',
+      identity: { ...github, provider: 'icims', tenant: 'careers-garmin', postingId: '19643' },
+    });
+    for (const candidate of [
+      'https://careers.garmin.com/jobs/19643',
+      'https://careers.garmin.com/jobs/19643?icims=0',
+      'https://careers.garmin.com/jobs/19643?icims=1&icims=1',
+      'https://careers.garmin.com/jobs/19643/another?icims=1',
+      'https://careers.garmin.example/jobs/19643?icims=1',
+      'https://careers.amd.com/jobs/19643?icims=1',
+    ]) expect(metadataApiRoute(github, candidate)).toBeUndefined();
+  });
   it('refuses an iCIMS response that is not the requested posting', async () => {
     const icims = { ...identity('icims', '12891'), tenant: 'careers-springswindowfashions' };
     const header = { headers: { 'content-type': 'text/html' } };
