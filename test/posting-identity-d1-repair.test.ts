@@ -268,6 +268,61 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it('confirms real expanded-family roles while keeping malformed roles unconfirmed', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const cases = [
+      ['eu-greenhouse', 'https://job-boards.eu.greenhouse.io/imc/jobs/4667854101', 'https://job-boards.eu.greenhouse.io/imc/jobs/software-engineer'],
+      ['smartrecruiters', 'https://jobs.smartrecruiters.com/ALTEN/744000142128541-ingenieur-developpeur-frontend-h-f-', 'https://jobs.smartrecruiters.com/ALTEN/software-engineer-intern'],
+      ['successfactors', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=colgate&career_job_req_id=169295', 'https://career4.successfactors.com/careers?career_ns=job_listing&career_job_req_id=169295'],
+      ['workable', 'https://apply.workable.com/activate-interactive-pte-ltd/j/1AD6CF565A/', 'https://apply.workable.com/activate-interactive-pte-ltd/'],
+      ['microsoft', 'https://apply.careers.microsoft.com/careers/job/1970393556862170', 'https://apply.careers.microsoft.com/careers/job/software-engineer'],
+      ['rippling', 'https://ats.rippling.com/4ag/jobs/71d97d10-87f2-4f53-88b7-97f27f392d24', 'https://ats.rippling.com/4ag/jobs/--------'],
+      ['eightfold', 'https://bostonscientific.eightfold.ai/careers/job/563602813483103', 'https://bostonscientific.eightfold.ai/careers'],
+      ['paylocity', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4341435', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/software-engineer'],
+      ['jobvite', 'https://jobs.jobvite.com/aarete/job/oBXLAfwD', 'https://jobs.jobvite.com/aarete/job/'],
+      ['amazon', 'https://amazon.jobs/en/jobs/10394156/2026-fall-applied-science-internship', 'https://amazon.jobs/en/jobs/10394156software-engineer'],
+      ['google', 'https://www.google.com/about/careers/applications/jobs/results/100028133205254854', 'https://www.google.com/about/careers/applications/jobs/results/software-engineer'],
+    ] as const;
+    for (const [family, goodUrl, badUrl] of cases) {
+      await store.putInternship(job(`${family}-good`, goodUrl, '2026-09-18T00:00:00.000Z', [
+        occurrence('community-list', `${family}-good`, goodUrl),
+      ]));
+      await store.putInternship(job(`${family}-bad`, badUrl, '2026-09-18T00:00:00.000Z', [
+        occurrence('community-list', `${family}-bad`, badUrl),
+      ]));
+    }
+
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({ duplicateGroups: 0, duplicateJobs: 0, conflicts: [] });
+    await runPostingIdentityRepair(db, {
+      apply: true, scope: 'identity', repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    const occurrenceDry = await runPostingIdentityRepair(db, { scope: 'occurrences' });
+    expect(occurrenceDry.conflicts).toEqual([]);
+    await runPostingIdentityRepair(db, {
+      apply: true, scope: 'occurrences', repairToken: occurrenceDry.repairToken,
+      expectedChanges: occurrenceDry.expectedChanges, expectedDuplicateJobs: occurrenceDry.duplicateJobs,
+    });
+
+    for (const [family] of cases) {
+      expect(await store.getJob(`${family}-good`)).toMatchObject({
+        postingIdentityStatus: 'confirmed',
+        sourceReferences: [expect.objectContaining({
+          postingIdentityDecision: expect.objectContaining({ status: 'confirmed', evidenceKind: 'immutable-provider-id' }),
+        })],
+      });
+      expect(await store.getJob(`${family}-bad`)).toMatchObject({
+        postingIdentityStatus: 'unconfirmed',
+        sourceReferences: [expect.objectContaining({
+          postingIdentityDecision: expect.objectContaining({ status: 'unconfirmed' }),
+        })],
+      });
+    }
+    expect(await runPostingIdentityRepair(db)).toMatchObject({ expectedChanges: 0, conflicts: [] });
+    sqlite.close();
+  });
+
   it('finds historical provider duplicates while keeping bad duplicate signals and regular postings separate', async () => {
     const { db } = await historicalDatabase();
     const first = await runPostingIdentityRepair(db); const second = await runPostingIdentityRepair(db);

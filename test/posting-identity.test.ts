@@ -152,20 +152,20 @@ describe('posting identity', () => {
   });
 
   it.each([
-    ['EU Greenhouse', 'https://job-boards.eu.greenhouse.io/Acme/jobs/101', 'provider:greenhouse:acme:101'],
-    ['SmartRecruiters slug', 'https://jobs.smartrecruiters.com/Acme/744000139649345-software-engineer', 'provider:smartrecruiters:acme:744000139649345'],
+    ['EU Greenhouse', 'https://job-boards.eu.greenhouse.io/imc/jobs/4667854101', 'provider:greenhouse:imc:4667854101'],
+    ['SmartRecruiters slug', 'https://jobs.smartrecruiters.com/ALTEN/744000142128541-ingenieur-developpeur-frontend-h-f-', 'provider:smartrecruiters:alten:744000142128541'],
     ['SuccessFactors', 'https://jobs.successfactors.com/job/London/Software-Intern/123456', 'provider:successfactors:jobs.successfactors.com:123456'],
     ['SuccessFactors tenant query', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=colgate&selected_lang=nl-NL&career_job_req_id=169295', 'provider:successfactors:colgate:169295'],
-    ['Workable', 'https://apply.workable.com/Acme/j/ABC123DEF/', 'provider:workable:acme:abc123def'],
+    ['Workable', 'https://apply.workable.com/activate-interactive-pte-ltd/j/1AD6CF565A/', 'provider:workable:activate-interactive-pte-ltd:1ad6cf565a'],
     ['Microsoft', 'https://jobs.careers.microsoft.com/global/en/job/1891234', 'provider:microsoft:microsoft:1891234'],
     ['Microsoft current', 'https://apply.careers.microsoft.com/careers/job/1970393556862170', 'provider:microsoft:microsoft:1970393556862170'],
-    ['Rippling', 'https://ats.rippling.com/acme/jobs/123e4567-e89b-12d3-a456-426614174000', 'provider:rippling:acme:123e4567-e89b-12d3-a456-426614174000'],
-    ['Eightfold', 'https://careers.acme.eightfold.ai/careers/job/REQ-42', 'provider:eightfold:careers.acme.eightfold.ai:req-42'],
+    ['Rippling', 'https://ats.rippling.com/4ag/jobs/71d97d10-87f2-4f53-88b7-97f27f392d24', 'provider:rippling:4ag:71d97d10-87f2-4f53-88b7-97f27f392d24'],
+    ['Eightfold', 'https://bostonscientific.eightfold.ai/careers/job/563602813483103', 'provider:eightfold:bostonscientific.eightfold.ai:563602813483103'],
     ['Paylocity slug', 'https://recruiting.paylocity.com/recruiting/jobs/Details/12345/Acme', 'provider:paylocity:recruiting.paylocity.com:12345'],
     ['Paylocity current', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4341435', 'provider:paylocity:recruiting.paylocity.com:4341435'],
-    ['Jobvite', 'https://jobs.jobvite.com/Acme/job/ABC123', 'provider:jobvite:acme:abc123'],
-    ['Amazon', 'https://www.amazon.jobs/en/jobs/2891234/software-development-engineer-intern', 'provider:amazon:amazon:2891234'],
-    ['Google', 'https://www.google.com/about/careers/applications/jobs/results/123456789-software-engineering-intern', 'provider:google:google:123456789'],
+    ['Jobvite', 'https://jobs.jobvite.com/aarete/job/oBXLAfwD', 'provider:jobvite:aarete:obxlafwd'],
+    ['Amazon', 'https://amazon.jobs/en/jobs/10394156/2026-fall-applied-science-internship-automated-reasoning-united-states-phd-student-science-recruiting', 'provider:amazon:amazon:10394156'],
+    ['Google', 'https://www.google.com/about/careers/applications/jobs/results/100028133205254854', 'provider:google:google:100028133205254854'],
   ])('recognizes a scoped immutable %s route', (_name, url, exactKey) => {
     expect(resolvePostingIdentityDecision({ sourceId: 'community', externalId: 'role', applicationUrl: url,
       observedAt: '2026-09-19T00:00:00.000Z' })).toMatchObject({
@@ -173,16 +173,45 @@ describe('posting identity', () => {
     });
   });
 
-  it('does not turn arbitrary identifiers or provider query parameters into claims', () => {
-    for (const url of [
-      'https://apply.workable.com/acme/',
-      'https://jobs.jobvite.com/acme/job/',
-      'https://careers.acme.eightfold.ai/careers',
-      'https://careers.example.test/openings?gh_jid=100',
-      'https://career4.successfactors.com/careers?career_job_req_id=169295',
-      'https://ats.rippling.com/acme/jobs/--------',
-      'https://www.amazon.jobs/en/jobs/123software-engineer',
-    ]) expect(providerPostingReference(url)).toEqual({ provider: 'unknown' });
+  it.each([
+    ['EU Greenhouse aggregate board', 'https://job-boards.eu.greenhouse.io/acme/'],
+    ['EU Greenhouse title id', 'https://job-boards.eu.greenhouse.io/acme/jobs/software-engineer'],
+    ['SmartRecruiters aggregate board', 'https://jobs.smartrecruiters.com/acme/'],
+    ['SmartRecruiters title slug', 'https://jobs.smartrecruiters.com/acme/software-engineer-intern'],
+    ['SuccessFactors missing tenant', 'https://career4.successfactors.com/careers?career_ns=job_listing&career_job_req_id=169295'],
+    ['SuccessFactors arbitrary query id', 'https://career4.successfactors.com/careers?company=colgate&id=169295'],
+    ['Workable aggregate board', 'https://apply.workable.com/acme/'],
+    ['Microsoft nonnumeric id', 'https://apply.careers.microsoft.com/careers/job/software-engineer'],
+    ['Rippling malformed id', 'https://ats.rippling.com/acme/jobs/--------'],
+    ['Eightfold aggregate board', 'https://careers.acme.eightfold.ai/careers'],
+    ['Paylocity nonnumeric id', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/software-engineer'],
+    ['Jobvite missing id', 'https://jobs.jobvite.com/acme/job/'],
+    ['Amazon numeric prefix', 'https://www.amazon.jobs/en/jobs/123software-engineer'],
+    ['Google nonnumeric id', 'https://www.google.com/about/careers/applications/jobs/results/software-engineering-intern'],
+    ['custom host Greenhouse query', 'https://careers.example.test/openings?gh_jid=100'],
+  ])('leaves a bad %s route unconfirmed', (_name, url) => {
+    expect(providerPostingReference(url)).toEqual({ provider: 'unknown' });
+    const result = resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'bad-role', applicationUrl: url,
+      observedAt: '2026-09-19T00:00:00.000Z',
+    });
+    expect(result).toMatchObject({ decision: { status: 'unconfirmed' } });
+    expect(result.identity).toBeUndefined();
+  });
+
+  it.each([
+    ['EU Greenhouse', 'https://job-boards.eu.greenhouse.io/acme/jobs/101', 'https://job-boards.eu.greenhouse.io/other/jobs/101'],
+    ['SmartRecruiters', 'https://jobs.smartrecruiters.com/acme/744000139649345', 'https://jobs.smartrecruiters.com/other/744000139649345'],
+    ['SuccessFactors', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=acme&career_job_req_id=101', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=other&career_job_req_id=101'],
+    ['Workable', 'https://apply.workable.com/acme/j/ABC123DEF', 'https://apply.workable.com/other/j/ABC123DEF'],
+    ['Rippling', 'https://ats.rippling.com/acme/jobs/123e4567-e89b-12d3-a456-426614174000', 'https://ats.rippling.com/other/jobs/123e4567-e89b-12d3-a456-426614174000'],
+    ['Eightfold', 'https://careers.acme.eightfold.ai/careers/job/REQ-42', 'https://careers.other.eightfold.ai/careers/job/REQ-42'],
+    ['Jobvite', 'https://jobs.jobvite.com/acme/job/ABC123', 'https://jobs.jobvite.com/other/job/ABC123'],
+  ])('quarantines cross-tenant %s evidence', (_name, applicationUrl, observedUrl) => {
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'cross-tenant', applicationUrl, observedUrls: [observedUrl],
+      observedAt: '2026-09-19T00:00:00.000Z',
+    }).decision).toMatchObject({ status: 'quarantined', reason: 'provider-scope-mismatch' });
   });
 
   it('keeps identical provider IDs on different tenants from merging', () => {

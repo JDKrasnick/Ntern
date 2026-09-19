@@ -298,7 +298,7 @@ test('honors a one-job audit batch through the compiled API Worker', async () =>
   });
 });
 
-test('repairs a new provider-route duplicate through the compiled API Worker and public catalog', async () => {
+test('passes real expanded-family roles and blocks malformed roles through repair and the public catalog', async () => {
   const database = await runtime.getD1Database('DB', apiWorkerName);
   const makeJob = (jobId, applyUrl, firstSeenAt) => ({
     jobId, company: 'Acme', title: 'Software Engineering Intern', location: 'New York', season: 'summer-2027',
@@ -315,9 +315,27 @@ test('repairs a new provider-route duplicate through the compiled API Worker and
   // The non-tracking query keeps the canonical URLs distinct, so this merge
   // depends on the scoped provider identity rather than URL canonicalization.
   const newerUrl = `${olderUrl}/?department=engineering`;
+  const familyCases = [
+    ['eu-greenhouse', 'https://job-boards.eu.greenhouse.io/imc/jobs/4667854101', 'https://job-boards.eu.greenhouse.io/imc/jobs/software-engineer'],
+    ['smartrecruiters', 'https://jobs.smartrecruiters.com/ALTEN/744000142128541-ingenieur-developpeur-frontend-h-f-', 'https://jobs.smartrecruiters.com/ALTEN/software-engineer-intern'],
+    ['successfactors', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=colgate&career_job_req_id=169295', 'https://career4.successfactors.com/careers?career_ns=job_listing&career_job_req_id=169295'],
+    ['workable', 'https://apply.workable.com/activate-interactive-pte-ltd/j/1AD6CF565A/', 'https://apply.workable.com/activate-interactive-pte-ltd/'],
+    ['microsoft', 'https://apply.careers.microsoft.com/careers/job/1970393556862170', 'https://apply.careers.microsoft.com/careers/job/software-engineer'],
+    ['rippling', 'https://ats.rippling.com/4ag/jobs/71d97d10-87f2-4f53-88b7-97f27f392d24', 'https://ats.rippling.com/4ag/jobs/--------'],
+    ['eightfold', 'https://bostonscientific.eightfold.ai/careers/job/563602813483103', 'https://bostonscientific.eightfold.ai/careers'],
+    ['paylocity', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4341435', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/software-engineer'],
+    ['jobvite', 'https://jobs.jobvite.com/aarete/job/oBXLAfwD', 'https://jobs.jobvite.com/aarete/job/'],
+    ['amazon', 'https://amazon.jobs/en/jobs/10394156/2026-fall-applied-science-internship', 'https://amazon.jobs/en/jobs/10394156software-engineer'],
+    ['google', 'https://www.google.com/about/careers/applications/jobs/results/100028133205254854', 'https://www.google.com/about/careers/applications/jobs/results/software-engineer'],
+  ];
+  const matrixJobs = familyCases.flatMap(([family, goodUrl, badUrl]) => [
+    makeJob(`matrix-${family}-good`, goodUrl, '2026-09-17T00:00:00.000Z'),
+    makeJob(`matrix-${family}-bad`, badUrl, '2026-09-17T00:00:00.000Z'),
+  ]);
   for (const value of [
     makeJob('workable-e2e-old', olderUrl, '2026-09-17T00:00:00.000Z'),
     makeJob('workable-e2e-new', newerUrl, '2026-09-18T00:00:00.000Z'),
+    ...matrixJobs,
   ]) {
     await database.prepare('INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, ?, ?, ?)')
       .bind(`JOB#${value.jobId}`, 'META', 'internship', JSON.stringify(value)).run();
@@ -348,11 +366,46 @@ test('repairs a new provider-route duplicate through the compiled API Worker and
   assert.equal(applied.verification.expectedChanges, 0);
   assert.equal(applied.verification.duplicateJobs, 0);
 
+  const occurrencePreviewResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({ scope: 'occurrences' }),
+  });
+  assert.equal(occurrencePreviewResponse.status, 200);
+  const occurrencePreview = await occurrencePreviewResponse.json();
+  assert.deepEqual(occurrencePreview.conflicts, []);
+  const occurrenceApplyResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({
+      apply: true, scope: 'occurrences', repairToken: occurrencePreview.repairToken,
+      expectedChanges: occurrencePreview.expectedChanges, expectedDuplicateJobs: occurrencePreview.duplicateJobs,
+    }),
+  });
+  const occurrenceApplied = await occurrenceApplyResponse.json();
+  assert.equal(occurrenceApplyResponse.status, 200, JSON.stringify(occurrenceApplied));
+  assert.equal(occurrenceApplied.verification.expectedChanges, 0);
+
+  for (const [family] of familyCases) {
+    for (const expectedStatus of ['good', 'bad']) {
+      const jobId = `matrix-${family}-${expectedStatus}`;
+      const row = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'")
+        .bind(`JOB#${jobId}`).first();
+      assert.ok(row, `missing durable ${jobId}`);
+      const stored = JSON.parse(row.value);
+      const status = expectedStatus === 'good' ? 'confirmed' : 'unconfirmed';
+      assert.equal(stored.postingIdentityStatus, status, jobId);
+      assert.equal(stored.sourceReferences[0].postingIdentityDecision.status, status, jobId);
+    }
+  }
+
   const catalogResponse = await api.fetch('https://api.example.test/jobs');
   assert.equal(catalogResponse.status, 200);
   const catalog = await catalogResponse.json();
   assert.ok(catalog.jobs.some((job) => job.jobId === 'workable-e2e-old'));
   assert.ok(!catalog.jobs.some((job) => job.jobId === 'workable-e2e-new'));
+  for (const [family] of familyCases) {
+    assert.ok(catalog.jobs.some((job) => job.jobId === `matrix-${family}-good`), family);
+    assert.ok(!catalog.jobs.some((job) => job.jobId === `matrix-${family}-bad`), family);
+  }
 });
 
 test('runs a dev account through signup, verification, sign-in, and private reads', async () => {
