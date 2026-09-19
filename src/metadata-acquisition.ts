@@ -4,7 +4,7 @@ import type { ProviderIdentity } from './types.js';
 import type { RoleMetadataArtifact } from './role-metadata.js';
 
 export type MetadataAcquisition = {
-  method: 'greenhouse-api' | 'lever-api' | 'ashby-api' | 'workday-api' | 'smartrecruiters-api';
+  method: 'greenhouse-api' | 'lever-api' | 'ashby-api' | 'workday-api' | 'smartrecruiters-api' | 'icims-page';
   sourceUrl: string;
   outcome: 'acquired' | 'failed' | 'identity-mismatch' | 'incomplete';
   artifact?: RoleMetadataArtifact;
@@ -59,6 +59,13 @@ export function metadataApiRoute(identity: ProviderIdentity, candidateUrl?: stri
   if (!validTenant || !postingId) return undefined;
   if (provider === 'greenhouse' && /^\d+$/u.test(postingId)) return {
     method: 'greenhouse-api', url: `https://boards-api.greenhouse.io/v1/boards/${tenant}/jobs/${postingId}?pay_transparency=true&pay_input_ranges=true`,
+  };
+  // iCIMS publishes no open JSON detail endpoint, and the plain job URL is a
+  // client-rendered shell — its frame route is the only response that carries the
+  // description. Both host and posting id come from the reviewed identity, so the
+  // route is constructed from evidence rather than from a URL guess.
+  if (provider === 'icims' && /^\d+$/u.test(postingId)) return {
+    method: 'icims-page', url: `https://${tenant}.icims.com/jobs/${postingId}/job?in_iframe=1&mobile=false`,
   };
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(postingId)) return undefined;
   if (provider === 'lever') return { method: 'lever-api', url: `https://api.lever.co/v0/postings/${tenant}/${postingId}?mode=json` };
@@ -115,6 +122,20 @@ export function extractGreenhouseCompensationBands(value: unknown): NonNullable<
 }
 
 export function parseMetadataApiResponse(identity: ProviderIdentity, method: MetadataAcquisition['method'], payload: unknown, requestUrl?: string): RoleMetadataArtifact | undefined {
+  // The iCIMS frame route answers with the posting's own HTML, so its payload is a
+  // string rather than a record. Identity is the requested posting id appearing in
+  // the document, and the description is the JobContent region the frame renders.
+  if (method === 'icims-page') {
+    if (typeof payload !== 'string' || !identity.postingId || !payload.includes(`/jobs/${identity.postingId}/`)) return undefined;
+    const marker = payload.indexOf('iCIMS_JobContent');
+    if (marker < 0) return undefined;
+    // Start after the container's opening tag so the marker itself never reaches
+    // the artifact text or its excerpts.
+    const content = description(payload.slice(payload.indexOf('>', marker) + 1));
+    const title = text(/<h1[^>]*>([\s\S]*?)<\/h1>/iu.exec(payload)?.[1]) || text(/<title[^>]*>([\s\S]*?)<\/title>/iu.exec(payload)?.[1]);
+    if (!title || !content) return undefined;
+    return { title, text: content };
+  }
   if (!record(payload)) return undefined;
   const expected = identity.postingId;
   if (method === 'workday-api') {
@@ -209,9 +230,13 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
       try {
         const host = new URL(route.url).hostname;
         if (throttled.has(host) || (hooks.canRequest && !await hooks.canRequest(host))) return { outcome: 'failed' as const, status: 429 };
+        // iCIMS publishes its description only as HTML, so this one route accepts
+        // that type. Every other route keeps the JSON-only gate, and the response
+        // is still a fixed reviewed host, non-redirected, timed out and bounded.
+        const html = route.method === 'icims-page';
         // workerd rejects redirect:'error' before issuing the request. Manual
         // mode plus the non-2xx check below rejects redirects without following.
-        const response = await fetchImpl(route.url, { headers: { Accept: 'application/json' }, redirect: 'manual', signal: AbortSignal.timeout(12_000) });
+        const response = await fetchImpl(route.url, { headers: { Accept: html ? 'text/html' : 'application/json' }, redirect: 'manual', signal: AbortSignal.timeout(12_000) });
         if (response.status === 429) {
           throttled.add(host);
           const header = response.headers.get('retry-after');
@@ -219,7 +244,8 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
           const until = new Date(Number.isFinite(parsed) ? Math.max(Date.now() + 60_000, Math.min(parsed, Date.now() + 86_400_000)) : Date.now() + 3_600_000).toISOString();
           await hooks.deferHost?.(host, until);
         }
-        if (!response.ok || !/\bapplication\/json\b/iu.test(response.headers.get('content-type') ?? '')) {
+        const expectedType = html ? /\btext\/html\b/iu : /\bapplication\/json\b/iu;
+        if (!response.ok || !expectedType.test(response.headers.get('content-type') ?? '')) {
           await response.body?.cancel(); return { outcome: 'failed' as const, status: response.status };
         }
         const reader = response.body?.getReader();
@@ -235,7 +261,7 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
           }
           body += decoder.decode();
         } finally { reader.releaseLock(); }
-        return { outcome: 'acquired' as const, payload: JSON.parse(body) as unknown, bytes, status: response.status };
+        return { outcome: 'acquired' as const, payload: html ? body : JSON.parse(body) as unknown, bytes, status: response.status };
       } catch { return { outcome: 'failed' as const }; }
     })());
     const result = await requests.get(route.url)!;
