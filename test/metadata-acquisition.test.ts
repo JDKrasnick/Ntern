@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createMetadataAcquirer, metadataApiRoute, parseMetadataApiResponse } from '../src/metadata-acquisition.js';
+import { educationAudienceLevels } from '../src/identity/enrichment.js';
 import { extractPostingMetadataEvidence, compensationFromRanges, reconcileRoleMetadata } from '../src/role-metadata.js';
 import { exactPostingRecoveryUrl, renderedDescriptionReady } from '../src/rendered-destination-evidence.js';
 import { compareMetadataCohort, decodeMetadataCursor, encodeMetadataCursor, metadataFieldOutcomes } from '../src/metadata-audit.js';
@@ -213,6 +214,41 @@ describe('identity-bound public metadata APIs', () => {
       expect(metadataApiRoute({ ...identity('ashby'), tenant })).toBeUndefined();
     }
     expect(metadataApiRoute({ ...identity('greenhouse', '123'), tenant: 'persona.ai' })).toBeUndefined();
+  });
+  it('reads an iCIMS posting from its frame route, the only response carrying the description', async () => {
+    const icims = { ...identity('icims', '12891'), tenant: 'careers-springswindowfashions' };
+    expect(metadataApiRoute(icims)).toEqual({ method: 'icims-page',
+      url: 'https://careers-springswindowfashions.icims.com/jobs/12891/job?in_iframe=1&mobile=false' });
+    // iCIMS postings are numeric, and the tenant is still a host label.
+    expect(metadataApiRoute({ ...identity('icims'), tenant: 'careers-sig' })).toBeUndefined();
+    for (const tenant of ['../acme', 'acme/other', 'acme.example']) {
+      expect(metadataApiRoute({ ...icims, tenant })).toBeUndefined();
+    }
+
+    const page = '<html><head><title>Software Engineering Internship in LONG ISLAND CITY | Careers</title></head><body>'
+      + '<h1>Software Engineering Internship</h1>'
+      + '<div class="iCIMS_JobContent"><p>Pursuing a 4-year degree with current standing of Sophomore or Junior.</p></div>'
+      + '<footer><a href="/jobs/12891/job">Apply</a></footer></body></html>';
+    const result = await createMetadataAcquirer(async () => new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } }))(icims);
+    expect(result).toMatchObject({ method: 'icims-page', outcome: 'acquired' });
+    // The clean heading wins over the title tag's location suffix, and the
+    // container marker never reaches the artifact text.
+    expect(result?.artifact?.title).toBe('Software Engineering Internship');
+    expect(result?.artifact?.text).toContain('Pursuing a 4-year degree');
+    expect(result?.artifact?.text).not.toContain('iCIMS_JobContent');
+    expect(educationAudienceLevels(`${result!.artifact!.title}\n${result!.artifact!.text}`)).toEqual(['undergraduate']);
+  });
+  it('refuses an iCIMS response that is not the requested posting', async () => {
+    const icims = { ...identity('icims', '12891'), tenant: 'careers-springswindowfashions' };
+    const header = { headers: { 'content-type': 'text/html' } };
+    // The posting id is the identity: another role's page, or none at all, is not ours.
+    expect(await createMetadataAcquirer(async () => new Response('<h1>Another role</h1><div class="iCIMS_JobContent">Pursuing a degree.</div>', header))(icims))
+      .toMatchObject({ outcome: 'identity-mismatch' });
+    expect(await createMetadataAcquirer(async () => new Response('<h1>Intern</h1><p>No container</p>', header))(icims))
+      .toMatchObject({ outcome: 'identity-mismatch' });
+    // JSON is not the frame document, so the iCIMS route keeps its own type gate.
+    expect(await createMetadataAcquirer(async () => Response.json({ ok: true }))(icims))
+      .toMatchObject({ outcome: 'failed' });
   });
   it('recovers only an exact observed Greenhouse embed identity', () => {
     const id = { ...identity('greenhouse', '8044334'), tenant: undefined };
