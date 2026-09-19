@@ -3,7 +3,9 @@ import { educationLevels } from '../../shared/education-display.js';
 import { educationAudienceOf, educationExcludesLevel } from '../identity/enrichment.js';
 import { employerCategories, employerCategory, type EmployerCategory } from './employers.js';
 
-export const jobCategories = ['ai-ml', 'grad', 'swe', 'quant', 'product', 'design'] as const;
+export const legacyJobCategories = ['ai-ml', 'grad', 'swe', 'quant', 'product', 'design'] as const;
+export const expandedJobCategories = ['general-engineering', 'mechanical', 'electrical', 'aerospace', 'civil', 'chemical-materials', 'industrial-manufacturing', 'biomedical', 'environmental-energy', 'systems-test', 'technical-operations'] as const;
+export const jobCategories = [...legacyJobCategories, ...expandedJobCategories] as const;
 export type JobCategory = typeof jobCategories[number];
 /** The initial public catalog deliberately stays focused on technical early-career roles. */
 export const technicalJobCategories: JobCategory[] = ['ai-ml', 'swe', 'quant', 'product', 'design'];
@@ -27,6 +29,8 @@ export interface JobFilter {
    * employer that never stated an audience is never hidden.
    */
   educationLevel?: EducationLevel;
+  /** Explicit consent gate for roles that qualify only under the expanded policy. */
+  includeExpandedTechnical?: boolean;
 }
 
 export function isEducationLevel(value: unknown): value is EducationLevel {
@@ -35,7 +39,7 @@ export function isEducationLevel(value: unknown): value is EducationLevel {
 
 /** Fields any filterable listing carries; the education audience lives in its identity. */
 export type FilterableListing = Pick<RawListing, 'company' | 'title' | 'location' | 'season' | 'requirements'>
-  & { internshipIdentity?: unknown; roleMetadata?: unknown };
+  & { internshipIdentity?: unknown; roleMetadata?: unknown; technicalScope?: 'legacy' | 'expanded' };
 
 export type FilterMatchReasonKind = 'category' | 'keyword' | 'company-type' | 'default-all-technical';
 export interface FilterMatchReason { kind: FilterMatchReasonKind; label: string; }
@@ -47,17 +51,29 @@ export interface JobFilterEvaluation {
 }
 
 const categoryLabels: Record<JobCategory, string> = {
-  'ai-ml': 'AI/ML', grad: 'Graduate roles', swe: 'Software engineering', quant: 'Quantitative', product: 'Product', design: 'Design'
+  'ai-ml': 'AI/ML', grad: 'Graduate roles', swe: 'Software engineering', quant: 'Quantitative', product: 'Product', design: 'Design',
+  'general-engineering': 'Engineering', mechanical: 'Mechanical', electrical: 'Electrical', aerospace: 'Aerospace', civil: 'Civil', 'chemical-materials': 'Chemical & materials', 'industrial-manufacturing': 'Manufacturing', biomedical: 'Biomedical', 'environmental-energy': 'Environment & energy', 'systems-test': 'Systems & test', 'technical-operations': 'Technical operations',
 };
 const employerCategoryLabels: Record<EmployerCategory, string> = { faang: 'FAANG', startup: 'Startups', normal: 'Other companies' };
 
 const patterns: Record<JobCategory, RegExp> = {
   'ai-ml': /\b(ai|artificial intelligence|machine learning|ml|data scien(?:ce|tist)|deep learning|nlp|computer vision|generative ai|llm)\b/i,
   grad: /\b(graduate|grad|master'?s|ph\.?d\.?|mba)\b/i,
-  swe: /\b(software|swe|backend|frontend|full[ -]?stack|developer|engineering)\b/i,
+  swe: /\b(software|swe|backend|frontend|full[ -]?stack|developer)\b/i,
   quant: /\b(quant|quantitative|trading|trader|research)\b/i,
   product: /\b(product manager|product management|pm)\b/i,
-  design: /\b(design|ux|ui|user experience)\b/i
+  design: /\b(design|ux|ui|user experience)\b/i,
+  'general-engineering': /\b(?:engineering (?:intern|co-?op|rotation)|engineering rotation(?: intern)?|project engineer)\b/i,
+  mechanical: /\b(?:mechanical|thermal|fluid(?:s| dynamics)?|hvac)\b/i,
+  electrical: /\b(?:electrical|electronics?|rf|power systems?|instrumentation)\b/i,
+  aerospace: /\b(?:aerospace|aerodynamic|propulsion|flight|space systems?)\b/i,
+  civil: /\b(?:civil|structural|transportation|geotechnical|construction)\b/i,
+  'chemical-materials': /\b(?:chemical|process engineer|materials?|polymers?|metallurgy|batter(?:y|ies))\b/i,
+  'industrial-manufacturing': /\b(?:industrial|manufacturing|production|tooling|automation)\b/i,
+  biomedical: /\b(?:biomedical|bioengineering|medical devices?)\b/i,
+  'environmental-energy': /\b(?:environmental|renewable energy|utilities)\b/i,
+  'systems-test': /\b(?:systems?|integration|test|validation|verification|reliability|safety|quality)\b/i,
+  'technical-operations': /\b(?:engineering technician|technologist|cad|drafting|laboratory technician|technical apprenticeship)\b/i,
 };
 const focusPatterns: Array<[JobFocus, RegExp]> = [
   ['AI/ML', /\b(generative ai|gen ai|artificial intelligence|machine learning|\bml\b|llm|nlp|natural language|computer vision|deep learning)\b/i],
@@ -134,7 +150,9 @@ function matchesCategory(value: string, category: JobCategory) { return patterns
 
 export function classifyJob(listing: Pick<RawListing, 'company' | 'title' | 'location' | 'season'>): JobCategory[] {
   const value = terms(listing);
-  return jobCategories.filter((category) => matchesCategory(value, category));
+  // Existing categories retain their whole-listing behavior. Engineering scope
+  // relies on title evidence, never an employer's boilerplate or location.
+  return jobCategories.filter((category) => matchesCategory(legacyJobCategories.includes(category as typeof legacyJobCategories[number]) ? value : listing.title, category));
 }
 /**
  * Tools and practices that only appear in technical job text. Individually weak
@@ -200,6 +218,9 @@ export function assessTechnicalRole(
     || qualifiedTechnicalPattern.test(listing.title)) {
     return { technical: true, basis: 'title' };
   }
+  if (classifyJob(role).some((category) => expandedJobCategories.includes(category as typeof expandedJobCategories[number]))) {
+    return { technical: true, basis: 'title' };
+  }
   const text = (description ?? '').trim();
   if (!text) return { technical: false, basis: 'no-evidence' };
   const domain = distinctMatches(text, strongTechnicalPattern);
@@ -212,6 +233,13 @@ export function assessTechnicalRole(
     score,
     signals: [...domain.slice(0, 3), ...stack.slice(0, 6)],
   };
+}
+
+export function technicalScopeFor(listing: Pick<RawListing, 'company' | 'title' | 'location' | 'season'>, description?: string): 'legacy' | 'expanded' | undefined {
+  if (!assessTechnicalRole(listing, description).technical) return undefined;
+  const categories = classifyJob(listing);
+  return categories.some((category) => expandedJobCategories.includes(category as typeof expandedJobCategories[number]))
+    && !categories.some((category) => technicalJobCategories.includes(category as typeof technicalJobCategories[number])) ? 'expanded' : 'legacy';
 }
 
 export function isTechnicalJob(listing: Pick<RawListing, 'company' | 'title' | 'location' | 'season'>, description?: string) {
@@ -230,6 +258,7 @@ export function evaluateJobFilter(listing: FilterableListing, filter?: JobFilter
   const categories = classifyJob(listing);
   const companyCategory = employerCategory(listing.company);
   const activeFilter = filter ?? {};
+  if (listing.technicalScope === 'expanded' && !activeFilter.includeExpandedTechnical) return { matches: false, reasons: [], exclusionsApplied: false };
   const requirements = listing.requirements ?? {
     requiresUsCitizenship: /🇺🇸|\b(?:requires?|must be)\s+(?:a\s+)?(?:u\.?s\.?|united states)\s+citizen(?:ship)?\b/i.test(value),
     advancedDegreeRequired: /🎓|\b(?:advanced degree|master'?s|ph\.?d\.?|mba)\b/i.test(value)
@@ -298,6 +327,8 @@ export function parseJobFilter(value: unknown): JobFilter | undefined {
   const excludeEmployerCategories = employerCategoryList(config.excludeEmployerCategories, 'excludeEmployerCategories');
   const excludeUsCitizenshipRequired = booleanValue(config.excludeUsCitizenshipRequired, 'excludeUsCitizenshipRequired');
   const educationLevel = educationLevelValue(config.educationLevel);
+  const includeExpandedTechnical = booleanValue(config.includeExpandedTechnical, 'includeExpandedTechnical');
+  const selectedExpandedCategory = Boolean(includeCategories?.some((category) => expandedJobCategories.includes(category as typeof expandedJobCategories[number])));
   return {
     ...(includeKeywords !== undefined ? { includeKeywords } : {}),
     ...(includeCategories !== undefined ? { includeCategories } : {}),
@@ -306,6 +337,7 @@ export function parseJobFilter(value: unknown): JobFilter | undefined {
     ...(includeEmployerCategories !== undefined ? { includeEmployerCategories } : {}),
     ...(excludeEmployerCategories !== undefined ? { excludeEmployerCategories } : {}),
     ...(excludeUsCitizenshipRequired !== undefined ? { excludeUsCitizenshipRequired } : {}),
-    ...(educationLevel !== undefined ? { educationLevel } : {})
+    ...(educationLevel !== undefined ? { educationLevel } : {}),
+    ...((includeExpandedTechnical || selectedExpandedCategory) ? { includeExpandedTechnical: true } : {}),
   };
 }
