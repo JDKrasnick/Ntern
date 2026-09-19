@@ -13,17 +13,17 @@ const { Response } = globalThis;
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 /**
- * Fixtures must track the extraction version the workers actually run: a stale
- * copy here leaves seeded catalog rows looking out of date, so the poller
- * re-resolves them instead of reusing and the reuse assertions fail.
+ * Fixtures must track the versions the workers actually run: a stale copy here
+ * leaves seeded rows looking out of date, so the poller re-resolves them instead
+ * of reusing and the reuse assertions fail.
  */
-async function readExtractionVersion() {
-  const source = await readFile(join(repositoryRoot, 'src/role-metadata.ts'), 'utf8');
-  const match = /ROLE_METADATA_EXTRACTION_VERSION = (\d+)/.exec(source);
-  if (!match) throw new Error('ROLE_METADATA_EXTRACTION_VERSION not found in src/role-metadata.ts');
+async function readConstant(relativePath, name) {
+  const match = new RegExp(`${name} = (\\d+)`).exec(await readFile(join(repositoryRoot, relativePath), 'utf8'));
+  if (!match) throw new Error(`${name} not found in ${relativePath}`);
   return Number(match[1]);
 }
-const roleMetadataExtractionVersion = await readExtractionVersion();
+const roleMetadataExtractionVersion = await readConstant('src/role-metadata.ts', 'ROLE_METADATA_EXTRACTION_VERSION');
+const sourceMetadataProcessingRevision = await readConstant('src/ingestion/processor.ts', 'SOURCE_METADATA_PROCESSING_REVISION');
 /** Mirrors src/poll.ts: applicationPageMetadataVersion = ROLE_METADATA_EXTRACTION_VERSION + 1. */
 const applicationPageMetadataVersion = roleMetadataExtractionVersion + 1;
 const apiWorkerName = 'intern-notifs-e2e-api';
@@ -671,7 +671,7 @@ test('keeps a production-scale scheduled cycle recoverable without direct dead l
   seedSource(githubSourceId, {
     sourceId: githubSourceId, successfulFetches: 1, lastSuccessAt: seededAt, contentHash: 'e2e-github-content-hash',
     lastRowCount: githubRows, lastRawCount: githubRows, activeExternalIds: githubActiveExternalIds,
-    metadataExtractionVersion: roleMetadataExtractionVersion, metadataProcessingRevision: 2,
+    metadataExtractionVersion: roleMetadataExtractionVersion, metadataProcessingRevision: sourceMetadataProcessingRevision,
   });
   seedSource(greenhouseSourceId, {
     sourceId: greenhouseSourceId, successfulFetches: 1, lastSuccessAt: seededAt, contentHash: 'e2e-greenhouse-content-hash',

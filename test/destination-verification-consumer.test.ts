@@ -7,6 +7,7 @@ import { enqueueDueDestinationVerifications, processDestinationVerificationBatch
   type DestinationVerificationEnvironment,
   type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
 import type { D1Database, D1PreparedStatement, MessageBatch, QueueMessage, R2Bucket } from '../cloudflare/types.js';
+import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import type { Internship, SourceOccurrence } from '../src/types.js';
 import { normalizeExactPostingDescription } from '../src/shadow-extraction.js';
 import { metadataDescriptionText } from '../src/core/metadata-text.js';
@@ -285,7 +286,8 @@ describe('destination verification queue consumer', () => {
         provider: 'greenhouse', sourceId: reference.sourceId, sourceUrl: reference.sourceUrl,
         tenant: 'acme', postingId: reference.externalId,
       }, reason: 'content-change', queuedAt: '2026-08-30T00:00:00Z', idempotencyKey: 'natural-shadow-handoff',
-      metadataExtractionVersion: 15,
+      // A message only counts as current when it carries the running version.
+      metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
       shadowContentHash: normalizeExactPostingDescription(reference.title, metadataDescriptionText(description)).contentHash,
       shadowOrigin: 'provider-poll' });
 

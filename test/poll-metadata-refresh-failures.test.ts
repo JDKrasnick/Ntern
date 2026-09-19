@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Poller } from '../src/poll.js';
+import { SOURCE_METADATA_PROCESSING_REVISION } from '../src/ingestion/processor.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import { SourceFetchError } from '../src/sources/source-error.js';
@@ -49,7 +50,7 @@ describe('bounded metadata refresh persistence failures', () => {
     expect([...store.jobs.values()]).toEqual([]);
     expect(await store.getCheckpoint(sourceId)).toMatchObject({
       metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
-      metadataProcessingRevision: 2,
+      metadataProcessingRevision: SOURCE_METADATA_PROCESSING_REVISION,
     });
     expect((await store.getCheckpoint(sourceId))!.pendingMetadataProcessedRows).toBeUndefined();
     expect((await store.getCheckpoint(sourceId))!.pendingMetadataOmissions).toBeUndefined();
