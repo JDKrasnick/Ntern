@@ -22,6 +22,33 @@ InternNotifs is an Expo mobile app with a Cloudflare Worker backend.
 
 The catalog is public. Accounts, preferences, device tokens, profiles, documents, and application tracking are private to the verified user identity.
 
+## Required Cloudflare development gate
+
+Every backend change must be deployed and smoke-tested in the isolated Cloudflare
+development environment before a production deployment is considered. The
+development Workers are `intern-notifs-dev` and `intern-notifs-dev-ingestion`;
+their public API is `https://intern-notifs-dev.jdkrasnick.workers.dev`.
+
+The development stack has its own D1 database (`intern-notifs-dev-db`), R2
+buckets, queues, Durable Object namespace, and Worker secrets. It must never
+bind a production database, bucket, queue, service, or secret. Its ingestion
+configuration intentionally has no cron triggers, so testing cannot begin
+provider polling or alter the production catalog.
+
+Use the committed, config-specific commands—never a bare Wrangler deploy:
+
+```sh
+npm run build:cloudflare
+npx wrangler d1 migrations apply intern-notifs-dev-db --remote --config wrangler.dev.api.jsonc
+npx wrangler deploy --config wrangler.dev.ingestion.jsonc
+npx wrangler deploy --config wrangler.dev.api.jsonc
+curl -fsS 'https://intern-notifs-dev.jdkrasnick.workers.dev/catalog?limit=5'
+```
+
+Verify the public catalog, authentication lifecycle, and protected operations
+boundary there. A successful development run is a prerequisite for, but never
+authorization to perform, a production deploy.
+
 ## API and ingestion deployment boundary
 
 The API Worker and ingestion Worker have separate, explicit Wrangler
