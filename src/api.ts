@@ -1,8 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { DeleteObjectCommand, GetObjectCommand, S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { isEducationLevel, jobCategories, matchesJobFilter, parseJobFilter } from './core/filters.js';
-import { DynamoInternshipStore, DynamoReleaseStore, DynamoUserStore, type InternshipStore, type ReleaseStore, type UserStore } from './store.js';
+import { type InternshipStore, type ReleaseStore, type UserStore } from './store.js';
 import { ACCOUNT_EXPORT_SCHEMA_VERSION, type AccountDataExport, type ApplicantProfile, type ApplicationRecord, type ApplicationStatus, type DeviceToken, type Internship, type OccurrenceProvenance, type UserPreferences } from './types.js';
 import { EmployerIntegrationRegistry } from './providers.js';
 import { assistanceAvailability } from './application-assistance.js';
@@ -379,30 +377,14 @@ export interface ApiDependencies {
   deleteIdentity?: (userId: string) => Promise<void>;
   /** Revokes and deletes linked-provider data before the account record disappears. */
   beforeDeleteUser?: (userId: string) => Promise<void>;
-  /** AWS document compatibility retained for rollback and export only. */
-  documentsBucket?: string;
   integrations?: EmployerIntegrationRegistry;
-  s3?: S3Client;
   now?: () => string;
   identityUnconfirmedPublicationEnabled?: boolean;
 }
 export function createApiHandler(dependencies: ApiDependencies) {
   const identityUnconfirmedPublicationEnabled = dependencies.identityUnconfirmedPublicationEnabled ?? true;
   const integrations = dependencies.integrations ?? new EmployerIntegrationRegistry();
-  const documentStorage: DocumentStorage | undefined = dependencies.documentStorage ?? (dependencies.documentsBucket ? {
-    async createUploadUrl(document) {
-      const s3 = dependencies.s3 ?? new S3Client({});
-      return getSignedUrl(s3, new PutObjectCommand({ Bucket: dependencies.documentsBucket, Key: document.objectKey, ContentType: document.contentType, ServerSideEncryption: 'aws:kms' }), { expiresIn: 300 });
-    },
-    async createDownloadUrl(document) {
-      const s3 = dependencies.s3 ?? new S3Client({});
-      return getSignedUrl(s3, new GetObjectCommand({ Bucket: dependencies.documentsBucket, Key: document.objectKey }), { expiresIn: 300 });
-    },
-    async deleteObject(objectKey) {
-      const s3 = dependencies.s3 ?? new S3Client({});
-      await s3.send(new DeleteObjectCommand({ Bucket: dependencies.documentsBucket, Key: objectKey }));
-    },
-  } : undefined);
+  const documentStorage = dependencies.documentStorage;
   return async (event: ApiEvent): Promise<ApiResponse> => {
     try {
       const method = event.requestContext?.http?.method ?? event.routeKey?.split(' ')[0] ?? 'GET'; const path = event.rawPath ?? event.routeKey?.split(' ')[1] ?? '/';
@@ -791,11 +773,3 @@ export function createApiHandler(dependencies: ApiDependencies) {
     } catch (error) { return reply(400, { message: error instanceof Error ? error.message : 'Invalid request' }); }
   };
 }
-
-export const handler = createApiHandler({
-  jobs: new DynamoInternshipStore(process.env.INTERNSHIPS_TABLE ?? ''),
-  users: new DynamoUserStore(process.env.USERS_TABLE ?? ''),
-  releases: new DynamoReleaseStore(process.env.USERS_TABLE ?? ''),
-  documentsBucket: process.env.DOCUMENTS_BUCKET,
-  identityUnconfirmedPublicationEnabled: process.env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
-});

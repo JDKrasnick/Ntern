@@ -7,11 +7,11 @@ import { qualityPolicyFor, verifySourceQuality } from './sources/quality.js';
 import { SourceFetchError } from './sources/source-error.js';
 import { ApplicationLinkValidationError, failedSourceHealth, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
 import { SOURCE_RETRY_DELAY_CAP_MS } from './source-poll-cadence.js';
-import { DynamoInternshipStore, DynamoUserStore, type InternshipStore, type UserStore } from './store.js';
+import { type InternshipStore, type UserStore } from './store.js';
 import type { SourceCheckpoint, SourceFetchResult } from './types.js';
 import type { LeverWorkMessage } from './lever-dispatch.js';
 import { processFifoBatch } from './sqs-fifo-batch.js';
-import { legacyDeliveryExclusions, loadGroupedNotificationCohort, type GroupedNotificationCohort } from './grouped-notification-cohort.js';
+import { legacyDeliveryExclusions, type GroupedNotificationCohort } from './grouped-notification-cohort.js';
 import type { CatalogAdmissionResolver, DestinationVerificationRequest } from './destination-verification.js';
 
 const SHADOW_CHECKPOINT_PREFIX = 'shadow-';
@@ -343,20 +343,4 @@ export async function processLeverQueue(
       throw error;
     }
   }, undefined, dependencies.onRecordFailure, dependencies.messageDeadlineMs);
-}
-
-export async function handler(
-  event: QueueEvent,
-  context?: { awsRequestId?: string },
-): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> {
-  const tableName = process.env.INTERNSHIPS_TABLE;
-  const usersTable = process.env.USERS_TABLE;
-  if (!tableName || !usersTable) throw new Error('INTERNSHIPS_TABLE and USERS_TABLE are required');
-  const cohortParameterName = process.env.GROUPED_NOTIFICATION_COHORT_PARAMETER_NAME;
-  if (!cohortParameterName) throw new Error('GROUPED_NOTIFICATION_COHORT_PARAMETER_NAME is required');
-  return processLeverQueue(event, {
-    store: new DynamoInternshipStore(tableName),
-    userStore: new DynamoUserStore(usersTable),
-    groupedNotificationCohort: await loadGroupedNotificationCohort(cohortParameterName),
-  }, context);
 }

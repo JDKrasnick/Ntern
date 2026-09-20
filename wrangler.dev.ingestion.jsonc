@@ -1,0 +1,76 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "intern-notifs-dev-ingestion",
+  "main": "cloudflare/ingestion-worker.ts",
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController" }] },
+  "migrations": [{ "tag": "v1-d1-traffic-controller", "new_sqlite_classes": ["D1TrafficController"] }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "limits": { "cpu_ms": 30000, "subrequests": 10000 },
+  "observability": { "enabled": true },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "intern-notifs-dev-db", "database_id": "cedc86d8-69a5-4a72-a1e6-f5629d722338", "migrations_dir": "cloudflare/migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "DOCUMENTS", "bucket_name": "intern-notifs-dev-documents" },
+    { "binding": "SHADOW_EXTRACTION_ARTIFACTS", "bucket_name": "intern-notifs-dev-shadow-extraction" }
+  ],
+  "browser": { "binding": "DESTINATION_BROWSER" },
+  "queues": {
+    "producers": [
+      { "binding": "GREENHOUSE_QUEUE", "queue": "intern-notifs-dev-greenhouse" },
+      { "binding": "LEVER_QUEUE", "queue": "intern-notifs-dev-lever" },
+      { "binding": "ASHBY_QUEUE", "queue": "intern-notifs-dev-ashby" },
+      { "binding": "GITHUB_QUEUE", "queue": "intern-notifs-dev-github" },
+      { "binding": "GMAIL_QUEUE", "queue": "intern-notifs-dev-gmail" },
+      { "binding": "DESTINATION_VERIFICATION_QUEUE", "queue": "intern-notifs-dev-destination-verification" },
+      { "binding": "SHADOW_EXTRACTION_QUEUE", "queue": "intern-notifs-dev-shadow-extraction" },
+      { "binding": "GREENHOUSE_DLQ", "queue": "intern-notifs-dev-greenhouse-dlq" },
+      { "binding": "LEVER_DLQ", "queue": "intern-notifs-dev-lever-dlq" },
+      { "binding": "ASHBY_DLQ", "queue": "intern-notifs-dev-ashby-dlq" },
+      { "binding": "GITHUB_DLQ", "queue": "intern-notifs-dev-github-dlq" },
+      { "binding": "GMAIL_DLQ", "queue": "intern-notifs-dev-gmail-dlq" },
+      { "binding": "DESTINATION_VERIFICATION_DLQ", "queue": "intern-notifs-dev-destination-verification-dlq" },
+      { "binding": "SHADOW_EXTRACTION_DLQ", "queue": "intern-notifs-dev-shadow-extraction-dlq" }
+    ],
+    "consumers": [
+      { "queue": "intern-notifs-dev-greenhouse", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 6, "dead_letter_queue": "intern-notifs-dev-greenhouse-dlq" },
+      { "queue": "intern-notifs-dev-lever", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-dev-lever-dlq" },
+      { "queue": "intern-notifs-dev-ashby", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-dev-ashby-dlq" },
+      { "queue": "intern-notifs-dev-github", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-dev-github-dlq" },
+      { "queue": "intern-notifs-dev-gmail", "max_batch_size": 1, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "intern-notifs-dev-gmail-dlq" },
+      { "queue": "intern-notifs-dev-destination-verification", "max_batch_size": 5, "max_batch_timeout": 60, "max_concurrency": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-dev-destination-verification-dlq" },
+      { "queue": "intern-notifs-dev-shadow-extraction", "max_batch_size": 1, "max_batch_timeout": 60, "max_concurrency": 1, "max_retries": 2, "retry_delay": 300, "dead_letter_queue": "intern-notifs-dev-shadow-extraction-dlq" }
+    ]
+  },
+  "version_metadata": { "binding": "VERSION_METADATA" },
+  "vars": {
+    "PUBLIC_API_URL": "https://intern-notifs-dev.jdkrasnick.workers.dev",
+    "AUTH_FROM_EMAIL": "Ntern Dev <dev.example>",
+    "EMPLOYER_PORTAL_ENABLED": "false",
+    "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED": "false",
+    "TRUSTED_COMMUNITY_CATALOG_ENABLED": "false",
+    "IDENTITY_CONFIRMED_COVERAGE_FLOOR": "0",
+    "GMAIL_ENABLED": "false",
+    "SHADOW_EXTRACTION_ENABLED": "true",
+    "SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS": "1500",
+    "SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS": "500",
+    "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":false,\"version\":\"disabled\",\"allowedFields\":[],\"cohort\":[]}",
+    "ADMISSION_QUEUE_AGE_ALERT_HOURS": "120",
+    "ADMISSION_STALE_ALERT_THRESHOLD": "1",
+    "GMAIL_CLIENT_ID": "17433524169-4753680goh32205can9g00ijqan3hic5.apps.googleusercontent.com",
+    "GMAIL_REDIRECT_URI": "https://intern-notifs-dev.jdkrasnick.workers.dev/oauth/gmail/callback",
+    "CLOUDFLARE_ACCOUNT_ID": "4d67a0f1b73641df84af0a283dd5b3d8",
+    "WORKER_NAME": "intern-notifs-dev-ingestion",
+    "GREENHOUSE_QUEUE_ID": "50abfc7d9fe74f32acf0221f9500300b",
+    "LEVER_QUEUE_ID": "f319f73a98e34c78bf0e4b104d66e5cf",
+    "ASHBY_QUEUE_ID": "04679453976843bcbd3d9301fb1e415e",
+    "GITHUB_QUEUE_ID": "f341f7327c38426abeefa14dd83a9ed5",
+    "GMAIL_QUEUE_ID": "6667a4e6d3e242e1987f3137ccef211e",
+    "DESTINATION_VERIFICATION_QUEUE_ID": "87fe87677dc941059b76d90603701e95",
+    "SHADOW_EXTRACTION_QUEUE_NAME": "intern-notifs-dev-shadow-extraction",
+    "DEPLOYMENT_ROLE": "ingestion"
+  }
+}

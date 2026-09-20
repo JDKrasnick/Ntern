@@ -1,8 +1,13 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { CloudWatchClient, DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
-import { GetQueueAttributesCommand, SendMessageCommand, SQSClient, type QueueAttributeName } from '@aws-sdk/client-sqs';
-import { GetParametersByPathCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { DynamoInternshipStore, type InternshipStore } from './store.js';
+import type { InternshipStore } from './store.js';
+type QueueAttributes = Partial<Record<'ApproximateNumberOfMessages' | 'ApproximateNumberOfMessagesNotVisible' | 'oldest_message_timestamp_ms', string>>;
+type QueueClient = { send(command: { input: Record<string, unknown> }): Promise<{ Attributes?: QueueAttributes }> };
+type AlarmClient = { send(command: { input: Record<string, unknown> }): Promise<{ MetricAlarms?: Array<{ AlarmName?: string; StateValue?: string; StateUpdatedTimestamp?: Date; AlarmDescription?: string }> }> };
+type ParameterClient = { send(command: { input: Record<string, unknown> }): Promise<{ Parameters?: Array<{ Name?: string; Value?: string }> }> };
+class GetQueueAttributesCommand { constructor(public input: Record<string, unknown>) {} }
+class SendMessageCommand { constructor(public input: Record<string, unknown>) {} }
+class DescribeAlarmsCommand { constructor(public input: Record<string, unknown>) {} }
+class GetParametersByPathCommand { constructor(public input: Record<string, unknown>) {} }
 import { acceptLeverAdmission, listLeverCandidates, verifyLeverAdmission, type LeverAdmissionInput } from './lever-admission.js';
 import { monitoringChecklistItems, monitoringPeriod, publicMonitoringChecklist } from './monitoring-checklist.js';
 import { occurrenceStatus } from './ingestion/monitoring.js';
@@ -38,7 +43,6 @@ const reply = (statusCode: number, body: unknown) => ({ statusCode, headers: res
 const inactiveHealthWindowMs = 7 * 60 * 60_000;
 // Cloudflare's queue-metrics client reports the age of the oldest message under
 // this name, which the SQS attribute union does not carry.
-type QueueAttributes = Partial<Record<QueueAttributeName | 'oldest_message_timestamp_ms', string>>;
 
 type Provider = CatalogProviderId;
 type OperationsSource = RegisteredOperationsSource;
@@ -122,8 +126,8 @@ function publicSource(
 async function fleetStatus(
   provider: (typeof catalogProviderDefinitions)[number],
   configuration: { queueUrl: string; deadLetterQueueUrl: string },
-  sqs: SQSClient,
-  cloudwatch: CloudWatchClient,
+  sqs: QueueClient,
+  cloudwatch: AlarmClient,
 ) {
   const [queue, deadLetter, alarms] = await Promise.all([
     sqs.send(new GetQueueAttributesCommand({
@@ -161,7 +165,7 @@ async function fleetStatus(
   };
 }
 
-async function applicationAlarms(cloudwatch: CloudWatchClient) {
+async function applicationAlarms(cloudwatch: AlarmClient) {
   const response = await cloudwatch.send(new DescribeAlarmsCommand({ AlarmNamePrefix: 'InternNotifs-' }));
   return (response.MetricAlarms ?? []).map((alarm) => ({
     name: alarm.AlarmName,
@@ -173,11 +177,11 @@ async function applicationAlarms(cloudwatch: CloudWatchClient) {
 
 async function providerFleets(
   configured: FleetConfiguration,
-  ssm: SSMClient,
+  ssm: ParameterClient | undefined,
   parameterPrefix?: string,
 ): Promise<FleetConfiguration> {
   const complete = (fleet: FleetConfiguration[Provider]) => Boolean(fleet?.queueUrl && fleet.deadLetterQueueUrl);
-  if (!parameterPrefix || catalogProviderDefinitions.every((provider) => complete(configured[provider.id]))) return configured;
+  if (!parameterPrefix || !ssm || catalogProviderDefinitions.every((provider) => complete(configured[provider.id]))) return configured;
   const response = await ssm.send(new GetParametersByPathCommand({
     Path: parameterPrefix,
     Recursive: true,
@@ -203,9 +207,9 @@ export interface SourceOperationsDependencies {
   queueUrl?: string;
   deadLetterQueueUrl?: string;
   parameterPrefix?: string;
-  sqs?: SQSClient;
-  cloudwatch?: CloudWatchClient;
-  ssm?: SSMClient;
+  sqs?: QueueClient;
+  cloudwatch?: AlarmClient;
+  ssm?: ParameterClient;
   now?: () => Date;
   alarmTelemetry?: { status: 'available' | 'unavailable'; reason?: string };
   queueTelemetry?: { status: 'available' | 'partial'; reason?: string };
@@ -461,7 +465,7 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
         try {
           configuredFleets = await providerFleets(
             configuredFleetInput(dependencies),
-            dependencies.ssm ?? new SSMClient({}),
+            dependencies.ssm,
             dependencies.parameterPrefix,
           );
         } catch {
@@ -475,7 +479,7 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
         }
         const runId = `${action === 'recover' ? 'recovery' : 'operator'}-${randomUUID()}`;
         try {
-          await (dependencies.sqs ?? new SQSClient({})).send(new SendMessageCommand({
+          await (dependencies.sqs ?? { async send() { throw new Error('Queue client unavailable'); } }).send(new SendMessageCommand({
             QueueUrl: fleet.queueUrl,
             MessageBody: JSON.stringify(provider.replayMessage(sourceId, changedAt, runId)),
             MessageGroupId: sourceId,
@@ -518,14 +522,14 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
       try {
         configuredFleets = await providerFleets(
           configuredFleetInput(dependencies),
-          dependencies.ssm ?? new SSMClient({}),
+          dependencies.ssm,
           dependencies.parameterPrefix,
         );
       } catch {
         configuredFleets = configuredFleetInput(dependencies);
         configurationDiscoveryUnavailable = true;
       }
-      const cloudwatch = dependencies.cloudwatch ?? new CloudWatchClient({});
+      const cloudwatch = dependencies.cloudwatch ?? { async send() { return { MetricAlarms: [] }; } };
       const [providerTelemetry, allApplicationAlarms, legacyPendingNotifications] = await Promise.all([
         Promise.all(catalogProviderDefinitions.map(async (provider) => {
           const configuration = configuredFleets[provider.id];
@@ -542,7 +546,7 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
             const fleet = await fleetStatus(
               provider,
               { queueUrl, deadLetterQueueUrl },
-              dependencies.sqs ?? new SQSClient({}),
+              dependencies.sqs ?? { async send() { throw new Error('Queue client unavailable'); } },
               cloudwatch,
             );
             return { provider, unavailableReasons: [], fleet };
@@ -659,16 +663,3 @@ const queueUrl = process.env.GREENHOUSE_QUEUE_URL;
 const deadLetterQueueUrl = process.env.GREENHOUSE_DEAD_LETTER_QUEUE_URL;
 const sharedSecret = process.env.OPERATIONS_SHARED_SECRET;
 const parameterPrefix = process.env.OPERATIONS_PROVIDER_PARAMETER_PREFIX;
-
-export const handler = async (event: ApiEvent) => {
-  if (!tableName || !sharedSecret || ((!queueUrl || !deadLetterQueueUrl) && !parameterPrefix)) {
-    return reply(500, { code: 'OPERATIONS_NOT_CONFIGURED', message: 'Source operations data is not configured.' });
-  }
-  return createSourceOperationsHandler({
-    store: new DynamoInternshipStore(tableName),
-    queueUrl,
-    deadLetterQueueUrl,
-    parameterPrefix,
-    sharedSecret,
-  })(event);
-};
