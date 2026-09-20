@@ -505,7 +505,7 @@ export class D1CatalogAdmissionStore {
         const result = projectRoleMetadata({ ...job, sourceReferences });
         if (result.deferredEvidenceHashes?.length) deferredProjections.push({ jobId: job.jobId, evidenceHashes: result.deferredEvidenceHashes });
         const projected = result.job;
-        const fields = ['compensation', 'housing', 'programType', 'workMode', 'applicationDeadline', 'graduationWindow', 'locations', 'employerPublishedAt', 'employerUpdatedAt']
+        const fields = ['compensation', 'housing', 'programType', 'season', 'workMode', 'applicationDeadline', 'graduationWindow', 'locations', 'employerPublishedAt', 'employerUpdatedAt']
           .filter((field) => JSON.stringify(projected[field as keyof Internship]) !== JSON.stringify(job[field as keyof Internship]));
         if (fields.length) projectionOnlyOmissions.push({ jobId: job.jobId, fields });
         const missing = new Set(fields);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applicationMetadataArtifactsFromJsonDocuments, extractVerifiedPageMetadataEvidence, projectRoleMetadata } from '../src/role-metadata.js';
+import { buildInternshipIdentity } from '../src/identity/enrichment.js';
 import type { Internship } from '../src/types.js';
 import { combineRenderedFrameEvidence } from '../src/rendered-destination-evidence.js';
 
@@ -115,5 +116,28 @@ describe('employer disclosure formats from the coverage audit', () => {
       expect(compensation.minHourlyUSD).toBeUndefined();
       expect(compensation.maxHourlyUSD).toBeUndefined();
     }
+  });
+
+  it('upgrades a source-default season only when the exact employer posting names a term and year', () => {
+    const title = 'Software Engineering Intern — Summer 2027';
+    const evidence = extractVerifiedPageMetadataEvidence({ expectedTitle: title, expectedPostingId: '123',
+      page: { title, text: 'Join our Summer 2027 internship program.' }, sourceId: 'fixture',
+      sourceUrl: 'https://example.test/jobs/123', observedAt: '2026-09-20T00:00:00Z', exactPosting: true });
+    const job = { title, season: 'ongoing', compensation: { raw: '' }, sourceReferences: [],
+      internshipIdentity: buildInternshipIdentity({ sourceId: 'fixture', sourceUrl: 'https://example.test/jobs/123',
+        observedAt: '2026-09-20T00:00:00Z', company: 'Acme', title, location: 'Remote', season: 'ongoing' }) } as unknown as Internship;
+    const result = projectRoleMetadata(job, evidence);
+    expect(result.conflicts).toEqual([]);
+    expect(result.job.season).toBe('summer-2027');
+    expect(result.job.roleMetadata?.season).toMatchObject({ value: { term: 'summer', year: 2027 } });
+    expect(result.job.internshipIdentity?.season).toMatchObject({ term: 'summer', year: 2027, evidenceStatus: 'explicit' });
+  });
+
+  it('does not turn a bare year on an exact employer posting into season evidence', () => {
+    const title = 'Software Engineering Intern';
+    const evidence = extractVerifiedPageMetadataEvidence({ expectedTitle: title, expectedPostingId: '123',
+      page: { title, text: 'Copyright 2027. Build reliable systems.' }, sourceId: 'fixture',
+      sourceUrl: 'https://example.test/jobs/123', observedAt: '2026-09-20T00:00:00Z', exactPosting: true });
+    expect(evidence[0]?.season).toBeUndefined();
   });
 });

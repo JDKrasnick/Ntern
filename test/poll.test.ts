@@ -75,10 +75,10 @@ describe('polling', () => {
   it('quietly seeds a source, then alerts a new canonical listing', async () => {
     const store = new MemoryInternshipStore();
     expect((await new Poller([new Adapter('one', [listing('https://jobs.example.com/a')])], store).poll()).newJobs).toHaveLength(0);
-    const second = await new Poller([new Adapter('one', [listing('https://jobs.example.com/a'), { ...listing('https://jobs.example.com/b'), title: 'Systems Engineering Intern' }])], store).poll();
+    const second = await new Poller([new Adapter('one', [listing('https://jobs.example.com/a'), { ...listing('https://jobs.example.com/b'), title: 'Backend Software Engineering Intern' }])], store).poll();
     expect(second.newJobs).toHaveLength(1); expect(await store.pendingSms()).toHaveLength(1);
     expect([...store.jobs.values()].find((job) => job.title === 'Software Engineering Intern')).toMatchObject({ catalogRecency: 'baseline' });
-    expect([...store.jobs.values()].find((job) => job.title === 'Systems Engineering Intern')).toMatchObject({ catalogRecency: 'normal' });
+    expect([...store.jobs.values()].find((job) => job.title === 'Backend Software Engineering Intern')).toMatchObject({ catalogRecency: 'normal' });
   });
   it('durably queues one natural shadow verification for a new exact provider posting', async () => {
     const store = new MemoryInternshipStore();
@@ -645,11 +645,11 @@ describe('polling', () => {
       ...listing(`https://jobs.example.com/baseline-${index}`), title: `Software Engineering Intern ${index}`,
     }));
     await new Poller([new Adapter('one', baseline)], store, () => new Date('2026-08-09T12:00:00.000Z')).poll();
-    const fresh = { ...listing('https://jobs.example.com/fresh'), title: 'Platform Engineering Intern' };
+    const fresh = { ...listing('https://jobs.example.com/fresh'), title: 'Platform Software Engineering Intern' };
     const report = await new Poller([new Adapter('one', [...baseline, fresh])], store, () => new Date('2026-08-10T12:00:00.000Z')).poll();
-    expect(report.newJobs).toMatchObject([{ title: 'Platform Engineering Intern', catalogRecency: 'normal' }]);
-    expect((await store.listOpen!(undefined, 25)).jobs[0]).toMatchObject({ title: 'Platform Engineering Intern' });
-    expect(await store.listOpenSince('2026-08-08T00:00:00.000Z', '2026-08-11T00:00:00.000Z')).toMatchObject([{ title: 'Platform Engineering Intern' }]);
+    expect(report.newJobs).toMatchObject([{ title: 'Platform Software Engineering Intern', catalogRecency: 'normal' }]);
+    expect((await store.listOpen!(undefined, 25)).jobs[0]).toMatchObject({ title: 'Platform Software Engineering Intern' });
+    expect(await store.listOpenSince('2026-08-08T00:00:00.000Z', '2026-08-11T00:00:00.000Z')).toMatchObject([{ title: 'Platform Software Engineering Intern' }]);
     expect(store.notificationEvents.size).toBe(1);
   });
   it('keeps identity-unconfirmed same-URL occurrences source-local', async () => {

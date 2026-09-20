@@ -22,6 +22,7 @@ import type {
   ReconciledRoleMetadata,
   RoleMetadataEvidence,
   RoleMetadataField,
+  SeasonIdentity,
   WorkMode,
   HousingDetail,
 } from './types.js';
@@ -29,7 +30,7 @@ import type {
 // Increment whenever a parser change can produce a different result from an
 // unchanged artifact. This makes the collection scheduler revisit both a
 // previous negative result and an already-enriched posting.
-export const ROLE_METADATA_EXTRACTION_VERSION = 17;
+export const ROLE_METADATA_EXTRACTION_VERSION = 18;
 export const VERIFIED_PAGE_METADATA_SOURCES = ['official-json-ld', 'official-page'] as const;
 const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
   // Exact-role detail retrieval owns its own slot; a later board-list poll
@@ -668,6 +669,11 @@ function deadline(value: string | undefined, timezone?: string): ApplicationDead
   return { kind: 'date', date, ...(explicitZone ? { timezone: /^[+-]\d{2}:\d{2}$/u.test(explicitZone) ? `UTC${explicitZone}` : explicitZone } : {}) };
 }
 
+function explicitSeason(value: string): Required<Pick<SeasonIdentity, 'term' | 'year'>> | undefined {
+  const match = /\b(spring|summer|fall|winter)\s*(?:intern(?:ship)?\s*)?(20\d{2})\b/iu.exec(value);
+  return match ? { term: match[1]!.toLowerCase() as NonNullable<SeasonIdentity['term']>, year: Number(match[2]) } : undefined;
+}
+
 function fieldExcerpt(value: string, pattern: RegExp): string | undefined {
   const sentence = value.split(/(?<=[.!?;\n])\s+/u).find((part) => pattern.test(part));
   return sentence ? boundedText(sentence, 240) : undefined;
@@ -791,18 +797,21 @@ export function extractRoleMetadataEvidence(input: ExtractRoleMetadataInput): Ro
   const directDeadline = input.titleOnly ? undefined : deadline(input.artifact.deadline, input.artifact.deadlineTimezone);
   const textDeadline = input.titleOnly ? undefined : textApplicationDeadline(input.artifact.text ?? '');
   const applicationDeadline = directDeadline ?? textDeadline;
+  const season = explicitSeason(`${title}\n${text}`);
   const publishedAt = input.titleOnly ? undefined : isoInstant(input.artifact.publishedAt) ?? labeledInstant(input.artifact.text ?? '', 'posted');
   const updatedAt = input.titleOnly ? undefined : isoInstant(input.artifact.updatedAt) ?? labeledInstant(input.artifact.text ?? '', 'updated');
-  if (!compensationRanges.length && !housing.length && !education && !locations.length && !mode && !applicationDeadline && !publishedAt && !updatedAt) return undefined;
+  if (!compensationRanges.length && !housing.length && !education && !season && !locations.length && !mode && !applicationDeadline && !publishedAt && !updatedAt) return undefined;
   const excerpts: Partial<Record<RoleMetadataField, string>> = {};
   if (compensationRanges.length) excerpts.compensation = boundedText([...new Set(compensationRanges.map((range) => range.sourceText))].join(' · '), 240);
   if (housing.length) excerpts.housing = housing[0]!.sourceText;
   if (education) excerpts.education = fieldExcerpt(text, /\b(?:bachelor|undergrad|four[ -]?year|master|graduate student|mba|ph\.?d\.?|doctoral?|graduat(?:e|ing|ion)|class of)\b/iu);
+  if (season) excerpts.season = fieldExcerpt(`${title}\n${text}`, /\b(?:spring|summer|fall|winter)\s*(?:intern(?:ship)?\s*)?20\d{2}\b/iu);
   if (applicationDeadline) excerpts['application-deadline'] = fieldExcerpt(input.artifact.text ?? input.artifact.deadline ?? '', /\b(?:deadline|closes?|apply by|rolling)\b/iu);
   return {
     schemaVersion: 1, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, artifactHash,
     sourceClass: input.sourceClass, sourceId: input.sourceId, sourceUrl: input.sourceUrl, observedAt: input.observedAt, exactPosting: true,
-    ...(compensationRanges.length ? { compensationRanges } : {}), ...(housing.length ? { housing } : {}), ...(education ? { education } : {}), ...(locations.length ? { locations } : {}),
+    ...(compensationRanges.length ? { compensationRanges } : {}), ...(housing.length ? { housing } : {}), ...(education ? { education } : {}),
+    ...(season ? { season: { value: season, provenance: [field('season-explicit')] } } : {}), ...(locations.length ? { locations } : {}),
     ...(mode ? { workMode: { value: mode, provenance: [field(input.titleOnly ? 'work-mode-title-explicit' : 'work-mode-explicit')] } } : {}),
     ...(applicationDeadline ? { applicationDeadline: { value: applicationDeadline, provenance: [field('application-deadline-explicit')] } } : {}),
     ...(publishedAt ? { employerPublishedAt: { value: publishedAt, provenance: [field('employer-published-at')] } } : {}),
@@ -831,7 +840,7 @@ export function extractPostingMetadataEvidence(input: Omit<ExtractRoleMetadataIn
 }
 
 export function roleMetadataEvidenceHasFields(value: RoleMetadataEvidence): boolean {
-  return Boolean(value.compensationRanges?.length || value.housing?.length || value.education || value.locations?.length || value.workMode
+  return Boolean(value.compensationRanges?.length || value.housing?.length || value.education || value.season || value.locations?.length || value.workMode
     || value.applicationDeadline || value.employerPublishedAt || value.employerUpdatedAt);
 }
 
@@ -950,6 +959,7 @@ export function reconcileRoleMetadata(
     && item.exactPosting && roleMetadataEvidenceHasFields(item));
   if (!usable.length) return { conflicts: [] };
   const conflicts: MetadataConflict[] = [];
+  const existingIdentity = existing ? structuredIdentity(existing) : undefined;
   const ranges = reconcileRanges(usable, existing?.compensation.ranges);
   conflicts.push(...ranges.conflicts);
   const housing: HousingDetail[] = [];
@@ -997,10 +1007,12 @@ export function reconcileRoleMetadata(
     const value = pick(item); return value ? [{ ...value, artifactHash: item.artifactHash }] : [];
   });
   const workMode = scalar('work-mode', scalarValues((item) => item.workMode), existing?.workMode === 'unspecified' ? undefined : existing?.workMode as Exclude<WorkMode, 'unspecified'> | undefined);
+  const season = scalar('season', scalarValues((item) => item.season), existingIdentity?.season.term && existingIdentity.season.year
+    ? { term: existingIdentity.season.term, year: existingIdentity.season.year } : undefined);
   const applicationDeadline = scalar('application-deadline', scalarValues((item) => item.applicationDeadline), existing?.applicationDeadline);
   const employerPublishedAt = scalar('employer-published-at', scalarValues((item) => item.employerPublishedAt), existing?.employerPublishedAt);
   const employerUpdatedAt = scalar('employer-updated-at', scalarValues((item) => item.employerUpdatedAt), existing?.employerUpdatedAt);
-  for (const result of [workMode, applicationDeadline, employerPublishedAt, employerUpdatedAt]) if (result.conflict) conflicts.push(result.conflict);
+  for (const result of [workMode, season, applicationDeadline, employerPublishedAt, employerUpdatedAt]) if (result.conflict) conflicts.push(result.conflict);
   const graduation = education?.graduationDateWindow
     ? { value: education.graduationDateWindow, provenance: education.provenance }
     : undefined;
@@ -1008,6 +1020,7 @@ export function reconcileRoleMetadata(
     schemaVersion: 1, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
     evidenceHashes: [...new Set(usable.map((item) => item.artifactHash))].sort(),
     ...(ranges.ranges.length ? { compensationRanges: ranges.ranges } : {}), ...(education ? { education } : {}),
+    ...(season.value?.provenance.length ? { season: season.value } : {}),
     ...(housing.length ? { housing } : {}),
     ...(locations?.length ? { locations } : {}), ...(workMode.value?.provenance.length ? { workMode: workMode.value } : {}),
     ...(applicationDeadline.value?.provenance.length ? { applicationDeadline: applicationDeadline.value } : {}),
@@ -1064,6 +1077,7 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
       }
     };
     preserve('workMode', 'work-mode');
+    preserve('season', 'season');
     preserve('applicationDeadline', 'application-deadline');
     preserve('employerPublishedAt', 'employer-published-at');
     preserve('employerUpdatedAt', 'employer-updated-at');
@@ -1081,6 +1095,7 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
     ...(result.metadata?.education ? { education: result.metadata.education }
       : previousEducationWasProjected ? { education: { levels: [], evidenceStatus: 'unspecified' as const, provenance: [] } } : {}),
     ...(metadataLocations?.length ? { locations: metadataLocations } : previousIdentityLocationsWereProjected ? { locations: [] } : {}),
+    ...(result.metadata?.season ? { season: { ...result.metadata.season.value, evidenceStatus: 'explicit' as const, provenance: result.metadata.season.provenance } } : {}),
   } : job.internshipIdentity;
   const previousCompensationWasProjected = Boolean(previousMetadata?.compensationRanges
     && stable(job.compensation) === stable(compensationFromRanges(previousMetadata.compensationRanges)));
@@ -1092,6 +1107,7 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
     ...(result.compensation ? { compensation: result.compensation } : previousCompensationWasProjected ? { compensation: { raw: '' } } : {}),
     ...(locationNames?.length ? { locations: locationNames, location: locationSummary(locationNames) } : {}),
     ...(result.metadata?.workMode ? { workMode: result.metadata.workMode.value } : {}),
+    ...(result.metadata?.season ? { season: `${result.metadata.season.value.term}-${result.metadata.season.value.year}` } : {}),
     ...(result.metadata?.applicationDeadline ? { applicationDeadline: result.metadata.applicationDeadline.value } : {}),
     ...(result.metadata?.graduationWindow ? { graduationWindow: result.metadata.graduationWindow.value } : {}),
     ...(identity?.programType?.value ? { programType: identity.programType.value } : {}),
