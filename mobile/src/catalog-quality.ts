@@ -16,6 +16,25 @@ export function compactLocations(values: unknown, fallback?: unknown): string {
   return boundedCatalogText(`${unique.slice(0, 2).join(" · ")}${unique.length > 2 ? ` + ${unique.length - 2} more` : ""}`, 160);
 }
 
+/** A stable one-line location for dense catalog cards; expanded details retain every site. */
+export function compactCatalogLocation(values: unknown, fallback?: unknown): string {
+  const candidates = Array.isArray(values) ? values : typeof fallback === "string" ? fallback.split(/\s*(?:\n|\||;|\s\/\s)\s*/u) : [];
+  const primary = boundedCatalogText(candidates.find((item): item is string => typeof item === "string" && Boolean(item.trim())), 120);
+  if (!primary) return "Location not specified";
+  const parts = primary.split(",").map((part) => part.trim()).filter(Boolean);
+  // A postal address often reads "City, building/address, country". Keeping
+  // the ends preserves the useful geographic answer without the address noise.
+  if (parts.length >= 3) return boundedCatalogText(`${parts[0]}, ${parts.at(-1)}`, 64);
+  return boundedCatalogText(primary, 64);
+}
+
+/** Keep dense card titles within a predictable two-line reading budget. */
+export function compactCatalogTitle(value: unknown): string {
+  const clean = typeof value === "string" ? value.normalize("NFC").replace(/\s+/gu, " ").trim() : "";
+  const compact = boundedCatalogText(clean, 72);
+  return compact && compact !== clean ? `${compact}…` : compact;
+}
+
 export function seasonLabel(value: unknown): string {
   const season = boundedCatalogText(value, 80);
   return !season || season.toLowerCase() === "ongoing" ? "Season not specified" : season;

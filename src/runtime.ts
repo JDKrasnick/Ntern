@@ -1,15 +1,9 @@
-import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { auditCatalogIndexes, emitCatalogIndexAuditMetric } from './catalog-index-audit.js';
 import { validateApplicationUrlWithEvidence, type ApplicationUrlValidator } from './core/application-url.js';
-import { defaultPushTemplates, deliverDeferredExpoNotifications, ExpoPushPublisher, inspectExpoPushReceipts, NtfyPublisher, retryExpoPushNotifications, sendDigest, sendNewJobNotifications, sendPendingNotifications, SesEmailSender, type EmailSender, type PushPublisher } from './notifications.js';
+import { defaultPushTemplates, deliverDeferredExpoNotifications, ExpoPushPublisher, inspectExpoPushReceipts, NtfyPublisher, retryExpoPushNotifications, sendDigest, sendNewJobNotifications, sendPendingNotifications, type EmailSender, type PushPublisher } from './notifications.js';
 import { Poller } from './poll.js';
-import { DynamoInternshipStore, DynamoUserStore, type InternshipStore, type UserStore } from './store.js';
+import { type InternshipStore, type UserStore } from './store.js';
 import { defaultSources } from './sources/index.js';
 import type { SourceAdapter } from './types.js';
-import { catalogGroupDetails, groupCatalogJobs } from './catalog-groups.js';
-import { loadGroupedNotificationCohort } from './grouped-notification-cohort.js';
 import type { CatalogAdmissionResolver, DestinationVerificationRequest } from './destination-verification.js';
 
 export interface RuntimeConfig {
@@ -22,13 +16,6 @@ export interface RuntimeConfig {
   sesTo: string;
 }
 
-export async function loadRuntimeConfig(parameterName: string, client = new SSMClient({})): Promise<RuntimeConfig> {
-  const value = (await client.send(new GetParameterCommand({ Name: parameterName, WithDecryption: true }))).Parameter?.Value;
-  if (!value) throw new Error(`Runtime configuration parameter ${parameterName} has no value`);
-  const config = JSON.parse(value) as Partial<RuntimeConfig>;
-  if (!config.sesFrom || !config.sesTo) throw new Error('Runtime configuration requires sesFrom and sesTo');
-  return config as RuntimeConfig;
-}
 
 export interface RuntimeDependencies {
   store: InternshipStore;
@@ -110,38 +97,6 @@ export async function runRuntimeCommand(command: 'poll' | 'digest', dependencies
     }
     return { poll, notifications: { sent: 0, skipped: 0, failed: 0 } };
   }
-  return { digested: await sendDigest(dependencies.store, dependencies.emailSender ?? new SesEmailSender(dependencies.config.sesFrom, dependencies.config.sesTo)) };
-}
-
-export async function runtimeHandler(event: { command?: string } = {}) {
-  const command = event.command;
-  if (command !== 'poll' && command !== 'digest' && command !== 'audit-catalog-indexes' && command !== 'refresh-catalog-groups') throw new Error('Scheduler event command must be poll, digest, audit-catalog-indexes, or refresh-catalog-groups');
-  const tableName = process.env.INTERNSHIPS_TABLE;
-  if (!tableName) throw new Error('INTERNSHIPS_TABLE is required');
-  if (command === 'audit-catalog-indexes') {
-    const result = await auditCatalogIndexes(tableName, DynamoDBDocumentClient.from(new DynamoDBClient({})));
-    emitCatalogIndexAuditMetric(result);
-    return result;
-  }
-  if (command === 'refresh-catalog-groups') {
-    const store = new DynamoInternshipStore(tableName);
-    const groups = groupCatalogJobs(await store.listCatalog(), { includeClosed: true }).map(catalogGroupDetails);
-    const generatedAt = new Date().toISOString();
-    await store.putCatalogProjection?.(groups, generatedAt);
-    return { generatedAt, groups: groups.length, roles: groups.reduce((total, group) => total + group.roles.length, 0) };
-  }
-  const parameterName = process.env.RUNTIME_CONFIG_PARAMETER_NAME;
-  const usersTable = process.env.USERS_TABLE;
-  if (!parameterName || !usersTable) throw new Error('USERS_TABLE and RUNTIME_CONFIG_PARAMETER_NAME are required');
-  const cohortParameterName = process.env.GROUPED_NOTIFICATION_COHORT_PARAMETER_NAME;
-  if (!cohortParameterName) throw new Error('GROUPED_NOTIFICATION_COHORT_PARAMETER_NAME is required');
-  const cohort = await loadGroupedNotificationCohort(cohortParameterName);
-  const result = await runRuntimeCommand(command, {
-    store: new DynamoInternshipStore(tableName), userStore: new DynamoUserStore(usersTable), config: await loadRuntimeConfig(parameterName),
-    groupedPipelineUserIds: cohort,
-    identityUnconfirmedPublicationEnabled: process.env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
-    trustedCommunityCatalogEnabled: process.env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
-  });
-  console.log(JSON.stringify({ command, ...result }));
-  return result;
+  if (!dependencies.emailSender) throw new Error('An EmailSender is required for digest delivery');
+  return { digested: await sendDigest(dependencies.store, dependencies.emailSender) };
 }

@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "intern-notifs-dev",
+  "main": "cloudflare/api-worker.ts",
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController", "script_name": "intern-notifs-dev-ingestion" }] },
+  "limits": { "cpu_ms": 30000, "subrequests": 10000 },
+  "observability": { "enabled": true },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "intern-notifs-dev-db", "database_id": "cedc86d8-69a5-4a72-a1e6-f5629d722338", "migrations_dir": "cloudflare/migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "DOCUMENTS", "bucket_name": "intern-notifs-dev-documents" }
+  ],
+  "queues": { "producers": [
+    { "binding": "GMAIL_QUEUE", "queue": "intern-notifs-dev-gmail" }
+  ] },
+  "services": [
+    { "binding": "INGESTION", "service": "intern-notifs-dev-ingestion" }
+  ],
+  "version_metadata": { "binding": "VERSION_METADATA" },
+  "vars": {
+    "PUBLIC_API_URL": "https://intern-notifs-dev.jdkrasnick.workers.dev",
+    "AUTH_FROM_EMAIL": "Ntern Dev <dev.example>",
+    "AUTH_DEV_MODE": "true",
+    "EMPLOYER_PORTAL_ENABLED": "false",
+    "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED": "false",
+    "IDENTITY_CONFIRMED_COVERAGE_FLOOR": "0",
+    "GMAIL_ENABLED": "false",
+    "GMAIL_CLIENT_ID": "17433524169-4753680goh32205can9g00ijqan3hic5.apps.googleusercontent.com",
+    "GMAIL_REDIRECT_URI": "https://intern-notifs-dev.jdkrasnick.workers.dev/oauth/gmail/callback",
+    "DEPLOYMENT_ROLE": "api"
+  }
+}

@@ -1,4 +1,3 @@
-import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import { createHash } from 'node:crypto';
 import { evaluateJobFilter, inferJobFocuses, type FilterMatchReason, type JobFocus } from './core/filters.js';
 import { postingIdentityKey, score } from './core/normalize.js';
@@ -48,11 +47,6 @@ export function classifyExpoPushFailure(error: unknown): ProviderFailureKind {
   return retryableExpoHttpStatus(error.status) ? 'retryable' : 'definitive-failure';
 }
 
-export function classifyAwsServiceFailure(error: unknown): ProviderFailureKind {
-  const status = (error as { $metadata?: { httpStatusCode?: number } } | undefined)?.$metadata?.httpStatusCode;
-  if (status === undefined) return 'unknown';
-  return retryableExpoHttpStatus(status) ? 'retryable' : 'definitive-failure';
-}
 export type NotificationDeliveryEvent = {
   event: 'notification_sent' | 'notification_failed' | 'notification_deferred' | 'notification_skipped_duplicate' | 'push_receipt_confirmed' | 'push_receipt_failed';
   occurredAt: string;
@@ -674,13 +668,6 @@ export async function sendPendingNotifications(store: InternshipStore, publisher
 }
 
 export interface EmailSender { send(subject: string, text: string, html: string): Promise<void>; }
-export class SesEmailSender implements EmailSender {
-  private readonly client = new SESv2Client({});
-  constructor(private readonly from: string, private readonly to: string) {}
-  async send(subject: string, text: string, html: string) {
-    await this.client.send(new SendEmailCommand({ FromEmailAddress: this.from, Destination: { ToAddresses: [this.to] }, Content: { Simple: { Subject: { Data: subject }, Body: { Text: { Data: text }, Html: { Data: html } } } } }));
-  }
-}
 
 const escapeHtml = (input: string) => input.replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char] ?? char);
 export async function sendDigest(store: InternshipStore, sender: EmailSender, now: () => Date = () => new Date()): Promise<number> {

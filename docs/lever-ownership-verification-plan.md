@@ -234,10 +234,10 @@ is the key a re-verification pass reads.
    clean unattributed probe before admission, binds `admittedAt` to the
    evidence's `verifiedAt`, and cross-checks the registry and quality policy.
    `test/lever-ownership.test.ts` covers the gate. **Built.**
-4. **Shadow runner** — `src/lever-{dispatch,worker}.ts` and
-   `infra/lever-monitoring-stack.ts` schedule all reviewed boards through a FIFO
-   queue with per-board ordering, bounded retries and concurrency, isolated
-   shadow checkpoints, quiet published baselines, and queue/worker alarms.
+4. **Shadow runner** — the ingestion Worker's Lever Cron dispatch and
+   provider-specific Cloudflare Queue schedule all reviewed boards with
+   per-board ordering, bounded retries and concurrency, isolated shadow
+   checkpoints, quiet published baselines, and operations telemetry.
    **Built.**
 5. **Re-verification** — the 180-day `admittedAt` clock is enforced by the
    manifest gate, and `npm run lever:reverify` refetches each verified board's

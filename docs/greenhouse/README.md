@@ -15,13 +15,12 @@ token or application host.
 
 ## Current operating contract
 
-- The independently deployable `InternNotifsGreenhouse` stack imports the
-  retained DynamoDB tables and does not own the main application resources.
-- EventBridge dispatches reviewed boards every thirty minutes. Published boards
-  run on every dispatch; shadow boards run on staggered three-hour checks.
-- A FIFO SQS queue preserves ordering per board and deduplicates a board within
-  the dispatch window.
-- Lambda consumes batches of ten with maximum concurrency four.
+- The `intern-notifs-ingestion` Worker owns Greenhouse Cron dispatch and the
+  provider queue consumer; the public API Worker owns no schedules or consumers.
+- Cloudflare Cron Triggers dispatch reviewed boards. Published boards run every
+  thirty minutes; shadow boards run on staggered three-hour checks.
+- The Greenhouse Cloudflare Queue preserves one-source-at-a-time processing;
+  its consumer uses batches of one with maximum concurrency six.
 - Shadow boards write only isolated source checkpoints and logs.
 - A board the owner has confirmed genuinely empty carries an
   `emptyBoardAcknowledged` declaration: its zero-row snapshots are expected
@@ -30,10 +29,9 @@ token or application host.
   quarantine, and resume it when that run reports healthy. The declaration
   expires after 180 days and must be re-checked.
 - Published boards use the catalog poller, quiet first baseline, link
-  validation, DynamoDB deduplication, and user alert path.
+  validation, atomic D1 reconciliation, and user alert path.
 - Each request to the Greenhouse jobs API has an eight-second timeout.
-- Individual failed SQS records retry without replaying successful records and
-  move to a dedicated dead-letter queue after four receives.
+- Failed messages retry twice and then move to the dedicated Greenhouse DLQ.
 
 No reviewed board is promoted merely because the worker exists. Promotion
 still requires its registry status to change from `shadow` to `published`.

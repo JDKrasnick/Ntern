@@ -2,13 +2,11 @@
 
 ## Status and invariants
 
-The Cloudflare replacement is the active backend. EAS development, preview, and
-production environments target its Worker (verified September 6, 2026). Existing
-native binaries need a new approved build to pick up changed build-time values.
-AWS stays untouched until its suspended
-account is reactivated and any useful development data is exported. Existing
-Cognito passwords cannot be migrated, so people who want account-backed data
-must create a fresh InternNotifs account; browsing and device alerts need none.
+Cloudflare is the only backend. EAS development, preview, and production
+environments target its Worker (verified September 6, 2026). Existing native
+binaries need a new approved build to pick up changed build-time values. People
+who want account-backed data create a verified email/password account; browsing
+and device alerts need none.
 
 The migration preserves these product rules:
 
@@ -124,25 +122,6 @@ Set `auth_dev_mode=false` before any non-development deployment. `true` returns
 the email confirmation code in the signup response and is intentionally local/dev
 only. `AUTH_FROM_EMAIL` must be a sender verified by the configured mail service.
 
-## AWS export and backfill
-
-Once AWS reactivates account `628031636041`:
-
-1. Validate `aws sts get-caller-identity --profile intern-notifs`.
-2. Export the retained `Internships` and `UserData` tables and the applicant
-   documents bucket before changing traffic.
-3. Keep the exports under `.context/` or encrypted object storage; they contain
-   private data and must never be committed.
-4. Re-run every source through the Cloudflare queues. This is the preferred
-   catalog backfill because current source snapshots reconstruct canonical jobs.
-5. Import only development user profiles/applications/documents that are still
-   useful. Cognito password material cannot be exported, so those users create
-   fresh Cloudflare credentials.
-
-If AWS data remains inaccessible, source polling rebuilds the public catalog.
-The accepted development fallback is to recreate user accounts and omit stale
-private records rather than weaken authentication or copy unverified data.
-
 ## Cost guards
 
 Cloudflare budget alerts are informational and are not hard spending limits.
@@ -188,25 +167,16 @@ npx wrangler d1 execute intern-notifs-db --remote \
 Terraform deliberately keeps Worker secret bindings; recovery does not require
 rotating the shutdown credentials.
 
-## Cutover and rollback
+## Release verification
 
 Before changing the mobile build, verify public catalog paging, sign-up and
 verification, sign-in, account deletion, notification registration, R2 document
 upload/download, all four catalog-provider queues and DLQs, Cron events, and operations
 replay against the deployed Worker.
 
-Set `EXPO_PUBLIC_API_URL` to the Cloudflare custom hostname and produce a test
-build. Keep AWS retained and the previous mobile configuration available during
-the observation window. Rollback changes the mobile/API hostname back to the AWS
-endpoint; it does not delete Cloudflare or AWS data.
-
-The retained AWS endpoint is rollback and export infrastructure, not the active
-account service. It fails account deletion before changing DynamoDB, S3, or
-Cognito state; users must use the current Cloudflare-backed app for deletion.
-
-Only after the observation window and an owner-approved export should AWS
-schedules be disabled. Destruction of retained DynamoDB tables, Cognito users,
-or S3 documents is a separate, explicit operation and is not part of cutover.
+Set `EXPO_PUBLIC_API_URL` to the Cloudflare hostname and produce a test build.
+Rollback uses the prior verified Cloudflare Worker deployment and OpenTofu state;
+it never changes the app's API to a different provider.
 
 ## Recover notification markers consumed before device registration
 

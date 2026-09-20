@@ -21,6 +21,7 @@ import {
   Text,
   TextInput,
   type TextInputProps,
+  type TextStyle,
   TouchableOpacity,
   useWindowDimensions,
   View,
@@ -30,8 +31,8 @@ import * as Notifications from "expo-notifications";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
-import { appendGroupedCatalogPage, catalogCardKind, type GroupedCatalogPage } from "./src/catalog";
-import { boundedCatalogText, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
+import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
+import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
@@ -176,6 +177,16 @@ type CatalogGroupRole = {
   postingIdentityStatus?: "confirmed" | "unconfirmed";
 };
 type CatalogGroupDetails = { group: CatalogGroupRow; roles: CatalogGroupRole[] };
+
+/** Let a reader finish a word before asking D1, while local results react at once. */
+function useDebouncedValue<T>(value: T, delayMs: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timeout = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timeout);
+  }, [delayMs, value]);
+  return debounced;
+}
 type Application = {
   applicationId: string;
   jobId: string;
@@ -1140,6 +1151,8 @@ function CatalogTile({
 }: CatalogCardProps & { job: Job; presentation: CatalogPresentation; isNew?: boolean }) {
   const lane = presentation === "lane";
   const display = presentCatalogRole(job);
+  const compactTitle = compactCatalogTitle(display.title);
+  const compactLocation = compactCatalogLocation(job.locations, job.location);
   const source = sourcePresentation(job.sourceReferences);
   const timing = postingTimingPresentation(job.sourceReferences, job.firstSeenAt);
   const recencyBadge = postingRecencyBadge(isNew, timing);
@@ -1234,9 +1247,8 @@ function CatalogTile({
               ) : null}
             </View>
             <Text style={styles.catalogTileCompany} numberOfLines={1}>{display.company}</Text>
-            <Text style={[styles.catalogTileTitle, lane && styles.catalogTileTitleLane]} numberOfLines={lane ? 2 : 3}>{display.title}</Text>
-            <Text style={styles.catalogTileMeta} numberOfLines={2}>{display.location} · {display.season}</Text>
-            {display.compensation ? <Text style={styles.catalogTileComp} numberOfLines={1}>{display.compensation}</Text> : null}
+            <Text style={[styles.catalogTileTitle, lane && styles.catalogTileTitleLane]} numberOfLines={2}>{compactTitle}</Text>
+            <Text style={styles.catalogTileMeta} numberOfLines={1}>{compactLocation} · {display.season}</Text>
             {lane ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
             {!job.open ? <Text style={styles.closedStatus}>Closed</Text> : null}
             <View style={styles.catalogTileFooter}>
@@ -1261,7 +1273,7 @@ function CatalogTile({
                 {!queuing && inQueue && onRemoveFromQueue ? (
                   <TouchableOpacity accessibilityRole="button" accessibilityLabel="Remove from queue" onPress={handleRemoveFromQueue} style={[styles.catalogTileAction, styles.catalogTileActionActive]}>
                     <Ionicons name="bookmark" size={16} color={colors.signal} />
-                    <Text style={styles.catalogTileActionActiveText} numberOfLines={1}>In queue</Text>
+                    <Text style={styles.catalogTileActionActiveText} numberOfLines={1}>Queue</Text>
                   </TouchableOpacity>
                 ) : null}
                 {canAddToQueue ? (
@@ -1325,8 +1337,8 @@ function CatalogGroupTile({
   };
   const groupCompany = boundedCatalogText(group.company, 160);
   const groupTitles = group.titles.map((title) => boundedCatalogText(title, 240)).filter(Boolean);
-  const groupLocation = compactLocations(group.locations);
-  const compensation = (group.compensations ?? []).filter(Boolean);
+  const compactGroupTitle = compactCatalogTitle(groupTitles.join(" · "));
+  const groupLocation = compactCatalogLocation(group.locations);
   const availability = catalogGroupAvailabilityLabel(group, status);
   const timing = featuredRole
     ? postingTimingPresentation(featuredRole.sourceReferences ?? [], featuredRole.firstSeenAt ?? featuredRole.visibleAt)
@@ -1371,15 +1383,10 @@ function CatalogGroupTile({
               </View>
             </View>
             <Text style={styles.catalogTileCompany} numberOfLines={1}>{groupCompany}</Text>
-            <Text style={[styles.catalogTileTitle, lane && styles.catalogTileTitleLane]} numberOfLines={lane ? 3 : 4}>{groupTitles.join(" · ")}</Text>
-            <Text style={styles.catalogTileMeta} numberOfLines={2}>
+            <Text style={[styles.catalogTileTitle, lane && styles.catalogTileTitleLane]} numberOfLines={2}>{compactGroupTitle}</Text>
+            <Text style={styles.catalogTileMeta} numberOfLines={1}>
               {[groupLocation, group.seasons.map(seasonLabel).join(" · ")].filter(Boolean).join("  •  ")}
             </Text>
-            {compensation.length ? (
-              <Text style={styles.catalogTileComp} numberOfLines={1}>
-                {compensation.slice(0, 2).join(" · ")}{compensation.length > 2 ? ` +${compensation.length - 2}` : ""}
-              </Text>
-            ) : null}
             {lane && timing ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
             {group.unconfirmedRoleCount ? (
               <Text style={styles.catalogTileNotice} numberOfLines={1}>
@@ -1387,9 +1394,7 @@ function CatalogGroupTile({
               </Text>
             ) : null}
             <View style={styles.catalogTileFooter}>
-              <View style={styles.catalogTileState}>
-                {inQueue ? <Text style={styles.catalogTileStateText}>In queue</Text> : null}
-              </View>
+              <View style={styles.catalogTileState} />
               <View style={styles.catalogTileActions}>
                 {canHideLocally ? (
                   <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={styles.catalogTileAction}>
@@ -1405,7 +1410,7 @@ function CatalogGroupTile({
                 {!queuing && inQueue && onRemoveFromQueue ? (
                   <TouchableOpacity accessibilityRole="button" accessibilityLabel="Remove from queue" onPress={handleRemoveFromQueue} style={[styles.catalogTileAction, styles.catalogTileActionActive]}>
                     <Ionicons name="bookmark" size={16} color={colors.signal} />
-                    <Text style={styles.catalogTileActionActiveText} numberOfLines={1}>In queue</Text>
+                    <Text style={styles.catalogTileActionActiveText} numberOfLines={1}>Queue</Text>
                   </TouchableOpacity>
                 ) : null}
                 {canAddToQueue ? (
@@ -3361,21 +3366,13 @@ function CatalogScreen({
   onUndoHide?: () => void;
 }) {
   const { width } = useWindowDimensions();
-  // The queue panel is a desktop workspace aid. Native keeps browsing focused;
-  // queued roles remain one tap away in the Queue tab.
-  const showQueueFixture = Platform.OS === "web" && queue !== undefined;
-  const showQueueSidebar = Platform.OS === "web" && width >= 1280 && queue !== undefined;
-  const [queueOpen, setQueueOpen] = useState(false);
   const [sheetVisible, setSheetVisible] = useState(false);
   const [queryFocused, setQueryFocused] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
   // Below this width the query field needs the whole row; the filter control
   // drops to its own line rather than truncating the placeholder.
   const stackedSearch = width < 560;
-  // The sidebar costs about a third of the window, so it caps the grid at three.
-  const columns = showQueueSidebar
-    ? (width >= 1660 ? 4 : 3)
-    : width >= 1400 ? 4 : width >= 840 ? 3 : 2;
+  const columns = width >= 1400 ? 4 : width >= 840 ? 3 : 2;
   const tokens = catalogFilterTokens(filters);
   const narrowed = catalogViewNarrowed(query, filters);
   // One way back to the whole catalog: the query and every facet at once, so a
@@ -3438,9 +3435,9 @@ function CatalogScreen({
     onRemoveFromQueue,
   };
   return (
-    <View style={[styles.roleWorkspace, showQueueSidebar && styles.roleWorkspaceWide]}>
-      <View style={[styles.roleFeedColumn, showQueueSidebar && styles.catalogColumnWide]}>
-        <View style={[styles.catalogSearchBlock, showQueueSidebar && styles.catalogSearchBlockWide]}>
+    <View style={styles.roleWorkspace}>
+      <View style={styles.roleFeedColumn}>
+        <View style={styles.catalogSearchBlock}>
           <View style={[styles.catalogSearchRow, stackedSearch && styles.catalogSearchRowStacked]}>
             <View style={[styles.catalogSearchField, queryFocused && styles.catalogSearchFieldFocused]}>
               <Ionicons name="search-outline" size={17} color={colors.muted} />
@@ -3448,13 +3445,13 @@ function CatalogScreen({
                 ref={searchFieldRef}
                 value={query}
                 onChangeText={onQueryChange}
-                accessibilityLabel="Search roles, companies, and locations"
+                accessibilityLabel="Search roles and companies"
                 autoComplete="off"
                 autoCorrect={false}
                 secureTextEntry={false}
                 textContentType="none"
                 returnKeyType="search"
-                placeholder="Search roles, companies, locations"
+                placeholder="Search roles or companies"
                 placeholderTextColor={colors.placeholder}
                 selectionColor={colors.signal}
                 onFocus={() => setQueryFocused(true)}
@@ -3462,7 +3459,12 @@ function CatalogScreen({
                 onKeyPress={(event) => {
                   if (event.nativeEvent.key === "Escape") onQueryChange("");
                 }}
-                style={styles.catalogSearchInput}
+                style={[
+                  styles.catalogSearchInput,
+                  // RN Web's TextInput starts with the browser focus outline.
+                  // The surrounding field is the accessible focus indicator.
+                  Platform.OS === "web" ? ({ outline: "none" } as unknown as TextStyle) : undefined,
+                ]}
               />
               {query ? (
                 <TouchableOpacity accessibilityRole="button" accessibilityLabel="Clear search" onPress={() => onQueryChange("")} style={styles.catalogSearchClear}>
@@ -3478,9 +3480,6 @@ function CatalogScreen({
                   selectedDay={filters.day}
                   onToggle={() => setCalendarOpen((current) => !current)}
                 />
-                {!showQueueSidebar && showQueueFixture && queueCount !== undefined ? (
-                  <QueuePillButton count={queueCount} expanded={queueOpen} onPress={() => setQueueOpen((open) => !open)} />
-                ) : null}
               </View>
             </View>
           </View>
@@ -3521,16 +3520,6 @@ function CatalogScreen({
             />
           ) : null}
         </View>
-        {!showQueueSidebar && showQueueFixture && queueOpen ? (
-          <QueuePanel
-            queue={queue}
-            jobs={queueJobs ?? []}
-            onOpenQueuedRole={onOpenQueuedRole}
-            onBulkOpenQueue={onBulkOpenQueue}
-            onViewAll={onOpenQueue}
-            onCollapse={() => setQueueOpen(false)}
-          />
-        ) : null}
         <FilterSheet
           visible={sheetVisible}
           filters={filters}
@@ -3542,7 +3531,7 @@ function CatalogScreen({
           data={rows}
           extraData={[applicationStatuses, queuingJobIds, filters.jobStatus]}
           keyExtractor={(row) => row[0]?.groupId ?? "catalog-row"}
-          contentContainerStyle={[styles.catalogGrid, showQueueSidebar && styles.feedListContentWide]}
+          contentContainerStyle={styles.catalogGrid}
           onEndReached={onLoadMore}
           onEndReachedThreshold={0.6}
           ListHeaderComponent={
@@ -3589,7 +3578,7 @@ function CatalogScreen({
                     ? "Pick another day in the calendar, or clear the day to see the whole catalog."
                     : tokens.length
                       ? "Remove a filter to widen the search."
-                      : "Try a company, a role, or a location with fewer terms."}
+                      : "Try a company or role with fewer terms."}
                 </Text>
                 <View style={styles.catalogEmptyAction}>
                   {filters.day ? (
@@ -3614,18 +3603,6 @@ function CatalogScreen({
           }
         />
       </View>
-      {showQueueSidebar && queue ? (
-        <View style={styles.queueSidebar}>
-          <QueuePanel
-            queue={queue}
-            jobs={queueJobs ?? []}
-            onOpenQueuedRole={onOpenQueuedRole}
-            onBulkOpenQueue={onBulkOpenQueue}
-            onViewAll={onOpenQueue}
-            maxRows={8}
-          />
-        </View>
-      ) : null}
     </View>
   );
 }
@@ -3784,6 +3761,7 @@ function AppContent() {
   const [hiddenJobIds, setHiddenJobIds] = useState<Set<string>>(() => new Set());
   const [hiddenFeedbackJob, setHiddenFeedbackJob] = useState<Job>();
   const [query, setQuery] = useState("");
+  const debouncedCatalogQuery = useDebouncedValue(query.trim(), 150);
   const [catalogFilters, setCatalogFilters] = useState<CatalogFilterValues>(emptyCatalogFilters);
   const [catalogFiltersHydrated, setCatalogFiltersHydrated] = useState(false);
   useEffect(() => {
@@ -3816,6 +3794,9 @@ function AppContent() {
   const launchRequestId = useRef(0);
   const legacyAlertMigrationToken = useRef<string | undefined>(undefined);
   const catalogGroupsRef = useRef<CatalogGroupRow[]>([]);
+  // Keep the unfiltered page around specifically for instant type-ahead
+  // previews; never derive a broader query from an already-narrowed result.
+  const catalogBrowsePreviewRef = useRef<CatalogGroupRow[]>([]);
   const catalogCursorRef = useRef<string | undefined>(undefined);
   const catalogRequestGeneration = useRef(0);
   const catalogRequestInFlight = useRef(false);
@@ -3909,6 +3890,7 @@ function AppContent() {
     void responseCache.get<CatalogCache>(catalogCacheKey).then((cached) => {
       if (active && cached?.groups.length && !catalogGroupsRef.current.length) {
         catalogGroupsRef.current = cached.groups;
+        catalogBrowsePreviewRef.current = cached.groups;
         catalogCursorRef.current = cached.cursor;
         setCatalogGroups(cached.groups);
         setNextCatalogCursor(cached.cursor);
@@ -3919,6 +3901,21 @@ function AppContent() {
     };
   }, []);
   useEffect(() => {
+    // Update the on-device preview with every keypress, but wait briefly before
+    // turning that keypress into a remote catalog request.
+    if (!catalogFiltersHydrated) return;
+    const preview = beginCatalogQueryChange(
+      catalogRequestGeneration,
+      catalogBrowsePreviewRef.current,
+      query,
+      countActiveCatalogFilters(catalogFilters) > 0,
+    );
+    if (preview) {
+      catalogGroupsRef.current = preview;
+      setCatalogGroups(preview);
+    }
+  }, [query, catalogFilters, catalogFiltersHydrated]);
+  useEffect(() => {
     // The stored level decides eligibility, so the first request waits for it
     // instead of fetching the default view and immediately replacing it.
     if (!catalogFiltersHydrated) return;
@@ -3926,20 +3923,36 @@ function AppContent() {
     catalogRequestInFlight.current = true;
     catalogCursorRef.current = undefined;
     setNextCatalogCursor(undefined);
+    // A narrowed view must never keep showing the previous, unfiltered page
+    // while its request is in flight. That makes a company search look broken.
+    if (debouncedCatalogQuery || countActiveCatalogFilters(catalogFilters) > 0) {
+      // A facet can have no safe local preview. A text query has already put a
+      // matching on-device preview in place above, so retain it until the live
+      // response arrives.
+      if (countActiveCatalogFilters(catalogFilters) > 0) {
+        catalogGroupsRef.current = [];
+        setCatalogGroups([]);
+      }
+    }
     setCatalogInitialLoading(true);
     setCatalogLoadingMore(false);
     setCatalogError(undefined);
     setCatalogMoreError(undefined);
-    const catalogQuery = query.trim();
+    const catalogQuery = debouncedCatalogQuery;
     const params = groupedCatalogParameters(catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }));
     void api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "")
       .then((page) => {
         if (catalogRequestGeneration.current !== requestGeneration) return;
-        catalogGroupsRef.current = page.groups;
+        // Older deployed API versions used substring matching over locations.
+        // Keep the client result aligned with the current employer/role search
+        // contract while that response is being refreshed.
+        const matchingPage = filterGroupedCatalogPage(page, catalogQuery);
+        catalogGroupsRef.current = matchingPage.groups;
         catalogCursorRef.current = page.cursor;
-        setCatalogGroups(page.groups);
+        setCatalogGroups(matchingPage.groups);
         setNextCatalogCursor(page.cursor);
         if (!catalogQuery && countActiveCatalogFilters(catalogFilters) === 0) {
+          catalogBrowsePreviewRef.current = page.groups;
           void responseCache.set(catalogCacheKey, page);
         }
       })
@@ -3964,7 +3977,7 @@ function AppContent() {
         catalogRequestInFlight.current = false;
       }
     };
-  }, [catalogRefresh, query, catalogFilters, dayZone, catalogFiltersHydrated, token]);
+  }, [catalogRefresh, debouncedCatalogQuery, catalogFilters, dayZone, catalogFiltersHydrated, token]);
   const loadNextCatalogPage = (retry = false) => {
     const cursor = catalogCursorRef.current;
     if (!cursor || catalogRequestInFlight.current || (!retry && catalogMoreError)) return;
@@ -3973,11 +3986,14 @@ function AppContent() {
     setCatalogLoadingMore(true);
     setCatalogMoreError(undefined);
     const catalogQuery = query.trim();
-    const params = groupedCatalogParameters(
-      catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }),
-      { cursor },
-    );
-    void api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "")
+    const fetchPage = (pageCursor: string) => {
+      const params = groupedCatalogParameters(
+        catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }),
+        { cursor: pageCursor },
+      );
+      return api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "");
+    };
+    void nextMatchingGroupedCatalogPage(cursor, catalogQuery, fetchPage)
       .then((page) => {
         if (catalogRequestGeneration.current !== requestGeneration) return;
         const nextGroups = appendGroupedCatalogPage(catalogGroupsRef.current, page);
@@ -7644,7 +7660,8 @@ const styles = StyleSheet.create({
   applicationsListContent: { paddingBottom: 44, paddingTop: 20 },
   catalogSearchBlock: {
     alignSelf: "center",
-    maxWidth: 1120,
+    // Share the catalog grid's rails so search and results read as one surface.
+    maxWidth: 1280,
     paddingBottom: 16,
     paddingHorizontal: 20,
     paddingTop: 12,
@@ -7742,7 +7759,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   catalogSearchFieldFocused: { borderColor: colors.signal, borderWidth: 2, paddingHorizontal: 13 },
-  catalogSearchInput: { color: colors.ink, flex: 1, fontSize: 16, minHeight: 48, paddingVertical: 0 },
+  // The field owns the focus ring. On web, suppress the browser input outline
+  // so it does not draw a second, rectangular blue selection inside this rail.
+  catalogSearchInput: { color: colors.ink, flex: 1, fontSize: 16, minHeight: 48, outlineWidth: 0, paddingVertical: 0 },
   catalogSearchClear: { alignItems: "center", height: 44, justifyContent: "center", width: 30 },
   catalogTokenRow: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
   catalogToken: {
@@ -7770,12 +7789,14 @@ const styles = StyleSheet.create({
   catalogTokenResetText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
   catalogGrid: {
     alignSelf: "center",
-    maxWidth: 1120,
+    // The catalog is a focused search surface, not a wall-to-wall dashboard.
+    // This gives roles a more legible reading width after removing the queue rail.
+    maxWidth: 1280,
     paddingBottom: 20,
     paddingHorizontal: 20,
     width: "100%",
   },
-  catalogGridRow: { alignItems: "stretch", flexDirection: "row", gap: 12, marginBottom: 10 },
+  catalogGridRow: { alignItems: "stretch", flexDirection: "row", gap: 16, marginBottom: 16 },
   catalogCell: { flex: 1, minWidth: 0 },
   catalogCellStack: { flexGrow: 1 },
   catalogTile: {
@@ -7784,18 +7805,20 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     flexGrow: 1,
-    padding: 11,
+    // Keep a shared, compact baseline now that compensation is intentionally
+    // reserved for the expanded view; exceptional titles can still grow.
+    minHeight: 280,
+    padding: 20,
   },
-  catalogTileLane: { padding: 12 },
+  catalogTileLane: { padding: 18 },
   catalogTileTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", minHeight: 22 },
   catalogTileTags: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
   catalogTileNew: { alignItems: "center", flexDirection: "row", flexShrink: 0, gap: 3 },
   catalogTileNewText: { color: colors.signal, fontSize: 11, fontWeight: "800" },
-  catalogTileCompany: { color: colors.signal, fontSize: 13, fontWeight: "700", lineHeight: 18, marginTop: 6 },
-  catalogTileTitle: { color: colors.ink, fontSize: 15, fontWeight: "700", lineHeight: 19, marginTop: 2 },
-  catalogTileTitleLane: { fontSize: 15, lineHeight: 19 },
-  catalogTileMeta: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 3 },
-  catalogTileComp: { color: colors.ink, fontSize: 12, fontWeight: "700", lineHeight: 16, marginTop: 2 },
+  catalogTileCompany: { color: colors.signal, fontSize: 15, fontWeight: "700", lineHeight: 20, marginTop: 8 },
+  catalogTileTitle: { color: colors.ink, fontSize: 18, fontWeight: "700", lineHeight: 24, marginTop: 3 },
+  catalogTileTitleLane: { fontSize: 17, lineHeight: 23 },
+  catalogTileMeta: { color: colors.muted, fontSize: 14, lineHeight: 20, marginTop: 5 },
   catalogTileTiming: { color: colors.muted, fontSize: 12, lineHeight: 16, marginTop: 3 },
   catalogTileNotice: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },
   catalogTileFooter: {
@@ -7808,7 +7831,9 @@ const styles = StyleSheet.create({
     // card above them says. Cards without a pay line were floating their buttons
     // fifty points higher than their neighbours.
     marginTop: "auto",
-    paddingTop: 6,
+    // Give the last action row a little air above the card edge.
+    paddingBottom: 8,
+    paddingTop: 12,
   },
   catalogTileState: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
   catalogTileStateText: { color: colors.signal, fontSize: 11, fontWeight: "800", letterSpacing: 0.4 },

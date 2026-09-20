@@ -4,11 +4,11 @@ import { Poller } from './poll.js';
 import { reviewedGreenhouseSources, type ReviewedGreenhouseSource } from './sources/greenhouse-config.js';
 import { GreenhouseBoardAdapter } from './sources/greenhouse.js';
 import { greenhouseQualityPolicy, verifySourceQuality } from './sources/quality.js';
-import { DynamoInternshipStore, DynamoUserStore, type InternshipStore, type UserStore } from './store.js';
+import { type InternshipStore, type UserStore } from './store.js';
 import type { GreenhouseWorkMessage } from './greenhouse-dispatch.js';
 import { ApplicationLinkValidationError, failedSourceHealth, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
 import { processFifoBatch } from './sqs-fifo-batch.js';
-import { legacyDeliveryExclusions, loadGroupedNotificationCohort, type GroupedNotificationCohort } from './grouped-notification-cohort.js';
+import { legacyDeliveryExclusions, type GroupedNotificationCohort } from './grouped-notification-cohort.js';
 import type { CatalogAdmissionResolver, DestinationVerificationRequest } from './destination-verification.js';
 import { integrationRegistry } from './integration-registry.js';
 
@@ -222,17 +222,4 @@ export async function processGreenhouseQueue(
       throw error;
     }
   }, undefined, dependencies.onRecordFailure, dependencies.messageDeadlineMs);
-}
-
-export async function handler(event: QueueEvent): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> {
-  const tableName = process.env.INTERNSHIPS_TABLE;
-  const usersTable = process.env.USERS_TABLE;
-  if (!tableName || !usersTable) throw new Error('INTERNSHIPS_TABLE and USERS_TABLE are required');
-  const cohortParameterName = process.env.GROUPED_NOTIFICATION_COHORT_PARAMETER_NAME;
-  if (!cohortParameterName) throw new Error('GROUPED_NOTIFICATION_COHORT_PARAMETER_NAME is required');
-  return processGreenhouseQueue(event, {
-    store: new DynamoInternshipStore(tableName),
-    userStore: new DynamoUserStore(usersTable),
-    groupedNotificationCohort: await loadGroupedNotificationCohort(cohortParameterName),
-  });
 }

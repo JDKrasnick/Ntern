@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { catalogEducation, catalogGroupDetails, employerDropGroupId, employerDropKey, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs } from '../src/catalog-groups.js';
+import { catalogEducation, catalogGroupDetails, catalogTextMatches, employerDropGroupId, employerDropKey, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs } from '../src/catalog-groups.js';
 import type { EducationEvidenceStatus, Internship, InternshipIdentity, InternshipProgramType, SeasonEvidenceStatus } from '../src/types.js';
 
 type IdentityJob = Internship & { internshipIdentity?: Record<string, unknown> };
@@ -35,6 +35,12 @@ function identity(options: {
 }
 
 describe('grouped catalog domain', () => {
+  it('searches company and role words without treating a location abbreviation as a role match', () => {
+    expect(catalogTextMatches('av', ['Avid', 'AI/ML Engineering Intern'])).toBe(true);
+    expect(catalogTextMatches('av', ['Priceline', 'Software Engineering - Web/JavaScript'])).toBe(false);
+    expect(catalogTextMatches('av', ['MSD', 'Quantitative Biosciences'])).toBe(false);
+    expect(catalogTextMatches('accenture soft eng', ['Accenture', 'Software Engineering Intern'])).toBe(true);
+  });
   it('preserves housing separately from compensation in featured and detailed roles', () => {
     const housing = [{ kind: 'stipend', minAmount: 2500, maxAmount: 2500, currency: 'USD', period: 'monthly',
       sourceText: 'Monthly housing stipend.', provenance: [] }];

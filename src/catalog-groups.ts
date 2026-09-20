@@ -170,6 +170,18 @@ const unique = (values: string[]) => [...new Map(values.filter(Boolean).map((val
 const timestamp = (job: Internship) => Date.parse(catalogVisibleAt(job));
 const identityFor = (job: Internship) => (job as CatalogJob).internshipIdentity ?? (job as CatalogJob).identity;
 
+/**
+ * Catalog text search is intentionally a company-and-role lookup. Matching at
+ * the beginning of words makes short queries useful ("av" finds Avid) instead
+ * of surfacing unrelated roles because a location contains "Ave".
+ */
+export function catalogTextMatches(query: string, fields: readonly string[]) {
+  const terms = folded(query).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (!terms.length) return true;
+  const words = fields.join(' ').split(/[^\p{L}\p{N}]+/u).map(folded).filter(Boolean);
+  return terms.every((term) => words.some((word) => word.startsWith(term)));
+}
+
 function companyKey(job: Internship) {
   const identity = identityFor(job);
   const value = identity?.canonicalCompanyId ?? identity?.company?.canonicalId ?? identity?.company?.id ?? job.company;
@@ -467,11 +479,11 @@ function excludesReader(education: CatalogEducationSummary, level: EducationLeve
 }
 
 export function filterCatalogGroups(groups: BuiltGroup[], filter: CatalogGroupFilter): BuiltGroup[] {
-  const query = folded(filter.query ?? '');
+  const query = filter.query ?? '';
   return groups.flatMap((group) => {
     const jobs = group.jobs.filter((job) => {
       const education = catalogEducation(job);
-      return (!query || folded(`${job.company} ${titleFor(job)} ${job.location} ${seasonFor(job)}`).includes(query))
+      return (catalogTextMatches(query, [job.company, titleFor(job)])
         && (!filter.status || job.open === (filter.status === 'open'))
         && (!filter.employerCategories?.length || filter.employerCategories.includes(job.employerCategory ?? employerCategory(job.company)))
         && (!filter.hideUsCitizenshipRequired || !job.requirements?.requiresUsCitizenship)
@@ -484,7 +496,7 @@ export function filterCatalogGroups(groups: BuiltGroup[], filter: CatalogGroupFi
         // Unspecified education matches every audience but remains visibly unspecified.
         && (!filter.educationLevels?.length || education.evidence === 'unspecified' || includesFolded(education.levels, filter.educationLevels))
         && (!filter.workModes?.length || includesFolded(workModesFor(job), filter.workModes))
-        && (!filter.locations?.length || filter.locations.some((location) => folded(locationsFor(job).join(' ')).includes(folded(location))));
+        && (!filter.locations?.length || filter.locations.some((location) => folded(locationsFor(job).join(' ')).includes(folded(location)))));
     });
     return jobs.length ? [{ row: summarize(group.row.kind, jobs, group.row.groupId), jobs }] : [];
   });
@@ -506,10 +518,10 @@ function materializedReleaseDay(role: CatalogGroupRole, zone?: string) {
 
 /** Filters a materialized projection without loading full catalog job records. */
 export function filterCatalogGroupDetails(groups: CatalogGroupDetails[], filter: CatalogGroupFilter): CatalogGroupDetails[] {
-  const query = folded(filter.query ?? '');
+  const query = filter.query ?? '';
   return groups.flatMap((details) => {
     const roles = details.roles.filter((role) =>
-      (!query || folded(`${role.company} ${role.title} ${role.location} ${role.season}`).includes(query))
+      catalogTextMatches(query, [role.company, role.title])
       && (!filter.status || role.open === (filter.status === 'open'))
       && (!filter.employerCategories?.length || filter.employerCategories.includes(role.employerCategory))
       && (!filter.hideUsCitizenshipRequired || !role.requiresUsCitizenship)

@@ -69,10 +69,11 @@ describe('catalog quality normalization', () => {
   });
 
   it('bounds, canonicalizes, and summarizes locations', () => {
-    const locations = normalizeLocations(['NYC', 'New York, NY', 'SF', 'Washington DC', '3 locations', 'US Remote', ...Array.from({ length: 20 }, (_, index) => `Office ${index}`)]);
+    const locations = normalizeLocations(['NYC', 'New York, NY', 'SF', 'Washington DC', '3 locations', 'US Remote', 'China, Beijing, China', ...Array.from({ length: 20 }, (_, index) => `Office ${index}`)]);
     expect(locations.slice(0, 4)).toEqual(['New York, NY', 'San Francisco, CA', 'Washington, DC', 'Remote — US']);
     expect(locations).toHaveLength(12);
     expect(locationSummary(locations)).toBe('New York, NY · San Francisco, CA + 10 more');
+    expect(locations).toContain('Beijing, China');
   });
 
   it('repairs internships without changing identity or notification state', () => {

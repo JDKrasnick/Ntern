@@ -1,30 +1,21 @@
 flowchart LR
-  subgraph GH["InternNotifsGreenhouse stack"]
-    EB["EventBridge Scheduler<br/>every 30 minutes"] --> D["Dispatch Lambda<br/>published every 30 min · shadow every 3 hr<br/>30 second ceiling"]
-    D --> Q["Greenhouse FIFO work queue<br/>one message per reviewed board"]
-
-    Q --> W["Worker Lambda<br/>batch 10 · 4 groups per invocation<br/>max 4 invocations · 2 minute ceiling"]
+  subgraph ING["intern-notifs-ingestion Worker"]
+    C["Cron Trigger<br/>published every 30 min<br/>shadow every 3 hr"] --> D["Provider dispatcher"]
+    D --> Q["Greenhouse Queue<br/>one board per message"]
+    Q --> W["Queue consumer<br/>batch 1 · max concurrency 6"]
     W --> R{"Registry status"}
-
-    R -->|shadow| S["Shadow validation<br/>API shape · mapping · quality · links"]
-
-    R -->|published| P["Catalog poller<br/>ETag · map · dedupe · validate"]
-
-    W -->|failed record| Q
-    Q -->|after 4 receives| DLQ["Greenhouse dead-letter queue<br/>14 day retention"]
-
-    Q -. queue age .-> CW["CloudWatch alarms"]
-    W -. invocation errors .-> CW
-    DLQ -. visible messages .-> CW
+    R -->|shadow| S["Validate identity, schema,<br/>quality, and links"]
+    R -->|published| P["Reconcile catalog<br/>and delivery state"]
+    Q -->|after 2 retries| DLQ["Greenhouse DLQ"]
+    W -. health and run evidence .-> O["Operations API<br/>and Worker logs"]
+    DLQ -. depth .-> O
   end
 
-  subgraph MAIN["Existing retained data plane"]
-    DB[("DynamoDB internships table<br/>jobs + isolated checkpoints")]
-    UDB[("DynamoDB user table")]
-    N["Matching user notifications"]
+  subgraph DATA["Cloudflare data plane"]
+    DB[("D1<br/>catalog, checkpoints,<br/>health, and receipts")]
+    PUSH["Expo push delivery"]
   end
 
-  S --> SC["Shadow checkpoint<br/>no catalog jobs · no alerts"] --> DB
+  S --> DB
   P --> DB
-  P --> UDB
-  DB --> N
+  DB --> PUSH
