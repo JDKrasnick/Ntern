@@ -7681,11 +7681,11 @@ const styles = StyleSheet.create({
   applicationsListContent: { paddingBottom: 44, paddingTop: 20 },
   catalogSearchBlock: {
     alignSelf: "center",
-    // Share the catalog grid's rails so search and results read as one surface.
-    maxWidth: 1280,
-    paddingBottom: 16,
-    paddingHorizontal: 20,
-    paddingTop: 12,
+    // Search, featured roles and the grid share one centered content rail.
+    maxWidth: 1440,
+    paddingBottom: 24,
+    paddingHorizontal: 24,
+    paddingTop: 24,
     position: "relative",
     width: "100%",
     // The release calendar hangs off this block; keep it above the scrollable grid.
@@ -7810,14 +7810,13 @@ const styles = StyleSheet.create({
   catalogTokenResetText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
   catalogGrid: {
     alignSelf: "center",
-    // The large release rail leads; the denser grid below is for fast scanning.
-    // Wide displays earn a sixth column without stretching the cards into panels.
-    maxWidth: 1760,
-    paddingBottom: 20,
-    paddingHorizontal: 20,
+    // Match the search rail and keep five cards comfortably scannable on wide screens.
+    maxWidth: 1440,
+    paddingBottom: 28,
+    paddingHorizontal: 24,
     width: "100%",
   },
-  catalogGridRow: { alignItems: "stretch", flexDirection: "row", gap: 12, marginBottom: 12 },
+  catalogGridRow: { alignItems: "stretch", flexDirection: "row", gap: 16, marginBottom: 16 },
   catalogCell: { flex: 1, minWidth: 0 },
   catalogCellStack: { flexGrow: 1 },
   catalogTile: {
@@ -7878,7 +7877,7 @@ const styles = StyleSheet.create({
   catalogTileActionStrong: { fontWeight: "800" },
   catalogGroupCountPill: { backgroundColor: colors.ink, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
   catalogGroupCountText: { color: colors.onDark, fontSize: 11, fontWeight: "800" },
-  catalogLane: { marginBottom: 6, marginTop: 10 },
+  catalogLane: { marginBottom: 8, marginTop: 8 },
   catalogLaneSubRow: { alignItems: "center", flexDirection: "row", gap: 10, justifyContent: "space-between", marginTop: 2 },
   catalogLaneControlCompact: { minHeight: 30, paddingHorizontal: 10 },
   catalogLaneControl: {
@@ -7897,13 +7896,13 @@ const styles = StyleSheet.create({
   catalogLaneRule: {
     backgroundColor: colors.ink,
     height: 1,
-    marginBottom: 22,
-    marginTop: 24,
+    marginBottom: 28,
+    marginTop: 28,
     opacity: 0.2,
   },
   catalogLaneTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", lineHeight: 22 },
   catalogLaneCaption: { color: colors.muted, fontSize: 13, fontWeight: "600" },
-  catalogLaneList: { gap: 12, paddingBottom: 4 },
+  catalogLaneList: { gap: 16, paddingBottom: 4, paddingTop: 8 },
   catalogTileSkeleton: {
     backgroundColor: colors.surface,
     borderColor: colors.separator,

@@ -10,8 +10,8 @@ describe("catalogGridColumnCount", () => {
     [1099, 4],
     [1100, 5],
     [1440, 5],
-    [1680, 6],
-    [1800, 6],
+    [1680, 5],
+    [1800, 5],
   ])("maps %ipx to %i columns", (width, columns) => {
     expect(catalogGridColumnCount(width)).toBe(columns);
   });
