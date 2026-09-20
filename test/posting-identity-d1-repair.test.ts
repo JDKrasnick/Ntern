@@ -285,6 +285,21 @@ describe('D1 posting identity repair', () => {
       ['amazon', 'https://amazon.jobs/en/jobs/10394156/2026-fall-applied-science-internship', 'https://amazon.jobs/en/jobs/10394156software-engineer'],
       ['amazon-apply', 'https://www.amazon.jobs/jobs/10418355/apply', 'https://www.amazon.jobs/jobs/10418355software-engineer/apply'],
       ['google', 'https://www.google.com/about/careers/applications/jobs/results/100028133205254854', 'https://www.google.com/about/careers/applications/jobs/results/software-engineer'],
+      ['custom-icims', 'https://careers.amd.com/jobs/90743?icims=1', 'https://careers.amd.com/jobs/software-engineer'],
+      ['custom-successfactors', 'https://jobs.l3harris.com/job/Bristol/Software-Engineering-Intern-PA-19007/1428452600/?ats=successfactors', 'https://jobs.l3harris.com/job/Bristol/software-engineer'],
+      ['myworkdaysite', 'https://wd1.myworkdaysite.com/recruiting/imeg/Imeg_Careers/job/Chicago-IL/Electrical-Engineering-Intern_R-16476', 'https://wd1.myworkdaysite.com/Imeg_Careers/openings/Electrical-Engineering-Intern_R-16476'],
+      ['taleo', 'https://textron.taleo.net/careersection/textron/jobdetail.ftl?job=342550', 'https://textron.taleo.net/careersection/textron/moresearch.ftl?job=342550'],
+      ['united', 'https://careers.united.com/us/en/job/WHQ00026618', 'https://careers.united.com/us/en/search-results?job=WHQ00026618'],
+      ['sig', 'https://careers.sig.com/intern-co-op-technology/jobs/10837', 'https://careers.sig.com/intern-co-op-technology/jobs/software-engineer'],
+      ['intuit', 'https://jobs.intuit.com/job/mountain-view/software-engineer-intern/27595/100620927536', 'https://jobs.intuit.com/job/mountain-view/software-engineer-intern/27595'],
+      ['eu-lever', 'https://jobs.eu.lever.co/quantinuum/46b3f32c-a2ad-4d4d-bff6-b1bbebf3e382/apply', 'https://jobs.eu.lever.co/quantinuum/software-engineer/apply'],
+      ['apple', 'https://jobs.apple.com/en-us/details/200664323/software-phd-internships', 'https://jobs.apple.com/en-us/details/software-intern'],
+      ['bamboohr', 'https://lunaroutpost.bamboohr.com/careers/390/', 'https://lunaroutpost.bamboohr.com/careers/'],
+      ['adp', 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=2cc1abe5-fdf4-41ed-b82d-9b34c651ef79&jobId=574462', 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?jobId=574462'],
+      ['avature', 'https://pomerleau.avature.net/en_US/Jobs/JobDetail/3476', 'https://pomerleau.avature.net/en_US/Jobs/JobDetail/software-engineer'],
+      ['employer-route', 'https://career.mlp.com/careers/job/755957778821', 'https://career.mlp.com/careers/search?job=755957778821'],
+      ['pinpoint', 'https://impulsespace.pinpointhq.com/en/postings/2b03cd5d-4a58-48a0-81f4-ea8c8c7bcd2a', 'https://impulsespace.pinpointhq.com/en/postings/software-engineer'],
+      ['applytojob', 'https://neboagency.applytojob.com/apply/AFMqe9Jb7b/Web-Development-Intern', 'https://neboagency.applytojob.com/apply/'],
     ] as const;
     for (const [family, goodUrl, badUrl] of cases) {
       await store.putInternship(job(`${family}-good`, goodUrl, '2026-09-18T00:00:00.000Z', [
