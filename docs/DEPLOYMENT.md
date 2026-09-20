@@ -707,6 +707,10 @@ and all other checks remain enabled.
 
 ### Posting identity D1 repair
 
+For the coordinated posting-identity, trusted-community, and official-source
+catalog rollout, use the bounded operator checklist in
+[`serving-backfill-handoff.md`](serving-backfill-handoff.md).
+
 Deploy migrations `0010_posting_identity.sql`,
 `0011_issue_50_reviewed_employer_identity.sql`, and
 `0012_official_career_provider_identity.sql` and the runtime identity support first,
