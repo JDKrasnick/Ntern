@@ -687,7 +687,8 @@ superseded DLQ messages. Retain disposition and queue-failure metadata for 30 da
 - EAS project ID: `b9b09ef1-a482-4875-a5f4-ff963488cd3e`
 - iOS bundle ID: `com.internnotifs.app`
 - App Store Connect app ID: `6792557963`
-- Active development API: `https://intern-notifs.jdkrasnick.workers.dev`
+- Production API: `https://intern-notifs.jdkrasnick.workers.dev`
+- Isolated development API: `https://intern-notifs-dev.jdkrasnick.workers.dev`
 
 These are not credentials. Do not record Apple private keys, API keys, Expo tokens, password values, or personal Apple Account emails here.
 

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isPastSeason } from './core/early-career.js';
 import { employerCategory } from './core/employers.js';
-import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency, openCatalogSortKey } from './catalog-recency.js';
+import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency } from './catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from './types.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from './identity/posting.js';
@@ -291,22 +291,6 @@ export class MemoryInternshipStore implements InternshipStore {
   }
 }
 
-type JobItem = { pk: string; sk: 'META'; urlPk: string; fingerprintPk: string; smsPk?: string; digestPk?: string; openPk?: string; openSk?: string; closedPk?: string; closedSk?: string; catalogSearchText?: string; catalogSourceClasses?: CatalogSource[]; job: Internship };
-
-function internshipItem(job: Internship): JobItem {
-  const canonical = canonicalCatalogRecency(job);
-  const item: JobItem = { pk: `JOB#${canonical.jobId}`, sk: 'META', urlPk: `URL#${canonical.normalizedUrl}`, fingerprintPk: `FP#${canonical.fingerprint}`, job: canonical };
-  if (canonical.notification.smsPending && alertEligible(canonical)) item.smsPk = 'PENDING#SMS';
-  if (canonical.notification.digestPending && alertEligible(canonical)) item.digestPk = 'PENDING#DIGEST';
-  if (canonical.technical !== false && catalogEligible(canonical)) {
-    item.catalogSearchText = catalogSearchText(canonical); item.catalogSourceClasses = catalogSourceClasses(canonical);
-    if (canonical.open) { item.openPk = 'OPEN'; item.openSk = openCatalogSortKey(canonical); }
-    else { item.closedPk = 'CLOSED'; item.closedSk = `${canonical.lastSeenAt}#${canonical.jobId}`; }
-  }
-  return item;
-}
-
-
 export interface UserStore {
   /** Permanently blocks new writes before account deletion starts. */
   beginUserDeletion(userId: string): Promise<void>;
@@ -394,5 +378,3 @@ export class MemoryUserStore implements UserStore {
   async deferredReceipts() { return [...this.receipts.values()].filter((receipt) => receipt.status === 'deferred').map((receipt) => structuredClone(receipt)); }
   async deleteUser(userId: string) { await this.beginUserDeletion(userId); const docs = await this.listDocuments(userId); for (const map of [this.preferences, this.profiles]) map.delete(userId); for (const [key] of this.devices) if (key.startsWith(`${userId}#`)) this.devices.delete(key); for (const [key] of this.applications) if (key.startsWith(`${userId}#`)) this.applications.delete(key); for (const [key] of this.sessions) if (key.startsWith(`${userId}#`)) this.sessions.delete(key); for (const [key] of this.documents) if (key.startsWith(`${userId}#`)) this.documents.delete(key); for (const [key] of this.receipts) if (key.startsWith(`${userId}#`)) this.receipts.delete(key); return docs; }
 }
-
-type UserItem = { pk: string; sk: string; kind: string; value: unknown; activePk?: string; tokenPk?: string; receiptPk?: string; alertPk?: string; activeSessionPk?: string; expiresAtEpoch?: number };

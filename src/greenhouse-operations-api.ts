@@ -657,9 +657,3 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
 
 /** Backward-compatible name retained for existing imports and the stable stack. */
 export const createGreenhouseOperationsHandler = createSourceOperationsHandler;
-
-const tableName = process.env.INTERNSHIPS_TABLE;
-const queueUrl = process.env.GREENHOUSE_QUEUE_URL;
-const deadLetterQueueUrl = process.env.GREENHOUSE_DEAD_LETTER_QUEUE_URL;
-const sharedSecret = process.env.OPERATIONS_SHARED_SECRET;
-const parameterPrefix = process.env.OPERATIONS_PROVIDER_PARAMETER_PREFIX;
