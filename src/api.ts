@@ -99,9 +99,6 @@ function eligibleProjectedGroup(details: CatalogGroupDetails, at = new Date()): 
 
 async function projectedCatalogPage(store: InternshipStore, cursor: string | undefined, limit: number, filter: CatalogGroupFilter) {
   const isDefaultBrowse = filter.status === 'open' && Object.keys(filter).length === 1;
-  // A release day is a calendar rule over each role, not a projection column, so a
-  // day-filtered request reads the catalog instead of a page of projection rows.
-  if (filter.day) return undefined;
   if (!store.listCatalogProjection) return undefined;
   if (!isDefaultBrowse && store.listCatalogProjectionFiltered) {
     // A filtered or searched request reads the matching groups in SQL instead of
@@ -496,8 +493,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
         if (status && status !== 'open' && status !== 'closed') return reply(400, { message: 'status must be open or closed' });
         const groupId = decodeURIComponent(catalogGroupMatch[1]!);
         const projected = await dependencies.jobs.getCatalogProjectionGroup?.(groupId);
-        // A day filter is a per-role calendar rule the projection cannot answer.
-        if (projected && !catalogFilter(event.queryStringParameters).day) {
+        if (projected) {
           const eligible = eligibleProjectedGroup(projected);
           const filtered = eligible ? filterCatalogGroupDetails([eligible], {
             ...catalogFilter(event.queryStringParameters),

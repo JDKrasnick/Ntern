@@ -128,6 +128,9 @@ describe('D1 filtered catalog projection', () => {
         { status: 'open', educationLevel: 'undergraduate' },
         { from: '2026-09-01', to: '2026-09-30' },
       )).resolves.toMatchObject([{ jobId: 'september' }]);
+      await expect(store.listCatalogProjectionFiltered(undefined, 25, {
+        status: 'open', educationLevel: 'undergraduate', day: '2026-09-17', dayZone: 'America/Los_Angeles',
+      })).resolves.toMatchObject({ groups: [{ roles: [{ jobId: 'september' }] }] });
       expect(queries.some((query) => query.includes("json_each(projection.value, '$.roles')"))).toBe(true);
       expect(queries.some((query) => query.includes("kind = 'internship'"))).toBe(false);
     } finally {
