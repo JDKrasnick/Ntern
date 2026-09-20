@@ -59,7 +59,10 @@ export type ReviewedProviderUrlResult =
 export function reviewedProviderUrlReference(input: string): ReviewedProviderUrlResult {
   let url: URL;
   try { url = new URL(input); } catch { return { outcome: 'none' }; }
-  const inputHost = url.hostname.toLowerCase().replace(/^www\./, '');
+  // The reviewed registry deliberately records exact public hosts, including
+  // `www` where an employer's application flow uses it. Preserve that form
+  // for the ownership gate, then normalize only for route-shape matching.
+  const inputHost = url.hostname.toLowerCase();
   const syntactic = providerPostingReference(input);
   if (syntactic.provider === 'greenhouse' && syntactic.tenant && syntactic.postingId) {
     const source = reviewedGreenhouseSources.find((candidate) => candidate.boardToken.toLowerCase() === syntactic.tenant);
@@ -76,11 +79,11 @@ export function reviewedProviderUrlReference(input: string): ReviewedProviderUrl
     } } : { outcome: 'none' };
   }
 
-  const host = inputHost;
+  const host = inputHost.replace(/^www\./, '');
   const sources = reviewedGreenhouseSources.filter((source) =>
     [...source.allowedInitialHosts, ...source.allowedFinalHosts]
       .filter((allowed) => !hostMatchesAllowlist(allowed, ['greenhouse.io']))
-      .some((allowed) => hostMatchesAllowlist(host, [allowed])),
+      .some((allowed) => hostMatchesAllowlist(inputHost, [allowed])),
   );
   if (sources.length !== 1) return { outcome: 'none' };
   const candidate = customGreenhouseReference(url, host);

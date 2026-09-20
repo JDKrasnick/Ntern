@@ -574,6 +574,18 @@ describe('posting identity', () => {
     expect(reviewedProviderUrlReference('https://drw.example.test/work-at-drw/listings/quantitative-research-intern-3413670')).toEqual({ outcome: 'none' });
   });
 
+  it('preserves a reviewed www host while parsing its custom Greenhouse route', () => {
+    expect(reviewedProviderUrlReference('https://www.jumptrading.com/hr/job?gh_jid=7974837')).toMatchObject({
+      outcome: 'match', reference: { provider: 'greenhouse', tenant: 'jumptrading', postingId: '7974837', sourceId: 'greenhouse-jumptrading', customHost: true },
+    });
+    expect(reviewedProviderUrlReference('https://www.jumptrading.com/hr/job')).toEqual({ outcome: 'none' });
+
+    expect(reviewedProviderUrlReference('https://www.coinbase.com/careers/positions/8175441')).toMatchObject({
+      outcome: 'match', reference: { provider: 'greenhouse', tenant: 'coinbase', postingId: '8175441', sourceId: 'greenhouse-coinbase', customHost: true },
+    });
+    expect(reviewedProviderUrlReference('https://www.coinbase.com/careers/positions/8175441?gh_jid=8175999')).toMatchObject({ outcome: 'conflict' });
+  });
+
   it('recognizes only the immutable public ID on a reviewed Roblox custom host', () => {
     expect(reviewedProviderUrlReference('https://careers.roblox.com/jobs/7116940/software-engineering-intern?gh_jid=7116940')).toMatchObject({
       outcome: 'match', reference: { provider: 'greenhouse', tenant: 'roblox', postingId: '7116940', sourceId: 'greenhouse-roblox', customHost: true },
