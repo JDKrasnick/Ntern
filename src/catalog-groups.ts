@@ -511,30 +511,33 @@ function credibilityMatches(value: CatalogGroupRole['sourceCredibility'], source
 
 /** A materialized role's release day, re-read in the requested zone when the day
  * came from an observed instant. Keeps this path and the live-job path in step. */
-function materializedReleaseDay(role: CatalogGroupRole, zone?: string) {
+export function materializedReleaseDay(role: CatalogGroupRole, zone?: string) {
   if (!role.releaseDay) return undefined;
   return role.releaseDayObserved ? zoneDay(role.visibleAt, zone) : role.releaseDay;
 }
 
+export function catalogProjectionRoleMatches(role: CatalogGroupRole, filter: CatalogGroupFilter): boolean {
+  const query = filter.query ?? '';
+  return catalogTextMatches(query, [role.company, role.title])
+    && (!filter.status || role.open === (filter.status === 'open'))
+    && (!filter.employerCategories?.length || filter.employerCategories.includes(role.employerCategory))
+    && (!filter.hideUsCitizenshipRequired || !role.requiresUsCitizenship)
+    && !excludesReader(role.education, filter.educationLevel, role.advancedDegreeRequired)
+    && (!filter.postingIdentityConfirmedOnly || role.postingIdentityStatus !== 'unconfirmed')
+    && (!filter.source || credibilityMatches(role.sourceCredibility, filter.source))
+    && (!filter.disciplines?.length || disciplinesMatch(role.disciplines, filter.disciplines))
+    && (!filter.seasons?.length || includesFolded([role.season], filter.seasons))
+    && (!filter.educationLevels?.length || role.education.evidence === 'unspecified' || includesFolded(role.education.levels, filter.educationLevels))
+    && (!filter.workModes?.length || includesFolded(role.workModes, filter.workModes))
+    && (!filter.hasCompensation || Boolean(role.compensation?.raw?.trim()))
+    && (!filter.day || materializedReleaseDay(role, filter.dayZone) === filter.day)
+    && (!filter.locations?.length || filter.locations.some((location) => folded((role.locations ?? role.location.split(/\s*(?:;|\||\n)\s*/)).join(' ')).includes(folded(location))));
+}
+
 /** Filters a materialized projection without loading full catalog job records. */
 export function filterCatalogGroupDetails(groups: CatalogGroupDetails[], filter: CatalogGroupFilter): CatalogGroupDetails[] {
-  const query = filter.query ?? '';
   return groups.flatMap((details) => {
-    const roles = details.roles.filter((role) =>
-      catalogTextMatches(query, [role.company, role.title])
-      && (!filter.status || role.open === (filter.status === 'open'))
-      && (!filter.employerCategories?.length || filter.employerCategories.includes(role.employerCategory))
-      && (!filter.hideUsCitizenshipRequired || !role.requiresUsCitizenship)
-      && !excludesReader(role.education, filter.educationLevel, role.advancedDegreeRequired)
-      && (!filter.postingIdentityConfirmedOnly || role.postingIdentityStatus !== 'unconfirmed')
-      && (!filter.source || credibilityMatches(role.sourceCredibility, filter.source))
-      && (!filter.disciplines?.length || disciplinesMatch(role.disciplines, filter.disciplines))
-      && (!filter.seasons?.length || includesFolded([role.season], filter.seasons))
-      && (!filter.educationLevels?.length || role.education.evidence === 'unspecified' || includesFolded(role.education.levels, filter.educationLevels))
-      && (!filter.workModes?.length || includesFolded(role.workModes, filter.workModes))
-      && (!filter.hasCompensation || Boolean(role.compensation?.raw?.trim()))
-      && (!filter.day || materializedReleaseDay(role, filter.dayZone) === filter.day)
-      && (!filter.locations?.length || filter.locations.some((location) => folded((role.locations ?? role.location.split(/\s*(?:;|\||\n)\s*/)).join(' ')).includes(folded(location)))));
+    const roles = details.roles.filter((role) => catalogProjectionRoleMatches(role, filter));
     if (!roles.length) return [];
     return [{
       group: {

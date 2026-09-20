@@ -26,6 +26,7 @@ describe("catalog presentation hardening", () => {
     expect(compactCatalogTitle("Market Analysis Intern - Computer science/data analytics")).toBe("Market Analysis Intern - Computer science/data analytics");
     expect(compactCatalogTitle("Data & AI Internship Program - She/He/They with an unusually long eligibility suffix")).toMatch(/…$/u);
     expect(compactCatalogLocation(["Katowice, Silesia Business Park Bldg C, Poland", "Remote — US"])).toBe("Katowice, Poland");
+    expect(compactCatalogLocation(["China, Beijing, China"])).toBe("Beijing, China");
     expect(compactCatalogLocation(["US-IL-Niles"])).toBe("US-IL-Niles");
   });
 

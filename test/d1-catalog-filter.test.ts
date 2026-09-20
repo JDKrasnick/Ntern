@@ -97,6 +97,44 @@ describe('D1 filtered catalog projection', () => {
     }
   });
 
+  it('reads a bounded release-day index from projected roles instead of catalog job rows', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (
+        pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL,
+        catalog_sort_key TEXT, PRIMARY KEY (pk, sk)
+      )
+    `);
+    const at = (jobId: string, visibleAt: string) => ({
+      ...job(jobId, 'Software Engineering Intern'),
+      firstSeenAt: visibleAt,
+      catalogVisibleAt: visibleAt,
+      lastSeenAt: visibleAt,
+    });
+    const queries: string[] = [];
+    const store = new D1InternshipStore(sqliteD1(database, (query) => queries.push(query)));
+    try {
+      await store.putCatalogProjection(
+        groupCatalogJobs([
+          at('august', '2026-08-25T12:00:00.000Z'),
+          at('september', '2026-09-18T01:00:00.000Z'),
+          at('october', '2026-10-04T12:00:00.000Z'),
+        ]).map(catalogGroupDetails),
+        new Date().toISOString(),
+      );
+      queries.length = 0;
+
+      await expect(store.listCatalogProjectionRoles(
+        { status: 'open', educationLevel: 'undergraduate' },
+        { from: '2026-09-01', to: '2026-09-30' },
+      )).resolves.toMatchObject([{ jobId: 'september' }]);
+      expect(queries.some((query) => query.includes("json_each(projection.value, '$.roles')"))).toBe(true);
+      expect(queries.some((query) => query.includes("kind = 'internship'"))).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
   it('still rejects projections older than the bounded recovery window', async () => {
     vi.useFakeTimers();
     const now = new Date('2026-09-15T05:30:00.000Z');
