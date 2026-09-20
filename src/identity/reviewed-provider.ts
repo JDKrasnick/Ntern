@@ -1,7 +1,7 @@
 import type { ProviderPostingEvidence } from '../types.js';
 import { hostMatchesAllowlist, reviewedGreenhouseSources } from '../sources/greenhouse-config.js';
 import { reviewedLeverSources } from '../sources/lever-config.js';
-import { providerPostingReference, type ProviderPostingReference } from './posting.js';
+import { customGreenhouseReference, providerPostingReference, type ProviderPostingReference } from './posting.js';
 
 export interface ReviewedProviderReference extends ProviderPostingReference {
   provider: 'greenhouse' | 'lever';
@@ -59,12 +59,16 @@ export type ReviewedProviderUrlResult =
 export function reviewedProviderUrlReference(input: string): ReviewedProviderUrlResult {
   let url: URL;
   try { url = new URL(input); } catch { return { outcome: 'none' }; }
+  // The reviewed registry deliberately records exact public hosts, including
+  // `www` where an employer's application flow uses it. Preserve that form
+  // for the ownership gate, then normalize only for route-shape matching.
+  const inputHost = url.hostname.toLowerCase();
   const syntactic = providerPostingReference(input);
   if (syntactic.provider === 'greenhouse' && syntactic.tenant && syntactic.postingId) {
     const source = reviewedGreenhouseSources.find((candidate) => candidate.boardToken.toLowerCase() === syntactic.tenant);
     return source ? { outcome: 'match', reference: {
       ...syntactic, provider: 'greenhouse', tenant: syntactic.tenant, postingId: syntactic.postingId,
-      sourceId: source.id, customHost: false,
+      sourceId: source.id, customHost: !hostMatchesAllowlist(inputHost, ['greenhouse.io']),
     } } : { outcome: 'none' };
   }
   if (syntactic.provider === 'lever' && syntactic.tenant && syntactic.postingId) {
@@ -75,14 +79,17 @@ export function reviewedProviderUrlReference(input: string): ReviewedProviderUrl
     } } : { outcome: 'none' };
   }
 
-  const host = url.hostname.toLowerCase().replace(/^www\./, '');
+  const host = inputHost.replace(/^www\./, '');
   const sources = reviewedGreenhouseSources.filter((source) =>
     [...source.allowedInitialHosts, ...source.allowedFinalHosts]
       .filter((allowed) => !hostMatchesAllowlist(allowed, ['greenhouse.io']))
-      .some((allowed) => hostMatchesAllowlist(host, [allowed])),
+      .some((allowed) => hostMatchesAllowlist(inputHost, [allowed])),
   );
   if (sources.length !== 1) return { outcome: 'none' };
-  const id = customGreenhousePostingId(url);
+  const candidate = customGreenhouseReference(url, host);
+  const id = candidate?.postingId
+    ? { postingId: candidate.postingId }
+    : customGreenhousePostingId(url);
   if (id.conflict) return { outcome: 'conflict', reason: 'custom Greenhouse URL contains disagreeing public IDs' };
   if (!id.postingId) return { outcome: 'none' };
   const source = sources[0]!;

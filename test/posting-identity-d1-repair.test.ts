@@ -225,6 +225,122 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it('merges SmartRecruiters presentation variants through the scoped provider identity', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const bareUrl = 'https://jobs.smartrecruiters.com/Acme/744000139649345';
+    const sluggedUrl = `${bareUrl}-software-engineer-intern`;
+    await store.putInternship(job('smartrecruiters-old', bareUrl, '2026-08-01T00:00:00.000Z', [
+      occurrence('community-list', 'smartrecruiters-old', bareUrl),
+    ]));
+    await store.putInternship(job('smartrecruiters-new', sluggedUrl, '2026-08-02T00:00:00.000Z', [
+      occurrence('community-list', 'smartrecruiters-new', sluggedUrl),
+    ]));
+
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({
+      duplicateGroups: 1, duplicateJobs: 1, eligibleDuplicateGroups: 1,
+      unresolvedDuplicateGroups: 0, conflicts: [], presentationDisagreements: [],
+    });
+    expect(dry.samples).toEqual([expect.objectContaining({
+      canonicalJobId: 'smartrecruiters-old', duplicateJobIds: ['smartrecruiters-new'],
+      providerIdentity: 'smartrecruiters:acme:744000139649345',
+    })]);
+
+    const applied = await runPostingIdentityRepair(db, {
+      apply: true, scope: 'identity', repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    expect(applied).toMatchObject({ duplicateJobs: 1 });
+    expect(await store.getJob('smartrecruiters-old')).toMatchObject({
+      jobId: 'smartrecruiters-old',
+      postingIdentity: {
+        provider: 'smartrecruiters', tenant: 'acme', providerPostingId: '744000139649345',
+      },
+      sourceReferences: expect.arrayContaining([
+        expect.objectContaining({ externalId: 'smartrecruiters-old' }),
+        expect.objectContaining({ externalId: 'smartrecruiters-new' }),
+      ]),
+    });
+    expect(await store.getJob('smartrecruiters-new')).toMatchObject({ jobId: 'smartrecruiters-old' });
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
+      expectedChanges: 0, duplicateGroups: 0, duplicateJobs: 0, conflicts: [],
+    });
+    sqlite.close();
+  });
+
+  it('confirms real expanded-family roles while keeping malformed roles unconfirmed', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const cases = [
+      ['eu-greenhouse', 'https://job-boards.eu.greenhouse.io/imc/jobs/4667854101', 'https://job-boards.eu.greenhouse.io/imc/jobs/software-engineer'],
+      ['smartrecruiters', 'https://jobs.smartrecruiters.com/ALTEN/744000142128541-ingenieur-developpeur-frontend-h-f-', 'https://jobs.smartrecruiters.com/ALTEN/software-engineer-intern'],
+      ['successfactors', 'https://career4.successfactors.com/careers?career_ns=job_listing&company=colgate&career_job_req_id=169295', 'https://career4.successfactors.com/careers?career_ns=job_listing&career_job_req_id=169295'],
+      ['workable', 'https://apply.workable.com/activate-interactive-pte-ltd/j/1AD6CF565A/', 'https://apply.workable.com/activate-interactive-pte-ltd/'],
+      ['workable-apply', 'https://apply.workable.com/connectprep/j/D1C67258C0/apply', 'https://apply.workable.com/connectprep/j/software-engineer/apply'],
+      ['microsoft', 'https://apply.careers.microsoft.com/careers/job/1970393556862170', 'https://apply.careers.microsoft.com/careers/job/software-engineer'],
+      ['rippling', 'https://ats.rippling.com/4ag/jobs/71d97d10-87f2-4f53-88b7-97f27f392d24', 'https://ats.rippling.com/4ag/jobs/--------'],
+      ['rippling-locale', 'https://ats.rippling.com/en-GB/greengas/jobs/b2938290-cc66-4f54-9888-bbe286c1d9b6', 'https://ats.rippling.com/en-GB/greengas/jobs/software-engineer'],
+      ['eightfold', 'https://bostonscientific.eightfold.ai/careers/job/563602813483103', 'https://bostonscientific.eightfold.ai/careers'],
+      ['paylocity', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4341435', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/software-engineer'],
+      ['jobvite', 'https://jobs.jobvite.com/aarete/job/oBXLAfwD', 'https://jobs.jobvite.com/aarete/job/'],
+      ['amazon', 'https://amazon.jobs/en/jobs/10394156/2026-fall-applied-science-internship', 'https://amazon.jobs/en/jobs/10394156software-engineer'],
+      ['amazon-apply', 'https://www.amazon.jobs/jobs/10418355/apply', 'https://www.amazon.jobs/jobs/10418355software-engineer/apply'],
+      ['google', 'https://www.google.com/about/careers/applications/jobs/results/100028133205254854', 'https://www.google.com/about/careers/applications/jobs/results/software-engineer'],
+      ['custom-icims', 'https://careers.amd.com/jobs/90743?icims=1', 'https://careers.amd.com/jobs/software-engineer'],
+      ['custom-successfactors', 'https://jobs.l3harris.com/job/Bristol/Software-Engineering-Intern-PA-19007/1428452600/?ats=successfactors', 'https://jobs.l3harris.com/job/Bristol/software-engineer'],
+      ['myworkdaysite', 'https://wd1.myworkdaysite.com/recruiting/imeg/Imeg_Careers/job/Chicago-IL/Electrical-Engineering-Intern_R-16476', 'https://wd1.myworkdaysite.com/Imeg_Careers/openings/Electrical-Engineering-Intern_R-16476'],
+      ['taleo', 'https://textron.taleo.net/careersection/textron/jobdetail.ftl?job=342550', 'https://textron.taleo.net/careersection/textron/moresearch.ftl?job=342550'],
+      ['united', 'https://careers.united.com/us/en/job/WHQ00026618', 'https://careers.united.com/us/en/search-results?job=WHQ00026618'],
+      ['sig', 'https://careers.sig.com/intern-co-op-technology/jobs/10837', 'https://careers.sig.com/intern-co-op-technology/jobs/software-engineer'],
+      ['intuit', 'https://jobs.intuit.com/job/mountain-view/software-engineer-intern/27595/100620927536', 'https://jobs.intuit.com/job/mountain-view/software-engineer-intern/27595'],
+      ['eu-lever', 'https://jobs.eu.lever.co/quantinuum/46b3f32c-a2ad-4d4d-bff6-b1bbebf3e382/apply', 'https://jobs.eu.lever.co/quantinuum/software-engineer/apply'],
+      ['apple', 'https://jobs.apple.com/en-us/details/200664323/software-phd-internships', 'https://jobs.apple.com/en-us/details/software-intern'],
+      ['bamboohr', 'https://lunaroutpost.bamboohr.com/careers/390/', 'https://lunaroutpost.bamboohr.com/careers/'],
+      ['adp', 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=2cc1abe5-fdf4-41ed-b82d-9b34c651ef79&jobId=574462', 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?jobId=574462'],
+      ['avature', 'https://pomerleau.avature.net/en_US/Jobs/JobDetail/3476', 'https://pomerleau.avature.net/en_US/Jobs/JobDetail/software-engineer'],
+      ['employer-route', 'https://career.mlp.com/careers/job/755957778821', 'https://career.mlp.com/careers/search?job=755957778821'],
+      ['pinpoint', 'https://impulsespace.pinpointhq.com/en/postings/2b03cd5d-4a58-48a0-81f4-ea8c8c7bcd2a', 'https://impulsespace.pinpointhq.com/en/postings/software-engineer'],
+      ['applytojob', 'https://neboagency.applytojob.com/apply/AFMqe9Jb7b/Web-Development-Intern', 'https://neboagency.applytojob.com/apply/'],
+    ] as const;
+    for (const [family, goodUrl, badUrl] of cases) {
+      await store.putInternship(job(`${family}-good`, goodUrl, '2026-09-18T00:00:00.000Z', [
+        occurrence('community-list', `${family}-good`, goodUrl),
+      ]));
+      await store.putInternship(job(`${family}-bad`, badUrl, '2026-09-18T00:00:00.000Z', [
+        occurrence('community-list', `${family}-bad`, badUrl),
+      ]));
+    }
+
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({ duplicateGroups: 0, duplicateJobs: 0, conflicts: [] });
+    await runPostingIdentityRepair(db, {
+      apply: true, scope: 'identity', repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    const occurrenceDry = await runPostingIdentityRepair(db, { scope: 'occurrences' });
+    expect(occurrenceDry.conflicts).toEqual([]);
+    await runPostingIdentityRepair(db, {
+      apply: true, scope: 'occurrences', repairToken: occurrenceDry.repairToken,
+      expectedChanges: occurrenceDry.expectedChanges, expectedDuplicateJobs: occurrenceDry.duplicateJobs,
+    });
+
+    for (const [family] of cases) {
+      expect(await store.getJob(`${family}-good`)).toMatchObject({
+        postingIdentityStatus: 'confirmed',
+        sourceReferences: [expect.objectContaining({
+          postingIdentityDecision: expect.objectContaining({ status: 'confirmed', evidenceKind: 'immutable-provider-id' }),
+        })],
+      });
+      expect(await store.getJob(`${family}-bad`)).toMatchObject({
+        postingIdentityStatus: 'unconfirmed',
+        sourceReferences: [expect.objectContaining({
+          postingIdentityDecision: expect.objectContaining({ status: 'unconfirmed' }),
+        })],
+      });
+    }
+    expect(await runPostingIdentityRepair(db)).toMatchObject({ expectedChanges: 0, conflicts: [] });
+    sqlite.close();
+  });
+
   it('finds historical provider duplicates while keeping bad duplicate signals and regular postings separate', async () => {
     const { db } = await historicalDatabase();
     const first = await runPostingIdentityRepair(db); const second = await runPostingIdentityRepair(db);

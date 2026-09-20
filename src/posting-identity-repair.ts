@@ -1407,9 +1407,11 @@ export async function runPostingIdentityRepair(db: D1Database, options: {
   ];
   const results = await db.batch(statements);
   const guarded = results[0]?.meta.changes === 1;
-  const changed = results.slice(1).reduce((total, item) => total + item.meta.changes, 0);
   await db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND kind IN ('${STAGE_KIND}', 'posting-identity-repair-guard')`).bind(stagePk).run();
-  if (!guarded || changed !== plan.expectedChanges) throw new Error('Posting identity repair conflict; no guarded changes were accepted');
+  // The guard atomically verifies the exact staged row count and every before-image.
+  // D1's per-statement `meta.changes` can include auxiliary table work, so its sum
+  // is not the number of logical staged changes and cannot safely validate apply.
+  if (!guarded) throw new Error('Posting identity repair conflict; no guarded changes were accepted');
   return { ...report, applied: true, projectionRefreshRequired: true };
 }
 
