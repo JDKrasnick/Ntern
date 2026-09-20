@@ -793,6 +793,7 @@ export type RoleMetadataField =
   | 'compensation'
   | 'housing'
   | 'education'
+  | 'season'
   | 'graduation-window'
   | 'locations'
   | 'work-mode'
@@ -826,6 +827,8 @@ export interface RoleMetadataEvidence {
   compensationRanges?: CompensationRange[];
   housing?: HousingDetail[];
   education?: EducationAudience;
+  /** A named term and year stated by the exact employer posting. */
+  season?: ProvenancedValue<Required<Pick<SeasonIdentity, 'term' | 'year'>>>;
   locations?: InternshipLocation[];
   workMode?: ProvenancedValue<Exclude<WorkMode, 'unspecified'>>;
   applicationDeadline?: ProvenancedValue<ApplicationDeadline>;
@@ -859,6 +862,7 @@ export interface ReconciledRoleMetadata {
   compensationRanges?: CompensationRange[];
   housing?: HousingDetail[];
   education?: EducationAudience;
+  season?: ProvenancedValue<Required<Pick<SeasonIdentity, 'term' | 'year'>>>;
   locations?: InternshipLocation[];
   workMode?: ProvenancedValue<Exclude<WorkMode, 'unspecified'>>;
   applicationDeadline?: ProvenancedValue<ApplicationDeadline>;
