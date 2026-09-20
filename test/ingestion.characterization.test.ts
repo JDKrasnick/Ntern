@@ -135,6 +135,7 @@ describe('neutral boundary parity', () => {
     externalId: expect.any(String) as unknown as string,
     provenance: 'official-ats' as const,
     technical: true,
+    technicalScope: 'legacy' as const,
     providerEvidence: expect.any(Object) as unknown as object,
     internshipIdentity: expect.any(Object) as unknown as object,
     employerEvidence: expect.any(Object) as unknown as object,

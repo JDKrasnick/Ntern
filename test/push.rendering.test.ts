@@ -25,7 +25,7 @@ describe('rendered native job alerts', () => {
       role(1, 'Software Engineering Intern', 'New York, NY'),
       role(2, 'Machine Learning Intern', 'Remote (US)'),
       role(3, 'Backend Engineering Intern', 'Austin, TX'),
-      role(4, 'Platform Engineering Intern', 'Seattle, WA'),
+      role(4, 'Platform Software Engineering Intern', 'Seattle, WA'),
     ])], jobs).poll();
     const users = new MemoryUserStore();
     await users.putPreferences({ userId: 'student', filter: {}, alertsEnabled: true, onboardingComplete: true, updatedAt: '2026-07-19T00:00:00.000Z' });

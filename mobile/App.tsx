@@ -306,11 +306,6 @@ const nextApplicationStatuses: Record<string, Application["status"]> = {
 };
 const categories = ["ai-ml", "grad", "swe", "quant", "product", "design", "general-engineering", "mechanical", "electrical", "aerospace", "civil", "chemical-materials", "industrial-manufacturing", "biomedical", "environmental-energy", "systems-test", "technical-operations"];
 const categoryLabel = (category: string) => category.replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-const employerCategoryLabels: Record<EmployerCategory, string> = {
-  faang: "FAANG",
-  startup: "Startups",
-  normal: "Normal",
-};
 const educationLevelChoices: Array<{ value: EducationLevel; label: string; description: string }> = [
   { value: "undergraduate", label: "Undergraduate", description: "Bachelor's, associate, or four-year degree roles." },
   { value: "masters", label: "Master's", description: "Master's programs and graduate-student roles." },
