@@ -237,5 +237,6 @@ describe('grouped catalog API', () => {
     expect(day.groups.flatMap((group) => group.roleIds).sort()).toEqual(['afternoon', 'next-utc-day']);
     const emptyDay = body<{ groups: unknown[] }>(await handler(event('GET', '/catalog', { day: '2026-09-30' })));
     expect(emptyDay.groups).toEqual([]);
+    expect(catalogReads).toBe(0);
   });
 });

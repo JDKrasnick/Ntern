@@ -170,6 +170,13 @@ function catalogProjectionRoleQuery(filter: CatalogGroupFilter) {
     clauses.push(`(${patterns.map(() => `lower(${searchableLocations}) LIKE ? ESCAPE '\\'`).join(' OR ')})`);
     values.push(...patterns);
   }
+  if (filter.day) {
+    // The stored day is UTC for observed roles. Any IANA-zone reinterpretation
+    // can move it by at most one date; the exact role filter below narrows this
+    // safe SQL superset to the reader's requested day.
+    clauses.push("json_extract(role.value, '$.releaseDay') BETWEEN date(?, '-1 day') AND date(?, '+1 day')");
+    values.push(filter.day, filter.day);
+  }
   return { clauses, values };
 }
 
