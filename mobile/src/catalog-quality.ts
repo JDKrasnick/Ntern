@@ -24,7 +24,17 @@ export function compactCatalogLocation(values: unknown, fallback?: unknown): str
   const parts = primary.split(",").map((part) => part.trim()).filter(Boolean);
   // A postal address often reads "City, building/address, country". Keeping
   // the ends preserves the useful geographic answer without the address noise.
-  if (parts.length >= 3) return boundedCatalogText(`${parts[0]}, ${parts.at(-1)}`, 64);
+  if (parts.length >= 3) {
+    const first = parts[0]!;
+    const last = parts.at(-1)!;
+    // Some ATS feeds prefix the country before the city ("China, Beijing,
+    // China"). Treat the repeated country as an envelope, not as a city, so
+    // compact cards do not collapse into "China, China".
+    if (first.localeCompare(last, undefined, { sensitivity: "accent" }) === 0) {
+      return boundedCatalogText(`${parts[1]}, ${last}`, 64);
+    }
+    return boundedCatalogText(`${first}, ${last}`, 64);
+  }
   return boundedCatalogText(primary, 64);
 }
 

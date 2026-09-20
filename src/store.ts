@@ -9,7 +9,7 @@ import type { ApplicationSession } from './application-automation.js';
 import type { ReviewedLeverSource } from './sources/lever-config.js';
 import type { LeverOwnershipEvidence } from './sources/lever-evidence.js';
 import type { LeverCandidateProbeResult } from './sources/lever-probe.js';
-import { filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogProjectionPage, type CatalogRelease } from './catalog-groups.js';
+import { filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from './catalog-groups.js';
 import { alertEligible, catalogEligible } from './catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from './identity/projection.js';
 import type { DestinationVerificationRequest } from './destination-verification.js';
@@ -97,6 +97,8 @@ export interface InternshipStore {
   listCatalogProjection?(cursor?: string, limit?: number): Promise<CatalogProjectionPage | undefined>;
   /** Uses the backing store's query engine to avoid sequential projection scans for filtered catalog pages. */
   listCatalogProjectionFiltered?(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined>;
+  /** Reads only matching projected roles for release-day indexes, bounded to the requested calendar range. */
+  listCatalogProjectionRoles?(filter: CatalogGroupFilter, range: { from?: string; to?: string }): Promise<CatalogGroupRole[] | undefined>;
   getCatalogProjectionGroup?(groupId: string): Promise<CatalogGroupDetails | undefined>;
   listLeverAdmissions?(): Promise<LeverAdmission[]>;
   putLeverAdmission?(admission: LeverAdmission): Promise<void>;
@@ -279,6 +281,10 @@ export class MemoryInternshipStore implements InternshipStore {
     const matching = filterCatalogGroupDetails(this.catalogProjection.groups, filter);
     const groups = matching.slice(offset, offset + limit);
     return { groups: structuredClone(groups), ...(offset + groups.length < matching.length ? { cursor: String(offset + groups.length) } : {}) };
+  }
+  async listCatalogProjectionRoles(filter: CatalogGroupFilter) {
+    if (!this.catalogProjection) return undefined;
+    return structuredClone(filterCatalogGroupDetails(this.catalogProjection.groups, filter).flatMap((details) => details.roles));
   }
   async getCatalogProjectionGroup(groupId: string) {
     const value = this.catalogProjection?.groups.find((group) => group.group.groupId === groupId);

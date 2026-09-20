@@ -6,7 +6,7 @@ import { employerCategory } from '../src/core/employers.js';
 import type { ApplicationSession } from '../src/application-automation.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
-import { disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
+import { catalogProjectionRoleMatches, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
@@ -93,6 +93,84 @@ function likePattern(value: string): string {
 
 function placeholders(values: readonly unknown[]): string {
   return values.map(() => '?').join(', ');
+}
+
+function catalogProjectionRoleQuery(filter: CatalogGroupFilter) {
+  const clauses = ["json_extract(role.value, '$.open') = ?"];
+  const values: unknown[] = [filter.status === 'closed' ? 0 : 1];
+  if (filter.query?.trim()) {
+    clauses.push(`lower(
+      coalesce(json_extract(role.value, '$.company'), '') || ' ' ||
+      coalesce(json_extract(role.value, '$.title'), '') || ' ' ||
+      coalesce(json_extract(role.value, '$.location'), '') || ' ' ||
+      coalesce(json_extract(role.value, '$.season'), '')
+    ) LIKE ? ESCAPE '\\'`);
+    values.push(likePattern(filter.query.trim()));
+  }
+  if (filter.source && filter.source !== 'all') {
+    const credibility = filter.source === 'direct'
+      ? ['official', 'corroborated']
+      : filter.source === 'community'
+        ? ['community', 'corroborated']
+        : ['corroborated'];
+    clauses.push(`json_extract(role.value, '$.sourceCredibility') IN (${placeholders(credibility)})`);
+    values.push(...credibility);
+  }
+  if (filter.employerCategories?.length) {
+    clauses.push(`json_extract(role.value, '$.employerCategory') IN (${placeholders(filter.employerCategories)})`);
+    values.push(...filter.employerCategories);
+  }
+  if (filter.hideUsCitizenshipRequired) clauses.push("coalesce(json_extract(role.value, '$.requiresUsCitizenship'), 0) = 0");
+  // Mirrors educationExcludesLevel: a stated audience that omits the reader's
+  // level hides the role, and the legacy badge only ever rules out an
+  // undergraduate because it does not say which graduate degree it means.
+  if (filter.educationLevel) {
+    clauses.push(`NOT (
+      (coalesce(json_extract(role.value, '$.education.evidence'), 'unspecified') = 'explicit'
+        AND json_array_length(coalesce(json_extract(role.value, '$.education.levels'), '[]')) > 0
+        AND NOT EXISTS (SELECT 1 FROM json_each(role.value, '$.education.levels') AS level WHERE lower(level.value) = ?))
+      OR (coalesce(json_extract(role.value, '$.advancedDegreeRequired'), 0) = 1 AND ? = 'undergraduate')
+    )`);
+    values.push(filter.educationLevel.toLowerCase(), filter.educationLevel.toLowerCase());
+  }
+  if (filter.postingIdentityConfirmedOnly) clauses.push("coalesce(json_extract(role.value, '$.postingIdentityStatus'), 'legacy') <> 'unconfirmed'");
+  if (filter.hasCompensation) clauses.push("trim(coalesce(json_extract(role.value, '$.compensation.raw'), '')) <> ''");
+  const exactArrayFilter = (path: string, requested: string[]) => {
+    const normalized = requested.map((value) => value.toLowerCase());
+    clauses.push(`EXISTS (SELECT 1 FROM json_each(role.value, '${path}') AS item WHERE lower(item.value) IN (${placeholders(normalized)}))`);
+    values.push(...normalized);
+  };
+  if (filter.disciplines?.length) {
+    const expanded = [...new Set(filter.disciplines.flatMap(disciplineSearchVariants).map((value) => value.toLowerCase()))];
+    exactArrayFilter('$.disciplines', expanded);
+  }
+  if (filter.seasons?.length) {
+    const normalized = filter.seasons.map((value) => value.toLowerCase());
+    clauses.push(`lower(json_extract(role.value, '$.season')) IN (${placeholders(normalized)})`);
+    values.push(...normalized);
+  }
+  if (filter.educationLevels?.length) {
+    const normalized = filter.educationLevels.map((value) => value.toLowerCase());
+    clauses.push(`(
+      json_extract(role.value, '$.education.evidence') = 'unspecified'
+      OR EXISTS (SELECT 1 FROM json_each(role.value, '$.education.levels') AS level WHERE lower(level.value) IN (${placeholders(normalized)}))
+    )`);
+    values.push(...normalized);
+  }
+  if (filter.workModes?.length) exactArrayFilter('$.workModes', filter.workModes);
+  if (filter.locations?.length) {
+    const patterns = filter.locations.map(likePattern);
+    const searchableLocations = `CASE
+      WHEN json_type(role.value, '$.locations') = 'array' THEN coalesce((
+        SELECT group_concat(location.value, ' ')
+        FROM json_each(role.value, '$.locations') AS location
+      ), '')
+      ELSE coalesce(json_extract(role.value, '$.location'), '')
+    END`;
+    clauses.push(`(${patterns.map(() => `lower(${searchableLocations}) LIKE ? ESCAPE '\\'`).join(' OR ')})`);
+    values.push(...patterns);
+  }
+  return { clauses, values };
 }
 
 export class D1InternshipStore implements InternshipStore {
@@ -779,80 +857,7 @@ export class D1InternshipStore implements InternshipStore {
     const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
     if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
     const offset = cursorOffset(cursor);
-    const roleClauses = ["json_extract(role.value, '$.open') = ?"];
-    const values: unknown[] = [filter.status === 'closed' ? 0 : 1];
-    if (filter.query?.trim()) {
-      roleClauses.push(`lower(
-        coalesce(json_extract(role.value, '$.company'), '') || ' ' ||
-        coalesce(json_extract(role.value, '$.title'), '') || ' ' ||
-        coalesce(json_extract(role.value, '$.location'), '') || ' ' ||
-        coalesce(json_extract(role.value, '$.season'), '')
-      ) LIKE ? ESCAPE '\\'`);
-      values.push(likePattern(filter.query.trim()));
-    }
-    if (filter.source && filter.source !== 'all') {
-      const credibility = filter.source === 'direct'
-        ? ['official', 'corroborated']
-        : filter.source === 'community'
-          ? ['community', 'corroborated']
-          : ['corroborated'];
-      roleClauses.push(`json_extract(role.value, '$.sourceCredibility') IN (${placeholders(credibility)})`);
-      values.push(...credibility);
-    }
-    if (filter.employerCategories?.length) {
-      roleClauses.push(`json_extract(role.value, '$.employerCategory') IN (${placeholders(filter.employerCategories)})`);
-      values.push(...filter.employerCategories);
-    }
-    if (filter.hideUsCitizenshipRequired) roleClauses.push("coalesce(json_extract(role.value, '$.requiresUsCitizenship'), 0) = 0");
-    // Mirrors educationExcludesLevel: a stated audience that omits the reader's
-    // level hides the role, and the legacy badge only ever rules out an
-    // undergraduate because it does not say which graduate degree it means.
-    if (filter.educationLevel) {
-      roleClauses.push(`NOT (
-        (coalesce(json_extract(role.value, '$.education.evidence'), 'unspecified') = 'explicit'
-          AND json_array_length(coalesce(json_extract(role.value, '$.education.levels'), '[]')) > 0
-          AND NOT EXISTS (SELECT 1 FROM json_each(role.value, '$.education.levels') AS level WHERE lower(level.value) = ?))
-        OR (coalesce(json_extract(role.value, '$.advancedDegreeRequired'), 0) = 1 AND ? = 'undergraduate')
-      )`);
-      values.push(filter.educationLevel.toLowerCase(), filter.educationLevel.toLowerCase());
-    }
-    if (filter.postingIdentityConfirmedOnly) roleClauses.push("coalesce(json_extract(role.value, '$.postingIdentityStatus'), 'legacy') <> 'unconfirmed'");
-    if (filter.hasCompensation) roleClauses.push("trim(coalesce(json_extract(role.value, '$.compensation.raw'), '')) <> ''");
-    const exactArrayFilter = (path: string, requested: string[]) => {
-      const normalized = requested.map((value) => value.toLowerCase());
-      roleClauses.push(`EXISTS (SELECT 1 FROM json_each(role.value, '${path}') AS item WHERE lower(item.value) IN (${placeholders(normalized)}))`);
-      values.push(...normalized);
-    };
-    if (filter.disciplines?.length) {
-      const expanded = [...new Set(filter.disciplines.flatMap(disciplineSearchVariants).map((value) => value.toLowerCase()))];
-      exactArrayFilter('$.disciplines', expanded);
-    }
-    if (filter.seasons?.length) {
-      const normalized = filter.seasons.map((value) => value.toLowerCase());
-      roleClauses.push(`lower(json_extract(role.value, '$.season')) IN (${placeholders(normalized)})`);
-      values.push(...normalized);
-    }
-    if (filter.educationLevels?.length) {
-      const normalized = filter.educationLevels.map((value) => value.toLowerCase());
-      roleClauses.push(`(
-        json_extract(role.value, '$.education.evidence') = 'unspecified'
-        OR EXISTS (SELECT 1 FROM json_each(role.value, '$.education.levels') AS level WHERE lower(level.value) IN (${placeholders(normalized)}))
-      )`);
-      values.push(...normalized);
-    }
-    if (filter.workModes?.length) exactArrayFilter('$.workModes', filter.workModes);
-    if (filter.locations?.length) {
-      const patterns = filter.locations.map(likePattern);
-      const searchableLocations = `CASE
-        WHEN json_type(role.value, '$.locations') = 'array' THEN coalesce((
-          SELECT group_concat(location.value, ' ')
-          FROM json_each(role.value, '$.locations') AS location
-        ), '')
-        ELSE coalesce(json_extract(role.value, '$.location'), '')
-      END`;
-      roleClauses.push(`(${patterns.map(() => `lower(${searchableLocations}) LIKE ? ESCAPE '\\'`).join(' OR ')})`);
-      values.push(...patterns);
-    }
+    const { clauses: roleClauses, values } = catalogProjectionRoleQuery(filter);
     const rows = await this.db.prepare(`
       SELECT projection.value
       FROM catalog_items AS projection
@@ -868,6 +873,27 @@ export class D1InternshipStore implements InternshipStore {
     const candidates = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
     const groups = filterCatalogGroupDetails(candidates, filter);
     return { groups, ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}) };
+  }
+  async listCatalogProjectionRoles(filter: CatalogGroupFilter, range: { from?: string; to?: string }): Promise<CatalogGroupRole[] | undefined> {
+    const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
+    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
+    const { clauses, values } = catalogProjectionRoleQuery(filter);
+    clauses.push("json_extract(role.value, '$.releaseDay') IS NOT NULL");
+    // Observed instants can cross one calendar boundary in the reader's zone.
+    // The expanded SQL window stays a safe superset; the handler applies the
+    // exact IANA-zone day after parsing these small role rows.
+    if (range.from) { clauses.push("json_extract(role.value, '$.releaseDay') >= date(?, '-1 day')"); values.push(range.from); }
+    if (range.to) { clauses.push("json_extract(role.value, '$.releaseDay') <= date(?, '+1 day')"); values.push(range.to); }
+    const rows = await this.db.prepare(`
+      SELECT role.value
+      FROM catalog_items AS projection, json_each(projection.value, '$.roles') AS role
+      WHERE projection.pk = ?
+        AND projection.kind = 'catalog-projection'
+        AND ${clauses.join('\n        AND ')}
+    `).bind(`CATALOG_PROJECTION#${pointer.version}`, ...values).all<JsonRow>();
+    return rows.results
+      .map((row) => JSON.parse(row.value) as CatalogGroupRole)
+      .filter((role) => catalogProjectionRoleMatches(role, filter));
   }
   async getCatalogProjectionGroup(groupId: string): Promise<CatalogGroupDetails | undefined> {
     const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');

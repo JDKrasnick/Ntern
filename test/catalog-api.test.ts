@@ -203,11 +203,14 @@ describe('grouped catalog API', () => {
     await at('morning', '2026-09-18T06:00:00.000Z');
     await at('afternoon', '2026-09-18T20:00:00.000Z');
     await at('next-utc-day', '2026-09-19T02:00:00.000Z');
-    // A projection exists, and a day-filtered request must still read the catalog.
+    // A projection exists, so the day index must not rebuild the full catalog.
     await jobs.putCatalogProjection(
       groupCatalogJobs(await jobs.listCatalog()).map(catalogGroupDetails),
       new Date().toISOString(),
     );
+    const listCatalog = jobs.listCatalog.bind(jobs);
+    let catalogReads = 0;
+    jobs.listCatalog = async () => { catalogReads += 1; return listCatalog(); };
     const handler = createApiHandler({ jobs, users: new MemoryUserStore() });
     type Index = { zone: string; days: Array<{ day: string; roles: number; employers: number }> };
     const range = { from: '2026-09-01', to: '2026-09-30' };
@@ -228,6 +231,7 @@ describe('grouped catalog API', () => {
     ]);
     expect(body<Index>(await handler(event('GET', '/catalog/days', { ...range, dayZone: 'Not/AZone' }))).zone).toBe('UTC');
     expect(await handler(event('GET', '/catalog/days', { from: '2026-09-31' }))).toMatchObject({ statusCode: 400 });
+    expect(catalogReads).toBe(0);
 
     const day = body<{ groups: Array<{ roleIds: string[] }> }>(await handler(event('GET', '/catalog', { day: '2026-09-18', dayZone: 'America/Los_Angeles' })));
     expect(day.groups.flatMap((group) => group.roleIds).sort()).toEqual(['afternoon', 'next-utc-day']);

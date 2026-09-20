@@ -6,7 +6,7 @@ import { EmployerIntegrationRegistry } from './providers.js';
 import { assistanceAvailability } from './application-assistance.js';
 import { createApplicationSession, transitionApplicationSession, type ApplicationFieldDraft, type ApplicationSession, type ApplicationSessionEvent } from './application-automation.js';
 import { companyCoverage } from '../coverage/summary.js';
-import { catalogGroupDetails, employerDropDay, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs,
+import { catalogGroupDetails, employerDropDay, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs, materializedReleaseDay,
   type CatalogGroupDetails, type CatalogGroupFilter } from './catalog-groups.js';
 import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
@@ -460,19 +460,27 @@ export function createApiHandler(dependencies: ApiDependencies) {
           ...(!identityUnconfirmedPublicationEnabled ? { postingIdentityConfirmedOnly: true } : {}),
         };
         delete filter.day;
-        const groups = filterCatalogGroups(
-          groupCatalogJobs(await completeCatalog(dependencies.jobs, identityUnconfirmedPublicationEnabled), { includeClosed: true }),
-          filter,
-        );
         const days = new Map<string, { day: string; roles: number; employers: Set<string> }>();
-        for (const group of groups) {
-          for (const job of group.jobs) {
-            const day = employerDropDay(job, zone);
-            if (!day || (from && day < from) || (to && day > to)) continue;
-            const entry = days.get(day) ?? { day, roles: 0, employers: new Set<string>() };
-            entry.roles += 1;
-            entry.employers.add(job.company);
-            days.set(day, entry);
+        const count = (day: string | undefined, company: string) => {
+          if (!day || (from && day < from) || (to && day > to)) return;
+          const entry = days.get(day) ?? { day, roles: 0, employers: new Set<string>() };
+          entry.roles += 1;
+          entry.employers.add(company);
+          days.set(day, entry);
+        };
+        const projectedRoles = await dependencies.jobs.listCatalogProjectionRoles?.(filter, { from, to });
+        if (projectedRoles) {
+          for (const role of projectedRoles) {
+            if (!catalogEligible({ admission: deriveCanonicalAdmission(role.sourceReferences, new Date().toISOString()) })) continue;
+            count(materializedReleaseDay(role, zone), role.company);
+          }
+        } else {
+          const groups = filterCatalogGroups(
+            groupCatalogJobs(await completeCatalog(dependencies.jobs, identityUnconfirmedPublicationEnabled), { includeClosed: true }),
+            filter,
+          );
+          for (const group of groups) {
+            for (const job of group.jobs) count(employerDropDay(job, zone), job.company);
           }
         }
         return reply(200, {
