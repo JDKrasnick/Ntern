@@ -32,6 +32,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
+import { catalogGridColumnCount } from "./src/catalog-layout";
 import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
@@ -1223,7 +1224,7 @@ function CatalogTile({
               if (event.nativeEvent.actionName === "hide") handleHide();
             }}
             activeOpacity={0.85}
-            style={[styles.catalogTile, lane && styles.catalogTileLane]}
+            style={[styles.catalogTile, lane ? styles.catalogTileLane : styles.catalogTileGrid]}
             onPress={() => onOpenRole(job)}
           >
             <View style={styles.catalogTileTop}>
@@ -1246,12 +1247,12 @@ function CatalogTile({
                 </View>
               ) : null}
             </View>
-            <Text style={styles.catalogTileCompany} numberOfLines={1}>{display.company}</Text>
-            <Text style={[styles.catalogTileTitle, lane && styles.catalogTileTitleLane]} numberOfLines={2}>{compactTitle}</Text>
-            <Text style={styles.catalogTileMeta} numberOfLines={1}>{compactLocation} · {display.season}</Text>
+            <Text style={[styles.catalogTileCompany, !lane && styles.catalogTileCompanyGrid]} numberOfLines={1}>{display.company}</Text>
+            <Text style={[styles.catalogTileTitle, lane ? styles.catalogTileTitleLane : styles.catalogTileTitleGrid]} numberOfLines={2}>{compactTitle}</Text>
+            <Text style={[styles.catalogTileMeta, !lane && styles.catalogTileMetaGrid]} numberOfLines={1}>{compactLocation} · {display.season}</Text>
             {lane ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
             {!job.open ? <Text style={styles.closedStatus}>Closed</Text> : null}
-            <View style={styles.catalogTileFooter}>
+            <View style={[styles.catalogTileFooter, !lane && styles.catalogTileFooterGrid]}>
               <View style={styles.catalogTileState}>
                 {!inQueue && applicationStatus ? <Text style={styles.catalogTileStateText}>{applicationStatus.toUpperCase()}</Text> : null}
                 {job.postingIdentityStatus === "unconfirmed" ? (
@@ -1365,7 +1366,7 @@ function CatalogGroupTile({
             accessibilityHint="Opens every role in this group"
             onPress={() => onOpenGroup(group)}
             activeOpacity={0.85}
-            style={[styles.catalogTile, lane && styles.catalogTileLane]}
+            style={[styles.catalogTile, lane ? styles.catalogTileLane : styles.catalogTileGrid]}
           >
             <View style={styles.catalogTileTop}>
               <View style={styles.catalogTileTags}>
@@ -1382,9 +1383,9 @@ function CatalogGroupTile({
                 })}
               </View>
             </View>
-            <Text style={styles.catalogTileCompany} numberOfLines={1}>{groupCompany}</Text>
-            <Text style={[styles.catalogTileTitle, lane && styles.catalogTileTitleLane]} numberOfLines={2}>{compactGroupTitle}</Text>
-            <Text style={styles.catalogTileMeta} numberOfLines={1}>
+            <Text style={[styles.catalogTileCompany, !lane && styles.catalogTileCompanyGrid]} numberOfLines={1}>{groupCompany}</Text>
+            <Text style={[styles.catalogTileTitle, lane ? styles.catalogTileTitleLane : styles.catalogTileTitleGrid]} numberOfLines={2}>{compactGroupTitle}</Text>
+            <Text style={[styles.catalogTileMeta, !lane && styles.catalogTileMetaGrid]} numberOfLines={1}>
               {[groupLocation, group.seasons.map(seasonLabel).join(" · ")].filter(Boolean).join("  •  ")}
             </Text>
             {lane && timing ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
@@ -1393,7 +1394,7 @@ function CatalogGroupTile({
                 {group.unconfirmedRoleCount} {group.unconfirmedRoleCount === 1 ? "role" : "roles"} unconfirmed
               </Text>
             ) : null}
-            <View style={styles.catalogTileFooter}>
+            <View style={[styles.catalogTileFooter, !lane && styles.catalogTileFooterGrid]}>
               <View style={styles.catalogTileState} />
               <View style={styles.catalogTileActions}>
                 {canHideLocally ? (
@@ -3372,7 +3373,7 @@ function CatalogScreen({
   // Below this width the query field needs the whole row; the filter control
   // drops to its own line rather than truncating the placeholder.
   const stackedSearch = width < 560;
-  const columns = width >= 1400 ? 4 : width >= 840 ? 3 : 2;
+  const columns = catalogGridColumnCount(width);
   const tokens = catalogFilterTokens(filters);
   const narrowed = catalogViewNarrowed(query, filters);
   // One way back to the whole catalog: the query and every facet at once, so a
@@ -7789,14 +7790,14 @@ const styles = StyleSheet.create({
   catalogTokenResetText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
   catalogGrid: {
     alignSelf: "center",
-    // The catalog is a focused search surface, not a wall-to-wall dashboard.
-    // This gives roles a more legible reading width after removing the queue rail.
-    maxWidth: 1280,
+    // The large release rail leads; the denser grid below is for fast scanning.
+    // Wide displays earn a sixth column without stretching the cards into panels.
+    maxWidth: 1760,
     paddingBottom: 20,
     paddingHorizontal: 20,
     width: "100%",
   },
-  catalogGridRow: { alignItems: "stretch", flexDirection: "row", gap: 16, marginBottom: 16 },
+  catalogGridRow: { alignItems: "stretch", flexDirection: "row", gap: 12, marginBottom: 12 },
   catalogCell: { flex: 1, minWidth: 0 },
   catalogCellStack: { flexGrow: 1 },
   catalogTile: {
@@ -7805,20 +7806,22 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     flexGrow: 1,
-    // Keep a shared, compact baseline now that compensation is intentionally
-    // reserved for the expanded view; exceptional titles can still grow.
     minHeight: 280,
     padding: 20,
   },
-  catalogTileLane: { padding: 18 },
+  catalogTileGrid: { minHeight: 232, padding: 14 },
+  catalogTileLane: { minHeight: 280, padding: 18 },
   catalogTileTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", minHeight: 22 },
   catalogTileTags: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
   catalogTileNew: { alignItems: "center", flexDirection: "row", flexShrink: 0, gap: 3 },
   catalogTileNewText: { color: colors.signal, fontSize: 11, fontWeight: "800" },
   catalogTileCompany: { color: colors.signal, fontSize: 15, fontWeight: "700", lineHeight: 20, marginTop: 8 },
+  catalogTileCompanyGrid: { fontSize: 13, lineHeight: 18, marginTop: 6 },
   catalogTileTitle: { color: colors.ink, fontSize: 18, fontWeight: "700", lineHeight: 24, marginTop: 3 },
+  catalogTileTitleGrid: { fontSize: 15, lineHeight: 20 },
   catalogTileTitleLane: { fontSize: 17, lineHeight: 23 },
   catalogTileMeta: { color: colors.muted, fontSize: 14, lineHeight: 20, marginTop: 5 },
+  catalogTileMetaGrid: { fontSize: 12, lineHeight: 17, marginTop: 4 },
   catalogTileTiming: { color: colors.muted, fontSize: 12, lineHeight: 16, marginTop: 3 },
   catalogTileNotice: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },
   catalogTileFooter: {
@@ -7835,6 +7838,7 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
     paddingTop: 12,
   },
+  catalogTileFooterGrid: { paddingBottom: 2, paddingTop: 8 },
   catalogTileState: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
   catalogTileStateText: { color: colors.signal, fontSize: 11, fontWeight: "800", letterSpacing: 0.4 },
   catalogTileActions: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 4, justifyContent: "flex-end" },
