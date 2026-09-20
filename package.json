@@ -48,6 +48,7 @@
     "migrate:source-occurrences": "tsx src/migrate-source-occurrences.ts",
     "migrate:posting-identity": "tsx scripts/posting-identity-repair.ts",
     "audit:posting-identity": "tsx scripts/posting-identity-repair.ts --audit --gate",
+    "migrate:trusted-admission": "tsx scripts/trusted-admission-backfill.ts",
     "migrate:catalog-quality": "tsx scripts/catalog-quality-backfill.ts",
     "migrate:role-metadata": "tsx scripts/role-metadata-backfill.ts",
     "eval:shadow:offline": "tsx scripts/shadow-extraction-eval.ts --offline test/fixtures/shadow-extraction-recorded.json --report eval/shadow-extraction-results",
