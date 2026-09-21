@@ -904,6 +904,32 @@ describe('D1 posting identity repair', () => {
     expect(await runPostingIdentityRepair(stale.db)).toMatchObject({ conflicts: [expect.stringContaining('already claimed')] });
   });
 
+  it('accepts a changed snapshot only when every approved repair bound still matches', async () => {
+    const { sqlite, db } = await historicalDatabase({ presentationAgrees: true });
+    const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    sqlite.prepare("UPDATE catalog_items SET value = json_set(value, '$.lastSeenAt', '2026-08-03T00:00:00.000Z') WHERE pk = 'JOB#plus-old' AND sk = 'META'").run();
+    const changed = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    expect(changed.repairToken).not.toBe(dry.repairToken);
+    expect(changed).toMatchObject({
+      expectedChanges: dry.expectedChanges, duplicateJobs: dry.duplicateJobs,
+      eligibleDuplicateGroups: dry.eligibleDuplicateGroups,
+      unresolvedDuplicateGroups: dry.unresolvedDuplicateGroups,
+    });
+    await expect(runBoundedPostingIdentityRepair(db, {
+      apply: true, jobBatch: 1, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+      acceptCurrentSnapshot: true, expectedEligibleDuplicateGroups: dry.eligibleDuplicateGroups,
+      expectedUnresolvedDuplicateGroups: dry.unresolvedDuplicateGroups + 1,
+    })).rejects.toThrow('Catalog changed after dry run');
+    await expect(runBoundedPostingIdentityRepair(db, {
+      apply: true, jobBatch: 1, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+      acceptCurrentSnapshot: true, expectedEligibleDuplicateGroups: dry.eligibleDuplicateGroups,
+      expectedUnresolvedDuplicateGroups: dry.unresolvedDuplicateGroups,
+    })).resolves.toMatchObject({ applied: true });
+    sqlite.close();
+  });
+
   it('classifies Ashby, ByteDance, and Workday history through the provider-neutral registry', async () => {
     const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
     const historical = [

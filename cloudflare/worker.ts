@@ -803,6 +803,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     const input = await request.json().catch(() => ({})) as {
       apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
+      acceptCurrentSnapshot?: boolean; expectedEligibleDuplicateGroups?: number; expectedUnresolvedDuplicateGroups?: number;
       scope?: 'all' | 'identity' | 'occurrences'; audit?: boolean; jobBatch?: number;
     };
     try {

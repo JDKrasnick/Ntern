@@ -101,6 +101,15 @@ export interface PostingIdentityRepairPlan {
 
 export type PostingIdentityRepairScope = 'all' | 'identity' | 'occurrences';
 
+export type PostingIdentityApplyOptions = {
+  repairToken?: string;
+  expectedChanges?: number;
+  expectedDuplicateJobs?: number;
+  acceptCurrentSnapshot?: boolean;
+  expectedEligibleDuplicateGroups?: number;
+  expectedUnresolvedDuplicateGroups?: number;
+};
+
 export type PresentationField =
   | 'employerIdentity'
   | 'employerName'
@@ -1140,13 +1149,19 @@ export function postingIdentityRepairQueryCount(expectedChanges: number) {
 }
 
 export function validatePostingIdentityRepairApply(plan: Pick<InternalPlan,
-  'conflicts' | 'presentationDisagreements' | 'repairToken' | 'expectedChanges' | 'duplicateJobs'>, options: {
-  repairToken?: string;
-  expectedChanges?: number;
-  expectedDuplicateJobs?: number;
-}) {
+  'conflicts' | 'repairToken' | 'expectedChanges' | 'duplicateJobs' | 'eligibleDuplicateGroups' | 'unresolvedDuplicateGroups'>,
+options: PostingIdentityApplyOptions) {
   if (plan.conflicts.length) throw new Error('Refusing apply while posting identity conflicts remain');
-  if (options.repairToken !== plan.repairToken || options.expectedChanges !== plan.expectedChanges || options.expectedDuplicateJobs !== plan.duplicateJobs) {
+  const exactSnapshot = options.repairToken === plan.repairToken
+    && options.expectedChanges === plan.expectedChanges
+    && options.expectedDuplicateJobs === plan.duplicateJobs;
+  const approvedCurrentSnapshot = options.acceptCurrentSnapshot === true
+    && typeof options.repairToken === 'string' && /^[a-f0-9]{64}$/u.test(options.repairToken)
+    && options.expectedChanges === plan.expectedChanges
+    && options.expectedDuplicateJobs === plan.duplicateJobs
+    && options.expectedEligibleDuplicateGroups === plan.eligibleDuplicateGroups
+    && options.expectedUnresolvedDuplicateGroups === plan.unresolvedDuplicateGroups;
+  if (!exactSnapshot && !approvedCurrentSnapshot) {
     throw new Error('Catalog changed after dry run; use its exact repair token, changed-record count, and duplicate-job count');
   }
   if (postingIdentityRepairQueryCount(plan.expectedChanges) > D1_PAID_QUERY_LIMIT - POST_REPAIR_QUERY_RESERVE) {
@@ -1314,11 +1329,8 @@ export async function runPostingIdentityRepair(db: D1Database, options: {
 
 /** Apply a fully materialized, guarded plan. Bounded planners use this same
  * staging and before-image fence as the legacy single-pass planner. */
-export async function applyPostingIdentityRepairPlan(db: D1Database, plan: InternalPostingIdentityRepairPlan, options: {
-  repairToken?: string;
-  expectedChanges?: number;
-  expectedDuplicateJobs?: number;
-}): Promise<PostingIdentityRepairPlan> {
+export async function applyPostingIdentityRepairPlan(db: D1Database, plan: InternalPostingIdentityRepairPlan,
+  options: PostingIdentityApplyOptions): Promise<PostingIdentityRepairPlan> {
   const report = repairReport(plan);
   validatePostingIdentityRepairApply(plan, options);
   if (!plan.expectedChanges) return { ...report, applied: true };
@@ -1327,11 +1339,7 @@ export async function applyPostingIdentityRepairPlan(db: D1Database, plan: Inter
 }
 
 export async function applyStagedPostingIdentityRepairPlan(db: D1Database, stagePk: string,
-  plan: InternalPostingIdentityRepairPlan, options: {
-    repairToken?: string;
-    expectedChanges?: number;
-    expectedDuplicateJobs?: number;
-  }): Promise<PostingIdentityRepairPlan> {
+  plan: InternalPostingIdentityRepairPlan, options: PostingIdentityApplyOptions): Promise<PostingIdentityRepairPlan> {
   const report = repairReport(plan);
   validatePostingIdentityRepairApply(plan, options);
   if (!plan.expectedChanges) return { ...report, applied: true };

@@ -188,6 +188,9 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   repairToken?: string;
   expectedChanges?: number;
   expectedDuplicateJobs?: number;
+  acceptCurrentSnapshot?: boolean;
+  expectedEligibleDuplicateGroups?: number;
+  expectedUnresolvedDuplicateGroups?: number;
   jobBatch?: number;
   log?: (event: string) => void;
 } = {}): Promise<PostingIdentityRepairPlan> {
