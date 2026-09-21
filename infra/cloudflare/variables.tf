@@ -47,6 +47,13 @@ variable "auth_from_email" {
   nullable    = true
 }
 
+variable "admission_support_recipient" {
+  description = "Private operator email for deduplicated catalog-admission and posting-identity alerts. Set only through untracked deployment inputs."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
 variable "digest_to_email" {
   description = "Optional private digest recipient."
   type        = string
@@ -75,7 +82,13 @@ variable "gmail_enabled" {
 }
 
 variable "identity_unconfirmed_publication_enabled" {
-  description = "Publishes and alerts admission-valid roles that do not yet have reviewed exact posting identity."
+  description = "Publishes admission-valid roles that do not yet have reviewed exact posting identity with an under-review disclosure."
+  type        = bool
+  default     = true
+}
+
+variable "identity_integrity_enforcement_enabled" {
+  description = "Turns failed posting-identity integrity audits into scheduled-handler failures. Keep false while under-review roles remain publishable."
   type        = bool
   default     = false
 }

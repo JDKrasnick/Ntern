@@ -57,7 +57,7 @@ describe('identity coverage ratchet', () => {
     const regression = baselineDb(0.8);
     await expect(runScheduledPostingIdentityAudit({
       DB: regression.db as unknown as Environment['DB'],
-      IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'true',
+      IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'true',
       IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0',
     }, { audit: async () => planWithCoverage(0.6), log: () => undefined }))
       .rejects.toThrow('integrity gate failed');
@@ -66,7 +66,7 @@ describe('identity coverage ratchet', () => {
     const improvement = baselineDb(0.8);
     await expect(runScheduledPostingIdentityAudit({
       DB: improvement.db as unknown as Environment['DB'],
-      IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'true',
+      IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'true',
       IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0',
     }, { audit: async () => planWithCoverage(0.9), log: () => undefined })).resolves.toMatchObject({
       status: 'passed', confirmedCoverage: 0.9, coverageRegression: false,
@@ -78,7 +78,7 @@ describe('identity coverage ratchet', () => {
     const slipping = baselineDb(0.8);
     await expect(runScheduledPostingIdentityAudit({
       DB: slipping.db as unknown as Environment['DB'],
-      IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'true',
+      IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'true',
       IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0',
     }, { audit: async () => planWithCoverage(0.789), log: () => undefined }))
       .rejects.toThrow('integrity gate failed');
@@ -88,10 +88,28 @@ describe('identity coverage ratchet', () => {
     const steady = baselineDb(0.8);
     await expect(runScheduledPostingIdentityAudit({
       DB: steady.db as unknown as Environment['DB'],
-      IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'true',
+      IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'true',
       IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0',
     }, { audit: async () => planWithCoverage(0.799), log: () => undefined })).resolves.toMatchObject({
       status: 'passed', coverageRegression: false,
     });
+  });
+
+  it('reports repeated unresolved roles from one source without making them unavailable', async () => {
+    const recurring = baselineDb(0.8);
+    const alerts: Array<{ signals: string[] }> = [];
+    await expect(runScheduledPostingIdentityAudit({
+      DB: recurring.db as unknown as Environment['DB'],
+      IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'false',
+      IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0',
+    }, { audit: async () => ({
+      ...planWithCoverage(0.8),
+      unconfirmedSources: [{ sourceId: 'reviewed-community', occurrences: 3 }],
+    }), log: () => undefined, alert: async (input) => { alerts.push(input); } })).resolves.toMatchObject({
+      status: 'failed', recurringUnconfirmedSources: 1,
+    });
+    expect(alerts).toMatchObject([{
+      signals: ['posting-identity-integrity-failure', 'repeated-unconfirmed-identity-source'],
+    }]);
   });
 });

@@ -95,6 +95,8 @@ export interface PostingIdentityAuditReport {
   gate: PostingIdentityRepairPlan['gate'];
   duplicateAlertGroups: number;
   unknownUrlFamilyCandidates: PostingIdentityRepairPlan['unknownUrlFamilyCandidates'];
+  /** Aggregate source patterns for operational follow-up; role identifiers stay private. */
+  unconfirmedSources: Array<{ sourceId: string; occurrences: number }>;
   providerGroups: number;
   duplicateGroups: number;
   duplicateJobs: number;
@@ -132,6 +134,7 @@ type AuditFacts = {
   jobsScanned: number;
   occurrenceDecisions: Map<string, string | null>;
   unconfirmedFamilies: Map<string, string>;
+  unconfirmedSources: Map<string, number>;
   groupMembers: Map<string, GroupMember[]>;
   groupAliases: Array<[string, string]>;
   conflicts: Set<string>;
@@ -145,7 +148,11 @@ function mergeScan(facts: AuditFacts, plan: Plan): void {
     if (!facts.occurrenceDecisions.has(key)) facts.occurrenceDecisions.set(key, status);
   }
   for (const [occurrenceKey, family] of plan.scan.unconfirmedFamilies) {
-    if (!facts.unconfirmedFamilies.has(occurrenceKey)) facts.unconfirmedFamilies.set(occurrenceKey, family);
+    if (!facts.unconfirmedFamilies.has(occurrenceKey)) {
+      facts.unconfirmedFamilies.set(occurrenceKey, family);
+      const sourceId = occurrenceKey.split('\0', 1)[0];
+      if (sourceId) facts.unconfirmedSources.set(sourceId, (facts.unconfirmedSources.get(sourceId) ?? 0) + 1);
+    }
   }
   for (const [key, jobId, firstSeenAt] of plan.scan.groupMembers) {
     const members = facts.groupMembers.get(key) ?? [];
@@ -210,7 +217,7 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
   }
 
   const facts: AuditFacts = {
-    pages: 0, jobsScanned: 0, occurrenceDecisions: new Map(), unconfirmedFamilies: new Map(),
+    pages: 0, jobsScanned: 0, occurrenceDecisions: new Map(), unconfirmedFamilies: new Map(), unconfirmedSources: new Map(),
     groupMembers: new Map(), groupAliases: [], conflicts: new Set(),
     projectionMismatches: 0, duplicateOccurrenceReferences: 0, danglingOccurrenceReferences: 0,
   };
@@ -343,6 +350,9 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
     unknownUrlFamilyCandidates: [...familyCounts.entries()].filter(([, count]) => count > 1)
       .map(([reviewFamilyKey, occurrences]) => ({ reviewFamilyKey, occurrences }))
       .sort((left, right) => right.occurrences - left.occurrences || left.reviewFamilyKey.localeCompare(right.reviewFamilyKey)),
+    unconfirmedSources: [...facts.unconfirmedSources.entries()]
+      .map(([sourceId, occurrences]) => ({ sourceId, occurrences }))
+      .sort((left, right) => right.occurrences - left.occurrences || left.sourceId.localeCompare(right.sourceId)),
     providerGroups: facts.groupMembers.size,
     duplicateGroups: detail.duplicateGroups,
     duplicateJobs: detail.duplicateJobs,
