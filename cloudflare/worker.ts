@@ -804,7 +804,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     const input = await request.json().catch(() => ({})) as {
       apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
       acceptCurrentSnapshot?: boolean; expectedEligibleDuplicateGroups?: number; expectedUnresolvedDuplicateGroups?: number;
-      scope?: 'all' | 'identity' | 'occurrences'; audit?: boolean; jobBatch?: number;
+      scope?: 'all' | 'identity' | 'occurrences'; audit?: boolean; jobBatch?: number; duplicateGroupsOnly?: boolean;
       applyBatch?: { jobIds?: unknown; contextRows?: unknown; occurrenceKeys?: unknown }; finalize?: boolean;
     };
     try {

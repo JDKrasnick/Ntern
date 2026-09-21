@@ -405,6 +405,23 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it('can plan only duplicate identity groups for a narrow production apply', async () => {
+    const { sqlite, db } = await historicalDatabase();
+    const all = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    const duplicates = await runBoundedPostingIdentityRepair(db, { jobBatch: 1, duplicateGroupsOnly: true });
+
+    expect(duplicates).toMatchObject({
+      duplicateGroups: all.duplicateGroups,
+      duplicateJobs: all.duplicateJobs,
+      eligibleDuplicateGroups: all.eligibleDuplicateGroups,
+      unresolvedDuplicateGroups: all.unresolvedDuplicateGroups,
+      conflicts: [],
+    });
+    expect(duplicates.applyBatches?.length).toBeLessThan(all.applyBatches?.length ?? 0);
+    expect(duplicates.applyBatches?.every((batch) => batch.jobIds.length > 1)).toBe(true);
+    sqlite.close();
+  });
+
   it('does not load unrelated large catalog or user row classes into the repair snapshot', async () => {
     const sqlite = database(); const db = sqliteD1(sqlite);
     const before = await runPostingIdentityRepair(db);

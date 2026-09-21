@@ -192,6 +192,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   expectedEligibleDuplicateGroups?: number;
   expectedUnresolvedDuplicateGroups?: number;
   jobBatch?: number;
+  duplicateGroupsOnly?: boolean;
   log?: (event: string) => void;
 } = {}): Promise<PostingIdentityRepairPlan> {
   const scan = await runPostingIdentityAuditScan(db, { jobBatch: options.jobBatch, log: options.log });
@@ -227,7 +228,10 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   let receiptMerges = 0;
 
   const groupLimit = Math.max(1, Math.min(options.jobBatch ?? GROUP_JOBS_PER_BATCH, 500));
-  const groupBatches = batches(scan.repairIndex.groups, groupLimit);
+  const selectedGroups = options.duplicateGroupsOnly
+    ? scan.repairIndex.groups.filter((group) => group.members.length > 1)
+    : scan.repairIndex.groups;
+  const groupBatches = batches(selectedGroups, groupLimit);
   for (let batchIndex = 0; batchIndex < groupBatches.length; batchIndex += 1) {
     const groupBatch = groupBatches[batchIndex]!;
     const jobIds = new Set(groupBatch.flatMap((group) => group.members.map((member) => member.jobId)));
