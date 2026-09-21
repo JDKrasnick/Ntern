@@ -240,7 +240,6 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
     if (!jobs.length) break;
     const last = jobs[jobs.length - 1]!;
     after = [last.pk, last.sk];
-    const slicePks = new Set(jobs.map((row) => row.pk));
     const jobIds = new Set<string>();
     for (const row of jobs) {
       try {
@@ -254,8 +253,15 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
     for (const [oldJobId, canonicalJobId] of jobAlias) if (jobIds.has(canonicalJobId)) jobIds.add(oldJobId);
     const occurrences = await readOccurrenceRowsByKey(db,
       [...jobIds].flatMap((jobId) => occurrenceKeysByJob.get(jobId) ?? []));
-    const plan = planOf([...slice, ...heads.filter((head) => !slicePks.has(head.pk)).map((head) => head.row),
-      ...occurrences, ...sliceRows]);
+    const pageContext = sliceRows.filter((row) => {
+      if (row.kind !== 'job-id-alias') return true;
+      try {
+        const alias = JSON.parse(row.value) as { oldJobId?: string; canonicalJobId?: string };
+        return Boolean((alias.oldJobId && jobIds.has(alias.oldJobId))
+          || (alias.canonicalJobId && jobIds.has(alias.canonicalJobId)));
+      } catch { return true; }
+    });
+    const plan = planOf([...slice, ...occurrences, ...pageContext]);
     mergeScan(facts, plan);
     facts.pages += 1;
     facts.jobsScanned += jobs.length;
