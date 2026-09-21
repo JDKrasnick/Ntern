@@ -56,11 +56,20 @@ const applyUrl = (index: number) => `https://${applicationHosts[index % applicat
  * HTML tables are separated by blank lines so a line-numbered parse is
  * exercised across them.
  */
-export function syntheticMarkdownTable(options: { rows: number; bytesPerRow: number; format?: 'gfm' | 'html'; seed?: number }): string {
+export function syntheticMarkdownTable(options: {
+  rows: number;
+  bytesPerRow: number;
+  format?: 'gfm' | 'html';
+  seed?: number;
+  technicalRows?: number;
+}): string {
   const seed = options.seed ?? 7;
+  const title = (index: number) => index < (options.technicalRows ?? options.rows)
+    ? 'Software Engineering Intern'
+    : 'Marketing Intern';
   const row = (index: number, detail: string) => options.format === 'gfm'
-    ? `| Acme ${index} | Software Engineering Intern | Remote | [Apply](${applyUrl(index)}) | ${detail} |`
-    : `<tr><td><strong>Acme ${index}</strong></td><td>Software Engineering Intern</td><td>Remote</td>`
+    ? `| Acme ${index} | ${title(index)} | Remote | [Apply](${applyUrl(index)}) | ${detail} |`
+    : `<tr><td><strong>Acme ${index}</strong></td><td>${title(index)}</td><td>Remote</td>`
       + `<td><a href="${applyUrl(index)}">Apply</a></td><td>${detail}</td></tr>`;
   const detailLength = Math.max(0, options.bytesPerRow - row(0, '').length - 1);
   const parts = options.format === 'gfm'

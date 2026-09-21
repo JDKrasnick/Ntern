@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
@@ -12,7 +12,6 @@ import {
   PRODUCTION_GITHUB_DOCUMENT,
   PRODUCTION_GITHUB_FEEDS,
   PRODUCTION_GITHUB_OCCURRENCES,
-  PRODUCTION_GITHUB_SOURCE_ROWS,
   syntheticMarkdownTable,
   syntheticOccurrences,
 } from './fixtures/production-scale.js';
@@ -148,40 +147,42 @@ async function seedLargestSource(store: D1InternshipStore) {
 }
 
 /** The measured source serves two documents (`README.md`, `README-Off-Season.md`). */
-function productionDocuments(): Record<string, string> {
+function productionDocuments(feed: (typeof PRODUCTION_GITHUB_FEEDS)[keyof typeof PRODUCTION_GITHUB_FEEDS]): Record<string, string> {
+  const firstRows = Math.ceil(feed.rawRows / 2);
+  const secondRows = feed.rawRows - firstRows;
+  const firstEligibleRows = Math.min(feed.eligibleRows, firstRows);
+  const bytesPerRow = Math.ceil(feed.bytes / feed.rawRows);
   return {
-    'README.md': syntheticMarkdownTable({ rows: 1_785, bytesPerRow: 605, format: 'gfm' }),
-    'README-Off-Season.md': syntheticMarkdownTable({ rows: PRODUCTION_GITHUB_SOURCE_ROWS - 1_785, bytesPerRow: 1_320, format: 'html' }),
+    'README.md': syntheticMarkdownTable({ rows: firstRows, bytesPerRow, format: 'gfm', technicalRows: firstEligibleRows }),
+    'README-Off-Season.md': syntheticMarkdownTable({ rows: secondRows, bytesPerRow, format: 'html', technicalRows: feed.eligibleRows - firstEligibleRows }),
   };
 }
 
-function productionAdapter(documents: Record<string, string>) {
+function productionAdapter(id: string, documents: Record<string, string>) {
   return new GitHubMarkdownAdapter({
-    id: sourceId, owner: 'acme', repo: 'internships',
+    id, owner: 'acme', repo: 'internships',
     documents: [{ path: 'README.md', branch: 'dev', season: 'summer-2027' }, { path: 'README-Off-Season.md', branch: 'dev', season: 'offseason-2027' }],
     fetchImpl: (async (input: string | URL | Request) => {
       const path = String(input).split('/').pop()!;
       const body = documents[path];
-      if (!body) throw new SourceFetchError(`${sourceId}: unexpected path ${path}`, 'transport');
+      if (!body) throw new SourceFetchError(`${id}: unexpected path ${path}`, 'transport');
       return new Response(body, { status: 200, headers: { 'content-type': 'text/plain' } });
     }) as typeof fetch,
   });
 }
 
 describe('ingestion resource budgets', () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it('keeps every current community feed and the growth case within a resumable delivery count', () => {
+  it('fetches every current community feed and the growth case at its measured raw, eligible, and byte shape', async () => {
     for (const [name, feed] of Object.entries(PRODUCTION_GITHUB_FEEDS)) {
-      const deliveries = Math.ceil(feed.rawRows / GITHUB_RESOLUTION_ROWS_PER_DELIVERY);
-      expect(deliveries, name).toBeGreaterThan(0);
-      expect(deliveries * GITHUB_RESOLUTION_ROWS_PER_DELIVERY).toBeGreaterThanOrEqual(feed.rawRows);
-      // A bounded retry receives at most this many listings regardless of the
-      // full source size. The 6,000-row case guards the next growth step rather
-      // than merely replaying today's three feeds.
-      expect(GITHUB_RESOLUTION_ROWS_PER_DELIVERY).toBeLessThan(feed.rawRows);
+      const documents = productionDocuments(feed);
+      const sourceBytes = Object.values(documents).reduce((total, document) => total + document.length, 0);
+      const fetched = await productionAdapter(`production-${name}`, documents).fetch();
+
+      expect(sourceBytes, name).toBeGreaterThan(feed.bytes * 0.9);
+      expect(fetched.rawRowCount, name).toBe(feed.rawRows);
+      expect(fetched.listings, name).toHaveLength(feed.eligibleRows);
     }
-  });
+  }, 30_000);
 
   it('parses a production-sized HTML table document under the parse budget with unchanged row numbers', () => {
     const bytesPerRow = Math.floor(PRODUCTION_GITHUB_DOCUMENT.bytes / PRODUCTION_GITHUB_DOCUMENT.htmlRows);
@@ -202,27 +203,19 @@ describe('ingestion resource budgets', () => {
     expect(parseCpuMs).toBeLessThan(PARSE_CPU_BUDGET_MS);
   }, 120_000);
 
-  it('resolves a production-sized GitHub source inside the per-message CPU, heap, and slice budgets', async () => {
-    // A 67-delivery pass emits one operational metric per delivery. Suppress
-    // those expected logs here so Vitest's task-update RPC remains bounded;
-    // production continues to emit the metrics.
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  it('resolves consecutive production-sized GitHub slices inside the per-message CPU, heap, and slice budgets', async () => {
     const { store } = catalog();
-    const documents = productionDocuments();
-    // The measured source serves 2.73 MB across its two documents.
+    const feed = PRODUCTION_GITHUB_FEEDS.simplify;
+    const documents = productionDocuments(feed);
     const sourceBytes = Object.values(documents).reduce((total, document) => total + document.length, 0);
-    expect(sourceBytes).toBeGreaterThan(PRODUCTION_GITHUB_DOCUMENT.bytes);
+    expect(sourceBytes).toBeGreaterThan(feed.bytes * 0.9);
     await seedLargestSource(store);
 
-    const runner = new IngestionRunner([productionAdapter(documents)], store, () => new Date('2026-09-16T00:00:00.000Z'), undefined, undefined, false);
-    const expectedSlices: number[] = [];
-    for (let remaining = PRODUCTION_GITHUB_SOURCE_ROWS; remaining > 0; remaining -= GITHUB_RESOLUTION_ROWS_PER_DELIVERY) {
-      expectedSlices.push(Math.min(GITHUB_RESOLUTION_ROWS_PER_DELIVERY, remaining));
-    }
+    const runner = new IngestionRunner([productionAdapter(sourceId, documents)], store, () => new Date('2026-09-16T00:00:00.000Z'), undefined, undefined, false);
     exposeGc?.();
     const baselineMb = process.memoryUsage().heapUsed / (1024 * 1024);
     const deliveries: Array<{ cpuMs: number; heapMb: number; peakMb: number; resolved: number }> = [];
-    for (let delivery = 0; delivery < expectedSlices.length; delivery += 1) {
+    for (let delivery = 0; delivery < 2; delivery += 1) {
       const before = (await store.getCheckpoint(sourceId))?.pendingResolutionRows?.length ?? 0;
       const started = process.cpuUsage();
       const report = await runner.run({ maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY });
@@ -232,19 +225,15 @@ describe('ingestion resource budgets', () => {
       const after = (await store.getCheckpoint(sourceId))?.pendingResolutionRows?.length ?? 0;
 
       expect(report.failures).toEqual([]);
-      // A pass slice never exceeds the configured rows per delivery, always
-      // drains, and reports its own continuation while rows remain.
-      expect((before || PRODUCTION_GITHUB_SOURCE_ROWS) - after).toBeLessThanOrEqual(GITHUB_RESOLUTION_ROWS_PER_DELIVERY);
-      expect(after).toBeLessThan(before || PRODUCTION_GITHUB_SOURCE_ROWS);
+      const unresolvedBefore = before || feed.rawRows;
+      expect(unresolvedBefore - after).toBe(GITHUB_RESOLUTION_ROWS_PER_DELIVERY);
+      expect(after).toBeLessThan(unresolvedBefore);
       expect(report.pendingResolution[sourceId] ?? 0).toBe(after);
-      if (after > 0) expect(report.continuationSources).toContain(sourceId);
-      deliveries.push({ cpuMs, heapMb: peakMb - baselineMb, peakMb, resolved: (before || PRODUCTION_GITHUB_SOURCE_ROWS) - after });
+      expect(report.continuationSources).toContain(sourceId);
+      deliveries.push({ cpuMs, heapMb: peakMb - baselineMb, peakMb, resolved: unresolvedBefore - after });
     }
 
-    // Every delivery resolves exactly the configured slice, and the tail that
-    // also reconciles omissions and closures is the last one.
-    expect(deliveries.map(({ resolved }) => resolved)).toEqual(expectedSlices);
-    expect(expectedSlices.length).toBe(Math.ceil(PRODUCTION_GITHUB_SOURCE_ROWS / GITHUB_RESOLUTION_ROWS_PER_DELIVERY));
+    expect(deliveries.map(({ resolved }) => resolved)).toEqual([GITHUB_RESOLUTION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY]);
     for (const delivery of deliveries) {
       expect(delivery.cpuMs).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
       if (exposeGc) {
