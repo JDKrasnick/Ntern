@@ -49,7 +49,7 @@ import { destinationVerificationMessage, enqueueDueDestinationVerifications, pro
   sendAdmissionOperationalAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
-import { observeD1Delivery } from './d1-traffic-observation.js';
+import { observeD1Delivery, observeQueueBatch } from './d1-traffic-observation.js';
 import { resilientD1 } from './resilient-d1.js';
 export { D1TrafficController } from './d1-traffic-controller.js';
 import type { CatalogAdmissionResolver } from '../src/destination-verification.js';
@@ -1599,26 +1599,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   const completeTraffic = async (messageId: string, outcome: 'success' | 'failure' | 'cancelled', error?: unknown) => {
     await trafficObservations.get(messageId)?.complete(outcome, error);
   };
-  const observedMessageOutcomes = new Map<string, 'success' | 'failure'>();
-  const observedBatch: MessageBatch<unknown> = {
-    ...batch,
-    messages: batch.messages.map((message) => ({
-      ...message,
-      ack: () => { observedMessageOutcomes.set(message.id, 'success'); message.ack(); },
-      retry: (options) => { observedMessageOutcomes.set(message.id, 'failure'); message.retry(options); },
-    })),
-  };
-  const completeObservedQueue = async () => {
-    await Promise.all(batch.messages.map((message) => completeTraffic(message.id, observedMessageOutcomes.get(message.id) ?? 'cancelled')));
-  };
   if (batch.queue.includes('destination-verification')) {
-    await processDestinationVerificationBatch(observedBatch, env);
-    await completeObservedQueue();
+    await observeQueueBatch(batch, trafficObservations, (observed) => processDestinationVerificationBatch(observed, env));
     return;
   }
   if (batch.queue.includes('shadow-extraction')) {
-    await processShadowExtractionBatch(observedBatch, env);
-    await completeObservedQueue();
+    await observeQueueBatch(batch, trafficObservations, (observed) => processShadowExtractionBatch(observed, env));
     return;
   }
   const records = batch.messages.map((message) => ({ messageId: message.id, body: typeof message.body === 'string' ? message.body : JSON.stringify(message.body) }));

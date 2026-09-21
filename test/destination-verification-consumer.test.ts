@@ -402,7 +402,7 @@ describe('destination verification queue consumer', () => {
     }, () => new Date('2026-08-30T00:01:00Z'));
 
     expect(queued.ack).not.toHaveBeenCalled();
-    expect(queued.retry).toHaveBeenCalledWith({ delaySeconds: 300 });
+    expect(queued.retry).toHaveBeenCalledWith({ delaySeconds: 300 }, expect.any(Error));
     expect(JSON.parse(database.prepare('SELECT report FROM role_metadata_acquisition WHERE job_id = ? AND source_id = ?')
       .get(job.jobId, reference.sourceId)!.report as string)).toMatchObject({
       shadowHandoff: { outcome: 'failed', method: 'greenhouse-api' },

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { observeD1Delivery } from '../cloudflare/d1-traffic-observation.js';
+import { observeD1Delivery, observeQueueBatch, type D1TrafficObservation } from '../cloudflare/d1-traffic-observation.js';
 
 describe('D1 traffic observation', () => {
   it('observes an actual catalog delivery and reports its D1 failure class without changing its outcome', async () => {
@@ -42,5 +42,49 @@ describe('D1 traffic observation', () => {
     })).resolves.toBeUndefined();
     expect(error).toHaveBeenCalledWith(expect.stringContaining('d1_traffic_observation_failed'));
     vi.restoreAllMocks();
+  });
+});
+
+describe('D1 queue batch observation', () => {
+  const observing = () => ({ complete: vi.fn(async () => undefined) }) as D1TrafficObservation;
+
+  it('completes each permit from the delivery it observed: ack, retry, or neither', async () => {
+    const acked = observing();
+    const retried = observing();
+    const unresolved = observing();
+    const ack = vi.fn();
+    const retry = vi.fn();
+    const overloaded = new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.');
+    const batch = {
+      queue: 'intern-notifs-destination-verification',
+      messages: [
+        { id: 'acked', body: 'acked', ack, retry: vi.fn() },
+        { id: 'retried', body: 'retried', ack: vi.fn(), retry },
+        { id: 'unresolved', body: 'unresolved', ack: vi.fn(), retry: vi.fn() },
+      ],
+    };
+
+    await observeQueueBatch(batch, new Map<string, D1TrafficObservation>([
+      ['acked', acked], ['retried', retried], ['unresolved', unresolved],
+    ]), async (observed) => {
+      observed.messages[0]!.ack();
+      observed.messages[1]!.retry({ delaySeconds: 300 }, overloaded);
+    });
+
+    expect(ack).toHaveBeenCalledOnce();
+    expect(retry).toHaveBeenCalledWith({ delaySeconds: 300 });
+    expect(acked.complete).toHaveBeenCalledWith('success', undefined);
+    expect(retried.complete).toHaveBeenCalledWith('failure', overloaded);
+    expect(unresolved.complete).toHaveBeenCalledWith('cancelled', undefined);
+  });
+
+  it('completes the permits and rethrows when the consumer fails the delivery', async () => {
+    const observed = observing();
+    const batch = { queue: 'intern-notifs-shadow-extraction', messages: [{ id: 'shadow-1', body: 'shadow-1', ack: vi.fn(), retry: vi.fn() }] };
+
+    await expect(observeQueueBatch(batch, new Map<string, D1TrafficObservation>([['shadow-1', observed]]),
+      async () => { throw new Error('shadow consumer failed'); })).rejects.toThrow('shadow consumer failed');
+
+    expect(observed.complete).toHaveBeenCalledWith('cancelled', undefined);
   });
 });

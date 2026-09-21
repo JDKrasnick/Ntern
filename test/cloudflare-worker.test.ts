@@ -3,7 +3,7 @@ import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRet
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
-import type { Queue } from '../cloudflare/types.js';
+import type { D1PreparedStatement, Queue } from '../cloudflare/types.js';
 import { catalogProviderIds, integrationRegistry } from '../src/integration-registry.js';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
@@ -848,6 +848,52 @@ describe('Cloudflare GitHub queue continuation', () => {
       expect(controllerFetch).toHaveBeenCalledTimes(2);
       expect(JSON.parse(String(controllerFetch.mock.calls[1]![1]?.body))).toMatchObject({ permitId: 'permit-structured', outcome: 'cancelled' });
       expect(runtime.runRuntimeCommand).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('Cloudflare D1 traffic observation', () => {
+  it('observes a destination-verification retry and its D1 failure class without taking the retry decision', async () => {
+    const controllerFetch = vi.fn()
+      .mockResolvedValueOnce(Response.json({ permit: { permitId: 'permit-destination', expiresAt: '2026-09-21T00:00:30.000Z', fenced: true }, status: { mode: 'observation', permitsInUse: { P0: 0, P1: 1, P2: 0 }, budgets: { P0: 4, P1: 2, P2: 2 }, recentPressure: 0 } }))
+      .mockResolvedValueOnce(Response.json({ mode: 'observation', permitsInUse: { P0: 0, P1: 0, P2: 0 }, budgets: { P0: 4, P1: 2, P2: 2 }, recentPressure: 0 }));
+    const ack = vi.fn();
+    const retry = vi.fn();
+    const d1Failure = new Error('D1_ERROR: internal error; reference = test');
+    // The shutdown latch reads system_state; every other statement is the D1
+    // failure the consumer retries.
+    const failingStatement = (query: string): D1PreparedStatement => ({
+      bind: () => failingStatement(query),
+      first: async () => { if (query.includes('system_state')) return null; throw d1Failure; },
+      all: async () => { throw d1Failure; },
+      run: async () => { throw d1Failure; },
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await cloudflareWorker.queue({
+        queue: 'intern-notifs-destination-verification',
+        messages: [{
+          id: 'destination-1', attempts: 1, ack, retry,
+          body: { version: 1, jobId: 'job-1', sourceId: 'greenhouse-1', externalId: '1',
+            candidateUrl: 'https://example.test/job', providerIdentity: {} },
+        }],
+      }, {
+        DB: { prepare: failingStatement, async batch() { return []; } },
+        D1_TRAFFIC_CONTROLLER: { idFromName: vi.fn(() => 'catalog-ingestion'), get: vi.fn(() => ({ fetch: controllerFetch })) },
+      } as unknown as Environment);
+
+      expect(ack).not.toHaveBeenCalled();
+      expect(retry).toHaveBeenCalledWith({ delaySeconds: 300 });
+      expect(controllerFetch).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(String(controllerFetch.mock.calls[0]![1]?.body))).toMatchObject({
+        workload: 'destination-verification', priority: 'P1', messageId: 'destination-1', runId: 'intern-notifs-destination-verification',
+      });
+      expect(JSON.parse(String(controllerFetch.mock.calls[1]![1]?.body))).toMatchObject({
+        permitId: 'permit-destination', outcome: 'failure', d1FailureClass: 'internal',
+      });
     } finally {
       vi.restoreAllMocks();
     }

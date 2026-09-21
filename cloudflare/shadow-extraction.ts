@@ -373,7 +373,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
         await releaseShadowCost(env.DB, failedAt, message.runKey, leaseToken);
         await finishRun(env.DB, message, leaseToken, 'transient-failure', failedAt, { error: error instanceof Error ? error.message.slice(0, 500) : 'unknown failure' });
       }
-      if ((queued.attempts ?? 1) >= 2) queued.ack(); else queued.retry({ delaySeconds: 300 });
+      if ((queued.attempts ?? 1) >= 2) queued.ack(); else queued.retry({ delaySeconds: 300 }, error);
     }
   }
 }
