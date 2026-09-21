@@ -285,6 +285,7 @@ test('honors a one-job audit batch through the compiled API Worker', async () =>
     },
     duplicateAlertGroups: 0,
     unknownUrlFamilyCandidates: [],
+    unconfirmedSources: [],
     providerGroups: 0,
     duplicateGroups: 0,
     duplicateJobs: 0,

@@ -119,6 +119,17 @@ describe('Cloudflare deployment configuration', () => {
     expect(api.vars.EMPLOYER_PORTAL_ENABLED).toBe('true');
     expect(terraform).toContain('{ name = "EMPLOYER_PORTAL_ENABLED", type = "plain_text", text = tostring(var.employer_portal_enabled) }');
     expect(read('infra/cloudflare/variables.tf')).toContain('variable "employer_portal_enabled"');
+    expect(api.vars.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED).toBe('true');
+    expect(ingestion.vars.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED).toBe('true');
+    expect(api.vars.IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED).toBe('false');
+    expect(ingestion.vars.IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED).toBe('false');
+    expect(terraform).toContain('{ name = "IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED", type = "plain_text", text = tostring(var.identity_integrity_enforcement_enabled) }');
+    expect(api.vars.IDENTITY_CONFIRMED_COVERAGE_FLOOR).toBe('0');
+    expect(ingestion.vars.IDENTITY_CONFIRMED_COVERAGE_FLOOR).toBe('0');
+    expect(terraform).toContain('{ name = "IDENTITY_CONFIRMED_COVERAGE_FLOOR", type = "plain_text", text = tostring(var.identity_confirmed_coverage_floor) }');
+    expect(read('infra/cloudflare/variables.tf')).toMatch(/variable "identity_confirmed_coverage_floor"[\s\S]*?default\s+= 0/);
+    expect(terraform).toContain('name = "ADMISSION_SUPPORT_RECIPIENT", type = "plain_text", text = var.admission_support_recipient');
+    expect(read('infra/cloudflare/variables.tf')).toContain('variable "admission_support_recipient"');
   });
 
   it('moves queue and cron state to ingestion ownership', () => {

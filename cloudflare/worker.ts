@@ -93,6 +93,7 @@ export interface Environment extends AuthEnvironment {
   OPERATIONS_SHARED_SECRET: string;
   EMPLOYER_PORTAL_ENABLED?: string;
   IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED?: string;
+  IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED?: string;
   TRUSTED_COMMUNITY_CATALOG_ENABLED?: string;
   IDENTITY_CONFIRMED_COVERAGE_FLOOR?: string;
   BILLING_WEBHOOK_SECRET?: string;
@@ -1313,11 +1314,14 @@ export type PostingIdentityAuditEvent = {
   projectionMismatches: number | null;
   duplicateOccurrenceReferences: number | null;
   danglingOccurrenceReferences: number | null;
+  recurringUnconfirmedSources: number | null;
 };
 
 /** Findings shared by the single-pass repair plan and the paged audit. */
 type PostingIdentityAuditFindings = Pick<PostingIdentityRepairPlan,
-  'occurrenceCounts' | 'gate' | 'duplicateJobs' | 'duplicateAlertGroups'>;
+  'occurrenceCounts' | 'gate' | 'duplicateJobs' | 'duplicateAlertGroups'> & {
+    unconfirmedSources?: Array<{ sourceId: string; occurrences: number }>;
+  };
 
 function postingIdentityAuditEvent(
   plan: PostingIdentityAuditFindings,
@@ -1326,10 +1330,11 @@ function postingIdentityAuditEvent(
 ): PostingIdentityAuditEvent {
   const coverageRegression = plan.occurrenceCounts.confirmedCoverage === null
     || plan.occurrenceCounts.confirmedCoverage < confirmedCoverageFloor;
+  const recurringUnconfirmedSources = (plan.unconfirmedSources ?? []).filter(({ occurrences }) => occurrences >= 3).length;
   return {
     event: 'posting_identity_integrity_audit',
     enforcementActive,
-    status: plan.gate.passed && !coverageRegression ? 'passed' : 'failed',
+    status: plan.gate.passed && !coverageRegression && recurringUnconfirmedSources === 0 ? 'passed' : 'failed',
     confirmedOccurrences: plan.occurrenceCounts.confirmed,
     unconfirmedOccurrences: plan.occurrenceCounts.unconfirmed,
     confirmedCoverage: plan.occurrenceCounts.confirmedCoverage,
@@ -1346,6 +1351,7 @@ function postingIdentityAuditEvent(
     projectionMismatches: plan.gate.projectionMismatches,
     duplicateOccurrenceReferences: plan.gate.duplicateOccurrenceReferences,
     danglingOccurrenceReferences: plan.gate.danglingOccurrenceReferences,
+    recurringUnconfirmedSources,
   };
 }
 
@@ -1353,13 +1359,15 @@ function postingIdentityAuditEvent(
  * review samples stay out of production logs. Disabled rollout reports a
  * failed gate without failing the cron; enabled publication makes it fatal. */
 export async function runScheduledPostingIdentityAudit(
-  env: Pick<Environment, 'DB' | 'IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED' | 'IDENTITY_CONFIRMED_COVERAGE_FLOOR'>,
+  env: Pick<Environment, 'DB' | 'IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED' | 'IDENTITY_CONFIRMED_COVERAGE_FLOOR'
+    | 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL'>,
   dependencies: {
     audit?: (db: D1Database) => Promise<PostingIdentityAuditFindings>;
     log?: (event: string) => void;
+    alert?: (input: { signals: string[]; details: string; observedAt: string }) => Promise<void>;
   } = {},
 ): Promise<PostingIdentityAuditEvent> {
-  const enforcementActive = env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true';
+  const enforcementActive = env.IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED === 'true';
   const parsedCoverageFloor = Number(env.IDENTITY_CONFIRMED_COVERAGE_FLOOR);
   const configuredCoverageFloor = env.IDENTITY_CONFIRMED_COVERAGE_FLOOR?.trim()
     && Number.isFinite(parsedCoverageFloor) && parsedCoverageFloor >= 0 && parsedCoverageFloor <= 1
@@ -1397,7 +1405,7 @@ export async function runScheduledPostingIdentityAudit(
       exactDuplicateGroups: null, duplicateJobs: null, duplicateAlertGroups: null, aliasConflicts: null,
       quarantinedOccurrences: null, untrackedQuarantines: null, presentationBlockers: null,
       legacyOccurrences: null, projectionMismatches: null, duplicateOccurrenceReferences: null,
-      danglingOccurrenceReferences: null,
+      danglingOccurrenceReferences: null, recurringUnconfirmedSources: null,
     };
   }
   const nextBaseline = nextIdentityCoverageBaseline(coverageBaseline, event.confirmedCoverage);
@@ -1412,6 +1420,23 @@ export async function runScheduledPostingIdentityAudit(
   if (dependencies.log) dependencies.log(serialized);
   else if (event.status === 'passed') console.log(serialized);
   else console.error(serialized);
+  const signals = [
+    ...(event.status === 'failed' ? ['posting-identity-integrity-failure'] : []),
+    ...(event.recurringUnconfirmedSources ? ['repeated-unconfirmed-identity-source'] : []),
+    ...(event.coverageRegression ? ['identity-coverage-regression'] : []),
+    ...(event.status === 'error' ? ['posting-identity-audit-error'] : []),
+  ];
+  if (signals.length) try {
+    const input = {
+      signals,
+      details: `Posting-identity audit status: ${event.status}; recurring unresolved sources: ${event.recurringUnconfirmedSources ?? 'unavailable'}; confirmed coverage: ${event.confirmedCoverage ?? 'unavailable'}; coverage floor: ${event.confirmedCoverageFloor ?? 'unavailable'}.`,
+      observedAt: new Date().toISOString(),
+    };
+    if (dependencies.alert) await dependencies.alert(input);
+    else await sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, input);
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'posting_identity_alert_delivery_failed', diagnostic: safeDiagnostic(error) }));
+  }
   if (enforcementActive && event.status !== 'passed') {
     throw new Error('Posting identity integrity gate failed while publication enforcement is active');
   }

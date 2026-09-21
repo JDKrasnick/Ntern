@@ -283,7 +283,9 @@ historical artifact versions, extraction outcomes, conflicts, and guarded repair
 staging, acquisition leases and host backoff. Full job descriptions are never
 written to these tables. Preserve the active production publication flags:
 `IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED=true` and
-`IDENTITY_CONFIRMED_COVERAGE_FLOOR=1`; local defaults differ.
+`IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED=false`. Admission remains the public
+catalog gate: an under-review identity never overrides a failed employer or
+destination decision.
 
 After deployment, use the existing destination-verification queue to collect
 historical exact-posting evidence. Identity-checked public APIs run first;
@@ -791,11 +793,17 @@ directly; a legacy job-ID alias does not satisfy this invariant.
 The dedicated `17 9 * * *` Cloudflare cron runs the same all-scope audit once
 per day and emits one aggregate `posting_identity_integrity_audit` event. The
 event contains only coverage, duplicate, conflict, quarantine, presentation,
-legacy-occurrence, projection, and duplicate-reference counts. Its
+legacy-occurrence, projection, duplicate-reference, and recurring-unconfirmed-
+source counts. Any failed integrity gate, coverage regression, audit error, or
+three-or-more unresolved occurrences from one source sends one deduplicated
+operator email per signal set per day when the private `RESEND_API_KEY`,
+`AUTH_FROM_EMAIL`, and `ADMISSION_SUPPORT_RECIPIENT` deployment inputs are set.
+The alert never contains role URLs, role titles, or source IDs. Its
 `IDENTITY_CONFIRMED_COVERAGE_FLOOR` is an owner-reviewed decimal from zero to
 one; a missing/invalid floor, unavailable coverage, or coverage below that
-floor is not passing evidence. The checked-in floor is `1` as a fail-safe.
-Treat the production value as a policy threshold with explicit headroom, not
+floor is not passing evidence. The checked-in floor is `0`; the persisted
+ratchet still fails a drop greater than its one-percentage-point churn buffer.
+Treat a production override as a policy threshold with explicit headroom, not
 the exact coverage from one audit. Normal growth from reviewed community
 sources changes the confirmed/unconfirmed source mix without indicating
 identity corruption. Record both the activation snapshot and the lower policy
