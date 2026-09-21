@@ -195,7 +195,11 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   duplicateGroupsOnly?: boolean;
   log?: (event: string) => void;
 } = {}): Promise<PostingIdentityRepairPlan> {
-  const scan = await runPostingIdentityAuditScan(db, { jobBatch: options.jobBatch, log: options.log });
+  // Repair atomicity and audit read efficiency are separate controls. A
+  // one-group repair must not degrade the full-catalog audit into one-job
+  // queries, which can exceed the request wall-time before planning starts.
+  const auditJobBatch = Math.max(GROUP_JOBS_PER_BATCH, options.jobBatch ?? GROUP_JOBS_PER_BATCH);
+  const scan = await runPostingIdentityAuditScan(db, { jobBatch: auditJobBatch, log: options.log });
   const contextRows = await readContextRows(db);
   const users = await readUserRows(db);
   const proposals = (await db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>()).results;
