@@ -210,12 +210,10 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     const occurrenceJobIds = new Set(jobIds);
     for (const [oldJobId, canonicalJobId] of jobAliases) if (jobIds.has(canonicalJobId)) occurrenceJobIds.add(oldJobId);
     const fullJobs = await readJobs(db, [...jobIds].sort());
-    const fullJobPks = new Set(fullJobs.map((row) => row.pk));
     const keys = [...occurrenceJobIds].flatMap((jobId) => occurrenceKeys.get(jobId) ?? []);
     const occurrences = await readOccurrenceRows(db, keys);
     const plan = postingIdentityRepairPlan([
       ...fullJobs,
-      ...scan.repairIndex.jobHeads.filter((row) => !fullJobPks.has(row.pk)),
       ...occurrences,
       ...contextRows,
     ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
