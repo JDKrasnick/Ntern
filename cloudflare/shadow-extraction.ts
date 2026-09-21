@@ -266,8 +266,34 @@ async function finishRunWithAnalysis(db: D1Database, message: ShadowExtractionMe
   return finished?.meta.changes === 1;
 }
 
+/** Validator failures grouped by cause. The mapping is exhaustive over the
+ * strings `validateShadowExtraction` can emit, so `other` appears only if a new
+ * failure message lands without a category. `not-stated is invalid for
+ * incomplete input` is its own category: the validator raises it only when the
+ * artifact is bounded, so it is never a model defect. */
+const failureCategorySql = `CASE
+        WHEN failure IN ('response is not the extraction contract', 'invalid classification')
+          OR failure LIKE '%: invalid field contract'
+          OR failure LIKE '%: status/value inconsistency' THEN 'model-schema'
+        WHEN failure LIKE '%: not-stated is invalid for incomplete input' THEN 'input-incomplete'
+        WHEN failure LIKE '%: invalid evidence'
+          OR failure LIKE '%: supporting passage absent from artifact'
+          OR failure LIKE '%: numeric or unit inconsistency' THEN 'model-evidence'
+        WHEN failure LIKE '%: unsupported work mode'
+          OR failure LIKE '%: location is not a geographic place' THEN 'model-normalization'
+        ELSE 'other'
+      END`;
+
+/** Invalid-output failures with the run dimensions needed to attribute them to a
+ * source artifact. `json_valid` keeps one unreadable row from failing the whole
+ * response, and `LIKE '%: ...'` matches only the field-prefixed validator
+ * messages that `validateShadowExtraction` records under `failures`. */
+const invalidOutputFailuresSql = `SELECT runs.origin AS origin, runs.input_completeness AS input_completeness, json_each.value AS failure
+      FROM shadow_extraction_runs runs, json_each(runs.validation, '$.failures')
+      WHERE runs.state = 'invalid-output' AND runs.validation IS NOT NULL AND json_valid(runs.validation)`;
+
 export async function shadowExtractionSummary(db: D1Database): Promise<Record<string, unknown>> {
-  const [runs, costs, versions, origins, coverage, failures, inputCompleteness, validationFailures, baselineDifferences, usage, handoffs, providerOutbox] = await Promise.all([
+  const [runs, costs, versions, origins, coverage, failures, inputCompleteness, validationFailures, failureAttribution, baselineDifferences, usage, handoffs, providerOutbox] = await Promise.all([
     db.prepare('SELECT state, COUNT(*) AS count, AVG(CASE WHEN completed_at IS NOT NULL THEN (julianday(completed_at) - julianday(created_at)) * 86400000 END) AS latency_ms FROM shadow_extraction_runs GROUP BY state').all(),
     db.prepare(`SELECT period, SUM(CASE WHEN state = 'reserved' THEN reserved_cents ELSE 0 END) AS reserved_cents,
       SUM(actual_cents) AS actual_cents, COUNT(*) AS attempts FROM shadow_extraction_cost_ledger
@@ -281,23 +307,12 @@ export async function shadowExtractionSummary(db: D1Database): Promise<Record<st
     db.prepare(`SELECT origin, state, COALESCE(input_completeness, 'unknown') AS completeness, COUNT(*) AS count
       FROM shadow_extraction_runs GROUP BY origin, state, COALESCE(input_completeness, 'unknown')
       ORDER BY origin, state, completeness`).all(),
-    db.prepare(`SELECT CASE
-        WHEN failure IN ('response is not the extraction contract', 'invalid classification')
-          OR failure LIKE '%: invalid field contract'
-          OR failure LIKE '%: status/value inconsistency'
-          OR failure LIKE '%: not-stated is invalid for incomplete input' THEN 'model-schema'
-        WHEN failure LIKE '%: invalid evidence'
-          OR failure LIKE '%: supporting passage absent from artifact'
-          OR failure LIKE '%: numeric or unit inconsistency' THEN 'model-evidence'
-        WHEN failure LIKE '%: unsupported work mode'
-          OR failure LIKE '%: location is not a geographic place' THEN 'model-normalization'
-        ELSE 'other'
-      END AS category, failure, COUNT(*) AS count
-      FROM (
-        SELECT json_each.value AS failure FROM shadow_extraction_runs runs, json_each(runs.validation, '$.failures')
-        WHERE runs.state = 'invalid-output' AND runs.validation IS NOT NULL
-      ) validation_failures
+    db.prepare(`SELECT ${failureCategorySql} AS category, failure, COUNT(*) AS count
+      FROM (${invalidOutputFailuresSql}) validation_failures
       GROUP BY category, failure ORDER BY category, failure`).all(),
+    db.prepare(`SELECT origin, COALESCE(input_completeness, 'unknown') AS completeness, ${failureCategorySql} AS category, COUNT(*) AS count
+      FROM (${invalidOutputFailuresSql}) failure_sources
+      GROUP BY origin, completeness, category ORDER BY origin, completeness, category`).all(),
     db.prepare(`SELECT field, baseline_state, shadow_state, COUNT(*) AS count
       FROM shadow_extraction_baseline_differences WHERE differs = 1 GROUP BY field, baseline_state, shadow_state`).all(),
     db.prepare(`SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -312,6 +327,7 @@ export async function shadowExtractionSummary(db: D1Database): Promise<Record<st
   return { runs: runs.results, coverage: coverage.results, failures: failures.results, costs: costs.results,
     usage: usage.results[0] ?? { input_tokens: 0, output_tokens: 0, actual_cost_cents: 0 }, versions: versions.results,
     origins: origins.results, inputCompleteness: inputCompleteness.results, validationFailures: validationFailures.results,
+    failureAttribution: failureAttribution.results,
     baselineDifferences: baselineDifferences.results, handoffs: handoffs.results,
     providerOutbox: providerOutbox ?? { pending: 0 } };
 }

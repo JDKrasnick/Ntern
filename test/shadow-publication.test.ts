@@ -57,7 +57,7 @@ async function publicationDatabase(): Promise<{ database: DatabaseSync; artifact
   const database = new DatabaseSync(':memory:');
   for (const migration of ['0001_initial.sql', '0003_billing_shutdown.sql', '0015_role_metadata_enrichment.sql', '0020_shadow_extraction.sql', '0021_shadow_extraction_fencing.sql',
     '0022_shadow_extraction_cache_expiry.sql', '0023_shadow_extraction_attempt_costs.sql', '0024_shadow_publication_receipts.sql', '0025_shadow_extraction_evaluations.sql',
-    '0026_shadow_extraction_origin.sql', '0027_shadow_extraction_input_completeness.sql']) {
+    '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   database.prepare(`INSERT INTO shadow_extraction_runs

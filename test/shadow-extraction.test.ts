@@ -48,7 +48,7 @@ function schema(): D1Database {
   database.exec(readFileSync(new URL('../cloudflare/migrations/0022_shadow_extraction_cache_expiry.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0023_shadow_extraction_attempt_costs.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0026_shadow_extraction_origin.sql', import.meta.url), 'utf8'));
-  database.exec(readFileSync(new URL('../cloudflare/migrations/0027_shadow_extraction_input_completeness.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0032_shadow_extraction_input_completeness.sql', import.meta.url), 'utf8'));
   // The operations summary joins these production tables; this focused shadow
   // fixture only needs their query surface, not the unrelated schemas.
   database.exec('CREATE TABLE role_metadata_acquisition (report TEXT); CREATE TABLE catalog_items (kind TEXT, sk TEXT);');
@@ -205,11 +205,34 @@ describe('shadow extraction queue and cost ledger', () => {
       DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
       SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '100', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100',
     }, undefined, async () => ({ response: invalid, inputTokens: 1, outputTokens: 1, actualCostCents: 1 }));
-    const summary = await shadowExtractionSummary(DB) as { inputCompleteness: unknown[]; validationFailures: unknown[] };
+    const summary = await shadowExtractionSummary(DB) as { inputCompleteness: unknown[]; validationFailures: unknown[]; failureAttribution: unknown[] };
     expect(summary.inputCompleteness).toContainEqual({ origin: 'provider-poll', state: 'invalid-output', completeness: 'incomplete', count: 1 });
     expect(summary.validationFailures).toContainEqual({ category: 'model-schema', failure: 'invalid classification', count: 1 });
     expect(summary.validationFailures).toContainEqual({ category: 'model-evidence', failure: 'compensation: supporting passage absent from artifact', count: 1 });
+    expect(summary.validationFailures).toContainEqual({ category: 'input-incomplete', failure: 'housing: not-stated is invalid for incomplete input', count: 1 });
+    // The attribution join is what separates a bounded artifact from a model
+    // defect: five absent fields are diagnosed as input-incomplete, not as
+    // model-schema, while the same bounded input still reports both model rows.
+    expect(summary.failureAttribution).toContainEqual({ origin: 'provider-poll', completeness: 'incomplete', category: 'input-incomplete', count: 5 });
+    expect(summary.failureAttribution).toContainEqual({ origin: 'provider-poll', completeness: 'incomplete', category: 'model-schema', count: 1 });
+    expect(summary.failureAttribution).toContainEqual({ origin: 'provider-poll', completeness: 'incomplete', category: 'model-evidence', count: 1 });
     expect(JSON.stringify(summary)).not.toContain(description);
+  });
+
+  it('keeps historical runs unknown and survives unreadable validator JSON', async () => {
+    const DB = schema();
+    const insert = `INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity,
+      content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, lease_token,
+      cache_key, input_key, created_at, updated_at, validation)
+      VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, 'model', 'prompt', 'schema', 'preprocessing',
+      ?, 1, '', ?, ?, 'shadow-input/x.json', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z', ?)`;
+    await DB.prepare(insert).bind('legacy-run', 'a'.repeat(64), 'completed', 'legacy-lease', 'b'.repeat(64), null).run();
+    await DB.prepare(insert).bind('garbage-run', 'c'.repeat(64), 'invalid-output', 'garbage-lease', 'd'.repeat(64), 'truncated validator text').run();
+    const summary = await shadowExtractionSummary(DB) as { inputCompleteness: unknown[]; validationFailures: unknown[]; failureAttribution: unknown[] };
+    expect(summary.inputCompleteness).toContainEqual({ origin: 'legacy-unknown', state: 'completed', completeness: 'unknown', count: 1 });
+    expect(summary.inputCompleteness).toContainEqual({ origin: 'legacy-unknown', state: 'invalid-output', completeness: 'unknown', count: 1 });
+    expect(summary.validationFailures).toEqual([]);
+    expect(summary.failureAttribution).toEqual([]);
   });
 
   it('re-truncates a complete posting whose envelope overhead would exceed the ceiling instead of dropping it (issue #189)', async () => {
