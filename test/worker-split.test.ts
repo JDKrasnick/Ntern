@@ -95,7 +95,7 @@ describe('API and ingestion Worker boundary', () => {
     const { db, first } = reconnectingD1();
     const message = { id: 'message-1', body: 'not-json', ack: vi.fn(), retry: vi.fn() };
 
-    await ingestionWorker.queue({ queue, messages: [message] }, { DB: db } as IngestionEnvironment);
+    await ingestionWorker.queue({ queue, messages: [message] }, { DB: db } as Environment);
 
     expect(first).toHaveBeenCalledTimes(2);
     if (queue === 'destination-verification') expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 300 });
