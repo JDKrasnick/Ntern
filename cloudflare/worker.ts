@@ -869,7 +869,8 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     const event = { Records: [{ messageId: crypto.randomUUID(), body: JSON.stringify(message) }] };
     const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB) };
     const result = atsProvider === 'greenhouse'
-      ? await processGreenhouseQueue(event, { ...dependencies, sources: providers.greenhouse })
+      ? await processGreenhouseQueue(event, { ...dependencies, sources: providers.greenhouse,
+        enqueueContinuation: (continuation) => sendQueueMessageWithin(env.GREENHOUSE_QUEUE, continuation) })
       : atsProvider === 'lever'
         ? await processLeverQueue(event, { ...dependencies, sources: providers.lever })
         : await processAshbyQueue(event, { ...dependencies, sources: providers.ashby });
@@ -1776,7 +1777,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   const leverRegistry = [...registry.lever, ...legacyLever.filter((source) => !registry.lever.some((candidate) => candidate.id === source.id))];
   const result = catalogProvider === 'greenhouse'
-    ? await processGreenhouseQueue(event, { ...dependencies, sources: registry.greenhouse, messageDeadlineMs: SOURCE_MESSAGE_DEADLINE_MS })
+    ? await processGreenhouseQueue(event, { ...dependencies, sources: registry.greenhouse, messageDeadlineMs: SOURCE_MESSAGE_DEADLINE_MS,
+      enqueueContinuation: (continuation) => sendQueueMessageWithin(env.GREENHOUSE_QUEUE, continuation) })
     : catalogProvider === 'lever'
       ? await processLeverQueue(event, { ...dependencies, sources: leverRegistry, messageDeadlineMs: SOURCE_MESSAGE_DEADLINE_MS })
       : catalogProvider === 'ashby'

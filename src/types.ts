@@ -144,6 +144,12 @@ export interface SourceCheckpoint {
   /** Last fetch read the board listing without descriptions because the board is
    * larger than an isolate can parse with them (SpaceX, Anduril). */
   contentOmitted?: boolean;
+  /** Greenhouse listing revisions from the lightweight board index. Kept only
+   * for boards whose descriptions are acquired one posting at a time. */
+  greenhousePostingRevisions?: Record<string, string>;
+  /** Detail documents still owed by an oversized Greenhouse board. The worker
+   * continues this set in bounded queue deliveries. */
+  pendingGreenhousePostingIds?: string[];
   /** Version of the reviewed admission configuration applied to this snapshot. */
   admissionConfigurationVersion?: string;
   /** Parser version applied after a successful full source reconciliation. */

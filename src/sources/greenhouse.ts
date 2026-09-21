@@ -48,6 +48,10 @@ export const GREENHOUSE_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
 export const GREENHOUSE_JOB_MAX_BYTES = 512 * 1024;
 export const GREENHOUSE_BOARD_MAX_JOBS = 5_000;
 export const GREENHOUSE_CONTENT_HASH_VERSION = 2;
+export const GREENHOUSE_INDEX_CONTENT_HASH_VERSION = 3;
+/** A bounded detail batch keeps the index and parsed descriptions below the
+ * isolate ceiling even when every detail response approaches its own limit. */
+export const GREENHOUSE_DETAILS_PER_DELIVERY = 20;
 /**
  * The deadline covers headers and body, because the largest reviewed boards are
  * tens of megabytes (SpaceX answers `?content=true` with 27.7 MB). The same
@@ -88,6 +92,10 @@ function boardBase(token: string): string {
 
 export function greenhouseJobsUrl(token: string, options: { content?: boolean } = {}): string {
   return `${boardBase(token)}/jobs?content=${options.content === false ? 'false' : 'true'}`;
+}
+
+export function greenhouseJobUrl(token: string, jobId: string | number): string {
+  return `${boardBase(token)}/jobs/${encodeURIComponent(String(jobId))}`;
 }
 
 /**
@@ -222,6 +230,10 @@ function jobProjection(job: GreenhouseJob): string {
       });
 }
 
+function listingRevision(job: GreenhouseJob): string {
+  return createHash('sha256').update(jobProjection({ ...job, content: '' })).digest('hex');
+}
+
 /**
  * Maps one Greenhouse posting to a canonical listing. The company is always the
  * reviewed display name — never the response — and prospect posts
@@ -322,12 +334,17 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
   }
 
   async fetch(previous?: SourceCheckpoint): Promise<TransitionalGreenhouseResult> {
-    const url = greenhouseJobsUrl(this.options.source.boardToken);
-    const conditionalRequestAttempted = Boolean(previous?.etag);
+    // Once a board has crossed the full-response ceiling, do not make every
+    // continuation repeat that failed transfer. Its small index is sufficient
+    // to identify the detail documents that still need acquisition.
+    const indexOnly = previous?.contentOmitted === true;
+    const url = greenhouseJobsUrl(this.options.source.boardToken, { content: !indexOnly });
+    const detailPassOpen = Boolean(previous?.pendingGreenhousePostingIds?.length);
+    const conditionalRequestAttempted = Boolean(previous?.etag) && !detailPassOpen;
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
-        headers: { Accept: 'application/json', ...(previous?.etag ? { 'If-None-Match': previous.etag } : {}) },
+        headers: { Accept: 'application/json', ...(conditionalRequestAttempted && previous?.etag ? { 'If-None-Match': previous.etag } : {}) },
         signal: AbortSignal.timeout(GREENHOUSE_REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
@@ -358,7 +375,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     // the listing keeps the source ingesting instead of failing as `capacity`
     // twice and quarantining, and the first attempt still stops within one chunk
     // of the ceiling so the oversized body is never retained.
-    let contentOmitted = false;
+    let contentOmitted = indexOnly;
     let payload: unknown;
     try {
       payload = (await readBoundedJson(response, GREENHOUSE_RESPONSE_MAX_BYTES, `${this.id}: Greenhouse`)).value;
@@ -377,12 +394,51 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     if (!payload || typeof payload !== 'object' || !Array.isArray((payload as GreenhouseJobsResponse).jobs)) {
       throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
     }
-    const jobs = (payload as GreenhouseJobsResponse).jobs ?? [];
+    let jobs = (payload as GreenhouseJobsResponse).jobs ?? [];
     if (jobs.length > GREENHOUSE_BOARD_MAX_JOBS) {
       throw new SourceFetchError(`${this.id}: Greenhouse board exceeds ${GREENHOUSE_BOARD_MAX_JOBS} jobs`, 'capacity');
     }
+    if (!jobs.every(isGreenhouseJobShape)) {
+      throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
+    }
     const returnedEtag = response.headers.get('etag');
     const fetchedAt = this.now().toISOString();
+    const revisions = Object.fromEntries(jobs.flatMap((job) => job.id === undefined || job.id === null
+      ? [] : [[String(job.id), listingRevision(job)] as const]));
+    let selectedDetailIds = new Set<string>();
+    let pendingGreenhousePostingIds: string[] | undefined;
+    if (contentOmitted) {
+      const available = new Set(Object.keys(revisions));
+      const pending = new Set((previous?.pendingGreenhousePostingIds ?? []).filter((id) => available.has(id)));
+      for (const [id, revision] of Object.entries(revisions)) {
+        if (previous?.greenhousePostingRevisions?.[id] !== revision) pending.add(id);
+      }
+      const detailIds = [...pending].sort().slice(0, GREENHOUSE_DETAILS_PER_DELIVERY);
+      selectedDetailIds = new Set(detailIds);
+      const details = new Map<string, GreenhouseJob>();
+      for (const id of detailIds) {
+        let detailResponse: Response;
+        try {
+          detailResponse = await this.fetchImpl(greenhouseJobUrl(this.options.source.boardToken, id), {
+            headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(GREENHOUSE_REQUEST_TIMEOUT_MS),
+          });
+        } catch (error) {
+          throw new SourceFetchError(`${this.id}: Greenhouse job ${id} transport failed (${error instanceof Error ? error.message : String(error)})`, 'transport');
+        }
+        if (!detailResponse.ok) throw new SourceFetchError(`${this.id}: Greenhouse job ${id} fetch failed (${detailResponse.status})`, 'http', detailResponse.status);
+        const detail = (await readBoundedJson(detailResponse, GREENHOUSE_JOB_MAX_BYTES, `${this.id}: Greenhouse job ${id}`)).value;
+        if (!isGreenhouseJobShape(detail) || String(detail.id ?? '') !== id) {
+          throw new SourceFetchError(`${this.id}: Greenhouse job ${id} detail shape was invalid`, 'json');
+        }
+        details.set(id, detail);
+      }
+      jobs = jobs.map((job) => {
+        const detail = job.id === undefined || job.id === null ? undefined : details.get(String(job.id));
+        return detail ? { ...job, ...detail } : job;
+      });
+      for (const id of detailIds) pending.delete(id);
+      pendingGreenhousePostingIds = [...pending].sort();
+    }
     const postings: SourcedPosting[] = [];
     const digests: string[] = [];
     const rejectedApplicationUrls: Array<{ row: number; url: string; reason: string }> = [];
@@ -396,7 +452,10 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
         && new TextEncoder().encode(JSON.stringify(job)).byteLength > GREENHOUSE_JOB_MAX_BYTES) {
         throw new SourceFetchError(`${this.id}: Greenhouse job ${String(job.id ?? index + 1)} exceeds ${GREENHOUSE_JOB_MAX_BYTES} bytes`, 'capacity');
       }
-      digests.push(createHash('sha256').update(jobProjection(job)).digest('hex'));
+      // An oversized-board hash represents its index. Detail documents arrive
+      // in separate deliveries, so their temporary presence must not make a
+      // stable index look changed on every continuation.
+      digests.push(createHash('sha256').update(contentOmitted ? jobProjection({ ...job, content: '' }) : jobProjection(job)).digest('hex'));
       const posting = mapGreenhouseSourcedPosting(job, this.options.source, fetchedAt, index + 1);
       if (!posting) continue;
       const rejection = greenhouseApplicationUrlRejection(posting.applyUrl, this.options.source.allowedInitialHosts);
@@ -406,15 +465,16 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     // The digest set is the same one, sorted the same way, so the content hash
     // is unchanged — but no second array of full-content projections is kept
     // alive alongside the parsed board.
+    const contentHashVersion = contentOmitted ? GREENHOUSE_INDEX_CONTENT_HASH_VERSION : GREENHOUSE_CONTENT_HASH_VERSION;
     const contentHash = createHash('sha256')
-      .update(`greenhouse-v${GREENHOUSE_CONTENT_HASH_VERSION}:${digests.sort().join('')}`)
+      .update(`greenhouse-v${contentHashVersion}:${digests.sort().join('')}`)
       .digest('hex');
     // Every job is mapped, so the parsed container and whatever else the
     // provider returned alongside `jobs` is dead before the snapshot is built.
     payload = undefined;
     const neutral: SourceSnapshot = {
       sourceId: this.id,
-      outcome: previous?.contentHashAlgorithmVersion === GREENHOUSE_CONTENT_HASH_VERSION && contentHash === previous?.contentHash ? 'unchanged' : 'changed',
+      outcome: !selectedDetailIds.size && previous?.contentHashAlgorithmVersion === contentHashVersion && contentHash === previous?.contentHash ? 'unchanged' : 'changed',
       complete: true,
       postings,
       rawCount: jobs.length,
@@ -423,10 +483,11 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
         sourceId: this.id,
         etag: returnedEtag ?? previous?.etag,
         contentHash,
-        contentHashAlgorithmVersion: GREENHOUSE_CONTENT_HASH_VERSION,
+        contentHashAlgorithmVersion: contentHashVersion,
         lastSuccessAt: fetchedAt,
         successfulFetches: (previous?.successfulFetches ?? 0) + 1,
         contentOmitted,
+        ...(contentOmitted ? { greenhousePostingRevisions: revisions, pendingGreenhousePostingIds } : {}),
         lastRowCount: 0,
         lastRawCount: jobs.length,
         activeExternalIds: postings.map((posting) => posting.externalId),

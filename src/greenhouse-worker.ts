@@ -35,6 +35,7 @@ export interface GreenhouseBoardDependencies {
   linkValidator?: ApplicationUrlValidator;
   groupedNotificationCohort?: GroupedNotificationCohort;
   enqueueDestinationVerification?: (request: DestinationVerificationRequest) => Promise<void>;
+  enqueueContinuation?: (message: GreenhouseWorkMessage) => Promise<void>;
   catalogAdmissionResolver?: CatalogAdmissionResolver;
   onRecordFailure?: (record: QueueRecord, error: unknown) => Promise<void> | void;
   messageDeadlineMs?: number;
@@ -154,6 +155,12 @@ export async function runGreenhouseBoard(
       legacyDeliveryExclusions(dependencies.groupedNotificationCohort ?? new Set()),
     )
     : { sent: 0, skipped: 0, failed: 0 };
+  if (poll.continuationSources.includes(source.id)) {
+    if (!dependencies.enqueueContinuation) {
+      throw new Error(`${source.id}: oversized Greenhouse detail pass needs a continuation queue`);
+    }
+    await dependencies.enqueueContinuation({ version: 1, sourceId: source.id, scheduledAt: new Date().toISOString(), ...(message.force ? { force: true } : {}) });
+  }
   return {
     sourceId: source.id,
     mode,
