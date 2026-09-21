@@ -1146,9 +1146,6 @@ export function validatePostingIdentityRepairApply(plan: Pick<InternalPlan,
   expectedDuplicateJobs?: number;
 }) {
   if (plan.conflicts.length) throw new Error('Refusing apply while posting identity conflicts remain');
-  if (plan.presentationDisagreements.length) {
-    throw new Error('Refusing apply while duplicate groups have unresolved presentation disagreements');
-  }
   if (options.repairToken !== plan.repairToken || options.expectedChanges !== plan.expectedChanges || options.expectedDuplicateJobs !== plan.duplicateJobs) {
     throw new Error('Catalog changed after dry run; use its exact repair token, changed-record count, and duplicate-job count');
   }

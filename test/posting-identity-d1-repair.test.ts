@@ -770,6 +770,36 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it('applies eligible groups while preserving presentation-blocked duplicates', async () => {
+    const { sqlite, db, store } = await historicalDatabase({ presentationAgrees: true });
+    const postingId = '910004'; const tenant = 'aquaticcapitalmanagement';
+    const sourceId = `greenhouse-${tenant}`;
+    const url = `https://job-boards.greenhouse.io/${tenant}/jobs/${postingId}`;
+    const evidence: ProviderPostingEvidence = { provider: 'greenhouse', tenant, postingId, sourceId, urls: [url] };
+    await store.putCheckpoint({ sourceId, successfulFetches: 10, activeExternalIds: [postingId] });
+    await store.putInternship(job('blocked-older', url, '2026-08-01T00:00:00.000Z', [
+      occurrence('community-list', 'blocked-older', url),
+    ], { employerId: 'same-legacy-id', admission: { canonicalEmployer: { id: 'reviewed-one', displayName: 'Reviewed One' } } }));
+    await store.putInternship(job('blocked-newer', url, '2026-08-02T00:00:00.000Z', [
+      { ...occurrence(sourceId, postingId, url, evidence), provenance: 'official-ats' },
+    ], { employerId: 'same-legacy-id', admission: { canonicalEmployer: { id: 'reviewed-two', displayName: 'Reviewed Two' } } }));
+
+    const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    expect(dry).toMatchObject({ eligibleDuplicateGroups: 2, unresolvedDuplicateGroups: 1 });
+    const applied = await runBoundedPostingIdentityRepair(db, {
+      apply: true, jobBatch: 1, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    expect(applied).toMatchObject({ applied: true, projectionRefreshRequired: true });
+    expect(await store.getJob('plus-duplicate')).toMatchObject({ jobId: 'plus-old' });
+    expect(await store.getJob('blocked-older')).toMatchObject({ jobId: 'blocked-older' });
+    expect(await store.getJob('blocked-newer')).toMatchObject({ jobId: 'blocked-newer' });
+    expect(await runBoundedPostingIdentityRepair(db, { jobBatch: 1 })).toMatchObject({
+      expectedChanges: 0, eligibleDuplicateGroups: 0, unresolvedDuplicateGroups: 1,
+    });
+    sqlite.close();
+  });
+
   it('applies exact guarded remaps for presentation-agreeing groups, preserves workflow/notifications, resolves legacy IDs, and is idempotent', async () => {
     const { sqlite, db, store } = await historicalDatabase({ presentationAgrees: true });
     sqlite.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES ('TOMBSTONE#student', 'ROLE#plus-duplicate', 'notification-tombstone', ?)")
