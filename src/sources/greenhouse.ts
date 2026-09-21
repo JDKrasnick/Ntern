@@ -440,6 +440,15 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       pendingGreenhousePostingIds = [...pending].sort();
     }
     const postings: SourcedPosting[] = [];
+    // The index is authoritative for lifecycle reconciliation, even though an
+    // oversized delivery only has descriptions for its selected detail slice.
+    // Keep that full id set separate from `postings`: emitting the index-only
+    // rows would overwrite descriptions saved by an earlier delivery with an
+    // empty body.
+    const activeExternalIds = jobs.flatMap((job) => {
+      const posting = mapGreenhouseSourcedPosting(job, this.options.source, fetchedAt);
+      return posting ? [posting.externalId] : [];
+    });
     const digests: string[] = [];
     const rejectedApplicationUrls: Array<{ row: number; url: string; reason: string }> = [];
     for (const [index, job] of jobs.entries()) {
@@ -456,6 +465,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       // in separate deliveries, so their temporary presence must not make a
       // stable index look changed on every continuation.
       digests.push(createHash('sha256').update(contentOmitted ? jobProjection({ ...job, content: '' }) : jobProjection(job)).digest('hex'));
+      if (contentOmitted && !selectedDetailIds.has(String(job.id ?? ''))) continue;
       const posting = mapGreenhouseSourcedPosting(job, this.options.source, fetchedAt, index + 1);
       if (!posting) continue;
       const rejection = greenhouseApplicationUrlRejection(posting.applyUrl, this.options.source.allowedInitialHosts);
@@ -490,7 +500,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
         ...(contentOmitted ? { greenhousePostingRevisions: revisions, pendingGreenhousePostingIds } : {}),
         lastRowCount: 0,
         lastRawCount: jobs.length,
-        activeExternalIds: postings.map((posting) => posting.externalId),
+        activeExternalIds,
         lastRawRowCount: jobs.length,
         lastWithheldRowCount: rejectedApplicationUrls.length,
       },
