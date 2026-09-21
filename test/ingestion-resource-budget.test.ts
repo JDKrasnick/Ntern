@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
@@ -10,6 +10,7 @@ import { SourceFetchError } from '../src/sources/source-error.js';
 import type { SourceOccurrenceState } from '../src/types.js';
 import {
   PRODUCTION_GITHUB_DOCUMENT,
+  PRODUCTION_GITHUB_FEEDS,
   PRODUCTION_GITHUB_OCCURRENCES,
   PRODUCTION_GITHUB_SOURCE_ROWS,
   syntheticMarkdownTable,
@@ -168,6 +169,20 @@ function productionAdapter(documents: Record<string, string>) {
 }
 
 describe('ingestion resource budgets', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('keeps every current community feed and the growth case within a resumable delivery count', () => {
+    for (const [name, feed] of Object.entries(PRODUCTION_GITHUB_FEEDS)) {
+      const deliveries = Math.ceil(feed.rawRows / GITHUB_RESOLUTION_ROWS_PER_DELIVERY);
+      expect(deliveries, name).toBeGreaterThan(0);
+      expect(deliveries * GITHUB_RESOLUTION_ROWS_PER_DELIVERY).toBeGreaterThanOrEqual(feed.rawRows);
+      // A bounded retry receives at most this many listings regardless of the
+      // full source size. The 6,000-row case guards the next growth step rather
+      // than merely replaying today's three feeds.
+      expect(GITHUB_RESOLUTION_ROWS_PER_DELIVERY).toBeLessThan(feed.rawRows);
+    }
+  });
+
   it('parses a production-sized HTML table document under the parse budget with unchanged row numbers', () => {
     const bytesPerRow = Math.floor(PRODUCTION_GITHUB_DOCUMENT.bytes / PRODUCTION_GITHUB_DOCUMENT.htmlRows);
     const document = syntheticMarkdownTable({ rows: PRODUCTION_GITHUB_DOCUMENT.htmlRows, bytesPerRow, format: 'html' });
@@ -188,6 +203,10 @@ describe('ingestion resource budgets', () => {
   }, 120_000);
 
   it('resolves a production-sized GitHub source inside the per-message CPU, heap, and slice budgets', async () => {
+    // A 67-delivery pass emits one operational metric per delivery. Suppress
+    // those expected logs here so Vitest's task-update RPC remains bounded;
+    // production continues to emit the metrics.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const { store } = catalog();
     const documents = productionDocuments();
     // The measured source serves 2.73 MB across its two documents.
