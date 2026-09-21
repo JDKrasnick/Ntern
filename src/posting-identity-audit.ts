@@ -18,7 +18,8 @@ import { postingIdentityRepairPlan, type PostingIdentityRepairPlan } from './pos
  * records the production comparison.
  */
 
-type Row = { pk: string; sk: string; kind: string; value: string };
+export type PostingIdentityAuditRow = { pk: string; sk: string; kind: string; value: string };
+type Row = PostingIdentityAuditRow;
 type Plan = ReturnType<typeof postingIdentityRepairPlan>;
 
 /** Catalog rows per D1 read. Bounds one result set; it does not cap the audit. */
@@ -106,7 +107,25 @@ export interface PostingIdentityAuditReport {
   outboxRows: number;
 }
 
-type GroupMember = { jobId: string; firstSeenAt: string };
+export type PostingIdentityGroupMember = { jobId: string; firstSeenAt: string };
+type GroupMember = PostingIdentityGroupMember;
+
+export type PostingIdentityRepairIndex = {
+  /** Every reviewed provider group, including singletons. Groups are complete
+   * across catalog pages, so a repair batch never splits one identity. */
+  groups: Array<{ providerIdentity: string; members: PostingIdentityGroupMember[] }>;
+  /** Minimal job rows keep current-job and alias validation global without
+   * retaining every full internship document. */
+  jobHeads: PostingIdentityAuditRow[];
+  /** Durable occurrence locators by the job ID stored on the occurrence row.
+   * The repair fetches full values only for the groups in its current batch. */
+  occurrenceKeysByJob: Array<{ jobId: string; keys: Array<[string, string]> }>;
+};
+
+export type PostingIdentityAuditScan = {
+  report: PostingIdentityAuditReport;
+  repairIndex: PostingIdentityRepairIndex;
+};
 
 type AuditFacts = {
   pages: number;
@@ -146,10 +165,10 @@ function canonicalGroupJobId(members: GroupMember[]): string {
     || left.jobId.localeCompare(right.jobId))[0]!.jobId;
 }
 
-export async function runPostingIdentityAudit(db: D1Database, options: {
+async function scanPostingIdentityAudit(db: D1Database, options: {
   jobBatch?: number;
   log?: (event: string) => void;
-} = {}): Promise<PostingIdentityAuditReport> {
+} = {}): Promise<PostingIdentityAuditScan> {
   const jobBatch = Math.max(1, Math.min(options.jobBatch ?? IDENTITY_AUDIT_JOB_BATCH, 2_000));
   const sliceRows = await readSmallRows(db, SLICE_KINDS);
   const finalizeRows = sliceRows.concat(await readSmallRows(db, FINALIZE_KINDS.slice(SLICE_KINDS.length)));
@@ -165,6 +184,7 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
   // Occurrence rows are indexed before the job walk so each slice receives its
   // own occurrences and no slice holds the whole occurrence catalog.
   const occurrencesByJob = new Map<string, Row[]>();
+  const occurrenceKeysByJob = new Map<string, Array<[string, string]>>();
   const orphanOccurrences: Row[] = [];
   const heads: Array<{ row: Row; pk: string }> = [];
   {
@@ -177,7 +197,10 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
         const compact = { ...row, value: compactIdentityValue('source-occurrence', row.value) };
         let jobId: unknown;
         try { jobId = (JSON.parse(compact.value) as { jobId?: unknown }).jobId; } catch { jobId = undefined; }
-        if (typeof jobId === 'string' && jobId) occurrencesByJob.set(jobId, [...(occurrencesByJob.get(jobId) ?? []), compact]);
+        if (typeof jobId === 'string' && jobId) {
+          occurrencesByJob.set(jobId, [...(occurrencesByJob.get(jobId) ?? []), compact]);
+          occurrenceKeysByJob.set(jobId, [...(occurrenceKeysByJob.get(jobId) ?? []), [row.pk, row.sk]]);
+        }
         else orphanOccurrences.push(compact);
       }
       if (page.results.length < IDENTITY_AUDIT_READ_LIMIT) break;
@@ -288,7 +311,7 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
   const { presentationDisagreements, eligibleDuplicateGroups, eligibleDuplicateJobs, duplicateAlertGroups } = detail;
   const familyCounts = new Map<string, number>();
   for (const family of facts.unconfirmedFamilies.values()) familyCounts.set(family, (familyCounts.get(family) ?? 0) + 1);
-  return {
+  const report: PostingIdentityAuditReport = {
     schemaVersion: 1,
     pages: facts.pages,
     jobsScanned: facts.jobsScanned,
@@ -326,6 +349,34 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
     conflicts: sortedConflicts,
     outboxRows: detail.outboxRows,
   };
+  return {
+    report,
+    repairIndex: {
+      groups: [...facts.groupMembers.entries()]
+        .map(([providerIdentity, members]) => ({ providerIdentity, members: [...members] }))
+        .sort((left, right) => left.providerIdentity.localeCompare(right.providerIdentity)),
+      jobHeads: heads.map((head) => head.row),
+      occurrenceKeysByJob: [...occurrenceKeysByJob.entries()]
+        .map(([jobId, keys]) => ({ jobId, keys }))
+        .sort((left, right) => left.jobId.localeCompare(right.jobId)),
+    },
+  };
+}
+
+export async function runPostingIdentityAudit(db: D1Database, options: {
+  jobBatch?: number;
+  log?: (event: string) => void;
+} = {}): Promise<PostingIdentityAuditReport> {
+  return (await scanPostingIdentityAudit(db, options)).report;
+}
+
+/** Internal repair preflight. It exposes only compact locators and complete
+ * identity membership; full catalog and occurrence values remain paged. */
+export async function runPostingIdentityAuditScan(db: D1Database, options: {
+  jobBatch?: number;
+  log?: (event: string) => void;
+} = {}): Promise<PostingIdentityAuditScan> {
+  return scanPostingIdentityAudit(db, options);
 }
 
 /**

@@ -359,7 +359,7 @@ test('passes real expanded-family roles and blocks malformed roles through repai
 
   const previewResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
-    body: JSON.stringify({ scope: 'identity' }),
+    body: JSON.stringify({ scope: 'identity', jobBatch: 1 }),
   });
   assert.equal(previewResponse.status, 200);
   const preview = await previewResponse.json();
@@ -373,7 +373,7 @@ test('passes real expanded-family roles and blocks malformed roles through repai
   const applyResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
     body: JSON.stringify({
-      apply: true, scope: 'identity', repairToken: preview.repairToken,
+      apply: true, scope: 'identity', jobBatch: 1, repairToken: preview.repairToken,
       expectedChanges: preview.expectedChanges, expectedDuplicateJobs: preview.duplicateJobs,
     }),
   });

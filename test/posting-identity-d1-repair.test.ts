@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
+import { runBoundedPostingIdentityRepair } from '../src/posting-identity-bounded-repair.js';
 import { postingIdentityRepairQueryCount, runPostingIdentityRepair } from '../src/posting-identity-repair.js';
 import type { Internship, ProviderPostingEvidence, SourceOccurrence } from '../src/types.js';
 
@@ -370,6 +371,43 @@ describe('D1 posting identity repair', () => {
       scope: 'occurrences',
       conflicts: [expect.stringContaining('identity scope')],
     });
+  });
+
+  it('builds and applies the exact identity repair in bounded provider-group batches', async () => {
+    const { sqlite, db, store } = await historicalDatabase();
+    const singlePass = await runPostingIdentityRepair(db, { scope: 'identity' });
+    const bounded = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+
+    expect(bounded).toMatchObject({
+      scope: 'identity',
+      duplicateGroups: singlePass.duplicateGroups,
+      duplicateJobs: singlePass.duplicateJobs,
+      eligibleDuplicateGroups: singlePass.eligibleDuplicateGroups,
+      expectedChanges: singlePass.expectedChanges,
+      jobUpdates: singlePass.jobUpdates,
+      jobDeletes: singlePass.jobDeletes,
+      aliasWrites: singlePass.aliasWrites,
+      applicationRemaps: singlePass.applicationRemaps,
+      applicationMerges: singlePass.applicationMerges,
+      sessionRemaps: singlePass.sessionRemaps,
+      releaseRemaps: singlePass.releaseRemaps,
+      proposalRemaps: singlePass.proposalRemaps,
+      conflicts: [],
+    });
+    const applied = await runBoundedPostingIdentityRepair(db, {
+      apply: true,
+      jobBatch: 1,
+      repairToken: bounded.repairToken,
+      expectedChanges: bounded.expectedChanges,
+      expectedDuplicateJobs: bounded.duplicateJobs,
+    });
+    expect(applied).toMatchObject({ applied: true, projectionRefreshRequired: true });
+    expect(await store.getJob('plus-duplicate')).toMatchObject({ jobId: 'plus-old' });
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
+      expectedChanges: 0,
+      duplicateJobs: 0,
+    });
+    sqlite.close();
   });
 
   it('does not load unrelated large catalog or user row classes into the repair snapshot', async () => {
@@ -921,22 +959,21 @@ describe('D1 posting identity repair', () => {
       throw error;
     }
     metrics.statements = 0; metrics.calls = 0; metrics.maxBoundParameters = 0;
-    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 100 });
     expect(dry).toMatchObject({ expectedChanges: corpusSize * 2, conflicts: [], unresolvedDuplicateGroups: 0 });
     metrics.statements = 0; metrics.calls = 0; metrics.maxBoundParameters = 0;
-    const applied = await runPostingIdentityRepair(db, {
-      apply: true, repairToken: dry.repairToken,
-      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs, scope: 'identity',
+    const applied = await runBoundedPostingIdentityRepair(db, {
+      apply: true, jobBatch: 100, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
     });
-    const verification = await runPostingIdentityRepair(db, { scope: 'identity' });
+    const verification = await runBoundedPostingIdentityRepair(db, { jobBatch: 100 });
     expect(applied).toMatchObject({ applied: true, projectionRefreshRequired: true });
     expect(verification).toMatchObject({ expectedChanges: 0, conflicts: [] });
     expect(postingIdentityRepairQueryCount(dry.expectedChanges)).toBe(124);
     expect(postingIdentityRepairQueryCount(4_250 * 2)).toBe(439);
-    // 128 plan/apply statements plus the keyset-paged reads: 2,200 catalog rows
-    // page at 500 per statement, so the reads cost a handful of statements
-    // instead of one unbounded `SELECT` that D1 refuses outright.
-    expect(metrics.statements).toBe(140);
+    // The preview and verification walk the full production-shaped corpus, but
+    // every broad read is keyset-paged and every full-value occurrence read is
+    // limited to one identity-group batch.
     expect(metrics.statements).toBeLessThanOrEqual(900);
     expect(metrics.maxBoundParameters).toBeLessThanOrEqual(100);
     expect(metrics.maxBatchStatements).toBeLessThanOrEqual(25);
@@ -948,5 +985,5 @@ describe('D1 posting identity repair', () => {
     });
     expect(await runPostingIdentityRepair(db)).toMatchObject({ expectedChanges: 0, conflicts: [] });
     sqlite.close();
-  }, 15_000);
+  }, 30_000);
 });

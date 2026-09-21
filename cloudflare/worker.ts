@@ -25,6 +25,7 @@ import type { SourceCheckpoint, SourceHealth } from '../src/types.js';
 import { authenticatedInstallation, authenticatedUser, cleanupExpiredAuth, consumeAuthRateLimit, createInstallation, deleteAuthUser, handleAuthRequest, type AuthEnvironment } from './auth.js';
 import { runCatalogQualityBackfill } from '../src/catalog-quality-backfill.js';
 import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
+import { runBoundedPostingIdentityRepair } from '../src/posting-identity-bounded-repair.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
 import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
@@ -813,10 +814,24 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
           log: (event) => console.log(event),
         })));
       }
-      const report = await runPostingIdentityRepair(env.DB, input);
+      const repairOptions = {
+        ...input,
+        ...(input.jobBatch === undefined ? {} : { jobBatch: input.jobBatch }),
+        log: (event: string) => console.log(event),
+      };
+      const report = input.scope === 'identity'
+        ? await runBoundedPostingIdentityRepair(env.DB, repairOptions)
+        : await runPostingIdentityRepair(env.DB, repairOptions);
       if (input.apply && report.projectionRefreshRequired) {
         await refreshCatalogProjection(new D1InternshipStore(env.DB));
-        const verification = await runPostingIdentityRepair(env.DB, { scope: input.scope });
+        const verificationOptions = {
+          scope: input.scope,
+          ...(input.jobBatch === undefined ? {} : { jobBatch: input.jobBatch }),
+          log: (event: string) => console.log(event),
+        };
+        const verification = input.scope === 'identity'
+          ? await runBoundedPostingIdentityRepair(env.DB, verificationOptions)
+          : await runPostingIdentityRepair(env.DB, verificationOptions);
         return withCors(Response.json({ ...report, verification }));
       }
       return withCors(Response.json(report, { status: report.conflicts.length ? 409 : 200 }));

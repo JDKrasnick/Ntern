@@ -118,11 +118,12 @@ export interface PresentationDisagreement {
   values: Partial<Record<PresentationField, Array<{ jobId: string; value: unknown }>>>;
 }
 
-type InternalPlan = PostingIdentityRepairPlan & {
+export type InternalPostingIdentityRepairPlan = PostingIdentityRepairPlan & {
   catalogWrites: CatalogWrite[]; catalogDeletes: CatalogRow[];
   userWrites: UserWrite[]; userDeletes: UserRow[]; proposalUpdates: ProposalRow[];
   scan: PostingIdentityScan;
 };
+type InternalPlan = InternalPostingIdentityRepairPlan;
 
 /**
  * Compact, merge-safe outputs of one plan pass. The paged identity audit runs
@@ -1283,6 +1284,17 @@ export async function runPostingIdentityRepair(db: D1Database, options: {
     return { ...report, conflicts: [...report.conflicts, 'Apply and verify the identity scope before occurrence synchronization'] };
   }
   if (!options.apply) return report;
+  return applyPostingIdentityRepairPlan(db, plan, options);
+}
+
+/** Apply a fully materialized, guarded plan. Bounded planners use this same
+ * staging and before-image fence as the legacy single-pass planner. */
+export async function applyPostingIdentityRepairPlan(db: D1Database, plan: InternalPostingIdentityRepairPlan, options: {
+  repairToken?: string;
+  expectedChanges?: number;
+  expectedDuplicateJobs?: number;
+}): Promise<PostingIdentityRepairPlan> {
+  const report = repairReport(plan);
   if (plan.conflicts.length) throw new Error('Refusing apply while posting identity conflicts remain');
   if (plan.presentationDisagreements.length) {
     throw new Error('Refusing apply while duplicate groups have unresolved presentation disagreements');
