@@ -1561,11 +1561,17 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
 
 async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Promise<void> {
   const catalogProvider = providerForQueueName(batch.queue);
-  // Catalog persistence is idempotent, so protect every D1 query in these
-  // consumers, including the billing guard that runs before queue routing.
+  const resilientQueue = Boolean(catalogProvider)
+    || batch.queue.includes('destination-verification')
+    || batch.queue.includes('shadow-extraction');
+  // Queue persistence is idempotent, so protect every D1 query in consumers
+  // that persist catalog, destination, or shadow work, including the billing
+  // guard that runs before queue routing.
   // Without this early boundary, a transient disconnect throws the whole batch
-  // before per-record source health or failure-ledger diagnostics can run.
-  if (catalogProvider) env = { ...env, DB: resilientD1(env.DB) };
+  // before per-record handling can run and consumes one of the platform's
+  // scarce queue retries. Destination and shadow queues otherwise DLQ valid
+  // work after only two failed deliveries.
+  if (resilientQueue) env = { ...env, DB: resilientD1(env.DB) };
   if (await isShutdown(env)) {
     for (const message of batch.messages) message.ack();
     return;

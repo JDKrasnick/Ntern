@@ -409,6 +409,9 @@ export async function sendAdmissionOperationalAlert(
 ): Promise<boolean> {
   if (!input.signals.length || !env.RESEND_API_KEY || !env.ADMISSION_SUPPORT_RECIPIENT || !env.AUTH_FROM_EMAIL) return false;
   const signals = [...new Set(input.signals)].sort();
+  const action = signals.includes('destination-verification-dlq')
+    ? '\n\nAction required: inspect the destination-verification DLQ and, after review, use the authenticated DLQ operations replay flow. Do not purge messages.'
+    : '';
   const day = input.observedAt.slice(0, 10);
   const dedupeKey = createHash('sha256').update(`operational-health\0${day}\0${signals.join(',')}`).digest('hex');
   if (await store.emailDeliveryExists(dedupeKey)) return true;
@@ -419,7 +422,7 @@ export async function sendAdmissionOperationalAlert(
       from: env.AUTH_FROM_EMAIL,
       to: [env.ADMISSION_SUPPORT_RECIPIENT],
       subject: `[InternNotifs] catalog admission health: ${signals.join(', ')}`,
-      text: input.details,
+      text: `${input.details}${action}`,
     }),
   });
   if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);

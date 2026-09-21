@@ -463,6 +463,8 @@ describe('destination verification queue consumer', () => {
       from: 'Ntern <notifications@send.ntern.app>',
       to: ['support@example.test'],
     });
+    expect(JSON.parse(init.body as string).text).toContain('Action required: inspect the destination-verification DLQ');
+    expect(JSON.parse(init.body as string).text).toContain('Do not purge messages.');
     vi.unstubAllGlobals();
   });
 });
