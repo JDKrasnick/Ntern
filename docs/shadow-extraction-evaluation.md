@@ -42,3 +42,7 @@ The existing `npm run eval:shadow:offline` remains the model-output replay comma
 - Headquarters or office-listing prose is not the role’s location.
 
 It never fabricates a field the model missed. Do not enable it in the Worker until the frozen random holdout is labelled and meets the per-field release gates.
+
+## Candidate model experiment
+
+The development candidate is the pinned `gpt-5-mini-2025-08-07` snapshot with low reasoning effort and a 2,200-token completion cap. It is intentionally an evaluation-only option: production continues to use the pinned GPT-4o-mini snapshot until the independently labelled holdout meets release gates. Run it with `scripts/run-shadow-live-eval.ts`; the script requires an explicit maximum in cents, limits the selected split to at most 50 cases, and saves only local ignored reports.

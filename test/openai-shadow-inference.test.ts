@@ -47,4 +47,16 @@ describe('OpenAI shadow inference', () => {
       choices: [{ message: { content: '{}' } }],
     }))).rejects.toThrow('incomplete');
   });
+
+  it('allows an evaluation to cap output and account for a pinned GPT-5 mini snapshot', async () => {
+    const request = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body).toMatchObject({ model: 'gpt-5-mini-2025-08-07', max_completion_tokens: 321, reasoning_effort: 'minimal' });
+      expect(body).not.toHaveProperty('temperature');
+      return Response.json({ choices: [{ message: { content: JSON.stringify(extracted) } }], usage: { prompt_tokens: 1_000, completion_tokens: 500 } });
+    });
+    await expect(inferOpenAIShadowExtraction('test-key', input, shadowExtractionPrompt(input), request as typeof fetch,
+      { model: 'gpt-5-mini-2025-08-07', maxOutputTokens: 321, reasoningEffort: 'minimal' }))
+      .resolves.toMatchObject({ actualCostCents: 1 });
+  });
 });

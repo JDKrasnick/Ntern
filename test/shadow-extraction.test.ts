@@ -121,6 +121,17 @@ describe('shadow extraction contract', () => {
     expect(validateShadowExtraction(value, input).accepted?.fields.compensation).toMatchObject({ status: 'present' });
   });
 
+  it('accepts European thousands separators in compensation evidence', () => {
+    const input = normalizeExactPostingDescription('Intern', 'The statutory amount is EUR 43.456,-- per year.');
+    const value = output();
+    value.fields.compensation = {
+      value: [{ min: 43456, max: 43456, currency: 'EUR', period: 'year' }], status: 'present',
+      evidence: ['The statutory amount is EUR 43.456,-- per year.'], qualifiers: [],
+    };
+    value.fields.locations = { value: null as never, status: 'not-stated', evidence: [], qualifiers: [] };
+    expect(validateShadowExtraction(value, input).accepted?.fields.compensation).toMatchObject({ status: 'present' });
+  });
+
   it('keeps unknown classifications and incomplete/conflicting fields distinct from silence', () => {
     const input = normalizeExactPostingDescription('Intern', source, true);
     const value = output();

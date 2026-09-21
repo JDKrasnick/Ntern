@@ -111,15 +111,22 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput): { system:
       + 'engineering, scientific, data, quantitative, or technical field (for example software engineer, machine learning, data '
       + 'analyst, network engineer, site reliability engineer) supports technical=yes, and a title with Intern, Co-op, Apprentice, '
       + 'or New Grad supports earlyCareer=yes, even when the body gives no further detail. Reserve unknown for classifications with '
-      + 'no title or body signal at all. Do not turn clearance into citizenship, graduation dates into role season, '
+      + 'no title or body signal at all. The title supports classification only: never use it as evidence or a value for any field. '
+      + 'Every present field must have at least one non-empty verbatim description substring; every non-present field must use null '
+      + 'with empty evidence and qualifiers. Do not turn clearance into citizenship, graduation dates into role season, '
       + 'or generic office/remote prose into a role location or work mode. '
       + 'Do not invent disclosures. WorkMode requires the posting to state that this role is or works remote, hybrid, or '
       + 'onsite; never infer a mode from benefits or their eligibility conditions (for example "interns not working fully '
       + 'remote may receive housing support" describes a benefit, not the role), from dates, from office or city names, or '
-      + 'from silence — use not-stated. Those exclusions never suppress a real housing, relocation, or travel benefit '
+      + 'from silence — use not-stated. Normalize an explicit role sentence saying "on-site", "on site", or "in-office" '
+      + 'to workMode=onsite; those are the same mode even when hyphenated. For locations, include only places tied to the '
+      + 'role itself and never mix them with headquarters, office lists, or other company-wide location copy. For eligibility, '
+      + 'E-Verify participation or a statutory wage notice alone is not an eligibility requirement; if a separate role-specific '
+      + 'authorization, citizenship, visa, clearance, or sponsorship statement exists, quote only that statement as evidence. '
+      + 'Those exclusions never suppress a real housing, relocation, or travel benefit '
       + 'disclosed for this role, which remains a housing disclosure. Eligibility requires an explicit work authorization, '
       + 'citizenship, visa, clearance, or sponsorship statement for this role — including that the role will or will not '
-      + 'sponsor or offer visas. Language skills, graduation timing, school or location attendance, and internship-count '
+      + 'sponsor or offer visas. A language requirement, E-Verify statement, statutory pay notice, graduation timing, school or location attendance, and internship-count '
       + 'constraints are not eligibility; quote any eligibility statement as one contiguous span. A statement that no '
       + 'degree is required is not an education disclosure; return education only for actual degree requirements or '
       + 'preferences stated for the role.',
@@ -153,8 +160,14 @@ function words(value: string): string[] {
 }
 
 function compensationNumberPresent(passage: string, value: number): boolean {
-  return [...passage.matchAll(/(?:^|[^0-9.])([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)(?![0-9])/gu)]
-    .some((match) => Number(match[1]!.replace(/,/gu, '')) === value);
+  return [...passage.matchAll(/(?:^|[^0-9.])([0-9]+(?:[,.][0-9]{3})*(?:[,.][0-9]+)?)(?![0-9])/gu)]
+    .some((match) => {
+      const token = match[1]!;
+      const direct = Number(token.replace(/,/gu, ''));
+      // European job posts use `.` as a thousands separator, e.g. 43.456,--.
+      const europeanThousands = /^\d{1,3}(?:\.\d{3})+$/u.test(token) ? Number(token.replace(/\./gu, '')) : Number.NaN;
+      return direct === value || europeanThousands === value;
+    });
 }
 
 function compensationCurrencyPresent(passage: string, currency: string): boolean {

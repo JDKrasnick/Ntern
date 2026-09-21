@@ -18,11 +18,14 @@ if (audited.length !== 25) throw new Error(`Expected exactly 25 audited cases, g
 
 const notStated = { status: 'not-stated' as const };
 const forcePresent = { status: 'present' as const, value: true };
-function humanExpected(run: Run, extraction: ShadowExtraction): ShadowEvalExpected {
+function humanExpected(run: Run, extraction: ShadowExtraction, description: string): ShadowEvalExpected {
   const fields = Object.fromEntries(Object.entries(extraction.fields).map(([name, field]) => [name, field.status === 'present'
     ? { status: 'present', value: field.value } : { status: field.status }])) as ShadowEvalExpected['fields'];
   // These overrides are the independently reviewed errors from the first-25 audit.
-  if (run.source_id === 'greenhouse-vardaspace' || run.source_id === 'greenhouse-celonis') fields.locations = notStated;
+  if (run.source_id === 'greenhouse-vardaspace') {
+    const place = description.match(/\bon[- ]site in ([^.\n]+)/iu)?.[1]?.trim();
+    fields.locations = place ? { status: 'present', value: [place] } : notStated;
+  } else if (run.source_id === 'greenhouse-celonis') fields.locations = notStated;
   if (run.source_id === 'greenhouse-celonis') fields.workMode = notStated;
   if (run.source_id === 'ashby-sentry' || run.source_id === 'ashby-skydio' || run.source_id === 'greenhouse-oneethos') fields.eligibility = notStated;
   if (run.source_id === 'greenhouse-schonfeld') fields.timing = forcePresent;
@@ -44,7 +47,8 @@ const guarded: ShadowEvalCaseResult[] = [];
 const changes: Array<{ id: string; changes: ReturnType<typeof postprocessRoleScopedExtraction>['changes'] }> = [];
 for (const entry of audited) {
   const extraction = await extractionFor(entry.run.run_key);
-  const expected = humanExpected(entry.run, extraction);
+  const source = JSON.parse(await readFile(`${artifactsPath}/input/${entry.run.run_key}.json`, 'utf8')) as { normalized: { description: string } };
+  const expected = humanExpected(entry.run, extraction, source.normalized.description);
   const baselineEval = evaluateShadowCase(extraction, expected);
   baseline.push({ id: entry.run.run_key, valid: true, failures: [], ...baselineEval });
   const result = postprocessRoleScopedExtraction(extraction);
