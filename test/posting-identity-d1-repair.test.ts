@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
-import { runBoundedPostingIdentityRepair } from '../src/posting-identity-bounded-repair.js';
+import { runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { postingIdentityRepairQueryCount, runPostingIdentityRepair } from '../src/posting-identity-repair.js';
 import type { Internship, ProviderPostingEvidence, SourceOccurrence } from '../src/types.js';
 
@@ -394,14 +394,9 @@ describe('D1 posting identity repair', () => {
       proposalRemaps: singlePass.proposalRemaps,
       conflicts: [],
     });
-    const applied = await runBoundedPostingIdentityRepair(db, {
-      apply: true,
-      jobBatch: 1,
-      repairToken: bounded.repairToken,
-      expectedChanges: bounded.expectedChanges,
-      expectedDuplicateJobs: bounded.duplicateJobs,
-    });
-    expect(applied).toMatchObject({ applied: true, projectionRefreshRequired: true });
+    for (const batch of bounded.applyBatches ?? []) {
+      await expect(runBoundedPostingIdentityRepairBatch(db, batch)).resolves.toMatchObject({ applied: true });
+    }
     expect(await store.getJob('plus-duplicate')).toMatchObject({ jobId: 'plus-old' });
     expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
       expectedChanges: 0,

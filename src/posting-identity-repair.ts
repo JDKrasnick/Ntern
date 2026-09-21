@@ -97,7 +97,17 @@ export interface PostingIdentityRepairPlan {
   expectedChanges: number;
   applied: boolean;
   projectionRefreshRequired: boolean;
+  applyBatches?: PostingIdentityApplyBatch[];
 }
+
+export type PostingIdentityApplyBatch = {
+  jobIds: string[];
+  contextJobIds: string[];
+  occurrenceKeys: Array<[string, string]>;
+  repairToken: string;
+  expectedChanges: number;
+  expectedDuplicateJobs: number;
+};
 
 export type PostingIdentityRepairScope = 'all' | 'identity' | 'occurrences';
 

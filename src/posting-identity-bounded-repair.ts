@@ -10,6 +10,7 @@ import {
   postingIdentityRepairPlan,
   validatePostingIdentityRepairApply,
   type InternalPostingIdentityRepairPlan,
+  type PostingIdentityApplyBatch,
   type PostingIdentityRepairPlan,
 } from './posting-identity-repair.js';
 
@@ -218,6 +219,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   const userDeleteFacts = new Map<string, DeleteFact>();
   const proposalUpdateFacts = new Map<string, ProposalRow>();
   const batchDigests: string[] = [];
+  const applyBatches: PostingIdentityApplyBatch[] = [];
   const batchConflicts = new Set<string>();
   let simulatedUsers = users;
   let notificationTombstoneRemaps = 0;
@@ -241,6 +243,11 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
 
     batchDigests.push(plan.snapshotDigest, plan.repairToken);
+    applyBatches.push({
+      jobIds: [...jobIds].sort(), contextJobIds: [...occurrenceJobIds].sort(), occurrenceKeys: keys,
+      repairToken: plan.repairToken, expectedChanges: plan.expectedChanges,
+      expectedDuplicateJobs: plan.duplicateJobs,
+    });
     for (const conflict of plan.conflicts) batchConflicts.add(conflict);
     for (const write of plan.catalogWrites) coalesceWriteFacts(catalogWriteFacts, `${write.pk}\0${write.sk}`, {
       kind: write.kind, before: hashed(write.before?.value), value: digest(write.value),
@@ -314,6 +321,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     expectedChanges,
     applied: false,
     projectionRefreshRequired: false,
+    applyBatches,
     catalogWrites: [],
     catalogDeletes: [],
     userWrites: [],
@@ -352,4 +360,33 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
       changes: batchPlan.expectedChanges }));
   }
   return { ...plan, applied: true, projectionRefreshRequired: true };
+}
+
+export async function runBoundedPostingIdentityRepairBatch(db: D1Database, options: {
+  jobIds: string[];
+  contextJobIds: string[];
+  occurrenceKeys: Array<[string, string]>;
+  repairToken: string;
+  expectedChanges: number;
+  expectedDuplicateJobs: number;
+}): Promise<PostingIdentityRepairPlan> {
+  if (!options.jobIds.length || options.jobIds.length > 500) throw new Error('Identity repair batch must contain 1 to 500 jobs');
+  if (options.occurrenceKeys.length > 5_000) throw new Error('Identity repair batch contains too many occurrence keys');
+  const [contextRows, users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
+    readContextRows(db),
+    readUserRows(db),
+    db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>().then((result) => result.results),
+    db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
+      WHERE superseded_at IS NULL ORDER BY provider, scope`).all<EmployerMappingRow>().then((result) => result.results),
+    db.prepare(`SELECT id, provider, tenant, posting_id, company, title, location,
+        locations_json, apply_url, evidence_url, evidence_hash, reviewed_at, reviewed_by
+      FROM posting_identity_presentation_reviews ORDER BY id`).all<PresentationReviewRow>().then((result) => result.results),
+    readJobs(db, [...new Set(options.jobIds)].sort()),
+    readOccurrenceRows(db, options.occurrenceKeys),
+  ]);
+  const contextJobIds = new Set(options.contextJobIds);
+  const plan = postingIdentityRepairPlan([
+    ...fullJobs, ...occurrences, ...contextForJobs(contextRows, contextJobIds),
+  ] as never, users as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
+  return applyPostingIdentityRepairPlan(db, plan, options);
 }

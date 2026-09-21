@@ -25,7 +25,7 @@ import type { SourceCheckpoint, SourceHealth } from '../src/types.js';
 import { authenticatedInstallation, authenticatedUser, cleanupExpiredAuth, consumeAuthRateLimit, createInstallation, deleteAuthUser, handleAuthRequest, type AuthEnvironment } from './auth.js';
 import { runCatalogQualityBackfill } from '../src/catalog-quality-backfill.js';
 import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
-import { runBoundedPostingIdentityRepair } from '../src/posting-identity-bounded-repair.js';
+import { runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
 import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
@@ -805,6 +805,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
       acceptCurrentSnapshot?: boolean; expectedEligibleDuplicateGroups?: number; expectedUnresolvedDuplicateGroups?: number;
       scope?: 'all' | 'identity' | 'occurrences'; audit?: boolean; jobBatch?: number;
+      applyBatch?: { jobIds?: unknown; contextJobIds?: unknown; occurrenceKeys?: unknown }; finalize?: boolean;
     };
     try {
       // The audit is the read-only integrity gate. It pages the catalog so a
@@ -820,7 +821,27 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
         ...(input.jobBatch === undefined ? {} : { jobBatch: input.jobBatch }),
         log: (event: string) => console.log(event),
       };
-      const report = input.scope === 'identity'
+      let report: PostingIdentityRepairPlan;
+      if (input.applyBatch) {
+        if (!input.apply || input.scope !== 'identity'
+          || !Array.isArray(input.applyBatch.jobIds) || input.applyBatch.jobIds.some((item) => typeof item !== 'string')
+          || !Array.isArray(input.applyBatch.contextJobIds) || input.applyBatch.contextJobIds.some((item) => typeof item !== 'string')
+          || !Array.isArray(input.applyBatch.occurrenceKeys)
+          || input.applyBatch.occurrenceKeys.some((item) => !Array.isArray(item) || item.length !== 2 || item.some((part) => typeof part !== 'string'))
+          || typeof input.repairToken !== 'string' || typeof input.expectedChanges !== 'number'
+          || typeof input.expectedDuplicateJobs !== 'number') throw new Error('Identity repair batch is invalid');
+        report = await runBoundedPostingIdentityRepairBatch(env.DB, {
+          jobIds: input.applyBatch.jobIds as string[],
+          contextJobIds: input.applyBatch.contextJobIds as string[],
+          occurrenceKeys: input.applyBatch.occurrenceKeys as Array<[string, string]>,
+          repairToken: input.repairToken,
+          expectedChanges: input.expectedChanges,
+          expectedDuplicateJobs: input.expectedDuplicateJobs,
+        });
+        if (input.finalize) await refreshCatalogProjection(new D1InternshipStore(env.DB));
+        return withCors(Response.json(report));
+      }
+      report = input.scope === 'identity'
         ? await runBoundedPostingIdentityRepair(env.DB, repairOptions)
         : await runPostingIdentityRepair(env.DB, repairOptions);
       if (input.apply && report.projectionRefreshRequired) {
