@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GREENHOUSE_RESPONSE_MAX_BYTES, GreenhouseBoardAdapter, greenhouseJobsUrl, isGreenhouseJobShape, mapGreenhouseJob } from '../src/sources/greenhouse.js';
+import { GREENHOUSE_DETAILS_PER_DELIVERY, GREENHOUSE_RESPONSE_MAX_BYTES, GreenhouseBoardAdapter, greenhouseJobsUrl, isGreenhouseJobShape, mapGreenhouseJob } from '../src/sources/greenhouse.js';
 import { reconcileRoleMetadata } from '../src/role-metadata.js';
 import { enabledGreenhouseQualityPolicies, greenhouseQualityPolicy, verifySourceQuality } from '../src/sources/quality.js';
 import { defaultSources } from '../src/sources/index.js';
@@ -204,6 +204,8 @@ describe('GreenhouseBoardAdapter', () => {
       source: acmeSource,
       fetchImpl: async (input) => {
         requested.push(String(input));
+        const detailId = /\/jobs\/(\d+)$/.exec(new URL(String(input)).pathname)?.[1];
+        if (detailId) return jsonResponse((acmeJobsResponse.jobs ?? []).find((job) => String(job.id) === detailId));
         return String(input).includes('content=false')
           ? jsonResponse(acmeJobsResponse)
           : chunkedBoardResponse(GREENHOUSE_RESPONSE_MAX_BYTES + 4 * 65_536).response;
@@ -213,6 +215,32 @@ describe('GreenhouseBoardAdapter', () => {
     expect(requested[1]).toContain('content=false');
     expect(result.checkpoint.contentOmitted).toBe(true);
     expect(result.listings.length).toBeGreaterThan(0);
+  });
+  it('acquires oversized-board details in bounded deliveries and skips unchanged bodies', async () => {
+    const jobs = Array.from({ length: GREENHOUSE_DETAILS_PER_DELIVERY + 1 }, (_, index) => ({
+      ...technicalInternship, id: String(80_000 + index), internal_job_id: 80_000 + index,
+      absolute_url: `https://job-boards.greenhouse.io/acmerobotics/jobs/${80_000 + index}`,
+    }));
+    const requested: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input); requested.push(url);
+      const detailId = /\/jobs\/(\d+)$/.exec(new URL(url).pathname)?.[1];
+      if (detailId) return jsonResponse(jobs.find((job) => String(job.id) === detailId));
+      return url.includes('content=false') ? jsonResponse({ jobs }, { etag: 'W/"index"' })
+        : chunkedBoardResponse(GREENHOUSE_RESPONSE_MAX_BYTES + 65_536).response;
+    };
+    const adapter = new GreenhouseBoardAdapter({ source: acmeSource, fetchImpl });
+    const first = await adapter.fetch();
+    expect(first.checkpoint.pendingGreenhousePostingIds).toHaveLength(1);
+    expect(requested.filter((url) => /\/jobs\/\d+$/.test(new URL(url).pathname))).toHaveLength(GREENHOUSE_DETAILS_PER_DELIVERY);
+
+    const second = await adapter.fetch(first.checkpoint);
+    expect(second.checkpoint.pendingGreenhousePostingIds).toEqual([]);
+    expect(requested.filter((url) => url.includes('content=true'))).toHaveLength(1);
+
+    const third = await adapter.fetch(second.checkpoint);
+    expect(third.outcome).toBe('unchanged');
+    expect(requested.filter((url) => /\/jobs\/\d+$/.test(new URL(url).pathname))).toHaveLength(jobs.length);
   });
 
   it('still fails as capacity when even the listing does not fit', async () => {
@@ -231,7 +259,11 @@ describe('GreenhouseBoardAdapter', () => {
     const oversized = chunkedBoardResponse(boardBytes);
     const adapter = new GreenhouseBoardAdapter({
       source: acmeSource,
-      fetchImpl: async (input) => (String(input).includes('content=false') ? jsonResponse(acmeJobsResponse) : oversized.response),
+      fetchImpl: async (input) => {
+        const detailId = /\/jobs\/(\d+)$/.exec(new URL(String(input)).pathname)?.[1];
+        if (detailId) return jsonResponse((acmeJobsResponse.jobs ?? []).find((job) => String(job.id) === detailId));
+        return String(input).includes('content=false') ? jsonResponse(acmeJobsResponse) : oversized.response;
+      },
     });
     const result = await adapter.fetch();
     expect(result.checkpoint.contentOmitted).toBe(true);

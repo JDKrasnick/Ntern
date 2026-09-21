@@ -1572,6 +1572,13 @@ export class IngestionRunner {
           report.continuationSources.push(connector.id);
         }
         if (nextPendingRows.length) report.pendingResolution[connector.id] = nextPendingRows.length;
+        // Greenhouse boards that exceed the response ceiling acquire their
+        // descriptions separately. The index is already complete, but its
+        // bounded detail pass still needs another queue delivery.
+        if (result.checkpoint.pendingGreenhousePostingIds?.length
+          && !report.continuationSources.includes(connector.id)) {
+          report.continuationSources.push(connector.id);
+        }
         if (trustedPolicy && result.unchangedReason !== 'not_modified') {
           const diagnostics = result.trustedCommunityDiagnostics ?? {
             rejectedAggregatorRows: result.rejectedApplicationUrls?.filter((item) => item.reason.includes('aggregator')).length ?? 0,
