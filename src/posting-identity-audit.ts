@@ -183,7 +183,6 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
 
   // Occurrence rows are indexed before the job walk so each slice receives its
   // own occurrences and no slice holds the whole occurrence catalog.
-  const occurrencesByJob = new Map<string, Row[]>();
   const occurrenceKeysByJob = new Map<string, Array<[string, string]>>();
   const orphanOccurrences: Row[] = [];
   const heads: Array<{ row: Row; pk: string }> = [];
@@ -194,14 +193,12 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
         WHERE kind = 'source-occurrence' AND (pk > ? OR (pk = ? AND sk > ?)) ORDER BY pk, sk LIMIT ?`)
         .bind(after?.[0] ?? '', after?.[0] ?? '', after?.[1] ?? '', IDENTITY_AUDIT_READ_LIMIT).all<Row>();
       for (const row of page.results) {
-        const compact = { ...row, value: compactIdentityValue('source-occurrence', row.value) };
         let jobId: unknown;
-        try { jobId = (JSON.parse(compact.value) as { jobId?: unknown }).jobId; } catch { jobId = undefined; }
+        try { jobId = (JSON.parse(row.value) as { jobId?: unknown }).jobId; } catch { jobId = undefined; }
         if (typeof jobId === 'string' && jobId) {
-          occurrencesByJob.set(jobId, [...(occurrencesByJob.get(jobId) ?? []), compact]);
           occurrenceKeysByJob.set(jobId, [...(occurrenceKeysByJob.get(jobId) ?? []), [row.pk, row.sk]]);
         }
-        else orphanOccurrences.push(compact);
+        else orphanOccurrences.push({ ...row, value: compactIdentityValue('source-occurrence', row.value) });
       }
       if (page.results.length < IDENTITY_AUDIT_READ_LIMIT) break;
       const last = page.results[page.results.length - 1]!;
@@ -255,7 +252,8 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
     // A retired job ID resolves to its canonical job, and the plan attaches the
     // occurrence to that job, so the slice has to carry those rows too.
     for (const [oldJobId, canonicalJobId] of jobAlias) if (jobIds.has(canonicalJobId)) jobIds.add(oldJobId);
-    const occurrences = [...jobIds].flatMap((jobId) => occurrencesByJob.get(jobId) ?? []);
+    const occurrences = await readOccurrenceRowsByKey(db,
+      [...jobIds].flatMap((jobId) => occurrenceKeysByJob.get(jobId) ?? []));
     const plan = planOf([...slice, ...heads.filter((head) => !slicePks.has(head.pk)).map((head) => head.row),
       ...occurrences, ...sliceRows]);
     mergeScan(facts, plan);
@@ -267,8 +265,8 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
 
   // Occurrences whose job row is gone still carry coverage and family facts.
   const survivors = new Set(heads.map((head) => head.pk.slice('JOB#'.length)));
-  const leftover = [...orphanOccurrences, ...[...occurrencesByJob]
-    .filter(([jobId]) => !survivors.has(jobAlias.get(jobId) ?? jobId)).flatMap(([, rows]) => rows)];
+  const leftover = [...orphanOccurrences, ...await readOccurrenceRowsByKey(db, [...occurrenceKeysByJob]
+    .filter(([jobId]) => !survivors.has(jobAlias.get(jobId) ?? jobId)).flatMap(([, keys]) => keys))];
   if (leftover.length || facts.pages === 0) {
     mergeScan(facts, planOf([...heads.map((head) => head.row), ...leftover, ...sliceRows]));
     facts.pages += 1;
@@ -282,7 +280,8 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
   const detailPks = new Set(detailRows.map((row) => row.pk));
   const detail = planOf([...detailRows,
     ...heads.filter((head) => !detailPks.has(head.pk)).map((head) => head.row),
-    ...duplicateJobIds.flatMap((jobId) => occurrencesByJob.get(jobId) ?? []), ...finalizeRows]);
+    ...await readOccurrenceRowsByKey(db,
+      duplicateJobIds.flatMap((jobId) => occurrenceKeysByJob.get(jobId) ?? [])), ...finalizeRows]);
   for (const conflict of detail.conflicts) facts.conflicts.add(conflict);
 
   // Group claims are certified outside the group pass so the check stays global:
@@ -409,6 +408,18 @@ async function readJobBatch(db: D1Database, after: [string, string] | undefined,
     ORDER BY pk, sk LIMIT ?`)
     .bind(after?.[0] ?? '', after?.[0] ?? '', after?.[1] ?? '', limit).all<Row>();
   return page.results;
+}
+
+async function readOccurrenceRowsByKey(db: D1Database, keys: Array<[string, string]>): Promise<Row[]> {
+  const rows: Row[] = [];
+  for (let offset = 0; offset < keys.length; offset += 40) {
+    const chunk = keys.slice(offset, offset + 40);
+    const page = await db.prepare(`SELECT pk, sk, kind, value FROM catalog_items
+      WHERE kind = 'source-occurrence' AND (${chunk.map(() => '(pk = ? AND sk = ?)').join(' OR ')})
+      ORDER BY pk, sk`).bind(...chunk.flat()).all<Row>();
+    rows.push(...page.results.map((row) => ({ ...row, value: compactIdentityValue('source-occurrence', row.value) })));
+  }
+  return rows;
 }
 
 async function readJobsByJobId(db: D1Database, jobIds: string[]): Promise<Row[]> {
