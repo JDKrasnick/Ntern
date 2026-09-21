@@ -4,6 +4,15 @@ import apiWorker, { type ApiEnvironment } from '../cloudflare/api-worker.js';
 import ingestionWorker, { type IngestionEnvironment } from '../cloudflare/ingestion-worker.js';
 import { isIngestionOperationPath, secretMatches } from '../cloudflare/split.js';
 import { billingShutdownQueueIds, type Environment } from '../cloudflare/worker.js';
+import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
+
+vi.mock('@cloudflare/puppeteer', () => ({ default: { launch: vi.fn() } }));
+
+function reconnectingD1(): { db: D1Database; first: ReturnType<typeof vi.fn> } {
+  const first = vi.fn().mockRejectedValueOnce(new Error('Connection closed')).mockResolvedValue(undefined);
+  const statement = { bind: vi.fn(), first, all: vi.fn(), run: vi.fn() } as unknown as D1PreparedStatement;
+  return { db: { prepare: vi.fn(() => statement), batch: vi.fn() }, first };
+}
 
 describe('API and ingestion Worker boundary', () => {
   it('forwards the trusted-admission backfill through the authenticated service binding', async () => {
@@ -80,6 +89,17 @@ describe('API and ingestion Worker boundary', () => {
     expect(billingShutdownQueueIds(env)).toEqual([
       'greenhouse', 'lever', 'ashby', 'github', 'gmail', 'destination-verification', 'shadow-extraction',
     ]);
+  });
+
+  it.each(['destination-verification', 'shadow-extraction'])('retries a D1 reconnect for the %s queue before processing it', async (queue) => {
+    const { db, first } = reconnectingD1();
+    const message = { id: 'message-1', body: 'not-json', ack: vi.fn(), retry: vi.fn() };
+
+    await ingestionWorker.queue({ queue, messages: [message] }, { DB: db } as Environment);
+
+    expect(first).toHaveBeenCalledTimes(2);
+    if (queue === 'destination-verification') expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 300 });
+    else expect(message.ack).toHaveBeenCalledOnce();
   });
 
   it('resolves the shadow queue by exact name for Wrangler billing shutdowns without a configured ID', async () => {
