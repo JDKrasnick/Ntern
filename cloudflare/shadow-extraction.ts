@@ -267,7 +267,7 @@ async function finishRunWithAnalysis(db: D1Database, message: ShadowExtractionMe
 }
 
 export async function shadowExtractionSummary(db: D1Database): Promise<Record<string, unknown>> {
-  const [runs, costs, versions, origins, coverage, failures, baselineDifferences, usage, handoffs, providerOutbox] = await Promise.all([
+  const [runs, costs, versions, origins, coverage, failures, inputCompleteness, validationFailures, baselineDifferences, usage, handoffs, providerOutbox] = await Promise.all([
     db.prepare('SELECT state, COUNT(*) AS count, AVG(CASE WHEN completed_at IS NOT NULL THEN (julianday(completed_at) - julianday(created_at)) * 86400000 END) AS latency_ms FROM shadow_extraction_runs GROUP BY state').all(),
     db.prepare(`SELECT period, SUM(CASE WHEN state = 'reserved' THEN reserved_cents ELSE 0 END) AS reserved_cents,
       SUM(actual_cents) AS actual_cents, COUNT(*) AS attempts FROM shadow_extraction_cost_ledger
@@ -278,6 +278,26 @@ export async function shadowExtractionSummary(db: D1Database): Promise<Record<st
       FROM shadow_extraction_field_outcomes GROUP BY field, status ORDER BY field, status`).all(),
     db.prepare(`SELECT state, COUNT(*) AS count FROM shadow_extraction_runs
       WHERE state IN ('invalid-output', 'transient-failure', 'obsolete') GROUP BY state`).all(),
+    db.prepare(`SELECT origin, state, COALESCE(input_completeness, 'unknown') AS completeness, COUNT(*) AS count
+      FROM shadow_extraction_runs GROUP BY origin, state, COALESCE(input_completeness, 'unknown')
+      ORDER BY origin, state, completeness`).all(),
+    db.prepare(`SELECT CASE
+        WHEN failure IN ('response is not the extraction contract', 'invalid classification')
+          OR failure LIKE '%: invalid field contract'
+          OR failure LIKE '%: status/value inconsistency'
+          OR failure LIKE '%: not-stated is invalid for incomplete input' THEN 'model-schema'
+        WHEN failure LIKE '%: invalid evidence'
+          OR failure LIKE '%: supporting passage absent from artifact'
+          OR failure LIKE '%: numeric or unit inconsistency' THEN 'model-evidence'
+        WHEN failure LIKE '%: unsupported work mode'
+          OR failure LIKE '%: location is not a geographic place' THEN 'model-normalization'
+        ELSE 'other'
+      END AS category, failure, COUNT(*) AS count
+      FROM (
+        SELECT json_each.value AS failure FROM shadow_extraction_runs runs, json_each(runs.validation, '$.failures')
+        WHERE runs.state = 'invalid-output' AND runs.validation IS NOT NULL
+      ) validation_failures
+      GROUP BY category, failure ORDER BY category, failure`).all(),
     db.prepare(`SELECT field, baseline_state, shadow_state, COUNT(*) AS count
       FROM shadow_extraction_baseline_differences WHERE differs = 1 GROUP BY field, baseline_state, shadow_state`).all(),
     db.prepare(`SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -291,7 +311,7 @@ export async function shadowExtractionSummary(db: D1Database): Promise<Record<st
   ]);
   return { runs: runs.results, coverage: coverage.results, failures: failures.results, costs: costs.results,
     usage: usage.results[0] ?? { input_tokens: 0, output_tokens: 0, actual_cost_cents: 0 }, versions: versions.results,
-    origins: origins.results,
+    origins: origins.results, inputCompleteness: inputCompleteness.results, validationFailures: validationFailures.results,
     baselineDifferences: baselineDifferences.results, handoffs: handoffs.results,
     providerOutbox: providerOutbox ?? { pending: 0 } };
 }
@@ -314,6 +334,11 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       }
       const parsed = JSON.parse(await r2Text(env.SHADOW_EXTRACTION_ARTIFACTS, message.inputKey)) as { normalized?: NormalizedPostingInput; baseline?: ShadowBaseline };
       const normalized = parsed.normalized;
+      if (normalized?.completeness === 'complete' || normalized?.completeness === 'incomplete') {
+        await env.DB.prepare(`UPDATE shadow_extraction_runs SET input_completeness = ?
+          WHERE run_key = ? AND state = 'running' AND lease_token = ?`)
+          .bind(normalized.completeness, message.runKey, leaseToken).run();
+      }
       if (!normalized || normalized.contentHash !== message.contentHash || shadowExtractionCacheKey(normalized) !== message.cacheKey) {
         await finishRun(env.DB, message, leaseToken, 'invalid-output', now(), { error: 'input identity or version mismatch' }); queued.ack(); continue;
       }

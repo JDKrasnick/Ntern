@@ -39,7 +39,7 @@ function subject() {
     '0012_destination_verification_schedule.sql', '0015_role_metadata_enrichment.sql', '0016_role_metadata_repair_plans.sql',
     '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
     '0020_shadow_extraction.sql', '0021_shadow_extraction_fencing.sql',
-    '0022_shadow_extraction_cache_expiry.sql', '0026_shadow_extraction_origin.sql']) {
+    '0022_shadow_extraction_cache_expiry.sql', '0026_shadow_extraction_origin.sql', '0027_shadow_extraction_input_completeness.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   const db = sqliteD1(database);

@@ -114,7 +114,8 @@ Apply migrations `0020_shadow_extraction.sql`,
 `0023_shadow_extraction_attempt_costs.sql`,
 `0024_shadow_publication_receipts.sql`,
 `0025_shadow_extraction_evaluations.sql`, and
-`0026_shadow_extraction_origin.sql` before deploying the queue consumer.
+`0026_shadow_extraction_origin.sql`, and
+`0027_shadow_extraction_input_completeness.sql` before deploying the queue consumer.
 Provision the private R2 bucket and the `shadow-extraction` work/DLQ
 queues from the infrastructure configuration. Configure this R2 lifecycle rule
 after the bucket exists, using credentials with only the documented R2 write
@@ -148,3 +149,9 @@ The v5 contract accepts only canonical `remote`, `hybrid`, or `onsite` work mode
 and forbids `not-stated` for missing fields when input is truncated. Evaluation
 metrics expose field precision and recall when their denominators are available;
 an empty denominator is reported as `null`, not as a passing score.
+
+The aggregate shadow operations response also reports input completeness by
+origin and terminal state, plus validator failures grouped into model-schema,
+model-evidence, and model-normalization categories. This makes a bounded or
+otherwise incomplete source artifact visible separately from a malformed or
+unsupported model response; it does not expose posting text, URLs, or run IDs.

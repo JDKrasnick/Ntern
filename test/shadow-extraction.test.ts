@@ -9,7 +9,7 @@ import {
   validateShadowExtraction,
   type ShadowExtraction,
 } from '../src/shadow-extraction.js';
-import { enqueueShadowExtraction, processShadowExtractionBatch, reserveShadowCost, shadowReportFingerprint } from '../cloudflare/shadow-extraction.js';
+import { enqueueShadowExtraction, processShadowExtractionBatch, reserveShadowCost, shadowExtractionSummary, shadowReportFingerprint } from '../cloudflare/shadow-extraction.js';
 import type { D1Database, D1PreparedStatement, Queue, R2Bucket } from '../cloudflare/types.js';
 
 function d1(database: DatabaseSync): D1Database {
@@ -48,6 +48,10 @@ function schema(): D1Database {
   database.exec(readFileSync(new URL('../cloudflare/migrations/0022_shadow_extraction_cache_expiry.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0023_shadow_extraction_attempt_costs.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0026_shadow_extraction_origin.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0027_shadow_extraction_input_completeness.sql', import.meta.url), 'utf8'));
+  // The operations summary joins these production tables; this focused shadow
+  // fixture only needs their query surface, not the unrelated schemas.
+  database.exec('CREATE TABLE role_metadata_acquisition (report TEXT); CREATE TABLE catalog_items (kind TEXT, sk TEXT);');
   return d1(database);
 }
 
@@ -183,8 +187,29 @@ describe('shadow extraction queue and cost ledger', () => {
     const delivered = { id: 'm1', body: message, ack() {}, retry() {} };
     await processShadowExtractionBatch({ queue: 'intern-notifs-shadow-extraction', messages: [delivered] }, { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts });
     await processShadowExtractionBatch({ queue: 'intern-notifs-shadow-extraction', messages: [delivered] }, { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts });
-    const row = await DB.prepare('SELECT state, attempts, origin FROM shadow_extraction_runs').first<{ state: string; attempts: number; origin: string }>();
-    expect(row).toEqual({ state: 'disabled', attempts: 1, origin: 'provider-poll' });
+    const row = await DB.prepare('SELECT state, attempts, origin, input_completeness FROM shadow_extraction_runs').first<{ state: string; attempts: number; origin: string; input_completeness: string }>();
+    expect(row).toEqual({ state: 'disabled', attempts: 1, origin: 'provider-poll', input_completeness: 'complete' });
+  });
+
+  it('reports source completeness separately from validator failures without exposing artifacts', async () => {
+    const DB = schema(); const artifacts = new MemoryR2();
+    const queue: Queue = { async send() {}, async sendBatch() {} };
+    const message = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts }, {
+      jobId: 'invalid', sourceId: identity.sourceId, externalId: 'invalid', sourceUrl: identity.sourceUrl, providerIdentity: identity,
+      title: 'Software Engineering Intern', description, incomplete: true, observedAt: '2026-09-08T00:00:00.000Z', origin: 'provider-poll',
+    });
+    const invalid = output();
+    invalid.classification.technical = 'invalid';
+    invalid.fields.compensation.evidence = ['$90 per hour'];
+    await processShadowExtractionBatch({ queue: 'intern-notifs-shadow-extraction', messages: [{ id: 'invalid', body: message, ack() {}, retry() {} }] }, {
+      DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '100', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100',
+    }, undefined, async () => ({ response: invalid, inputTokens: 1, outputTokens: 1, actualCostCents: 1 }));
+    const summary = await shadowExtractionSummary(DB) as { inputCompleteness: unknown[]; validationFailures: unknown[] };
+    expect(summary.inputCompleteness).toContainEqual({ origin: 'provider-poll', state: 'invalid-output', completeness: 'incomplete', count: 1 });
+    expect(summary.validationFailures).toContainEqual({ category: 'model-schema', failure: 'invalid classification', count: 1 });
+    expect(summary.validationFailures).toContainEqual({ category: 'model-evidence', failure: 'compensation: supporting passage absent from artifact', count: 1 });
+    expect(JSON.stringify(summary)).not.toContain(description);
   });
 
   it('re-truncates a complete posting whose envelope overhead would exceed the ceiling instead of dropping it (issue #189)', async () => {
