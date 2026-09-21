@@ -1410,13 +1410,12 @@ export async function applyStagedPostingIdentityRepairPlan(db: D1Database, stage
         AND ${guardClause()}
     `).bind(stagePk, stagePk),
     db.prepare(`
-      DELETE FROM catalog_items AS current
-      WHERE EXISTS (
-        SELECT 1 FROM catalog_items AS staged
-        WHERE staged.pk = ? AND staged.kind = '${STAGE_KIND}'
-          AND json_extract(staged.value, '$.table') = 'catalog'
-          AND json_extract(staged.value, '$.action') = 'delete'
-          AND current.pk = staged.source_id AND current.sk = staged.external_id
+      DELETE FROM catalog_items
+      WHERE (pk, sk) IN (
+        SELECT source_id, external_id FROM catalog_items
+        WHERE pk = ? AND kind = '${STAGE_KIND}'
+          AND json_extract(value, '$.table') = 'catalog'
+          AND json_extract(value, '$.action') = 'delete'
       ) AND ${guardClause()}
     `).bind(stagePk, stagePk),
     db.prepare(`
@@ -1444,13 +1443,12 @@ export async function applyStagedPostingIdentityRepairPlan(db: D1Database, stage
         AND ${guardClause()}
     `).bind(stagePk, stagePk),
     db.prepare(`
-      DELETE FROM user_items AS current
-      WHERE EXISTS (
-        SELECT 1 FROM catalog_items AS staged
-        WHERE staged.pk = ? AND staged.kind = '${STAGE_KIND}'
-          AND json_extract(staged.value, '$.table') = 'user'
-          AND json_extract(staged.value, '$.action') = 'delete'
-          AND current.user_id = staged.source_id AND current.item_key = staged.external_id
+      DELETE FROM user_items
+      WHERE (user_id, item_key) IN (
+        SELECT source_id, external_id FROM catalog_items
+        WHERE pk = ? AND kind = '${STAGE_KIND}'
+          AND json_extract(value, '$.table') = 'user'
+          AND json_extract(value, '$.action') = 'delete'
       ) AND ${guardClause()}
     `).bind(stagePk, stagePk),
     db.prepare(`
