@@ -6,8 +6,10 @@ import {
   type PostingIdentityGroupMember,
 } from './posting-identity-audit.js';
 import {
-  applyPostingIdentityRepairPlan,
+  applyStagedPostingIdentityRepairPlan,
   postingIdentityRepairPlan,
+  stagePostingIdentityRepairPlan,
+  validatePostingIdentityRepairApply,
   type InternalPostingIdentityRepairPlan,
   type PostingIdentityRepairPlan,
 } from './posting-identity-repair.js';
@@ -158,9 +160,16 @@ function simulateUserRows(rows: UserRow[], plan: InternalPostingIdentityRepairPl
     || left.item_key.localeCompare(right.item_key));
 }
 
-function coalesceWrites<T extends { before?: unknown }>(target: Map<string, T>, key: string, write: T): void {
+type WriteFact = { kind: string; before: string | null; value: string };
+type DeleteFact = { kind: string; value: string };
+
+function hashed(value: string | null | undefined): string | null {
+  return value == null ? null : digest(value);
+}
+
+function coalesceWriteFacts(target: Map<string, WriteFact>, key: string, fact: WriteFact): void {
   const previous = target.get(key);
-  target.set(key, previous ? { ...write, before: previous.before ?? write.before } : write);
+  target.set(key, previous ? { ...fact, before: previous.before ?? fact.before } : fact);
 }
 
 function contextForJobs(rows: PostingIdentityAuditRow[], jobIds: Set<string>): PostingIdentityAuditRow[] {
@@ -201,11 +210,11 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     } catch { /* The audit and batch planner report malformed rows. */ }
   }
 
-  const catalogWrites = new Map<string, InternalPostingIdentityRepairPlan['catalogWrites'][number]>();
-  const catalogDeletes = new Map<string, InternalPostingIdentityRepairPlan['catalogDeletes'][number]>();
-  const userWrites = new Map<string, InternalPostingIdentityRepairPlan['userWrites'][number]>();
-  const userDeletes = new Map<string, InternalPostingIdentityRepairPlan['userDeletes'][number]>();
-  const proposalUpdates = new Map<string, ProposalRow>();
+  const catalogWriteFacts = new Map<string, WriteFact>();
+  const catalogDeleteFacts = new Map<string, DeleteFact>();
+  const userWriteFacts = new Map<string, WriteFact>();
+  const userDeleteFacts = new Map<string, DeleteFact>();
+  const proposalUpdateFacts = new Map<string, ProposalRow>();
   const batchDigests: string[] = [];
   const batchConflicts = new Set<string>();
   let simulatedUsers = users;
@@ -231,11 +240,15 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
 
     batchDigests.push(plan.snapshotDigest, plan.repairToken);
     for (const conflict of plan.conflicts) batchConflicts.add(conflict);
-    for (const write of plan.catalogWrites) coalesceWrites(catalogWrites, `${write.pk}\0${write.sk}`, write);
-    for (const row of plan.catalogDeletes) catalogDeletes.set(`${row.pk}\0${row.sk}`, row);
-    for (const write of plan.userWrites) coalesceWrites(userWrites, `${write.userId}\0${write.itemKey}`, write);
-    for (const row of plan.userDeletes) userDeletes.set(`${row.user_id}\0${row.item_key}`, row);
-    for (const row of plan.proposalUpdates) proposalUpdates.set(row.id, row);
+    for (const write of plan.catalogWrites) coalesceWriteFacts(catalogWriteFacts, `${write.pk}\0${write.sk}`, {
+      kind: write.kind, before: hashed(write.before?.value), value: digest(write.value),
+    });
+    for (const row of plan.catalogDeletes) catalogDeleteFacts.set(`${row.pk}\0${row.sk}`, { kind: row.kind, value: digest(row.value) });
+    for (const write of plan.userWrites) coalesceWriteFacts(userWriteFacts, `${write.userId}\0${write.itemKey}`, {
+      kind: write.kind, before: hashed(write.before?.value), value: digest(write.value),
+    });
+    for (const row of plan.userDeletes) userDeleteFacts.set(`${row.user_id}\0${row.item_key}`, { kind: row.kind, value: digest(row.value) });
+    for (const row of plan.proposalUpdates) proposalUpdateFacts.set(row.id, row);
     simulatedUsers = simulateUserRows(simulatedUsers, plan);
     notificationTombstoneRemaps += plan.notificationTombstoneRemaps;
     receiptRemaps += plan.receiptRemaps;
@@ -244,21 +257,21 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
       batches: groupBatches.length, groups: groupBatch.length, jobs: jobIds.size }));
   }
 
-  const catalogWriteValues = [...catalogWrites.values()];
-  const catalogDeleteValues = [...catalogDeletes.values()];
-  const userWriteValues = [...userWrites.values()];
-  const userDeleteValues = [...userDeletes.values()];
-  const proposalUpdateValues = [...proposalUpdates.values()];
+  const catalogWriteValues = [...catalogWriteFacts.values()];
+  const catalogDeleteValues = [...catalogDeleteFacts.values()];
+  const userWriteValues = [...userWriteFacts.values()];
+  const userDeleteValues = [...userDeleteFacts.values()];
+  const proposalUpdateValues = [...proposalUpdateFacts.values()];
   const conflicts = [...new Set([...scan.report.conflicts, ...batchConflicts])].sort();
   const expectedChanges = catalogWriteValues.length + catalogDeleteValues.length
     + userWriteValues.length + userDeleteValues.length + proposalUpdateValues.length;
   const repairFacts = {
     audit: scan.report,
     batches: batchDigests,
-    catalogWrites: catalogWriteValues.map((item) => [item.pk, item.sk, item.before?.value ?? null, item.value]),
-    catalogDeletes: catalogDeleteValues.map((item) => [item.pk, item.sk, item.value]),
-    userWrites: userWriteValues.map((item) => [item.userId, item.itemKey, item.before?.value ?? null, item.value]),
-    userDeletes: userDeleteValues.map((item) => [item.user_id, item.item_key, item.value]),
+    catalogWrites: [...catalogWriteFacts.entries()],
+    catalogDeletes: [...catalogDeleteFacts.entries()],
+    userWrites: [...userWriteFacts.entries()],
+    userDeletes: [...userDeleteFacts.entries()],
     proposalUpdates: proposalUpdateValues.map((item) => [item.id, item.job_id]),
   };
   const plan: InternalPostingIdentityRepairPlan = {
@@ -299,13 +312,43 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     expectedChanges,
     applied: false,
     projectionRefreshRequired: false,
-    catalogWrites: catalogWriteValues,
-    catalogDeletes: catalogDeleteValues,
-    userWrites: userWriteValues,
-    userDeletes: userDeleteValues,
-    proposalUpdates: proposalUpdateValues,
+    catalogWrites: [],
+    catalogDeletes: [],
+    userWrites: [],
+    userDeletes: [],
+    proposalUpdates: [],
     scan: { occurrenceDecisions: [], unconfirmedFamilies: [], groupMembers: [], groupAliases: [] },
   };
   if (!options.apply) return plan;
-  return applyPostingIdentityRepairPlan(db, plan, options);
+
+  // Validate the compact dry-run facts before materializing any full before/after
+  // values. Large repairs that cannot fit inside D1's guarded query budget fail
+  // here instead of consuming the Worker's entire 128 MB heap first.
+  validatePostingIdentityRepairApply(plan, options);
+  if (!plan.expectedChanges) return { ...plan, applied: true };
+
+  const stagePk = `POSTING_IDENTITY_REPAIR#${plan.repairToken}`;
+  await db.prepare("DELETE FROM catalog_items WHERE pk = ? AND kind IN ('posting-identity-repair-stage', 'posting-identity-repair-guard')")
+    .bind(stagePk).run();
+  simulatedUsers = users;
+  try {
+    for (const groupBatch of groupBatches) {
+      const jobIds = new Set(groupBatch.flatMap((group) => group.members.map((member) => member.jobId)));
+      const occurrenceJobIds = new Set(jobIds);
+      for (const [oldJobId, canonicalJobId] of jobAliases) if (jobIds.has(canonicalJobId)) occurrenceJobIds.add(oldJobId);
+      const fullJobs = await readJobs(db, [...jobIds].sort());
+      const keys = [...occurrenceJobIds].flatMap((jobId) => occurrenceKeys.get(jobId) ?? []);
+      const occurrences = await readOccurrenceRows(db, keys);
+      const batchPlan = postingIdentityRepairPlan([
+        ...fullJobs, ...occurrences, ...contextForJobs(contextRows, occurrenceJobIds),
+      ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
+      await stagePostingIdentityRepairPlan(db, stagePk, batchPlan);
+      simulatedUsers = simulateUserRows(simulatedUsers, batchPlan);
+    }
+    return await applyStagedPostingIdentityRepairPlan(db, stagePk, plan, options);
+  } catch (error) {
+    await db.prepare("DELETE FROM catalog_items WHERE pk = ? AND kind IN ('posting-identity-repair-stage', 'posting-identity-repair-guard')")
+      .bind(stagePk).run();
+    throw error;
+  }
 }

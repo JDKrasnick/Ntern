@@ -1126,7 +1126,9 @@ const STAGE_ROWS_PER_STATEMENT = 20;
 const STAGE_STATEMENTS_PER_BATCH = 25;
 const D1_PAID_QUERY_LIMIT = 1_000;
 const POST_REPAIR_QUERY_RESERVE = 100;
-function operationId(value: unknown) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
+function operationId(value: { table: string; key1: string; key2: string }) {
+  return createHash('sha256').update(JSON.stringify([value.table, value.key1, value.key2])).digest('hex');
+}
 
 /**
  * Conservative statement budget for the repair itself. Twenty staged rows use
@@ -1137,9 +1139,26 @@ export function postingIdentityRepairQueryCount(expectedChanges: number) {
   return Math.ceil(expectedChanges / STAGE_ROWS_PER_STATEMENT) + 14;
 }
 
-async function stage(db: D1Database, plan: InternalPlan) {
-  const pk = `POSTING_IDENTITY_REPAIR#${plan.repairToken}`;
-  await db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND kind = '${STAGE_KIND}'`).bind(pk).run();
+export function validatePostingIdentityRepairApply(plan: Pick<InternalPlan,
+  'conflicts' | 'presentationDisagreements' | 'repairToken' | 'expectedChanges' | 'duplicateJobs'>, options: {
+  repairToken?: string;
+  expectedChanges?: number;
+  expectedDuplicateJobs?: number;
+}) {
+  if (plan.conflicts.length) throw new Error('Refusing apply while posting identity conflicts remain');
+  if (plan.presentationDisagreements.length) {
+    throw new Error('Refusing apply while duplicate groups have unresolved presentation disagreements');
+  }
+  if (options.repairToken !== plan.repairToken || options.expectedChanges !== plan.expectedChanges || options.expectedDuplicateJobs !== plan.duplicateJobs) {
+    throw new Error('Catalog changed after dry run; use its exact repair token, changed-record count, and duplicate-job count');
+  }
+  if (postingIdentityRepairQueryCount(plan.expectedChanges) > D1_PAID_QUERY_LIMIT - POST_REPAIR_QUERY_RESERVE) {
+    throw new Error('Posting identity repair exceeds the guarded D1 query budget; split the reviewed repair plan');
+  }
+}
+
+export async function stagePostingIdentityRepairPlan(db: D1Database, pk: string, plan: InternalPlan, reset = false) {
+  if (reset) await db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND kind = '${STAGE_KIND}'`).bind(pk).run();
   const values = [
     ...plan.catalogWrites.map((item) => ({
       table: 'catalog', action: 'write', key1: item.pk, key2: item.sk,
@@ -1175,13 +1194,22 @@ async function stage(db: D1Database, plan: InternalPlan) {
     const chunk = values.slice(offset, offset + STAGE_ROWS_PER_STATEMENT);
     const placeholders = chunk.map(() => `(?, ?, '${STAGE_KIND}', ?, ?, ?)`).join(', ');
     statements.push(db.prepare(
-      `INSERT INTO catalog_items (pk, sk, kind, value, source_id, external_id) VALUES ${placeholders}`,
+      `INSERT INTO catalog_items (pk, sk, kind, value, source_id, external_id) VALUES ${placeholders}
+       ON CONFLICT(pk, sk) DO UPDATE SET
+         value = json_set(excluded.value, '$.old', json_extract(catalog_items.value, '$.old')),
+         source_id = excluded.source_id,
+         external_id = excluded.external_id`,
     ).bind(...chunk.flatMap((item) => [pk, operationId(item), JSON.stringify(item), item.key1, item.key2])));
   }
   for (let offset = 0; offset < statements.length; offset += STAGE_STATEMENTS_PER_BATCH) {
     await db.batch(statements.slice(offset, offset + STAGE_STATEMENTS_PER_BATCH));
   }
   return pk;
+}
+
+async function stage(db: D1Database, plan: InternalPlan) {
+  const pk = `POSTING_IDENTITY_REPAIR#${plan.repairToken}`;
+  return stagePostingIdentityRepairPlan(db, pk, plan, true);
 }
 
 function guardClause() { return "EXISTS (SELECT 1 FROM catalog_items WHERE pk = ? AND sk = 'GUARD' AND kind = 'posting-identity-repair-guard')"; }
@@ -1295,18 +1323,21 @@ export async function applyPostingIdentityRepairPlan(db: D1Database, plan: Inter
   expectedDuplicateJobs?: number;
 }): Promise<PostingIdentityRepairPlan> {
   const report = repairReport(plan);
-  if (plan.conflicts.length) throw new Error('Refusing apply while posting identity conflicts remain');
-  if (plan.presentationDisagreements.length) {
-    throw new Error('Refusing apply while duplicate groups have unresolved presentation disagreements');
-  }
-  if (options.repairToken !== plan.repairToken || options.expectedChanges !== plan.expectedChanges || options.expectedDuplicateJobs !== plan.duplicateJobs) {
-    throw new Error('Catalog changed after dry run; use its exact repair token, changed-record count, and duplicate-job count');
-  }
+  validatePostingIdentityRepairApply(plan, options);
   if (!plan.expectedChanges) return { ...report, applied: true };
-  if (postingIdentityRepairQueryCount(plan.expectedChanges) > D1_PAID_QUERY_LIMIT - POST_REPAIR_QUERY_RESERVE) {
-    throw new Error('Posting identity repair exceeds the guarded D1 query budget; split the reviewed repair plan');
-  }
   const stagePk = await stage(db, plan);
+  return applyStagedPostingIdentityRepairPlan(db, stagePk, plan, options);
+}
+
+export async function applyStagedPostingIdentityRepairPlan(db: D1Database, stagePk: string,
+  plan: InternalPostingIdentityRepairPlan, options: {
+    repairToken?: string;
+    expectedChanges?: number;
+    expectedDuplicateJobs?: number;
+  }): Promise<PostingIdentityRepairPlan> {
+  const report = repairReport(plan);
+  validatePostingIdentityRepairApply(plan, options);
+  if (!plan.expectedChanges) return { ...report, applied: true };
   const guard = db.prepare(`
     INSERT INTO catalog_items (pk, sk, kind, value)
     SELECT ?, 'GUARD', 'posting-identity-repair-guard', ?

@@ -961,6 +961,12 @@ describe('D1 posting identity repair', () => {
     metrics.statements = 0; metrics.calls = 0; metrics.maxBoundParameters = 0;
     const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 100 });
     expect(dry).toMatchObject({ expectedChanges: corpusSize * 2, conflicts: [], unresolvedDuplicateGroups: 0 });
+    // The production endpoint must not retain or serialize every full before/after
+    // job body. Apply stages one bounded batch at a time only after the compact
+    // token, counts, conflict gates, and D1 query budget have all been checked.
+    expect(dry).toMatchObject({
+      catalogWrites: [], catalogDeletes: [], userWrites: [], userDeletes: [], proposalUpdates: [],
+    });
     metrics.statements = 0; metrics.calls = 0; metrics.maxBoundParameters = 0;
     const applied = await runBoundedPostingIdentityRepair(db, {
       apply: true, jobBatch: 100, repairToken: dry.repairToken,
