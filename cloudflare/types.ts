@@ -34,7 +34,13 @@ export interface QueueMessage<T> {
   attempts?: number;
   timestamp?: Date;
   ack(): void;
-  retry(options?: { delaySeconds?: number }): void;
+  /**
+   * The optional second argument carries the failure that made the consumer
+   * retry, so D1 traffic observation can classify it. The platform call uses
+   * `options` alone; only the observation wrapper in d1-traffic-observation.ts
+   * reads it.
+   */
+  retry(options?: { delaySeconds?: number }, failure?: unknown): void;
 }
 export interface MessageBatch<T> {
   queue: string;

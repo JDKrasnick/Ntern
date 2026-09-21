@@ -1,11 +1,10 @@
 import { classifyD1Failure } from './d1-errors.js';
 import type { ControllerOutcome, ControllerStatus, Permit, PipelinePriority } from './d1-traffic-controller.js';
-import type { DurableObjectNamespace } from './types.js';
+import type { DurableObjectNamespace, MessageBatch } from './types.js';
 
-type CatalogProvider = 'github' | 'greenhouse' | 'lever' | 'ashby';
 interface AcquireResponse { permit?: Permit; retryAfterSeconds?: number; status: ControllerStatus; }
 
-export interface CatalogTrafficObservation {
+export interface D1TrafficObservation {
   complete(outcome: ControllerOutcome, error?: unknown): Promise<void>;
 }
 
@@ -14,21 +13,22 @@ function log(event: string, details: Record<string, unknown>): void {
 }
 
 /**
- * Observes one real catalog delivery without changing its queue semantics.
+ * Observes one real D1-backed queue delivery without changing its queue semantics.
  * The Durable Object is deliberately fail-open until a later owner-reviewed
  * enforcement rollout makes permit refusal actionable.
  */
-export async function observeCatalogDelivery(input: {
+export async function observeD1Delivery(input: {
   controller?: DurableObjectNamespace;
-  provider: CatalogProvider;
+  workload: string;
   queue: string;
   messageId: string;
   priority?: PipelinePriority;
-}): Promise<CatalogTrafficObservation | undefined> {
+  details?: Record<string, unknown>;
+}): Promise<D1TrafficObservation | undefined> {
   if (!input.controller) return undefined;
   const priority = input.priority ?? 'P0';
-  const workload = `catalog:${input.provider}`;
-  const details = { provider: input.provider, queue: input.queue, messageId: input.messageId, workload, priority };
+  const { workload } = input;
+  const details = { ...input.details, queue: input.queue, messageId: input.messageId, workload, priority };
   try {
     const stub = input.controller.get(input.controller.idFromName('catalog-ingestion'));
     const acquired = await stub.fetch('https://d1-traffic-controller/acquire', {
@@ -70,5 +70,42 @@ export async function observeCatalogDelivery(input: {
     console.error(JSON.stringify({ event: 'd1_traffic_observation_failed', phase: 'acquire', ...details,
       error: error instanceof Error ? error.message : String(error) }));
     return undefined;
+  }
+}
+
+/**
+ * Observes every delivery in one batch and completes its permits from the
+ * consumer's own decision. `ack` and `retry` still call the real messages, so
+ * queue semantics never change; the wrapper only records which one the consumer
+ * chose and the failure that made it retry.
+ *
+ * Completion runs in a `finally`: a consumer that throws would otherwise hold
+ * every permit in the batch until the controller's lease expires, and the whole
+ * batch's outcome would go unrecorded.
+ */
+export async function observeQueueBatch<T>(
+  batch: MessageBatch<unknown>,
+  observations: Map<string, D1TrafficObservation | undefined>,
+  consume: (observed: MessageBatch<unknown>) => Promise<T>,
+): Promise<T> {
+  const outcomes = new Map<string, ControllerOutcome>();
+  const failures = new Map<string, unknown>();
+  const observed: MessageBatch<unknown> = {
+    ...batch,
+    messages: batch.messages.map((message) => ({
+      ...message,
+      ack: () => { outcomes.set(message.id, 'success'); message.ack(); },
+      retry: (options, failure) => {
+        outcomes.set(message.id, 'failure');
+        if (failure !== undefined) failures.set(message.id, failure);
+        message.retry(options);
+      },
+    })),
+  };
+  try {
+    return await consume(observed);
+  } finally {
+    await Promise.all(batch.messages.map((message) => observations.get(message.id)
+      ?.complete(outcomes.get(message.id) ?? 'cancelled', failures.get(message.id))));
   }
 }

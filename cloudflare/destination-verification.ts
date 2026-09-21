@@ -490,8 +490,8 @@ export async function processDestinationVerificationBatch(
       }
       pendingAttemptKeys.add(attemptKey);
       pending.push({ queued, message });
-    } catch {
-      queued.retry({ delaySeconds: 300 });
+    } catch (error) {
+      queued.retry({ delaySeconds: 300 }, error);
     }
   }
   if (!pending.length) return;
@@ -795,12 +795,12 @@ export async function processDestinationVerificationBatch(
           if (message.idempotencyKey) await operations.recordVerificationCompletion(message.idempotencyKey, inspectedAt);
           queued.ack();
         }
-      } catch {
-        queued.retry({ delaySeconds: 300 });
+      } catch (error) {
+        queued.retry({ delaySeconds: 300 }, error);
       }
     }
-  } catch {
-    for (const { queued } of pending) queued.retry({ delaySeconds: 300 });
+  } catch (error) {
+    for (const { queued } of pending) queued.retry({ delaySeconds: 300 }, error);
   } finally {
     if (browser) await browser.close();
   }
