@@ -245,7 +245,11 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
 
     batchDigests.push(plan.snapshotDigest, plan.repairToken);
     applyBatches.push({
-      jobIds: [...jobIds].sort(), contextRows: batchContextRows, occurrenceKeys: keys,
+      // Checkpoints can contain multi-megabyte active-id snapshots. Repeating
+      // them in every response batch can exceed the Worker string limit, so
+      // the apply request re-reads that small row set and the repair token
+      // detects any drift. The much larger alias set stays signed inline.
+      jobIds: [...jobIds].sort(), contextRows: batchContextRows.filter((row) => row.kind !== 'checkpoint'), occurrenceKeys: keys,
       repairToken: plan.repairToken, expectedChanges: plan.expectedChanges,
       expectedDuplicateJobs: plan.duplicateJobs,
     });
@@ -374,7 +378,8 @@ export async function runBoundedPostingIdentityRepairBatch(db: D1Database, optio
   if (!options.jobIds.length || options.jobIds.length > 500) throw new Error('Identity repair batch must contain 1 to 500 jobs');
   if (options.occurrenceKeys.length > 5_000) throw new Error('Identity repair batch contains too many occurrence keys');
   if (options.contextRows.length > 5_000) throw new Error('Identity repair batch contains too many context rows');
-  const [users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
+  const [checkpoints, users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
+    readKindRows(db, 'checkpoint'),
     readUserRows(db),
     db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>().then((result) => result.results),
     db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
@@ -386,7 +391,7 @@ export async function runBoundedPostingIdentityRepairBatch(db: D1Database, optio
     readOccurrenceRows(db, options.occurrenceKeys),
   ]);
   const plan = postingIdentityRepairPlan([
-    ...fullJobs, ...occurrences, ...options.contextRows,
+    ...fullJobs, ...occurrences, ...checkpoints, ...options.contextRows,
   ] as never, users as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
   return applyPostingIdentityRepairPlan(db, plan, options);
 }
