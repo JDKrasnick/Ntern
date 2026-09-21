@@ -49,7 +49,7 @@ import { destinationVerificationMessage, enqueueDueDestinationVerifications, pro
   sendAdmissionOperationalAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
-import { observeCatalogDelivery } from './d1-traffic-observation.js';
+import { observeD1Delivery } from './d1-traffic-observation.js';
 import { resilientD1 } from './resilient-d1.js';
 export { D1TrafficController } from './d1-traffic-controller.js';
 import type { CatalogAdmissionResolver } from '../src/destination-verification.js';
@@ -1559,8 +1559,20 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   }
 }
 
+export function d1TrafficWorkloadForQueue(queue: string) {
+  const catalogProvider = providerForQueueName(queue);
+  return catalogProvider
+    ? { workload: `catalog:${catalogProvider}`, priority: 'P0' as const, details: { provider: catalogProvider } }
+    : queue.includes('destination-verification')
+      ? { workload: 'destination-verification', priority: 'P1' as const }
+      : queue.includes('shadow-extraction')
+        ? { workload: 'shadow-extraction', priority: 'P2' as const }
+        : undefined;
+}
+
 async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Promise<void> {
   const catalogProvider = providerForQueueName(batch.queue);
+  const trafficWorkload = d1TrafficWorkloadForQueue(batch.queue);
   const resilientQueue = Boolean(catalogProvider)
     || batch.queue.includes('destination-verification')
     || batch.queue.includes('shadow-extraction');
@@ -1576,23 +1588,37 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     for (const message of batch.messages) message.ack();
     return;
   }
-  const trafficObservations = new Map<string, Awaited<ReturnType<typeof observeCatalogDelivery>>>();
-  if (catalogProvider) {
+  const trafficObservations = new Map<string, Awaited<ReturnType<typeof observeD1Delivery>>>();
+  if (trafficWorkload) {
     for (const message of batch.messages) {
-      trafficObservations.set(message.id, await observeCatalogDelivery({
-        controller: env.D1_TRAFFIC_CONTROLLER, provider: catalogProvider, queue: batch.queue, messageId: message.id,
+      trafficObservations.set(message.id, await observeD1Delivery({
+        controller: env.D1_TRAFFIC_CONTROLLER, queue: batch.queue, messageId: message.id, ...trafficWorkload,
       }));
     }
   }
   const completeTraffic = async (messageId: string, outcome: 'success' | 'failure' | 'cancelled', error?: unknown) => {
     await trafficObservations.get(messageId)?.complete(outcome, error);
   };
+  const observedMessageOutcomes = new Map<string, 'success' | 'failure'>();
+  const observedBatch: MessageBatch<unknown> = {
+    ...batch,
+    messages: batch.messages.map((message) => ({
+      ...message,
+      ack: () => { observedMessageOutcomes.set(message.id, 'success'); message.ack(); },
+      retry: (options) => { observedMessageOutcomes.set(message.id, 'failure'); message.retry(options); },
+    })),
+  };
+  const completeObservedQueue = async () => {
+    await Promise.all(batch.messages.map((message) => completeTraffic(message.id, observedMessageOutcomes.get(message.id) ?? 'cancelled')));
+  };
   if (batch.queue.includes('destination-verification')) {
-    await processDestinationVerificationBatch(batch, env);
+    await processDestinationVerificationBatch(observedBatch, env);
+    await completeObservedQueue();
     return;
   }
   if (batch.queue.includes('shadow-extraction')) {
-    await processShadowExtractionBatch(batch, env);
+    await processShadowExtractionBatch(observedBatch, env);
+    await completeObservedQueue();
     return;
   }
   const records = batch.messages.map((message) => ({ messageId: message.id, body: typeof message.body === 'string' ? message.body : JSON.stringify(message.body) }));

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -41,6 +41,12 @@ const publishedGreenhouseRecords: ReviewedSourceRecord[] = reviewedGreenhouseSou
   }));
 
 describe('Cloudflare scheduled dispatch leases', () => {
+  it('assigns every D1-backed queue a traffic-observation priority', () => {
+    expect(d1TrafficWorkloadForQueue('intern-notifs-greenhouse')).toMatchObject({ workload: 'catalog:greenhouse', priority: 'P0' });
+    expect(d1TrafficWorkloadForQueue('intern-notifs-destination-verification')).toEqual({ workload: 'destination-verification', priority: 'P1' });
+    expect(d1TrafficWorkloadForQueue('intern-notifs-shadow-extraction')).toEqual({ workload: 'shadow-extraction', priority: 'P2' });
+  });
+
   it.each([
     ['D1_ERROR: D1 DB is overloaded. Requests queued for too long.', 60, 300],
     ['D1_ERROR: internal error; reference = 6hi9i83lajvi9r65mtnuni1t', 120, 600],

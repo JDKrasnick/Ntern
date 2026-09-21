@@ -2,10 +2,9 @@ import { classifyD1Failure } from './d1-errors.js';
 import type { ControllerOutcome, ControllerStatus, Permit, PipelinePriority } from './d1-traffic-controller.js';
 import type { DurableObjectNamespace } from './types.js';
 
-type CatalogProvider = 'github' | 'greenhouse' | 'lever' | 'ashby';
 interface AcquireResponse { permit?: Permit; retryAfterSeconds?: number; status: ControllerStatus; }
 
-export interface CatalogTrafficObservation {
+export interface D1TrafficObservation {
   complete(outcome: ControllerOutcome, error?: unknown): Promise<void>;
 }
 
@@ -14,21 +13,22 @@ function log(event: string, details: Record<string, unknown>): void {
 }
 
 /**
- * Observes one real catalog delivery without changing its queue semantics.
+ * Observes one real D1-backed queue delivery without changing its queue semantics.
  * The Durable Object is deliberately fail-open until a later owner-reviewed
  * enforcement rollout makes permit refusal actionable.
  */
-export async function observeCatalogDelivery(input: {
+export async function observeD1Delivery(input: {
   controller?: DurableObjectNamespace;
-  provider: CatalogProvider;
+  workload: string;
   queue: string;
   messageId: string;
   priority?: PipelinePriority;
-}): Promise<CatalogTrafficObservation | undefined> {
+  details?: Record<string, unknown>;
+}): Promise<D1TrafficObservation | undefined> {
   if (!input.controller) return undefined;
   const priority = input.priority ?? 'P0';
-  const workload = `catalog:${input.provider}`;
-  const details = { provider: input.provider, queue: input.queue, messageId: input.messageId, workload, priority };
+  const { workload } = input;
+  const details = { ...input.details, queue: input.queue, messageId: input.messageId, workload, priority };
   try {
     const stub = input.controller.get(input.controller.idFromName('catalog-ingestion'));
     const acquired = await stub.fetch('https://d1-traffic-controller/acquire', {
