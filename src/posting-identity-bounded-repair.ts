@@ -163,6 +163,17 @@ function coalesceWrites<T extends { before?: unknown }>(target: Map<string, T>, 
   target.set(key, previous ? { ...write, before: previous.before ?? write.before } : write);
 }
 
+function contextForJobs(rows: PostingIdentityAuditRow[], jobIds: Set<string>): PostingIdentityAuditRow[] {
+  return rows.filter((row) => {
+    if (row.kind === 'checkpoint') return true;
+    try {
+      const value = JSON.parse(row.value) as { jobId?: unknown; oldJobId?: unknown; canonicalJobId?: unknown };
+      const ids = [value.jobId, value.oldJobId, value.canonicalJobId].filter((item): item is string => typeof item === 'string');
+      return ids.length === 0 || ids.some((jobId) => jobIds.has(jobId));
+    } catch { return true; }
+  });
+}
+
 export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   apply?: boolean;
   repairToken?: string;
@@ -215,7 +226,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     const plan = postingIdentityRepairPlan([
       ...fullJobs,
       ...occurrences,
-      ...contextRows,
+      ...contextForJobs(contextRows, occurrenceJobIds),
     ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
 
     batchDigests.push(plan.snapshotDigest, plan.repairToken);
