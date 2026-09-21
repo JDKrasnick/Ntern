@@ -13,6 +13,7 @@ const reportPath = option('--report') ?? '.context/shadow-gpt5mini-low-v11.json'
 const manifestPath = option('--manifest') ?? '.context/shadow-production-eval-manifest.json';
 const artifactsPath = option('--artifacts') ?? '.context/pr324-artifacts';
 const outputPath = option('--out') ?? 'eval/shadow-live-rescored.json';
+const split = option('--split') ?? 'audited';
 const notStated = { status: 'not-stated' as const };
 const forcePresent = { status: 'present' as const, value: true };
 function expected(run: Run, extraction: ShadowExtraction, description: string): ShadowEvalExpected {
@@ -32,7 +33,7 @@ const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Manifest;
 const report = JSON.parse(await readFile(reportPath, 'utf8')) as Report;
 const byId = new Map(report.records.map((record) => [record.id, record]));
 const results: ShadowEvalCaseResult[] = [];
-for (const entry of manifest.cases.filter((item) => item.split === 'audited')) {
+for (const entry of manifest.cases.filter((item) => item.split === split)) {
   const record = byId.get(entry.run.run_key);
   const old = JSON.parse(await readFile(`${artifactsPath}/response/${entry.run.run_key}.json`, 'utf8')) as { validation: { accepted?: ShadowExtraction } };
   const source = JSON.parse(await readFile(`${artifactsPath}/input/${entry.run.run_key}.json`, 'utf8')) as { normalized: { title: string; description: string; completeness: string } };
@@ -40,7 +41,7 @@ for (const entry of manifest.cases.filter((item) => item.split === 'audited')) {
   const input = normalizeExactPostingDescription(source.normalized.title, source.normalized.description, source.normalized.completeness === 'incomplete');
   const validation = validateShadowExtraction(record.response, input);
   if (!validation.accepted) { results.push({ id: entry.run.run_key, valid: false, failures: validation.failures, fields: [] }); continue; }
-  const scored = evaluateShadowCase(postprocessRoleScopedExtraction(validation.accepted).extraction, expected(entry.run, old.validation.accepted, input.description));
+  const scored = evaluateShadowCase(postprocessRoleScopedExtraction(validation.accepted, input.completeness).extraction, expected(entry.run, old.validation.accepted, input.description));
   results.push({ id: entry.run.run_key, valid: true, failures: [], ...scored, cost: record.inputTokens === undefined || record.outputTokens === undefined || record.actualCostCents === undefined ? undefined : { inputTokens: record.inputTokens, outputTokens: record.outputTokens, actualCostCents: record.actualCostCents } });
 }
 const output = summarizeShadowEval(results);

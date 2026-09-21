@@ -63,6 +63,56 @@ describe('postprocessRoleScopedExtraction', () => {
     expect(result.extraction.fields.eligibility.status).toBe('not-stated');
   });
 
+  it('removes student-status eligibility, office-only work modes, and graduation-only timing', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', 'Current co-op students only', ['This position is open exclusively to current Co-Op students.']),
+      workMode: field('present', 'onsite', ['Work at our London office.']),
+      timing: field('present', 'Graduating in 2027', ['Graduating with a bachelor’s degree in 2027.']),
+    }));
+    expect(result.extraction.fields.eligibility.status).toBe('not-stated');
+    expect(result.extraction.fields.workMode.status).toBe('not-stated');
+    expect(result.extraction.fields.timing.status).toBe('not-stated');
+  });
+
+  it('normalizes malformed location prose and rejects schedule or incomplete-field noise on complete input', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['This internship is available for Summer 2027 in San Francisco'], ['This internship is available for Summer 2027 in San Francisco.']),
+      timing: field('present', 'Full-time, 40 hours per week', ['Full-time, 40 hours per week.']),
+      eligibility: { value: null, status: 'incomplete', evidence: [], qualifiers: [] },
+    }));
+    expect(result.extraction.fields.locations.value).toEqual(['San Francisco']);
+    expect(result.extraction.fields.timing.status).toBe('not-stated');
+    expect(result.extraction.fields.eligibility.status).toBe('not-stated');
+  });
+
+  it('preserves an explicit in-person role mode while filtering student-only eligibility and mixed office locations', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['Vancouver', 'Gastown'], ['This role is based in person at our Vancouver office.', 'Great location: Gastown office.']),
+      workMode: field('present', 'onsite', ['This role is based in person at our Vancouver office.']),
+      eligibility: field('present', 'Current university co-op students only', ['This position is open exclusively to current Northeastern University Co-Op students.']),
+    }));
+    expect(result.extraction.fields.locations.value).toEqual(['Vancouver']);
+    expect(result.extraction.fields.workMode.status).toBe('present');
+    expect(result.extraction.fields.eligibility.status).toBe('not-stated');
+  });
+
+  it('preserves a worded role duration', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      timing: field('present', 'ten weeks', ['You will spend ten weeks within our team.']),
+    }));
+    expect(result.extraction.fields.timing.status).toBe('present');
+  });
+
+  it('does not treat export-control geography as a role location', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['Auckland', 'United States'], [
+        'Engineering Intern to join our team in Auckland.',
+        'This position requires ITAR eligibility to access equipment regulated by the United States.',
+      ]),
+    }));
+    expect(result.extraction.fields.locations.value).toEqual(['Auckland']);
+  });
+
   it('does not invent missing facts or rewrite a role-scoped hybrid statement', () => {
     const result = postprocessRoleScopedExtraction(extraction({
       workMode: field('present', 'hybrid', ['This position follows a flexible hybrid work model.']),
