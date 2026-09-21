@@ -14,7 +14,7 @@
     "test": "vitest run --dir test --exclude ingestion-resource-budget.test.ts",
     "test:budget": "NODE_OPTIONS=--expose-gc vitest run --dir test test/ingestion-resource-budget.test.ts",
     "test:unit": "vitest run --dir test --exclude test/integration.workflow.test.ts --exclude test/api.workflow.test.ts --exclude test/full-day.workflow.test.ts",
-    "test:integration": "vitest run test/integration.workflow.test.ts test/api.workflow.test.ts test/full-day.workflow.test.ts",
+    "test:integration": "vitest run test/destination-queue-resilience.integration.test.ts test/full-day.workflow.test.ts",
     "test:e2e": "npm run build:cloudflare && node --test test/e2e/*.e2e.mjs",
     "test:greenhouse:live": "GREENHOUSE_LIVE=1 vitest run test/greenhouse.live.test.ts",
     "test:watch": "vitest",

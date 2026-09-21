@@ -552,6 +552,43 @@ test('uses the longer D1-overload delay after the first compiled queue delivery'
   assert.deepEqual(retries, [{ delaySeconds: 300 }]);
 });
 
+test('reconnects D1 inside each compiled destination queue consumer before queue settlement', async () => {
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  for (const [queue, settlement] of [
+    ['intern-notifs-destination-verification', 'retry'],
+    ['intern-notifs-shadow-extraction', 'ack'],
+  ]) {
+    let firstCalls = 0;
+    const statement = {
+      bind() { return statement; },
+      async first() {
+        firstCalls += 1;
+        if (firstCalls === 1) throw new Error('Connection closed');
+        return null;
+      },
+      async all() { return { results: [] }; },
+      async run() { return { meta: { changes: 0 } }; },
+    };
+    const database = { prepare() { return statement; }, async batch() { return []; } };
+    const calls = { ack: 0, retry: [] };
+
+    await builtWorker.queue({
+      queue,
+      messages: [{ id: `compiled-reconnect-${settlement}`, body: 'not-json', attempts: 1,
+        ack() { calls.ack += 1; }, retry(options) { calls.retry.push(options); } }],
+    }, { DB: database });
+
+    assert.equal(firstCalls, 2, `${queue} must retry the transient D1 disconnect in-request`);
+    if (settlement === 'retry') {
+      assert.deepEqual(calls.retry, [{ delaySeconds: 300 }]);
+      assert.equal(calls.ack, 0);
+    } else {
+      assert.equal(calls.ack, 1);
+      assert.deepEqual(calls.retry, []);
+    }
+  }
+});
+
 // Payload generators copied from test/fixtures/production-scale.ts. The e2e file
 // runs under bare `node --test`, which cannot import a TypeScript fixture, so the
 // generators live here byte-for-byte while the sizing constants stay documented.
