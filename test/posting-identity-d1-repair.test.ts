@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
+import { runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { postingIdentityRepairQueryCount, runPostingIdentityRepair } from '../src/posting-identity-repair.js';
 import type { Internship, ProviderPostingEvidence, SourceOccurrence } from '../src/types.js';
 
@@ -372,6 +373,55 @@ describe('D1 posting identity repair', () => {
     });
   });
 
+  it('builds and applies the exact identity repair in bounded provider-group batches', async () => {
+    const { sqlite, db, store } = await historicalDatabase();
+    const singlePass = await runPostingIdentityRepair(db, { scope: 'identity' });
+    const bounded = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+
+    expect(bounded).toMatchObject({
+      scope: 'identity',
+      duplicateGroups: singlePass.duplicateGroups,
+      duplicateJobs: singlePass.duplicateJobs,
+      eligibleDuplicateGroups: singlePass.eligibleDuplicateGroups,
+      expectedChanges: singlePass.expectedChanges,
+      jobUpdates: singlePass.jobUpdates,
+      jobDeletes: singlePass.jobDeletes,
+      aliasWrites: singlePass.aliasWrites,
+      applicationRemaps: singlePass.applicationRemaps,
+      applicationMerges: singlePass.applicationMerges,
+      sessionRemaps: singlePass.sessionRemaps,
+      releaseRemaps: singlePass.releaseRemaps,
+      proposalRemaps: singlePass.proposalRemaps,
+      conflicts: [],
+    });
+    for (const batch of bounded.applyBatches ?? []) {
+      await expect(runBoundedPostingIdentityRepairBatch(db, batch)).resolves.toMatchObject({ applied: true });
+    }
+    expect(await store.getJob('plus-duplicate')).toMatchObject({ jobId: 'plus-old' });
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
+      expectedChanges: 0,
+      duplicateJobs: 0,
+    });
+    sqlite.close();
+  });
+
+  it('can plan only duplicate identity groups for a narrow production apply', async () => {
+    const { sqlite, db } = await historicalDatabase();
+    const all = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    const duplicates = await runBoundedPostingIdentityRepair(db, { jobBatch: 1, duplicateGroupsOnly: true });
+
+    expect(duplicates).toMatchObject({
+      duplicateGroups: all.duplicateGroups,
+      duplicateJobs: all.duplicateJobs,
+      eligibleDuplicateGroups: all.eligibleDuplicateGroups,
+      unresolvedDuplicateGroups: all.unresolvedDuplicateGroups,
+      conflicts: [],
+    });
+    expect(duplicates.applyBatches?.length).toBeLessThan(all.applyBatches?.length ?? 0);
+    expect(duplicates.applyBatches?.every((batch) => batch.jobIds.length > 1)).toBe(true);
+    sqlite.close();
+  });
+
   it('does not load unrelated large catalog or user row classes into the repair snapshot', async () => {
     const sqlite = database(); const db = sqliteD1(sqlite);
     const before = await runPostingIdentityRepair(db);
@@ -732,6 +782,36 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it('applies eligible groups while preserving presentation-blocked duplicates', async () => {
+    const { sqlite, db, store } = await historicalDatabase({ presentationAgrees: true });
+    const postingId = '910004'; const tenant = 'aquaticcapitalmanagement';
+    const sourceId = `greenhouse-${tenant}`;
+    const url = `https://job-boards.greenhouse.io/${tenant}/jobs/${postingId}`;
+    const evidence: ProviderPostingEvidence = { provider: 'greenhouse', tenant, postingId, sourceId, urls: [url] };
+    await store.putCheckpoint({ sourceId, successfulFetches: 10, activeExternalIds: [postingId] });
+    await store.putInternship(job('blocked-older', url, '2026-08-01T00:00:00.000Z', [
+      occurrence('community-list', 'blocked-older', url),
+    ], { employerId: 'same-legacy-id', admission: { canonicalEmployer: { id: 'reviewed-one', displayName: 'Reviewed One' } } }));
+    await store.putInternship(job('blocked-newer', url, '2026-08-02T00:00:00.000Z', [
+      { ...occurrence(sourceId, postingId, url, evidence), provenance: 'official-ats' },
+    ], { employerId: 'same-legacy-id', admission: { canonicalEmployer: { id: 'reviewed-two', displayName: 'Reviewed Two' } } }));
+
+    const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    expect(dry).toMatchObject({ eligibleDuplicateGroups: 2, unresolvedDuplicateGroups: 1 });
+    const applied = await runBoundedPostingIdentityRepair(db, {
+      apply: true, jobBatch: 1, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    expect(applied).toMatchObject({ applied: true, projectionRefreshRequired: true });
+    expect(await store.getJob('plus-duplicate')).toMatchObject({ jobId: 'plus-old' });
+    expect(await store.getJob('blocked-older')).toMatchObject({ jobId: 'blocked-older' });
+    expect(await store.getJob('blocked-newer')).toMatchObject({ jobId: 'blocked-newer' });
+    expect(await runBoundedPostingIdentityRepair(db, { jobBatch: 1 })).toMatchObject({
+      expectedChanges: 0, eligibleDuplicateGroups: 0, unresolvedDuplicateGroups: 1,
+    });
+    sqlite.close();
+  });
+
   it('applies exact guarded remaps for presentation-agreeing groups, preserves workflow/notifications, resolves legacy IDs, and is idempotent', async () => {
     const { sqlite, db, store } = await historicalDatabase({ presentationAgrees: true });
     sqlite.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES ('TOMBSTONE#student', 'ROLE#plus-duplicate', 'notification-tombstone', ?)")
@@ -836,6 +916,32 @@ describe('D1 posting identity repair', () => {
     expect(await runPostingIdentityRepair(stale.db)).toMatchObject({ conflicts: [expect.stringContaining('already claimed')] });
   });
 
+  it('accepts a changed snapshot only when every approved repair bound still matches', async () => {
+    const { sqlite, db } = await historicalDatabase({ presentationAgrees: true });
+    const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    sqlite.prepare("UPDATE catalog_items SET value = json_set(value, '$.lastSeenAt', '2026-08-03T00:00:00.000Z') WHERE pk = 'JOB#plus-old' AND sk = 'META'").run();
+    const changed = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    expect(changed.repairToken).not.toBe(dry.repairToken);
+    expect(changed).toMatchObject({
+      expectedChanges: dry.expectedChanges, duplicateJobs: dry.duplicateJobs,
+      eligibleDuplicateGroups: dry.eligibleDuplicateGroups,
+      unresolvedDuplicateGroups: dry.unresolvedDuplicateGroups,
+    });
+    await expect(runBoundedPostingIdentityRepair(db, {
+      apply: true, jobBatch: 1, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+      acceptCurrentSnapshot: true, expectedEligibleDuplicateGroups: dry.eligibleDuplicateGroups,
+      expectedUnresolvedDuplicateGroups: dry.unresolvedDuplicateGroups + 1,
+    })).rejects.toThrow('Catalog changed after dry run');
+    await expect(runBoundedPostingIdentityRepair(db, {
+      apply: true, jobBatch: 1, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+      acceptCurrentSnapshot: true, expectedEligibleDuplicateGroups: dry.eligibleDuplicateGroups,
+      expectedUnresolvedDuplicateGroups: dry.unresolvedDuplicateGroups,
+    })).resolves.toMatchObject({ applied: true });
+    sqlite.close();
+  });
+
   it('classifies Ashby, ByteDance, and Workday history through the provider-neutral registry', async () => {
     const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
     const historical = [
@@ -921,22 +1027,27 @@ describe('D1 posting identity repair', () => {
       throw error;
     }
     metrics.statements = 0; metrics.calls = 0; metrics.maxBoundParameters = 0;
-    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 100 });
     expect(dry).toMatchObject({ expectedChanges: corpusSize * 2, conflicts: [], unresolvedDuplicateGroups: 0 });
-    metrics.statements = 0; metrics.calls = 0; metrics.maxBoundParameters = 0;
-    const applied = await runPostingIdentityRepair(db, {
-      apply: true, repairToken: dry.repairToken,
-      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs, scope: 'identity',
+    // The production endpoint must not retain or serialize every full before/after
+    // job body. Apply stages one bounded batch at a time only after the compact
+    // token, counts, conflict gates, and D1 query budget have all been checked.
+    expect(dry).toMatchObject({
+      catalogWrites: [], catalogDeletes: [], userWrites: [], userDeletes: [], proposalUpdates: [],
     });
-    const verification = await runPostingIdentityRepair(db, { scope: 'identity' });
+    metrics.statements = 0; metrics.calls = 0; metrics.maxBoundParameters = 0;
+    const applied = await runBoundedPostingIdentityRepair(db, {
+      apply: true, jobBatch: 100, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    const verification = await runBoundedPostingIdentityRepair(db, { jobBatch: 100 });
     expect(applied).toMatchObject({ applied: true, projectionRefreshRequired: true });
     expect(verification).toMatchObject({ expectedChanges: 0, conflicts: [] });
     expect(postingIdentityRepairQueryCount(dry.expectedChanges)).toBe(124);
     expect(postingIdentityRepairQueryCount(4_250 * 2)).toBe(439);
-    // 128 plan/apply statements plus the keyset-paged reads: 2,200 catalog rows
-    // page at 500 per statement, so the reads cost a handful of statements
-    // instead of one unbounded `SELECT` that D1 refuses outright.
-    expect(metrics.statements).toBe(140);
+    // The preview and verification walk the full production-shaped corpus, but
+    // every broad read is keyset-paged and every full-value occurrence read is
+    // limited to one identity-group batch.
     expect(metrics.statements).toBeLessThanOrEqual(900);
     expect(metrics.maxBoundParameters).toBeLessThanOrEqual(100);
     expect(metrics.maxBatchStatements).toBeLessThanOrEqual(25);
@@ -948,5 +1059,5 @@ describe('D1 posting identity repair', () => {
     });
     expect(await runPostingIdentityRepair(db)).toMatchObject({ expectedChanges: 0, conflicts: [] });
     sqlite.close();
-  }, 15_000);
+  }, 30_000);
 });

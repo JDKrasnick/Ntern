@@ -18,7 +18,8 @@ import { postingIdentityRepairPlan, type PostingIdentityRepairPlan } from './pos
  * records the production comparison.
  */
 
-type Row = { pk: string; sk: string; kind: string; value: string };
+export type PostingIdentityAuditRow = { pk: string; sk: string; kind: string; value: string };
+type Row = PostingIdentityAuditRow;
 type Plan = ReturnType<typeof postingIdentityRepairPlan>;
 
 /** Catalog rows per D1 read. Bounds one result set; it does not cap the audit. */
@@ -106,7 +107,25 @@ export interface PostingIdentityAuditReport {
   outboxRows: number;
 }
 
-type GroupMember = { jobId: string; firstSeenAt: string };
+export type PostingIdentityGroupMember = { jobId: string; firstSeenAt: string };
+type GroupMember = PostingIdentityGroupMember;
+
+export type PostingIdentityRepairIndex = {
+  /** Every reviewed provider group, including singletons. Groups are complete
+   * across catalog pages, so a repair batch never splits one identity. */
+  groups: Array<{ providerIdentity: string; members: PostingIdentityGroupMember[] }>;
+  /** Minimal job rows keep current-job and alias validation global without
+   * retaining every full internship document. */
+  jobHeads: PostingIdentityAuditRow[];
+  /** Durable occurrence locators by the job ID stored on the occurrence row.
+   * The repair fetches full values only for the groups in its current batch. */
+  occurrenceKeysByJob: Array<{ jobId: string; keys: Array<[string, string]> }>;
+};
+
+export type PostingIdentityAuditScan = {
+  report: PostingIdentityAuditReport;
+  repairIndex: PostingIdentityRepairIndex;
+};
 
 type AuditFacts = {
   pages: number;
@@ -146,10 +165,10 @@ function canonicalGroupJobId(members: GroupMember[]): string {
     || left.jobId.localeCompare(right.jobId))[0]!.jobId;
 }
 
-export async function runPostingIdentityAudit(db: D1Database, options: {
+async function scanPostingIdentityAudit(db: D1Database, options: {
   jobBatch?: number;
   log?: (event: string) => void;
-} = {}): Promise<PostingIdentityAuditReport> {
+} = {}): Promise<PostingIdentityAuditScan> {
   const jobBatch = Math.max(1, Math.min(options.jobBatch ?? IDENTITY_AUDIT_JOB_BATCH, 2_000));
   const sliceRows = await readSmallRows(db, SLICE_KINDS);
   const finalizeRows = sliceRows.concat(await readSmallRows(db, FINALIZE_KINDS.slice(SLICE_KINDS.length)));
@@ -164,7 +183,7 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
 
   // Occurrence rows are indexed before the job walk so each slice receives its
   // own occurrences and no slice holds the whole occurrence catalog.
-  const occurrencesByJob = new Map<string, Row[]>();
+  const occurrenceKeysByJob = new Map<string, Array<[string, string]>>();
   const orphanOccurrences: Row[] = [];
   const heads: Array<{ row: Row; pk: string }> = [];
   {
@@ -174,11 +193,12 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
         WHERE kind = 'source-occurrence' AND (pk > ? OR (pk = ? AND sk > ?)) ORDER BY pk, sk LIMIT ?`)
         .bind(after?.[0] ?? '', after?.[0] ?? '', after?.[1] ?? '', IDENTITY_AUDIT_READ_LIMIT).all<Row>();
       for (const row of page.results) {
-        const compact = { ...row, value: compactIdentityValue('source-occurrence', row.value) };
         let jobId: unknown;
-        try { jobId = (JSON.parse(compact.value) as { jobId?: unknown }).jobId; } catch { jobId = undefined; }
-        if (typeof jobId === 'string' && jobId) occurrencesByJob.set(jobId, [...(occurrencesByJob.get(jobId) ?? []), compact]);
-        else orphanOccurrences.push(compact);
+        try { jobId = (JSON.parse(row.value) as { jobId?: unknown }).jobId; } catch { jobId = undefined; }
+        if (typeof jobId === 'string' && jobId) {
+          occurrenceKeysByJob.set(jobId, [...(occurrenceKeysByJob.get(jobId) ?? []), [row.pk, row.sk]]);
+        }
+        else orphanOccurrences.push({ ...row, value: compactIdentityValue('source-occurrence', row.value) });
       }
       if (page.results.length < IDENTITY_AUDIT_READ_LIMIT) break;
       const last = page.results[page.results.length - 1]!;
@@ -220,7 +240,6 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
     if (!jobs.length) break;
     const last = jobs[jobs.length - 1]!;
     after = [last.pk, last.sk];
-    const slicePks = new Set(jobs.map((row) => row.pk));
     const jobIds = new Set<string>();
     for (const row of jobs) {
       try {
@@ -232,9 +251,17 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
     // A retired job ID resolves to its canonical job, and the plan attaches the
     // occurrence to that job, so the slice has to carry those rows too.
     for (const [oldJobId, canonicalJobId] of jobAlias) if (jobIds.has(canonicalJobId)) jobIds.add(oldJobId);
-    const occurrences = [...jobIds].flatMap((jobId) => occurrencesByJob.get(jobId) ?? []);
-    const plan = planOf([...slice, ...heads.filter((head) => !slicePks.has(head.pk)).map((head) => head.row),
-      ...occurrences, ...sliceRows]);
+    const occurrences = await readOccurrenceRowsByKey(db,
+      [...jobIds].flatMap((jobId) => occurrenceKeysByJob.get(jobId) ?? []));
+    const pageContext = sliceRows.filter((row) => {
+      if (row.kind !== 'job-id-alias') return true;
+      try {
+        const alias = JSON.parse(row.value) as { oldJobId?: string; canonicalJobId?: string };
+        return Boolean((alias.oldJobId && jobIds.has(alias.oldJobId))
+          || (alias.canonicalJobId && jobIds.has(alias.canonicalJobId)));
+      } catch { return true; }
+    });
+    const plan = planOf([...slice, ...occurrences, ...pageContext]);
     mergeScan(facts, plan);
     facts.pages += 1;
     facts.jobsScanned += jobs.length;
@@ -244,8 +271,8 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
 
   // Occurrences whose job row is gone still carry coverage and family facts.
   const survivors = new Set(heads.map((head) => head.pk.slice('JOB#'.length)));
-  const leftover = [...orphanOccurrences, ...[...occurrencesByJob]
-    .filter(([jobId]) => !survivors.has(jobAlias.get(jobId) ?? jobId)).flatMap(([, rows]) => rows)];
+  const leftover = [...orphanOccurrences, ...await readOccurrenceRowsByKey(db, [...occurrenceKeysByJob]
+    .filter(([jobId]) => !survivors.has(jobAlias.get(jobId) ?? jobId)).flatMap(([, keys]) => keys))];
   if (leftover.length || facts.pages === 0) {
     mergeScan(facts, planOf([...heads.map((head) => head.row), ...leftover, ...sliceRows]));
     facts.pages += 1;
@@ -259,7 +286,8 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
   const detailPks = new Set(detailRows.map((row) => row.pk));
   const detail = planOf([...detailRows,
     ...heads.filter((head) => !detailPks.has(head.pk)).map((head) => head.row),
-    ...duplicateJobIds.flatMap((jobId) => occurrencesByJob.get(jobId) ?? []), ...finalizeRows]);
+    ...await readOccurrenceRowsByKey(db,
+      duplicateJobIds.flatMap((jobId) => occurrenceKeysByJob.get(jobId) ?? [])), ...finalizeRows]);
   for (const conflict of detail.conflicts) facts.conflicts.add(conflict);
 
   // Group claims are certified outside the group pass so the check stays global:
@@ -288,7 +316,7 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
   const { presentationDisagreements, eligibleDuplicateGroups, eligibleDuplicateJobs, duplicateAlertGroups } = detail;
   const familyCounts = new Map<string, number>();
   for (const family of facts.unconfirmedFamilies.values()) familyCounts.set(family, (familyCounts.get(family) ?? 0) + 1);
-  return {
+  const report: PostingIdentityAuditReport = {
     schemaVersion: 1,
     pages: facts.pages,
     jobsScanned: facts.jobsScanned,
@@ -326,6 +354,34 @@ export async function runPostingIdentityAudit(db: D1Database, options: {
     conflicts: sortedConflicts,
     outboxRows: detail.outboxRows,
   };
+  return {
+    report,
+    repairIndex: {
+      groups: [...facts.groupMembers.entries()]
+        .map(([providerIdentity, members]) => ({ providerIdentity, members: [...members] }))
+        .sort((left, right) => left.providerIdentity.localeCompare(right.providerIdentity)),
+      jobHeads: heads.map((head) => head.row),
+      occurrenceKeysByJob: [...occurrenceKeysByJob.entries()]
+        .map(([jobId, keys]) => ({ jobId, keys }))
+        .sort((left, right) => left.jobId.localeCompare(right.jobId)),
+    },
+  };
+}
+
+export async function runPostingIdentityAudit(db: D1Database, options: {
+  jobBatch?: number;
+  log?: (event: string) => void;
+} = {}): Promise<PostingIdentityAuditReport> {
+  return (await scanPostingIdentityAudit(db, options)).report;
+}
+
+/** Internal repair preflight. It exposes only compact locators and complete
+ * identity membership; full catalog and occurrence values remain paged. */
+export async function runPostingIdentityAuditScan(db: D1Database, options: {
+  jobBatch?: number;
+  log?: (event: string) => void;
+} = {}): Promise<PostingIdentityAuditScan> {
+  return scanPostingIdentityAudit(db, options);
 }
 
 /**
@@ -358,6 +414,18 @@ async function readJobBatch(db: D1Database, after: [string, string] | undefined,
     ORDER BY pk, sk LIMIT ?`)
     .bind(after?.[0] ?? '', after?.[0] ?? '', after?.[1] ?? '', limit).all<Row>();
   return page.results;
+}
+
+async function readOccurrenceRowsByKey(db: D1Database, keys: Array<[string, string]>): Promise<Row[]> {
+  const rows: Row[] = [];
+  for (let offset = 0; offset < keys.length; offset += 40) {
+    const chunk = keys.slice(offset, offset + 40);
+    const page = await db.prepare(`SELECT pk, sk, kind, value FROM catalog_items
+      WHERE kind = 'source-occurrence' AND (${chunk.map(() => '(pk = ? AND sk = ?)').join(' OR ')})
+      ORDER BY pk, sk`).bind(...chunk.flat()).all<Row>();
+    rows.push(...page.results.map((row) => ({ ...row, value: compactIdentityValue('source-occurrence', row.value) })));
+  }
+  return rows;
 }
 
 async function readJobsByJobId(db: D1Database, jobIds: string[]): Promise<Row[]> {
