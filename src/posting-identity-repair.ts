@@ -102,7 +102,7 @@ export interface PostingIdentityRepairPlan {
 
 export type PostingIdentityApplyBatch = {
   jobIds: string[];
-  contextJobIds: string[];
+  contextRows: Array<{ pk: string; sk: string; kind: string; value: string }>;
   occurrenceKeys: Array<[string, string]>;
   repairToken: string;
   expectedChanges: number;

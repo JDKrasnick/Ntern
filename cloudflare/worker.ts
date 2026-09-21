@@ -805,7 +805,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
       acceptCurrentSnapshot?: boolean; expectedEligibleDuplicateGroups?: number; expectedUnresolvedDuplicateGroups?: number;
       scope?: 'all' | 'identity' | 'occurrences'; audit?: boolean; jobBatch?: number;
-      applyBatch?: { jobIds?: unknown; contextJobIds?: unknown; occurrenceKeys?: unknown }; finalize?: boolean;
+      applyBatch?: { jobIds?: unknown; contextRows?: unknown; occurrenceKeys?: unknown }; finalize?: boolean;
     };
     try {
       // The audit is the read-only integrity gate. It pages the catalog so a
@@ -825,14 +825,16 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       if (input.applyBatch) {
         if (!input.apply || input.scope !== 'identity'
           || !Array.isArray(input.applyBatch.jobIds) || input.applyBatch.jobIds.some((item) => typeof item !== 'string')
-          || !Array.isArray(input.applyBatch.contextJobIds) || input.applyBatch.contextJobIds.some((item) => typeof item !== 'string')
+          || !Array.isArray(input.applyBatch.contextRows)
+          || input.applyBatch.contextRows.some((item) => !item || typeof item !== 'object'
+            || ['pk', 'sk', 'kind', 'value'].some((key) => typeof (item as Record<string, unknown>)[key] !== 'string'))
           || !Array.isArray(input.applyBatch.occurrenceKeys)
           || input.applyBatch.occurrenceKeys.some((item) => !Array.isArray(item) || item.length !== 2 || item.some((part) => typeof part !== 'string'))
           || typeof input.repairToken !== 'string' || typeof input.expectedChanges !== 'number'
           || typeof input.expectedDuplicateJobs !== 'number') throw new Error('Identity repair batch is invalid');
         report = await runBoundedPostingIdentityRepairBatch(env.DB, {
           jobIds: input.applyBatch.jobIds as string[],
-          contextJobIds: input.applyBatch.contextJobIds as string[],
+          contextRows: input.applyBatch.contextRows as Array<{ pk: string; sk: string; kind: string; value: string }>,
           occurrenceKeys: input.applyBatch.occurrenceKeys as Array<[string, string]>,
           repairToken: input.repairToken,
           expectedChanges: input.expectedChanges,

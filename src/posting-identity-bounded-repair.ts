@@ -236,15 +236,16 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     const fullJobs = await readJobs(db, [...jobIds].sort());
     const keys = [...occurrenceJobIds].flatMap((jobId) => occurrenceKeys.get(jobId) ?? []);
     const occurrences = await readOccurrenceRows(db, keys);
+    const batchContextRows = contextForJobs(contextRows, occurrenceJobIds);
     const plan = postingIdentityRepairPlan([
       ...fullJobs,
       ...occurrences,
-      ...contextForJobs(contextRows, occurrenceJobIds),
+      ...batchContextRows,
     ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
 
     batchDigests.push(plan.snapshotDigest, plan.repairToken);
     applyBatches.push({
-      jobIds: [...jobIds].sort(), contextJobIds: [...occurrenceJobIds].sort(), occurrenceKeys: keys,
+      jobIds: [...jobIds].sort(), contextRows: batchContextRows, occurrenceKeys: keys,
       repairToken: plan.repairToken, expectedChanges: plan.expectedChanges,
       expectedDuplicateJobs: plan.duplicateJobs,
     });
@@ -364,7 +365,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
 
 export async function runBoundedPostingIdentityRepairBatch(db: D1Database, options: {
   jobIds: string[];
-  contextJobIds: string[];
+  contextRows: PostingIdentityAuditRow[];
   occurrenceKeys: Array<[string, string]>;
   repairToken: string;
   expectedChanges: number;
@@ -372,8 +373,8 @@ export async function runBoundedPostingIdentityRepairBatch(db: D1Database, optio
 }): Promise<PostingIdentityRepairPlan> {
   if (!options.jobIds.length || options.jobIds.length > 500) throw new Error('Identity repair batch must contain 1 to 500 jobs');
   if (options.occurrenceKeys.length > 5_000) throw new Error('Identity repair batch contains too many occurrence keys');
-  const [contextRows, users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
-    readContextRows(db),
+  if (options.contextRows.length > 5_000) throw new Error('Identity repair batch contains too many context rows');
+  const [users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
     readUserRows(db),
     db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>().then((result) => result.results),
     db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
@@ -384,9 +385,8 @@ export async function runBoundedPostingIdentityRepairBatch(db: D1Database, optio
     readJobs(db, [...new Set(options.jobIds)].sort()),
     readOccurrenceRows(db, options.occurrenceKeys),
   ]);
-  const contextJobIds = new Set(options.contextJobIds);
   const plan = postingIdentityRepairPlan([
-    ...fullJobs, ...occurrences, ...contextForJobs(contextRows, contextJobIds),
+    ...fullJobs, ...occurrences, ...options.contextRows,
   ] as never, users as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
   return applyPostingIdentityRepairPlan(db, plan, options);
 }
