@@ -6,9 +6,8 @@ import {
   type PostingIdentityGroupMember,
 } from './posting-identity-audit.js';
 import {
-  applyStagedPostingIdentityRepairPlan,
+  applyPostingIdentityRepairPlan,
   postingIdentityRepairPlan,
-  stagePostingIdentityRepairPlan,
   validatePostingIdentityRepairApply,
   type InternalPostingIdentityRepairPlan,
   type PostingIdentityRepairPlan,
@@ -330,28 +329,27 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   validatePostingIdentityRepairApply(plan, options);
   if (!plan.expectedChanges) return { ...plan, applied: true };
 
-  const stagePk = `POSTING_IDENTITY_REPAIR#${plan.repairToken}`;
-  await db.prepare("DELETE FROM catalog_items WHERE pk = ? AND kind IN ('posting-identity-repair-stage', 'posting-identity-repair-guard')")
-    .bind(stagePk).run();
   simulatedUsers = users;
-  try {
-    for (const groupBatch of groupBatches) {
-      const jobIds = new Set(groupBatch.flatMap((group) => group.members.map((member) => member.jobId)));
-      const occurrenceJobIds = new Set(jobIds);
-      for (const [oldJobId, canonicalJobId] of jobAliases) if (jobIds.has(canonicalJobId)) occurrenceJobIds.add(oldJobId);
-      const fullJobs = await readJobs(db, [...jobIds].sort());
-      const keys = [...occurrenceJobIds].flatMap((jobId) => occurrenceKeys.get(jobId) ?? []);
-      const occurrences = await readOccurrenceRows(db, keys);
-      const batchPlan = postingIdentityRepairPlan([
-        ...fullJobs, ...occurrences, ...contextForJobs(contextRows, occurrenceJobIds),
-      ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
-      await stagePostingIdentityRepairPlan(db, stagePk, batchPlan);
-      simulatedUsers = simulateUserRows(simulatedUsers, batchPlan);
-    }
-    return await applyStagedPostingIdentityRepairPlan(db, stagePk, plan, options);
-  } catch (error) {
-    await db.prepare("DELETE FROM catalog_items WHERE pk = ? AND kind IN ('posting-identity-repair-stage', 'posting-identity-repair-guard')")
-      .bind(stagePk).run();
-    throw error;
+  for (let batchIndex = 0; batchIndex < groupBatches.length; batchIndex += 1) {
+    const groupBatch = groupBatches[batchIndex]!;
+    const jobIds = new Set(groupBatch.flatMap((group) => group.members.map((member) => member.jobId)));
+    const occurrenceJobIds = new Set(jobIds);
+    for (const [oldJobId, canonicalJobId] of jobAliases) if (jobIds.has(canonicalJobId)) occurrenceJobIds.add(oldJobId);
+    const fullJobs = await readJobs(db, [...jobIds].sort());
+    const keys = [...occurrenceJobIds].flatMap((jobId) => occurrenceKeys.get(jobId) ?? []);
+    const occurrences = await readOccurrenceRows(db, keys);
+    const batchPlan = postingIdentityRepairPlan([
+      ...fullJobs, ...occurrences, ...contextForJobs(contextRows, occurrenceJobIds),
+    ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
+    await applyPostingIdentityRepairPlan(db, batchPlan, {
+      repairToken: batchPlan.repairToken,
+      expectedChanges: batchPlan.expectedChanges,
+      expectedDuplicateJobs: batchPlan.duplicateJobs,
+    });
+    simulatedUsers = simulateUserRows(simulatedUsers, batchPlan);
+    options.log?.(JSON.stringify({ event: 'posting_identity_repair_apply_batch', batch: batchIndex + 1,
+      batches: groupBatches.length, groups: groupBatch.length, jobs: jobIds.size,
+      changes: batchPlan.expectedChanges }));
   }
+  return { ...plan, applied: true, projectionRefreshRequired: true };
 }
