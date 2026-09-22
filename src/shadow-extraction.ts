@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v14';
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v15';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v5';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v1';
 export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-5-mini-2025-08-07';
@@ -152,6 +152,17 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput): { system:
       + 'process notices are not a role eligibility rule unless they explicitly state who may hold this role. Each retained list item must stand alone as a '
       + 'valid fact for that field.',
     user: JSON.stringify({ title: input.title, completeness: input.completeness, description: input.description }),
+  };
+}
+
+/** A single repair pass is allowed only after field-level contract failures.
+ * It reuses the original untrusted posting and never authorizes new evidence. */
+export function shadowExtractionRepairPrompt(input: NormalizedPostingInput, malformedFields: readonly string[]): { system: string; user: string } {
+  const base = shadowExtractionPrompt(input);
+  return {
+    system: `${base.system} This is one repair attempt. The prior response had malformed fields: ${malformedFields.join(', ')}. `
+      + 'Return the complete JSON contract again. Correct those fields from the supplied description; do not change valid facts by guessing.',
+    user: base.user,
   };
 }
 

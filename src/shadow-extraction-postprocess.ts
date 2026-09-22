@@ -29,13 +29,13 @@ const statutoryWage = /\b(?:minimum wage|wage notice|pay transparency)\b/iu;
 const genericHybridBenefit = /\b(?:hybrid work model|flexible work model|work[- ]life)\b/iu;
 const roleLocation = /\b(?:this|the) (?:role|position|internship|job)\b.*\b(?:in|at|based)\b|\b(?:intern|co-?op|new grad)\b.*\b(?:in|at)\b|\bbased(?: in person)? (?:at|in)\b|\bon[- ]site in\b|\bavailable\b.*\bin\b/iu;
 const languageOnly = /\b(?:fluent|proficien(?:cy|t)|speak|language)\b/iu;
-const eligibilityTerms = /\b(?:work authorization|authorized to work|eligible for employment|citizen(?:ship|national(?:ity)?)|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]controlled|itar|international traffic in arms)\b/iu;
+const eligibilityTerms = /\b(?:work authorization|authorized to work|eligible for employment|citizen(?:ship|national(?:ity)?)|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]?control(?:led)?|itar|international traffic in arms)\b/iu;
 const studentStatus = /\b(?:current(?:ly)?|enrolled)\b[^.\n]{0,80}\b(?:student|co-?op)\b|\bstudents? only\b/iu;
 const candidateAffiliation = /\b(?:student|recent graduate|degree|school|university|co-?op)\b/iu;
 const equalOpportunity = /\b(?:equal employment opportunity|equal opportunity employer)\b/iu;
 const graduationDate = /\bgraduat(?:e|ing|ion date)\b/iu;
-const explicitMode = /\b(?:remote|hybrid|on[- ]?site|in[- ]?office|in person)\b|\bin the office \d+ days?\b/iu;
-const roleTimingSignal = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:weeks?|months?)\b|\b(?:spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december|start(?:ing)?|end(?:ing)?|duration|until|through)\b/iu;
+const explicitMode = /\b(?:remote|hybrid|on[- ]?site|in[- ]?office|in[- ]person)\b|\bin the office \d+ days?\b/iu;
+const roleTimingSignal = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:(?:[a-z]+(?:-[a-z]+){1,2})\s+)?(?:weeks?|months?)\b|\b\d+\s*(?:[-–]\s*\d+\s*)hours?\s*(?:\/|per|a)\s*week\b|\b(?:spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december|start(?:ing)?|end(?:ing)?|duration|until|through)\b/iu;
 const locationInPassage = /\bin\s+([A-Z][a-z]+(?:[ -][A-Z][a-z]+){0,3})(?=$|[.,;:])/gu;
 
 function notStated(): ShadowField {

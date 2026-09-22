@@ -471,7 +471,7 @@ test('processes a compiled shadow queue event through R2 and exposes its disable
   const sha256 = (value) => createHash('sha256').update(value).digest('hex');
   const normalized = { title: 'Software Engineering Intern', description: 'Austin\n$50 - $60 per hour', completeness: 'complete' };
   normalized.contentHash = sha256(JSON.stringify(normalized));
-  const cacheKey = sha256([normalized.contentHash, 'gpt-5-mini-2025-08-07', 'shadow-extraction-prompt-v14',
+  const cacheKey = sha256([normalized.contentHash, 'gpt-5-mini-2025-08-07', 'shadow-extraction-prompt-v15',
     'shadow-extraction-schema-v5', 'exact-posting-markdown-v1'].join('\0'));
   const identity = { provider: 'greenhouse', sourceId: 'greenhouse-review', tenant: 'review', postingId: '175', sourceUrl: 'https://example.test/175' };
   const runKey = sha256(['review-job', 'greenhouse-review', '175', normalized.contentHash, cacheKey].join('\0'));

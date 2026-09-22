@@ -117,6 +117,25 @@ describe('postprocessRoleScopedExtraction', () => {
     expect(result.extraction.fields.eligibility.status).toBe('not-stated');
   });
 
+  it('preserves hyphenated in-person work and descriptive term or weekly-hour timing', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      workMode: field('present', 'onsite', ['This role is based in-person at our Vancouver office.']),
+      timing: field('present', ['10 action-packed weeks', 'Expected 14–16 hour/week work schedule.'], [
+        'The internship explicitly runs for 10 action-packed weeks.',
+        'Expected 14–16 hour/week work schedule.',
+      ]),
+    }));
+    expect(result.extraction.fields.workMode.status).toBe('present');
+    expect(result.extraction.fields.timing.status).toBe('present');
+  });
+
+  it('preserves direct export-control access restrictions', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', 'export-control access restriction', ['Access is restricted by export-control requirements.']),
+    }));
+    expect(result.extraction.fields.eligibility.status).toBe('present');
+  });
+
   it('preserves a worded role duration', () => {
     const result = postprocessRoleScopedExtraction(extraction({
       timing: field('present', 'ten weeks', ['You will spend ten weeks within our team.']),
