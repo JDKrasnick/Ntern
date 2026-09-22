@@ -386,6 +386,8 @@ export interface ResumeDraftGenerator {
 
 export interface ResumeArtifactStorage {
   putTex(objectKey: string, tex: string): Promise<void>;
+  putPdf?(objectKey: string, pdf: ArrayBuffer): Promise<void>;
+  compile?(tex: string, resumeSpecHash: string): Promise<ArrayBuffer>;
   createContentUrl(artifact: { userId: string; artifactId: string; objectKey: string }): Promise<string>;
 }
 
@@ -847,9 +849,13 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const existing = (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash);
           if (existing) return reply(200, { draft: updated, artifact: existing });
           const artifactId = randomUUID();
-          const objectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
-          await dependencies.resumeArtifactStorage.putTex(objectKey, rendered.tex);
-          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey: objectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, createdAt: timestamp };
+          const texObjectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
+          await dependencies.resumeArtifactStorage.putTex(texObjectKey, rendered.tex);
+          const pdf = dependencies.resumeArtifactStorage.compile && dependencies.resumeArtifactStorage.putPdf
+            ? await dependencies.resumeArtifactStorage.compile(rendered.tex, rendered.resumeSpecHash) : undefined;
+          const objectKey = pdf ? `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf` : texObjectKey;
+          if (pdf) await dependencies.resumeArtifactStorage.putPdf!(objectKey, pdf);
+          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, createdAt: timestamp };
           if (!await dependencies.users.putResumeArtifact(artifact)) return reply(409, { message: 'Resume artifact changed; refresh and retry' });
           return reply(200, { draft: updated, artifact });
         }

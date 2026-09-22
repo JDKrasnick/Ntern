@@ -67,6 +67,7 @@
     "deploy:cloudflare": "npm run build:cloudflare && tsx scripts/deploy-cloudflare.ts"
   },
   "dependencies": {
+    "@cloudflare/containers": "^0.0.16",
     "fflate": "^0.8.3",
     "pdfjs-dist": "^5.7.284"
   },

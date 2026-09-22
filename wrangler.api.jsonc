@@ -4,7 +4,12 @@
   "main": "cloudflare/api-worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
-  "durable_objects": { "bindings": [{ "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController", "script_name": "intern-notifs-ingestion" }] },
+  "durable_objects": { "bindings": [
+    { "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController", "script_name": "intern-notifs-ingestion" },
+    { "name": "RESUME_PDF_COMPILER", "class_name": "ResumePdfCompiler" }
+  ] },
+  "migrations": [{ "tag": "v2-resume-pdf-compiler", "new_sqlite_classes": ["ResumePdfCompiler"] }],
+  "containers": [{ "class_name": "ResumePdfCompiler", "image": "./cloudflare/resume-compiler/Dockerfile", "instance_type": "basic", "max_instances": 2 }],
   "limits": { "cpu_ms": 30000, "subrequests": 10000 },
   "observability": { "enabled": true },
   "ai": { "binding": "AI" },

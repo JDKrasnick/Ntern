@@ -1,5 +1,6 @@
 import legacyWorker, { type Environment } from './worker.js';
 import { isIngestionOperationPath, secretMatches, type ServiceBinding } from './split.js';
+export { ResumePdfCompiler } from './resume-pdf-container.js';
 
 export interface ApiEnvironment extends Partial<Environment> {
   INGESTION: ServiceBinding;
