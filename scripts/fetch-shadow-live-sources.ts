@@ -3,14 +3,18 @@
 import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
-const roots = ['.context/shadow-fresh50-unique-artifacts/input', '.context/shadow-second-cohort-artifacts/input', '.context/shadow-third-cohort-artifacts/input'];
+const roots = [
+  { cohort: 'first', path: '.context/shadow-fresh50-unique-artifacts/input' },
+  { cohort: 'second', path: '.context/shadow-second-cohort-artifacts/input' },
+  { cohort: 'third', path: '.context/shadow-third-cohort-artifacts/input' },
+];
 const output = process.argv[2] ?? '.context/shadow-live-source-probe.json';
-type Entry = { id: string; title: string; sourceUrl: string };
+type Entry = { cohort: string; id: string; title: string; sourceUrl: string };
 const entries: Entry[] = [];
-for (const root of roots) for (const file of await readdir(root)) {
+for (const root of roots) for (const file of await readdir(root.path)) {
   if (!file.endsWith('.json')) continue;
-  const input = JSON.parse(await readFile(join(root, file), 'utf8')) as { identity: { sourceUrl: string }; normalized: { title: string } };
-  entries.push({ id: basename(file, '.json'), title: input.normalized.title, sourceUrl: input.identity.sourceUrl });
+  const input = JSON.parse(await readFile(join(root.path, file), 'utf8')) as { identity: { sourceUrl: string }; normalized: { title: string } };
+  entries.push({ cohort: root.cohort, id: basename(file, '.json'), title: input.normalized.title, sourceUrl: input.identity.sourceUrl });
 }
 const settled = await Promise.all(entries.map(async (entry) => {
   const startedAt = new Date().toISOString();
