@@ -57,6 +57,25 @@ bare `wrangler deploy`. The cutover sequence, binding inventory, smoke checks,
 and rollback procedure are in [`api-ingestion-split.md`](api-ingestion-split.md).
 The coordinator alone performs that cutover.
 
+### Resume Tuner staged rollout
+
+`RESUME_TUNER_ENABLED` is `false` in both Worker configs and must remain false
+until a separate security review approves an exact OpenTofu plan. The feature
+uses authenticated `/me/resume-*` routes, private user-store records, and the
+`intern-notifs-resume-job-import` queue. Its shared import cache contains only
+public job-page text; uploaded résumé source material, extracted bank cards,
+drafts, and generated artifacts remain user-scoped and are deleted with the
+account.
+
+Before enabling the flag, validate the API and ingestion Worker bindings,
+exercise a catalog hit, a cached import, a safe public-page import, and the
+manual-description fallback. Confirm that private-network, credential-bearing,
+and non-HTTPS URLs are rejected; check the import queue and its DLQ without
+consuming messages. The current artifact endpoint intentionally delivers the
+fixed-template TeX source. Do not advertise PDF export or enable the flag until
+the separate, internet-disabled Container image has passed its isolated TeX
+compiler and artifact-retention review.
+
 ## OpenTofu state adoption
 
 The production Cloudflare stack uses the private

@@ -75,6 +75,36 @@ describe('resume API ownership and revisions', () => {
     expect((await handler(event('student', 'POST', `/me/resume-drafts/${draft.draftId}/finalize`, { revision: updated.revision }))).statusCode).toBe(200);
   });
 
+  it('resolves catalog records before cache or asynchronous public-page acquisition', async () => {
+    const jobs = new MemoryInternshipStore();
+    await jobs.putInternship({
+      jobId: 'catalog-job', company: 'Acme', title: 'Platform Intern', location: 'Remote', season: 'summer-2027',
+      applyUrl: 'https://careers.example.test/jobs/1', normalizedUrl: 'https://careers.example.test/jobs/1', fingerprint: 'acme-platform',
+      compensation: { raw: '' }, sourceReferences: [], open: true, firstSeenAt: '2026-09-22T00:00:00.000Z', lastSeenAt: '2026-09-22T00:00:00.000Z', notification: { smsPending: false, digestPending: false },
+    });
+    const queued = vi.fn();
+    const handler = createApiHandler({
+      jobs, users: new MemoryUserStore(), resumeTunerEnabled: true,
+      resumeImportQueue: { send: queued },
+      resumeImportCache: { get: async () => ({ canonicalUrl: 'https://careers.example.test/jobs/2', description: 'cached role text', contentHash: 'cached' }) },
+    });
+    const response = await handler(event('student', 'POST', '/me/resume-jobs/resolve', { url: 'https://careers.example.test/jobs/1' }));
+    expect(JSON.parse(response.body)).toMatchObject({ status: 'ready', source: 'catalog', title: 'Platform Intern', company: 'Acme' });
+    expect(queued).not.toHaveBeenCalled();
+  });
+
+  it('uses a ready shared public-job cache before queuing a fetch', async () => {
+    const queued = vi.fn();
+    const handler = createApiHandler({
+      jobs: new MemoryInternshipStore(), users: new MemoryUserStore(), resumeTunerEnabled: true,
+      resumeImportQueue: { send: queued },
+      resumeImportCache: { get: async () => ({ canonicalUrl: 'https://careers.example.test/jobs/2', title: 'Cached role', description: 'Public cached job description', contentHash: 'cached' }) },
+    });
+    const response = await handler(event('student', 'POST', '/me/resume-jobs/resolve', { url: 'https://careers.example.test/jobs/2' }));
+    expect(JSON.parse(response.body)).toMatchObject({ status: 'ready', source: 'cache', title: 'Cached role' });
+    expect(queued).not.toHaveBeenCalled();
+  });
+
   it('imports PDF or DOCX extraction as unverified, user-owned bank cards', async () => {
     const users = new MemoryUserStore();
     await users.putDocument({ userId: 'student', documentId: 'resume', fileName: 'resume.pdf', contentType: 'application/pdf', objectKey: 'private/student/resume', createdAt: 'now' });

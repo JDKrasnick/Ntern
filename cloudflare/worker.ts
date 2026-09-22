@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { decodeMetadataCursor, encodeMetadataCursor } from '../src/metadata-audit.js';
-import { createApiHandler, type DocumentStorage, type ResumeArtifactStorage } from '../src/api.js';
+import { createApiHandler, type DocumentStorage, type ResumeArtifactStorage, type ResumeImportCache, type ResumeImportQueue } from '../src/api.js';
 import { ashbyWorkMessages, isAshbySourceDue } from '../src/ashby-dispatch.js';
 import { processAshbyQueue } from '../src/ashby-worker.js';
 import { greenhouseWorkMessages, isGreenhouseSourceDue } from '../src/greenhouse-dispatch.js';
@@ -571,6 +571,45 @@ function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
   };
 }
 
+function resumeImportCache(env: Environment): ResumeImportCache {
+  return {
+    async get(canonicalUrl) {
+      const row = await env.DB.prepare(`SELECT imports.canonical_url, imports.content_hash, imports.title, imports.company, imports.description_object_key
+        FROM resume_job_aliases aliases JOIN resume_job_imports imports ON imports.import_id = aliases.import_id
+        WHERE aliases.alias_url = ? AND imports.status = 'ready' LIMIT 1`).bind(canonicalUrl).first<{
+          canonical_url: string; content_hash: string; title: string | null; company: string | null; description_object_key: string | null;
+        }>();
+      if (!row?.description_object_key) return undefined;
+      const object = await env.DOCUMENTS.get(row.description_object_key);
+      if (!object) return undefined;
+      return { canonicalUrl: row.canonical_url, contentHash: row.content_hash, description: await new Response(object.body).text(),
+        ...(row.title ? { title: row.title } : {}), ...(row.company ? { company: row.company } : {}) };
+    },
+  };
+}
+
+function resumeImportQueue(env: Environment): ResumeImportQueue {
+  return {
+    async send(message) {
+      const timestamp = new Date().toISOString();
+      const taskId = crypto.randomUUID();
+      const cacheImportId = crypto.randomUUID();
+      // This shared row contains public job material only. The user-owned import
+      // remains in the user store and is updated only after an owned-ID check.
+      await env.DB.prepare(`INSERT INTO resume_job_imports (import_id, canonical_url, content_hash, status, created_at, updated_at)
+          VALUES (?, ?, ?, 'pending', ?, ?) ON CONFLICT(canonical_url) DO NOTHING`)
+          .bind(cacheImportId, message.canonicalUrl, createHash('sha256').update(message.canonicalUrl).digest('hex'), timestamp, timestamp).run();
+      const shared = await env.DB.prepare('SELECT import_id FROM resume_job_imports WHERE canonical_url = ? LIMIT 1')
+        .bind(message.canonicalUrl).first<{ import_id: string }>();
+      if (!shared) throw new Error('Resume import cache row was not created');
+      await env.DB.prepare(`INSERT INTO resume_job_import_tasks (task_id, import_id, state, attempts, created_at, updated_at)
+          VALUES (?, ?, 'queued', 0, ?, ?)`)
+          .bind(taskId, shared.import_id, timestamp, timestamp).run();
+      await env.RESUME_JOB_IMPORT_QUEUE.send({ ...message, cacheImportId: shared.import_id, taskId });
+    },
+  };
+}
+
 export async function readDocumentUpload(request: Request): Promise<
   { tooLarge: true } | { tooLarge: false; content: ArrayBuffer }
 > {
@@ -1051,7 +1090,8 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     releases: new D1ReleaseStore(env.DB),
     documentStorage: documentStorage(env),
     resumeArtifactStorage: resumeArtifactStorage(env),
-    resumeImportQueue: env.RESUME_JOB_IMPORT_QUEUE,
+    resumeImportQueue: resumeImportQueue(env),
+    resumeImportCache: resumeImportCache(env),
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     resumeTunerEnabled: env.RESUME_TUNER_ENABLED === 'true',
     beforeDeleteUser: (userId) => disconnectGmail(userId, env),
@@ -1681,9 +1721,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   if (batch.queue.includes('resume-job-import')) {
     for (const message of batch.messages) {
-      const body = message.body as { userId?: string; importId?: string; canonicalUrl?: string };
-      if (!body.userId || !body.importId || !body.canonicalUrl) { message.ack(); continue; }
+      const body = message.body as { userId?: string; importId?: string; canonicalUrl?: string; cacheImportId?: string; taskId?: string };
+      if (!body.userId || !body.importId || !body.canonicalUrl || !body.cacheImportId || !body.taskId) { message.ack(); continue; }
       try {
+        const startedAt = new Date().toISOString();
+        await env.DB.prepare(`UPDATE resume_job_import_tasks SET state = 'leased', attempts = attempts + 1, lease_until = ?, updated_at = ? WHERE task_id = ?`)
+          .bind(new Date(Date.now() + 30_000).toISOString(), startedAt, body.taskId).run();
         let importedUrl: string;
         let extracted: ReturnType<typeof extractResumeJobText>;
         try {
@@ -1705,9 +1748,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         await env.DB.prepare(`INSERT INTO resume_job_imports (import_id, canonical_url, content_hash, status, title, description_object_key, created_at, updated_at)
           VALUES (?, ?, ?, 'ready', ?, ?, ?, ?)
           ON CONFLICT(import_id) DO UPDATE SET canonical_url = excluded.canonical_url, content_hash = excluded.content_hash, status = 'ready', title = excluded.title, description_object_key = excluded.description_object_key, updated_at = excluded.updated_at`)
-          .bind(body.importId, importedUrl, contentHash, extracted.title ?? null, objectKey, timestamp, timestamp).run();
+          .bind(body.cacheImportId, importedUrl, contentHash, extracted.title ?? null, objectKey, timestamp, timestamp).run();
         await env.DB.prepare(`INSERT INTO resume_job_aliases (alias_url, import_id, created_at) VALUES (?, ?, ?)
-          ON CONFLICT(alias_url) DO UPDATE SET import_id = excluded.import_id`).bind(body.canonicalUrl, body.importId, timestamp).run();
+          ON CONFLICT(alias_url) DO UPDATE SET import_id = excluded.import_id`).bind(body.canonicalUrl, body.cacheImportId, timestamp).run();
+        await env.DB.prepare(`UPDATE resume_job_import_tasks SET state = 'succeeded', lease_until = NULL, updated_at = ? WHERE task_id = ?`).bind(timestamp, body.taskId).run();
         const users = new D1UserStore(env.DB);
         const current = await users.getImportedResumeJob(body.userId, body.importId);
         if (current && current.canonicalUrl === body.canonicalUrl && current.status === 'pending') {
@@ -1715,6 +1759,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         }
         message.ack();
       } catch (error) {
+        await env.DB.prepare(`UPDATE resume_job_import_tasks SET state = 'failed', lease_until = NULL, updated_at = ? WHERE task_id = ?`)
+          .bind(new Date().toISOString(), body.taskId).run();
         const users = new D1UserStore(env.DB);
         const current = await users.getImportedResumeJob(body.userId, body.importId);
         if (current?.status === 'pending') await users.putImportedResumeJob(body.userId, { ...current, status: 'manual-description-required', revision: current.revision + 1, updatedAt: new Date().toISOString() }, current.revision);

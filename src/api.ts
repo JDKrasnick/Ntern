@@ -374,6 +374,11 @@ export interface ResumeImportQueue {
   send(message: { userId: string; importId: string; canonicalUrl: string }): Promise<void>;
 }
 
+/** Shared, public-job cache only. It never exposes another user's résumé data. */
+export interface ResumeImportCache {
+  get(canonicalUrl: string): Promise<Pick<ImportedJob, 'canonicalUrl' | 'title' | 'company' | 'description' | 'contentHash'> | undefined>;
+}
+
 export interface ResumeArtifactStorage {
   putTex(objectKey: string, tex: string): Promise<void>;
   createContentUrl(artifact: { userId: string; artifactId: string; objectKey: string }): Promise<string>;
@@ -385,6 +390,7 @@ export interface ApiDependencies {
   releases?: ReleaseStore;
   documentStorage?: DocumentStorage;
   resumeImportQueue?: ResumeImportQueue;
+  resumeImportCache?: ResumeImportCache;
   resumeDocumentExtractor?: (bytes: ArrayBuffer, contentType: string) => Promise<ExtractedResumeItem[]>;
   resumeArtifactStorage?: ResumeArtifactStorage;
   deleteIdentity?: (userId: string) => Promise<void>;
@@ -644,14 +650,28 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const body = parseBody(event);
             const canonicalUrl = normalizeResumeJobUrl(resumeText(body.url, 'url', 2_000));
             const manualDescription = body.manualDescription === undefined ? undefined : resumeText(body.manualDescription, 'manualDescription', 30_000);
-            const description = manualDescription ?? '';
+            const catalog = manualDescription ? undefined : await dependencies.jobs.findByUrl(canonicalUrl);
+            const cached = manualDescription || catalog ? undefined : await dependencies.resumeImportCache?.get(canonicalUrl);
+            // The catalog has already passed the application's normal source and URL
+            // admission checks. It is still deliberately a compact role summary: no
+            // private résumé text is ever put into the shared acquisition cache.
+            const catalogDescription = catalog && [
+              `${catalog.title} at ${catalog.company}.`,
+              catalog.location ? `Location: ${catalog.location}.` : '',
+              catalog.season ? `Program: ${catalog.season}.` : '',
+              catalog.requirements?.requiresUsCitizenship ? 'US citizenship required.' : '',
+              catalog.requirements?.advancedDegreeRequired ? 'Advanced degree required.' : '',
+            ].filter(Boolean).join(' ');
+            const description = manualDescription ?? catalogDescription ?? cached?.description ?? '';
             const imported: ImportedJob = {
-              importId: randomUUID(), canonicalUrl, description, source: manualDescription ? 'manual' : 'cache',
-              contentHash: createHash('sha256').update(description || canonicalUrl).digest('hex'),
-              status: manualDescription ? 'ready' : 'pending', revision: 0, createdAt: timestamp, updatedAt: timestamp,
+              importId: randomUUID(), canonicalUrl: cached?.canonicalUrl ?? canonicalUrl,
+              ...(catalog ? { title: catalog.title, company: catalog.company } : cached?.title || cached?.company ? { title: cached?.title, company: cached?.company } : {}),
+              description, source: manualDescription ? 'manual' : catalog ? 'catalog' : 'cache',
+              contentHash: cached?.contentHash ?? createHash('sha256').update(description || canonicalUrl).digest('hex'),
+              status: manualDescription || catalog || cached ? 'ready' : 'pending', revision: 0, createdAt: timestamp, updatedAt: timestamp,
             };
             if (!await dependencies.users.putImportedResumeJob(userId, imported)) return reply(409, { message: 'Job import already exists; retry' });
-            if (!manualDescription && dependencies.resumeImportQueue) await dependencies.resumeImportQueue.send({ userId, importId: imported.importId, canonicalUrl });
+            if (imported.status === 'pending' && dependencies.resumeImportQueue) await dependencies.resumeImportQueue.send({ userId, importId: imported.importId, canonicalUrl });
             return reply(201, imported);
           }
         }

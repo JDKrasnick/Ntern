@@ -5483,6 +5483,23 @@ function ResumeWorkspace({ token }: { token: string }) {
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that decision."))
       .finally(() => setResumeBusy(false));
   };
+  const keepRemainingOriginals = () => {
+    if (!draft || resumeBusy) return;
+    const remaining = draft.changes.filter((change) => !change.decision);
+    if (!remaining.length) return;
+    setResumeBusy(true);
+    void (async () => {
+      let updated = draft;
+      for (const change of remaining) {
+        updated = await api<ResumeDraftCard>(`/me/resume-drafts/${updated.draftId}/changes/${change.changeId}`, token, {
+          method: "PATCH", body: JSON.stringify({ revision: updated.revision, decision: "rejected" }),
+        });
+      }
+      setDraft(updated);
+      setActiveChange(Math.max(0, updated.changes.length - 1));
+    })().catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't keep the remaining originals."))
+      .finally(() => setResumeBusy(false));
+  };
   const accepted = draft?.changes.filter((change) => change.decision === "accepted").length ?? 0;
   const loadBank = () => {
     setBankLoading(true);
@@ -5745,7 +5762,7 @@ function ResumeWorkspace({ token }: { token: string }) {
           ) : null}
         </View> : null}
         <View style={styles.resumeFinalizeRow}>
-          <TouchableOpacity accessibilityRole="button" onPress={() => current && decide("rejected")}>
+          <TouchableOpacity accessibilityRole="button" disabled={!draft || reviewed === draft.changes.length || resumeBusy} onPress={keepRemainingOriginals}>
             <Text style={styles.resumeKeepAll}>Keep all remaining originals</Text>
           </TouchableOpacity>
           <ActionButton label={resumeBusy ? "Creating…" : `Create résumé${accepted ? ` with ${accepted} change${accepted === 1 ? "" : "s"}` : ""}`} onPress={finalizeDraft} disabled={!draft || draft.status === "finalized" || reviewed !== draft.changes.length || resumeBusy} />
