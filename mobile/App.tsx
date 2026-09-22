@@ -5514,7 +5514,7 @@ function ResumeWorkspace({ token }: { token: string }) {
     if (!draft || !current || resumeBusy) return;
     setResumeBusy(true);
     const changes = draft.changes.map((change) => change.changeId === current.changeId ? { ...change, decision } : change);
-    void api<ResumeDraftCard>(`/me/resume-drafts/${draft.draftId}`, token, { method: "PATCH", body: JSON.stringify({ revision: draft.revision, decisions: [{ changeId: current.changeId, decision }] }) })
+    void api<ResumeDraftCard>(`/me/resume-drafts/${draft.draftId}/changes/${current.changeId}`, token, { method: "PATCH", body: JSON.stringify({ revision: draft.revision, decision }) })
       .then((updated) => { setDraft(updated); if (activeChange < updated.changes.length - 1) setActiveChange((index) => index + 1); })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that decision."))
       .finally(() => setResumeBusy(false));
@@ -5560,7 +5560,7 @@ function ResumeWorkspace({ token }: { token: string }) {
   const importJob = () => {
     if (!jobUrl.trim() || resumeBusy) return;
     setResumeBusy(true); setBankError(undefined);
-    void api<ResumeImportCard>("/me/resume-imports", token, { method: "POST", body: JSON.stringify({ url: jobUrl }) })
+    void api<ResumeImportCard>("/me/resume-jobs/resolve", token, { method: "POST", body: JSON.stringify({ url: jobUrl }) })
       .then((value) => { setJobImport(value); setDraft(undefined); setActiveChange(0); })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't import that job."))
       .finally(() => setResumeBusy(false));
@@ -5568,8 +5568,12 @@ function ResumeWorkspace({ token }: { token: string }) {
   const saveManualDescription = () => {
     if (!jobImport || !manualDescription.trim() || resumeBusy) return;
     setResumeBusy(true);
-    void api<ResumeImportCard>(`/me/resume-imports/${jobImport.importId}`, token, { method: "PATCH", body: JSON.stringify({ revision: jobImport.revision, manualDescription }) })
-      .then((value) => setJobImport(value))
+    void api<ResumeImportCard>(`/me/resume-jobs/${jobImport.importId}/manual-description`, token, { method: "POST", body: JSON.stringify({ revision: jobImport.revision, description: manualDescription }) })
+      .then(async (value) => {
+        setJobImport(value);
+        const result = await api<{ recommendations: Array<{ profileId: string }> }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
+        if (result.recommendations[0]) setSelectedProfileId(result.recommendations[0].profileId);
+      })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that description."))
       .finally(() => setResumeBusy(false));
   };

@@ -90,6 +90,31 @@ export interface ResumeArtifact {
   createdAt: string;
 }
 
+export interface ResumeProfileRecommendation {
+  profileId: string;
+  score: number;
+  explanation: string;
+}
+
+const resumeWords = (value: string) => new Set(value.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
+
+/** Deterministic first-pass base selection. Canonical records stay in D1; a later
+ * Vectorize lookup may refine this score but must not replace its explanation. */
+export function recommendResumeProfiles(jobDescription: string, profiles: ResumeProfile[], bankItems: ResumeBankItem[]): ResumeProfileRecommendation[] {
+  const words = resumeWords(jobDescription);
+  const byId = new Map(bankItems.filter((item) => item.verified).map((item) => [item.bankItemId, item]));
+  return profiles.map((profile) => {
+    const tagHits = profile.tags.filter((tag) => words.has(tag.toLowerCase())).length;
+    const evidence = profile.bankItemIds.map((id) => byId.get(id)).filter((item): item is ResumeBankItem => Boolean(item));
+    const evidenceHits = evidence.filter((item) => [...resumeWords(item.content)].some((word) => words.has(word))).length;
+    const score = tagHits * 100 + evidenceHits * 10;
+    const explanation = tagHits
+      ? `Matches ${tagHits} job-family tag${tagHits === 1 ? '' : 's'} and ${evidenceHits} verified bank item${evidenceHits === 1 ? '' : 's'}.`
+      : `Matches ${evidenceHits} verified bank item${evidenceHits === 1 ? '' : 's'} from this base.`;
+    return { profileId: profile.profileId, score, explanation };
+  }).sort((left, right) => right.score - left.score || left.profileId.localeCompare(right.profileId));
+}
+
 const privateIpv4 = /^(?:127\.|10\.|0\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)/u;
 const localhostNames = new Set(['localhost', 'localhost.localdomain']);
 

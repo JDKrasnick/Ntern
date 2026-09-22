@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, recommendResumeProfiles, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 
 type ApiEvent = { requestContext?: { authorizer?: { jwt?: { claims?: Record<string, string> } }; http?: { method?: string }; requestId?: string }; rawPath?: string; routeKey?: string; pathParameters?: Record<string, string>; queryStringParameters?: Record<string, string>; headers?: Record<string, string | undefined>; body?: string | null };
 type ApiResponse = { statusCode: number; headers: Record<string, string>; body: string };
@@ -609,7 +609,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (!await dependencies.users.putResumeBankItem(updated, previous.revision)) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
           return reply(200, updated);
         }
-        if (path === '/me/resume-imports') {
+        if (path === '/me/resume-imports' || path === '/me/resume-jobs/resolve') {
           if (method === 'GET') return reply(200, { imports: await dependencies.users.listImportedResumeJobs(userId) });
           if (method === 'POST') {
             const body = parseBody(event);
@@ -638,6 +638,27 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const updated: ImportedJob = { ...previous, description, source: 'manual', status: 'ready', contentHash: createHash('sha256').update(description).digest('hex'), revision: previous.revision + 1, updatedAt: timestamp };
             if (!await dependencies.users.putImportedResumeJob(userId, updated, previous.revision)) return reply(409, { message: 'Imported job changed; refresh and retry' });
             return reply(200, updated);
+          }
+        }
+        const resumeJobMatch = path.match(/^\/me\/resume-jobs\/([^/]+)(?:\/(manual-description|recommendation))?$/u);
+        if (resumeJobMatch) {
+          const importId = decodeURIComponent(resumeJobMatch[1]!);
+          const action = resumeJobMatch[2];
+          const imported = await dependencies.users.getImportedResumeJob(userId, importId);
+          if (!imported) return reply(404, { message: 'Imported job not found' });
+          if (method === 'GET' && !action) return reply(200, imported);
+          if (method === 'POST' && action === 'manual-description') {
+            const body = parseBody(event);
+            if (!Number.isInteger(body.revision) || body.revision !== imported.revision) return reply(409, { message: 'Imported job changed; refresh and retry' });
+            const description = resumeText(body.description, 'description', 30_000);
+            const updated: ImportedJob = { ...imported, description, source: 'manual', status: 'ready', contentHash: createHash('sha256').update(description).digest('hex'), revision: imported.revision + 1, updatedAt: timestamp };
+            if (!await dependencies.users.putImportedResumeJob(userId, updated, imported.revision)) return reply(409, { message: 'Imported job changed; refresh and retry' });
+            return reply(200, updated);
+          }
+          if (method === 'POST' && action === 'recommendation') {
+            if (imported.status !== 'ready') return reply(409, { message: 'The job description is still pending. Paste it manually to continue.' });
+            const [profiles, bankItems] = await Promise.all([dependencies.users.listResumeProfiles(userId), dependencies.users.listResumeBank(userId)]);
+            return reply(200, { recommendations: recommendResumeProfiles(imported.description, profiles, bankItems) });
           }
         }
         if (path === '/me/resume-profiles') {
@@ -724,6 +745,34 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
             return reply(200, updated);
           }
+        }
+        const draftChangeMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/changes\/([^/]+)$/u);
+        if (draftChangeMatch && method === 'PATCH') {
+          const draftId = decodeURIComponent(draftChangeMatch[1]!);
+          const changeId = decodeURIComponent(draftChangeMatch[2]!);
+          const previous = await dependencies.users.getResumeDraft(userId, draftId);
+          if (!previous) return reply(404, { message: 'Resume draft not found' });
+          const body = parseBody(event);
+          if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume draft changed; refresh and retry' });
+          if (body.decision !== 'accepted' && body.decision !== 'rejected') return reply(400, { message: 'decision must be accepted or rejected' });
+          if (!previous.changes.some((change) => change.changeId === changeId)) return reply(404, { message: 'Resume change not found' });
+          const decision = body.decision as NonNullable<ResumeChange['decision']>;
+          const changes = previous.changes.map((change) => change.changeId === changeId ? { ...change, decision } : change);
+          const updated: ResumeDraft = { ...previous, changes, status: changes.every((change) => change.decision) ? 'finalized' : 'reviewing', revision: previous.revision + 1, updatedAt: timestamp };
+          if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
+          return reply(200, updated);
+        }
+        const finalizeDraftMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/finalize$/u);
+        if (finalizeDraftMatch && method === 'POST') {
+          const draftId = decodeURIComponent(finalizeDraftMatch[1]!);
+          const previous = await dependencies.users.getResumeDraft(userId, draftId);
+          if (!previous) return reply(404, { message: 'Resume draft not found' });
+          const body = parseBody(event);
+          if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume draft changed; refresh and retry' });
+          if (!previous.changes.every((change) => change.decision)) return reply(409, { message: 'Review every change before finalizing' });
+          const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
+          if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
+          return reply(200, updated);
         }
       }
       const releaseMatch = path.match(/^\/me\/releases\/([^/]+)$/);

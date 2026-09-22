@@ -59,4 +59,19 @@ describe('resume API ownership and revisions', () => {
     expect(value.changes).toEqual([expect.objectContaining({ evidenceIds: [bank.bankItemId], suggestion: 'Built a TypeScript dashboard' })]);
     expect((await handler(event('other', 'GET', `/me/resume-imports/${imported.importId}`))).statusCode).toBe(404);
   });
+
+  it('supports the specified resolve, recommendation, decision, and finalization routes', async () => {
+    const users = new MemoryUserStore();
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    const bank = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank', { kind: 'skill', content: 'TypeScript' }))).body) as { bankItemId: string; revision: number };
+    await handler(event('student', 'PATCH', `/me/resume-bank/${bank.bankItemId}`, { revision: bank.revision, verified: true }));
+    const profile = JSON.parse((await handler(event('student', 'POST', '/me/resume-profiles', { name: 'Web', tags: ['typescript'], bankItemIds: [bank.bankItemId], sectionOrder: [], template: 'clean-standard' }))).body) as { profileId: string };
+    const pending = JSON.parse((await handler(event('student', 'POST', '/me/resume-jobs/resolve', { url: 'https://careers.example.test/jobs/1' }))).body) as { importId: string; revision: number };
+    const ready = JSON.parse((await handler(event('student', 'POST', `/me/resume-jobs/${pending.importId}/manual-description`, { revision: pending.revision, description: 'TypeScript engineering role' }))).body) as { importId: string };
+    expect(JSON.parse((await handler(event('student', 'POST', `/me/resume-jobs/${ready.importId}/recommendation`))).body)).toMatchObject({ recommendations: [expect.objectContaining({ profileId: profile.profileId })] });
+    const draft = JSON.parse((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: profile.profileId, importId: ready.importId }))).body) as { draftId: string; revision: number; changes: Array<{ changeId: string }> };
+    const decided = await handler(event('student', 'PATCH', `/me/resume-drafts/${draft.draftId}/changes/${draft.changes[0]!.changeId}`, { revision: draft.revision, decision: 'accepted' }));
+    const updated = JSON.parse(decided.body) as { revision: number };
+    expect((await handler(event('student', 'POST', `/me/resume-drafts/${draft.draftId}/finalize`, { revision: updated.revision }))).statusCode).toBe(200);
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { escapeLatex, normalizeResumeJobUrl, validateResumeChanges } from '../src/resume.js';
+import { escapeLatex, normalizeResumeJobUrl, recommendResumeProfiles, validateResumeChanges } from '../src/resume.js';
 
 describe('resume safety contracts', () => {
   it('normalizes public HTTPS job URLs without retaining fragments', () => {
@@ -17,5 +17,13 @@ describe('resume safety contracts', () => {
     const verified = { userId: 'owner', bankItemId: 'bank-1', kind: 'bullet' as const, content: 'Improved 20% with Python', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
     expect(() => validateResumeChanges([{ changeId: 'c', type: 'rewrite', section: 'Experience', suggestion: 'Improved 30%', evidenceIds: ['bank-1'], reason: 'fit' }], [verified])).toThrow('numeric');
     expect(() => validateResumeChanges([{ changeId: 'c', type: 'rewrite', section: 'Experience', suggestion: 'Improved 20%', evidenceIds: ['other'], reason: 'fit' }], [verified])).toThrow('verified');
+  });
+
+  it('ranks bases with explainable verified-evidence coverage', () => {
+    const recommendation = recommendResumeProfiles('TypeScript dashboard engineer', [
+      { userId: 'student', profileId: 'web', name: 'Web', tags: ['typescript'], bankItemIds: ['dashboard'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' },
+      { userId: 'student', profileId: 'ml', name: 'ML', tags: ['machine-learning'], bankItemIds: [], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' },
+    ], [{ userId: 'student', bankItemId: 'dashboard', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' }]);
+    expect(recommendation[0]).toMatchObject({ profileId: 'web', score: 110, explanation: expect.stringContaining('verified bank item') });
   });
 });
