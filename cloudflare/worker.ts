@@ -1754,7 +1754,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         }
         if (result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
         if (result.poll?.continuationSources.includes(source.id)) {
-          await sendQueueMessageWithin(env.GITHUB_QUEUE, { sourceId: source.id });
+          await sendQueueMessageWithin(env.GITHUB_QUEUE, {
+            sourceId: source.id,
+            ...(message.force === true ? { force: true } : {}),
+          });
         }
         await resolveFailures(queued.id, queued.attempts);
         await completeTraffic(queued.id, 'success');
