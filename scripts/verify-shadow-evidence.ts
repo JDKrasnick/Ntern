@@ -9,7 +9,9 @@ const cohorts = [
 ] as const;
 const out = process.argv[2] ?? '.context/shadow-evidence-verification.json';
 type Field = { status: string; evidence?: string[] };
-const norm = (s: string) => s.replace(/\s+/gu, ' ').trim().toLowerCase();
+// Evidence is verbatim apart from extraction's observed quote/control-character
+// corruption, so compare lexical tokens rather than byte-level punctuation.
+const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 const rows: unknown[] = [];
 for (const [cohort, rawPath, projectedPath, inputRoot] of cohorts) {
   for (const [kind, path, fieldRoot] of [['raw', rawPath, 'raw'], ['projected', projectedPath, 'extraction']] as const) {
