@@ -39,7 +39,8 @@ import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalo
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
-import { assertPublicHttpsUrl, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
+import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
+import { extractResumeJobText } from '../src/resume-job-import.js';
 import type { EmployerVerificationChallenge } from '../src/employer-types.js';
 import { reviewedProviderRegistry, reviewedStructuredRegistry } from './employer-registry.js';
 import { StructuredCareerSourceConnector } from '../src/sources/structured/index.js';
@@ -74,6 +75,7 @@ export interface Environment extends AuthEnvironment {
   GMAIL_QUEUE: Queue;
   DESTINATION_VERIFICATION_QUEUE: Queue;
   SHADOW_EXTRACTION_QUEUE: Queue;
+  RESUME_JOB_IMPORT_QUEUE: Queue;
   D1_TRAFFIC_CONTROLLER?: DurableObjectNamespace;
   DESTINATION_BROWSER: BrowserWorker;
   GREENHOUSE_DLQ: Queue;
@@ -1633,6 +1635,42 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   if (batch.queue.includes('shadow-extraction')) {
     await observeQueueBatch(batch, trafficObservations, (observed) => processShadowExtractionBatch(observed, env));
+    return;
+  }
+  if (batch.queue.includes('resume-job-import')) {
+    for (const message of batch.messages) {
+      const body = message.body as { userId?: string; importId?: string; canonicalUrl?: string };
+      if (!body.userId || !body.importId || !body.canonicalUrl) { message.ack(); continue; }
+      try {
+        const fetched = await safeFetchText(body.canonicalUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 3, maxBodyBytes: 128 * 1024, headers: { Accept: 'text/html,application/xhtml+xml' } });
+        if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
+        const extracted = extractResumeJobText(fetched.body);
+        if (extracted.description.length < 40) throw new Error('Job import did not contain enough readable role text');
+        const contentHash = createHash('sha256').update(extracted.description).digest('hex');
+        const objectKey = `resume-imports/${contentHash}.txt`;
+        const descriptionBytes = new TextEncoder().encode(extracted.description);
+        await env.DOCUMENTS.put(objectKey, descriptionBytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'text/plain; charset=utf-8' } });
+        const timestamp = new Date().toISOString();
+        await env.DB.prepare(`INSERT INTO resume_job_imports (import_id, canonical_url, content_hash, status, title, description_object_key, created_at, updated_at)
+          VALUES (?, ?, ?, 'ready', ?, ?, ?, ?)
+          ON CONFLICT(import_id) DO UPDATE SET canonical_url = excluded.canonical_url, content_hash = excluded.content_hash, status = 'ready', title = excluded.title, description_object_key = excluded.description_object_key, updated_at = excluded.updated_at`)
+          .bind(body.importId, fetched.url, contentHash, extracted.title ?? null, objectKey, timestamp, timestamp).run();
+        await env.DB.prepare(`INSERT INTO resume_job_aliases (alias_url, import_id, created_at) VALUES (?, ?, ?)
+          ON CONFLICT(alias_url) DO UPDATE SET import_id = excluded.import_id`).bind(body.canonicalUrl, body.importId, timestamp).run();
+        const users = new D1UserStore(env.DB);
+        const current = await users.getImportedResumeJob(body.userId, body.importId);
+        if (current && current.canonicalUrl === body.canonicalUrl && current.status === 'pending') {
+          await users.putImportedResumeJob(body.userId, { ...current, canonicalUrl: fetched.url, title: extracted.title, description: extracted.description, source: 'cache', contentHash, status: 'ready', revision: current.revision + 1, updatedAt: timestamp }, current.revision);
+        }
+        message.ack();
+      } catch (error) {
+        const users = new D1UserStore(env.DB);
+        const current = await users.getImportedResumeJob(body.userId, body.importId);
+        if (current?.status === 'pending') await users.putImportedResumeJob(body.userId, { ...current, status: 'manual-description-required', revision: current.revision + 1, updatedAt: new Date().toISOString() }, current.revision);
+        console.warn(JSON.stringify({ command: 'resume-job-import', importId: body.importId, error: safeDiagnostic(error) }));
+        message.ack();
+      }
+    }
     return;
   }
   const records = batch.messages.map((message) => ({ messageId: message.id, body: typeof message.body === 'string' ? message.body : JSON.stringify(message.body) }));

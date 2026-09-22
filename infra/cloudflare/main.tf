@@ -3,7 +3,7 @@ locals {
   ingestion_worker_bundle = "${path.module}/../../cloudflare/dist/ingestion/ingestion-worker.js"
   ingestion_worker_name   = "${var.worker_name}-ingestion"
   catalog_providers       = toset(["greenhouse", "lever", "ashby", "github"])
-  asynchronous_queues     = setunion(local.catalog_providers, toset(["gmail", "destination-verification", "shadow-extraction"]))
+  asynchronous_queues     = setunion(local.catalog_providers, toset(["gmail", "destination-verification", "shadow-extraction", "resume-job-import"]))
 
   # Sized from the 2026-09-15 drain measurements: published boards per sweep x
   # per-message wall clock / cadence, doubled for the validation, notification,
@@ -22,6 +22,7 @@ locals {
     gmail                    = 1
     destination-verification = 1
     shadow-extraction        = 1
+    resume-job-import        = 1
   }
 
   api_plain_bindings = concat(
@@ -177,6 +178,7 @@ resource "cloudflare_workers_script" "application" {
       { name = "DB", type = "d1", id = cloudflare_d1_database.application.id },
       { name = "DOCUMENTS", type = "r2_bucket", bucket_name = cloudflare_r2_bucket.documents.name },
       { name = "GMAIL_QUEUE", type = "queue", queue_name = cloudflare_queue.work["gmail"].queue_name },
+      { name = "RESUME_JOB_IMPORT_QUEUE", type = "queue", queue_name = cloudflare_queue.work["resume-job-import"].queue_name },
       { name = "INGESTION", type = "service", service = cloudflare_workers_script.ingestion.script_name },
       { name = "VERSION_METADATA", type = "version_metadata" },
     ],

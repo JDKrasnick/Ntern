@@ -14,7 +14,8 @@
     { "binding": "DOCUMENTS", "bucket_name": "intern-notifs-documents" }
   ],
   "queues": { "producers": [
-    { "binding": "GMAIL_QUEUE", "queue": "intern-notifs-gmail" }
+    { "binding": "GMAIL_QUEUE", "queue": "intern-notifs-gmail" },
+    { "binding": "RESUME_JOB_IMPORT_QUEUE", "queue": "intern-notifs-resume-job-import" }
   ] },
   "services": [
     { "binding": "INGESTION", "service": "intern-notifs-ingestion" }

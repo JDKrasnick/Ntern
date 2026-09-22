@@ -367,11 +367,16 @@ export interface DocumentStorage {
   deleteObject(objectKey: string): Promise<void>;
 }
 
+export interface ResumeImportQueue {
+  send(message: { userId: string; importId: string; canonicalUrl: string }): Promise<void>;
+}
+
 export interface ApiDependencies {
   jobs: InternshipStore;
   users: UserStore;
   releases?: ReleaseStore;
   documentStorage?: DocumentStorage;
+  resumeImportQueue?: ResumeImportQueue;
   deleteIdentity?: (userId: string) => Promise<void>;
   /** Revokes and deletes linked-provider data before the account record disappears. */
   beforeDeleteUser?: (userId: string) => Promise<void>;
@@ -622,6 +627,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
               status: manualDescription ? 'ready' : 'pending', revision: 0, createdAt: timestamp, updatedAt: timestamp,
             };
             if (!await dependencies.users.putImportedResumeJob(userId, imported)) return reply(409, { message: 'Job import already exists; retry' });
+            if (!manualDescription && dependencies.resumeImportQueue) await dependencies.resumeImportQueue.send({ userId, importId: imported.importId, canonicalUrl });
             return reply(201, imported);
           }
         }

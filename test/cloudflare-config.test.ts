@@ -50,10 +50,10 @@ describe('Cloudflare deployment configuration', () => {
   it('assigns every cron and queue consumer to ingestion only', () => {
     expect(api.queues?.consumers ?? []).toEqual([]);
     expect(api.triggers).toBeUndefined();
-    expect(api.queues?.producers?.map(({ binding }) => binding)).toEqual(['GMAIL_QUEUE']);
+    expect(api.queues?.producers?.map(({ binding }) => binding)).toEqual(['GMAIL_QUEUE', 'RESUME_JOB_IMPORT_QUEUE']);
     expect(ingestion.queues?.consumers?.map(({ queue }) => queue)).toEqual([
       'intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby', 'intern-notifs-github', 'intern-notifs-gmail', 'intern-notifs-destination-verification',
-      'intern-notifs-shadow-extraction',
+      'intern-notifs-shadow-extraction', 'intern-notifs-resume-job-import',
     ]);
     expect(ingestion.triggers?.crons).toHaveLength(9);
     expect(ingestion.workers_dev).toBe(false);
@@ -106,7 +106,7 @@ describe('Cloudflare deployment configuration', () => {
       .map(([, provider, value]) => [provider, Number(value)]));
 
     expect(Object.keys(declared).sort()).toEqual([
-      'ashby', 'destination-verification', 'github', 'gmail', 'greenhouse', 'lever', 'shadow-extraction',
+      'ashby', 'destination-verification', 'github', 'gmail', 'greenhouse', 'lever', 'resume-job-import', 'shadow-extraction',
     ]);
     for (const consumer of ingestion.queues?.consumers ?? []) {
       expect(consumer.max_concurrency).toBe(declared[consumer.queue.replace('intern-notifs-', '')]);
