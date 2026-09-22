@@ -1413,6 +1413,9 @@ export class IngestionRunner {
             || (this.trustedCommunityCatalogEnabled && prior.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash
               && prior.occurrence.trustedCommunityAlertQualification.sourceMaterialHash !== sourceMaterialHash(sourceListing)));
         });
+        const metadataProgressKey = (row: NonNullable<SourceCheckpoint['pendingMetadataProcessedRows']>[number]) =>
+          JSON.stringify([row.externalId, row.sourceMaterialHash, row.extractionVersion, row.processingRevision]);
+        const priorMetadataProgress = new Set((previous?.pendingMetadataProcessedRows ?? []).map(metadataProgressKey));
         const metadataRowProcessed = (sourceListing: ProcessedListing) => {
           const materialHash = sourceMaterialHash(sourceListing);
           const prior = priorByExternalId.get(externalId(sourceListing));
@@ -1420,11 +1423,11 @@ export class IngestionRunner {
           // row disappeared after it was parsed, its unchanged reappearance
           // must still restore the occurrence before the refresh certifies.
           if (prior && (!prior.present || prior.occurrence.state !== sourceListing.state)) return false;
-          return previous?.pendingMetadataProcessedRows?.some((row) =>
-            row.externalId === externalId(sourceListing)
-            && row.sourceMaterialHash === materialHash
-            && row.extractionVersion === ROLE_METADATA_EXTRACTION_VERSION
-            && row.processingRevision === SOURCE_METADATA_PROCESSING_REVISION) === true;
+          return priorMetadataProgress.has(metadataProgressKey({
+            externalId: externalId(sourceListing), sourceMaterialHash: materialHash,
+            extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
+            processingRevision: SOURCE_METADATA_PROCESSING_REVISION,
+          }));
         };
         const opportunisticMigrationCandidates = migrationLimit === undefined ? [] : batch.processed.listings.filter((sourceListing) =>
           !priorByExternalId.has(externalId(sourceListing))
@@ -1876,18 +1879,20 @@ export class IngestionRunner {
           ? previous?.admissionConfigurationVersion
           : admissionConfigurationVersion;
         const priorProcessedRows = previous?.pendingMetadataProcessedRows ?? [];
-        const processedRows = [
-          ...priorProcessedRows,
-          ...migrationCandidates.filter((listing) => metadataMigrationCandidates.some((candidate) => externalId(candidate) === externalId(listing))
+        const metadataMigrationExternalIds = new Set(metadataMigrationCandidates.map(externalId));
+        const appendedProcessedRows = migrationCandidates.filter((listing) => metadataMigrationExternalIds.has(externalId(listing))
             && resolution.handledExternalIds.has(externalId(listing))
             && !resolution.failedExternalIds.has(externalId(listing))
             && !persistenceFailedExternalIds.has(externalId(listing)))
             .map((listing) => ({ externalId: externalId(listing), sourceMaterialHash: sourceMaterialHash(listing),
-              extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, processingRevision: SOURCE_METADATA_PROCESSING_REVISION })),
-        ].filter((row, index, rows) => rows.findIndex((candidate) => candidate.externalId === row.externalId
-          && candidate.sourceMaterialHash === row.sourceMaterialHash
-          && candidate.extractionVersion === row.extractionVersion
-          && candidate.processingRevision === row.processingRevision) === index);
+              extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, processingRevision: SOURCE_METADATA_PROCESSING_REVISION }));
+        const seenMetadataProgress = new Set<string>();
+        const processedRows = [...priorProcessedRows, ...appendedProcessedRows].filter((row) => {
+          const key = metadataProgressKey(row);
+          if (seenMetadataProgress.has(key)) return false;
+          seenMetadataProgress.add(key);
+          return true;
+        });
         const processedOmissionIds = [...new Set([
           ...pendingOmissionIds,
           ...selectedClosures.filter((prior) => !persistenceFailedExternalIds.has(prior.externalId)).map((prior) => prior.externalId),
