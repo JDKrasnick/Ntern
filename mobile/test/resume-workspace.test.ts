@@ -9,12 +9,14 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('resumeEnabled ? [{ key: "resume" as const, label: "Resume"');
     expect(app).toContain('resumeEnabled={publicConfig.resumeTunerEnabled}');
     expect(app).toContain('feature="tailor and save résumés"');
+    expect(app).toContain('Import a PDF or DOCX résumé');
+    expect(app).toContain('"/me/resume-bank/import"');
   });
 
   it('offers an adaptive review workspace with evidence and explicit decisions', () => {
     expect(app).toContain('reviewMode === "changes"');
     expect(app).toContain('resumeReviewWorkspaceWide');
-    expect(app).toContain('Master Bank · Analytics project');
+    expect(app).toContain('Master Bank evidence');
     expect(app).toContain('label="Keep original"');
     expect(app).toContain('label="Use suggestion"');
   });

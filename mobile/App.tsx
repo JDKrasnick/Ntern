@@ -5449,42 +5449,6 @@ function AccountGate({
   );
 }
 
-type ResumeSuggestion = {
-  id: string;
-  section: string;
-  original: string;
-  suggestion: string;
-  evidence: string;
-  reason: string;
-};
-
-const resumeSuggestions: ResumeSuggestion[] = [
-  {
-    id: "impact",
-    section: "Experience",
-    original: "Built a dashboard for the team.",
-    suggestion: "Built a dashboard that gave the team a single view of experiment results.",
-    evidence: "Master Bank · Analytics project",
-    reason: "Makes the existing project outcome easier to scan without adding a new claim.",
-  },
-  {
-    id: "skills",
-    section: "Skills",
-    original: "Python · SQL · React",
-    suggestion: "Python · SQL · React · Experiment analysis",
-    evidence: "Master Bank · Analytics project",
-    reason: "Matches a requirement in the job description using an approved bank item.",
-  },
-  {
-    id: "order",
-    section: "Projects",
-    original: "Projects follow Skills.",
-    suggestion: "Move Projects before Skills.",
-    evidence: "Master Bank · Recommender project",
-    reason: "Puts the most relevant evidence earlier for this role family.",
-  },
-];
-
 type ResumeBankCard = { bankItemId: string; kind: string; content: string; verified: boolean; revision: number };
 type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; revision: number };
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number };
@@ -5507,7 +5471,6 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [resumeBusy, setResumeBusy] = useState(false);
   const [activeChange, setActiveChange] = useState(0);
   const [reviewMode, setReviewMode] = useState<"changes" | "preview">("changes");
-  const [decisions, setDecisions] = useState<Record<string, "accepted" | "rejected">>({});
   const current = draft?.changes[activeChange];
   const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
   const decide = (decision: "accepted" | "rejected") => {
@@ -5549,6 +5512,28 @@ function ResumeWorkspace({ token }: { token: string }) {
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that bank item."))
       .finally(() => setBankSaving(false));
   };
+  const importResume = async () => {
+    if (bankSaving) return;
+    setBankError(undefined);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      if (!asset) return;
+      const contentType = asset.mimeType ?? (asset.name.toLowerCase().endsWith(".docx") ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/pdf");
+      setBankSaving(true);
+      const response = await api<{ document: { documentId: string }; uploadUrl: string }>("/me/documents", token, { method: "POST", body: JSON.stringify({ fileName: asset.name, contentType }) });
+      const file = await fetch(asset.uri);
+      await uploadDocumentContent({ uploadUrl: response.uploadUrl, token, contentType, body: await file.blob() }, { deleteMetadata: () => api(`/me/documents/${encodeURIComponent(response.document.documentId)}`, token, { method: "DELETE" }) });
+      const imported = await api<{ items: ResumeBankCard[] }>("/me/resume-bank/import", token, { method: "POST", body: JSON.stringify({ documentId: response.document.documentId }) });
+      setBankItems((items) => [...items, ...imported.items]);
+    } catch (error) {
+      setBankError(error instanceof Error ? error.message : "We couldn't import that résumé.");
+    } finally { setBankSaving(false); }
+  };
   const saveBase = () => {
     if (resumeBusy || !bankItems.length) return;
     setResumeBusy(true);
@@ -5581,7 +5566,7 @@ function ResumeWorkspace({ token }: { token: string }) {
     if (!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy) return;
     setResumeBusy(true);
     void api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: selectedProfileId }) })
-      .then((value) => { setDraft(value); setActiveChange(0); setDecisions({}); })
+      .then((value) => { setDraft(value); setActiveChange(0); })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create a grounded draft."))
       .finally(() => setResumeBusy(false));
   };
@@ -5624,6 +5609,9 @@ function ResumeWorkspace({ token }: { token: string }) {
         <View style={styles.resumeBankComposerAction}>
           <ActionButton label={bankSaving ? "Saving…" : "Save to Master Bank"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving} />
         </View>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import PDF or DOCX resume" onPress={() => void importResume()} disabled={bankSaving}>
+          <Text style={styles.resumeKeepAll}>{bankSaving ? "Importing résumé…" : "Import a PDF or DOCX résumé"}</Text>
+        </TouchableOpacity>
         {!bankLoading && bankItems.length ? (
           <View style={styles.resumeBankItems}>
             {bankItems.map((item) => (
