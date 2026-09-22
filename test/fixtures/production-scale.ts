@@ -13,8 +13,19 @@ import type { SourceOccurrenceState } from '../../src/types.js';
  * pseudo-random so retained sizes reflect real documents rather than one shared
  * constant string.
  */
-export const PRODUCTION_GITHUB_DOCUMENT = { bytes: 1_648_342, htmlRows: 4_716 };
-export const PRODUCTION_GITHUB_SOURCE_ROWS = 3_029;
+export const PRODUCTION_GITHUB_DOCUMENT = { bytes: 1_671_339, htmlRows: 4_716 };
+/**
+ * Current public community-feed shapes captured 2026-09-21 for #317. Keep the
+ * raw counts separate from eligible counts: source acquisition must finish even
+ * when policy withholds rows.
+ */
+export const PRODUCTION_GITHUB_FEEDS = {
+  simplify: { rawRows: 3_302, eligibleRows: 2_851, bytes: 2_849_080 },
+  speedyapplySwe: { rawRows: 1_140, eligibleRows: 1_118, bytes: 379_082 },
+  speedyapplyAi: { rawRows: 1_037, eligibleRows: 1_013, bytes: 350_623 },
+  growth: { rawRows: 6_000, eligibleRows: 5_100, bytes: 5_200_000 },
+} as const;
+export const PRODUCTION_GITHUB_SOURCE_ROWS = PRODUCTION_GITHUB_FEEDS.simplify.rawRows;
 export const PRODUCTION_GITHUB_OCCURRENCES = 4_194;
 export const PRODUCTION_GREENHOUSE_BOARD_BYTES = { spacex: 27_849_116, anduril: 40_679_935 };
 /** Reviewed sources per provider in production, used to size the e2e cycle. */
@@ -45,11 +56,20 @@ const applyUrl = (index: number) => `https://${applicationHosts[index % applicat
  * HTML tables are separated by blank lines so a line-numbered parse is
  * exercised across them.
  */
-export function syntheticMarkdownTable(options: { rows: number; bytesPerRow: number; format?: 'gfm' | 'html'; seed?: number }): string {
+export function syntheticMarkdownTable(options: {
+  rows: number;
+  bytesPerRow: number;
+  format?: 'gfm' | 'html';
+  seed?: number;
+  technicalRows?: number;
+}): string {
   const seed = options.seed ?? 7;
+  const title = (index: number) => index < (options.technicalRows ?? options.rows)
+    ? 'Software Engineering Intern'
+    : 'Marketing Intern';
   const row = (index: number, detail: string) => options.format === 'gfm'
-    ? `| Acme ${index} | Software Engineering Intern | Remote | [Apply](${applyUrl(index)}) | ${detail} |`
-    : `<tr><td><strong>Acme ${index}</strong></td><td>Software Engineering Intern</td><td>Remote</td>`
+    ? `| Acme ${index} | ${title(index)} | Remote | [Apply](${applyUrl(index)}) | ${detail} |`
+    : `<tr><td><strong>Acme ${index}</strong></td><td>${title(index)}</td><td>Remote</td>`
       + `<td><a href="${applyUrl(index)}">Apply</a></td><td>${detail}</td></tr>`;
   const detailLength = Math.max(0, options.bytesPerRow - row(0, '').length - 1);
   const parts = options.format === 'gfm'

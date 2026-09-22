@@ -127,8 +127,8 @@ only. `AUTH_FROM_EMAIL` must be a sender verified by the configured mail service
 Cloudflare budget alerts are informational and are not hard spending limits.
 The Worker therefore keeps its paid-plan blast radius deliberately small:
 
-- 30,000 ms of CPU and 10,000 subrequests per invocation, enough for a bounded
-  multi-document community-source poll; Cloudflare does not bill subrequests,
+- 120,000 ms of CPU and 10,000 subrequests per ingestion invocation, preserving
+  the production envelope for bounded oversized-provider detail slices; Cloudflare does not bill subrequests,
   and the paid plan's included CPU allocation remains the account-level guard;
 - one queued source job at a time, with batches of one and two retries;
 - five private documents per user and 100 documents account-wide;

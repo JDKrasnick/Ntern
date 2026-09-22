@@ -223,12 +223,14 @@ const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
  * reviewed source holds 3,063 raw rows, and in production each resolved row also
  * pays a destination check, a browser inspection for roughly half of them, and
  * its own catalog writes. 750 rows measured a 300 s (five-minute) message-deadline
- * abort on `simplify-summer-2026`, and 200 rows still exceeded that deadline for
- * the same list, so the slice is 100; the pass is resumable from the checkpoint
+ * abort on `simplify-summer-2026`, and the later 3,302-row production snapshot
+ * still exhausted the delivery at 100 rows once page probes and persistence were
+ * included. A slice of 50 leaves room for the fixed fetch/parse cost as the
+ * community list grows. The pass is resumable from the checkpoint
  * (`pendingResolutionRows`), so lowering this only trades deliveries for
- * per-delivery cost.
+ * per-delivery cost; it never closes rows outside the completed slice.
  */
-export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 100;
+export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 50;
 /**
  * Listings one delivery may re-grade after an admission policy change. The
  * bounded-migration gate suppresses newly admitted rows of a trusted list until
