@@ -5453,6 +5453,7 @@ type ResumeBankCard = { bankItemId: string; kind: string; content: string; verif
 type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; revision: number };
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number };
 type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; section: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
+type ResumeArtifactCard = { artifactId: string };
 
 function ResumeWorkspace({ token }: { token: string }) {
   const { width } = useWindowDimensions();
@@ -5568,6 +5569,19 @@ function ResumeWorkspace({ token }: { token: string }) {
     void api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: selectedProfileId }) })
       .then((value) => { setDraft(value); setActiveChange(0); })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create a grounded draft."))
+      .finally(() => setResumeBusy(false));
+  };
+  const finalizeDraft = () => {
+    if (!draft || draft.status === "finalized" || resumeBusy) return;
+    setResumeBusy(true);
+    void api<{ draft: ResumeDraftCard; artifact?: ResumeArtifactCard }>(`/me/resume-drafts/${draft.draftId}/finalize`, token, { method: "POST", body: JSON.stringify({ revision: draft.revision }) })
+      .then(async (result) => {
+        setDraft(result.draft);
+        if (!result.artifact) return;
+        const content = await api<{ downloadUrl: string }>(`/me/resume-artifacts/${result.artifact.artifactId}/content`, token);
+        await WebBrowser.openBrowserAsync(content.downloadUrl);
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create that résumé."))
       .finally(() => setResumeBusy(false));
   };
 
@@ -5734,7 +5748,7 @@ function ResumeWorkspace({ token }: { token: string }) {
           <TouchableOpacity accessibilityRole="button" onPress={() => current && decide("rejected")}>
             <Text style={styles.resumeKeepAll}>Keep all remaining originals</Text>
           </TouchableOpacity>
-          <ActionButton label={`Create résumé${accepted ? ` with ${accepted} change${accepted === 1 ? "" : "s"}` : ""}`} onPress={() => undefined} disabled={!draft || reviewed !== draft.changes.length} />
+          <ActionButton label={resumeBusy ? "Creating…" : `Create résumé${accepted ? ` with ${accepted} change${accepted === 1 ? "" : "s"}` : ""}`} onPress={finalizeDraft} disabled={!draft || draft.status === "finalized" || reviewed !== draft.changes.length || resumeBusy} />
         </View>
       </View>
     </ScrollView>
