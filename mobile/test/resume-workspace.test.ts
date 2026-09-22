@@ -11,6 +11,8 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('feature="tailor and save résumés"');
     expect(app).toContain('Import a PDF or DOCX résumé');
     expect(app).toContain('"/me/resume-bank/import"');
+    expect(app).toContain('label={item.verified ? "Mark for review" : "Verify item"}');
+    expect(app).toContain('method: "PATCH", body: JSON.stringify({ revision: item.revision, verified })');
   });
 
   it('offers an adaptive review workspace with evidence and explicit decisions', () => {

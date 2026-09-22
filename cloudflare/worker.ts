@@ -1158,6 +1158,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   }
   const artifactContentMatch = url.pathname.match(/^\/me\/resume-artifacts\/([^/]+)\/content$/u);
   if (artifactContentMatch && request.method === 'GET') {
+    if (env.RESUME_TUNER_ENABLED !== 'true') return withCors(Response.json({ message: 'Resume tailoring is not enabled' }, { status: 404 }));
     if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
     const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactContentMatch[1]));
     if (!artifact) return withCors(Response.json({ message: 'Resume artifact not found' }, { status: 404 }));

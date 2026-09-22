@@ -853,9 +853,12 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
           if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           if (!dependencies.resumeArtifactStorage) return reply(200, { draft: updated });
-          const profile = await dependencies.users.getResumeProfile(userId, updated.profileId);
+          const [profile, bankItems] = await Promise.all([
+            dependencies.users.getResumeProfile(userId, updated.profileId),
+            dependencies.users.listResumeBank(userId),
+          ]);
           if (!profile) return reply(404, { message: 'Resume profile not found' });
-          const rendered = renderResumeLatex(profile, updated);
+          const rendered = renderResumeLatex(profile, updated, bankItems);
           const existing = (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash
             && artifact.templateVersion === RESUME_TEMPLATE_VERSION && artifact.compilerVersion === RESUME_COMPILER_VERSION);
           if (existing) return reply(200, { draft: updated, artifact: existing });

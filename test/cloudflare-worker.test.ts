@@ -327,6 +327,16 @@ describe('Cloudflare DLQ route authentication', () => {
   });
 });
 
+describe('resume artifact rollout boundary', () => {
+  it('hides artifact downloads while resume tailoring is disabled', async () => {
+    const response = await cloudflareWorker.fetch(
+      new Request('https://intern-notifs.test/me/resume-artifacts/artifact/content'),
+      { RESUME_TUNER_ENABLED: 'false', PUBLIC_API_URL: 'https://intern-notifs.test', DB: { prepare: () => ({ async first() { return null; } }) } } as unknown as Environment,
+    );
+    expect(response.status).toBe(404);
+  });
+});
+
 describe('Cloudflare queue continuation bounds', () => {
   it('rejects a queue send that never settles so the source message can retry', async () => {
     vi.useFakeTimers();

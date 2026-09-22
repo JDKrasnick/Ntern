@@ -5530,6 +5530,17 @@ function ResumeWorkspace({ token }: { token: string }) {
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that bank item."))
       .finally(() => setBankSaving(false));
   };
+  const setBankItemVerification = (item: ResumeBankCard, verified: boolean) => {
+    if (bankSaving) return;
+    setBankSaving(true);
+    setBankError(undefined);
+    void api<ResumeBankCard>(`/me/resume-bank/${encodeURIComponent(item.bankItemId)}`, token, {
+      method: "PATCH", body: JSON.stringify({ revision: item.revision, verified }),
+    })
+      .then((updated) => setBankItems((items) => items.map((current) => current.bankItemId === updated.bankItemId ? updated : current)))
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that review."))
+      .finally(() => setBankSaving(false));
+  };
   const importResume = async () => {
     if (bankSaving) return;
     setBankError(undefined);
@@ -5652,6 +5663,13 @@ function ResumeWorkspace({ token }: { token: string }) {
                   <Text style={styles.resumeBankItemText}>{item.content}</Text>
                   <Text style={styles.resumeBankItemStatus}>{item.verified ? "Verified" : "Needs review"}</Text>
                 </View>
+                <ActionButton
+                  label={item.verified ? "Mark for review" : "Verify item"}
+                  variant="secondary"
+                  compact
+                  disabled={bankSaving}
+                  onPress={() => setBankItemVerification(item, !item.verified)}
+                />
               </View>
             ))}
           </View>
