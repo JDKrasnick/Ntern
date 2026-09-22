@@ -6,7 +6,6 @@ const fields = ['compensation', 'locations', 'workMode', 'housing', 'timing', 'e
 const scores = await Promise.all(cohorts.map(async (cohort) => JSON.parse(await readFile(`.context/shadow-${cohort}-v14-human-score.json`, 'utf8'))));
 const inclusion = JSON.parse(await readFile('.context/shadow-live-inclusion-manifest.json', 'utf8')) as { excluded: Array<{ cohort: string; id: string; title: string; status: number | null; visibleTitleMatch?: boolean; error?: string }> };
 const percent = (n: number | null) => n === null ? 'n/a' : `${(n * 100).toFixed(1)}%`;
-const count = (key: 'raw' | 'projected', section: 'endToEnd' | 'conditionalOnValid', field: string) => scores.reduce((sum, score) => sum + score[key][section].fields[field][key === 'raw' ? 'TP' : 'TP'], 0);
 function combined(which: 'raw' | 'projected', field: string) {
   const keys = ['TP', 'UC', 'VM', 'FN', 'TN'];
   const c = Object.fromEntries(keys.map((key) => [key, scores.reduce((sum, score) => sum + score[which].endToEnd.fields[field][key], 0)])) as Record<string, number>;
