@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v13';
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v14';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v5';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v1';
 export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-5-mini-2025-08-07';
@@ -147,7 +147,9 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput): { system:
       + 'for every field item, copy its supporting description passage first, then include the item only when that exact passage '
       + 'supports the field definition. Never use title text in fields. A missing or non-verbatim passage means omit the item; '
       + 'when no valid item remains, return not-stated rather than guessing. In timing, omit application events and candidate '
-      + 'background facts. In eligibility, omit operational and procedural facts. Each retained list item must stand alone as a '
+      + 'background facts, including applicant-pool labels such as "students only" or "applicants considered", even if they name '
+      + 'a season. In eligibility, omit operational and procedural facts: visa, residency, permit, documentation, or application '
+      + 'process notices are not a role eligibility rule unless they explicitly state who may hold this role. Each retained list item must stand alone as a '
       + 'valid fact for that field.',
     user: JSON.stringify({ title: input.title, completeness: input.completeness, description: input.description }),
   };
