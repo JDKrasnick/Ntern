@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createApiHandler } from '../src/api.js';
 import { MemoryInternshipStore, MemoryUserStore } from '../src/store.js';
 
@@ -85,5 +85,17 @@ describe('resume API ownership and revisions', () => {
     });
     const response = await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }));
     expect(JSON.parse(response.body)).toMatchObject({ items: [expect.objectContaining({ content: 'Built a dashboard', sourceDocumentId: 'resume', sourceLocation: 'line 3', verified: false })] });
+  });
+
+  it('finalizes reviewed drafts into private fixed-template TeX artifacts', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: [], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [{ changeId: 'change', type: 'add', section: 'Projects', suggestion: 'Built a dashboard', evidenceIds: ['bank'], reason: 'fit', decision: 'accepted' }], revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now' });
+    const putTex = vi.fn();
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex, createContentUrl: async () => 'https://example.test/artifact' } });
+    const finalized = await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }));
+    expect(finalized.statusCode).toBe(200);
+    expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { draftId: 'draft', templateVersion: '2026-09-22.1', compilerVersion: 'fixed-template-tex-v1' } });
+    expect(putTex).toHaveBeenCalledOnce();
   });
 });

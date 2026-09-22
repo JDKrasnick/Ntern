@@ -14,6 +14,7 @@ import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
 import { normalizeResumeJobUrl, recommendResumeProfiles, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
+import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 
 type ApiEvent = { requestContext?: { authorizer?: { jwt?: { claims?: Record<string, string> } }; http?: { method?: string }; requestId?: string }; rawPath?: string; routeKey?: string; pathParameters?: Record<string, string>; queryStringParameters?: Record<string, string>; headers?: Record<string, string | undefined>; body?: string | null };
 type ApiResponse = { statusCode: number; headers: Record<string, string>; body: string };
@@ -373,6 +374,11 @@ export interface ResumeImportQueue {
   send(message: { userId: string; importId: string; canonicalUrl: string }): Promise<void>;
 }
 
+export interface ResumeArtifactStorage {
+  putTex(objectKey: string, tex: string): Promise<void>;
+  createContentUrl(artifact: { userId: string; artifactId: string; objectKey: string }): Promise<string>;
+}
+
 export interface ApiDependencies {
   jobs: InternshipStore;
   users: UserStore;
@@ -380,6 +386,7 @@ export interface ApiDependencies {
   documentStorage?: DocumentStorage;
   resumeImportQueue?: ResumeImportQueue;
   resumeDocumentExtractor?: (bytes: ArrayBuffer, contentType: string) => Promise<ExtractedResumeItem[]>;
+  resumeArtifactStorage?: ResumeArtifactStorage;
   deleteIdentity?: (userId: string) => Promise<void>;
   /** Revokes and deletes linked-provider data before the account record disappears. */
   beforeDeleteUser?: (userId: string) => Promise<void>;
@@ -795,7 +802,25 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (!previous.changes.every((change) => change.decision)) return reply(409, { message: 'Review every change before finalizing' });
           const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
           if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
-          return reply(200, updated);
+          if (!dependencies.resumeArtifactStorage) return reply(200, { draft: updated });
+          const profile = await dependencies.users.getResumeProfile(userId, updated.profileId);
+          if (!profile) return reply(404, { message: 'Resume profile not found' });
+          const rendered = renderResumeLatex(profile, updated);
+          const existing = (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash);
+          if (existing) return reply(200, { draft: updated, artifact: existing });
+          const artifactId = randomUUID();
+          const objectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
+          await dependencies.resumeArtifactStorage.putTex(objectKey, rendered.tex);
+          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey: objectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, createdAt: timestamp };
+          if (!await dependencies.users.putResumeArtifact(artifact)) return reply(409, { message: 'Resume artifact changed; refresh and retry' });
+          return reply(200, { draft: updated, artifact });
+        }
+        const artifactContentMatch = path.match(/^\/me\/resume-artifacts\/([^/]+)\/content$/u);
+        if (artifactContentMatch && method === 'GET') {
+          if (!dependencies.resumeArtifactStorage) return reply(503, { message: 'Resume artifact storage is unavailable' });
+          const artifact = await dependencies.users.getResumeArtifact(userId, decodeURIComponent(artifactContentMatch[1]!));
+          if (!artifact) return reply(404, { message: 'Resume artifact not found' });
+          return reply(200, { artifact, downloadUrl: await dependencies.resumeArtifactStorage.createContentUrl(artifact) });
         }
       }
       const releaseMatch = path.match(/^\/me\/releases\/([^/]+)$/);

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { decodeMetadataCursor, encodeMetadataCursor } from '../src/metadata-audit.js';
-import { createApiHandler, type DocumentStorage } from '../src/api.js';
+import { createApiHandler, type DocumentStorage, type ResumeArtifactStorage } from '../src/api.js';
 import { ashbyWorkMessages, isAshbySourceDue } from '../src/ashby-dispatch.js';
 import { processAshbyQueue } from '../src/ashby-worker.js';
 import { greenhouseWorkMessages, isGreenhouseSourceDue } from '../src/greenhouse-dispatch.js';
@@ -563,6 +563,14 @@ function documentStorage(env: Environment): DocumentStorage {
   };
 }
 
+function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
+  const base = env.PUBLIC_API_URL.replace(/\/$/u, '');
+  return {
+    async putTex(objectKey, tex) { const bytes = new TextEncoder().encode(tex); await env.DOCUMENTS.put(objectKey, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'application/x-tex; charset=utf-8' } }); },
+    async createContentUrl(artifact) { return `${base}/me/resume-artifacts/${encodeURIComponent(artifact.artifactId)}/content`; },
+  };
+}
+
 export async function readDocumentUpload(request: Request): Promise<
   { tooLarge: true } | { tooLarge: false; content: ArrayBuffer }
 > {
@@ -1042,6 +1050,8 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     users: new D1UserStore(env.DB),
     releases: new D1ReleaseStore(env.DB),
     documentStorage: documentStorage(env),
+    resumeArtifactStorage: resumeArtifactStorage(env),
+    resumeImportQueue: env.RESUME_JOB_IMPORT_QUEUE,
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     resumeTunerEnabled: env.RESUME_TUNER_ENABLED === 'true',
     beforeDeleteUser: (userId) => disconnectGmail(userId, env),
@@ -1084,6 +1094,15 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   if (contentMatch && (request.method === 'GET' || request.method === 'PUT')) {
     if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
     return withCors(await documentContent(request, env, userId, decodeURIComponent(contentMatch[1])));
+  }
+  const artifactContentMatch = url.pathname.match(/^\/me\/resume-artifacts\/([^/]+)\/content$/u);
+  if (artifactContentMatch && request.method === 'GET') {
+    if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
+    const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactContentMatch[1]));
+    if (!artifact) return withCors(Response.json({ message: 'Resume artifact not found' }, { status: 404 }));
+    const object = await env.DOCUMENTS.get(artifact.objectKey);
+    if (!object) return withCors(Response.json({ message: 'Resume artifact content not found' }, { status: 404 }));
+    return withCors(new Response(object.body, { headers: { 'Content-Type': 'application/x-tex; charset=utf-8', 'Content-Disposition': `attachment; filename="resume-${artifact.artifactId}.tex"`, 'Cache-Control': 'private, no-store' } }));
   }
   const event = apiEvent(request, userId, request.method === 'GET' || request.method === 'HEAD' ? null : await request.text());
   const result = await handler(event);
