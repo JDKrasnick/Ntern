@@ -67,14 +67,21 @@ public job-page text; uploaded résumé source material, extracted bank cards,
 drafts, and generated artifacts remain user-scoped and are deleted with the
 account.
 
-Before enabling the flag, validate the API and ingestion Worker bindings,
-exercise a catalog hit, a cached import, a safe public-page import, and the
+Before enabling the flag, provision the `intern-notifs-resume-bank-v1`
+Vectorize index using the `@cf/baai/bge-base-en-v1.5` preset and create its
+metadata indexes before inserting any vectors. The API stores no raw account ID
+or résumé text in Vectorize metadata: it uses a stable hashed account namespace
+and treats vectors as a delete-on-account-removal cache. Confirm the index name
+matches `resume_embedding_index_name` in the exact OpenTofu plan.
+
+Validate the API and ingestion Worker bindings, exercise a catalog hit, a
+cached import, a safe public-page import, Browser Rendering, and the
 manual-description fallback. Confirm that private-network, credential-bearing,
 and non-HTTPS URLs are rejected; check the import queue and its DLQ without
-consuming messages. The current artifact endpoint intentionally delivers the
-fixed-template TeX source. Do not advertise PDF export or enable the flag until
-the separate, internet-disabled Container image has passed its isolated TeX
-compiler and artifact-retention review.
+consuming messages. Compile a fixture through the internet-disabled Container
+and inspect the bounded PDF, TeX, page-count metadata, and private PNG previews.
+Account deletion must remove every one of those R2 objects and the associated
+Vectorize IDs before the flag can be enabled.
 
 ## OpenTofu state adoption
 

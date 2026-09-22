@@ -12,5 +12,5 @@ export function renderResumeLatex(profile: ResumeProfile, draft: ResumeDraft): {
   for (const change of accepted) sections.set(change.section, [...(sections.get(change.section) ?? []), escapeLatex(change.suggestion!)]);
   const body = [...sections.entries()].map(([section, lines]) => `\\section*{${escapeLatex(section)}}\n\\begin{itemize}\n${lines.map((line) => `  \\item ${line}`).join('\n')}\n\\end{itemize}`).join('\n\n');
   const tex = `\\documentclass[10pt]{article}\n\\usepackage[margin=0.65in]{geometry}\n\\usepackage[T1]{fontenc}\n\\begin{document}\n\\begin{center}\\Large ${escapeLatex(profile.name)}\\end{center}\n${body || '% No accepted changes.'}\n\\end{document}\n`;
-  return { tex, resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, draftId: draft.draftId, changes: draft.changes, template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION })).digest('hex') };
+  return { tex, resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, draftId: draft.draftId, changes: draft.changes, template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex') };
 }

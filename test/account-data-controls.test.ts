@@ -118,11 +118,13 @@ describe('account data controls', () => {
 
   it('removes private resume artifact objects before deleting the account record', async () => {
     const users = new MemoryUserStore();
-    await users.putResumeArtifact({ userId: 'mock-artifact', artifactId: 'artifact-1', draftId: 'draft-1', objectKey: 'private/mock-artifact/resume-artifacts/spec.tex', texObjectKey: 'private/mock-artifact/resume-artifacts/spec.tex', templateVersion: 'test', compilerVersion: 'test', resumeSpecHash: 'spec', createdAt: 'now' });
+    await users.putResumeArtifact({ userId: 'mock-artifact', artifactId: 'artifact-1', draftId: 'draft-1', objectKey: 'private/mock-artifact/resume-artifacts/spec.pdf', texObjectKey: 'private/mock-artifact/resume-artifacts/spec.tex', previewObjectKeys: ['private/mock-artifact/resume-artifacts/spec/preview-1.png'], templateVersion: 'test', compilerVersion: 'test', resumeSpecHash: 'spec', createdAt: 'now' });
     const deleteObject = vi.fn().mockResolvedValue(undefined);
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, deleteIdentity: vi.fn().mockResolvedValue(undefined), documentStorage: { createUploadUrl: vi.fn(), createDownloadUrl: vi.fn(), deleteObject } });
     expect((await handler(event('mock-artifact', 'DELETE', '/me'))).statusCode).toBe(204);
+    expect(deleteObject).toHaveBeenCalledWith('private/mock-artifact/resume-artifacts/spec.pdf');
     expect(deleteObject).toHaveBeenCalledWith('private/mock-artifact/resume-artifacts/spec.tex');
+    expect(deleteObject).toHaveBeenCalledWith('private/mock-artifact/resume-artifacts/spec/preview-1.png');
     expect(await users.listResumeArtifacts('mock-artifact')).toEqual([]);
   });
 

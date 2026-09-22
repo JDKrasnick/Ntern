@@ -105,6 +105,19 @@ describe('resume API ownership and revisions', () => {
     expect(queued).not.toHaveBeenCalled();
   });
 
+  it('adds isolated semantic similarity to the deterministic saved-base recommendation', async () => {
+    const users = new MemoryUserStore();
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
+      resumeSemanticIndex: { index: async () => undefined, remove: async () => undefined, scores: async () => new Map([['semantic-evidence', 0.9]]) } });
+    const bank = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank', { kind: 'project', content: 'Built a compiler' }))).body) as { bankItemId: string; revision: number };
+    await handler(event('student', 'PATCH', `/me/resume-bank/${bank.bankItemId}`, { revision: bank.revision, verified: true }));
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'semantic-evidence', kind: 'project', content: 'Implemented mobile user interfaces', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const profile = JSON.parse((await handler(event('student', 'POST', '/me/resume-profiles', { name: 'Mobile', tags: [], bankItemIds: ['semantic-evidence'], sectionOrder: [], template: 'clean-standard' }))).body) as { profileId: string };
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'Software internship', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const response = JSON.parse((await handler(event('student', 'POST', '/me/resume-jobs/job/recommendation'))).body) as { recommendations: Array<{ profileId: string; score: number; explanation: string }> };
+    expect(response.recommendations).toEqual([expect.objectContaining({ profileId: profile.profileId, score: 23, explanation: expect.stringContaining('Semantic similarity: 90%') })]);
+  });
+
   it('rejects malformed generated changes and falls back to verified deterministic evidence', async () => {
     const users = new MemoryUserStore();
     await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
@@ -131,13 +144,14 @@ describe('resume API ownership and revisions', () => {
     const users = new MemoryUserStore();
     await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: [], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
     await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [{ changeId: 'change', type: 'add', section: 'Projects', suggestion: 'Built a dashboard', evidenceIds: ['bank'], reason: 'fit', decision: 'accepted' }], revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now' });
-    const putTex = vi.fn(); const putPdf = vi.fn();
-    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex, putPdf, compile: async () => new Uint8Array([37, 80, 68, 70]).buffer, createContentUrl: async () => 'https://example.test/artifact' } });
+    const putTex = vi.fn(); const putPdf = vi.fn(); const putPreview = vi.fn();
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex, putPdf, putPreview, compile: async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer] }), createContentUrl: async () => 'https://example.test/artifact' } });
     const finalized = await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }));
     expect(finalized.statusCode).toBe(200);
     expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { draftId: 'draft', templateVersion: '2026-09-22.1', compilerVersion: 'fixed-template-tex-v1' } });
     expect(putTex).toHaveBeenCalledOnce();
     expect(putPdf).toHaveBeenCalledOnce();
-    expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { objectKey: expect.stringMatching(/\.pdf$/u), texObjectKey: expect.stringMatching(/\.tex$/u) } });
+    expect(putPreview).toHaveBeenCalledOnce();
+    expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { objectKey: expect.stringMatching(/\.pdf$/u), texObjectKey: expect.stringMatching(/\.tex$/u), pageCount: 1, previewObjectKeys: [expect.stringMatching(/preview-1\.png$/u)] } });
   });
 });

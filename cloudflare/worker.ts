@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { unzipSync } from 'fflate';
 import { decodeMetadataCursor, encodeMetadataCursor } from '../src/metadata-audit.js';
 import { createApiHandler, type DocumentStorage, type ResumeArtifactStorage, type ResumeImportCache, type ResumeImportQueue } from '../src/api.js';
 import { ashbyWorkMessages, isAshbySourceDue } from '../src/ashby-dispatch.js';
@@ -42,6 +43,7 @@ import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenan
 import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
 import { extractResumeJobText } from '../src/resume-job-import.js';
 import { workersAiResumeDraftGenerator, type WorkersAi } from '../src/resume-generation.js';
+import { workersAiResumeSemanticIndex, type ResumeVectorIndex } from '../src/resume-embeddings.js';
 import type { EmployerVerificationChallenge } from '../src/employer-types.js';
 import { reviewedProviderRegistry, reviewedStructuredRegistry } from './employer-registry.js';
 import { StructuredCareerSourceConnector } from '../src/sources/structured/index.js';
@@ -68,6 +70,7 @@ import {
 
 export interface Environment extends AuthEnvironment {
   AI: WorkersAi;
+  RESUME_EMBEDDINGS?: ResumeVectorIndex;
   DOCUMENTS: R2Bucket;
   SHADOW_EXTRACTION_ARTIFACTS: R2Bucket;
   GREENHOUSE_QUEUE: Queue;
@@ -571,11 +574,17 @@ function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
   return {
     async putTex(objectKey, tex) { const bytes = new TextEncoder().encode(tex); await env.DOCUMENTS.put(objectKey, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'application/x-tex; charset=utf-8' } }); },
     async putPdf(objectKey, pdf) { await env.DOCUMENTS.put(objectKey, pdf, { httpMetadata: { contentType: 'application/pdf' } }); },
+    async putPreview(objectKey, png) { await env.DOCUMENTS.put(objectKey, png, { httpMetadata: { contentType: 'image/png' } }); },
     async compile(tex, resumeSpecHash) {
       const stub = env.RESUME_PDF_COMPILER.get(env.RESUME_PDF_COMPILER.idFromName(resumeSpecHash));
       const response = await stub.fetch('https://resume-compiler/compile', { method: 'POST', headers: { 'content-type': 'application/x-tex' }, body: tex });
       if (!response.ok) throw new Error('Resume PDF compiler did not produce an artifact');
-      return response.arrayBuffer();
+      const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
+      const pdf = files['resume.pdf']; const pageCountText = files['page-count.txt'];
+      const pageCount = pageCountText && Number.parseInt(new TextDecoder().decode(pageCountText), 10);
+      const previewPngs = Object.entries(files).filter(([name]) => /^preview-\d+\.png$/u.test(name)).sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true })).map(([, value]) => value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
+      if (!pdf || !Number.isInteger(pageCount) || pageCount < 1 || previewPngs.length !== pageCount) throw new Error('Resume PDF compiler returned an invalid artifact bundle');
+      return { pdf: pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) as ArrayBuffer, pageCount, previewPngs };
     },
     async createContentUrl(artifact) { return `${base}/me/resume-artifacts/${encodeURIComponent(artifact.artifactId)}/content`; },
   };
@@ -1103,6 +1112,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     resumeImportQueue: resumeImportQueue(env),
     resumeImportCache: resumeImportCache(env),
     resumeDraftGenerator: workersAiResumeDraftGenerator(env.AI),
+    ...(env.RESUME_EMBEDDINGS ? { resumeSemanticIndex: workersAiResumeSemanticIndex(env.AI, env.RESUME_EMBEDDINGS) } : {}),
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     resumeTunerEnabled: env.RESUME_TUNER_ENABLED === 'true',
     beforeDeleteUser: (userId) => disconnectGmail(userId, env),

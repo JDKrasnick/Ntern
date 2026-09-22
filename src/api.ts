@@ -12,9 +12,10 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, recommendResumeProfiles, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, recommendResumeProfiles, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
+import type { ResumeSemanticIndex } from './resume-embeddings.js';
 
 type ApiEvent = { requestContext?: { authorizer?: { jwt?: { claims?: Record<string, string> } }; http?: { method?: string }; requestId?: string }; rawPath?: string; routeKey?: string; pathParameters?: Record<string, string>; queryStringParameters?: Record<string, string>; headers?: Record<string, string | undefined>; body?: string | null };
 type ApiResponse = { statusCode: number; headers: Record<string, string>; body: string };
@@ -387,7 +388,8 @@ export interface ResumeDraftGenerator {
 export interface ResumeArtifactStorage {
   putTex(objectKey: string, tex: string): Promise<void>;
   putPdf?(objectKey: string, pdf: ArrayBuffer): Promise<void>;
-  compile?(tex: string, resumeSpecHash: string): Promise<ArrayBuffer>;
+  putPreview?(objectKey: string, png: ArrayBuffer): Promise<void>;
+  compile?(tex: string, resumeSpecHash: string): Promise<ResumeCompilation>;
   createContentUrl(artifact: { userId: string; artifactId: string; objectKey: string }): Promise<string>;
 }
 
@@ -401,6 +403,8 @@ export interface ApiDependencies {
   resumeDraftGenerator?: ResumeDraftGenerator;
   resumeDocumentExtractor?: (bytes: ArrayBuffer, contentType: string) => Promise<ExtractedResumeItem[]>;
   resumeArtifactStorage?: ResumeArtifactStorage;
+  /** User-namespaced derived cache. Failures never alter canonical D1 records. */
+  resumeSemanticIndex?: ResumeSemanticIndex;
   deleteIdentity?: (userId: string) => Promise<void>;
   /** Revokes and deletes linked-provider data before the account record disappears. */
   beforeDeleteUser?: (userId: string) => Promise<void>;
@@ -650,6 +654,10 @@ export function createApiHandler(dependencies: ApiDependencies) {
             revision: previous.revision + 1, updatedAt: timestamp,
           };
           if (!await dependencies.users.putResumeBankItem(updated, previous.revision)) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
+          try {
+            if (updated.verified) await dependencies.resumeSemanticIndex?.index(updated);
+            else await dependencies.resumeSemanticIndex?.remove(userId, [updated.bankItemId]);
+          } catch { /* D1 remains authoritative; a later verification edit retries this cache. */ }
           return reply(200, updated);
         }
         if (path === '/me/resume-imports' || path === '/me/resume-jobs/resolve') {
@@ -716,7 +724,9 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (method === 'POST' && action === 'recommendation') {
             if (imported.status !== 'ready') return reply(409, { message: 'The job description is still pending. Paste it manually to continue.' });
             const [profiles, bankItems] = await Promise.all([dependencies.users.listResumeProfiles(userId), dependencies.users.listResumeBank(userId)]);
-            return reply(200, { recommendations: recommendResumeProfiles(imported.description, profiles, bankItems) });
+            let semanticScores = new Map<string, number>();
+            try { semanticScores = await dependencies.resumeSemanticIndex?.scores(userId, imported.description, bankItems.filter((item) => item.verified).map((item) => item.bankItemId)) ?? semanticScores; } catch { /* deterministic ranking is the safe cache-miss fallback */ }
+            return reply(200, { recommendations: recommendResumeProfiles(imported.description, profiles, bankItems, semanticScores) });
           }
         }
         if (path === '/me/resume-profiles') {
@@ -846,16 +856,19 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const profile = await dependencies.users.getResumeProfile(userId, updated.profileId);
           if (!profile) return reply(404, { message: 'Resume profile not found' });
           const rendered = renderResumeLatex(profile, updated);
-          const existing = (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash);
+          const existing = (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash
+            && artifact.templateVersion === RESUME_TEMPLATE_VERSION && artifact.compilerVersion === RESUME_COMPILER_VERSION);
           if (existing) return reply(200, { draft: updated, artifact: existing });
           const artifactId = randomUUID();
           const texObjectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
           await dependencies.resumeArtifactStorage.putTex(texObjectKey, rendered.tex);
-          const pdf = dependencies.resumeArtifactStorage.compile && dependencies.resumeArtifactStorage.putPdf
+          const compilation = dependencies.resumeArtifactStorage.compile && dependencies.resumeArtifactStorage.putPdf
             ? await dependencies.resumeArtifactStorage.compile(rendered.tex, rendered.resumeSpecHash) : undefined;
-          const objectKey = pdf ? `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf` : texObjectKey;
-          if (pdf) await dependencies.resumeArtifactStorage.putPdf!(objectKey, pdf);
-          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, createdAt: timestamp };
+          const objectKey = compilation ? `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf` : texObjectKey;
+          if (compilation) await dependencies.resumeArtifactStorage.putPdf!(objectKey, compilation.pdf);
+          const previewObjectKeys = compilation?.previewPngs.map((_, index) => `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/preview-${index + 1}.png`) ?? [];
+          if (compilation && dependencies.resumeArtifactStorage.putPreview) await Promise.all(compilation.previewPngs.map((png, index) => dependencies.resumeArtifactStorage!.putPreview!(previewObjectKeys[index]!, png)));
+          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, ...(compilation ? { pageCount: compilation.pageCount, previewObjectKeys } : {}), createdAt: timestamp };
           if (!await dependencies.users.putResumeArtifact(artifact)) return reply(409, { message: 'Resume artifact changed; refresh and retry' });
           return reply(200, { draft: updated, artifact });
         }
@@ -1063,12 +1076,14 @@ export function createApiHandler(dependencies: ApiDependencies) {
         let documents: Awaited<ReturnType<UserStore['listDocuments']>>;
         let artifacts: Awaited<ReturnType<UserStore['listResumeArtifacts']>>;
         let activeDocumentUploads: boolean;
+        let resumeBank: ResumeBankItem[];
         try {
           await dependencies.users.beginUserDeletion(userId);
-          [documents, artifacts, activeDocumentUploads] = await Promise.all([
+          [documents, artifacts, activeDocumentUploads, resumeBank] = await Promise.all([
             dependencies.users.listDocuments(userId),
             dependencies.users.listResumeArtifacts(userId),
             dependencies.users.hasActiveDocumentUploads(userId),
+            dependencies.users.listResumeBank(userId),
           ]);
         } catch {
           return reply(503, { code: 'ACCOUNT_DELETION_INCOMPLETE', stage: 'account-data', retryable: true, message: 'Account deletion could not be prepared. Your account data and sign-in were kept so you can retry.' });
@@ -1082,8 +1097,9 @@ export function createApiHandler(dependencies: ApiDependencies) {
         try {
           if (documentStorage) await Promise.all([
             ...documents.map((document) => documentStorage.deleteObject(document.objectKey)),
-            ...artifacts.map((artifact) => documentStorage.deleteObject(artifact.objectKey)),
+            ...artifacts.flatMap((artifact) => [artifact.objectKey, artifact.texObjectKey, ...(artifact.previewObjectKeys ?? [])].filter((key): key is string => Boolean(key)).map((key) => documentStorage.deleteObject(key))),
           ]);
+          await dependencies.resumeSemanticIndex?.remove(userId, resumeBank.map((item) => item.bankItemId));
         } catch {
           return reply(503, { code: 'ACCOUNT_DELETION_INCOMPLETE', stage: 'document-storage', retryable: true, message: 'Account deletion is incomplete. Your document and resume artifact records and sign-in are still available so you can retry.' });
         }

@@ -87,6 +87,12 @@ variable "resume_tuner_enabled" {
   default     = false
 }
 
+variable "resume_embedding_index_name" {
+  description = "Pre-provisioned Vectorize index for user-namespaced resume-bank embeddings."
+  type        = string
+  default     = "intern-notifs-resume-bank-v1"
+}
+
 variable "identity_unconfirmed_publication_enabled" {
   description = "Publishes admission-valid roles that do not yet have reviewed exact posting identity with an under-review disclosure."
   type        = bool

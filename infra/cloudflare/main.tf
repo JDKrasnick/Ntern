@@ -178,6 +178,7 @@ resource "cloudflare_workers_script" "application" {
       { name = "DB", type = "d1", id = cloudflare_d1_database.application.id },
       { name = "DOCUMENTS", type = "r2_bucket", bucket_name = cloudflare_r2_bucket.documents.name },
       { name = "AI", type = "ai" },
+      { name = "RESUME_EMBEDDINGS", type = "vectorize", index_name = var.resume_embedding_index_name },
       { name = "GMAIL_QUEUE", type = "queue", queue_name = cloudflare_queue.work["gmail"].queue_name },
       { name = "RESUME_JOB_IMPORT_QUEUE", type = "queue", queue_name = cloudflare_queue.work["resume-job-import"].queue_name },
       { name = "INGESTION", type = "service", service = cloudflare_workers_script.ingestion.script_name },

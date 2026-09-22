@@ -87,7 +87,16 @@ export interface ResumeArtifact {
   compilerVersion: string;
   resumeSpecHash: string;
   pageCount?: number;
+  /** Private R2 object keys for rasterized PDF pages, in page order. */
+  previewObjectKeys?: string[];
   createdAt: string;
+}
+
+/** Derived output from the isolated compiler. None of these fields are user input. */
+export interface ResumeCompilation {
+  pdf: ArrayBuffer;
+  pageCount: number;
+  previewPngs: ArrayBuffer[];
 }
 
 export interface ResumeProfileRecommendation {
@@ -100,18 +109,19 @@ const resumeWords = (value: string) => new Set(value.toLowerCase().match(/[a-z][
 
 /** Deterministic first-pass base selection. Canonical records stay in D1; a later
  * Vectorize lookup may refine this score but must not replace its explanation. */
-export function recommendResumeProfiles(jobDescription: string, profiles: ResumeProfile[], bankItems: ResumeBankItem[]): ResumeProfileRecommendation[] {
+export function recommendResumeProfiles(jobDescription: string, profiles: ResumeProfile[], bankItems: ResumeBankItem[], semanticScores = new Map<string, number>()): ResumeProfileRecommendation[] {
   const words = resumeWords(jobDescription);
   const byId = new Map(bankItems.filter((item) => item.verified).map((item) => [item.bankItemId, item]));
   return profiles.map((profile) => {
     const tagHits = profile.tags.filter((tag) => words.has(tag.toLowerCase())).length;
     const evidence = profile.bankItemIds.map((id) => byId.get(id)).filter((item): item is ResumeBankItem => Boolean(item));
     const evidenceHits = evidence.filter((item) => [...resumeWords(item.content)].some((word) => words.has(word))).length;
-    const score = tagHits * 100 + evidenceHits * 10;
+    const semanticScore = evidence.reduce((best, item) => Math.max(best, semanticScores.get(item.bankItemId) ?? 0), 0);
+    const score = tagHits * 100 + evidenceHits * 10 + Math.round(semanticScore * 25);
     const explanation = tagHits
       ? `Matches ${tagHits} job-family tag${tagHits === 1 ? '' : 's'} and ${evidenceHits} verified bank item${evidenceHits === 1 ? '' : 's'}.`
       : `Matches ${evidenceHits} verified bank item${evidenceHits === 1 ? '' : 's'} from this base.`;
-    return { profileId: profile.profileId, score, explanation };
+    return { profileId: profile.profileId, score, explanation: semanticScore > 0 ? `${explanation} Semantic similarity: ${Math.round(semanticScore * 100)}%.` : explanation };
   }).sort((left, right) => right.score - left.score || left.profileId.localeCompare(right.profileId));
 }
 
