@@ -1017,11 +1017,13 @@ export function createApiHandler(dependencies: ApiDependencies) {
           return reply(503, { code: 'ACCOUNT_DELETION_UNAVAILABLE', retryable: false, message: 'Account deletion is unavailable on this retired service. Update Ntern and try again.' });
         }
         let documents: Awaited<ReturnType<UserStore['listDocuments']>>;
+        let artifacts: Awaited<ReturnType<UserStore['listResumeArtifacts']>>;
         let activeDocumentUploads: boolean;
         try {
           await dependencies.users.beginUserDeletion(userId);
-          [documents, activeDocumentUploads] = await Promise.all([
+          [documents, artifacts, activeDocumentUploads] = await Promise.all([
             dependencies.users.listDocuments(userId),
+            dependencies.users.listResumeArtifacts(userId),
             dependencies.users.hasActiveDocumentUploads(userId),
           ]);
         } catch {
@@ -1030,13 +1032,16 @@ export function createApiHandler(dependencies: ApiDependencies) {
         if (activeDocumentUploads) {
           return reply(503, { code: 'ACCOUNT_DELETION_INCOMPLETE', stage: 'document-storage', retryable: true, message: 'A document upload is still finishing. Your account data and sign-in were kept so you can retry deletion.' });
         }
-        if (documents.length > 0 && !documentStorage) {
+        if ((documents.length > 0 || artifacts.length > 0) && !documentStorage) {
           return reply(503, { code: 'ACCOUNT_DELETION_INCOMPLETE', stage: 'document-storage', retryable: true, message: 'Document storage is unavailable. Your account data and sign-in were kept so you can retry.' });
         }
         try {
-          if (documentStorage) await Promise.all(documents.map((document) => documentStorage.deleteObject(document.objectKey)));
+          if (documentStorage) await Promise.all([
+            ...documents.map((document) => documentStorage.deleteObject(document.objectKey)),
+            ...artifacts.map((artifact) => documentStorage.deleteObject(artifact.objectKey)),
+          ]);
         } catch {
-          return reply(503, { code: 'ACCOUNT_DELETION_INCOMPLETE', stage: 'document-storage', retryable: true, message: 'Account deletion is incomplete. Your document records and sign-in are still available so you can retry.' });
+          return reply(503, { code: 'ACCOUNT_DELETION_INCOMPLETE', stage: 'document-storage', retryable: true, message: 'Account deletion is incomplete. Your document and resume artifact records and sign-in are still available so you can retry.' });
         }
         try {
           await dependencies.beforeDeleteUser?.(userId);

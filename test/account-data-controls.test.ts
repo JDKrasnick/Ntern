@@ -116,6 +116,16 @@ describe('account data controls', () => {
     expect(await users.getPreferences('installation:mock-device')).toMatchObject({ alertsEnabled: true, filter: { includeKeywords: ['security'] } });
   });
 
+  it('removes private resume artifact objects before deleting the account record', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeArtifact({ userId: 'mock-artifact', artifactId: 'artifact-1', draftId: 'draft-1', objectKey: 'private/mock-artifact/resume-artifacts/spec.tex', texObjectKey: 'private/mock-artifact/resume-artifacts/spec.tex', templateVersion: 'test', compilerVersion: 'test', resumeSpecHash: 'spec', createdAt: 'now' });
+    const deleteObject = vi.fn().mockResolvedValue(undefined);
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, deleteIdentity: vi.fn().mockResolvedValue(undefined), documentStorage: { createUploadUrl: vi.fn(), createDownloadUrl: vi.fn(), deleteObject } });
+    expect((await handler(event('mock-artifact', 'DELETE', '/me'))).statusCode).toBe(204);
+    expect(deleteObject).toHaveBeenCalledWith('private/mock-artifact/resume-artifacts/spec.tex');
+    expect(await users.listResumeArtifacts('mock-artifact')).toEqual([]);
+  });
+
   it('cleans up linked providers before deleting account data and identity', async () => {
     const users = new MemoryUserStore();
     await users.putPreferences({ userId: 'mock-linked-account', filter: {}, alertsEnabled: false, onboardingComplete: true, updatedAt: 'now' });
