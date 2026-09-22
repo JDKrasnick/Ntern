@@ -3,9 +3,10 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 
-const reportPath = '.context/shadow-fresh50-gpt5mini-v10-projected.json';
-const artifactsPath = '.context/shadow-fresh50-unique-artifacts/input';
-const outputPath = '.context/shadow-fresh50-manual-review.md';
+const option = (name: string) => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
+const reportPath = option('--report') ?? '.context/shadow-fresh50-gpt5mini-v10-projected.json';
+const artifactsPath = option('--artifacts') ?? '.context/shadow-fresh50-unique-artifacts/input';
+const outputPath = option('--out') ?? '.context/shadow-fresh50-manual-review.md';
 const report = JSON.parse(await readFile(reportPath, 'utf8')) as { records: Array<{ id: string; sourceId: string; extraction: { fields: Record<string, { status: string; value: unknown; evidence: string[] }> }; projectedFields: string[] }> };
 const blocks: string[] = ['# Fresh 50 metadata review', '', 'Each retained tag is listed with its model value and verbatim evidence. Mark semantic correctness independently of structural validation.', ''];
 for (const [index, record] of report.records.entries()) {

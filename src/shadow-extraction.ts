@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v11';
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v13';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v5';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v1';
 export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-5-mini-2025-08-07';
@@ -135,9 +135,20 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput): { system:
       + 'use incomplete with null value and empty evidence and qualifiers. A role location is only an actual work site for '
       + 'this role: never use company footprint, hiring jurisdiction, visa/work-authorization text, applicant availability, '
       + 'or compliance notices as a location. Timing is only the role term, start/end window, duration, or required work '
-      + 'schedule: never use an internal project milestone, onboarding task, or general program marketing. Eligibility is '
+      + 'schedule: never use an internal project milestone, onboarding task, general program marketing, application deadline, '
+      + 'posting-open date, or candidate qualification such as degree timing, return-to-school plans, years of experience, or '
+      + 'future employment. Eligibility is '
       + 'only a condition for an applicant to hold the role or the employer sponsorship policy: never include E-Verify, '
-      + 'EEO, background-check, drug-test, or visa-processing procedure text unless it itself states a role requirement.',
+      + 'EEO, background-check, drug-test, or visa-processing procedure text unless it itself states a role requirement. '
+      + 'For a present eligibility field, every value and every evidence passage must itself state a work-authorization, '
+      + 'citizenship or nationality, security-clearance, export-control, or sponsorship rule. Do not mix those rules with '
+      + 'facility proximity, lone-worker or other operational expectations, drug screens, hiring workflow, or general '
+      + 'student/candidate descriptions; omit an invalid item, and return not-stated if no valid rule remains. FINAL OUTPUT GATE: '
+      + 'for every field item, copy its supporting description passage first, then include the item only when that exact passage '
+      + 'supports the field definition. Never use title text in fields. A missing or non-verbatim passage means omit the item; '
+      + 'when no valid item remains, return not-stated rather than guessing. In timing, omit application events and candidate '
+      + 'background facts. In eligibility, omit operational and procedural facts. Each retained list item must stand alone as a '
+      + 'valid fact for that field.',
     user: JSON.stringify({ title: input.title, completeness: input.completeness, description: input.description }),
   };
 }

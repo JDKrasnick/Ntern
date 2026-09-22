@@ -44,6 +44,16 @@ describe('postprocessRoleScopedExtraction', () => {
     expect(result.extraction.fields.eligibility.qualifiers).toEqual([]);
   });
 
+  it('keeps only aligned work-authorization claims from mixed eligibility evidence', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', ['UK security clearance', 'Must be near the office'], [
+        'Active or eligible for UK security clearance.',
+        'Ability to be physically located near the facility during open hours.',
+      ]),
+    }));
+    expect(result.extraction.fields.eligibility).toMatchObject({ value: ['UK security clearance'], evidence: ['Active or eligible for UK security clearance.'] });
+  });
+
   it('removes generic office copy but preserves role-scoped locations', () => {
     const generic = postprocessRoleScopedExtraction(extraction({
       locations: field('present', ['New York, NY'], ['Our headquarters and offices are in New York, NY.']),
@@ -112,6 +122,37 @@ describe('postprocessRoleScopedExtraction', () => {
       timing: field('present', 'ten weeks', ['You will spend ten weeks within our team.']),
     }));
     expect(result.extraction.fields.timing.status).toBe('present');
+  });
+
+  it('removes candidate criteria and application deadlines from timing', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      timing: field('present', ['0-2 years relevant experience', 'Deadline to submit application: Friday'], [
+        '0-2 years of relevant experience through academic projects.',
+        'Deadline to submit application: Friday.',
+      ]),
+    }));
+    expect(result.extraction.fields.timing.status).toBe('not-stated');
+  });
+
+  it('removes applicant-pool labels while preserving the role schedule', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      timing: field('present', ['10-week summer program', 'Applicants considered for Summer 2027 - Students Only'], [
+        'Program Availability: Ability to commit to a full-time schedule for the duration of the 10-week summer program.',
+        'Applicants considered for Summer 2027 - Students Only',
+      ]),
+    }));
+    expect(result.extraction.fields.timing).toMatchObject({ value: ['10-week summer program'], evidence: ['Program Availability: Ability to commit to a full-time schedule for the duration of the 10-week summer program.'] });
+  });
+
+  it('removes visa application procedures that do not state a role eligibility rule', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', ['Qatar permit procedure'], [
+        'For those applying based in Qatar: Residency and employment in Qatar requires certain permissions (visa and permits) issued by the Qatari authorities.',
+        'If you are successful in your application, we will support the visa application process.',
+      ]),
+    }));
+    expect(result.extraction.fields.eligibility.status).toBe('not-stated');
+    expect(result.changes).toEqual([{ field: 'eligibility', reason: 'procedural-eligibility-copy' }]);
   });
 
   it('does not treat export-control geography as a role location', () => {

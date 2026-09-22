@@ -9,11 +9,13 @@ type Report = { records: Record[] };
 const option = (name: string) => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
 const reportPath = option('--report') ?? '.context/shadow-fresh50-gpt5mini-v10-projected.json';
 const artifactsPath = option('--artifacts') ?? '.context/shadow-fresh50-unique-artifacts';
+const sourceReport = option('--source-report');
 const version = option('--version') ?? 'v11';
 const prefix = option('--prefix') ?? 'gpt5mini';
 const basePaths = [0, 10, 20, 30, 40].map((offset) => `.context/shadow-fresh50-${prefix}-${version}-${offset}.json`);
 const retryPath = option('--retry');
-const base = (await Promise.all(basePaths.map(async (path) => (JSON.parse(await readFile(path, 'utf8')) as Report).records))).flat();
+const base = sourceReport ? (JSON.parse(await readFile(sourceReport, 'utf8')) as Report).records
+  : (await Promise.all(basePaths.map(async (path) => (JSON.parse(await readFile(path, 'utf8')) as Report).records))).flat();
 const retried = retryPath ? (JSON.parse(await readFile(retryPath, 'utf8')) as Report).records : [];
 const chosen = new Map(base.map((record) => [record.id, record]));
 for (const record of retried) chosen.set(record.id, record);
