@@ -9,7 +9,7 @@ import type { ShadowExtraction, ShadowField } from './shadow-extraction.js';
  * publication: callers must compare the returned changes against a labelled
  * set before enabling any variant in the Worker.
  */
-export type ShadowPostprocessReason = 'generic-e-verify' | 'statutory-wage-copy' | 'generic-hybrid-benefit' | 'generic-office-copy' | 'generic-language-requirement' | 'candidate-student-status' | 'candidate-graduation-date' | 'office-reference-not-mode' | 'incomplete-on-complete-input' | 'non-temporal-schedule-copy';
+export type ShadowPostprocessReason = 'generic-e-verify' | 'statutory-wage-copy' | 'equal-opportunity-copy' | 'procedural-eligibility-copy' | 'generic-hybrid-benefit' | 'generic-office-copy' | 'eligibility-geography-not-location' | 'student-affiliation-not-location' | 'generic-language-requirement' | 'candidate-student-status' | 'candidate-graduation-date' | 'office-reference-not-mode' | 'incomplete-on-complete-input' | 'non-temporal-schedule-copy';
 
 export interface ShadowPostprocessChange {
   field: keyof ShadowExtraction['fields'];
@@ -24,12 +24,14 @@ export interface ShadowPostprocessResult {
 const roleScoped = /\b(?:this|the) (?:role|position|internship|job)\b|\byou (?:will|must|are required)\b/iu;
 const genericOffice = /\b(?:headquartered|headquarters|offices? (?:in|across|around)|our locations?)\b/iu;
 const genericEverify = /\be-?verify\b/iu;
+const proceduralEligibility = /\b(?:e-?verify|drug[- ]?test|background[- ]?check|visa[- ]?processing)\b/iu;
 const statutoryWage = /\b(?:minimum wage|wage notice|pay transparency)\b/iu;
 const genericHybridBenefit = /\b(?:hybrid work model|flexible work model|work[- ]life)\b/iu;
 const roleLocation = /\b(?:this|the) (?:role|position|internship|job)\b.*\b(?:in|at|based)\b|\b(?:intern|co-?op|new grad)\b.*\b(?:in|at)\b|\bbased(?: in person)? (?:at|in)\b|\bon[- ]site in\b|\bavailable\b.*\bin\b/iu;
 const languageOnly = /\b(?:fluent|proficien(?:cy|t)|speak|language)\b/iu;
-const eligibilityTerms = /\b(?:work authorization|authorized to work|citizen(?:ship)?|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]controlled|itar|international traffic in arms)\b/iu;
+const eligibilityTerms = /\b(?:work authorization|authorized to work|eligible for employment|citizen(?:ship)?|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]controlled|itar|international traffic in arms)\b/iu;
 const studentStatus = /\b(?:current(?:ly)?|enrolled)\b[^.\n]{0,80}\b(?:student|co-?op)\b|\bstudents? only\b/iu;
+const equalOpportunity = /\b(?:equal employment opportunity|equal opportunity employer)\b/iu;
 const graduationDate = /\bgraduat(?:e|ing|ion date)\b/iu;
 const explicitMode = /\b(?:remote|hybrid|on[- ]?site|in[- ]?office|in person)\b|\bin the office \d+ days?\b/iu;
 const roleTimingSignal = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:weeks?|months?)\b|\b(?:spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december|start(?:ing)?|end(?:ing)?|duration|until|through)\b/iu;
@@ -63,6 +65,13 @@ export function postprocessRoleScopedExtraction(extraction: ShadowExtraction, in
     const passages = eligibility.evidence;
     if (passages.length > 0 && passages.every((passage) => genericEverify.test(passage))) clear('eligibility', 'generic-e-verify');
     else if (passages.length > 0 && passages.every((passage) => statutoryWage.test(passage))) clear('eligibility', 'statutory-wage-copy');
+    else if (passages.length > 0 && passages.every((passage) => equalOpportunity.test(passage))) clear('eligibility', 'equal-opportunity-copy');
+    else if (Array.isArray(eligibility.value) && eligibility.value.length === passages.length) {
+      const values = eligibility.value;
+      const retained = passages.map((passage, index) => ({ passage, value: values[index] })).filter(({ passage }) => !proceduralEligibility.test(passage));
+      if (retained.length === 0) clear('eligibility', 'procedural-eligibility-copy');
+      else if (retained.length !== passages.length) fields.eligibility = { ...eligibility, value: retained.map(({ value }) => value), evidence: retained.map(({ passage }) => passage), qualifiers: [] };
+    }
   }
 
   const workMode = fields.workMode;
@@ -86,6 +95,8 @@ export function postprocessRoleScopedExtraction(extraction: ShadowExtraction, in
       if (retained.length === 0) clear('locations', 'generic-office-copy');
       else fields.locations = { ...locations, value: retained, evidence: rolePassages };
     } else if (genericPassages.length > 0) clear('locations', 'generic-office-copy');
+    else if (locations.evidence.length > 0 && locations.evidence.every((passage) => eligibilityTerms.test(passage))) clear('locations', 'eligibility-geography-not-location');
+    else if (locations.evidence.length > 0 && locations.evidence.every((passage) => studentStatus.test(passage))) clear('locations', 'student-affiliation-not-location');
     if (fields.locations.status === 'present' && fields.locations.evidence.length > 0
       && fields.locations.evidence.every((passage) => genericEverify.test(passage))) clear('locations', 'generic-office-copy');
   }

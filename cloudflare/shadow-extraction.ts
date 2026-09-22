@@ -8,6 +8,7 @@ import {
   normalizeExactPostingDescription,
   shadowExtractionCacheKey,
   shadowExtractionPrompt,
+  projectShadowExtractionToSupportedFields,
   validateShadowExtraction,
   type NormalizedPostingInput,
   type ShadowExtractionOrigin,
@@ -335,7 +336,9 @@ export async function shadowExtractionSummary(db: D1Database): Promise<Record<st
 export async function processShadowExtractionBatch(batch: MessageBatch<unknown>, env: ShadowExtractionEnvironment, now = () => new Date(), infer?: (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => Promise<ShadowInferenceResult>): Promise<void> {
   const apiKey = env.OPENAI_KEY;
   const inference = infer ?? (apiKey
-    ? (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => inferOpenAIShadowExtraction(apiKey, input, prompt)
+    ? (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => inferOpenAIShadowExtraction(apiKey, input, prompt, fetch, {
+      model: SHADOW_EXTRACTION_MODEL_ID, maxOutputTokens: 1400, reasoningEffort: 'minimal',
+    })
     : undefined);
   for (const queued of batch.messages) {
     let message: ShadowExtractionMessage;
@@ -395,9 +398,14 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
         await finishRun(env.DB, message, leaseToken, 'obsolete', now(), { error: 'a newer posting revision arrived during inference', inputTokens: response.inputTokens,
           outputTokens: response.outputTokens, actualCostCents: response.actualCostCents }); queued.ack(); continue;
       }
-      const validation = validateShadowExtraction(response.response, normalized);
+      const rawValidation = validateShadowExtraction(response.response, normalized);
+      const projection = rawValidation.accepted ? undefined : projectShadowExtractionToSupportedFields(response.response, normalized);
+      const validation = projection?.accepted
+        ? { ...validateShadowExtraction(projection.accepted, normalized), projectedFields: projection.removedFields }
+        : rawValidation;
       const responseKey = `shadow-response/${message.runKey}/${leaseToken}.json`;
-      await env.SHADOW_EXTRACTION_ARTIFACTS.put(responseKey, new TextEncoder().encode(JSON.stringify({ response: response.response, validation })).buffer, { httpMetadata: { contentType: 'application/json' } });
+      await env.SHADOW_EXTRACTION_ARTIFACTS.put(responseKey, new TextEncoder().encode(JSON.stringify({ response: response.response, validation, rawValidation,
+        projection: projection ? { removedFields: projection.removedFields, failures: projection.failures } : undefined })).buffer, { httpMetadata: { contentType: 'application/json' } });
       const state = validation.accepted ? 'completed' : 'invalid-output';
       const completedAt = now();
       const finished = await finishRunWithAnalysis(env.DB, message, leaseToken, state, completedAt, { responseKey, validation,

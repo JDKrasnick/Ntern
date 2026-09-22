@@ -6,6 +6,7 @@ import {
   normalizeExactPostingDescription,
   shadowExtractionCacheKey,
   shadowExtractionPrompt,
+  projectShadowExtractionToSupportedFields,
   validateShadowExtraction,
   type ShadowExtraction,
 } from '../src/shadow-extraction.js';
@@ -160,6 +161,16 @@ describe('shadow extraction contract', () => {
     expect(validateShadowExtraction(location, normalizeExactPostingDescription('Intern', source)).failures)
       .toContain('locations: location is not a geographic place');
   });
+
+  it('projects only fields lacking support instead of inventing repairs', () => {
+    const input = normalizeExactPostingDescription('Software Engineering Intern - Summer 2027', source);
+    const value = output() as ShadowExtraction;
+    value.fields.timing = { value: ['Summer 2027'], status: 'present', evidence: ['Software Engineering Intern - Summer 2027'], qualifiers: [] };
+    const repaired = projectShadowExtractionToSupportedFields(value, input);
+    expect(repaired.removedFields).toEqual(['timing']);
+    expect(repaired.accepted?.fields.timing).toEqual({ value: null, status: 'not-stated', evidence: [], qualifiers: [] });
+    expect(repaired.accepted?.fields.compensation).toMatchObject({ status: 'present', value: [{ min: 50, max: 60 }] });
+  });
 });
 
 describe('shadow extraction queue and cost ledger', () => {
@@ -228,6 +239,27 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(summary.failureAttribution).toContainEqual({ origin: 'provider-poll', completeness: 'incomplete', category: 'model-schema', count: 1 });
     expect(summary.failureAttribution).toContainEqual({ origin: 'provider-poll', completeness: 'incomplete', category: 'model-evidence', count: 1 });
     expect(JSON.stringify(summary)).not.toContain(description);
+  });
+
+  it('retains supported fields when one field fails evidence validation', async () => {
+    const DB = schema(); const artifacts = new MemoryR2(); const queue: Queue = { async send() {}, async sendBatch() {} };
+    const message = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts }, {
+      jobId: 'projected', sourceId: identity.sourceId, externalId: 'projected', sourceUrl: identity.sourceUrl, providerIdentity: identity,
+      title: 'Software Engineering Intern', description, observedAt: '2026-09-08T00:00:00.000Z', origin: 'provider-poll',
+    });
+    const partial = output();
+    partial.fields.compensation = { ...partial.fields.compensation, evidence: ['$90 per hour'] };
+    await processShadowExtractionBatch({ queue: 'intern-notifs-shadow-extraction', messages: [{ id: 'projected', body: message, ack() {}, retry() {} }] }, {
+      DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '100', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100',
+    }, undefined, async () => ({ response: partial, inputTokens: 1, outputTokens: 1, actualCostCents: 1 }));
+    expect(await DB.prepare('SELECT state FROM shadow_extraction_runs WHERE run_key = ?').bind(message!.runKey).first()).toEqual({ state: 'completed' });
+    expect(await DB.prepare("SELECT status, accepted FROM shadow_extraction_field_outcomes WHERE run_key = ? AND field = 'compensation'").bind(message!.runKey).first())
+      .toEqual({ status: 'not-stated', accepted: 1 });
+    const key = (await DB.prepare('SELECT response_key FROM shadow_extraction_runs WHERE run_key = ?').bind(message!.runKey).first<{ response_key: string }>())!.response_key;
+    const artifact = await new Response((await artifacts.get(key))!.body).json() as { rawValidation: { failures: string[] }; projection: { removedFields: string[] } };
+    expect(artifact.rawValidation.failures).toContain('compensation: supporting passage absent from artifact');
+    expect(artifact.projection.removedFields).toEqual(['compensation']);
   });
 
   it('keeps historical runs unknown and survives unreadable validator JSON', async () => {

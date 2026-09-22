@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v9';
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v11';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v5';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v1';
-export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-4o-mini-2024-07-18';
+export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-5-mini-2025-08-07';
 export const SHADOW_EXTRACTION_MAX_INPUT_BYTES = 40_000;
 
 export const shadowStatuses = ['present', 'not-stated', 'conflicting', 'incomplete'] as const;
@@ -129,7 +129,15 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput): { system:
       + 'sponsor or offer visas. A language requirement, E-Verify statement, statutory pay notice, graduation timing, school or location attendance, and internship-count '
       + 'constraints are not eligibility; quote any eligibility statement as one contiguous span. A statement that no '
       + 'degree is required is not an education disclosure; return education only for actual degree requirements or '
-      + 'preferences stated for the role.',
+      + 'preferences stated for the role. Final contract check before responding: for every present field, each evidence '
+      + 'passage must be a contiguous copy from description (never from title); otherwise mark that field not-stated, or '
+      + 'incomplete when description is incomplete. When completeness is incomplete, no absent field may be not-stated: '
+      + 'use incomplete with null value and empty evidence and qualifiers. A role location is only an actual work site for '
+      + 'this role: never use company footprint, hiring jurisdiction, visa/work-authorization text, applicant availability, '
+      + 'or compliance notices as a location. Timing is only the role term, start/end window, duration, or required work '
+      + 'schedule: never use an internal project milestone, onboarding task, or general program marketing. Eligibility is '
+      + 'only a condition for an applicant to hold the role or the employer sponsorship policy: never include E-Verify, '
+      + 'EEO, background-check, drug-test, or visa-processing procedure text unless it itself states a role requirement.',
     user: JSON.stringify({ title: input.title, completeness: input.completeness, description: input.description }),
   };
 }
@@ -248,4 +256,33 @@ export function validateShadowExtraction(value: unknown, input: NormalizedPostin
   }
   if (failures.length || !technical || !earlyCareer || !disciplines || Object.keys(accepted).length !== fields.length) return { failures, fieldOutcomes: outcomes };
   return { accepted: { classification: { technical, earlyCareer, disciplines }, fields: accepted as ShadowExtraction['fields'] }, failures, fieldOutcomes: outcomes };
+}
+
+/**
+ * A field whose value cannot satisfy the evidence contract must never make the
+ * independently supported fields unusable. This projection only removes the
+ * unsupported field; it never supplies a fact, edits evidence, or repairs an
+ * invalid classification. It is useful for truncated provider artifacts and
+ * model responses that cite a title instead of the supplied description.
+ */
+export function projectShadowExtractionToSupportedFields(value: unknown, input: NormalizedPostingInput): {
+  accepted?: ShadowExtraction;
+  removedFields: string[];
+  failures: string[];
+} {
+  const first = validateShadowExtraction(value, input);
+  if (first.accepted) return { accepted: first.accepted, removedFields: [], failures: [] };
+  if (!isRecord(value) || !isRecord(value.classification) || !isRecord(value.fields)
+    || first.failures.some((failure) => !failure.includes(':'))) return { removedFields: [], failures: first.failures };
+  const repaired = structuredClone(value) as Record<string, unknown>;
+  const repairedFields = repaired.fields as Record<string, unknown>;
+  const removedFields = first.fieldOutcomes.filter((outcome) => !outcome.accepted).map((outcome) => outcome.field);
+  for (const field of removedFields) repairedFields[field] = {
+    value: null,
+    status: input.completeness === 'incomplete' ? 'incomplete' : 'not-stated',
+    evidence: [],
+    qualifiers: [],
+  };
+  const second = validateShadowExtraction(repaired, input);
+  return { accepted: second.accepted, removedFields, failures: second.failures };
 }

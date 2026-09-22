@@ -33,6 +33,17 @@ describe('postprocessRoleScopedExtraction', () => {
     expect(result.changes).toEqual([]);
   });
 
+  it('removes procedural eligibility fragments without losing a paired role rule', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', ['No visa sponsorship.', 'Drug-test completion requires U.S. availability.'], [
+        'This position does not sponsor visas.',
+        'Drug-test completion requires U.S. availability before the program starts.',
+      ]),
+    }));
+    expect(result.extraction.fields.eligibility).toMatchObject({ value: ['No visa sponsorship.'], evidence: ['This position does not sponsor visas.'] });
+    expect(result.extraction.fields.eligibility.qualifiers).toEqual([]);
+  });
+
   it('removes generic office copy but preserves role-scoped locations', () => {
     const generic = postprocessRoleScopedExtraction(extraction({
       locations: field('present', ['New York, NY'], ['Our headquarters and offices are in New York, NY.']),
@@ -111,6 +122,23 @@ describe('postprocessRoleScopedExtraction', () => {
       ]),
     }));
     expect(result.extraction.fields.locations.value).toEqual(['Auckland']);
+  });
+
+  it('does not treat employment jurisdiction as a role location', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['United States'], ['This position is open only to individuals eligible for employment in the United States without visa sponsorship.']),
+    }));
+    expect(result.extraction.fields.locations.status).toBe('not-stated');
+    expect(result.changes).toEqual([{ field: 'locations', reason: 'eligibility-geography-not-location' }]);
+  });
+
+  it('excludes student affiliations from locations and equal-opportunity copy from eligibility', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['Northeastern University'], ['This position is open exclusively to current Northeastern University Co-Op students.']),
+      eligibility: field('present', 'Equal Opportunity Employer', ['We are an Equal Opportunity Employer and consider every qualified applicant.']),
+    }));
+    expect(result.extraction.fields.locations.status).toBe('not-stated');
+    expect(result.extraction.fields.eligibility.status).toBe('not-stated');
   });
 
   it('does not invent missing facts or rewrite a role-scoped hybrid statement', () => {
