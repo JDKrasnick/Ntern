@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v9';
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v14';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v5';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v1';
-export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-4o-mini-2024-07-18';
+export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-5-mini-2025-08-07';
 export const SHADOW_EXTRACTION_MAX_INPUT_BYTES = 40_000;
 
 export const shadowStatuses = ['present', 'not-stated', 'conflicting', 'incomplete'] as const;
@@ -111,18 +111,46 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput): { system:
       + 'engineering, scientific, data, quantitative, or technical field (for example software engineer, machine learning, data '
       + 'analyst, network engineer, site reliability engineer) supports technical=yes, and a title with Intern, Co-op, Apprentice, '
       + 'or New Grad supports earlyCareer=yes, even when the body gives no further detail. Reserve unknown for classifications with '
-      + 'no title or body signal at all. Do not turn clearance into citizenship, graduation dates into role season, '
+      + 'no title or body signal at all. The title supports classification only: never use it as evidence or a value for any field. '
+      + 'Every present field must have at least one non-empty verbatim description substring; every non-present field must use null '
+      + 'with empty evidence and qualifiers. Do not turn clearance into citizenship, graduation dates into role season, '
       + 'or generic office/remote prose into a role location or work mode. '
       + 'Do not invent disclosures. WorkMode requires the posting to state that this role is or works remote, hybrid, or '
       + 'onsite; never infer a mode from benefits or their eligibility conditions (for example "interns not working fully '
       + 'remote may receive housing support" describes a benefit, not the role), from dates, from office or city names, or '
-      + 'from silence — use not-stated. Those exclusions never suppress a real housing, relocation, or travel benefit '
+      + 'from silence — use not-stated. Normalize an explicit role sentence saying "on-site", "on site", or "in-office" '
+      + 'to workMode=onsite; those are the same mode even when hyphenated. For locations, include only places tied to the '
+      + 'role itself and never mix them with headquarters, office lists, or other company-wide location copy. For eligibility, '
+      + 'E-Verify participation or a statutory wage notice alone is not an eligibility requirement; if a separate role-specific '
+      + 'authorization, citizenship, visa, clearance, or sponsorship statement exists, quote only that statement as evidence. '
+      + 'Those exclusions never suppress a real housing, relocation, or travel benefit '
       + 'disclosed for this role, which remains a housing disclosure. Eligibility requires an explicit work authorization, '
       + 'citizenship, visa, clearance, or sponsorship statement for this role — including that the role will or will not '
-      + 'sponsor or offer visas. Language skills, graduation timing, school or location attendance, and internship-count '
+      + 'sponsor or offer visas. A language requirement, E-Verify statement, statutory pay notice, graduation timing, school or location attendance, and internship-count '
       + 'constraints are not eligibility; quote any eligibility statement as one contiguous span. A statement that no '
       + 'degree is required is not an education disclosure; return education only for actual degree requirements or '
-      + 'preferences stated for the role.',
+      + 'preferences stated for the role. Final contract check before responding: for every present field, each evidence '
+      + 'passage must be a contiguous copy from description (never from title); otherwise mark that field not-stated, or '
+      + 'incomplete when description is incomplete. When completeness is incomplete, no absent field may be not-stated: '
+      + 'use incomplete with null value and empty evidence and qualifiers. A role location is only an actual work site for '
+      + 'this role: never use company footprint, hiring jurisdiction, visa/work-authorization text, applicant availability, '
+      + 'or compliance notices as a location. Timing is only the role term, start/end window, duration, or required work '
+      + 'schedule: never use an internal project milestone, onboarding task, general program marketing, application deadline, '
+      + 'posting-open date, or candidate qualification such as degree timing, return-to-school plans, years of experience, or '
+      + 'future employment. Eligibility is '
+      + 'only a condition for an applicant to hold the role or the employer sponsorship policy: never include E-Verify, '
+      + 'EEO, background-check, drug-test, or visa-processing procedure text unless it itself states a role requirement. '
+      + 'For a present eligibility field, every value and every evidence passage must itself state a work-authorization, '
+      + 'citizenship or nationality, security-clearance, export-control, or sponsorship rule. Do not mix those rules with '
+      + 'facility proximity, lone-worker or other operational expectations, drug screens, hiring workflow, or general '
+      + 'student/candidate descriptions; omit an invalid item, and return not-stated if no valid rule remains. FINAL OUTPUT GATE: '
+      + 'for every field item, copy its supporting description passage first, then include the item only when that exact passage '
+      + 'supports the field definition. Never use title text in fields. A missing or non-verbatim passage means omit the item; '
+      + 'when no valid item remains, return not-stated rather than guessing. In timing, omit application events and candidate '
+      + 'background facts, including applicant-pool labels such as "students only" or "applicants considered", even if they name '
+      + 'a season. In eligibility, omit operational and procedural facts: visa, residency, permit, documentation, or application '
+      + 'process notices are not a role eligibility rule unless they explicitly state who may hold this role. Each retained list item must stand alone as a '
+      + 'valid fact for that field.',
     user: JSON.stringify({ title: input.title, completeness: input.completeness, description: input.description }),
   };
 }
@@ -153,8 +181,14 @@ function words(value: string): string[] {
 }
 
 function compensationNumberPresent(passage: string, value: number): boolean {
-  return [...passage.matchAll(/(?:^|[^0-9.])([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)(?![0-9])/gu)]
-    .some((match) => Number(match[1]!.replace(/,/gu, '')) === value);
+  return [...passage.matchAll(/(?:^|[^0-9.])([0-9]+(?:[,.][0-9]{3})*(?:[,.][0-9]+)?)(?![0-9])/gu)]
+    .some((match) => {
+      const token = match[1]!;
+      const direct = Number(token.replace(/,/gu, ''));
+      // European job posts use `.` as a thousands separator, e.g. 43.456,--.
+      const europeanThousands = /^\d{1,3}(?:\.\d{3})+$/u.test(token) ? Number(token.replace(/\./gu, '')) : Number.NaN;
+      return direct === value || europeanThousands === value;
+    });
 }
 
 function compensationCurrencyPresent(passage: string, currency: string): boolean {
@@ -235,4 +269,33 @@ export function validateShadowExtraction(value: unknown, input: NormalizedPostin
   }
   if (failures.length || !technical || !earlyCareer || !disciplines || Object.keys(accepted).length !== fields.length) return { failures, fieldOutcomes: outcomes };
   return { accepted: { classification: { technical, earlyCareer, disciplines }, fields: accepted as ShadowExtraction['fields'] }, failures, fieldOutcomes: outcomes };
+}
+
+/**
+ * A field whose value cannot satisfy the evidence contract must never make the
+ * independently supported fields unusable. This projection only removes the
+ * unsupported field; it never supplies a fact, edits evidence, or repairs an
+ * invalid classification. It is useful for truncated provider artifacts and
+ * model responses that cite a title instead of the supplied description.
+ */
+export function projectShadowExtractionToSupportedFields(value: unknown, input: NormalizedPostingInput): {
+  accepted?: ShadowExtraction;
+  removedFields: string[];
+  failures: string[];
+} {
+  const first = validateShadowExtraction(value, input);
+  if (first.accepted) return { accepted: first.accepted, removedFields: [], failures: [] };
+  if (!isRecord(value) || !isRecord(value.classification) || !isRecord(value.fields)
+    || first.failures.some((failure) => !failure.includes(':'))) return { removedFields: [], failures: first.failures };
+  const repaired = structuredClone(value) as Record<string, unknown>;
+  const repairedFields = repaired.fields as Record<string, unknown>;
+  const removedFields = first.fieldOutcomes.filter((outcome) => !outcome.accepted).map((outcome) => outcome.field);
+  for (const field of removedFields) repairedFields[field] = {
+    value: null,
+    status: input.completeness === 'incomplete' ? 'incomplete' : 'not-stated',
+    evidence: [],
+    qualifiers: [],
+  };
+  const second = validateShadowExtraction(repaired, input);
+  return { accepted: second.accepted, removedFields, failures: second.failures };
 }

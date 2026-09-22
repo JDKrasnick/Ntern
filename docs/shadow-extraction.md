@@ -62,7 +62,9 @@ with a five-minute delay; malformed output is a visible `invalid-output` state,
 not a repair loop.
 
 Use the authenticated, read-only endpoint below for aggregate run states,
-latency, cost totals, version distribution, and deterministic-baseline differences:
+latency, cost totals, version distribution, input completeness by origin and
+terminal state, validator failures by cause, and deterministic-baseline
+differences:
 
 ```text
 GET /internal/operations/shadow-extraction
@@ -113,8 +115,9 @@ Apply migrations `0020_shadow_extraction.sql`,
 `0022_shadow_extraction_cache_expiry.sql`,
 `0023_shadow_extraction_attempt_costs.sql`,
 `0024_shadow_publication_receipts.sql`,
-`0025_shadow_extraction_evaluations.sql`, and
-`0026_shadow_extraction_origin.sql` before deploying the queue consumer.
+`0025_shadow_extraction_evaluations.sql`,
+`0026_shadow_extraction_origin.sql`, and
+`0032_shadow_extraction_input_completeness.sql` before deploying the queue consumer.
 Provision the private R2 bucket and the `shadow-extraction` work/DLQ
 queues from the infrastructure configuration. Configure this R2 lifecycle rule
 after the bucket exists, using credentials with only the documented R2 write
@@ -148,3 +151,18 @@ The v5 contract accepts only canonical `remote`, `hybrid`, or `onsite` work mode
 and forbids `not-stated` for missing fields when input is truncated. Evaluation
 metrics expose field precision and recall when their denominators are available;
 an empty denominator is reported as `null`, not as a passing score.
+
+The aggregate shadow operations response also reports input completeness by
+origin and terminal state, validator failures grouped into model-schema,
+model-evidence, model-normalization, and input-incomplete categories, and those
+same failures attributed by origin, input completeness, and category. The
+attribution join is what separates a bounded source artifact from a malformed or
+unsupported model response. The completeness column is forward-only, so a run
+that predates it reports `unknown` instead of receiving a retroactive source
+diagnosis. `input-incomplete` is the `not-stated is invalid for incomplete
+input` failure, which the validator raises only for a bounded artifact, so it
+never counts as a model defect. A run that never reached validation — an input
+identity or version mismatch — carries `invalid-output` with no validator
+failures, so the failure rows can sum to less than the `invalid-output` count,
+and unreadable validator JSON is skipped rather than failing the response. None
+of it exposes posting text, URLs, or run IDs.
