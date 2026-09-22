@@ -66,7 +66,10 @@
     "terraform:validate": "tofu -chdir=infra/cloudflare validate",
     "deploy:cloudflare": "npm run build:cloudflare && tsx scripts/deploy-cloudflare.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "pdfjs-dist": "^5.7.284"
+  },
   "devDependencies": {
     "@cloudflare/puppeteer": "^1.4.0",
     "@cloudflare/workers-types": "^5.20260823.1",

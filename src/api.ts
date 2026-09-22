@@ -13,6 +13,7 @@ import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
 import { normalizeResumeJobUrl, recommendResumeProfiles, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 
 type ApiEvent = { requestContext?: { authorizer?: { jwt?: { claims?: Record<string, string> } }; http?: { method?: string }; requestId?: string }; rawPath?: string; routeKey?: string; pathParameters?: Record<string, string>; queryStringParameters?: Record<string, string>; headers?: Record<string, string | undefined>; body?: string | null };
 type ApiResponse = { statusCode: number; headers: Record<string, string>; body: string };
@@ -365,6 +366,7 @@ export interface DocumentStorage {
   createUploadUrl(document: { userId: string; documentId: string; objectKey: string; contentType: string }): Promise<string>;
   createDownloadUrl(document: { userId: string; documentId: string; objectKey: string; contentType: string }): Promise<string>;
   deleteObject(objectKey: string): Promise<void>;
+  readContent?(document: { userId: string; documentId: string; objectKey: string; contentType: string }): Promise<ArrayBuffer>;
 }
 
 export interface ResumeImportQueue {
@@ -377,6 +379,7 @@ export interface ApiDependencies {
   releases?: ReleaseStore;
   documentStorage?: DocumentStorage;
   resumeImportQueue?: ResumeImportQueue;
+  resumeDocumentExtractor?: (bytes: ArrayBuffer, contentType: string) => Promise<ExtractedResumeItem[]>;
   deleteIdentity?: (userId: string) => Promise<void>;
   /** Revokes and deletes linked-provider data before the account record disappears. */
   beforeDeleteUser?: (userId: string) => Promise<void>;
@@ -595,6 +598,20 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (!await dependencies.users.putResumeBankItem(item)) return reply(409, { message: 'Resume bank item already exists; retry' });
             return reply(201, item);
           }
+        }
+        if (method === 'POST' && path === '/me/resume-bank/import') {
+          if (!documentStorage?.readContent) return reply(503, { message: 'Document import is unavailable' });
+          const body = parseBody(event);
+          const documentId = resumeText(body.documentId, 'documentId', 160);
+          const document = (await dependencies.users.listDocuments(userId)).find((item) => item.documentId === documentId);
+          if (!document) return reply(404, { message: 'Document not found' });
+          const items = await (dependencies.resumeDocumentExtractor ?? extractResumeDocument)(await documentStorage.readContent(document), document.contentType);
+          const created: ResumeBankItem[] = [];
+          for (const extracted of items.slice(0, 100)) {
+            const item: ResumeBankItem = { userId, bankItemId: randomUUID(), kind: extracted.kind, content: extracted.content, sourceDocumentId: document.documentId, sourceLocation: extracted.sourceLocation, verified: false, revision: 0, createdAt: timestamp, updatedAt: timestamp };
+            if (await dependencies.users.putResumeBankItem(item)) created.push(item);
+          }
+          return reply(201, { items: created });
         }
         const bankMatch = path.match(/^\/me\/resume-bank\/([^/]+)$/u);
         if (bankMatch && method === 'PATCH') {

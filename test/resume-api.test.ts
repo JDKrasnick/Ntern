@@ -74,4 +74,16 @@ describe('resume API ownership and revisions', () => {
     const updated = JSON.parse(decided.body) as { revision: number };
     expect((await handler(event('student', 'POST', `/me/resume-drafts/${draft.draftId}/finalize`, { revision: updated.revision }))).statusCode).toBe(200);
   });
+
+  it('imports PDF or DOCX extraction as unverified, user-owned bank cards', async () => {
+    const users = new MemoryUserStore();
+    await users.putDocument({ userId: 'student', documentId: 'resume', fileName: 'resume.pdf', contentType: 'application/pdf', objectKey: 'private/student/resume', createdAt: 'now' });
+    const handler = createApiHandler({
+      jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
+      documentStorage: { createUploadUrl: async () => '', createDownloadUrl: async () => '', deleteObject: async () => undefined, readContent: async () => new ArrayBuffer(0) },
+      resumeDocumentExtractor: async () => [{ kind: 'project', content: 'Built a dashboard', sourceLocation: 'line 3' }],
+    });
+    const response = await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }));
+    expect(JSON.parse(response.body)).toMatchObject({ items: [expect.objectContaining({ content: 'Built a dashboard', sourceDocumentId: 'resume', sourceLocation: 'line 3', verified: false })] });
+  });
 });

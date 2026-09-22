@@ -555,6 +555,11 @@ function documentStorage(env: Environment): DocumentStorage {
     async createUploadUrl(document) { return `${base}/me/documents/${encodeURIComponent(document.documentId)}/content`; },
     async createDownloadUrl(document) { return `${base}/me/documents/${encodeURIComponent(document.documentId)}/content`; },
     async deleteObject(objectKey) { await env.DOCUMENTS.delete(objectKey); },
+    async readContent(document) {
+      const object = await env.DOCUMENTS.get(document.objectKey);
+      if (!object) throw new Error('Document content not found');
+      return new Response(object.body).arrayBuffer();
+    },
   };
 }
 
