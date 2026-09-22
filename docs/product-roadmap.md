@@ -37,6 +37,7 @@
 
 ### Codex
 
+- [x] Add the authenticated web-first Resume workspace: a fifth navigation tab with a responsive review/preview flow, Master Bank framing, saved-base recommendation, and explicit evidence-backed change decisions. Persistence, job import, grounded generation, and artifact compilation remain staged follow-up work.
 - [x] Implement the Cloudflare replacement substrate with Workers, D1, R2, Queues, Cron Triggers, provider v5 Terraform, Cloudflare-native mobile authentication, and local end-to-end smoke coverage.
 - [x] Provision the Cloudflare account, apply remote D1 migrations and Worker secrets, verify the source backfill, cut every mobile environment over, and retire AWS deployment paths.
 - [x] Bound sparse grouped-catalog filter scans, reconcile legacy notification markers through durable Expo receipts, isolate iOS plain-text accessibility state from secure authentication fields, and make account switching/sign-out race-safe with server-side session revocation.
