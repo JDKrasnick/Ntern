@@ -6,7 +6,8 @@ const app = readFileSync(new URL('../App.tsx', import.meta.url).pathname, 'utf8'
 describe('resume workspace navigation contract', () => {
   it('keeps Resume as the fifth authenticated navigation destination', () => {
     expect(app).toContain('type AppTab = "roles" | "queue" | "catalog" | "resume" | "profile";');
-    expect(app).toContain('{ key: "resume", label: "Resume", icon: "document-text-outline", activeIcon: "document-text" }');
+    expect(app).toContain('resumeEnabled ? [{ key: "resume" as const, label: "Resume"');
+    expect(app).toContain('resumeEnabled={publicConfig.resumeTunerEnabled}');
     expect(app).toContain('feature="tailor and save résumés"');
   });
 

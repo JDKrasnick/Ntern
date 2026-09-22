@@ -1,0 +1,131 @@
+/**
+ * Canonical, user-owned resume records. Generated PDFs, previews, embeddings,
+ * and model output deliberately remain outside these contracts.
+ */
+export type ResumeBankKind = 'role' | 'project' | 'skill' | 'education' | 'bullet';
+export type ResumeChangeType = 'rewrite' | 'add' | 'remove' | 'move';
+export type ResumeTemplateId = 'jake-technical' | 'clean-standard' | 'research-academic' | 'project-compact';
+
+export interface ResumeBankItem {
+  userId: string;
+  bankItemId: string;
+  kind: ResumeBankKind;
+  content: string;
+  sourceDocumentId?: string;
+  sourceLocation?: string;
+  verified: boolean;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResumeProfile {
+  userId: string;
+  profileId: string;
+  name: string;
+  tags: string[];
+  bankItemIds: string[];
+  sectionOrder: string[];
+  template: ResumeTemplateId;
+  approvedWording: Record<string, string>;
+  bankRevision: number;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResumeTemplate {
+  template: ResumeTemplateId;
+  version: string;
+  displayName: string;
+}
+
+export interface ImportedJob {
+  importId: string;
+  canonicalUrl: string;
+  title?: string;
+  company?: string;
+  description: string;
+  source: 'catalog' | 'cache' | 'manual';
+  contentHash: string;
+  status: 'ready' | 'pending' | 'manual-description-required';
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResumeChange {
+  changeId: string;
+  type: ResumeChangeType;
+  section: string;
+  original?: string;
+  suggestion?: string;
+  evidenceIds: string[];
+  reason: string;
+  decision?: 'accepted' | 'rejected';
+}
+
+export interface ResumeDraft {
+  userId: string;
+  draftId: string;
+  profileId: string;
+  importId: string;
+  changes: ResumeChange[];
+  revision: number;
+  status: 'reviewing' | 'finalized';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResumeArtifact {
+  userId: string;
+  artifactId: string;
+  draftId: string;
+  objectKey: string;
+  texObjectKey?: string;
+  templateVersion: string;
+  compilerVersion: string;
+  resumeSpecHash: string;
+  pageCount?: number;
+  createdAt: string;
+}
+
+const privateIpv4 = /^(?:127\.|10\.|0\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)/u;
+const localhostNames = new Set(['localhost', 'localhost.localdomain']);
+
+/** Rejects credentials, private hosts and non-HTTPS schemes before any fetch. */
+export function normalizeResumeJobUrl(value: string): string {
+  let url: URL;
+  try { url = new URL(value.trim()); } catch { throw new Error('Enter a valid HTTPS job URL.'); }
+  if (url.protocol !== 'https:' || url.username || url.password || !url.hostname) {
+    throw new Error('Enter a public HTTPS job URL without credentials.');
+  }
+  const host = url.hostname.toLowerCase();
+  if (localhostNames.has(host) || privateIpv4.test(host) || host === '::1' || host.startsWith('fc') || host.startsWith('fd')) {
+    throw new Error('Private network job URLs are not allowed.');
+  }
+  url.hash = '';
+  return url.toString();
+}
+
+/** Fixed templates escape every user-controlled value before compilation. */
+export function escapeLatex(value: string): string {
+  return value.replace(/[\\{}#$%&_~^]/gu, (character) => ({
+    '\\': '\\textbackslash{}', '{': '\\{', '}': '\\}', '#': '\\#', '$': '\\$', '%': '\\%', '&': '\\&', '_': '\\_', '~': '\\textasciitilde{}', '^': '\\textasciicircum{}',
+  }[character] ?? character));
+}
+
+/** Model output cannot cite unknown or unverified facts, including numeric claims. */
+export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankItem[]): void {
+  const verified = new Map(bank.filter((item) => item.verified).map((item) => [item.bankItemId, item]));
+  for (const change of changes) {
+    if (!change.evidenceIds.length || change.evidenceIds.some((id) => !verified.has(id))) {
+      throw new Error('Each resume change must cite verified bank evidence.');
+    }
+    const evidence = change.evidenceIds.map((id) => verified.get(id)!.content).join(' ');
+    const numbers = (change.suggestion ?? '').match(/\b\d+(?:\.\d+)?%?\b/gu) ?? [];
+    if (numbers.some((number) => !evidence.includes(number))) {
+      throw new Error('Resume changes cannot add numeric claims absent from verified evidence.');
+    }
+  }
+}

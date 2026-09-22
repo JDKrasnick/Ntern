@@ -97,7 +97,7 @@ export interface UserDocument {
   createdAt: string;
 }
 
-export const ACCOUNT_EXPORT_SCHEMA_VERSION = 1 as const;
+export const ACCOUNT_EXPORT_SCHEMA_VERSION = 2 as const;
 
 export interface AccountDataExport {
   schemaVersion: typeof ACCOUNT_EXPORT_SCHEMA_VERSION;
@@ -106,6 +106,11 @@ export interface AccountDataExport {
     profile: ApplicantProfile | null;
     applications: ApplicationRecord[];
     documents: Array<Pick<UserDocument, 'documentId' | 'fileName' | 'contentType' | 'createdAt'>>;
+    resume: {
+      bankItems: import('./resume.js').ResumeBankItem[];
+      profiles: import('./resume.js').ResumeProfile[];
+      drafts: import('./resume.js').ResumeDraft[];
+    };
   };
 }
 

@@ -5,6 +5,11 @@ export type AccountExportResponse = {
     profile: Record<string, unknown> | null;
     applications: Array<Record<string, unknown>>;
     documents: Array<{ documentId: string; fileName: string; contentType: string; createdAt: string }>;
+    resume?: {
+      bankItems: Array<Record<string, unknown>>;
+      profiles: Array<Record<string, unknown>>;
+      drafts: Array<Record<string, unknown>>;
+    };
   };
 };
 

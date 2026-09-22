@@ -44,6 +44,7 @@ import { type EducationLevel } from "../shared/education-display";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
+import { publicConfig } from "./src/public-config";
 import { installationApi } from "./src/installation";
 import { migrateLegacyAccountAlerts } from "./src/legacy-alert-migration";
 import { buildCompleteDataExport, DataExportFetchError, SharingUnavailableError, type AccountExportResponse } from "./src/account-data-export";
@@ -2794,17 +2795,19 @@ function TabNavigation({
   onChange,
   rail = false,
   badgeCount = 0,
+  resumeEnabled = false,
 }: {
   active: AppTab;
   onChange: (tab: AppTab) => void;
   rail?: boolean;
   badgeCount?: number;
+  resumeEnabled?: boolean;
 }) {
   const tabs = [
     { key: "roles", label: "Roles", icon: "briefcase-outline", activeIcon: "briefcase" },
     { key: "queue", label: "Queue", accessibilityLabel: "Apply queue", icon: "albums-outline", activeIcon: "albums" },
     { key: "catalog", label: "Catalog", accessibilityLabel: "Catalog search", icon: "search-outline", activeIcon: "search" },
-    { key: "resume", label: "Resume", icon: "document-text-outline", activeIcon: "document-text" },
+    ...(resumeEnabled ? [{ key: "resume" as const, label: "Resume", icon: "document-text-outline" as const, activeIcon: "document-text" as const }] : []),
     { key: "profile", label: "Profile", icon: "person-outline", activeIcon: "person" },
   ] as const;
   return (
@@ -4704,7 +4707,7 @@ function AppContent() {
   return (
     <SafeAreaView style={styles.screen}>
       <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
-        {usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} rail badgeCount={applyQueue.length} /> : null}
+        {usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} rail badgeCount={applyQueue.length} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
         <View style={styles.appMain}>
           {tab === "roles" ? (
             <View style={styles.pageColumn}>
@@ -4791,7 +4794,7 @@ function AppContent() {
             />
           ) : tab === "resume" ? (
             <View style={styles.pageColumn}>
-              <ResumeWorkspace />
+              <ResumeWorkspace token={token} />
             </View>
           ) : (
             <View style={styles.pageColumn}>
@@ -4810,7 +4813,7 @@ function AppContent() {
             </View>
           )}
         </View>
-        {!usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} badgeCount={applyQueue.length} /> : null}
+        {!usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} badgeCount={applyQueue.length} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
       </View>
       <JobDetailSheet
         job={selectedJob}
@@ -5301,7 +5304,7 @@ function GuestExperience({
         importantForAccessibility={showAccount ? "no-hide-descendants" : "auto"}
       >
         <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
-          {usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} rail /> : null}
+          {usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} rail resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
           <View style={styles.appMain}>
             <View
               style={[styles.appMain, tab !== "catalog" && styles.hiddenScreen]}
@@ -5390,7 +5393,7 @@ function GuestExperience({
               </View>
             ) : null}
           </View>
-          {!usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} /> : null}
+          {!usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
         </View>
         <JobDetailSheet
           job={routedJob}
@@ -5482,20 +5485,102 @@ const resumeSuggestions: ResumeSuggestion[] = [
   },
 ];
 
-function ResumeWorkspace() {
+type ResumeBankCard = { bankItemId: string; kind: string; content: string; verified: boolean; revision: number };
+type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; revision: number };
+type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number };
+type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; section: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
+
+function ResumeWorkspace({ token }: { token: string }) {
   const { width } = useWindowDimensions();
   const desktop = width >= 700;
   const [jobUrl, setJobUrl] = useState("");
+  const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
+  const [bankDraft, setBankDraft] = useState("");
+  const [bankLoading, setBankLoading] = useState(true);
+  const [bankSaving, setBankSaving] = useState(false);
+  const [bankError, setBankError] = useState<string>();
+  const [profiles, setProfiles] = useState<ResumeProfileCard[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string>();
+  const [jobImport, setJobImport] = useState<ResumeImportCard>();
+  const [manualDescription, setManualDescription] = useState("");
+  const [draft, setDraft] = useState<ResumeDraftCard>();
+  const [resumeBusy, setResumeBusy] = useState(false);
   const [activeChange, setActiveChange] = useState(0);
   const [reviewMode, setReviewMode] = useState<"changes" | "preview">("changes");
   const [decisions, setDecisions] = useState<Record<string, "accepted" | "rejected">>({});
-  const current = resumeSuggestions[activeChange];
-  const reviewed = Object.keys(decisions).length;
+  const current = draft?.changes[activeChange];
+  const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
   const decide = (decision: "accepted" | "rejected") => {
-    setDecisions((previous) => ({ ...previous, [current.id]: decision }));
-    if (activeChange < resumeSuggestions.length - 1) setActiveChange((index) => index + 1);
+    if (!draft || !current || resumeBusy) return;
+    setResumeBusy(true);
+    const changes = draft.changes.map((change) => change.changeId === current.changeId ? { ...change, decision } : change);
+    void api<ResumeDraftCard>(`/me/resume-drafts/${draft.draftId}`, token, { method: "PATCH", body: JSON.stringify({ revision: draft.revision, decisions: [{ changeId: current.changeId, decision }] }) })
+      .then((updated) => { setDraft(updated); if (activeChange < updated.changes.length - 1) setActiveChange((index) => index + 1); })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that decision."))
+      .finally(() => setResumeBusy(false));
   };
-  const accepted = Object.values(decisions).filter((decision) => decision === "accepted").length;
+  const accepted = draft?.changes.filter((change) => change.decision === "accepted").length ?? 0;
+  const loadBank = () => {
+    setBankLoading(true);
+    setBankError(undefined);
+    void api<{ items: ResumeBankCard[] }>("/me/resume-bank", token)
+      .then(async ({ items }) => {
+        setBankItems(items);
+        const { profiles: savedProfiles } = await api<{ profiles: ResumeProfileCard[] }>("/me/resume-profiles", token);
+        setProfiles(savedProfiles);
+        setSelectedProfileId((selected) => selected ?? savedProfiles[0]?.profileId);
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't load your Master Bank."))
+      .finally(() => setBankLoading(false));
+  };
+  useEffect(loadBank, [token]);
+  const addBankItem = () => {
+    const content = bankDraft.trim();
+    if (!content || bankSaving) return;
+    setBankSaving(true);
+    setBankError(undefined);
+    void api<ResumeBankCard>("/me/resume-bank", token, {
+      method: "POST", body: JSON.stringify({ kind: "bullet", content }),
+    })
+      .then((item) => {
+        setBankItems((items) => [...items, item]);
+        setBankDraft("");
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that bank item."))
+      .finally(() => setBankSaving(false));
+  };
+  const saveBase = () => {
+    if (resumeBusy || !bankItems.length) return;
+    setResumeBusy(true);
+    void api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: bankItems.map((item) => item.bankItemId), sectionOrder: ["experience", "projects", "skills"], template: "clean-standard" }) })
+      .then((profile) => { setProfiles((all) => [...all, profile]); setSelectedProfileId(profile.profileId); })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that base."))
+      .finally(() => setResumeBusy(false));
+  };
+  const importJob = () => {
+    if (!jobUrl.trim() || resumeBusy) return;
+    setResumeBusy(true); setBankError(undefined);
+    void api<ResumeImportCard>("/me/resume-imports", token, { method: "POST", body: JSON.stringify({ url: jobUrl }) })
+      .then((value) => { setJobImport(value); setDraft(undefined); setActiveChange(0); })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't import that job."))
+      .finally(() => setResumeBusy(false));
+  };
+  const saveManualDescription = () => {
+    if (!jobImport || !manualDescription.trim() || resumeBusy) return;
+    setResumeBusy(true);
+    void api<ResumeImportCard>(`/me/resume-imports/${jobImport.importId}`, token, { method: "PATCH", body: JSON.stringify({ revision: jobImport.revision, manualDescription }) })
+      .then((value) => setJobImport(value))
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that description."))
+      .finally(() => setResumeBusy(false));
+  };
+  const createDraft = () => {
+    if (!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy) return;
+    setResumeBusy(true);
+    void api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: selectedProfileId }) })
+      .then((value) => { setDraft(value); setActiveChange(0); setDecisions({}); })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create a grounded draft."))
+      .finally(() => setResumeBusy(false));
+  };
 
   return (
     <ScrollView style={styles.list} contentContainerStyle={styles.resumeContent}>
@@ -5510,16 +5595,44 @@ function ResumeWorkspace() {
           <Text style={styles.resumeCardLabel}>Master Bank</Text>
           <Text style={styles.resumeCardTitle}>Your source of truth</Text>
           <Text style={styles.resumeCardCopy}>Add résumés, roles, projects, and skills once. You decide what is verified before it can be used.</Text>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add a résumé to the Master Bank" style={styles.resumeInlineAction}>
-            <Ionicons name="add-circle-outline" size={18} color={colors.signal} />
-            <Text style={styles.resumeInlineActionText}>Add a résumé</Text>
-          </TouchableOpacity>
+          <Text style={styles.resumeBankStatus}>{bankLoading ? "Loading your private bank…" : `${bankItems.length} item${bankItems.length === 1 ? "" : "s"} in your private bank`}</Text>
         </View>
         <View style={styles.resumeTrustCard}>
           <Ionicons name="shield-checkmark-outline" size={22} color={colors.signal} />
           <Text style={styles.resumeTrustTitle}>Nothing is invented</Text>
           <Text style={styles.resumeTrustCopy}>Suggestions must point back to your approved evidence.</Text>
         </View>
+      </View>
+
+      <View style={styles.resumeBankComposer}>
+        <Text style={styles.inputLabel}>Add a fact or bullet for review</Text>
+        <TextInput
+          value={bankDraft}
+          onChangeText={setBankDraft}
+          accessibilityLabel="Add a Master Bank item"
+          placeholder="e.g. Built a dashboard that gave the team a single view of experiment results"
+          placeholderTextColor={colors.placeholder}
+          selectionColor={colors.signal}
+          multiline
+          style={styles.resumeBankInput}
+        />
+        {bankError ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
+        <View style={styles.resumeBankComposerAction}>
+          <ActionButton label={bankSaving ? "Saving…" : "Save to Master Bank"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving} />
+        </View>
+        {!bankLoading && bankItems.length ? (
+          <View style={styles.resumeBankItems}>
+            {bankItems.map((item) => (
+              <View key={item.bankItemId} style={styles.resumeBankItem}>
+                <Ionicons name={item.verified ? "shield-checkmark-outline" : "time-outline"} size={17} color={item.verified ? colors.signal : colors.muted} />
+                <View style={styles.resumeBankItemCopy}>
+                  <Text style={styles.resumeBankItemText}>{item.content}</Text>
+                  <Text style={styles.resumeBankItemStatus}>{item.verified ? "Verified" : "Needs review"}</Text>
+                </View>
+              </View>
+            ))}
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.resumeSection}>
@@ -5541,8 +5654,16 @@ function ResumeWorkspace() {
               style={styles.resumeUrlInput}
             />
           </View>
-          <ActionButton label="Find best base" onPress={() => setReviewMode("changes")} disabled={!jobUrl.trim()} />
+          <ActionButton label={resumeBusy ? "Checking…" : "Import job"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
         </View>
+        {jobImport?.status === "pending" ? (
+          <View style={styles.resumeBankComposer}>
+            <Text style={styles.inputLabel}>Paste the job description to continue</Text>
+            <Text style={styles.resumeSectionDescription}>The URL is queued for safe retrieval. Pasted text stays in your private resume workspace.</Text>
+            <TextInput value={manualDescription} onChangeText={setManualDescription} accessibilityLabel="Job description" multiline placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} />
+            <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.resumeSection}>
@@ -5551,28 +5672,25 @@ function ResumeWorkspace() {
             <Text style={styles.sectionTitle}>Saved resumes</Text>
             <Text style={styles.resumeSectionDescription}>Versioned recipes reuse approved bank items; they never copy over your source material.</Text>
           </View>
-          <Text style={styles.resumeRecommendation}>Recommended</Text>
+          <TouchableOpacity accessibilityRole="button" onPress={saveBase} disabled={!bankItems.length || resumeBusy}><Text style={styles.resumeRecommendation}>Save current bank as a base</Text></TouchableOpacity>
         </View>
         <View style={[styles.resumeProfileGrid, desktop && styles.resumeProfileGridWide]}>
-          {[
-            ["Full-stack", "React · TypeScript · APIs", "Best fit for product engineering"],
-            ["Machine learning", "Python · modeling · research", "Strong skills overlap"],
-            ["iOS", "Swift · mobile · product", "Ready to tailor"],
-          ].map(([name, tags, note], index) => (
-            <TouchableOpacity key={name} accessibilityRole="button" accessibilityLabel={`Use ${name} resume`} style={[styles.resumeProfileCard, index === 0 && styles.resumeProfileRecommended]}>
-              <Text style={styles.resumeProfileName}>{name}</Text>
-              <Text style={styles.resumeProfileTags}>{tags}</Text>
-              <Text style={styles.resumeProfileNote}>{note}</Text>
+          {profiles.length ? profiles.map((profile) => (
+            <TouchableOpacity key={profile.profileId} accessibilityRole="button" accessibilityLabel={`Use ${profile.name} resume`} onPress={() => setSelectedProfileId(profile.profileId)} style={[styles.resumeProfileCard, selectedProfileId === profile.profileId && styles.resumeProfileRecommended]}>
+              <Text style={styles.resumeProfileName}>{profile.name}</Text>
+              <Text style={styles.resumeProfileTags}>{profile.tags.join(" · ") || "No tags yet"}</Text>
+              <Text style={styles.resumeProfileNote}>{profile.bankItemIds.length} selected bank item{profile.bankItemIds.length === 1 ? "" : "s"}</Text>
             </TouchableOpacity>
-          ))}
+          )) : <Text style={styles.resumeSectionDescription}>Save a base after adding the experience you want to reuse.</Text>}
         </View>
+        <View style={styles.resumeBankComposerAction}><ActionButton label="Create grounded review" onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy} /></View>
       </View>
 
       <View style={styles.resumeSection}>
         <View style={styles.resumeReviewHeader}>
           <View>
             <Text style={styles.sectionTitle}>Review changes</Text>
-            <Text style={styles.resumeSectionDescription}>{reviewed} of {resumeSuggestions.length} reviewed · every suggestion has evidence and a reason.</Text>
+            <Text style={styles.resumeSectionDescription}>{draft ? `${reviewed} of ${draft.changes.length} reviewed · every suggestion has evidence and a reason.` : "Import a job and choose a saved base to start a grounded review."}</Text>
           </View>
           {!desktop ? (
             <View style={styles.resumeSegmentedControl} accessibilityRole="tablist">
@@ -5584,21 +5702,20 @@ function ResumeWorkspace() {
             </View>
           ) : null}
         </View>
-        <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
+        {draft?.changes.length ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
           {(desktop || reviewMode === "changes") ? (
             <View style={styles.resumeChangePanel}>
-              <Text style={styles.resumeChangeCounter}>Change {activeChange + 1} of {resumeSuggestions.length}</Text>
-              <Text style={styles.resumeChangeSection}>{current.section}</Text>
-              <Text style={styles.resumeChangeOriginal}>{current.original}</Text>
+              <Text style={styles.resumeChangeCounter}>Change {activeChange + 1} of {draft.changes.length}</Text>
+              <Text style={styles.resumeChangeSection}>{current?.section}</Text>
               <View style={styles.resumeSuggestion}>
                 <Text style={styles.resumeSuggestionLabel}>Suggested</Text>
-                <Text style={styles.resumeSuggestionText}>{current.suggestion}</Text>
+                <Text style={styles.resumeSuggestionText}>{current?.suggestion}</Text>
               </View>
               <View style={styles.resumeEvidence}>
                 <Ionicons name="link-outline" size={16} color={colors.signal} />
-                <Text style={styles.resumeEvidenceText}>{current.evidence}</Text>
+                <Text style={styles.resumeEvidenceText}>Master Bank evidence · {current?.evidenceIds.length} item{current?.evidenceIds.length === 1 ? "" : "s"}</Text>
               </View>
-              <Text style={styles.resumeReason}>{current.reason}</Text>
+              <Text style={styles.resumeReason}>{current?.reason}</Text>
               <View style={styles.resumeDecisionRow}>
                 <ActionButton label="Keep original" variant="secondary" onPress={() => decide("rejected")} />
                 <ActionButton label="Use suggestion" onPress={() => decide("accepted")} />
@@ -5611,21 +5728,21 @@ function ResumeWorkspace() {
                 <Text style={styles.resumePreviewName}>Your name</Text>
                 <Text style={styles.resumePreviewContact}>City · email@example.com · portfolio</Text>
                 <Text style={styles.resumePreviewHeading}>Experience</Text>
-                <Text style={styles.resumePreviewLine}>{decisions.impact === "accepted" ? resumeSuggestions[0].suggestion : resumeSuggestions[0].original}</Text>
+                <Text style={styles.resumePreviewLine}>{draft.changes.find((change) => change.decision === "accepted")?.suggestion ?? "Approved changes appear here after review."}</Text>
                 <Text style={styles.resumePreviewHeading}>Projects</Text>
-                <Text style={styles.resumePreviewLine}>A focused selection of approved work appears here.</Text>
+                <Text style={styles.resumePreviewLine}>A focused selection of approved evidence appears here.</Text>
                 <Text style={styles.resumePreviewHeading}>Skills</Text>
-                <Text style={styles.resumePreviewLine}>{decisions.skills === "accepted" ? resumeSuggestions[1].suggestion : resumeSuggestions[1].original}</Text>
+                <Text style={styles.resumePreviewLine}>{accepted ? `${accepted} accepted evidence-backed change${accepted === 1 ? "" : "s"}` : "No suggested changes accepted yet."}</Text>
               </View>
               <Text style={styles.resumePreviewCaption}>Live structured preview · PDF generation comes after final review</Text>
             </View>
           ) : null}
-        </View>
+        </View> : null}
         <View style={styles.resumeFinalizeRow}>
-          <TouchableOpacity accessibilityRole="button" onPress={() => setDecisions(Object.fromEntries(resumeSuggestions.map((suggestion) => [suggestion.id, "rejected"]))) }>
+          <TouchableOpacity accessibilityRole="button" onPress={() => current && decide("rejected")}>
             <Text style={styles.resumeKeepAll}>Keep all remaining originals</Text>
           </TouchableOpacity>
-          <ActionButton label={`Create résumé${accepted ? ` with ${accepted} change${accepted === 1 ? "" : "s"}` : ""}`} onPress={() => undefined} disabled={reviewed !== resumeSuggestions.length} />
+          <ActionButton label={`Create résumé${accepted ? ` with ${accepted} change${accepted === 1 ? "" : "s"}` : ""}`} onPress={() => undefined} disabled={!draft || reviewed !== draft.changes.length} />
         </View>
       </View>
     </ScrollView>
@@ -8125,11 +8242,21 @@ const styles = StyleSheet.create({
   resumeCardLabel: { color: colors.signalGlow, fontSize: 12, fontWeight: "800", letterSpacing: 1.1, textTransform: "uppercase" },
   resumeCardTitle: { color: colors.onDark, fontSize: 25, fontWeight: "800", letterSpacing: -0.5, lineHeight: 31, marginTop: 5 },
   resumeCardCopy: { color: "#D1D5DB", fontSize: 15, lineHeight: 21, marginTop: 6 },
+  resumeBankStatus: { color: colors.signalGlow, fontSize: 13, fontWeight: "700", lineHeight: 18, marginTop: 15 },
   resumeInlineAction: { alignItems: "center", alignSelf: "flex-start", flexDirection: "row", gap: 6, marginTop: 16, minHeight: 36 },
   resumeInlineActionText: { color: colors.signalGlow, fontSize: 14, fontWeight: "800" },
   resumeTrustCard: { backgroundColor: "rgba(255,255,255,0.1)", borderColor: "rgba(255,255,255,0.16)", borderRadius: 14, borderWidth: 1, flexBasis: 230, flexGrow: 0, padding: 14 },
   resumeTrustTitle: { color: colors.onDark, fontSize: 15, fontWeight: "800", marginTop: 9 },
   resumeTrustCopy: { color: "#D1D5DB", fontSize: 13, lineHeight: 18, marginTop: 3 },
+  resumeBankComposer: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, marginBottom: 8, padding: 16 },
+  resumeBankInput: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, color: colors.ink, fontSize: 15, lineHeight: 21, minHeight: 82, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: "top" },
+  resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },
+  resumeBankError: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 8 },
+  resumeBankItems: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 8, marginTop: 16, paddingTop: 12 },
+  resumeBankItem: { alignItems: "flex-start", flexDirection: "row", gap: 9, paddingVertical: 4 },
+  resumeBankItemCopy: { flex: 1 },
+  resumeBankItemText: { color: colors.ink, fontSize: 14, lineHeight: 20 },
+  resumeBankItemStatus: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 1 },
   resumeSection: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 8, paddingTop: 24, paddingBottom: 4 },
   resumeSectionDescription: { color: colors.muted, fontSize: 14, lineHeight: 20, marginTop: 5, maxWidth: 660 },
   resumeUrlRow: { alignItems: "center", flexDirection: "row", gap: 10, marginTop: 14 },

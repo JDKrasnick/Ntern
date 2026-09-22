@@ -12,6 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
+import { normalizeResumeJobUrl, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 
 type ApiEvent = { requestContext?: { authorizer?: { jwt?: { claims?: Record<string, string> } }; http?: { method?: string }; requestId?: string }; rawPath?: string; routeKey?: string; pathParameters?: Record<string, string>; queryStringParameters?: Record<string, string>; headers?: Record<string, string | undefined>; body?: string | null };
 type ApiResponse = { statusCode: number; headers: Record<string, string>; body: string };
@@ -377,11 +378,33 @@ export interface ApiDependencies {
   integrations?: EmployerIntegrationRegistry;
   now?: () => string;
   identityUnconfirmedPublicationEnabled?: boolean;
+  /** Default-disabled because résumé records are sensitive private data. */
+  resumeTunerEnabled?: boolean;
+}
+
+const resumeKinds = new Set<ResumeBankItem['kind']>(['role', 'project', 'skill', 'education', 'bullet']);
+const resumeTemplates = new Set<ResumeTemplateId>(['jake-technical', 'clean-standard', 'research-academic', 'project-compact']);
+function resumeText(value: unknown, field: string, max = 8_000): string {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > max) throw new Error(`${field} must be non-empty text up to ${max} characters`);
+  return value.trim();
+}
+function resumeStrings(value: unknown, field: string, limit = 24): string[] {
+  if (!Array.isArray(value) || value.length > limit || value.some((item) => typeof item !== 'string' || !item.trim() || item.length > 160)) throw new Error(`${field} must be a short text list`);
+  return value.map((item) => item.trim());
+}
+function resumeDraftChanges(job: ImportedJob, bankItems: ResumeBankItem[]): ResumeChange[] {
+  const jobWords = new Set(job.description.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
+  return bankItems.filter((item) => item.verified).flatMap((item) => {
+    const matched = (item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []).filter((word) => jobWords.has(word));
+    if (!matched.length) return [];
+    return [{ changeId: randomUUID(), type: 'add' as const, section: item.kind === 'skill' ? 'Skills' : 'Selected experience', suggestion: item.content, evidenceIds: [item.bankItemId], reason: `Matches job language: ${[...new Set(matched)].slice(0, 3).join(', ')}.` }];
+  }).slice(0, 12);
 }
 export function createApiHandler(dependencies: ApiDependencies) {
   const identityUnconfirmedPublicationEnabled = dependencies.identityUnconfirmedPublicationEnabled ?? true;
   const integrations = dependencies.integrations ?? new EmployerIntegrationRegistry();
   const documentStorage = dependencies.documentStorage;
+  const resumeTunerEnabled = dependencies.resumeTunerEnabled === true;
   return async (event: ApiEvent): Promise<ApiResponse> => {
     try {
       const method = event.requestContext?.http?.method ?? event.routeKey?.split(' ')[0] ?? 'GET'; const path = event.rawPath ?? event.routeKey?.split(' ')[1] ?? '/';
@@ -549,6 +572,160 @@ export function createApiHandler(dependencies: ApiDependencies) {
       if (!deletingAccount && method !== 'GET' && method !== 'HEAD' && await dependencies.users.isUserDeletionPending(userId)) {
         return reply(409, { code: 'ACCOUNT_DELETION_IN_PROGRESS', retryable: false, message: 'Account deletion is already in progress. Finish or retry deletion before changing account data.' });
       }
+      if (path.startsWith('/me/resume-')) {
+        if (!resumeTunerEnabled) return reply(404, { message: 'Resume tailoring is not enabled' });
+        const timestamp = dependencies.now?.() ?? now();
+        if (path === '/me/resume-bank') {
+          if (method === 'GET') return reply(200, { items: await dependencies.users.listResumeBank(userId) });
+          if (method === 'POST') {
+            const body = parseBody(event);
+            if (!resumeKinds.has(body.kind as ResumeBankItem['kind'])) return reply(400, { message: 'kind is not supported' });
+            const item: ResumeBankItem = {
+              userId, bankItemId: randomUUID(), kind: body.kind as ResumeBankItem['kind'], content: resumeText(body.content, 'content'),
+              ...(typeof body.sourceDocumentId === 'string' && body.sourceDocumentId ? { sourceDocumentId: body.sourceDocumentId.slice(0, 160) } : {}),
+              ...(typeof body.sourceLocation === 'string' && body.sourceLocation ? { sourceLocation: body.sourceLocation.slice(0, 500) } : {}),
+              // A caller cannot mark unreviewed extraction as verified.
+              verified: false, revision: 0, createdAt: timestamp, updatedAt: timestamp,
+            };
+            if (!await dependencies.users.putResumeBankItem(item)) return reply(409, { message: 'Resume bank item already exists; retry' });
+            return reply(201, item);
+          }
+        }
+        const bankMatch = path.match(/^\/me\/resume-bank\/([^/]+)$/u);
+        if (bankMatch && method === 'PATCH') {
+          const previous = await dependencies.users.getResumeBankItem(userId, decodeURIComponent(bankMatch[1]!));
+          if (!previous) return reply(404, { message: 'Resume bank item not found' });
+          const body = parseBody(event);
+          if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
+          if (body.kind !== undefined && !resumeKinds.has(body.kind as ResumeBankItem['kind'])) return reply(400, { message: 'kind is not supported' });
+          if (body.verified !== undefined && typeof body.verified !== 'boolean') return reply(400, { message: 'verified must be a boolean' });
+          const updated: ResumeBankItem = {
+            ...previous,
+            ...(body.content === undefined ? {} : { content: resumeText(body.content, 'content') }),
+            ...(body.kind === undefined ? {} : { kind: body.kind as ResumeBankItem['kind'] }),
+            ...(body.verified === undefined ? {} : { verified: body.verified }),
+            revision: previous.revision + 1, updatedAt: timestamp,
+          };
+          if (!await dependencies.users.putResumeBankItem(updated, previous.revision)) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
+          return reply(200, updated);
+        }
+        if (path === '/me/resume-imports') {
+          if (method === 'GET') return reply(200, { imports: await dependencies.users.listImportedResumeJobs(userId) });
+          if (method === 'POST') {
+            const body = parseBody(event);
+            const canonicalUrl = normalizeResumeJobUrl(resumeText(body.url, 'url', 2_000));
+            const manualDescription = body.manualDescription === undefined ? undefined : resumeText(body.manualDescription, 'manualDescription', 30_000);
+            const description = manualDescription ?? '';
+            const imported: ImportedJob = {
+              importId: randomUUID(), canonicalUrl, description, source: manualDescription ? 'manual' : 'cache',
+              contentHash: createHash('sha256').update(description || canonicalUrl).digest('hex'),
+              status: manualDescription ? 'ready' : 'pending', revision: 0, createdAt: timestamp, updatedAt: timestamp,
+            };
+            if (!await dependencies.users.putImportedResumeJob(userId, imported)) return reply(409, { message: 'Job import already exists; retry' });
+            return reply(201, imported);
+          }
+        }
+        const importMatch = path.match(/^\/me\/resume-imports\/([^/]+)$/u);
+        if (importMatch) {
+          const importId = decodeURIComponent(importMatch[1]!);
+          const previous = await dependencies.users.getImportedResumeJob(userId, importId);
+          if (!previous) return reply(404, { message: 'Imported job not found' });
+          if (method === 'GET') return reply(200, previous);
+          if (method === 'PATCH') {
+            const body = parseBody(event);
+            if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Imported job changed; refresh and retry' });
+            const description = resumeText(body.manualDescription, 'manualDescription', 30_000);
+            const updated: ImportedJob = { ...previous, description, source: 'manual', status: 'ready', contentHash: createHash('sha256').update(description).digest('hex'), revision: previous.revision + 1, updatedAt: timestamp };
+            if (!await dependencies.users.putImportedResumeJob(userId, updated, previous.revision)) return reply(409, { message: 'Imported job changed; refresh and retry' });
+            return reply(200, updated);
+          }
+        }
+        if (path === '/me/resume-profiles') {
+          if (method === 'GET') return reply(200, { profiles: await dependencies.users.listResumeProfiles(userId) });
+          if (method === 'POST') {
+            const body = parseBody(event);
+            const template = body.template as ResumeTemplateId;
+            if (!resumeTemplates.has(template)) return reply(400, { message: 'template is not supported' });
+            const bankItemIds = resumeStrings(body.bankItemIds, 'bankItemIds', 100);
+            const owned = new Set((await dependencies.users.listResumeBank(userId)).map((item) => item.bankItemId));
+            if (bankItemIds.some((id) => !owned.has(id))) return reply(403, { message: 'A resume profile may only reference your bank items' });
+            const profile: ResumeProfile = {
+              userId, profileId: randomUUID(), name: resumeText(body.name, 'name', 120), tags: resumeStrings(body.tags ?? [], 'tags'), bankItemIds,
+              sectionOrder: resumeStrings(body.sectionOrder ?? [], 'sectionOrder', 32), template, approvedWording: {}, bankRevision: 0, revision: 0, createdAt: timestamp, updatedAt: timestamp,
+            };
+            if (!await dependencies.users.putResumeProfile(profile)) return reply(409, { message: 'Resume profile already exists; retry' });
+            return reply(201, profile);
+          }
+        }
+        const profileMatch = path.match(/^\/me\/resume-profiles\/([^/]+)$/u);
+        if (profileMatch) {
+          const profileId = decodeURIComponent(profileMatch[1]!);
+          const previous = await dependencies.users.getResumeProfile(userId, profileId);
+          if (!previous) return reply(404, { message: 'Resume profile not found' });
+          if (method === 'GET') return reply(200, previous);
+          if (method === 'DELETE') {
+            const body = parseBody(event);
+            if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume profile changed; refresh and retry' });
+            if (!await dependencies.users.deleteResumeProfile(userId, profileId, previous.revision)) return reply(409, { message: 'Resume profile changed; refresh and retry' });
+            return reply(204, {});
+          }
+          if (method === 'PATCH') {
+            const body = parseBody(event);
+            if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume profile changed; refresh and retry' });
+            const template = body.template === undefined ? previous.template : body.template as ResumeTemplateId;
+            if (!resumeTemplates.has(template)) return reply(400, { message: 'template is not supported' });
+            const bankItemIds = body.bankItemIds === undefined ? previous.bankItemIds : resumeStrings(body.bankItemIds, 'bankItemIds', 100);
+            const owned = new Set((await dependencies.users.listResumeBank(userId)).map((item) => item.bankItemId));
+            if (bankItemIds.some((id) => !owned.has(id))) return reply(403, { message: 'A resume profile may only reference your bank items' });
+            const updated: ResumeProfile = {
+              ...previous, template, bankItemIds,
+              ...(body.name === undefined ? {} : { name: resumeText(body.name, 'name', 120) }),
+              ...(body.tags === undefined ? {} : { tags: resumeStrings(body.tags, 'tags') }),
+              ...(body.sectionOrder === undefined ? {} : { sectionOrder: resumeStrings(body.sectionOrder, 'sectionOrder', 32) }),
+              revision: previous.revision + 1, updatedAt: timestamp,
+            };
+            if (!await dependencies.users.putResumeProfile(updated, previous.revision)) return reply(409, { message: 'Resume profile changed; refresh and retry' });
+            return reply(200, updated);
+          }
+        }
+        if (path === '/me/resume-drafts') {
+          if (method === 'GET') return reply(200, { drafts: await dependencies.users.listResumeDrafts(userId) });
+          if (method === 'POST') {
+            const body = parseBody(event);
+            const profileId = resumeText(body.profileId, 'profileId', 160);
+            const importId = resumeText(body.importId, 'importId', 160);
+            const [profile, imported, bankItems] = await Promise.all([
+              dependencies.users.getResumeProfile(userId, profileId), dependencies.users.getImportedResumeJob(userId, importId), dependencies.users.listResumeBank(userId),
+            ]);
+            if (!profile) return reply(404, { message: 'Resume profile not found' });
+            if (!imported) return reply(404, { message: 'Imported job not found' });
+            if (imported.status !== 'ready') return reply(409, { message: 'The job description is still pending. Paste it manually to continue.' });
+            const allowed = new Set(profile.bankItemIds);
+            const changes = resumeDraftChanges(imported, bankItems.filter((item) => allowed.has(item.bankItemId)));
+            const draft: ResumeDraft = { userId, draftId: randomUUID(), profileId, importId, changes, revision: 0, status: 'reviewing', createdAt: timestamp, updatedAt: timestamp };
+            if (!await dependencies.users.putResumeDraft(draft)) return reply(409, { message: 'Resume draft already exists; retry' });
+            return reply(201, draft);
+          }
+        }
+        const draftMatch = path.match(/^\/me\/resume-drafts\/([^/]+)$/u);
+        if (draftMatch) {
+          const draftId = decodeURIComponent(draftMatch[1]!);
+          const previous = await dependencies.users.getResumeDraft(userId, draftId);
+          if (!previous) return reply(404, { message: 'Resume draft not found' });
+          if (method === 'GET') return reply(200, previous);
+          if (method === 'PATCH') {
+            const body = parseBody(event);
+            if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume draft changed; refresh and retry' });
+            if (!Array.isArray(body.decisions)) return reply(400, { message: 'decisions must be a list' });
+            const decisions = new Map(body.decisions.map((decision) => [typeof decision === 'object' && decision !== null ? (decision as Record<string, unknown>).changeId : undefined, typeof decision === 'object' && decision !== null ? (decision as Record<string, unknown>).decision : undefined]));
+            if ([...decisions].some(([id, decision]) => typeof id !== 'string' || (decision !== 'accepted' && decision !== 'rejected')) || [...decisions.keys()].some((id) => !previous.changes.some((change) => change.changeId === id))) return reply(400, { message: 'decisions must name draft changes and use accepted or rejected' });
+            const changes = previous.changes.map((change) => ({ ...change, ...(decisions.has(change.changeId) ? { decision: decisions.get(change.changeId) as 'accepted' | 'rejected' } : {}) }));
+            const updated: ResumeDraft = { ...previous, changes, status: changes.every((change) => change.decision) ? 'finalized' : 'reviewing', revision: previous.revision + 1, updatedAt: timestamp };
+            if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
+            return reply(200, updated);
+          }
+        }
+      }
       const releaseMatch = path.match(/^\/me\/releases\/([^/]+)$/);
       if (method === 'GET' && releaseMatch) {
         const releaseId = decodeURIComponent(releaseMatch[1]!);
@@ -611,10 +788,13 @@ export function createApiHandler(dependencies: ApiDependencies) {
       if (method === 'GET' && path === '/me/profile') return reply(200, (await dependencies.users.getProfile(userId)) ?? null);
       if (method === 'PUT' && path === '/me/profile') { const profile = requireProfile(parseBody(event), userId); await dependencies.users.putProfile(profile); return reply(200, profile); }
       if (method === 'GET' && path === '/me/export') {
-        const [profile, applications, documents] = await Promise.all([
+        const [profile, applications, documents, resumeBank, resumeProfiles, resumeDrafts] = await Promise.all([
           dependencies.users.getProfile(userId),
           dependencies.users.listApplications(userId),
           dependencies.users.listDocuments(userId),
+          dependencies.users.listResumeBank(userId),
+          dependencies.users.listResumeProfiles(userId),
+          dependencies.users.listResumeDrafts(userId),
         ]);
         const exported: AccountDataExport = {
           schemaVersion: ACCOUNT_EXPORT_SCHEMA_VERSION,
@@ -623,6 +803,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
             profile: profile ?? null,
             applications,
             documents: documents.map(({ documentId, fileName, contentType, createdAt }) => ({ documentId, fileName, contentType, createdAt })),
+            resume: { bankItems: resumeBank, profiles: resumeProfiles, drafts: resumeDrafts },
           },
         };
         return reply(200, exported);

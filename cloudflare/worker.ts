@@ -114,6 +114,7 @@ export interface Environment extends AuthEnvironment {
   METADATA_SCHEDULED_COLLECTION_LIMIT?: string;
   GMAIL_ENABLED?: string;
   SHADOW_EXTRACTION_ENABLED?: string;
+  RESUME_TUNER_ENABLED?: string;
   SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS?: string;
   SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS?: string;
   /** Default-disabled, exact-cohort policy for reviewer-receipted shadow data. */
@@ -1035,6 +1036,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     releases: new D1ReleaseStore(env.DB),
     documentStorage: documentStorage(env),
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
+    resumeTunerEnabled: env.RESUME_TUNER_ENABLED === 'true',
     beforeDeleteUser: (userId) => disconnectGmail(userId, env),
     deleteIdentity: async (id) => {
       const email = await accountEmail(env, id);

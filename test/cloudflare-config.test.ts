@@ -185,6 +185,7 @@ describe('Cloudflare deployment configuration', () => {
       max_batch_timeout: 60, max_retries: 2, retry_delay: 300, dead_letter_queue: 'intern-notifs-shadow-extraction-dlq',
     });
     expect(ingestion.vars.SHADOW_EXTRACTION_ENABLED).toBe('true');
+    expect(ingestion.vars.RESUME_TUNER_ENABLED).toBe('false');
     expect(ingestion.vars.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS).toBe('1500');
     expect(ingestion.vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS).toBe('500');
     expect(ingestion.vars.SHADOW_EXTRACTION_QUEUE_NAME).toBe('intern-notifs-shadow-extraction');
@@ -193,6 +194,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('"shadow-extraction"');
     expect(terraform).toContain('{ name = "SHADOW_EXTRACTION_QUEUE_ID", type = "plain_text"');
     expect(terraform).toContain('{ name = "SHADOW_EXTRACTION_QUEUE_NAME", type = "plain_text"');
+    expect(terraform).toContain('{ name = "RESUME_TUNER_ENABLED", type = "plain_text", text = tostring(var.resume_tuner_enabled) }');
     expect(terraform).toContain('contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000');
     expect(terraform).toContain('retry_delay      = each.key == "shadow-extraction" ? 300 : null');
     expect(worker).toContain('env.SHADOW_EXTRACTION_QUEUE_ID');

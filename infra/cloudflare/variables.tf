@@ -81,6 +81,12 @@ variable "gmail_enabled" {
   default     = false
 }
 
+variable "resume_tuner_enabled" {
+  description = "Enables private resume-tailoring records and routes after staged security review."
+  type        = bool
+  default     = false
+}
+
 variable "identity_unconfirmed_publication_enabled" {
   description = "Publishes admission-valid roles that do not yet have reviewed exact posting identity with an under-review disclosure."
   type        = bool
