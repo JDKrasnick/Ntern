@@ -19,6 +19,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('Master Bank evidence');
     expect(app).toContain('label="Keep original"');
     expect(app).toContain('label="Use suggestion"');
+    expect(app).toContain('accessibilityLabel="Previous change"');
     expect(app).toContain('/finalize`');
     expect(app).toContain('/me/resume-artifacts/${result.artifact.artifactId}/content');
   });

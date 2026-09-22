@@ -5740,6 +5740,7 @@ function ResumeWorkspace({ token }: { token: string }) {
               </View>
               <Text style={styles.resumeReason}>{current?.reason}</Text>
               <View style={styles.resumeDecisionRow}>
+                {activeChange > 0 ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous change" onPress={() => setActiveChange((index) => index - 1)} disabled={resumeBusy}><Text style={styles.resumeKeepAll}>Previous</Text></TouchableOpacity> : null}
                 <ActionButton label="Keep original" variant="secondary" onPress={() => decide("rejected")} />
                 <ActionButton label="Use suggestion" onPress={() => decide("accepted")} />
               </View>
