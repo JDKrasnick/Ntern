@@ -107,9 +107,9 @@ export interface AccountDataExport {
     applications: ApplicationRecord[];
     documents: Array<Pick<UserDocument, 'documentId' | 'fileName' | 'contentType' | 'createdAt'>>;
     resume: {
-      bankItems: import('./resume.js').ResumeBankItem[];
-      profiles: import('./resume.js').ResumeProfile[];
-      drafts: import('./resume.js').ResumeDraft[];
+      bankItems: ResumeBankItem[];
+      profiles: ResumeProfile[];
+      drafts: ResumeDraft[];
     };
   };
 }
@@ -1182,3 +1182,4 @@ export interface SourceFetchResult {
     duplicateOccurrenceIds: number;
   };
 }
+import type { ResumeBankItem, ResumeDraft, ResumeProfile } from './resume.js';
