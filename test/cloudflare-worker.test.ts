@@ -700,7 +700,7 @@ describe('Cloudflare GitHub queue continuation', () => {
    * structured registry is empty, so the delivery reaches the reviewed GitHub
    * branch, and the source reports no prior health so quarantine cannot block it.
    */
-  const deliver = async (report: Record<string, unknown>) => {
+  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth } = {}) => {
     const sent: unknown[] = [];
     const handled: string[] = [];
     const polls: Array<{ command: string; sourceIds: string[]; maxListingsPerSourceRun: number | undefined }> = [];
@@ -710,7 +710,7 @@ describe('Cloudflare GitHub queue continuation', () => {
     };
     const logged: string[] = [];
     vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([]);
-    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(options.priorHealth);
     runtime.runRuntimeCommand.mockImplementationOnce(async (command, dependencies) => {
       polls.push({
         command,
@@ -721,7 +721,7 @@ describe('Cloudflare GitHub queue continuation', () => {
     });
     vi.spyOn(console, 'log').mockImplementation((line) => { logged.push(String(line)); });
     const message = {
-      id: 'github-first', body: { sourceId: reviewedGithub.id }, attempts: 1,
+      id: 'github-first', body: { sourceId: reviewedGithub.id, ...(options.force ? { force: true } : {}) }, attempts: 1,
       ack() { handled.push('ack'); }, retry() { handled.push('retry'); },
     };
     try {
@@ -754,6 +754,21 @@ describe('Cloudflare GitHub queue continuation', () => {
     expect(sliceEvents).toEqual([expect.objectContaining({
       sourceId: reviewedGithub.id, continuation: true, resolutionPending: 4, failureCount: 0,
     })]);
+    expect(handled).toEqual(['ack']);
+  });
+
+  it('keeps forced recovery on every continuation while the source remains paused', async () => {
+    const { sent, handled } = await deliver({
+      continuationSources: [reviewedGithub.id],
+      pendingResolution: { [reviewedGithub.id]: 4 },
+      failures: [],
+    }, {
+      force: true,
+      priorHealth: { sourceId: reviewedGithub.id, provider: 'github', region: 'unknown', state: 'quarantined',
+        sourceStatus: 'paused', consecutiveFailures: 2, lastAttemptAt: '2026-09-20T18:12:45.125Z', durationMs: 1 },
+    });
+
+    expect(sent).toEqual([{ sourceId: reviewedGithub.id, force: true }]);
     expect(handled).toEqual(['ack']);
   });
 
