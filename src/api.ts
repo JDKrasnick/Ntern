@@ -860,13 +860,15 @@ export function createApiHandler(dependencies: ApiDependencies) {
       if (method === 'GET' && path === '/me/profile') return reply(200, (await dependencies.users.getProfile(userId)) ?? null);
       if (method === 'PUT' && path === '/me/profile') { const profile = requireProfile(parseBody(event), userId); await dependencies.users.putProfile(profile); return reply(200, profile); }
       if (method === 'GET' && path === '/me/export') {
-        const [profile, applications, documents, resumeBank, resumeProfiles, resumeDrafts] = await Promise.all([
+        const [profile, applications, documents, resumeBank, resumeProfiles, resumeDrafts, resumeImports, resumeArtifacts] = await Promise.all([
           dependencies.users.getProfile(userId),
           dependencies.users.listApplications(userId),
           dependencies.users.listDocuments(userId),
           dependencies.users.listResumeBank(userId),
           dependencies.users.listResumeProfiles(userId),
           dependencies.users.listResumeDrafts(userId),
+          dependencies.users.listImportedResumeJobs(userId),
+          dependencies.users.listResumeArtifacts(userId),
         ]);
         const exported: AccountDataExport = {
           schemaVersion: ACCOUNT_EXPORT_SCHEMA_VERSION,
@@ -875,7 +877,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
             profile: profile ?? null,
             applications,
             documents: documents.map(({ documentId, fileName, contentType, createdAt }) => ({ documentId, fileName, contentType, createdAt })),
-            resume: { bankItems: resumeBank, profiles: resumeProfiles, drafts: resumeDrafts },
+            resume: { bankItems: resumeBank, profiles: resumeProfiles, drafts: resumeDrafts, imports: resumeImports, artifacts: resumeArtifacts },
           },
         };
         return reply(200, exported);

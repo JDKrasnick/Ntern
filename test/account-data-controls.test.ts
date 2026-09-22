@@ -39,7 +39,7 @@ describe('account data controls', () => {
         profile: expect.objectContaining({ userId: 'mock-full', contact: { name: 'QA Student', email: 'qa@example.test' } }),
         applications: [expect.objectContaining({ applicationId: 'application-1', status: 'interview' })],
         documents: [{ documentId: 'document-1', fileName: 'resume.pdf', contentType: 'application/pdf', createdAt: '2026-08-23T00:00:00.000Z' }],
-        resume: { bankItems: [], profiles: [], drafts: [] },
+        resume: { bankItems: [], profiles: [], drafts: [], imports: [], artifacts: [] },
       },
     });
     expect(response.body).not.toContain('secret-storage-key');
@@ -51,7 +51,7 @@ describe('account data controls', () => {
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users: new MemoryUserStore(), now: () => '2026-08-26T12:00:00.000Z' });
     expect(json(await handler(event('mock-empty', 'GET', '/me/export')))).toEqual({
       schemaVersion: 2, exportedAt: '2026-08-26T12:00:00.000Z',
-      account: { profile: null, applications: [], documents: [], resume: { bankItems: [], profiles: [], drafts: [] } },
+      account: { profile: null, applications: [], documents: [], resume: { bankItems: [], profiles: [], drafts: [], imports: [], artifacts: [] } },
     });
     expect((await handler(event(undefined, 'GET', '/me/export'))).statusCode).toBe(401);
     expect((await handler(event(undefined, 'DELETE', '/me'))).statusCode).toBe(401);

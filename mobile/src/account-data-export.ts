@@ -9,6 +9,8 @@ export type AccountExportResponse = {
       bankItems: Array<Record<string, unknown>>;
       profiles: Array<Record<string, unknown>>;
       drafts: Array<Record<string, unknown>>;
+      imports: Array<Record<string, unknown>>;
+      artifacts: Array<Record<string, unknown>>;
     };
   };
 };

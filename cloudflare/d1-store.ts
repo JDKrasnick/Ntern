@@ -8,7 +8,7 @@ import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolut
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
-import type { ImportedJob, ResumeBankItem, ResumeDraft, ResumeProfile } from '../src/resume.js';
+import type { ImportedJob, ResumeArtifact, ResumeBankItem, ResumeDraft, ResumeProfile } from '../src/resume.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from '../src/identity/projection.js';
@@ -1124,6 +1124,14 @@ export class D1UserStore implements UserStore {
       WHERE user_id = ? AND item_key = ? AND CAST(json_extract(value, '$.revision') AS INTEGER) = ?
         AND NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')`)
       .bind(JSON.stringify(value), userId, key, expectedRevision, this.deletionOwner(userId)).run();
+    return result.meta.changes > 0;
+  }
+  async listResumeArtifacts(userId: string) { return this.list<ResumeArtifact>(userId, 'RESUME_ARTIFACT#'); }
+  getResumeArtifact(userId: string, artifactId: string) { return this.get<ResumeArtifact>(userId, `RESUME_ARTIFACT#${artifactId}`); }
+  async putResumeArtifact(value: ResumeArtifact): Promise<boolean> {
+    const result = await this.db.prepare(`INSERT INTO user_items (user_id, item_key, kind, value)
+      SELECT ?, ?, 'resume-artifact', ? WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+      ON CONFLICT(user_id, item_key) DO NOTHING`).bind(value.userId, `RESUME_ARTIFACT#${value.artifactId}`, JSON.stringify(value), this.deletionOwner(value.userId)).run();
     return result.meta.changes > 0;
   }
   getReceipt(userId: string, dedupeKey: string, token: string) { return this.get<DeliveryReceipt>(userId, `RECEIPT#${dedupeKey}#${token}`); }

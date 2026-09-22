@@ -4,7 +4,7 @@ import { employerCategory } from './core/employers.js';
 import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency } from './catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from './types.js';
-import type { ImportedJob, ResumeBankItem, ResumeDraft, ResumeProfile } from './resume.js';
+import type { ImportedJob, ResumeArtifact, ResumeBankItem, ResumeDraft, ResumeProfile } from './resume.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from './identity/posting.js';
 import type { ApplicationSession } from './application-automation.js';
 import type { ReviewedLeverSource } from './sources/lever-config.js';
@@ -335,6 +335,9 @@ export interface UserStore {
   listImportedResumeJobs(userId: string): Promise<ImportedJob[]>;
   getImportedResumeJob(userId: string, importId: string): Promise<ImportedJob | undefined>;
   putImportedResumeJob(userId: string, value: ImportedJob, expectedRevision?: number): Promise<boolean>;
+  listResumeArtifacts(userId: string): Promise<ResumeArtifact[]>;
+  getResumeArtifact(userId: string, artifactId: string): Promise<ResumeArtifact | undefined>;
+  putResumeArtifact(value: ResumeArtifact): Promise<boolean>;
   getReceipt(userId: string, dedupeKey: string, token: string): Promise<DeliveryReceipt | undefined>;
   /** Atomically claims a delivery key. Existing pending/ok receipts win; error receipts may be retried once. */
   claimReceipt(value: DeliveryReceipt): Promise<boolean>;
@@ -366,7 +369,7 @@ export class MemoryReleaseStore implements ReleaseStore {
 /** Durable personalized release rows share the encrypted user-data table. */
 
 export class MemoryUserStore implements UserStore {
-  readonly preferences = new Map<string, UserPreferences>(); readonly devices = new Map<string, DeviceToken>(); readonly profiles = new Map<string, ApplicantProfile>(); readonly applications = new Map<string, ApplicationRecord>(); readonly sessions = new Map<string, ApplicationSession>(); readonly documents = new Map<string, UserDocument>(); readonly resumeBank = new Map<string, ResumeBankItem>(); readonly resumeProfiles = new Map<string, ResumeProfile>(); readonly resumeDrafts = new Map<string, ResumeDraft>(); readonly resumeImports = new Map<string, ImportedJob>(); readonly receipts = new Map<string, DeliveryReceipt>();
+  readonly preferences = new Map<string, UserPreferences>(); readonly devices = new Map<string, DeviceToken>(); readonly profiles = new Map<string, ApplicantProfile>(); readonly applications = new Map<string, ApplicationRecord>(); readonly sessions = new Map<string, ApplicationSession>(); readonly documents = new Map<string, UserDocument>(); readonly resumeBank = new Map<string, ResumeBankItem>(); readonly resumeProfiles = new Map<string, ResumeProfile>(); readonly resumeDrafts = new Map<string, ResumeDraft>(); readonly resumeImports = new Map<string, ImportedJob>(); readonly resumeArtifacts = new Map<string, ResumeArtifact>(); readonly receipts = new Map<string, DeliveryReceipt>();
   readonly deletedUsers = new Set<string>();
   private writable(userId: string) { if (this.deletedUsers.has(deletedUserTombstoneKey(userId).pk)) throw new Error('Account deletion is in progress'); }
   async beginUserDeletion(userId: string) { this.deletedUsers.add(deletedUserTombstoneKey(userId).pk); }
@@ -396,6 +399,9 @@ export class MemoryUserStore implements UserStore {
   async listImportedResumeJobs(userId: string) { return [...this.resumeImports.entries()].filter(([key]) => key.startsWith(`${userId}#`)).map(([, item]) => structuredClone(item)); }
   async getImportedResumeJob(userId: string, importId: string) { const item = this.resumeImports.get(`${userId}#${importId}`); return item && structuredClone(item); }
   async putImportedResumeJob(userId: string, value: ImportedJob, expectedRevision?: number) { if (this.deletedUsers.has(deletedUserTombstoneKey(userId).pk)) return false; const key = `${userId}#${value.importId}`; const previous = this.resumeImports.get(key); if ((expectedRevision === undefined && previous) || (expectedRevision !== undefined && previous?.revision !== expectedRevision)) return false; this.resumeImports.set(key, structuredClone(value)); return true; }
+  async listResumeArtifacts(userId: string) { return [...this.resumeArtifacts.values()].filter((item) => item.userId === userId).map((item) => structuredClone(item)); }
+  async getResumeArtifact(userId: string, artifactId: string) { const item = this.resumeArtifacts.get(`${userId}#${artifactId}`); return item && structuredClone(item); }
+  async putResumeArtifact(value: ResumeArtifact) { if (this.deletedUsers.has(deletedUserTombstoneKey(value.userId).pk)) return false; const key = `${value.userId}#${value.artifactId}`; if (this.resumeArtifacts.has(key)) return false; this.resumeArtifacts.set(key, structuredClone(value)); return true; }
   async getReceipt(userId: string, dedupeKey: string, token: string) { return this.receipts.get(`${userId}#${dedupeKey}#${token}`); }
   async claimReceipt(value: DeliveryReceipt) { if (await this.isUserDeletionPending(value.userId)) return false; const key = `${value.userId}#${value.dedupeKey ?? value.jobId}#${value.token}`; const existing = this.receipts.get(key); if (existing && existing.status !== 'error') return false; this.receipts.set(key, structuredClone(value)); return true; }
   async putReceipt(value: DeliveryReceipt) { this.writable(value.userId); this.receipts.set(`${value.userId}#${value.dedupeKey ?? value.jobId}#${value.token}`, structuredClone(value)); }
@@ -409,5 +415,5 @@ export class MemoryUserStore implements UserStore {
   async pendingReceipts() { return [...this.receipts.values()].filter((receipt) => receipt.status === 'pending' && receipt.ticketId).map((receipt) => structuredClone(receipt)); }
   async retryableReceipts() { return [...this.receipts.values()].filter((receipt) => receipt.status === 'retryable').map((receipt) => structuredClone(receipt)); }
   async deferredReceipts() { return [...this.receipts.values()].filter((receipt) => receipt.status === 'deferred').map((receipt) => structuredClone(receipt)); }
-  async deleteUser(userId: string) { await this.beginUserDeletion(userId); const docs = await this.listDocuments(userId); for (const map of [this.preferences, this.profiles]) map.delete(userId); for (const map of [this.devices, this.applications, this.sessions, this.documents, this.resumeBank, this.resumeProfiles, this.resumeDrafts, this.resumeImports, this.receipts]) for (const [key] of map) if (key.startsWith(`${userId}#`)) map.delete(key); return docs; }
+  async deleteUser(userId: string) { await this.beginUserDeletion(userId); const docs = await this.listDocuments(userId); for (const map of [this.preferences, this.profiles]) map.delete(userId); for (const map of [this.devices, this.applications, this.sessions, this.documents, this.resumeBank, this.resumeProfiles, this.resumeDrafts, this.resumeImports, this.resumeArtifacts, this.receipts]) for (const [key] of map) if (key.startsWith(`${userId}#`)) map.delete(key); return docs; }
 }

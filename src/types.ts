@@ -1,6 +1,7 @@
 import type { JobFilter } from './core/filters.js';
 import type { EmployerCategory } from './core/employers.js';
 import type { EducationLevel } from '../shared/education-display.js';
+import type { ImportedJob, ResumeArtifact, ResumeBankItem, ResumeDraft, ResumeProfile } from './resume.js';
 
 export type { EducationLevel };
 
@@ -110,6 +111,8 @@ export interface AccountDataExport {
       bankItems: ResumeBankItem[];
       profiles: ResumeProfile[];
       drafts: ResumeDraft[];
+      imports: ImportedJob[];
+      artifacts: ResumeArtifact[];
     };
   };
 }
@@ -1182,4 +1185,3 @@ export interface SourceFetchResult {
     duplicateOccurrenceIds: number;
   };
 }
-import type { ResumeBankItem, ResumeDraft, ResumeProfile } from './resume.js';
