@@ -26,6 +26,7 @@ describe('OpenAI shadow inference', () => {
         response_format: { type: 'json_schema' },
       });
       expect(init?.headers).toMatchObject({ authorization: 'Bearer test-key' });
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
       return Response.json({
         choices: [{ message: { content: JSON.stringify(extracted) } }],
         usage: { prompt_tokens: 1_000, completion_tokens: 500 },

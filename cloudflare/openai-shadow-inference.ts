@@ -123,25 +123,32 @@ export async function inferOpenAIShadowExtraction(
   const outputLimit = model.startsWith('gpt-5-') ? { max_completion_tokens: outputCap } : { max_tokens: outputCap };
   const sampling = model.startsWith('gpt-5-') ? {} : { temperature: 0 };
   const reasoning = model.startsWith('gpt-5-') && options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {};
-  const response = await request(endpoint, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      ...sampling,
-      ...reasoning,
-      ...outputLimit,
-      response_format: {
-        type: 'json_schema',
-        json_schema: { name: 'shadow_metadata_extraction', strict: true, schema: responseSchema },
-      },
-      messages: [
-        { role: 'system', content: prompt.system },
-        { role: 'user', content: prompt.user },
-      ],
-    }),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+  let response: Response;
+  try {
+    response = await request(endpoint, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        ...sampling,
+        ...reasoning,
+        ...outputLimit,
+        response_format: {
+          type: 'json_schema',
+          json_schema: { name: 'shadow_metadata_extraction', strict: true, schema: responseSchema },
+        },
+        messages: [
+          { role: 'system', content: prompt.system },
+          { role: 'user', content: prompt.user },
+        ],
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
   const completion = await boundedJson(response);
   if (!response.ok) {
     const detail = typeof completion.error?.message === 'string' ? `: ${completion.error.message.slice(0, 300)}` : '';

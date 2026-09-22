@@ -17,8 +17,10 @@ const maxCostCents = Number(option('--max-cost-cents') ?? 100);
 const reasoningEffort = option('--reasoning-effort') ?? 'minimal';
 const offset = Number(option('--offset') ?? 0);
 const limit = Number(option('--limit') ?? 50);
+const concurrency = Number(option('--concurrency') ?? 1);
 if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || !Number.isSafeInteger(maxCostCents) || maxCostCents < 1
-  || !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid token, cost, offset, or limit');
+  || !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50
+  || !Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 10) throw new Error('Invalid token, cost, offset, limit, or concurrency');
 if (!['minimal', 'low', 'medium', 'high'].includes(reasoningEffort)) throw new Error('Invalid reasoning effort');
 
 function apiKey(): string {
@@ -37,7 +39,7 @@ const records: Array<Record<string, unknown>> = [];
 const rawPresent: Record<string, number> = {};
 const guardedPresent: Record<string, number> = {};
 const changedByField: Record<string, number> = {};
-for (const run of runs) {
+async function processRun(run: Run) {
   const artifact = JSON.parse(await readFile(`${artifactsPath}/input/${run.run_key}.json`, 'utf8')) as { normalized: { title: string; description: string; completeness: string } };
   const input = normalizeExactPostingDescription(artifact.normalized.title, artifact.normalized.description, artifact.normalized.completeness === 'incomplete');
   if (spentCents >= maxCostCents) throw new Error(`Cost ceiling reached before ${run.run_key}`);
@@ -49,7 +51,7 @@ for (const run of runs) {
     if (!validation.accepted) {
       records.push({ id: run.run_key, sourceId: run.source_id, inputCompleteness: input.completeness, valid: false, failures: validation.failures,
         inputTokens: inference.inputTokens, outputTokens: inference.outputTokens, actualCostCents: inference.actualCostCents, response: inference.response });
-      continue;
+      return;
     }
     const guard = postprocessRoleScopedExtraction(validation.accepted, input.completeness);
     for (const [field, value] of Object.entries(validation.accepted.fields)) if (value.status === 'present') rawPresent[field] = (rawPresent[field] ?? 0) + 1;
@@ -62,6 +64,13 @@ for (const run of runs) {
     records.push({ id: run.run_key, sourceId: run.source_id, valid: false, error: error instanceof Error ? error.message : String(error) });
   }
 }
+let nextRun = 0;
+await Promise.all(Array.from({ length: Math.min(concurrency, runs.length) }, async () => {
+  while (nextRun < runs.length) {
+    const run = runs[nextRun++]!;
+    await processRun(run);
+  }
+}));
 const validCases = records.filter((record) => record.valid).length;
 const report = { version: 1, purpose: 'Fresh, independently selected 50-content cohort. Outputs require human labels before accuracy scoring.', model, reasoningEffort, offset,
   maxOutputTokens, maxCostCents, spentCents, totalCases: runs.length, validCases, invalidCases: runs.length - validCases, rawPresent, guardedPresent,
