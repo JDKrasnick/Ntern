@@ -41,6 +41,7 @@ import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
 import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
 import { extractResumeJobText } from '../src/resume-job-import.js';
+import { workersAiResumeDraftGenerator } from '../src/resume-generation.js';
 import type { EmployerVerificationChallenge } from '../src/employer-types.js';
 import { reviewedProviderRegistry, reviewedStructuredRegistry } from './employer-registry.js';
 import { StructuredCareerSourceConnector } from '../src/sources/structured/index.js';
@@ -66,6 +67,7 @@ import {
 } from '../src/integration-registry.js';
 
 export interface Environment extends AuthEnvironment {
+  AI: import('../src/resume-generation.js').WorkersAi;
   DOCUMENTS: R2Bucket;
   SHADOW_EXTRACTION_ARTIFACTS: R2Bucket;
   GREENHOUSE_QUEUE: Queue;
@@ -1092,6 +1094,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     resumeArtifactStorage: resumeArtifactStorage(env),
     resumeImportQueue: resumeImportQueue(env),
     resumeImportCache: resumeImportCache(env),
+    resumeDraftGenerator: workersAiResumeDraftGenerator(env.AI),
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     resumeTunerEnabled: env.RESUME_TUNER_ENABLED === 'true',
     beforeDeleteUser: (userId) => disconnectGmail(userId, env),

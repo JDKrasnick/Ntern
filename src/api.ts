@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, recommendResumeProfiles, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, recommendResumeProfiles, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 
@@ -379,6 +379,11 @@ export interface ResumeImportCache {
   get(canonicalUrl: string): Promise<Pick<ImportedJob, 'canonicalUrl' | 'title' | 'company' | 'description' | 'contentHash'> | undefined>;
 }
 
+/** Model implementations return only proposed structured changes; API guards own validation. */
+export interface ResumeDraftGenerator {
+  generate(input: { job: ImportedJob; profile: ResumeProfile; bankItems: ResumeBankItem[] }): Promise<ResumeChange[]>;
+}
+
 export interface ResumeArtifactStorage {
   putTex(objectKey: string, tex: string): Promise<void>;
   createContentUrl(artifact: { userId: string; artifactId: string; objectKey: string }): Promise<string>;
@@ -391,6 +396,7 @@ export interface ApiDependencies {
   documentStorage?: DocumentStorage;
   resumeImportQueue?: ResumeImportQueue;
   resumeImportCache?: ResumeImportCache;
+  resumeDraftGenerator?: ResumeDraftGenerator;
   resumeDocumentExtractor?: (bytes: ArrayBuffer, contentType: string) => Promise<ExtractedResumeItem[]>;
   resumeArtifactStorage?: ResumeArtifactStorage;
   deleteIdentity?: (userId: string) => Promise<void>;
@@ -772,7 +778,19 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (!imported) return reply(404, { message: 'Imported job not found' });
             if (imported.status !== 'ready') return reply(409, { message: 'The job description is still pending. Paste it manually to continue.' });
             const allowed = new Set(profile.bankItemIds);
-            const changes = resumeDraftChanges(imported, bankItems.filter((item) => allowed.has(item.bankItemId)));
+            const selected = bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified);
+            let changes: ResumeChange[];
+            try {
+              changes = dependencies.resumeDraftGenerator
+                ? await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: selected })
+                : resumeDraftChanges(imported, selected);
+              validateResumeChanges(changes, selected);
+            } catch {
+              // Generation availability must not make a verified base unusable.
+              // The fallback remains evidence-linked and never invents a claim.
+              changes = resumeDraftChanges(imported, selected);
+            }
+            validateResumeChanges(changes, selected);
             const draft: ResumeDraft = { userId, draftId: randomUUID(), profileId, importId, changes, revision: 0, status: 'reviewing', createdAt: timestamp, updatedAt: timestamp };
             if (!await dependencies.users.putResumeDraft(draft)) return reply(409, { message: 'Resume draft already exists; retry' });
             return reply(201, draft);

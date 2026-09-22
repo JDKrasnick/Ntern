@@ -7,6 +7,7 @@
   "durable_objects": { "bindings": [{ "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController", "script_name": "intern-notifs-ingestion" }] },
   "limits": { "cpu_ms": 30000, "subrequests": 10000 },
   "observability": { "enabled": true },
+  "ai": { "binding": "AI" },
   "d1_databases": [
     { "binding": "DB", "database_name": "intern-notifs-db", "database_id": "4e389f1c-7c6d-48e1-aa97-dc4cb1769bb8", "migrations_dir": "cloudflare/migrations" }
   ],

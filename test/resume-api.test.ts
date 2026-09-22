@@ -105,6 +105,16 @@ describe('resume API ownership and revisions', () => {
     expect(queued).not.toHaveBeenCalled();
   });
 
+  it('rejects malformed generated changes and falls back to verified deterministic evidence', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Web', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'TypeScript dashboard role', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeDraftGenerator: { generate: async () => [{ changeId: 'bad', type: 'add', section: 'Projects', suggestion: 'Claim 999 customers', evidenceIds: ['unknown'], reason: 'bad' }] } });
+    const response = await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }));
+    expect(JSON.parse(response.body)).toMatchObject({ changes: [expect.objectContaining({ evidenceIds: ['evidence'] })] });
+  });
+
   it('imports PDF or DOCX extraction as unverified, user-owned bank cards', async () => {
     const users = new MemoryUserStore();
     await users.putDocument({ userId: 'student', documentId: 'resume', fileName: 'resume.pdf', contentType: 'application/pdf', objectKey: 'private/student/resume', createdAt: 'now' });
