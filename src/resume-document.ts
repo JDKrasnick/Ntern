@@ -126,6 +126,8 @@ export async function extractResumeDocument(bytes: ArrayBuffer, contentType: str
     text = cleanXml(new TextDecoder().decode(documentXml));
   } else if (normalized === 'application/pdf') {
     ensurePdfTextExtractionGlobals();
+    const pdfWorker = await import('pdfjs-dist/legacy/build/pdf.worker.mjs');
+    (globalThis as typeof globalThis & { pdfjsWorker?: typeof pdfWorker }).pdfjsWorker ??= pdfWorker;
     const pdf = await import('pdfjs-dist/legacy/build/pdf.mjs');
     const document = await pdf.getDocument({ data: new Uint8Array(bytes) }).promise;
     try {
