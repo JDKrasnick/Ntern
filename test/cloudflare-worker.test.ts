@@ -328,12 +328,49 @@ describe('Cloudflare DLQ route authentication', () => {
 });
 
 describe('resume artifact rollout boundary', () => {
-  it('hides artifact downloads while resume tailoring is disabled', async () => {
-    const response = await cloudflareWorker.fetch(
-      new Request('https://intern-notifs.test/me/resume-artifacts/artifact/content'),
-      { RESUME_TUNER_ENABLED: 'false', PUBLIC_API_URL: 'https://intern-notifs.test', DB: { prepare: () => ({ async first() { return null; } }) } } as unknown as Environment,
-    );
-    expect(response.status).toBe(404);
+  it('hides artifact content, source, and previews while resume tailoring is disabled', async () => {
+    for (const suffix of ['content', 'source', 'preview/1']) {
+      const response = await cloudflareWorker.fetch(
+        new Request(`https://intern-notifs.test/me/resume-artifacts/artifact/${suffix}`),
+        { RESUME_TUNER_ENABLED: 'false', PUBLIC_API_URL: 'https://intern-notifs.test', DB: { prepare: () => ({ async first() { return null; } }) } } as unknown as Environment,
+      );
+      expect(response.status).toBe(404);
+    }
+  });
+
+  it('serves the authenticated owner PDF, LaTeX source, and rendered preview privately', async () => {
+    const artifact = {
+      userId: 'student', artifactId: 'artifact', draftId: 'draft', objectKey: 'private/student/resume.pdf',
+      texObjectKey: 'private/student/resume.tex', previewObjectKeys: ['private/student/preview-1.png'],
+      templateVersion: 'v1', compilerVersion: 'compiler', resumeSpecHash: 'hash', pageCount: 1, createdAt: 'now',
+    };
+    const getArtifact = vi.spyOn(D1UserStore.prototype, 'getResumeArtifact').mockResolvedValue(artifact);
+    const getObject = vi.fn(async (key: string) => ({ body: new TextEncoder().encode(key) }));
+    const statement = { bind() { return this; }, async first() { return { user_id: 'student' }; } };
+    const env = {
+      RESUME_TUNER_ENABLED: 'true', PUBLIC_API_URL: 'https://intern-notifs.test',
+      AUTH_SESSION_SECRET: 'a-production-length-session-secret-value',
+      DB: { prepare: () => statement }, DOCUMENTS: { get: getObject },
+    } as unknown as Environment;
+    try {
+      for (const [suffix, contentType, objectKey] of [
+        ['content', 'application/pdf', artifact.objectKey],
+        ['source', 'text/plain; charset=utf-8', artifact.texObjectKey],
+        ['preview/1', 'image/png', artifact.previewObjectKeys[0]],
+      ] as const) {
+        const response = await cloudflareWorker.fetch(new Request(`https://intern-notifs.test/me/resume-artifacts/artifact/${suffix}`, {
+          headers: { Authorization: 'Bearer session-token' },
+        }), env);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe(contentType);
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+        expect(await response.text()).toBe(objectKey);
+      }
+      expect(getArtifact).toHaveBeenCalledTimes(3);
+      expect(getObject).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
 

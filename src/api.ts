@@ -432,6 +432,16 @@ function resumeDraftChanges(job: ImportedJob, bankItems: ResumeBankItem[]): Resu
     return [{ changeId: randomUUID(), type: 'move' as const, section: item.kind === 'skill' ? 'Skills' : 'Selected experience', original: item.content, evidenceIds: [item.bankItemId], reason: `Matches job language: ${[...new Set(matched)].slice(0, 3).join(', ')}.` }];
   }).slice(0, 12);
 }
+
+/** Keeps a comprehensive Technical base out of the model context window while
+ * retaining the source records with the strongest direct job-language match. */
+function resumeGenerationEvidence(job: ImportedJob, bankItems: ResumeBankItem[], limit = 80): ResumeBankItem[] {
+  const jobWords = new Set(`${job.title ?? ''} ${job.company ?? ''} ${job.description}`.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
+  return bankItems.map((item, index) => ({
+    item, index,
+    score: [...new Set(item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? [])].filter((word) => jobWords.has(word)).length,
+  })).filter(({ score }) => score > 0).sort((left, right) => right.score - left.score || left.index - right.index).slice(0, limit).map(({ item }) => item);
+}
 export function createApiHandler(dependencies: ApiDependencies) {
   const identityUnconfirmedPublicationEnabled = dependencies.identityUnconfirmedPublicationEnabled ?? true;
   const integrations = dependencies.integrations ?? new EmployerIntegrationRegistry();
@@ -616,10 +626,12 @@ export function createApiHandler(dependencies: ApiDependencies) {
               userId, bankItemId: randomUUID(), kind: body.kind as ResumeBankItem['kind'], content: resumeText(body.content, 'content'),
               ...(typeof body.sourceDocumentId === 'string' && body.sourceDocumentId ? { sourceDocumentId: body.sourceDocumentId.slice(0, 160) } : {}),
               ...(typeof body.sourceLocation === 'string' && body.sourceLocation ? { sourceLocation: body.sourceLocation.slice(0, 500) } : {}),
-              // A caller cannot mark unreviewed extraction as verified.
-              verified: false, revision: 0, createdAt: timestamp, updatedAt: timestamp,
+              // The user authored this private source material. Review is reserved
+              // for job-specific changes derived from it, not every stored fact.
+              verified: true, revision: 0, createdAt: timestamp, updatedAt: timestamp,
             };
             if (!await dependencies.users.putResumeBankItem(item)) return reply(409, { message: 'Resume bank item already exists; retry' });
+            try { await dependencies.resumeSemanticIndex?.index(item); } catch { /* D1 remains authoritative if the derived cache is unavailable. */ }
             return reply(201, item);
           }
         }
@@ -631,8 +643,8 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (!document) return reply(404, { message: 'Document not found' });
           const items = await (dependencies.resumeDocumentExtractor ?? extractResumeDocument)(await documentStorage.readContent(document), document.contentType);
           const created: ResumeBankItem[] = [];
-          for (const extracted of items.slice(0, 100)) {
-            const item: ResumeBankItem = { userId, bankItemId: randomUUID(), kind: extracted.kind, content: extracted.content, sourceDocumentId: document.documentId, sourceLocation: extracted.sourceLocation, verified: false, revision: 0, createdAt: timestamp, updatedAt: timestamp };
+          for (const extracted of items.slice(0, 500)) {
+            const item: ResumeBankItem = { userId, bankItemId: randomUUID(), kind: extracted.kind, content: extracted.content, sourceDocumentId: document.documentId, sourceLocation: extracted.sourceLocation, verified: true, revision: 0, createdAt: timestamp, updatedAt: timestamp };
             if (await dependencies.users.putResumeBankItem(item)) created.push(item);
           }
           return reply(201, { items: created });
@@ -734,7 +746,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const body = parseBody(event);
             const template = body.template as ResumeTemplateId;
             if (!resumeTemplates.has(template)) return reply(400, { message: 'template is not supported' });
-            const bankItemIds = resumeStrings(body.bankItemIds, 'bankItemIds', 100);
+            const bankItemIds = resumeStrings(body.bankItemIds, 'bankItemIds', 500);
             const owned = new Set((await dependencies.users.listResumeBank(userId)).map((item) => item.bankItemId));
             if (bankItemIds.some((id) => !owned.has(id))) return reply(403, { message: 'A resume profile may only reference your bank items' });
             const profile: ResumeProfile = {
@@ -762,7 +774,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume profile changed; refresh and retry' });
             const template = body.template === undefined ? previous.template : body.template as ResumeTemplateId;
             if (!resumeTemplates.has(template)) return reply(400, { message: 'template is not supported' });
-            const bankItemIds = body.bankItemIds === undefined ? previous.bankItemIds : resumeStrings(body.bankItemIds, 'bankItemIds', 100);
+            const bankItemIds = body.bankItemIds === undefined ? previous.bankItemIds : resumeStrings(body.bankItemIds, 'bankItemIds', 500);
             const owned = new Set((await dependencies.users.listResumeBank(userId)).map((item) => item.bankItemId));
             if (bankItemIds.some((id) => !owned.has(id))) return reply(403, { message: 'A resume profile may only reference your bank items' });
             const updated: ResumeProfile = {
@@ -793,7 +805,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
             let changes: ResumeChange[];
             try {
               changes = dependencies.resumeDraftGenerator
-                ? await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: selected })
+                ? await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: resumeGenerationEvidence(imported, selected) })
                 : resumeDraftChanges(imported, selected);
               validateResumeChanges(changes, selected);
             } catch {

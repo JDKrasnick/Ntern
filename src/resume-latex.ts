@@ -11,10 +11,9 @@ const sectionForKind: Record<ResumeBankItem['kind'], string> = {
   role: 'Experience', project: 'Projects', skill: 'Skills', education: 'Education', bullet: 'Selected experience',
 };
 
-const sameText = (left: string, right: string) => left.trim() === right.trim();
-
-/** Builds a fixed-template document from the reviewed base, then applies every
- * accepted review decision. The bank remains the user-owned source of truth. */
+/** Builds a fixed-template document from the reviewed job-specific selection.
+ * The profile may point at a large content bank; only evidence surfaced in the
+ * draft enters the rendered resume. */
 export function renderResumeLatex(profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[] = []): { tex: string; resumeSpecHash: string } {
   const sections = new Map<string, string[]>();
   const add = (section: string, content: string) => {
@@ -27,29 +26,20 @@ export function renderResumeLatex(profile: ResumeProfile, applicant: ApplicantPr
     for (const line of content.split(/\r?\n/gu)) add(section, line);
   }
   const allowed = new Set(profile.bankItemIds);
-  for (const item of bankItems) if (item.verified && allowed.has(item.bankItemId)) add(sectionForKind[item.kind], item.content);
-  const remove = (original: string, preferredSection?: string) => {
-    const entries = preferredSection && sections.has(preferredSection)
-      ? [[preferredSection, sections.get(preferredSection)!] as const]
-      : [...sections.entries()];
-    for (const [section, lines] of entries) {
-      const index = lines.findIndex((line) => sameText(line, original));
-      if (index >= 0) {
-        sections.set(section, lines.filter((_, candidate) => candidate !== index));
-        return true;
-      }
-    }
-    return false;
+  const bankById = new Map(bankItems.filter((item) => item.verified && allowed.has(item.bankItemId)).map((item) => [item.bankItemId, item]));
+  const originalSection = (change: ResumeDraft['changes'][number]) => {
+    const evidence = change.evidenceIds.map((id) => bankById.get(id)).find(Boolean);
+    return evidence ? sectionForKind[evidence.kind] : change.section;
   };
   for (const change of draft.changes) {
+    if (change.decision === 'rejected') {
+      if (change.type !== 'add' && change.original) add(originalSection(change), change.original);
+      continue;
+    }
     if (change.decision !== 'accepted') continue;
     if (change.type === 'add' && change.suggestion) add(change.section, change.suggestion);
-    if (change.type === 'remove' && change.original) remove(change.original, change.section);
-    if (change.type === 'move' && change.original && remove(change.original)) add(change.section, change.original);
-    if (change.type === 'rewrite' && change.suggestion) {
-      if (change.original) remove(change.original, change.section);
-      add(change.section, change.suggestion);
-    }
+    if (change.type === 'move' && change.original) add(change.section, change.original);
+    if (change.type === 'rewrite' && change.suggestion) add(change.section, change.suggestion);
   }
   const rank = new Map(profile.sectionOrder.map((section, index) => [section.toLowerCase(), index]));
   const body = [...sections.entries()]
@@ -58,5 +48,6 @@ export function renderResumeLatex(profile: ResumeProfile, applicant: ApplicantPr
     .map(([section, lines]) => `\\section*{${escapeLatex(section)}}\n\\begin{itemize}\n${lines.map((line) => `  \\item ${escapeLatex(line)}`).join('\n')}\n\\end{itemize}`).join('\n\n');
   const contact = [applicant.location, applicant.contact.email, applicant.contact.phone, ...Object.values(applicant.links)].filter((value): value is string => Boolean(value?.trim())).map(escapeLatex).join(' $\\cdot$ ');
   const tex = `\\documentclass[10pt]{article}\n\\usepackage[margin=0.65in]{geometry}\n\\usepackage[T1]{fontenc}\n\\begin{document}\n\\begin{center}{\\Large ${escapeLatex(applicant.contact.name)}}\\\\\n${contact}\\end{center}\n${body || '% No accepted changes.'}\n\\end{document}\n`;
-  return { tex, resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, applicant: { contact: applicant.contact, location: applicant.location, links: applicant.links }, draftId: draft.draftId, changes: draft.changes, approvedWording: profile.approvedWording, bank: bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified).map(({ bankItemId, kind, content, revision }) => ({ bankItemId, kind, content, revision })), template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex') };
+  const referenced = new Set(draft.changes.flatMap((change) => change.evidenceIds));
+  return { tex, resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, applicant: { contact: applicant.contact, location: applicant.location, links: applicant.links }, draftId: draft.draftId, changes: draft.changes, approvedWording: profile.approvedWording, bank: bankItems.filter((item) => referenced.has(item.bankItemId) && allowed.has(item.bankItemId) && item.verified).map(({ bankItemId, kind, content, revision }) => ({ bankItemId, kind, content, revision })), template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex') };
 }

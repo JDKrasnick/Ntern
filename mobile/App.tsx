@@ -8,6 +8,7 @@ import {
   Easing,
   FlatList,
   InteractionManager,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -50,7 +51,7 @@ import { migrateLegacyAccountAlerts } from "./src/legacy-alert-migration";
 import { buildCompleteDataExport, DataExportFetchError, SharingUnavailableError, type AccountExportResponse } from "./src/account-data-export";
 import { accountDataActionState } from "./src/account-data-controls";
 import { shareDataExport } from "./src/account-data-share";
-import { shareResumeArtifact } from "./src/resume-artifact-share";
+import { loadResumeArtifactPreview, loadResumeArtifactSource, releaseResumeArtifactPreview, shareResumeArtifact } from "./src/resume-artifact-share";
 import { pollResumeImport } from "./src/resume-import-poll";
 import { clearSession, confirmEmail, restoreSession, signIn, signOut, signUp } from "./src/auth";
 import { policyUrls } from "./src/policies";
@@ -5454,8 +5455,8 @@ function AccountGate({
 type ResumeBankCard = { bankItemId: string; kind: string; content: string; verified: boolean; revision: number };
 type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; revision: number };
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
-type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; section: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
-type ResumeArtifactCard = { artifactId: string };
+type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
+type ResumeArtifactCard = { artifactId: string; pageCount?: number };
 
 function ResumeWorkspace({ token }: { token: string }) {
   const { width } = useWindowDimensions();
@@ -5466,6 +5467,7 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [bankLoading, setBankLoading] = useState(true);
   const [bankSaving, setBankSaving] = useState(false);
   const [bankError, setBankError] = useState<string>();
+  const [bankExpanded, setBankExpanded] = useState(false);
   const [profiles, setProfiles] = useState<ResumeProfileCard[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState<string>();
   const [jobImport, setJobImport] = useState<ResumeImportCard>();
@@ -5474,6 +5476,11 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [resumeBusy, setResumeBusy] = useState(false);
   const [activeChange, setActiveChange] = useState(0);
   const [reviewMode, setReviewMode] = useState<"changes" | "preview">("changes");
+  const [artifact, setArtifact] = useState<ResumeArtifactCard>();
+  const [artifactMode, setArtifactMode] = useState<"rendered" | "latex">("rendered");
+  const [artifactPreview, setArtifactPreview] = useState<string>();
+  const [artifactSource, setArtifactSource] = useState("");
+  const [artifactLoading, setArtifactLoading] = useState(false);
   const current = draft?.changes[activeChange];
   const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
   const decide = (decision: "accepted" | "rejected") => {
@@ -5503,6 +5510,9 @@ function ResumeWorkspace({ token }: { token: string }) {
       .finally(() => setResumeBusy(false));
   };
   const accepted = draft?.changes.filter((change) => change.decision === "accepted").length ?? 0;
+  const technicalBase = profiles.find((profile) => profile.name === "Technical base");
+  const visibleBankItems = bankExpanded ? bankItems : bankItems.slice(0, 12);
+  const bankKindCounts = bankItems.reduce<Record<string, number>>((counts, item) => ({ ...counts, [item.kind]: (counts[item.kind] ?? 0) + 1 }), {});
   const loadBank = () => {
     setBankLoading(true);
     setBankError(undefined);
@@ -5536,6 +5546,7 @@ function ResumeWorkspace({ token }: { token: string }) {
       .catch((error) => { if (!cancelled) setBankError(error instanceof Error ? error.message : "We couldn't refresh that job import."); });
     return () => { cancelled = true; };
   }, [jobImport?.importId, jobImport?.status, token]);
+  useEffect(() => () => releaseResumeArtifactPreview(artifactPreview), [artifactPreview]);
   const addBankItem = () => {
     const content = bankDraft.trim();
     if (!content || bankSaving) return;
@@ -5549,17 +5560,6 @@ function ResumeWorkspace({ token }: { token: string }) {
         setBankDraft("");
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that bank item."))
-      .finally(() => setBankSaving(false));
-  };
-  const setBankItemVerification = (item: ResumeBankCard, verified: boolean) => {
-    if (bankSaving) return;
-    setBankSaving(true);
-    setBankError(undefined);
-    void api<ResumeBankCard>(`/me/resume-bank/${encodeURIComponent(item.bankItemId)}`, token, {
-      method: "PATCH", body: JSON.stringify({ revision: item.revision, verified }),
-    })
-      .then((updated) => setBankItems((items) => items.map((current) => current.bankItemId === updated.bankItemId ? updated : current)))
-      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that review."))
       .finally(() => setBankSaving(false));
   };
   const importResume = async () => {
@@ -5587,8 +5587,11 @@ function ResumeWorkspace({ token }: { token: string }) {
   const saveBase = () => {
     if (resumeBusy || !bankItems.length) return;
     setResumeBusy(true);
-    void api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: bankItems.map((item) => item.bankItemId), sectionOrder: ["experience", "projects", "skills"], template: "clean-standard" }) })
-      .then((profile) => { setProfiles((all) => [...all, profile]); setSelectedProfileId(profile.profileId); })
+    const request = technicalBase
+      ? api<ResumeProfileCard>(`/me/resume-profiles/${technicalBase.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: technicalBase.revision, bankItemIds: bankItems.map((item) => item.bankItemId) }) })
+      : api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: bankItems.map((item) => item.bankItemId), sectionOrder: ["experience", "projects", "skills", "education"], template: "clean-standard" }) });
+    void request
+      .then((profile) => { setProfiles((all) => technicalBase ? all.map((item) => item.profileId === profile.profileId ? profile : item) : [...all, profile]); setSelectedProfileId(profile.profileId); })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that base."))
       .finally(() => setResumeBusy(false));
   };
@@ -5616,7 +5619,7 @@ function ResumeWorkspace({ token }: { token: string }) {
     if (!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy) return;
     setResumeBusy(true);
     void api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: selectedProfileId }) })
-      .then((value) => { setDraft(value); setActiveChange(0); })
+      .then((value) => { setDraft(value); setActiveChange(0); setArtifact(undefined); setArtifactSource(""); setArtifactPreview(undefined); setReviewMode("changes"); })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create a grounded draft."))
       .finally(() => setResumeBusy(false));
   };
@@ -5627,10 +5630,19 @@ function ResumeWorkspace({ token }: { token: string }) {
       .then(async (result) => {
         setDraft(result.draft);
         if (!result.artifact) return;
-        await shareResumeArtifact(result.artifact.artifactId, token);
+        setArtifact(result.artifact);
+        setReviewMode("preview");
+        setArtifactMode("rendered");
+        setArtifactLoading(true);
+        const [preview, source] = await Promise.all([
+          loadResumeArtifactPreview(result.artifact.artifactId, 1, token),
+          loadResumeArtifactSource(result.artifact.artifactId, token),
+        ]);
+        setArtifactPreview(preview);
+        setArtifactSource(source);
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create that résumé."))
-      .finally(() => setResumeBusy(false));
+      .finally(() => { setResumeBusy(false); setArtifactLoading(false); });
   };
 
   return (
@@ -5638,29 +5650,29 @@ function ResumeWorkspace({ token }: { token: string }) {
       <PageHeading
         eyebrow="Resume"
         title="Tailor from what you have done."
-        description="Start with verified experience, then review every suggested change before creating a résumé."
+        description="Keep one comprehensive technical base, then review only the changes proposed for each role."
       />
 
       <View style={styles.resumeOverview}>
         <View style={styles.resumeOverviewCopy}>
-          <Text style={styles.resumeCardLabel}>Master Bank</Text>
-          <Text style={styles.resumeCardTitle}>Your source of truth</Text>
-          <Text style={styles.resumeCardCopy}>Add résumés, roles, projects, and skills once. You decide what is verified before it can be used.</Text>
-          <Text style={styles.resumeBankStatus}>{bankLoading ? "Loading your private bank…" : `${bankItems.length} item${bankItems.length === 1 ? "" : "s"} in your private bank`}</Text>
+          <Text style={styles.resumeCardLabel}>Technical base</Text>
+          <Text style={styles.resumeCardTitle}>Your complete content bank</Text>
+          <Text style={styles.resumeCardCopy}>Store every useful role, project, skill, and bullet here. Ntern selects from this library; it never squeezes the whole bank into one résumé.</Text>
+          <Text style={styles.resumeBankStatus}>{bankLoading ? "Loading your private bank…" : `${bankItems.length} source item${bankItems.length === 1 ? "" : "s"} · ${Object.entries(bankKindCounts).map(([kind, count]) => `${count} ${kind}`).join(" · ")}`}</Text>
         </View>
         <View style={styles.resumeTrustCard}>
           <Ionicons name="shield-checkmark-outline" size={22} color={colors.signal} />
-          <Text style={styles.resumeTrustTitle}>Nothing is invented</Text>
-          <Text style={styles.resumeTrustCopy}>Suggestions must point back to your approved evidence.</Text>
+          <Text style={styles.resumeTrustTitle}>Review the diff</Text>
+          <Text style={styles.resumeTrustCopy}>Your imported source stays trusted. Only job-specific additions, removals, moves, and rewrites need a decision.</Text>
         </View>
       </View>
 
       <View style={styles.resumeBankComposer}>
-        <Text style={styles.inputLabel}>Add a fact or bullet for review</Text>
+        <Text style={styles.inputLabel}>Add source material</Text>
         <TextInput
           value={bankDraft}
           onChangeText={setBankDraft}
-          accessibilityLabel="Add a Master Bank item"
+          accessibilityLabel="Add a technical base item"
           placeholder="e.g. Built a dashboard that gave the team a single view of experiment results"
           placeholderTextColor={colors.placeholder}
           selectionColor={colors.signal}
@@ -5669,29 +5681,27 @@ function ResumeWorkspace({ token }: { token: string }) {
         />
         {bankError ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
         <View style={styles.resumeBankComposerAction}>
-          <ActionButton label={bankSaving ? "Saving…" : "Save to Master Bank"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving} />
+          <ActionButton label={bankSaving ? "Saving…" : "Add to technical base"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving} />
         </View>
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import PDF or DOCX resume" onPress={() => void importResume()} disabled={bankSaving}>
-          <Text style={styles.resumeKeepAll}>{bankSaving ? "Importing résumé…" : "Import a PDF or DOCX résumé"}</Text>
+          <Text style={styles.resumeKeepAll}>{bankSaving ? "Importing source…" : "Import a résumé or master-bank DOCX"}</Text>
         </TouchableOpacity>
         {!bankLoading && bankItems.length ? (
           <View style={styles.resumeBankItems}>
-            {bankItems.map((item) => (
+            {visibleBankItems.map((item) => (
               <View key={item.bankItemId} style={styles.resumeBankItem}>
-                <Ionicons name={item.verified ? "shield-checkmark-outline" : "time-outline"} size={17} color={item.verified ? colors.signal : colors.muted} />
+                <Ionicons name={item.kind === "role" ? "briefcase-outline" : item.kind === "project" ? "code-slash-outline" : item.kind === "skill" ? "construct-outline" : item.kind === "education" ? "school-outline" : "document-text-outline"} size={17} color={colors.signal} />
                 <View style={styles.resumeBankItemCopy}>
                   <Text style={styles.resumeBankItemText}>{item.content}</Text>
-                  <Text style={styles.resumeBankItemStatus}>{item.verified ? "Verified" : "Needs review"}</Text>
+                  <Text style={styles.resumeBankItemStatus}>{item.kind} · source material</Text>
                 </View>
-                <ActionButton
-                  label={item.verified ? "Mark for review" : "Verify item"}
-                  variant="secondary"
-                  compact
-                  disabled={bankSaving}
-                  onPress={() => setBankItemVerification(item, !item.verified)}
-                />
               </View>
             ))}
+            {bankItems.length > 12 ? (
+              <TouchableOpacity accessibilityRole="button" onPress={() => setBankExpanded((value) => !value)}>
+                <Text style={styles.resumeKeepAll}>{bankExpanded ? "Show a compact summary" : `Browse all ${bankItems.length} source items`}</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         ) : null}
       </View>
@@ -5730,17 +5740,17 @@ function ResumeWorkspace({ token }: { token: string }) {
       <View style={styles.resumeSection}>
         <View style={styles.resumeSectionHeading}>
           <View>
-            <Text style={styles.sectionTitle}>Saved resumes</Text>
-            <Text style={styles.resumeSectionDescription}>Versioned recipes reuse approved bank items; they never copy over your source material.</Text>
+            <Text style={styles.sectionTitle}>Resume bases</Text>
+            <Text style={styles.resumeSectionDescription}>A base is a reusable repository, not a one-page résumé. The technical base should include your full content bank.</Text>
           </View>
-          <TouchableOpacity accessibilityRole="button" onPress={saveBase} disabled={!bankItems.length || resumeBusy}><Text style={styles.resumeRecommendation}>Save current bank as a base</Text></TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" onPress={saveBase} disabled={!bankItems.length || resumeBusy}><Text style={styles.resumeRecommendation}>{technicalBase ? "Sync all items to technical base" : "Create technical base from all items"}</Text></TouchableOpacity>
         </View>
         <View style={[styles.resumeProfileGrid, desktop && styles.resumeProfileGridWide]}>
           {profiles.length ? profiles.map((profile) => (
             <TouchableOpacity key={profile.profileId} accessibilityRole="button" accessibilityLabel={`Use ${profile.name} resume`} onPress={() => setSelectedProfileId(profile.profileId)} style={[styles.resumeProfileCard, selectedProfileId === profile.profileId && styles.resumeProfileRecommended]}>
               <Text style={styles.resumeProfileName}>{profile.name}</Text>
               <Text style={styles.resumeProfileTags}>{profile.tags.join(" · ") || "No tags yet"}</Text>
-              <Text style={styles.resumeProfileNote}>{profile.bankItemIds.length} selected bank item{profile.bankItemIds.length === 1 ? "" : "s"}</Text>
+              <Text style={styles.resumeProfileNote}>{profile.bankItemIds.length} source item{profile.bankItemIds.length === 1 ? "" : "s"} available for tailoring</Text>
             </TouchableOpacity>
           )) : <Text style={styles.resumeSectionDescription}>Save a base after adding the experience you want to reuse.</Text>}
         </View>
@@ -5751,7 +5761,7 @@ function ResumeWorkspace({ token }: { token: string }) {
         <View style={styles.resumeReviewHeader}>
           <View>
             <Text style={styles.sectionTitle}>Review changes</Text>
-            <Text style={styles.resumeSectionDescription}>{draft ? `${reviewed} of ${draft.changes.length} reviewed · every suggestion has evidence and a reason.` : "Import a job and choose a saved base to start a grounded review."}</Text>
+            <Text style={styles.resumeSectionDescription}>{draft ? `${reviewed} of ${draft.changes.length} diffs reviewed · unchanged source material needs no approval.` : "Import a job and choose a saved base to start a grounded review."}</Text>
           </View>
           {!desktop ? (
             <View style={styles.resumeSegmentedControl} accessibilityRole="tablist">
@@ -5766,37 +5776,65 @@ function ResumeWorkspace({ token }: { token: string }) {
         {draft?.changes.length ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
           {(desktop || reviewMode === "changes") ? (
             <View style={styles.resumeChangePanel}>
-              <Text style={styles.resumeChangeCounter}>Change {activeChange + 1} of {draft.changes.length}</Text>
+              <View style={styles.resumeDiffHeader}>
+                <Text style={styles.resumeChangeCounter}>Diff {activeChange + 1} of {draft.changes.length}</Text>
+                <Text style={styles.resumeDiffType}>{current?.type}</Text>
+              </View>
               <Text style={styles.resumeChangeSection}>{current?.section}</Text>
-              <View style={styles.resumeSuggestion}>
-                <Text style={styles.resumeSuggestionLabel}>Suggested</Text>
-                <Text style={styles.resumeSuggestionText}>{current?.suggestion}</Text>
+              <View style={styles.resumeDiffCode}>
+                {current?.original ? (
+                  <View style={[styles.resumeDiffLine, styles.resumeDiffRemoved]}>
+                    <Text style={[styles.resumeDiffMarker, styles.resumeDiffRemovedText]}>−</Text>
+                    <Text style={[styles.resumeDiffText, styles.resumeDiffRemovedText]}>{current.original}</Text>
+                  </View>
+                ) : null}
+                {current?.suggestion || current?.type === "move" ? (
+                  <View style={[styles.resumeDiffLine, styles.resumeDiffAdded]}>
+                    <Text style={[styles.resumeDiffMarker, styles.resumeDiffAddedText]}>+</Text>
+                    <Text style={[styles.resumeDiffText, styles.resumeDiffAddedText]}>{current.suggestion ?? current.original}</Text>
+                  </View>
+                ) : null}
               </View>
               <View style={styles.resumeEvidence}>
                 <Ionicons name="link-outline" size={16} color={colors.signal} />
-                <Text style={styles.resumeEvidenceText}>Master Bank evidence · {current?.evidenceIds.length} item{current?.evidenceIds.length === 1 ? "" : "s"}</Text>
+                <Text style={styles.resumeEvidenceText}>Technical-base evidence · {current?.evidenceIds.length} source item{current?.evidenceIds.length === 1 ? "" : "s"}</Text>
               </View>
               <Text style={styles.resumeReason}>{current?.reason}</Text>
               <View style={styles.resumeDecisionRow}>
                 {activeChange > 0 ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous change" onPress={() => setActiveChange((index) => index - 1)} disabled={resumeBusy}><Text style={styles.resumeKeepAll}>Previous</Text></TouchableOpacity> : null}
                 <ActionButton label="Keep original" variant="secondary" onPress={() => decide("rejected")} />
-                <ActionButton label="Use suggestion" onPress={() => decide("accepted")} />
+                <ActionButton label="Apply change" onPress={() => decide("accepted")} />
               </View>
             </View>
           ) : null}
           {(desktop || reviewMode === "preview") ? (
             <View style={styles.resumePreviewPanel}>
-              <View style={styles.resumePreviewPaper}>
-                <Text style={styles.resumePreviewName}>Your name</Text>
-                <Text style={styles.resumePreviewContact}>City · email@example.com · portfolio</Text>
-                <Text style={styles.resumePreviewHeading}>Experience</Text>
-                <Text style={styles.resumePreviewLine}>{draft.changes.find((change) => change.decision === "accepted")?.suggestion ?? "Approved changes appear here after review."}</Text>
-                <Text style={styles.resumePreviewHeading}>Projects</Text>
-                <Text style={styles.resumePreviewLine}>A focused selection of approved evidence appears here.</Text>
-                <Text style={styles.resumePreviewHeading}>Skills</Text>
-                <Text style={styles.resumePreviewLine}>{accepted ? `${accepted} accepted evidence-backed change${accepted === 1 ? "" : "s"}` : "No suggested changes accepted yet."}</Text>
-              </View>
-              <Text style={styles.resumePreviewCaption}>Live structured preview · PDF generation comes after final review</Text>
+              {artifact ? (
+                <>
+                  <View style={styles.resumeArtifactTabs} accessibilityRole="tablist">
+                    {(["rendered", "latex"] as const).map((mode) => (
+                      <TouchableOpacity key={mode} accessibilityRole="tab" aria-selected={artifactMode === mode} onPress={() => setArtifactMode(mode)} style={[styles.resumeArtifactTab, artifactMode === mode && styles.resumeArtifactTabActive]}>
+                        <Text style={[styles.resumeArtifactTabText, artifactMode === mode && styles.resumeArtifactTabTextActive]}>{mode === "rendered" ? "Rendered PDF" : "LaTeX source"}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {artifactLoading ? <Text style={styles.resumePreviewCaption}>Loading compiled résumé…</Text> : artifactMode === "rendered" ? (
+                    artifactPreview ? <Image accessibilityLabel="Rendered resume page 1" source={{ uri: artifactPreview }} resizeMode="contain" style={styles.resumeRenderedPage} /> : <Text style={styles.resumePreviewCaption}>The rendered preview is unavailable.</Text>
+                  ) : (
+                    <ScrollView horizontal style={styles.resumeLatexScroller}><Text selectable style={styles.resumeLatexSource}>{artifactSource}</Text></ScrollView>
+                  )}
+                  <View style={styles.resumeArtifactActions}>
+                    <Text style={styles.resumePreviewCaption}>{artifact.pageCount ?? 1} compiled PDF page{artifact.pageCount === 1 ? "" : "s"} · private and ready to inspect</Text>
+                    <ActionButton label="Download PDF" variant="secondary" onPress={() => void shareResumeArtifact(artifact.artifactId, token).catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't download that résumé."))} />
+                  </View>
+                </>
+              ) : (
+                <View style={styles.resumePreviewEmpty}>
+                  <Ionicons name="document-text-outline" size={28} color={colors.muted} />
+                  <Text style={styles.resumePreviewEmptyTitle}>Rendered preview after review</Text>
+                  <Text style={styles.resumePreviewCaption}>Review each diff, then compile the résumé to inspect the real PDF and its LaTeX source before downloading.</Text>
+                </View>
+              )}
             </View>
           ) : null}
         </View> : null}
@@ -5804,7 +5842,7 @@ function ResumeWorkspace({ token }: { token: string }) {
           <TouchableOpacity accessibilityRole="button" disabled={!draft || reviewed === draft.changes.length || resumeBusy} onPress={keepRemainingOriginals}>
             <Text style={styles.resumeKeepAll}>Keep all remaining originals</Text>
           </TouchableOpacity>
-          <ActionButton label={resumeBusy ? "Creating…" : `Create résumé${accepted ? ` with ${accepted} change${accepted === 1 ? "" : "s"}` : ""}`} onPress={finalizeDraft} disabled={!draft || draft.status === "finalized" || reviewed !== draft.changes.length || resumeBusy} />
+          <ActionButton label={resumeBusy ? "Compiling…" : `Compile résumé${accepted ? ` with ${accepted} applied change${accepted === 1 ? "" : "s"}` : ""}`} onPress={finalizeDraft} disabled={!draft || draft.status === "finalized" || reviewed !== draft.changes.length || resumeBusy} />
         </View>
       </View>
     </ScrollView>
@@ -8343,23 +8381,44 @@ const styles = StyleSheet.create({
   resumeReviewWorkspace: { marginTop: 15 },
   resumeReviewWorkspaceWide: { alignItems: "stretch", flexDirection: "row", gap: 14 },
   resumeChangePanel: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1, padding: 18 },
+  resumeDiffHeader: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
   resumeChangeCounter: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.8, textTransform: "uppercase" },
+  resumeDiffType: { backgroundColor: colors.separator, borderRadius: 999, color: colors.body, fontSize: 11, fontWeight: "800", overflow: "hidden", paddingHorizontal: 9, paddingVertical: 4, textTransform: "uppercase" },
   resumeChangeSection: { color: colors.ink, fontSize: 18, fontWeight: "800", marginTop: 9 },
   resumeChangeOriginal: { color: colors.body, fontSize: 15, lineHeight: 22, marginTop: 8 },
   resumeSuggestion: { backgroundColor: colors.signalSoft, borderRadius: 10, marginTop: 12, padding: 12 },
   resumeSuggestionLabel: { color: colors.signal, fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
   resumeSuggestionText: { color: colors.ink, fontSize: 15, lineHeight: 22, marginTop: 3 },
+  resumeDiffCode: { borderColor: colors.separator, borderRadius: 10, borderWidth: 1, marginTop: 12, overflow: "hidden" },
+  resumeDiffLine: { alignItems: "flex-start", flexDirection: "row", gap: 9, minHeight: 44, paddingHorizontal: 11, paddingVertical: 10 },
+  resumeDiffRemoved: { backgroundColor: colors.dangerSoft, borderBottomColor: colors.dangerBorder, borderBottomWidth: 1 },
+  resumeDiffAdded: { backgroundColor: colors.successSoft },
+  resumeDiffMarker: { fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 15, fontWeight: "800", lineHeight: 21, width: 14 },
+  resumeDiffText: { flex: 1, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 13, lineHeight: 20 },
+  resumeDiffRemovedText: { color: colors.danger },
+  resumeDiffAddedText: { color: colors.success },
   resumeEvidence: { alignItems: "center", flexDirection: "row", gap: 6, marginTop: 14 },
   resumeEvidenceText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
   resumeReason: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },
   resumeDecisionRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 18 },
-  resumePreviewPanel: { backgroundColor: "#E9ECF1", borderRadius: 16, flex: 1, justifyContent: "center", minHeight: 390, padding: 20 },
+  resumePreviewPanel: { backgroundColor: "#E9ECF1", borderRadius: 16, flex: 1, justifyContent: "center", minHeight: 390, overflow: "hidden", padding: 16 },
   resumePreviewPaper: { alignSelf: "center", backgroundColor: colors.surface, borderColor: "#D7DBE2", borderRadius: 2, borderWidth: 1, maxWidth: 430, minHeight: 330, padding: 24, shadowColor: "#1C1C1E", shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.12, shadowRadius: 8, width: "100%" },
   resumePreviewName: { color: colors.ink, fontSize: 21, fontWeight: "800", letterSpacing: -0.3 },
   resumePreviewContact: { color: colors.muted, fontSize: 11, marginTop: 4 },
   resumePreviewHeading: { borderBottomColor: colors.separator, borderBottomWidth: 1, color: colors.ink, fontSize: 12, fontWeight: "800", letterSpacing: 0.6, marginTop: 18, paddingBottom: 4, textTransform: "uppercase" },
   resumePreviewLine: { color: colors.body, fontSize: 12, lineHeight: 18, marginTop: 7 },
   resumePreviewCaption: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 12, textAlign: "center" },
+  resumePreviewEmpty: { alignItems: "center", alignSelf: "center", maxWidth: 330, padding: 24 },
+  resumePreviewEmptyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800", marginTop: 10 },
+  resumeArtifactTabs: { alignSelf: "center", backgroundColor: "#DDE1E7", borderRadius: 9, flexDirection: "row", padding: 3 },
+  resumeArtifactTab: { alignItems: "center", borderRadius: 7, justifyContent: "center", minHeight: 34, paddingHorizontal: 12 },
+  resumeArtifactTabActive: { backgroundColor: colors.surface },
+  resumeArtifactTabText: { color: colors.muted, fontSize: 12, fontWeight: "700" },
+  resumeArtifactTabTextActive: { color: colors.ink },
+  resumeRenderedPage: { alignSelf: "center", aspectRatio: 8.5 / 11, backgroundColor: colors.surface, marginTop: 14, maxHeight: 620, width: "100%" },
+  resumeLatexScroller: { backgroundColor: "#111827", borderRadius: 8, marginTop: 14, maxHeight: 620, padding: 14 },
+  resumeLatexSource: { color: "#E5E7EB", fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 12, lineHeight: 18, minWidth: 640 },
+  resumeArtifactActions: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between", marginTop: 12 },
   resumeFinalizeRow: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginTop: 16 },
   resumeKeepAll: { color: colors.signal, fontSize: 14, fontWeight: "800", minHeight: 44, paddingTop: 12 },
   profileContent: {

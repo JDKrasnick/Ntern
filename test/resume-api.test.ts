@@ -12,18 +12,18 @@ describe('resume API ownership and revisions', () => {
     expect((await handler(event('student', 'GET', '/me/resume-bank'))).statusCode).toBe(404);
   });
 
-  it('keeps bank items private and makes verification an optimistic user decision', async () => {
+  it('keeps trusted source items private and allows optimistic source-status edits', async () => {
     const users = new MemoryUserStore();
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, now: () => '2026-09-22T00:00:00.000Z' });
     const created = await handler(event('student-a', 'POST', '/me/resume-bank', { kind: 'bullet', content: 'Built a dashboard', verified: true }));
     expect(created.statusCode).toBe(201);
     const item = JSON.parse(created.body) as { bankItemId: string; verified: boolean; revision: number };
-    expect(item.verified).toBe(false);
+    expect(item.verified).toBe(true);
     expect(JSON.parse((await handler(event('student-b', 'GET', '/me/resume-bank'))).body)).toEqual({ items: [] });
     expect((await handler(event('student-b', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: true }))).statusCode).toBe(404);
-    const updated = await handler(event('student-a', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: true }));
-    expect(JSON.parse(updated.body)).toMatchObject({ verified: true, revision: 1 });
-    expect((await handler(event('student-a', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: false }))).statusCode).toBe(409);
+    const updated = await handler(event('student-a', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: false }));
+    expect(JSON.parse(updated.body)).toMatchObject({ verified: false, revision: 1 });
+    expect((await handler(event('student-a', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: true }))).statusCode).toBe(409);
   });
 
   it('rejects a saved-base reference to somebody else’s bank evidence', async () => {
@@ -134,7 +134,25 @@ describe('resume API ownership and revisions', () => {
     expect(JSON.parse(response.body)).toMatchObject({ changes: [expect.objectContaining({ evidenceIds: ['evidence'] })] });
   });
 
-  it('imports PDF or DOCX extraction as unverified, user-owned bank cards', async () => {
+  it('retrieves a bounded relevant slice from a large Technical base for generation', async () => {
+    const users = new MemoryUserStore();
+    const ids = Array.from({ length: 140 }, (_, index) => `evidence-${index}`);
+    for (const [index, bankItemId] of ids.entries()) await users.putResumeBankItem({
+      userId: 'student', bankItemId, kind: 'project', content: index < 100 ? `Built TypeScript service ${index}` : `Unrelated archive ${index}`,
+      verified: true, revision: 0, createdAt: 'now', updatedAt: 'now',
+    });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: ids, sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', title: 'TypeScript Engineer', description: 'Build TypeScript services', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const received: Array<Array<{ content: string }>> = [];
+    const generate = vi.fn(async (input: { bankItems: Array<{ content: string }> }) => { received.push(input.bankItems); return []; });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeDraftGenerator: { generate } });
+    expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(201);
+    const supplied = received[0]!;
+    expect(supplied).toHaveLength(80);
+    expect(supplied.every((item) => item.content.includes('TypeScript'))).toBe(true);
+  });
+
+  it('imports PDF or DOCX extraction as trusted, user-owned source cards', async () => {
     const users = new MemoryUserStore();
     await users.putDocument({ userId: 'student', documentId: 'resume', fileName: 'resume.pdf', contentType: 'application/pdf', objectKey: 'private/student/resume', createdAt: 'now' });
     const handler = createApiHandler({
@@ -143,7 +161,7 @@ describe('resume API ownership and revisions', () => {
       resumeDocumentExtractor: async () => [{ kind: 'project', content: 'Built a dashboard', sourceLocation: 'line 3' }],
     });
     const response = await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }));
-    expect(JSON.parse(response.body)).toMatchObject({ items: [expect.objectContaining({ content: 'Built a dashboard', sourceDocumentId: 'resume', sourceLocation: 'line 3', verified: false })] });
+    expect(JSON.parse(response.body)).toMatchObject({ items: [expect.objectContaining({ content: 'Built a dashboard', sourceDocumentId: 'resume', sourceLocation: 'line 3', verified: true })] });
   });
 
   it('finalizes reviewed drafts into private fixed-template PDF artifacts with applicant contact details', async () => {

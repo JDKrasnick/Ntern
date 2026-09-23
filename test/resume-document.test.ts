@@ -24,7 +24,7 @@ function minimalPdf(lines: string[]) {
 }
 
 describe('resume document extraction', () => {
-  it('assigns source lines to unverified Master Bank categories', () => {
+  it('assigns source lines to Technical base categories', () => {
     expect(extractResumeBankItems('Experience\n• Built a TypeScript dashboard\nProjects\n• Created an accessibility audit\nSkills\nTypeScript, React\nEducation\nCornell University')).toEqual([
       { kind: 'role', content: 'Built a TypeScript dashboard', sourceLocation: 'line 2' },
       { kind: 'project', content: 'Created an accessibility audit', sourceLocation: 'line 4' },

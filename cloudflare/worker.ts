@@ -1165,6 +1165,29 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!object) return withCors(Response.json({ message: 'Resume artifact content not found' }, { status: 404 }));
     return withCors(new Response(object.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="resume-${artifact.artifactId}.pdf"`, 'Cache-Control': 'private, no-store' } }));
   }
+  const artifactSourceMatch = url.pathname.match(/^\/me\/resume-artifacts\/([^/]+)\/source$/u);
+  if (artifactSourceMatch && request.method === 'GET') {
+    if (env.RESUME_TUNER_ENABLED !== 'true') return withCors(Response.json({ message: 'Resume tailoring is not enabled' }, { status: 404 }));
+    if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
+    const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactSourceMatch[1]!));
+    if (!artifact?.texObjectKey) return withCors(Response.json({ message: 'Resume LaTeX source is not available' }, { status: 404 }));
+    const object = await env.DOCUMENTS.get(artifact.texObjectKey);
+    if (!object) return withCors(Response.json({ message: 'Resume LaTeX source was not found' }, { status: 404 }));
+    return withCors(new Response(object.body, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': `inline; filename="resume-${artifact.artifactId}.tex"`, 'Cache-Control': 'private, no-store' } }));
+  }
+  const artifactPreviewMatch = url.pathname.match(/^\/me\/resume-artifacts\/([^/]+)\/preview\/(\d+)$/u);
+  if (artifactPreviewMatch && request.method === 'GET') {
+    if (env.RESUME_TUNER_ENABLED !== 'true') return withCors(Response.json({ message: 'Resume tailoring is not enabled' }, { status: 404 }));
+    if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
+    const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactPreviewMatch[1]!));
+    if (!artifact) return withCors(Response.json({ message: 'Resume artifact not found' }, { status: 404 }));
+    const page = Number(artifactPreviewMatch[2]);
+    const objectKey = Number.isSafeInteger(page) && page > 0 ? artifact.previewObjectKeys?.[page - 1] : undefined;
+    if (!objectKey) return withCors(Response.json({ message: 'Resume preview page is not available' }, { status: 404 }));
+    const object = await env.DOCUMENTS.get(objectKey);
+    if (!object) return withCors(Response.json({ message: 'Resume preview content was not found' }, { status: 404 }));
+    return withCors(new Response(object.body, { headers: { 'Content-Type': 'image/png', 'Content-Disposition': `inline; filename="resume-${artifact.artifactId}-page-${page}.png"`, 'Cache-Control': 'private, no-store' } }));
+  }
   const event = apiEvent(request, userId, request.method === 'GET' || request.method === 'HEAD' ? null : await request.text());
   const result = await handler(event);
   return eventResponse(result);

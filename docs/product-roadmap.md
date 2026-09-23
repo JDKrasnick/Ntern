@@ -38,8 +38,8 @@
 ### Codex
 
 - [x] Complete the authenticated web-first Resume workspace in code; the production flag remains disabled pending the documented staged security and infrastructure rollout.
-  - [x] Gate the fifth navigation tab behind `RESUME_TUNER_ENABLED`, persist private Master Bank entries, saved-base recipes, imported-job records, and review drafts with revisions, account export, and account deletion cleanup.
-  - [x] Provide a responsive web review path that saves only user-approved bank evidence, rejects private/non-HTTPS import targets, keeps pasted job descriptions per-user, and creates deterministic evidence-linked suggestions.
+  - [x] Gate the fifth navigation tab behind `RESUME_TUNER_ENABLED`, persist a private Technical base content repository, saved-base recipes, imported-job records, and review drafts with revisions, account export, and account deletion cleanup.
+  - [x] Provide a responsive GitHub-style diff review path that asks for approval only on job-specific changes, rejects private/non-HTTPS import targets, keeps pasted job descriptions per-user, and creates deterministic evidence-linked suggestions.
   - [x] Add the asynchronous catalog/cache/browser import worker, document extraction, managed model generation, user-namespaced semantic ranking, and isolated PDF/LaTeX artifact compiler with derived page previews before enabling the production flag.
 - [x] Implement the Cloudflare replacement substrate with Workers, D1, R2, Queues, Cron Triggers, provider v5 Terraform, Cloudflare-native mobile authentication, and local end-to-end smoke coverage.
 - [x] Provision the Cloudflare account, apply remote D1 migrations and Worker secrets, verify the source backfill, cut every mobile environment over, and retire AWS deployment paths.

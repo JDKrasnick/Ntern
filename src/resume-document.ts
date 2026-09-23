@@ -97,17 +97,17 @@ function pdfTextItemsToLines(items: readonly unknown[]) {
   return lines.join('\n');
 }
 
-export function extractResumeBankItems(text: string, limit = 100): ExtractedResumeItem[] {
+export function extractResumeBankItems(text: string, limit = 500): ExtractedResumeItem[] {
   let section: ExtractedResumeItem['kind'] = 'bullet';
   const items: ExtractedResumeItem[] = [];
   for (const [index, raw] of text.split(/\r?\n/gu).entries()) {
     const line = raw.replace(/\s+/gu, ' ').trim();
     if (!line) continue;
     const heading = line.toLowerCase().replace(/[^a-z]/gu, '');
-    if (/(experience|employment|workhistory)/u.test(heading)) { section = 'role'; continue; }
-    if (/(project|research)/u.test(heading)) { section = 'project'; continue; }
-    if (/(skill|technology|tool)/u.test(heading)) { section = 'skill'; continue; }
-    if (/(education|coursework)/u.test(heading)) { section = 'education'; continue; }
+    if (/^(?:professional)?(?:experience|employment|workhistory)(?:bank)?$/u.test(heading)) { section = 'role'; continue; }
+    if (/^(?:projects?|research)(?:bank.*)?$/u.test(heading)) { section = 'project'; continue; }
+    if (/^(?:technical)?(?:skill|skills|technology|technologies|tools)(?:masterinventory)?$/u.test(heading)) { section = 'skill'; continue; }
+    if (/^(?:coreprofile(?:and)?)?(?:education|coursework)(?:bank)?$/u.test(heading)) { section = 'education'; continue; }
     const content = line.replace(/^(?:[-•*]|\d+[.)])\s*/u, '').trim();
     if (content.length < 2 || content.length > 2_000 || items.some((item) => item.content === content)) continue;
     items.push({ kind: section, content, sourceLocation: `line ${index + 1}` });

@@ -22,7 +22,7 @@ vi.mock('expo-file-system', () => ({
 }));
 vi.mock('../src/public-config', () => ({ publicConfig: { apiUrl: 'https://api.example.test' } }));
 
-import { shareResumeArtifact } from '../src/resume-artifact-share';
+import { loadResumeArtifactPreview, loadResumeArtifactSource, releaseResumeArtifactPreview, shareResumeArtifact } from '../src/resume-artifact-share';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -33,6 +33,28 @@ beforeEach(() => {
 });
 
 describe('private resume PDF sharing', () => {
+  it('loads authenticated LaTeX source for review', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response('\\documentclass{article}', { headers: { 'content-type': 'text/plain; charset=utf-8' } }));
+    await expect(loadResumeArtifactSource('artifact/id', 'secret-token')).resolves.toBe('\\documentclass{article}');
+    expect(fetch).toHaveBeenCalledWith('https://api.example.test/me/resume-artifacts/artifact%2Fid/source', {
+      headers: { Accept: 'text/plain', Authorization: 'Bearer secret-token' },
+    });
+  });
+
+  it('loads and releases an authenticated rendered page on web', async () => {
+    mocks.platform.OS = 'web';
+    vi.mocked(fetch).mockResolvedValue(new Response(new Uint8Array([137, 80, 78, 71]), { headers: { 'content-type': 'image/png' } }));
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:rendered-page');
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    await expect(loadResumeArtifactPreview('artifact/id', 1, 'secret-token')).resolves.toBe('blob:rendered-page');
+    expect(fetch).toHaveBeenCalledWith('https://api.example.test/me/resume-artifacts/artifact%2Fid/preview/1', {
+      headers: { Accept: 'image/png', Authorization: 'Bearer secret-token' },
+    });
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    releaseResumeArtifactPreview('blob:rendered-page');
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:rendered-page');
+  });
+
   it('downloads with authentication, shares as PDF, and cleans up', async () => {
     await shareResumeArtifact('artifact/id', 'secret-token');
     expect(fetch).toHaveBeenCalledWith('https://api.example.test/me/resume-artifacts/artifact%2Fid/content', {
