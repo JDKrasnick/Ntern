@@ -143,6 +143,55 @@ async function readUserRows(db: D1Database): Promise<UserRow[]> {
   }
 }
 
+/**
+ * A duplicate-only repair can touch user history only for a member of one of
+ * its selected provider groups. Reading every saved application and release
+ * turns a small, guarded duplicate repair into an unbounded request at
+ * production scale. The JSON predicates inspect job-ID fields and release
+ * arrays exactly, and the repair planner parses every candidate again before
+ * it can be written.
+ */
+async function readUserRowsForJobs(db: D1Database, jobIds: Iterable<string>): Promise<UserRow[]> {
+  const ids = [...new Set(jobIds)].sort();
+  if (!ids.length) return [];
+  const rows = new Map<string, UserRow>();
+  for (let offset = 0; offset < ids.length; offset += 20) {
+    const chunk = ids.slice(offset, offset + 20);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const page = await db.prepare(`SELECT * FROM user_items
+      WHERE (kind IN ('application', 'application-session', 'receipt')
+        AND json_extract(value, '$.jobId') IN (${placeholders}))
+        OR (kind = 'catalog-release' AND (
+          EXISTS (SELECT 1 FROM json_each(user_items.value, '$.jobIds') WHERE value IN (${placeholders}))
+          OR EXISTS (SELECT 1 FROM json_each(user_items.value, '$.newJobIds') WHERE value IN (${placeholders}))
+        ))
+      ORDER BY user_id, item_key`)
+      .bind(...chunk, ...chunk, ...chunk).all<UserRow>();
+    for (const row of page.results) rows.set(`${row.user_id}\0${row.item_key}`, row);
+  }
+  return [...rows.values()].sort((left, right) => left.user_id.localeCompare(right.user_id)
+    || left.item_key.localeCompare(right.item_key));
+}
+
+async function readContextRowsForJobs(db: D1Database, jobIds: Iterable<string>): Promise<PostingIdentityAuditRow[]> {
+  const ids = [...new Set(jobIds)].sort();
+  const rows = await readKindRows(db, 'checkpoint');
+  if (!ids.length) return rows;
+  const byKey = new Map(rows.map((row) => [`${row.pk}\0${row.sk}`, row]));
+  for (let offset = 0; offset < ids.length; offset += 25) {
+    const chunk = ids.slice(offset, offset + 25);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const page = await db.prepare(`SELECT pk, sk, kind, value FROM catalog_items
+      WHERE kind IN ('job-id-alias', 'posting-alias', 'notification-tombstone')
+        AND (json_extract(value, '$.jobId') IN (${placeholders})
+          OR json_extract(value, '$.oldJobId') IN (${placeholders})
+          OR json_extract(value, '$.canonicalJobId') IN (${placeholders}))
+      ORDER BY pk, sk`).bind(...chunk, ...chunk, ...chunk).all<PostingIdentityAuditRow>();
+    for (const row of page.results) byKey.set(`${row.pk}\0${row.sk}`, row);
+  }
+  return [...byKey.values()].sort((left, right) => left.pk.localeCompare(right.pk) || left.sk.localeCompare(right.sk));
+}
+
 function simulateUserRows(rows: UserRow[], plan: InternalPostingIdentityRepairPlan): UserRow[] {
   const byKey = new Map(rows.map((row) => [`${row.user_id}\0${row.item_key}`, row]));
   for (const row of plan.userDeletes) byKey.delete(`${row.user_id}\0${row.item_key}`);
@@ -200,8 +249,13 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   // queries, which can exceed the request wall-time before planning starts.
   const auditJobBatch = Math.max(GROUP_JOBS_PER_BATCH, options.jobBatch ?? GROUP_JOBS_PER_BATCH);
   const scan = await runPostingIdentityAuditScan(db, { jobBatch: auditJobBatch, log: options.log });
-  const contextRows = await readContextRows(db);
-  const users = await readUserRows(db);
+  const selectedGroups = options.duplicateGroupsOnly
+    ? scan.repairIndex.groups.filter((group) => group.members.length > 1)
+    : scan.repairIndex.groups;
+  const selectedJobIds = selectedGroups.flatMap((group) => group.members.map((member) => member.jobId));
+  const [contextRows, users] = options.duplicateGroupsOnly
+    ? await Promise.all([readContextRowsForJobs(db, selectedJobIds), readUserRowsForJobs(db, selectedJobIds)])
+    : await Promise.all([readContextRows(db), readUserRows(db)]);
   const proposals = (await db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>()).results;
   const employerMappings = (await db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
     WHERE superseded_at IS NULL ORDER BY provider, scope`).all<EmployerMappingRow>()).results;
@@ -232,9 +286,6 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   let receiptMerges = 0;
 
   const groupLimit = Math.max(1, Math.min(options.jobBatch ?? GROUP_JOBS_PER_BATCH, 500));
-  const selectedGroups = options.duplicateGroupsOnly
-    ? scan.repairIndex.groups.filter((group) => group.members.length > 1)
-    : scan.repairIndex.groups;
   const groupBatches = batches(selectedGroups, groupLimit);
   for (let batchIndex = 0; batchIndex < groupBatches.length; batchIndex += 1) {
     const groupBatch = groupBatches[batchIndex]!;
@@ -388,7 +439,7 @@ export async function runBoundedPostingIdentityRepairBatch(db: D1Database, optio
   if (options.contextRows.length > 5_000) throw new Error('Identity repair batch contains too many context rows');
   const [checkpoints, users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
     readKindRows(db, 'checkpoint'),
-    readUserRows(db),
+    readUserRowsForJobs(db, options.jobIds),
     db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>().then((result) => result.results),
     db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
       WHERE superseded_at IS NULL ORDER BY provider, scope`).all<EmployerMappingRow>().then((result) => result.results),
