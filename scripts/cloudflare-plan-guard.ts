@@ -156,7 +156,8 @@ function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
   if (oldBindings.length === 0) {
     // First enablement is the only permitted binding addition. Terraform may
     // insert it into the ordered list, so compare everything after removal.
-    return isDeepStrictEqual(enabled, { name, type: 'plain_text', text: 'true' })
+    return enabled.text === 'true'
+      && Object.entries(enabled).every(([key, value]) => ['name', 'type', 'text'].includes(key) || value === null)
       && after.length === before.length + 1
       && isDeepStrictEqual(before, after.filter((binding) => !isRecord(binding) || binding.name !== name));
   }
