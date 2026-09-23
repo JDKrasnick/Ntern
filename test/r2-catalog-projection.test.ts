@@ -33,6 +33,26 @@ function fakeBucket() {
 }
 
 describe('R2 catalog projection', () => {
+  it('reads role pages with bounded concurrency for the days index', async () => {
+    const { bucket } = fakeBucket();
+    const groups = groupCatalogJobs(Array.from({ length: 501 }, (_, index) => role(index)), { includeClosed: true }).map(catalogGroupDetails);
+    let active = 0;
+    let peak = 0;
+    const measuredBucket = { ...bucket, async get(key: string) {
+      if (/\/[^/]+\/\d+$/.test(key)) {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+      }
+      return bucket.get(key);
+    } } as R2Bucket;
+    const projection = new R2CatalogProjection(measuredBucket);
+    await projection.publish(groups, new Date().toISOString());
+    await projection.roles({}, {});
+    expect(peak).toBe(4);
+  });
+
   it('publishes complete pages before the pointer and serves page and search cursors', async () => {
     const { bucket, objects, failNextPage } = fakeBucket();
     const projection = new R2CatalogProjection(bucket);
