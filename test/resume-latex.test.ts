@@ -57,6 +57,8 @@ describe('fixed resume LaTeX rendering', () => {
     const result = renderResumeLatex(profile, applicant, draft, bank);
     expect(result.document.experience[0]?.bullets).toEqual(['Raised ingestion success above 98%.']);
     expect(result.document.projects[0]?.bullets).toEqual(['Maintained 99.9% metadata presence.']);
+    expect(result.tex).toContain('margin=0.50in');
+    expect(result.tex).toContain('\\setlength{\\itemsep}{0.75pt}');
     expect(result.tex.indexOf('\\ResumeSection{Experience}')).toBeLessThan(result.tex.indexOf('\\ResumeSection{Projects}'));
     const projectFirst = renderResumeLatex({ ...profile, template: 'project-compact' }, applicant, draft, bank).tex;
     expect(projectFirst.indexOf('\\ResumeSection{Projects}')).toBeLessThan(projectFirst.indexOf('\\ResumeSection{Experience}'));

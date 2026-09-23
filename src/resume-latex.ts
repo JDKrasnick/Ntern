@@ -116,26 +116,32 @@ function templatePreamble(profile: ResumeProfile) {
   const template = RESUME_TEMPLATES[profile.template];
   const dense = template.density === 'dense';
   const comfortable = template.density === 'comfortable';
-  const margin = dense ? '0.45in' : comfortable ? '0.64in' : '0.55in';
-  const itemSep = dense ? '0.5pt' : comfortable ? '2pt' : '1pt';
-  const sectionBefore = dense ? '5pt' : comfortable ? '10pt' : '7pt';
-  const sectionAfter = dense ? '2pt' : '4pt';
+  const jake = profile.template === 'jake-technical';
+  // Jake stays one-page dense, but retains a readable frame and visible rhythm
+  // between bullets, entries, and section rules. Project Compact remains the
+  // deliberately tighter option when a larger source selection needs it.
+  const margin = jake ? '0.50in' : dense ? '0.45in' : comfortable ? '0.64in' : '0.55in';
+  const itemSep = jake ? '0.75pt' : dense ? '0.5pt' : comfortable ? '2pt' : '1pt';
+  const sectionBefore = jake ? '5.5pt' : dense ? '5pt' : comfortable ? '10pt' : '7pt';
+  const sectionAfter = jake ? '2.5pt' : dense ? '2pt' : '4pt';
+  const compactPull = jake ? '-1.75pt' : '-2pt';
   return `\\documentclass[letterpaper,10pt]{article}
 \\usepackage[margin=${margin}]{geometry}
 \\usepackage[T1]{fontenc}
 ${template.typography === 'sans' ? '\\renewcommand{\\familydefault}{\\sfdefault}' : ''}
+${jake ? '\\linespread{0.96}' : ''}
 \\pagestyle{empty}
 \\setlength{\\parindent}{0pt}
 \\setlength{\\tabcolsep}{0pt}
 \\raggedbottom
 \\raggedright
 \\newcommand{\\ResumeSection}[1]{\\vspace{${sectionBefore}}{\\large\\bfseries\\MakeUppercase{#1}}\\par\\vspace{1pt}\\hrule\\vspace{${sectionAfter}}}
-\\newcommand{\\ResumeHeading}[4]{\\begin{tabular*}{\\textwidth}{@{}l@{\\extracolsep{\\fill}}r@{}}\\textbf{#1} & #2 \\\\ \\textit{#3} & \\textit{#4}\\end{tabular*}\\vspace{-2pt}}
+\\newcommand{\\ResumeHeading}[4]{\\begin{tabular*}{\\textwidth}{@{}l@{\\extracolsep{\\fill}}r@{}}\\textbf{#1} & #2 \\\\ \\textit{#3} & \\textit{#4}\\end{tabular*}\\vspace{${compactPull}}}
 \\newcommand{\\ResumeEducationCompact}[2]{\\textbf{#1}, #2\\par}
-\\newcommand{\\ResumeProject}[3]{\\textbf{#1}${profile.template === 'clean-standard' ? ' \\textit{#2}' : ' --- #2'}\\hfill #3\\par\\vspace{-2pt}}
+\\newcommand{\\ResumeProject}[3]{\\textbf{#1}${profile.template === 'clean-standard' ? ' \\textit{#2}' : ' --- #2'}\\hfill #3\\par\\vspace{${compactPull}}}
 \\newcommand{\\ResumeDetail}[1]{#1\\par}
 \\newcommand{\\ResumeSkill}[2]{\\textbf{#1:} #2\\par}
-\\newenvironment{ResumeBullets}{\\begin{list}{$\\bullet$}{\\setlength{\\leftmargin}{1.15em}\\setlength{\\itemsep}{${itemSep}}\\setlength{\\topsep}{1pt}\\setlength{\\parsep}{0pt}\\setlength{\\partopsep}{0pt}}}{\\end{list}\\vspace{-2pt}}
+\\newenvironment{ResumeBullets}{\\begin{list}{$\\bullet$}{\\setlength{\\leftmargin}{1.2em}\\setlength{\\itemsep}{${itemSep}}\\setlength{\\topsep}{1.25pt}\\setlength{\\parsep}{0pt}\\setlength{\\partopsep}{0pt}}}{\\end{list}\\vspace{${compactPull}}}
 `;
 }
 
@@ -150,8 +156,8 @@ export function renderResumeLatex(profile: ResumeProfile, applicant: ApplicantPr
     return rendered ? [`\\ResumeSection{${sectionTitle[section]}}\n${rendered}`] : [];
   }).join('\n');
   const source = `${templatePreamble(profile)}\\begin{document}
-\\begin{center}{\\LARGE\\bfseries ${tex(document.name)}}\\\\[2pt]
-\\small ${contact}\\end{center}\\vspace{-4pt}
+{\\centering{\\LARGE\\bfseries ${tex(document.name)}}\\par\\vspace{2pt}
+{\\small ${contact}}\\par}\\vspace{2pt}
 ${body || '% No selected resume content.'}
 \\end{document}\n`;
   return {

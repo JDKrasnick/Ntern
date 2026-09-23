@@ -233,7 +233,7 @@ describe('resume API ownership and revisions', () => {
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex, putPdf, putPreview, compile: async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer] }) } });
     const finalized = await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }));
     expect(finalized.statusCode).toBe(200);
-    expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { draftId: 'draft', templateVersion: '2026-09-23.1', compilerVersion: 'typed-fixed-template-tex-v2' } });
+    expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { draftId: 'draft', templateVersion: '2026-09-23.2', compilerVersion: 'typed-fixed-template-tex-v2' } });
     expect(putTex).toHaveBeenCalledOnce();
     expect(putTex.mock.calls[0]?.[1]).toContain('Student Name');
     expect(putTex.mock.calls[0]?.[1]).toContain('student@example.test');

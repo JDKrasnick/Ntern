@@ -8,7 +8,7 @@ export interface ResumeTemplateDefinition extends ResumeTemplate {
   density: 'comfortable' | 'compact' | 'dense';
 }
 
-export const RESUME_TEMPLATE_VERSION = '2026-09-23.1';
+export const RESUME_TEMPLATE_VERSION = '2026-09-23.2';
 
 export const RESUME_TEMPLATES: Readonly<Record<ResumeTemplateId, ResumeTemplateDefinition>> = {
   'jake-technical': {
