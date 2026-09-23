@@ -17,6 +17,7 @@ import {
   type ShadowStatus,
   type ShadowValidationResult,
 } from '../src/shadow-extraction.js';
+import { postprocessRoleScopedExtraction } from '../src/shadow-extraction-postprocess.js';
 import type { ProviderIdentity } from '../src/types.js';
 import type { D1Database, D1PreparedStatement, MessageBatch, Queue, R2Bucket } from './types.js';
 import { inferOpenAIShadowExtraction } from './openai-shadow-inference.js';
@@ -111,6 +112,7 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   providerIdentity: ProviderIdentity;
   title: string;
   description: string;
+  structuredLocations?: readonly string[];
   observedAt: string;
   incomplete?: boolean;
   baseline?: ShadowBaseline;
@@ -123,7 +125,7 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
       jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId, sourceUrl: input.sourceUrl,
       providerIdentity: input.providerIdentity, observedAt: input.observedAt, origin,
     }, retention: { expiresAt: new Date(Date.parse(input.observedAt) + retentionDays * 86_400_000).toISOString() } });
-  let normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete);
+  let normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete, undefined, input.structuredLocations);
   if (!normalized.title || !normalized.description) return undefined;
   let stored = serialize(normalized);
   const artifactLimit = maxInputBytes + 2_000;
@@ -136,7 +138,7 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
     let fitting: { normalized: typeof normalized; stored: string } | undefined;
     while (low <= high) {
       const budget = Math.floor((low + high) / 2);
-      const candidate = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget);
+      const candidate = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget, input.structuredLocations);
       const candidateStored = serialize(candidate);
       if (candidate.title && candidate.description && bytes(candidateStored) <= artifactLimit) {
         fitting = { normalized: candidate, stored: candidateStored };
@@ -442,6 +444,10 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       if (!await currentRevision(env.DB, message)) {
         await finishRun(env.DB, message, leaseToken, 'obsolete', now(), { error: 'a newer posting revision arrived during inference', inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens, actualCostCents: usage.actualCostCents }); queued.ack(); continue;
+      }
+      if (validation.accepted) {
+        const postprocessed = postprocessRoleScopedExtraction(validation.accepted, normalized.completeness);
+        if (postprocessed.changes.length > 0) validation = validateShadowExtraction(postprocessed.extraction, normalized);
       }
       const responseKey = `shadow-response/${message.runKey}/${leaseToken}.json`;
       await env.SHADOW_EXTRACTION_ARTIFACTS.put(responseKey, new TextEncoder().encode(JSON.stringify({ response: response.response, validation, rawValidation,
