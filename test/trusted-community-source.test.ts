@@ -909,6 +909,25 @@ describe('trusted rollout repair boundaries', { timeout: 20_000 }, () => {
       .admissionConfigurationVersion).not.toBe(original.occurrence.admissionConfigurationVersion);
   });
 
+  it('limits concurrent D1 commits in an admission migration slice', async () => {
+    const { store, poll } = migrationFixture();
+    await poll(false);
+    const commit = store.commitPostingObservation.bind(store);
+    let active = 0;
+    let peak = 0;
+    const writes = vi.spyOn(store, 'commitPostingObservation').mockImplementation(async (input) => {
+      peak = Math.max(peak, ++active);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        return await commit(input);
+      } finally { active -= 1; }
+    });
+    const result = await poll(true, 20);
+    expect(result.failures).toEqual([]);
+    expect(writes.mock.calls.length).toBeGreaterThan(4);
+    expect(peak).toBe(4);
+  });
+
   it('collects evidence and publishes in bounded slices without probing completed rows again', async () => {
     const { store, rows, state, poll, sourceId } = migrationFixture();
     await poll(false);
