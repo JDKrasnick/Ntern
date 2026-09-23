@@ -16,7 +16,6 @@ export type Plan = {
 };
 
 const allowedUpdates = new Set([
-  'cloudflare_d1_database.application',
   'cloudflare_workers_script.application',
   'cloudflare_workers_script.ingestion',
 ]);
@@ -178,21 +177,6 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   return !containsUnknown(protectedWorkerValue(afterUnknown, afterUnknown));
 }
 
-function isSafeD1ReplicationUpdate(change: ResourceChange['change']): boolean {
-  if (!isRecord(change.before) || !isRecord(change.after)) return false;
-  const { read_replication: beforeReplication, ...beforeOther } = change.before;
-  const { read_replication: afterReplication, ...afterOther } = change.after;
-  const computedFields = new Set(['created_at', 'file_size', 'num_tables', 'version']);
-  const unknown = change.after_unknown;
-  const ignored = new Set([...computedFields].filter((field) => isRecord(unknown) && unknown[field] === true));
-  const protectedValue = (value: Record<string, unknown>) => Object.fromEntries(
-    Object.entries(value).filter(([field]) => !ignored.has(field)));
-  return isDeepStrictEqual(beforeReplication, { mode: 'disabled' })
-    && isDeepStrictEqual(afterReplication, { mode: 'auto' })
-    && isDeepStrictEqual(protectedValue(beforeOther), protectedValue(afterOther))
-    && !containsUnknown(isRecord(unknown) ? protectedValue(unknown) : unknown);
-}
-
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
   return (plan.resource_changes ?? [])
     .filter(({ change }) => !change.actions.every((action) => action === 'no-op' || action === 'read'))
@@ -207,9 +191,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
     !allowedUpdates.has(address)
     || change.actions.length !== 1
     || change.actions[0] !== 'update'
-    || !(address === 'cloudflare_d1_database.application'
-      ? isSafeD1ReplicationUpdate(change)
-      : isSafeWorkerUpdate(address, change))
+    || !isSafeWorkerUpdate(address, change)
   )).map(({ address, change }) => ({ address, actions: change.actions }));
 
   if (unsafe.length > 0) {
@@ -222,7 +204,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const plan = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as Plan;
   const changes = validateCloudflarePlan(plan);
-  console.log(`Safe plan: ${changes.length} approved update(s).`);
+  console.log(`Safe plan: ${changes.length} Worker script update(s).`);
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changes.length > 0}\n`);
   }

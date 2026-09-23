@@ -227,13 +227,10 @@ describe('D1 filtered catalog projection', () => {
     insert.run('OTHER', 'META', 'checkpoint', '{}');
     const pageSizes: number[] = [];
     try {
-      const db = sqliteD1(database, (query, rows) => {
+      const store = new D1InternshipStore(sqliteD1(database, (query, rows) => {
         if (/SELECT pk, sk, value FROM catalog_items/iu.test(query)) pageSizes.push(rows.length);
-      });
-      const withSession = vi.fn(() => db);
-      const store = new D1InternshipStore({ ...db, withSession });
+      }));
       const listed = await store.listCatalog();
-      expect(withSession).toHaveBeenCalledExactlyOnceWith('first-primary');
       expect(listed).toHaveLength(206);
       expect(listed.some((item) => item.jobId === 'shared-key')).toBe(true);
       expect(listed.some((item) => item.jobId === 'filtered')).toBe(false);

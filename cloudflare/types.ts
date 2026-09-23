@@ -1,6 +1,6 @@
 export interface D1ResultMeta { changes: number; }
 export interface D1RunResult { meta: D1ResultMeta; }
-export interface D1AllResult<T> { results: T[]; meta?: { served_by_primary?: boolean; served_by_region?: string }; }
+export interface D1AllResult<T> { results: T[]; }
 export interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -10,7 +10,6 @@ export interface D1PreparedStatement {
 export interface D1Database {
   prepare(query: string): D1PreparedStatement;
   batch(statements: D1PreparedStatement[]): Promise<D1RunResult[]>;
-  withSession?(constraint: 'first-primary' | 'first-unconstrained'): D1Database;
 }
 
 export interface R2ObjectBody {

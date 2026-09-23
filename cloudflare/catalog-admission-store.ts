@@ -278,10 +278,10 @@ function preserveDurableFields(current: Internship, change: RepairChange): Inter
 export class D1CatalogAdmissionStore {
   constructor(private readonly db: D1Database) {}
 
-  private async *catalogInternshipPages(limit = 100, openOnly = false, reader = this.db): AsyncGenerator<Array<{ pk: string; sk: string; value: string }>> {
+  private async *catalogInternshipPages(limit = 100, openOnly = false): AsyncGenerator<Array<{ pk: string; sk: string; value: string }>> {
     let after = ['', ''];
     while (true) {
-      const page = await reader.prepare(`SELECT pk, sk, value FROM catalog_items
+      const page = await this.db.prepare(`SELECT pk, sk, value FROM catalog_items
         WHERE kind = 'internship' ${openOnly ? "AND json_extract(value, '$.open') = 1" : ''}
           AND (pk, sk) > (?, ?) ORDER BY pk, sk LIMIT ?`)
         .bind(...after, limit).all<{ pk: string; sk: string; value: string }>();
@@ -574,21 +574,17 @@ export class D1CatalogAdmissionStore {
     jobId: string; sourceId: string; externalId: string; candidateUrl: string; providerIdentity: ProviderIdentity;
     metadataArtifactHash?: string;
   }>> {
-    // This scan only nominates candidates. A separate primary write below
-    // conditionally acquires each lease, so a lagging replica cannot reserve
-    // stale work or grant publication.
-    const reader = this.db.withSession?.('first-unconstrained') ?? this.db;
     const [attempts, evidence, reservations] = await Promise.all([
-      reader.prepare(`SELECT job_id, source_id, observed_at, artifact_hash
+      this.db.prepare(`SELECT job_id, source_id, observed_at, artifact_hash
         FROM role_metadata_extraction_attempts WHERE extraction_version = ?`)
         .bind(ROLE_METADATA_EXTRACTION_VERSION)
         .all<{ job_id: string; source_id: string; observed_at: string; artifact_hash: string }>(),
-      reader.prepare(`SELECT job_id, source_id, observed_at, artifact_hash
+      this.db.prepare(`SELECT job_id, source_id, observed_at, artifact_hash
         FROM role_metadata_evidence WHERE extraction_version = ? AND is_current = 1
           AND source_class IN ('official-page', 'official-json-ld')`)
         .bind(ROLE_METADATA_EXTRACTION_VERSION)
         .all<{ job_id: string; source_id: string; observed_at: string; artifact_hash: string }>(),
-      reader.prepare("SELECT job_id, source_id, lease_until, retry_after, json_extract(report, '$.extractionVersion') AS version FROM role_metadata_acquisition")
+      this.db.prepare("SELECT job_id, source_id, lease_until, retry_after, json_extract(report, '$.extractionVersion') AS version FROM role_metadata_acquisition")
         .all<{ job_id: string; source_id: string; lease_until: string; retry_after: string; version: number | null }>(),
     ]);
     const now = options.reserveAt ?? new Date().toISOString();
@@ -609,7 +605,7 @@ export class D1CatalogAdmissionStore {
       providerIdentity: ProviderIdentity; metadataArtifactHash?: string; bypassDeferral?: true }> = [];
     // Match collectionCoverage's open-role cohort, including withheld roles.
     // Metadata collection must not require or grant catalog admission.
-    for await (const page of this.catalogInternshipPages(100, true, reader)) {
+    for await (const page of this.catalogInternshipPages(100, true)) {
       for (const row of page) {
         const job = JSON.parse(row.value) as Internship;
         for (const reference of job.sourceReferences) {

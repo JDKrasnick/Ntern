@@ -35,7 +35,7 @@ try {
   // Throws on a plan that touches anything outside the Worker bundles and the
   // bindings the release is permitted to reconcile.
   const changes = validateCloudflarePlan(plan);
-  console.log(`Safe plan: ${changes.length} approved update(s).`);
+  console.log(`Safe plan: ${changes.length} Worker script update(s).`);
   if (planOnly || !changes.length) {
     console.log(planOnly ? 'Plan only: nothing applied.' : 'Nothing to apply: production already matches this working tree.');
     process.exit(0);
