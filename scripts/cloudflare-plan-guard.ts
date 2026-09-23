@@ -29,6 +29,25 @@ const permittedPlainTextBindings = new Set([
   'IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED',
   'IDENTITY_CONFIRMED_COVERAGE_FLOOR',
 ]);
+const disabledMetadataPolicy = {
+  enabled: false,
+  version: 'disabled',
+  allowedFields: [],
+  cohort: [],
+};
+
+function disablesReviewedMetadataCanary(before: string, after: string): boolean {
+  try {
+    const prior = JSON.parse(before) as unknown;
+    const next = JSON.parse(after) as unknown;
+    return isRecord(prior)
+      && prior.enabled === true
+      && prior.version === 'production-canary-2026-09-09-v1'
+      && isDeepStrictEqual(next, disabledMetadataPolicy);
+  } catch {
+    return false;
+  }
+}
 // These provider-computed values may legitimately change after uploading new
 // code. Keep this list explicit so a new provider field fails closed.
 const computedWorkerPaths = new Set([
@@ -100,19 +119,29 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
     && controller.class_name === 'D1TrafficController';
   if (addedController) return isDeepStrictEqual(before, afterWithoutController);
   if (before.length !== after.length) return false;
-  let senderChanged = false;
+  let permittedBindingChanged = false;
   const plainTextUpdate = before.every((binding, index) => {
     const nextBinding = after[index];
     if (!isRecord(binding) || !isRecord(nextBinding)) return false;
     if (binding.name !== nextBinding.name) return false;
+    if (binding.name === 'LLM_METADATA_PUBLICATION_POLICY_JSON') {
+      if (binding.type !== 'plain_text' || nextBinding.type !== 'plain_text') return false;
+      const { text: beforeText, ...beforeRest } = binding;
+      const { text: afterText, ...afterRest } = nextBinding;
+      if (!isDeepStrictEqual(beforeRest, afterRest) || typeof beforeText !== 'string' || typeof afterText !== 'string') return false;
+      if (beforeText === afterText) return true;
+      if (!disablesReviewedMetadataCanary(beforeText, afterText)) return false;
+      permittedBindingChanged = true;
+      return true;
+    }
     if (!permittedPlainTextBindings.has(String(binding.name))) return isDeepStrictEqual(binding, nextBinding);
     if (binding.type !== 'plain_text' || nextBinding.type !== 'plain_text') return false;
     const { text: beforeText, ...beforeRest } = binding;
     const { text: afterText, ...afterRest } = nextBinding;
     if (typeof beforeText !== 'string' || typeof afterText !== 'string' || !isDeepStrictEqual(beforeRest, afterRest)) return false;
-    senderChanged ||= beforeText !== afterText;
+    permittedBindingChanged ||= beforeText !== afterText;
     return true;
-  }) && senderChanged;
+  }) && permittedBindingChanged;
   return addedController || plainTextUpdate;
 }
 
@@ -124,10 +153,10 @@ function isSafeWorkerUpdate(change: ResourceChange['change']): boolean {
   const contentChanged = [...allowedContentFields].some((field) => (
     !isDeepStrictEqual(before[field], after[field])
   ));
-  const senderChanged = isPermittedBindingUpdate(before.bindings, after.bindings);
-  if (!contentChanged && !senderChanged) return false;
+  const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings);
+  if (!contentChanged && !permittedBindingChanged) return false;
 
-  const beforeForComparison = senderChanged ? { ...before, bindings: after.bindings } : before;
+  const beforeForComparison = permittedBindingChanged ? { ...before, bindings: after.bindings } : before;
 
   const afterUnknown = change.after_unknown;
   if (!isDeepStrictEqual(
