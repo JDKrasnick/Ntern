@@ -417,19 +417,21 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await reserveShadowCost(DB, now, 'd'.repeat(64), 'lease-d', 1, env)).toBe(false);
   });
 
-  it('admits September v34 work after 496 cents but restores the 500-cent shadow cap in October', async () => {
+  it('admits September v34 work after 691 cents, caps it at 800, and restores 500 in October', async () => {
     const DB = schema();
     const september = new Date('2026-09-23T00:00:00.000Z');
     const october = new Date('2026-10-01T00:00:00.000Z');
-    const priorKey = 'e'.repeat(64); const septemberKey = 'f'.repeat(64); const octoberKey = '1'.repeat(64);
-    for (const key of [priorKey, septemberKey, octoberKey]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, input_key, created_at, updated_at)
+    const priorKey = 'e'.repeat(64); const septemberKey = 'f'.repeat(64); const octoberKey = '1'.repeat(64); const overLimitKey = '2'.repeat(64);
+    for (const key of [priorKey, septemberKey, octoberKey, overLimitKey]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, input_key, created_at, updated_at)
       VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, ?, 'p', 's', 'n', 'queued', 0, '', 'shadow-input/x.json', ?, ?)`).bind(key, key, SHADOW_EXTRACTION_MODEL_ID, september.toISOString(), september.toISOString()).run();
     for (const period of ['2026-09', '2026-10']) await DB.prepare(`INSERT INTO shadow_extraction_cost_ledger
       (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
-      VALUES (?, ?, ?, 10, 496, 'reconciled', ?, ?)`).bind(period, `prior-${period}`, priorKey, september.toISOString(), september.toISOString()).run();
+      VALUES (?, ?, ?, 10, 691, 'reconciled', ?, ?)`).bind(period, `prior-${period}`, priorKey, september.toISOString(), september.toISOString()).run();
     const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '500' };
     expect(await reserveShadowCost(DB, september, septemberKey, 'september-v34', 10, env)).toBe(true);
     expect(await reserveShadowCost(DB, october, octoberKey, 'october-v34', 10, env)).toBe(false);
+    await DB.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = 790 WHERE period = '2026-09' AND run_key = ?`).bind(priorKey).run();
+    expect(await reserveShadowCost(DB, september, overLimitKey, 'september-over-limit', 1, env)).toBe(false);
   });
 
   it('reuses a reservation for one transient retry and records deterministic baseline differences', async () => {
