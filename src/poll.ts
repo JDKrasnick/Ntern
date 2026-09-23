@@ -1044,11 +1044,15 @@ export class IngestionRunner {
             // A probe that never completed, or one that resolved to a dead link,
             // withdraws its row rather than failing the delivery; a genuinely
             // broken list is caught by the share gate in the caller.
-            // A bounded metadata refresh cannot withdraw its selected row: doing
-            // so would certify a parser revision that never successfully read
-            // the page. Keep that obligation pending for a later delivery.
-            if (isProbeFailure(error) && !stampSourceMetadata) withdrawnProbeFailures.push(failure);
-            else failures[slot] = failure;
+            // A confirmed 404/410 is a complete negative destination decision:
+            // admission below persists it without publishing the row. In a
+            // bounded metadata refresh, inconclusive probes must remain pending
+            // instead of entering the processed-row checkpoint ledger.
+            if (!(stampSourceMetadata && reachability === 'gone' && admissionManaged)) {
+              if (isProbeFailure(error) && !stampSourceMetadata) withdrawnProbeFailures.push(failure);
+              else failures[slot] = failure;
+            }
+            if (stampSourceMetadata && reachability !== 'gone') failedExternalIds.add(id);
             if (!admissionManaged) {
               failedExternalIds.add(id);
               if (existing?.open && reachability === 'gone') await this.quarantine(existing);
