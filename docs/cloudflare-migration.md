@@ -169,6 +169,18 @@ rotating the shutdown credentials.
 
 ## Release verification
 
+The public catalog projection is written to D1 and mirrored under
+`public-catalog/v1/` in the private documents R2 bucket. The API reads the
+complete R2 version after its pointer is published, and falls back to D1 if
+the R2 version is missing or damaged. Compare the R2 pointer's hash, generated
+time, and group count with D1 before enabling `CATALOG_R2_READ_ENABLED` in
+production. A prefix-scoped `catalog-projection-14d` lifecycle rule expires old
+immutable pages in both `intern-notifs-documents` and
+`intern-notifs-dev-documents`; check it with
+`npx wrangler r2 bucket lifecycle list <bucket>` after bucket changes. The
+current pointer is refreshed every ten minutes, while readers accept a
+complete projection for up to seven days if maintenance is interrupted.
+
 Before changing the mobile build, verify public catalog paging, sign-up and
 verification, sign-in, account deletion, notification registration, R2 document
 upload/download, all four catalog-provider queues and DLQs, Cron events, and operations
