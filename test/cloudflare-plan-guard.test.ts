@@ -120,6 +120,22 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits only the production API catalog R2 read toggle', () => {
+    const enabled = { name: 'CATALOG_R2_READ_ENABLED', type: 'plain_text', text: 'true' };
+    const added = { ...contentUpdate, after: { ...contentUpdate.after, bindings: [enabled, ...worker.bindings] } };
+    expect(validateCloudflarePlan(plan([added]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{ ...added, address: 'cloudflare_workers_script.ingestion' }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{ ...added, after: { ...added.after,
+      bindings: [{ ...enabled, text: 'false' }, ...worker.bindings] } }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{ ...added, after: { ...added.after,
+      bindings: [{ ...enabled, service: 'unreviewed' }, ...worker.bindings] } }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{ ...added, after: { ...added.after,
+      bindings: [enabled, ...worker.bindings, { name: 'OTHER', type: 'plain_text', text: 'on' }] } }]))).toThrow('Refusing unsafe Cloudflare plan');
+    const rollback = { ...contentUpdate, before: { ...worker, bindings: [enabled, ...worker.bindings] },
+      after: { ...worker, bindings: [{ ...enabled, text: 'false' }, ...worker.bindings] } };
+    expect(validateCloudflarePlan(plan([rollback]))).toHaveLength(1);
+  });
+
   it('allows only disabling the reviewed metadata canary', () => {
     const name = 'LLM_METADATA_PUBLICATION_POLICY_JSON';
     const enabled = JSON.stringify({ enabled: true, version: 'production-canary-2026-09-09-v1', allowedFields: ['compensation'], cohort: [{ sourceId: 'reviewed' }] });

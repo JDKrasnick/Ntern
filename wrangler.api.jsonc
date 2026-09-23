@@ -30,6 +30,7 @@
   "version_metadata": { "binding": "VERSION_METADATA" },
   "vars": {
     "PUBLIC_API_URL": "https://intern-notifs.jdkrasnick.workers.dev",
+    "CATALOG_R2_READ_ENABLED": "true",
     "AUTH_FROM_EMAIL": "Ntern <notifications@send.ntern.app>",
     "AUTH_DEV_MODE": "false",
     "EMPLOYER_PORTAL_ENABLED": "true",

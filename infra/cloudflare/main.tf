@@ -28,6 +28,7 @@ locals {
   api_plain_bindings = concat(
     [
       { name = "PUBLIC_API_URL", type = "plain_text", text = var.public_api_url },
+      { name = "CATALOG_R2_READ_ENABLED", type = "plain_text", text = "true" },
       { name = "AUTH_DEV_MODE", type = "plain_text", text = tostring(var.auth_dev_mode) },
       { name = "EMPLOYER_PORTAL_ENABLED", type = "plain_text", text = tostring(var.employer_portal_enabled) },
       { name = "GMAIL_ENABLED", type = "plain_text", text = tostring(var.gmail_enabled) },

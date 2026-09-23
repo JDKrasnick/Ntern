@@ -210,6 +210,8 @@ interface PrefetchedBoardFetch {
 }
 
 const SOURCE_WORK_CONCURRENCY = 24;
+const SOURCE_PERSISTENCE_CONCURRENCY = 8;
+const SOURCE_MIGRATION_PERSISTENCE_CONCURRENCY = 4;
 /**
  * Share of a delivery's rows whose application page may fail to verify before the
  * source itself is treated as broken. Individual dead or unreachable pages are a
@@ -246,7 +248,8 @@ export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 100;
  * Bounded worker pool that always drains: the first error is rethrown only once
  * every worker has settled, so a failed slice never leaves writes in flight.
  */
-async function forEachBounded<T>(items: readonly T[], task: (item: T, index: number) => Promise<void>): Promise<void> {
+async function forEachBounded<T>(items: readonly T[], task: (item: T, index: number) => Promise<void>,
+  concurrency = SOURCE_WORK_CONCURRENCY): Promise<void> {
   let next = 0;
   let failure: unknown;
   const worker = async () => {
@@ -256,7 +259,7 @@ async function forEachBounded<T>(items: readonly T[], task: (item: T, index: num
       catch (error) { failure ??= error; }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(SOURCE_WORK_CONCURRENCY, items.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
   if (failure !== undefined) throw failure;
 }
 
@@ -1725,6 +1728,8 @@ export class IngestionRunner {
         const notificationErrors = new Array<unknown>(plan.notifications.length);
         const consumedEvents = new Set<string>();
         const classifiedEventIds = new Set<string>();
+        const persistenceConcurrency = migrationLimit === undefined
+          ? SOURCE_PERSISTENCE_CONCURRENCY : SOURCE_MIGRATION_PERSISTENCE_CONCURRENCY;
         await forEachBounded(plan.occurrences, async (occurrence) => {
           try {
             const job = plannedJobs.get(occurrence.jobId);
@@ -1796,7 +1801,7 @@ export class IngestionRunner {
               throw new Error(`${error instanceof Error ? error.message : String(error)}; failed to preserve migration decision: ${preserveError instanceof Error ? preserveError.message : String(preserveError)}`);
             }
           }
-        });
+        }, persistenceConcurrency);
         await forEachBounded(
           plan.jobs.filter((job) => !committedJobIds.has(job.jobId) && !blockedJobIds.has(job.jobId)
             && !persistenceFailedJobIds.has(job.jobId) && !notificationByJobId.has(job.jobId)),
@@ -1812,7 +1817,7 @@ export class IngestionRunner {
               }
               report.failures.push(`${connector.id}: ${job.jobId}: migration job persistence failed; preserved prior decision: ${error instanceof Error ? error.message : String(error)}`);
             }
-          },
+          }, persistenceConcurrency,
         );
         // Legacy-unclassified plans retain the compatible job+event operation.
         await forEachBounded(plan.notifications.filter((event) => !classifiedEventIds.has(event.eventId) && !consumedEvents.has(event.eventId) && !blockedJobIds.has(event.jobId)), async (event, index) => {
@@ -1828,7 +1833,7 @@ export class IngestionRunner {
               }
             }
           }
-        });
+        }, persistenceConcurrency);
         for (const job of plan.newJobs) {
           if (alertedJobIds.has(job.jobId)) report.newJobs.push(job);
         }
