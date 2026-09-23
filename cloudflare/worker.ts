@@ -50,6 +50,7 @@ import { destinationVerificationMessage, enqueueDueDestinationVerifications, pro
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
 import { recentD1OverloadCount } from './d1-overload-alert.js';
+import { measureDlqGrowth, recordDlqBaseline } from './dlq-growth-alert.js';
 import { observeD1Delivery, observeQueueBatch } from './d1-traffic-observation.js';
 import { resilientD1 } from './resilient-d1.js';
 export { D1TrafficController } from './d1-traffic-controller.js';
@@ -1511,6 +1512,12 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'metadata_collection_deferred', recentOverloads: recentOverloads ?? null }));
     const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
     const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
+    const dlqGrowth = await runScheduledStep('dlq_growth_metrics', () => measureDlqGrowth(env.DB, {
+      greenhouse: env.GREENHOUSE_DLQ, lever: env.LEVER_DLQ, ashby: env.ASHBY_DLQ,
+      github: env.GITHUB_DLQ, gmail: env.GMAIL_DLQ,
+      'destination-verification': env.DESTINATION_VERIFICATION_DLQ,
+      'shadow-extraction': env.SHADOW_EXTRACTION_DLQ,
+    }));
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
     const queueAgeMs = queueMetrics?.oldestMessageTimestamp
       ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
@@ -1518,11 +1525,15 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),
       ...(recentOverloads ? ['d1-overloaded'] : []),
+      ...(dlqGrowth && Object.keys(dlqGrowth.increases).length ? ['dlq-growth'] : []),
     ];
-    await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
+    const alertSent = await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
       signals: operationalSignals, observedAt: observedAt.toISOString(),
-      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}.`,
+      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}.`,
     }));
+    if (dlqGrowth?.changed && (!Object.keys(dlqGrowth.increases).length || alertSent)) {
+      await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts));
+    }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
