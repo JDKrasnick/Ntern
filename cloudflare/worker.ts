@@ -602,13 +602,24 @@ export function resumeCompilerRequest(tex: string): Request {
   });
 }
 
+/** Keep container-backed Durable Objects within the configured container pool.
+ * A Durable Object name per resume would request an unbounded number of
+ * container instances and fail as soon as a burst exceeds max_instances. */
+export const RESUME_PDF_COMPILER_POOL_SIZE = 2;
+export function resumeCompilerPoolName(resumeSpecHash: string, poolSize = RESUME_PDF_COMPILER_POOL_SIZE): string {
+  if (!/^[a-f0-9]{8,}$/u.test(resumeSpecHash) || !Number.isSafeInteger(poolSize) || poolSize < 1) {
+    throw new Error('Resume compiler pool selection requires a digest and a positive pool size');
+  }
+  return `resume-pdf-compiler-${Number.parseInt(resumeSpecHash.slice(0, 8), 16) % poolSize}`;
+}
+
 function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
   return {
     async putTex(objectKey, tex) { const bytes = new TextEncoder().encode(tex); await env.DOCUMENTS.put(objectKey, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'application/x-tex; charset=utf-8' } }); },
     async putPdf(objectKey, pdf) { await env.DOCUMENTS.put(objectKey, pdf, { httpMetadata: { contentType: 'application/pdf' } }); },
     async putPreview(objectKey, png) { await env.DOCUMENTS.put(objectKey, png, { httpMetadata: { contentType: 'image/png' } }); },
     async compile(tex, resumeSpecHash) {
-      const stub = env.RESUME_PDF_COMPILER.get(env.RESUME_PDF_COMPILER.idFromName(resumeSpecHash));
+      const stub = env.RESUME_PDF_COMPILER.get(env.RESUME_PDF_COMPILER.idFromName(resumeCompilerPoolName(resumeSpecHash)));
       const response = await stub.fetch(resumeCompilerRequest(tex));
       if (!response.ok) throw new Error('Resume PDF compiler did not produce an artifact');
       const files = unzipSync(new Uint8Array(await response.arrayBuffer()));

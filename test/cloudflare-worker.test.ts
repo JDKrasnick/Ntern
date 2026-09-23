@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -38,6 +38,13 @@ describe('Resume compiler transport', () => {
     expect(request.headers.get('content-type')).toBe('application/x-tex');
     expect(request.headers.get('content-length')).toBe(String(new TextEncoder().encode('Résumé – PDF').byteLength));
     expect(new Uint8Array(await request.arrayBuffer())).toEqual(new TextEncoder().encode('Résumé – PDF'));
+  });
+
+  it('maps arbitrary resume digests onto the bounded compiler instance pool', () => {
+    expect(resumeCompilerPoolName('00000000abcdef12')).toBe('resume-pdf-compiler-0');
+    expect(resumeCompilerPoolName('00000001abcdef12')).toBe('resume-pdf-compiler-1');
+    expect(resumeCompilerPoolName('ffffffffabcdef12')).toBe('resume-pdf-compiler-1');
+    expect(() => resumeCompilerPoolName('not-a-digest')).toThrow(/digest/u);
   });
 });
 
