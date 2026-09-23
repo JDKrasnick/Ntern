@@ -8,13 +8,16 @@ import {
   normalizeExactPostingDescription,
   shadowExtractionCacheKey,
   shadowExtractionPrompt,
+  shadowExtractionRepairPrompt,
   projectShadowExtractionToSupportedFields,
   validateShadowExtraction,
+  type ShadowExtraction,
   type NormalizedPostingInput,
   type ShadowExtractionOrigin,
   type ShadowStatus,
   type ShadowValidationResult,
 } from '../src/shadow-extraction.js';
+import { postprocessRoleScopedExtraction } from '../src/shadow-extraction-postprocess.js';
 import type { ProviderIdentity } from '../src/types.js';
 import type { D1Database, D1PreparedStatement, MessageBatch, Queue, R2Bucket } from './types.js';
 import { inferOpenAIShadowExtraction } from './openai-shadow-inference.js';
@@ -53,6 +56,8 @@ export interface ShadowExtractionEnvironment {
   SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS?: string;
   OPENAI_KEY?: string;
 }
+
+const shadowFieldNames = ['compensation', 'locations', 'workMode', 'housing', 'timing', 'education', 'eligibility'] as const;
 
 const leaseMs = 5 * 60_000;
 const retentionDays = 30;
@@ -107,6 +112,7 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   providerIdentity: ProviderIdentity;
   title: string;
   description: string;
+  structuredLocations?: readonly string[];
   observedAt: string;
   incomplete?: boolean;
   baseline?: ShadowBaseline;
@@ -119,7 +125,7 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
       jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId, sourceUrl: input.sourceUrl,
       providerIdentity: input.providerIdentity, observedAt: input.observedAt, origin,
     }, retention: { expiresAt: new Date(Date.parse(input.observedAt) + retentionDays * 86_400_000).toISOString() } });
-  let normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete);
+  let normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete, undefined, input.structuredLocations);
   if (!normalized.title || !normalized.description) return undefined;
   let stored = serialize(normalized);
   const artifactLimit = maxInputBytes + 2_000;
@@ -132,7 +138,7 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
     let fitting: { normalized: typeof normalized; stored: string } | undefined;
     while (low <= high) {
       const budget = Math.floor((low + high) / 2);
-      const candidate = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget);
+      const candidate = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget, input.structuredLocations);
       const candidateStored = serialize(candidate);
       if (candidate.title && candidate.description && bytes(candidateStored) <= artifactLimit) {
         fitting = { normalized: candidate, stored: candidateStored };
@@ -173,7 +179,9 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
   const prior = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger
     WHERE period = ? AND lease_token = ?`).bind(period, leaseToken).first<{ state: string; reserved_cents: number }>();
   if (prior?.state === 'reserved' && prior.reserved_cents >= reserveCents) return true;
-  const allowance = Math.min(headroom, Math.max(0, 2_000 - forecast));
+  // Owner-approved $3 increase applies only to September 2026; October returns to the usual envelope.
+  const septemberIncreaseCents = period === '2026-09' ? 300 : 0;
+  const allowance = Math.min(headroom + septemberIncreaseCents, Math.max(0, 2_000 + septemberIncreaseCents - forecast));
   if (reserveCents > allowance) return false;
   const result = await db.prepare(`INSERT INTO shadow_extraction_cost_ledger (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
     SELECT ?, ?, ?, ?, 0, 'reserved', ?, ?
@@ -231,7 +239,8 @@ async function finishRun(db: D1Database, message: ShadowExtractionMessage, lease
   return result.meta.changes === 1;
 }
 
-async function reconcileUsage(db: D1Database, message: ShadowExtractionMessage, leaseToken: string, startedAt: Date, response: ShadowInferenceResult, now: Date): Promise<void> {
+async function reconcileUsage(db: D1Database, message: ShadowExtractionMessage, leaseToken: string, startedAt: Date,
+  response: Pick<ShadowInferenceResult, 'inputTokens' | 'outputTokens' | 'actualCostCents'>, now: Date): Promise<void> {
   await db.batch([
     db.prepare(`INSERT OR IGNORE INTO shadow_extraction_usage (lease_token, run_key, input_tokens, output_tokens, actual_cost_cents, recorded_at)
       SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM shadow_extraction_claims WHERE lease_token = ? AND run_key = ?)`)
@@ -362,7 +371,10 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
         await finishRun(env.DB, message, leaseToken, 'invalid-output', now(), { error: 'input identity or version mismatch' }); queued.ack(); continue;
       }
       if (env.SHADOW_EXTRACTION_ENABLED !== 'true' || !inference) {
-        await finishRun(env.DB, message, leaseToken, 'disabled', now(), { error: 'live model execution disabled or credential unavailable' }); queued.ack(); continue;
+        const error = env.SHADOW_EXTRACTION_ENABLED !== 'true'
+          ? 'live model execution disabled by runtime flag'
+          : 'live model credential unavailable';
+        await finishRun(env.DB, message, leaseToken, 'disabled', now(), { error }); queued.ack(); continue;
       }
       const cached = await env.DB.prepare('SELECT response_key, validation, expires_at FROM shadow_extraction_cache WHERE cache_key = ?')
         .bind(message.cacheKey).first<{ response_key: string; validation: string; expires_at: string }>();
@@ -383,33 +395,75 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
         await env.DB.prepare('DELETE FROM shadow_extraction_cache WHERE cache_key = ? AND response_key = ?')
           .bind(message.cacheKey, cached.response_key).run();
       }
-      // Conservative upper bound: 5 cents/request. Actual model cost is reconciled below.
-      if (!await reserveShadowCost(env.DB, startedAt, message.runKey, leaseToken, 5, env)) {
+      // Reserve the upper bound for one extraction plus one field-repair retry.
+      // Actual combined usage is reconciled below.
+      if (!await reserveShadowCost(env.DB, startedAt, message.runKey, leaseToken, 10, env)) {
         await finishRun(env.DB, message, leaseToken, 'disabled', now(), { error: 'cost headroom unavailable' }); queued.ack(); continue;
       }
+      const usageValid = (response: ShadowInferenceResult) => Number.isSafeInteger(response.inputTokens) && response.inputTokens >= 0
+        && Number.isSafeInteger(response.outputTokens) && response.outputTokens >= 0
+        && Number.isSafeInteger(response.actualCostCents) && response.actualCostCents >= 0;
       const response = await inference(normalized, shadowExtractionPrompt(normalized));
-      if (!Number.isSafeInteger(response.inputTokens) || response.inputTokens < 0
-        || !Number.isSafeInteger(response.outputTokens) || response.outputTokens < 0
-        || !Number.isSafeInteger(response.actualCostCents) || response.actualCostCents < 0) {
+      if (!usageValid(response)) {
         throw new Error('model usage is invalid');
       }
-      await reconcileUsage(env.DB, message, leaseToken, startedAt, response, now());
-      if (!await currentRevision(env.DB, message)) {
-        await finishRun(env.DB, message, leaseToken, 'obsolete', now(), { error: 'a newer posting revision arrived during inference', inputTokens: response.inputTokens,
-          outputTokens: response.outputTokens, actualCostCents: response.actualCostCents }); queued.ack(); continue;
-      }
       const rawValidation = validateShadowExtraction(response.response, normalized);
-      const projection = rawValidation.accepted ? undefined : projectShadowExtractionToSupportedFields(response.response, normalized);
-      const validation = projection?.accepted
-        ? { ...validateShadowExtraction(projection.accepted, normalized), projectedFields: projection.removedFields }
+      const initialProjection = rawValidation.accepted ? undefined : projectShadowExtractionToSupportedFields(response.response, normalized);
+      const malformedFields = rawValidation.failures.length > 0 && rawValidation.failures.every((failure) => failure.includes(':'))
+        ? rawValidation.fieldOutcomes.filter((outcome) => !outcome.accepted && shadowFieldNames.includes(outcome.field as typeof shadowFieldNames[number]))
+          .map((outcome) => outcome.field as typeof shadowFieldNames[number]) : [];
+      let repairedResponse: ShadowInferenceResult | undefined;
+      let validation = initialProjection?.accepted
+        ? { ...validateShadowExtraction(initialProjection.accepted, normalized), projectedFields: initialProjection.removedFields }
         : rawValidation;
+      let repairedFields: string[] = [];
+      let repairError: string | undefined;
+      // Incomplete artifacts cannot safely gain facts from another pass. The
+      // retry is solely a bounded repair of a complete posting's malformed
+      // field contract; the valid first projection remains authoritative if it
+      // cannot be completed.
+      if (normalized.completeness === 'complete' && malformedFields.length > 0 && initialProjection?.accepted) {
+        try {
+          repairedResponse = await inference(normalized, shadowExtractionRepairPrompt(normalized, malformedFields));
+          if (!usageValid(repairedResponse)) throw new Error('model repair usage is invalid');
+          const retryProjection = projectShadowExtractionToSupportedFields(repairedResponse.response, normalized);
+          if (retryProjection.accepted) {
+            const fields = { ...initialProjection.accepted.fields };
+            for (const field of malformedFields) fields[field] = retryProjection.accepted.fields[field];
+            const merged: ShadowExtraction = { classification: initialProjection.accepted.classification, fields };
+            validation = { ...validateShadowExtraction(merged, normalized), projectedFields: initialProjection.removedFields };
+            repairedFields = malformedFields.filter((field) => retryProjection.accepted!.fields[field].status === 'present');
+          }
+        } catch (error) {
+          // The initial projection is already contract-valid and billed. Do
+          // not requeue it merely because the optional repair was unavailable.
+          repairError = error instanceof Error ? error.message.slice(0, 500) : 'model repair failed';
+          repairedResponse = undefined;
+        }
+      }
+      const usage = repairedResponse
+        ? { inputTokens: response.inputTokens + repairedResponse.inputTokens, outputTokens: response.outputTokens + repairedResponse.outputTokens,
+          actualCostCents: response.actualCostCents + repairedResponse.actualCostCents }
+        : response;
+      await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now());
+      if (!await currentRevision(env.DB, message)) {
+        await finishRun(env.DB, message, leaseToken, 'obsolete', now(), { error: 'a newer posting revision arrived during inference', inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens, actualCostCents: usage.actualCostCents }); queued.ack(); continue;
+      }
+      if (validation.accepted) {
+        const postprocessed = postprocessRoleScopedExtraction(validation.accepted, normalized.completeness);
+        if (postprocessed.changes.length > 0) validation = validateShadowExtraction(postprocessed.extraction, normalized);
+      }
       const responseKey = `shadow-response/${message.runKey}/${leaseToken}.json`;
       await env.SHADOW_EXTRACTION_ARTIFACTS.put(responseKey, new TextEncoder().encode(JSON.stringify({ response: response.response, validation, rawValidation,
-        projection: projection ? { removedFields: projection.removedFields, failures: projection.failures } : undefined })).buffer, { httpMetadata: { contentType: 'application/json' } });
+        projection: initialProjection ? { removedFields: initialProjection.removedFields, failures: initialProjection.failures } : undefined,
+        repair: repairedResponse ? { response: repairedResponse.response, repairedFields, inputTokens: repairedResponse.inputTokens,
+          outputTokens: repairedResponse.outputTokens, actualCostCents: repairedResponse.actualCostCents }
+          : repairError ? { error: repairError } : undefined })).buffer, { httpMetadata: { contentType: 'application/json' } });
       const state = validation.accepted ? 'completed' : 'invalid-output';
       const completedAt = now();
       const finished = await finishRunWithAnalysis(env.DB, message, leaseToken, state, completedAt, { responseKey, validation,
-        inputTokens: response.inputTokens, outputTokens: response.outputTokens, actualCostCents: response.actualCostCents }, parsed.baseline);
+        inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, actualCostCents: usage.actualCostCents }, parsed.baseline);
       if (!finished) { queued.ack(); continue; }
       if (validation.accepted) await env.DB.prepare(`INSERT INTO shadow_extraction_cache (cache_key, response_key, validation, created_at, expires_at)
         VALUES (?, ?, ?, ?, ?) ON CONFLICT(cache_key) DO NOTHING`).bind(message.cacheKey, responseKey, JSON.stringify(validation), completedAt.toISOString(), new Date(completedAt.getTime() + retentionDays * 86_400_000).toISOString()).run();

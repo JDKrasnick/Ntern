@@ -97,8 +97,14 @@ before(async () => {
           OPERATIONS_SHARED_SECRET: { type: 'text', value: operationsSecret },
           DEPLOYMENT_ROLE: { type: 'text', value: 'ingestion' },
           DB: { type: 'd1', id: 'intern-notifs-e2e' },
+          GREENHOUSE_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-greenhouse' },
+          LEVER_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-lever' },
+          ASHBY_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-ashby' },
+          GITHUB_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-github' },
+          GMAIL_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-gmail' },
           DESTINATION_VERIFICATION_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-destination-verification' },
           DESTINATION_VERIFICATION_DLQ: { type: 'queue', name: 'intern-notifs-e2e-destination-verification-dlq' },
+          SHADOW_EXTRACTION_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-shadow-extraction' },
         },
       ),
     ],
@@ -471,8 +477,8 @@ test('processes a compiled shadow queue event through R2 and exposes its disable
   const sha256 = (value) => createHash('sha256').update(value).digest('hex');
   const normalized = { title: 'Software Engineering Intern', description: 'Austin\n$50 - $60 per hour', completeness: 'complete' };
   normalized.contentHash = sha256(JSON.stringify(normalized));
-  const cacheKey = sha256([normalized.contentHash, 'gpt-5-mini-2025-08-07', 'shadow-extraction-prompt-v14',
-    'shadow-extraction-schema-v5', 'exact-posting-markdown-v1'].join('\0'));
+  const cacheKey = sha256([normalized.contentHash, 'gpt-5-mini-2025-08-07', 'shadow-extraction-prompt-v34',
+    'shadow-extraction-schema-v5', 'exact-posting-markdown-v2'].join('\0'));
   const identity = { provider: 'greenhouse', sourceId: 'greenhouse-review', tenant: 'review', postingId: '175', sourceUrl: 'https://example.test/175' };
   const runKey = sha256(['review-job', 'greenhouse-review', '175', normalized.contentHash, cacheKey].join('\0'));
   const inputKey = `shadow-input/${runKey}.json`;
@@ -501,7 +507,7 @@ test('processes a compiled shadow queue event through R2 and exposes its disable
   await shadowRuntime.dispose();
 
   assert.equal(acked, true);
-  assert.deepEqual(row, { state: 'disabled', attempts: 1, error: 'live model execution disabled or credential unavailable' });
+  assert.deepEqual(row, { state: 'disabled', attempts: 1, error: 'live model execution disabled by runtime flag' });
   assert.equal(summary.status, 200);
   assert.ok(summaryBody.runs.some((item) => item.state === 'disabled' && item.count === 1));
   assert.deepEqual(summaryBody.providerOutbox, { pending: 0 });

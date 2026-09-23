@@ -125,6 +125,7 @@ export async function inferOpenAIShadowExtraction(
   const reasoning = model.startsWith('gpt-5-') && options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {};
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+  let completion: OpenAIChatCompletion;
   let response: Response;
   try {
     response = await request(endpoint, {
@@ -146,10 +147,13 @@ export async function inferOpenAIShadowExtraction(
       }),
       signal: controller.signal,
     });
+    // Keep the deadline active while consuming the body as well. Clearing it
+    // after headers arrive permits a stalled streaming response to hold an
+    // extraction worker indefinitely.
+    completion = await boundedJson(response);
   } finally {
     clearTimeout(timeout);
   }
-  const completion = await boundedJson(response);
   if (!response.ok) {
     const detail = typeof completion.error?.message === 'string' ? `: ${completion.error.message.slice(0, 300)}` : '';
     throw new Error(`OpenAI request failed with status ${response.status}${detail}`);

@@ -53,6 +53,9 @@ import { destinationVerificationMessage, enqueueDueDestinationVerifications, pro
   sendAdmissionOperationalAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
+import { recentD1OverloadCount } from './d1-overload-alert.js';
+import { measureDlqGrowth, recordDlqBaseline } from './dlq-growth-alert.js';
+import { assessBulkSafeWindow } from './bulk-safe-window.js';
 import { observeD1Delivery, observeQueueBatch } from './d1-traffic-observation.js';
 import { resilientD1 } from './resilient-d1.js';
 export { D1TrafficController } from './d1-traffic-controller.js';
@@ -403,6 +406,25 @@ function eventResponse(result: { body: string; statusCode: number; headers?: Rec
 function operationsAuthorized(request: Request, env: Environment): boolean {
   return Boolean(env.OPERATIONS_SHARED_SECRET)
     && request.headers.get('X-Operations-Key') === env.OPERATIONS_SHARED_SECRET;
+}
+
+async function bulkOperationWindow(env: Environment): Promise<Response | undefined> {
+  try {
+    const window = await assessBulkSafeWindow(env.DB, {
+      greenhouse: env.GREENHOUSE_QUEUE, lever: env.LEVER_QUEUE, ashby: env.ASHBY_QUEUE,
+      github: env.GITHUB_QUEUE, gmail: env.GMAIL_QUEUE,
+      'destination-verification': env.DESTINATION_VERIFICATION_QUEUE,
+      'shadow-extraction': env.SHADOW_EXTRACTION_QUEUE,
+    }, new Date());
+    if (window.ready) return undefined;
+    console.warn(JSON.stringify({ event: 'bulk_operation_deferred', reason: window.reason, queues: window.queues ?? [] }));
+    return Response.json({ message: 'Bulk operation requires a quiet queue and D1 window', ...window },
+      { status: 503, headers: { 'Retry-After': '300' } });
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'bulk_operation_window_unavailable', diagnostic: safeDiagnostic(error) }));
+    return Response.json({ message: 'Bulk operation window could not be verified' },
+      { status: 503, headers: { 'Retry-After': '300' } });
+  }
 }
 
 function apiEvent(request: Request, userId: string | undefined, body: string | null) {
@@ -853,6 +875,8 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   }
   if (request.method === 'POST' && url.pathname === '/internal/catalog-quality-backfill') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    const window = await bulkOperationWindow(env);
+    if (window) return withCors(window);
     const input = await request.json().catch(() => ({})) as { apply?: boolean; repairToken?: string; expectedChanged?: number };
     try {
       const report = await runCatalogQualityBackfill(env.DB, input);
@@ -865,6 +889,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     } catch (error) {
       return withCors(Response.json({ message: error instanceof Error ? error.message : 'Backfill failed' }, { status: 409 }));
     }
+  }
+  if (request.method === 'GET' && url.pathname === '/internal/operations/bulk-window') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    return withCors(await bulkOperationWindow(env) ?? Response.json({ ready: true }));
   }
   if (url.pathname.startsWith('/internal/admission/')) {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
@@ -883,6 +911,8 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   }
   if (request.method === 'POST' && url.pathname === '/internal/posting-identity-repair') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    const window = await bulkOperationWindow(env);
+    if (window) return withCors(window);
     const input = await request.json().catch(() => ({})) as {
       apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
       acceptCurrentSnapshot?: boolean; expectedEligibleDuplicateGroups?: number; expectedUnresolvedDuplicateGroups?: number;
@@ -1619,25 +1649,40 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // alert held the feed on a day-old snapshot.
     // See docs/197-ingestion-resource-bounds.md.
     const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store));
+    const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
-    // Bounded per pass and lease-protected, so running on every maintenance tick
-    // drains the backlog without overlapping work. Gating this on a specific
-    // minute made it depend on fragile clock arithmetic and unobservable.
-    const metadataCollection = await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt));
+    // Metadata collection scans the open catalog. When D1 recently refused
+    // queue writes, or pressure cannot be measured, defer this background scan
+    // so the public projection and source consumers keep their capacity.
+    const metadataCollection = recentOverloads === 0
+      ? await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt))
+      : { queued: 0, deferred: true };
+    if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'metadata_collection_deferred', recentOverloads: recentOverloads ?? null }));
     const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
     const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
+    const dlqGrowth = await runScheduledStep('dlq_growth_metrics', () => measureDlqGrowth(env.DB, {
+      greenhouse: env.GREENHOUSE_DLQ, lever: env.LEVER_DLQ, ashby: env.ASHBY_DLQ,
+      github: env.GITHUB_DLQ, gmail: env.GMAIL_DLQ,
+      'destination-verification': env.DESTINATION_VERIFICATION_DLQ,
+      'shadow-extraction': env.SHADOW_EXTRACTION_DLQ,
+    }));
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
     const queueAgeMs = queueMetrics?.oldestMessageTimestamp
       ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
     const operationalSignals = [
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),
+      ...(recentOverloads ? ['d1-overloaded'] : []),
+      ...(dlqGrowth && Object.keys(dlqGrowth.increases).length ? ['dlq-growth'] : []),
     ];
-    await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
+    const alertSent = await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
       signals: operationalSignals, observedAt: observedAt.toISOString(),
-      details: `Destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}.`,
+      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}.`,
     }));
+    if (dlqGrowth?.changed && (!Object.keys(dlqGrowth.increases).length || alertSent)) {
+      await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts));
+    }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
@@ -1944,7 +1989,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         }
         if (result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
         if (result.poll?.continuationSources.includes(source.id)) {
-          await sendQueueMessageWithin(env.GITHUB_QUEUE, { sourceId: source.id });
+          await sendQueueMessageWithin(env.GITHUB_QUEUE, {
+            sourceId: source.id,
+            ...(message.force === true ? { force: true } : {}),
+          });
         }
         await resolveFailures(queued.id, queued.attempts);
         await completeTraffic(queued.id, 'success');

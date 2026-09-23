@@ -8,7 +8,7 @@
   "migrations": [{ "tag": "v1-d1-traffic-controller", "new_sqlite_classes": ["D1TrafficController"] }],
   "workers_dev": false,
   "preview_urls": false,
-  "limits": { "cpu_ms": 30000, "subrequests": 10000 },
+  "limits": { "cpu_ms": 120000, "subrequests": 50000 },
   "observability": { "enabled": true },
   "d1_databases": [
     { "binding": "DB", "database_name": "intern-notifs-dev-db", "database_id": "cedc86d8-69a5-4a72-a1e6-f5629d722338", "migrations_dir": "cloudflare/migrations" }

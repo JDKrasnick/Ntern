@@ -65,6 +65,16 @@ describe('Cloudflare deployment plan guard', () => {
     expect(actionableChanges(plan([{ address: 'data.cloudflare_zone.application', actions: ['read'] }]))).toEqual([]);
   });
 
+  it('permits only the reviewed ingestion subrequest increase', () => {
+    const increase = { ...contentUpdate, address: 'cloudflare_workers_script.ingestion',
+      after: { ...worker, limits: { cpu_ms: 120_000, subrequests: 50_000 } },
+      before: { ...worker, limits: { cpu_ms: 120_000, subrequests: 10_000 } } };
+    expect(validateCloudflarePlan(plan([increase]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{ ...increase, address: 'cloudflare_workers_script.application' }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{ ...increase,
+      after: { ...increase.after, limits: { cpu_ms: 120_000, subrequests: 100_000 } } }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it.each([
     ['bindings', { bindings: [{ name: 'DB', type: 'd1', id: 'other-db' }] }],
     ['compatibility settings', { compatibility_date: '2026-09-09' }],
@@ -108,6 +118,27 @@ describe('Cloudflare deployment plan guard', () => {
         bindings: [...worker.bindings, { name: 'UNRELATED_SETTING', type: 'plain_text', text: 'new-value' }],
       },
     }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
+  it('allows only disabling the reviewed metadata canary', () => {
+    const name = 'LLM_METADATA_PUBLICATION_POLICY_JSON';
+    const enabled = JSON.stringify({ enabled: true, version: 'production-canary-2026-09-09-v1', allowedFields: ['compensation'], cohort: [{ sourceId: 'reviewed' }] });
+    const disabled = JSON.stringify({ enabled: false, version: 'disabled', allowedFields: [], cohort: [] });
+    const change = (beforeText: string, afterText: string) => ({
+      address: 'cloudflare_workers_script.ingestion', actions: ['update'],
+      before: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: beforeText }] },
+      after: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: afterText }] },
+    });
+    expect(validateCloudflarePlan(plan([change(enabled, disabled)]))).toHaveLength(1);
+    for (const next of [
+      JSON.stringify({ enabled: true, version: 'new-canary', allowedFields: [], cohort: [] }),
+      JSON.stringify({ enabled: false, version: 'disabled', allowedFields: ['compensation'], cohort: [] }),
+      '{invalid',
+    ]) {
+      expect(() => validateCloudflarePlan(plan([change(enabled, next)]))).toThrow('Refusing unsafe Cloudflare plan');
+    }
+    expect(() => validateCloudflarePlan(plan([change(disabled, enabled)]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([change(enabled.replace('production-canary-2026-09-09-v1', 'other-canary'), disabled)]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
   it('accepts only the reviewed traffic-controller Durable Object binding addition', () => {

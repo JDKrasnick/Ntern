@@ -147,7 +147,7 @@ resource "cloudflare_workers_script" "ingestion" {
     local.ingestion_plain_bindings,
   )
 
-  limits = { cpu_ms = 120000, subrequests = 10000 }
+  limits = { cpu_ms = 120000, subrequests = 50000 }
   observability = {
     enabled            = true
     head_sampling_rate = 1

@@ -268,6 +268,7 @@ describe('Cloudflare maintenance cron', () => {
     vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
     const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
     const failing = vi.spyOn(D1CatalogAdmissionStore.prototype, 'listActiveIncidents').mockRejectedValue(new Error('Resend returned HTTP 422'));
+    const metadata = vi.spyOn(D1CatalogAdmissionStore.prototype, 'metadataVerificationCandidates');
     vi.spyOn(D1InternshipStore.prototype, 'listPendingProviderShadowVerifications').mockResolvedValue([]);
     vi.spyOn(D1InternshipStore.prototype, 'pendingSms').mockResolvedValue([]);
     vi.spyOn(D1UserStore.prototype, 'activeDevices').mockResolvedValue([]);
@@ -280,12 +281,13 @@ describe('Cloudflare maintenance cron', () => {
       await cloudflareWorker.scheduled({
         cron: '9-59/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:09:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
-        DB: { prepare: () => ({ async first() { return null; } }) },
+        DB: { prepare: () => ({ bind: () => ({ async first() { return { count: 2 }; } }), async first() { return null; } }) },
         DESTINATION_VERIFICATION_QUEUE: queue(undefined),
         DESTINATION_VERIFICATION_DLQ: queue(undefined),
       } as unknown as Environment);
       expect(failing).toHaveBeenCalled();
       expect(projection).toHaveBeenCalledOnce();
+      expect(metadata).not.toHaveBeenCalled();
       expect(errors).toHaveBeenCalledWith(expect.stringContaining('"step":"admission_verification_warnings"'));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
     } finally {
@@ -381,6 +383,44 @@ describe('resume artifact rollout boundary', () => {
       vi.restoreAllMocks();
     }
   });
+});
+
+describe('Cloudflare bulk operation admission', () => {
+  it('exposes a protected read-only preflight', async () => {
+    const empty = queue(async () => ({ backlogCount: 0, backlogBytes: 0 }));
+    const db = { prepare(query: string) { return { bind() { return this; },
+      async first() { return query.includes('queue_failure_events') ? { count: 0 } : null; } }; } };
+    const env = { OPERATIONS_SHARED_SECRET: 'secret', DB: db,
+      GREENHOUSE_QUEUE: empty, LEVER_QUEUE: empty, ASHBY_QUEUE: empty, GITHUB_QUEUE: empty,
+      GMAIL_QUEUE: empty, DESTINATION_VERIFICATION_QUEUE: empty, SHADOW_EXTRACTION_QUEUE: empty,
+    } as unknown as Environment;
+    const url = 'https://intern-notifs.test/internal/operations/bulk-window';
+    expect((await cloudflareWorker.fetch(new Request(url), env)).status).toBe(404);
+    const response = await cloudflareWorker.fetch(new Request(url, { headers: { 'X-Operations-Key': 'secret' } }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ready: true });
+  });
+
+  it.each(['/internal/posting-identity-repair', '/internal/catalog-quality-backfill'])(
+    'returns a retryable response before scanning %s when a work queue is busy', async (path) => {
+      const empty = queue(async () => ({ backlogCount: 0, backlogBytes: 0 }));
+      const busy = queue(async () => ({ backlogCount: 1, backlogBytes: 1 }));
+      const db = { prepare(query: string) { return { bind() { return this; },
+        async first() { return query.includes('queue_failure_events') ? { count: 0 } : null; } }; } };
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const response = await cloudflareWorker.fetch(new Request(`https://intern-notifs.test${path}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': 'secret' }, body: '{}',
+        }), { OPERATIONS_SHARED_SECRET: 'secret', DB: db,
+          GREENHOUSE_QUEUE: empty, LEVER_QUEUE: empty, ASHBY_QUEUE: empty, GITHUB_QUEUE: busy,
+          GMAIL_QUEUE: empty, DESTINATION_VERIFICATION_QUEUE: empty, SHADOW_EXTRACTION_QUEUE: empty,
+        } as unknown as Environment);
+        expect(response.status).toBe(503);
+        expect(response.headers.get('Retry-After')).toBe('300');
+        expect(await response.json()).toMatchObject({ reason: 'queue-busy', queues: ['github'] });
+      } finally { warning.mockRestore(); }
+    },
+  );
 });
 
 describe('Cloudflare queue continuation bounds', () => {
@@ -756,7 +796,7 @@ describe('Cloudflare GitHub queue continuation', () => {
    * structured registry is empty, so the delivery reaches the reviewed GitHub
    * branch, and the source reports no prior health so quarantine cannot block it.
    */
-  const deliver = async (report: Record<string, unknown>) => {
+  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth } = {}) => {
     const sent: unknown[] = [];
     const handled: string[] = [];
     const polls: Array<{ command: string; sourceIds: string[]; maxListingsPerSourceRun: number | undefined }> = [];
@@ -766,7 +806,7 @@ describe('Cloudflare GitHub queue continuation', () => {
     };
     const logged: string[] = [];
     vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([]);
-    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(options.priorHealth);
     runtime.runRuntimeCommand.mockImplementationOnce(async (command, dependencies) => {
       polls.push({
         command,
@@ -777,7 +817,7 @@ describe('Cloudflare GitHub queue continuation', () => {
     });
     vi.spyOn(console, 'log').mockImplementation((line) => { logged.push(String(line)); });
     const message = {
-      id: 'github-first', body: { sourceId: reviewedGithub.id }, attempts: 1,
+      id: 'github-first', body: { sourceId: reviewedGithub.id, ...(options.force ? { force: true } : {}) }, attempts: 1,
       ack() { handled.push('ack'); }, retry() { handled.push('retry'); },
     };
     try {
@@ -810,6 +850,21 @@ describe('Cloudflare GitHub queue continuation', () => {
     expect(sliceEvents).toEqual([expect.objectContaining({
       sourceId: reviewedGithub.id, continuation: true, resolutionPending: 4, failureCount: 0,
     })]);
+    expect(handled).toEqual(['ack']);
+  });
+
+  it('keeps forced recovery on every continuation while the source remains paused', async () => {
+    const { sent, handled } = await deliver({
+      continuationSources: [reviewedGithub.id],
+      pendingResolution: { [reviewedGithub.id]: 4 },
+      failures: [],
+    }, {
+      force: true,
+      priorHealth: { sourceId: reviewedGithub.id, provider: 'github', region: 'unknown', state: 'quarantined',
+        sourceStatus: 'paused', consecutiveFailures: 2, lastAttemptAt: '2026-09-20T18:12:45.125Z', durationMs: 1 },
+    });
+
+    expect(sent).toEqual([{ sourceId: reviewedGithub.id, force: true }]);
     expect(handled).toEqual(['ack']);
   });
 

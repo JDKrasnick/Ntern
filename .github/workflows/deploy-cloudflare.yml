@@ -43,7 +43,7 @@ jobs:
       TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TF_VAR_public_api_url: ${{ vars.PUBLIC_API_URL }}
       TF_VAR_employer_portal_enabled: ${{ vars.EMPLOYER_PORTAL_ENABLED }}
-      TF_VAR_auth_from_email: ${{ vars.AUTH_FROM_EMAIL }}
+      TF_VAR_auth_from_email: ${{ secrets.AUTH_FROM_EMAIL }}
       TF_VAR_gmail_enabled: ${{ vars.GMAIL_ENABLED }}
       TF_VAR_gmail_client_id: ${{ vars.GMAIL_CLIENT_ID }}
       TF_VAR_gmail_redirect_uri: ${{ vars.GMAIL_REDIRECT_URI }}
@@ -51,6 +51,7 @@ jobs:
       TF_VAR_trusted_community_catalog_enabled: ${{ vars.TRUSTED_COMMUNITY_CATALOG_ENABLED }}
       TF_VAR_identity_confirmed_coverage_floor: ${{ vars.IDENTITY_CONFIRMED_COVERAGE_FLOOR }}
       TF_VAR_llm_metadata_publication_policy_json: ${{ vars.LLM_METADATA_PUBLICATION_POLICY_JSON }}
+      TF_VAR_admission_support_recipient: ${{ secrets.ADMISSION_SUPPORT_RECIPIENT }}
       TF_VAR_shadow_extraction_enabled: ${{ vars.SHADOW_EXTRACTION_ENABLED }}
       TF_VAR_shadow_extraction_monthly_forecast_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS }}
       TF_VAR_shadow_extraction_monthly_headroom_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS }}
@@ -76,6 +77,7 @@ jobs:
             TF_VAR_gmail_redirect_uri TF_VAR_identity_unconfirmed_publication_enabled
             TF_VAR_trusted_community_catalog_enabled TF_VAR_identity_confirmed_coverage_floor
             TF_VAR_llm_metadata_publication_policy_json TF_VAR_shadow_extraction_enabled
+            TF_VAR_admission_support_recipient
             TF_VAR_shadow_extraction_monthly_forecast_cents
             TF_VAR_shadow_extraction_monthly_headroom_cents
           )

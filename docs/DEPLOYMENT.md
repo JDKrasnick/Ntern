@@ -880,6 +880,11 @@ deserialising the whole catalog.
 - `POST /internal/posting-identity-repair` accepts `{"audit": true}` with an
   optional `jobBatch`. `npm run audit:posting-identity` uses that mode, so the
   gate no longer depends on a single unbounded read.
+- Before a manual posting-identity or catalog-quality scan, use authenticated
+  `GET /internal/operations/bulk-window`. It returns `200 {"ready":true}` only
+  when every work queue reports zero backlog and the last 30 minutes contain no
+  recorded D1 overload. A missing queue metric or D1 check returns retryable
+  `503`; the two bulk endpoints repeat this check immediately before scanning.
 
 Measured on the production snapshot on 2026-09-15: the paged audit returned
 exactly the single-pass gate, coverage, duplicate, presentation, conflict, and
