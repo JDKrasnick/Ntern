@@ -28,6 +28,7 @@ import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
 import { runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
+import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
 import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, shadowExtractionSummary } from './shadow-extraction.js';
@@ -87,6 +88,7 @@ export interface Environment extends AuthEnvironment {
   DESTINATION_VERIFICATION_DLQ: Queue;
   SHADOW_EXTRACTION_DLQ: Queue;
   PUBLIC_API_URL: string;
+  CATALOG_R2_READ_ENABLED?: string;
   RESEND_API_KEY?: string;
   ADMISSION_SUPPORT_RECIPIENT?: string;
   AUTH_FROM_EMAIL?: string;
@@ -653,7 +655,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   if (request.method === 'GET' && url.pathname === '/oauth/gmail/callback') return withCors(await gmailCallback(request, env));
   if (request.method === 'POST' && url.pathname === '/internal/refresh-catalog') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
-    return withCors(Response.json(await refreshCatalogProjection(new D1InternshipStore(env.DB))));
+    return withCors(Response.json(await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS)));
   }
   if (request.method === 'POST' && url.pathname === '/internal/recover-notifications') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
@@ -740,7 +742,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
           throw new Error('expectedJobs and expectedOccurrences must exactly match the dry-run');
         }
         const result = await operations.applyRoleMetadataRepair(input.repairToken, input.expectedJobs!, input.expectedOccurrences!, new Date().toISOString());
-        if (result.projectionRefreshRequired) await refreshCatalogProjection(new D1InternshipStore(env.DB));
+        if (result.projectionRefreshRequired) await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         // Full verification is a separate read-only request. Repeating the
         // paged whole-cohort audit after the guarded transaction and grouped
         // projection refresh can exceed D1's per-invocation query budget.
@@ -783,7 +785,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
         apply: input.apply, repairToken: input.repairToken, expectedChanged: input.expectedChanged, sourceIds,
       });
       if (input.apply && report.projectionRefreshRequired) {
-        await refreshCatalogProjection(new D1InternshipStore(env.DB));
+        await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         const verified = await runTrustedAdmissionBackfill(env.DB, { apply: false, sourceIds });
         return withCors(Response.json({ ...report, verification: verified }));
       }
@@ -800,7 +802,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     try {
       const report = await runCatalogQualityBackfill(env.DB, input);
       if (input.apply && report.projectionRefreshRequired) {
-        await refreshCatalogProjection(new D1InternshipStore(env.DB));
+        await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         const verified = await runCatalogQualityBackfill(env.DB);
         return withCors(Response.json({ ...report, verification: verified }));
       }
@@ -818,7 +820,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     return withCors(await handleCatalogAdmissionOperations(
       request,
       new D1CatalogAdmissionStore(env.DB),
-      () => refreshCatalogProjection(new D1InternshipStore(env.DB)),
+      () => refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS),
       'operations-reviewer',
       () => new Date(),
       (operation) => env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage(operation)),
@@ -871,14 +873,14 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
           expectedChanges: input.expectedChanges,
           expectedDuplicateJobs: input.expectedDuplicateJobs,
         });
-        if (input.finalize) await refreshCatalogProjection(new D1InternshipStore(env.DB));
+        if (input.finalize) await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         return withCors(Response.json(report));
       }
       report = input.scope === 'identity'
         ? await runBoundedPostingIdentityRepair(env.DB, repairOptions)
         : await runPostingIdentityRepair(env.DB, repairOptions);
       if (input.apply && report.projectionRefreshRequired) {
-        await refreshCatalogProjection(new D1InternshipStore(env.DB));
+        await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         const verificationOptions = {
           scope: input.scope,
           ...(input.jobBatch === undefined ? {} : { jobBatch: input.jobBatch }),
@@ -905,7 +907,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   if (url.pathname === '/internal/operations/shadow-publication') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     return withCors(await handleShadowPublication(request, env,
-      () => refreshCatalogProjection(new D1InternshipStore(env.DB))));
+      () => refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS)));
   }
   if (request.method === 'POST' && url.pathname === '/internal/poll-source') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
@@ -1060,7 +1062,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     return withCors(Response.json(result, { status: 201, headers: { 'Cache-Control': 'no-store' } }));
   }
   const handler = createApiHandler({
-    jobs: new D1InternshipStore(env.DB),
+    jobs: env.CATALOG_R2_READ_ENABLED === 'true'
+      ? new R2CatalogReadStore(env.DB, env.DOCUMENTS)
+      : new D1InternshipStore(env.DB),
     users: new D1UserStore(env.DB),
     releases: new D1ReleaseStore(env.DB),
     documentStorage: documentStorage(env),
@@ -1259,10 +1263,22 @@ async function runScheduledStep<T>(step: string, run: () => Promise<T>): Promise
   }
 }
 
-async function refreshCatalogProjection(store: D1InternshipStore) {
+async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket) {
   const groups = groupCatalogJobs(await store.listCatalog(), { includeClosed: true }).map(catalogGroupDetails);
   const generatedAt = new Date().toISOString();
   await store.putCatalogProjection(groups, generatedAt);
+  if (bucket) {
+    try { await new R2CatalogProjection(bucket).publish(groups, generatedAt); }
+    catch (error) {
+      console.error(JSON.stringify({ event: 'r2_catalog_projection_publish_failed', error: String(error) }));
+      // D1 already points at the new projection. Hide an older R2 pointer so
+      // readers fall back to D1 instead of serving stale admission decisions.
+      try { await new R2CatalogProjection(bucket).invalidate(); }
+      catch (invalidationError) {
+        console.error(JSON.stringify({ event: 'r2_catalog_projection_invalidation_failed', error: String(invalidationError) }));
+      }
+    }
+  }
   return {
     generatedAt,
     groups: groups.length,
@@ -1527,7 +1543,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // cancel it. While the refresh sat last, one failing verification email or
     // alert held the feed on a day-old snapshot.
     // See docs/197-ingestion-resource-bounds.md.
-    const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store));
+    const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store, env.DOCUMENTS));
     const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
