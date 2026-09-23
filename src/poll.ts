@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { classifyD1Failure } from '../cloudflare/d1-errors.js';
 import { assessApplicationPageForListing, canonicalApplicationUrl, type ApplicationPageEvidence, type ApplicationUrlValidator } from './core/application-url.js';
 import { boardReference, reachabilityFromFailure, reachabilityFromSignals, verifyApplication, type AttributionBasis, type Reachability } from './core/application-verification.js';
 import { inferSeason, isPastSeason } from './core/early-career.js';
@@ -249,7 +250,7 @@ async function forEachBounded<T>(items: readonly T[], task: (item: T, index: num
   let next = 0;
   let failure: unknown;
   const worker = async () => {
-    while (next < items.length) {
+    while (failure === undefined && next < items.length) {
       const index = next++;
       try { await task(items[index]!, index); }
       catch (error) { failure ??= error; }
@@ -1772,6 +1773,10 @@ export class IngestionRunner {
               if (result.notificationInserted) alertedJobIds.add(job.jobId);
             }
           } catch (error) {
+            // Pressure is a delivery-level failure. Continuing the slice and
+            // stamping the old decision would both amplify D1 load and skip
+            // the failed row when the queued delivery retries.
+            if (classifyD1Failure(error) !== 'other') throw error;
             const job = plannedJobs.get(occurrence.jobId);
             const event = job ? notificationByJobId.get(job.jobId) : undefined;
             if (event) notificationErrors[plan.notifications.indexOf(event)] = error;

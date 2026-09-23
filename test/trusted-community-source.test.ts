@@ -888,6 +888,27 @@ describe('trusted rollout repair boundaries', { timeout: 20_000 }, () => {
     expect(store.notificationEvents.size).toBe(0);
   });
 
+  it('retries a pressured migration row without stamping its old decision as migrated', async () => {
+    const { store, poll, sourceId } = migrationFixture();
+    await poll(false);
+    const oldVersion = (await store.getCheckpoint(sourceId))!.admissionConfigurationVersion;
+    const before = await store.getSourceOccurrences(sourceId);
+    const commit = vi.spyOn(store, 'commitPostingObservation')
+      .mockRejectedValueOnce(new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'));
+    const pressured = await poll(true, 20);
+    expect(pressured.failures).toEqual(expect.arrayContaining([expect.stringContaining('D1 DB is overloaded')]));
+    const attempted = commit.mock.calls[0]![0].occurrence.externalId;
+    const original = before.find((item) => item.externalId === attempted)!;
+    const after = (await store.getSourceOccurrences(sourceId)).find((item) => item.externalId === attempted)!;
+    expect(after.occurrence.admissionConfigurationVersion).toBe(original.occurrence.admissionConfigurationVersion);
+    expect((await store.getCheckpoint(sourceId))!.admissionConfigurationVersion).toBe(oldVersion);
+    commit.mockRestore();
+    const retry = await poll(true, 20);
+    expect(retry.failures).toEqual([]);
+    expect((await store.getSourceOccurrences(sourceId)).find((item) => item.externalId === attempted)!.occurrence
+      .admissionConfigurationVersion).not.toBe(original.occurrence.admissionConfigurationVersion);
+  });
+
   it('collects evidence and publishes in bounded slices without probing completed rows again', async () => {
     const { store, rows, state, poll, sourceId } = migrationFixture();
     await poll(false);
