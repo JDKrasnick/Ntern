@@ -79,7 +79,7 @@ resource "cloudflare_d1_database" "application" {
   account_id            = var.cloudflare_account_id
   name                  = "${var.worker_name}-db"
   primary_location_hint = "wnam"
-  read_replication      = { mode = "auto" }
+  read_replication      = { mode = "disabled" }
 
   lifecycle {
     prevent_destroy = true
