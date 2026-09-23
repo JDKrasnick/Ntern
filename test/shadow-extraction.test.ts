@@ -396,7 +396,7 @@ describe('shadow extraction queue and cost ledger', () => {
   });
 
   it('serializes concurrent cost reservations and does not let a late revision run', async () => {
-    const DB = schema(); const now = new Date('2026-09-08T00:00:00.000Z');
+    const DB = schema(); const now = new Date('2026-10-08T00:00:00.000Z');
     // Foreign-key rows exist in production before a reservation; create two runs here to exercise the ledger guard.
     for (const key of ['a'.repeat(64), 'b'.repeat(64)]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, input_key, created_at, updated_at)
       VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, ?, 'p', 's', 'n', 'queued', 0, '', 'shadow-input/x.json', ?, ?)`)
@@ -406,15 +406,30 @@ describe('shadow extraction queue and cost ledger', () => {
   });
 
   it('enforces the combined monthly cap and counts actual overshoot against later reservations', async () => {
-    const DB = schema(); const now = new Date('2026-09-08T00:00:00.000Z');
+    const DB = schema(); const now = new Date('2026-10-08T00:00:00.000Z');
     for (const key of ['c'.repeat(64), 'd'.repeat(64)]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, input_key, created_at, updated_at)
       VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, ?, 'p', 's', 'n', 'queued', 0, '', 'shadow-input/x.json', ?, ?)`)
       .bind(key, key, SHADOW_EXTRACTION_MODEL_ID, now.toISOString(), now.toISOString()).run();
     const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1995', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100' };
     expect(await reserveShadowCost(DB, now, 'c'.repeat(64), 'lease-c', 5, env)).toBe(true);
     await DB.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = 7, state = 'reconciled'
-      WHERE period = '2026-09' AND run_key = ?`).bind('c'.repeat(64)).run();
+      WHERE period = '2026-10' AND run_key = ?`).bind('c'.repeat(64)).run();
     expect(await reserveShadowCost(DB, now, 'd'.repeat(64), 'lease-d', 1, env)).toBe(false);
+  });
+
+  it('admits September v34 work after 496 cents but restores the 500-cent shadow cap in October', async () => {
+    const DB = schema();
+    const september = new Date('2026-09-23T00:00:00.000Z');
+    const october = new Date('2026-10-01T00:00:00.000Z');
+    const priorKey = 'e'.repeat(64); const septemberKey = 'f'.repeat(64); const octoberKey = '1'.repeat(64);
+    for (const key of [priorKey, septemberKey, octoberKey]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, input_key, created_at, updated_at)
+      VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, ?, 'p', 's', 'n', 'queued', 0, '', 'shadow-input/x.json', ?, ?)`).bind(key, key, SHADOW_EXTRACTION_MODEL_ID, september.toISOString(), september.toISOString()).run();
+    for (const period of ['2026-09', '2026-10']) await DB.prepare(`INSERT INTO shadow_extraction_cost_ledger
+      (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
+      VALUES (?, ?, ?, 10, 496, 'reconciled', ?, ?)`).bind(period, `prior-${period}`, priorKey, september.toISOString(), september.toISOString()).run();
+    const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '500' };
+    expect(await reserveShadowCost(DB, september, septemberKey, 'september-v34', 10, env)).toBe(true);
+    expect(await reserveShadowCost(DB, october, octoberKey, 'october-v34', 10, env)).toBe(false);
   });
 
   it('reuses a reservation for one transient retry and records deterministic baseline differences', async () => {
