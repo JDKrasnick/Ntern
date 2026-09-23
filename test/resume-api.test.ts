@@ -12,6 +12,24 @@ describe('resume API ownership and revisions', () => {
     expect((await handler(event('student', 'GET', '/me/resume-bank'))).statusCode).toBe(404);
   });
 
+  it('publishes fixed templates and validates typed parent details', async () => {
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users: new MemoryUserStore(), resumeTunerEnabled: true });
+    const templates = await handler(event('student', 'GET', '/resume-templates'));
+    expect(JSON.parse(templates.body)).toMatchObject({ templates: [
+      { template: 'jake-technical', displayName: "Jake's Technical" },
+      { template: 'clean-standard' },
+      { template: 'research-academic' },
+      { template: 'project-compact' },
+    ] });
+    const project = await handler(event('student', 'POST', '/me/resume-bank', {
+      kind: 'project', content: 'Ntern | Internship radar', details: { name: 'Ntern', tagline: 'Internship radar', technologies: ['TypeScript', 'Cloudflare Workers'] },
+    }));
+    expect(JSON.parse(project.body)).toMatchObject({ kind: 'project', details: { name: 'Ntern', tagline: 'Internship radar', technologies: ['TypeScript', 'Cloudflare Workers'] } });
+    expect((await handler(event('student', 'POST', '/me/resume-bank', {
+      kind: 'project', content: 'Invalid', details: { name: 'Invalid', technologies: 'TypeScript' },
+    }))).statusCode).toBe(400);
+  });
+
   it('keeps trusted source items private and allows optimistic source-status edits', async () => {
     const users = new MemoryUserStore();
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, now: () => '2026-09-22T00:00:00.000Z' });
@@ -215,7 +233,7 @@ describe('resume API ownership and revisions', () => {
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex, putPdf, putPreview, compile: async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer] }) } });
     const finalized = await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }));
     expect(finalized.statusCode).toBe(200);
-    expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { draftId: 'draft', templateVersion: '2026-09-22.1', compilerVersion: 'fixed-template-tex-v1' } });
+    expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { draftId: 'draft', templateVersion: '2026-09-23.1', compilerVersion: 'typed-fixed-template-tex-v2' } });
     expect(putTex).toHaveBeenCalledOnce();
     expect(putTex.mock.calls[0]?.[1]).toContain('Student Name');
     expect(putTex.mock.calls[0]?.[1]).toContain('student@example.test');

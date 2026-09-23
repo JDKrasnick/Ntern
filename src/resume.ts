@@ -2,7 +2,7 @@
  * Canonical, user-owned resume records. Generated PDFs, previews, embeddings,
  * and model output deliberately remain outside these contracts.
  */
-export type ResumeBankParentKind = 'role' | 'project' | 'education';
+export type ResumeBankParentKind = 'role' | 'research' | 'project' | 'education';
 export type ResumeBankRootKind = ResumeBankParentKind | 'skill';
 export type ResumeBankKind = ResumeBankRootKind | 'bullet';
 export type ResumeChangeType = 'rewrite' | 'add' | 'remove' | 'move';
@@ -20,6 +20,53 @@ interface ResumeBankItemBase {
   updatedAt: string;
 }
 
+export interface ResumeRoleDetails {
+  organization: string;
+  title?: string;
+  location?: string;
+  dateRange?: string;
+}
+
+export interface ResumeResearchDetails {
+  organization: string;
+  title?: string;
+  advisor?: string;
+  location?: string;
+  dateRange?: string;
+}
+
+export interface ResumeProjectDetails {
+  name: string;
+  tagline?: string;
+  technologies: string[];
+  url?: string;
+}
+
+export interface ResumeEducationDetails {
+  institution: string;
+  credential?: string;
+  location?: string;
+  dateRange?: string;
+  gpa?: string;
+  testScores?: string[];
+  coursework?: string[];
+  awards?: string[];
+  details?: string;
+}
+
+export interface ResumeSkillDetails {
+  category: string;
+  skills: string[];
+}
+
+export interface ResumeBankDetailsByKind {
+  role: ResumeRoleDetails;
+  research: ResumeResearchDetails;
+  project: ResumeProjectDetails;
+  education: ResumeEducationDetails;
+  skill: ResumeSkillDetails;
+}
+
 /** A tagged pointer is carried across every API and model boundary. The tag
  * prevents a bullet from being represented as the child of another bullet or
  * an untyped row identifier. */
@@ -32,11 +79,61 @@ export type ResumeBankItemRef =
   | { kind: 'bullet'; bankItemId: string; parent: ResumeBankParentRef };
 
 export type ResumeBankItem =
-  | (ResumeBankItemBase & { [Kind in ResumeBankRootKind]: { kind: Kind; parent?: never } }[ResumeBankRootKind])
+  | ({ [Kind in ResumeBankRootKind]: ResumeBankItemBase & { kind: Kind; parent?: never; details?: ResumeBankDetailsByKind[Kind] } }[ResumeBankRootKind])
   | (ResumeBankItemBase & { kind: 'bullet'; parent: ResumeBankParentRef });
 
-const resumeParentKinds = new Set<ResumeBankParentKind>(['role', 'project', 'education']);
-const resumeRootKinds = new Set<ResumeBankRootKind>(['role', 'project', 'education', 'skill']);
+const resumeParentKinds = new Set<ResumeBankParentKind>(['role', 'research', 'project', 'education']);
+const resumeRootKinds = new Set<ResumeBankRootKind>(['role', 'research', 'project', 'education', 'skill']);
+
+const optionalDetail = (value: unknown, field: string, max = 240) => {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > max) throw new Error(`${field} must be text up to ${max} characters`);
+  return value.trim();
+};
+
+const requiredDetail = (value: unknown, fallback: string, field: string) => optionalDetail(value, field) ?? fallback.trim();
+const detailList = (value: unknown, field: string, limit = 40) => {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > limit || value.some((item) => typeof item !== 'string' || !item.trim() || item.trim().length > 160)) throw new Error(`${field} must be a list of short text values`);
+  return value.map((item) => String(item).trim());
+};
+
+/** Validates the discriminated metadata used by renderers. `content` remains a
+ * searchable summary and supplies a safe compatibility value for old rows. */
+export function parseResumeBankDetails<Kind extends ResumeBankRootKind>(kind: Kind, value: unknown, content: string): ResumeBankDetailsByKind[Kind] {
+  const details = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  switch (kind) {
+    case 'role': return {
+      organization: requiredDetail(details.organization, content, 'organization'),
+      title: optionalDetail(details.title, 'title'), location: optionalDetail(details.location, 'location'), dateRange: optionalDetail(details.dateRange, 'dateRange'),
+    } as ResumeBankDetailsByKind[Kind];
+    case 'research': return {
+      organization: requiredDetail(details.organization, content, 'organization'),
+      title: optionalDetail(details.title, 'title'), advisor: optionalDetail(details.advisor, 'advisor'),
+      location: optionalDetail(details.location, 'location'), dateRange: optionalDetail(details.dateRange, 'dateRange'),
+    } as ResumeBankDetailsByKind[Kind];
+    case 'project': {
+      const technologies = details.technologies === undefined ? [] : details.technologies;
+      if (!Array.isArray(technologies) || technologies.length > 30 || technologies.some((item) => typeof item !== 'string' || !item.trim() || item.trim().length > 80)) {
+        throw new Error('technologies must be a list of short names');
+      }
+      return { name: requiredDetail(details.name, content, 'name'), tagline: optionalDetail(details.tagline, 'tagline'), technologies: technologies.map((item) => String(item).trim()), url: optionalDetail(details.url, 'url', 500) } as ResumeBankDetailsByKind[Kind];
+    }
+    case 'education': return {
+      institution: requiredDetail(details.institution, content, 'institution'), credential: optionalDetail(details.credential, 'credential'),
+      location: optionalDetail(details.location, 'location'), dateRange: optionalDetail(details.dateRange, 'dateRange'),
+      gpa: optionalDetail(details.gpa, 'gpa'), testScores: detailList(details.testScores, 'testScores'), coursework: detailList(details.coursework, 'coursework'), awards: detailList(details.awards, 'awards'),
+      details: optionalDetail(details.details, 'details', 1_000),
+    } as ResumeBankDetailsByKind[Kind];
+    case 'skill': {
+      const skills = details.skills === undefined ? content.split(',') : details.skills;
+      if (!Array.isArray(skills) || skills.length > 80 || skills.some((item) => typeof item !== 'string' || !item.trim() || item.trim().length > 80)) {
+        throw new Error('skills must be a list of short names');
+      }
+      return { category: requiredDetail(details.category, 'Technical', 'category'), skills: skills.map((item) => String(item).trim()) } as ResumeBankDetailsByKind[Kind];
+    }
+  }
+}
 
 export function parseResumeBankParentRef(value: unknown): ResumeBankParentRef {
   if (!value || typeof value !== 'object') throw new Error('parent must be a typed role, project, or education pointer');
@@ -149,8 +246,31 @@ function bankItemForRef(ref: ResumeBankItemRef, byId: ReadonlyMap<string, Resume
 
 function owningResumeParent(item: ResumeBankItem): ResumeBankParentRef | undefined {
   if (item.kind === 'bullet') return item.parent;
-  if (item.kind === 'role' || item.kind === 'project' || item.kind === 'education') return { kind: item.kind, bankItemId: item.bankItemId };
+  if (item.kind === 'role' || item.kind === 'research' || item.kind === 'project' || item.kind === 'education') return { kind: item.kind, bankItemId: item.bankItemId };
   return undefined;
+}
+
+export interface ResumeEntryBase {
+  id: string;
+  bullets: string[];
+}
+
+export interface ResumeExperienceEntry extends ResumeEntryBase, ResumeRoleDetails {}
+export interface ResumeResearchEntry extends ResumeEntryBase, ResumeResearchDetails {}
+export interface ResumeProjectEntry extends ResumeEntryBase, ResumeProjectDetails {}
+export interface ResumeEducationEntry extends ResumeEntryBase, ResumeEducationDetails {}
+export interface ResumeSkillEntry extends ResumeSkillDetails { id: string }
+
+/** Canonical, fully typed input shared by every renderer. Templates may change
+ * layout and density, but they cannot reinterpret the content graph. */
+export interface ResumeDocument {
+  name: string;
+  contact: Array<{ label: string; value: string }>;
+  education: ResumeEducationEntry[];
+  experience: ResumeExperienceEntry[];
+  research: ResumeResearchEntry[];
+  projects: ResumeProjectEntry[];
+  skills: ResumeSkillEntry[];
 }
 
 export interface ResumeDraft {
@@ -236,7 +356,12 @@ export function normalizeResumeJobUrl(value: string): string {
 
 /** Fixed templates escape every user-controlled value before compilation. */
 export function escapeLatex(value: string): string {
-  return value.replace(/[\\{}#$%&_~^]/gu, (character) => ({
+  const normalized = value
+    .replace(/“/gu, '``').replace(/”/gu, "''").replace(/[‘’]/gu, "'")
+    .replace(/[‐‑‒–—−]/gu, '--').replace(/∼/gu, 'about ')
+    .replace(/…/gu, '...').replace(/ﬁ/gu, 'fi').replace(/ﬂ/gu, 'fl')
+    .replace(/[\u00a0\u2007\u202f]/gu, ' ');
+  return normalized.replace(/[\\{}#$%&_~^]/gu, (character) => ({
     '\\': '\\textbackslash{}', '{': '\\{', '}': '\\}', '#': '\\#', '$': '\\$', '%': '\\%', '&': '\\&', '_': '\\_', '~': '\\textasciitilde{}', '^': '\\textasciicircum{}',
   }[character] ?? character));
 }

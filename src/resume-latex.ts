@@ -1,53 +1,162 @@
 import { createHash } from 'node:crypto';
-import { escapeLatex, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from './resume.js';
 import type { ApplicantProfile } from './types.js';
+import { escapeLatex, parseResumeBankDetails, type ResumeBankItem, type ResumeDocument, type ResumeDraft, type ResumeProfile } from './resume.js';
+import { RESUME_TEMPLATES, RESUME_TEMPLATE_VERSION } from './resume-templates.js';
 
-export const RESUME_TEMPLATE_VERSION = '2026-09-22.1';
-export const RESUME_COMPILER_VERSION = 'fixed-template-tex-v1';
+export { RESUME_TEMPLATE_VERSION } from './resume-templates.js';
+export const RESUME_COMPILER_VERSION = 'typed-fixed-template-tex-v2';
 
-/** Emits only fixed, audited structure. User values pass through LaTeX escaping
- * and cannot select packages, commands, files, or shell escapes. */
-const sectionForKind: Record<ResumeBankItem['kind'], string> = {
-  role: 'Experience', project: 'Projects', skill: 'Skills', education: 'Education', bullet: 'Selected experience',
-};
+const sectionTitle = { education: 'Education', experience: 'Experience', research: 'Research', projects: 'Projects', skills: 'Technical Skills' } as const;
 
-/** Builds a fixed-template document from the reviewed job-specific selection.
- * The profile may point at a large content bank; only evidence surfaced in the
- * draft enters the rendered resume. */
-export function renderResumeLatex(profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[] = []): { tex: string; resumeSpecHash: string } {
-  const sections = new Map<string, string[]>();
-  const add = (section: string, content: string) => {
-    const normalizedSection = section.trim();
-    const normalizedContent = content.trim();
-    if (!normalizedSection || !normalizedContent) return;
-    sections.set(normalizedSection, [...(sections.get(normalizedSection) ?? []), normalizedContent]);
-  };
-  for (const [section, content] of Object.entries(profile.approvedWording)) {
-    for (const line of content.split(/\r?\n/gu)) add(section, line);
-  }
+function resolvedResumeBank(profile: ResumeProfile, draft: ResumeDraft, bankItems: ResumeBankItem[]) {
   const allowed = new Set(profile.bankItemIds);
-  const bankById = new Map(bankItems.filter((item) => item.verified && allowed.has(item.bankItemId)).map((item) => [item.bankItemId, item]));
-  const originalSection = (change: ResumeDraft['changes'][number]) => {
-    const evidence = change.evidenceIds.map((id) => bankById.get(id)).find(Boolean);
-    return evidence ? sectionForKind[evidence.kind] : change.section;
-  };
+  const selected = bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified);
+  const byId = new Map(selected.map((item) => [item.bankItemId, item]));
+  const removed = new Set<string>();
+  const rewritten = new Map<string, string>();
+  const added: ResumeBankItem[] = [];
   for (const change of draft.changes) {
-    if (change.decision === 'rejected') {
-      if (change.type !== 'add' && change.original) add(originalSection(change), change.original);
-      continue;
-    }
     if (change.decision !== 'accepted') continue;
-    if (change.type === 'add' && change.suggestion) add(change.section, change.suggestion);
-    if (change.type === 'move' && change.original) add(change.section, change.original);
-    if (change.type === 'rewrite' && change.suggestion) add(change.section, change.suggestion);
+    if (change.type === 'remove') removed.add(change.target.bankItemId);
+    if (change.type === 'rewrite' && change.suggestion) rewritten.set(change.target.bankItemId, change.suggestion.trim());
+    if (change.type === 'add' && change.suggestion) {
+      const target = byId.get(change.target.bankItemId);
+      const parent = target?.kind === 'bullet' ? target.parent
+        : target && (target.kind === 'role' || target.kind === 'research' || target.kind === 'project' || target.kind === 'education')
+          ? { kind: target.kind, bankItemId: target.bankItemId } as const : undefined;
+      if (parent) added.push({
+        userId: profile.userId, bankItemId: `change:${change.changeId}`, kind: 'bullet', parent,
+        content: change.suggestion.trim(), verified: true, revision: 0, createdAt: draft.createdAt, updatedAt: draft.updatedAt,
+      });
+    }
   }
-  const rank = new Map(profile.sectionOrder.map((section, index) => [section.toLowerCase(), index]));
-  const body = [...sections.entries()]
-    .filter(([, lines]) => lines.length)
-    .sort(([left], [right]) => (rank.get(left.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) || left.localeCompare(right))
-    .map(([section, lines]) => `\\section*{${escapeLatex(section)}}\n\\begin{itemize}\n${lines.map((line) => `  \\item ${escapeLatex(line)}`).join('\n')}\n\\end{itemize}`).join('\n\n');
-  const contact = [applicant.location, applicant.contact.email, applicant.contact.phone, ...Object.values(applicant.links)].filter((value): value is string => Boolean(value?.trim())).map(escapeLatex).join(' $\\cdot$ ');
-  const tex = `\\documentclass[10pt]{article}\n\\usepackage[margin=0.65in]{geometry}\n\\usepackage[T1]{fontenc}\n\\begin{document}\n\\begin{center}{\\Large ${escapeLatex(applicant.contact.name)}}\\\\\n${contact}\\end{center}\n${body || '% No accepted changes.'}\n\\end{document}\n`;
-  const referenced = new Set(draft.changes.flatMap((change) => change.evidenceIds));
-  return { tex, resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, applicant: { contact: applicant.contact, location: applicant.location, links: applicant.links }, draftId: draft.draftId, changes: draft.changes, approvedWording: profile.approvedWording, bank: bankItems.filter((item) => referenced.has(item.bankItemId) && allowed.has(item.bankItemId) && item.verified).map(({ bankItemId, kind, content, revision }) => ({ bankItemId, kind, content, revision })), template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex') };
+  return [...selected, ...added]
+    .filter((item) => !removed.has(item.bankItemId) && !(item.kind === 'bullet' && removed.has(item.parent.bankItemId)))
+    .map((item) => rewritten.has(item.bankItemId) ? { ...item, content: rewritten.get(item.bankItemId)! } : item);
+}
+
+/** Turns the bank graph into the only input shape a template may render. Child
+ * bullets are joined exclusively through their typed parent pointers. */
+export function buildResumeDocument(profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[]): ResumeDocument {
+  const resolved = resolvedResumeBank(profile, draft, bankItems);
+  const bullets = new Map<string, string[]>();
+  for (const item of resolved) {
+    if (item.kind !== 'bullet') continue;
+    bullets.set(item.parent.bankItemId, [...(bullets.get(item.parent.bankItemId) ?? []), item.content]);
+  }
+  const document: ResumeDocument = {
+    name: applicant.contact.name,
+    contact: [
+      applicant.contact.email ? { label: 'Email', value: applicant.contact.email } : undefined,
+      applicant.contact.phone ? { label: 'Phone', value: applicant.contact.phone } : undefined,
+      ...Object.entries(applicant.links).map(([label, value]) => value ? { label, value } : undefined),
+      applicant.location ? { label: 'Location', value: applicant.location } : undefined,
+    ].filter((value): value is { label: string; value: string } => Boolean(value)),
+    education: [], experience: [], research: [], projects: [], skills: [],
+  };
+  for (const item of resolved) {
+    if (item.kind === 'bullet') continue;
+    if (item.kind === 'role') document.experience.push({ id: item.bankItemId, ...(item.details ?? parseResumeBankDetails('role', undefined, item.content)), bullets: bullets.get(item.bankItemId) ?? [] });
+    else if (item.kind === 'research') document.research.push({ id: item.bankItemId, ...(item.details ?? parseResumeBankDetails('research', undefined, item.content)), bullets: bullets.get(item.bankItemId) ?? [] });
+    else if (item.kind === 'project') document.projects.push({ id: item.bankItemId, ...(item.details ?? parseResumeBankDetails('project', undefined, item.content)), bullets: bullets.get(item.bankItemId) ?? [] });
+    else if (item.kind === 'education') document.education.push({ id: item.bankItemId, ...(item.details ?? parseResumeBankDetails('education', undefined, item.content)), bullets: bullets.get(item.bankItemId) ?? [] });
+    else document.skills.push({ id: item.bankItemId, ...(item.details ?? parseResumeBankDetails('skill', undefined, item.content)) });
+  }
+  if (!document.education.length) {
+    for (const [index, education] of applicant.education.entries()) document.education.push({
+      id: `applicant-education-${index}`, institution: education.school,
+      credential: [education.degree, education.field].filter(Boolean).join(' in ') || undefined,
+      dateRange: education.graduationDate, bullets: [],
+    });
+  }
+  return document;
+}
+
+const tex = (value?: string) => escapeLatex(value ?? '');
+const bulletList = (items: string[]) => items.length
+  ? `\\begin{ResumeBullets}\n${items.map((item) => `\\item ${tex(item)}`).join('\n')}\n\\end{ResumeBullets}` : '';
+
+function renderEducation(document: ResumeDocument) {
+  return document.education.map((entry) => {
+    const heading = [entry.institution, entry.gpa ? `GPA: ${entry.gpa}` : undefined, ...(entry.testScores ?? [])].filter(Boolean).join(' | ');
+    if (entry.awards?.length && !entry.location && !entry.dateRange && !entry.bullets.length) {
+      return `\\ResumeEducationCompact{${tex(heading)}}{${tex([entry.credential, `Awards: ${entry.awards.join(', ')}`].filter(Boolean).join(' | '))}}`;
+    }
+    const details = [entry.details, entry.coursework?.length ? `Relevant Coursework: ${entry.coursework.join(', ')}` : undefined].filter(Boolean);
+    return `\\ResumeHeading{${tex(heading)}}{${tex(entry.location)}}{${tex(entry.credential)}}{${tex(entry.dateRange)}}
+${details.map((value) => `\\ResumeDetail{${tex(value)}}`).join('\n')}${details.length ? '\n' : ''}${bulletList(entry.bullets)}`;
+  }).join('\n');
+}
+
+function renderExperience(document: ResumeDocument) {
+  return document.experience.map((entry) => `\\ResumeHeading{${tex(entry.organization)}}{${tex(entry.location)}}{${tex(entry.title)}}{${tex(entry.dateRange)}}
+${bulletList(entry.bullets)}`).join('\n');
+}
+
+function renderResearch(document: ResumeDocument) {
+  return document.research.map((entry) => `\\ResumeHeading{${tex(entry.organization)}}{${tex(entry.location)}}{${tex(entry.title)}${entry.advisor ? `, advised by ${tex(entry.advisor)}` : ''}}{${tex(entry.dateRange)}}
+${bulletList(entry.bullets)}`).join('\n');
+}
+
+function renderProjects(document: ResumeDocument) {
+  return document.projects.map((entry) => {
+    const parts = [entry.tagline, entry.technologies.length ? entry.technologies.join(', ') : undefined].filter(Boolean);
+    const descriptor = parts.length > 1 ? `${parts[0]} (${parts[1]})` : parts[0] ?? '';
+    return `\\ResumeProject{${tex(entry.name)}}{${tex(descriptor)}}{${tex(entry.url)}}\n${bulletList(entry.bullets)}`;
+  }).join('\n');
+}
+
+function renderSkills(document: ResumeDocument) {
+  return document.skills.map((entry) => `\\ResumeSkill{${tex(entry.category)}}{${tex(entry.skills.join(', '))}}`).join('\n');
+}
+
+const renderers = { education: renderEducation, experience: renderExperience, research: renderResearch, projects: renderProjects, skills: renderSkills };
+
+function templatePreamble(profile: ResumeProfile) {
+  const template = RESUME_TEMPLATES[profile.template];
+  const dense = template.density === 'dense';
+  const comfortable = template.density === 'comfortable';
+  const margin = dense ? '0.45in' : comfortable ? '0.64in' : '0.55in';
+  const itemSep = dense ? '0.5pt' : comfortable ? '2pt' : '1pt';
+  const sectionBefore = dense ? '5pt' : comfortable ? '10pt' : '7pt';
+  const sectionAfter = dense ? '2pt' : '4pt';
+  return `\\documentclass[letterpaper,10pt]{article}
+\\usepackage[margin=${margin}]{geometry}
+\\usepackage[T1]{fontenc}
+${template.typography === 'sans' ? '\\renewcommand{\\familydefault}{\\sfdefault}' : ''}
+\\pagestyle{empty}
+\\setlength{\\parindent}{0pt}
+\\setlength{\\tabcolsep}{0pt}
+\\raggedbottom
+\\raggedright
+\\newcommand{\\ResumeSection}[1]{\\vspace{${sectionBefore}}{\\large\\bfseries\\MakeUppercase{#1}}\\par\\vspace{1pt}\\hrule\\vspace{${sectionAfter}}}
+\\newcommand{\\ResumeHeading}[4]{\\begin{tabular*}{\\textwidth}{@{}l@{\\extracolsep{\\fill}}r@{}}\\textbf{#1} & #2 \\\\ \\textit{#3} & \\textit{#4}\\end{tabular*}\\vspace{-2pt}}
+\\newcommand{\\ResumeEducationCompact}[2]{\\textbf{#1}, #2\\par}
+\\newcommand{\\ResumeProject}[3]{\\textbf{#1}${profile.template === 'clean-standard' ? ' \\textit{#2}' : ' --- #2'}\\hfill #3\\par\\vspace{-2pt}}
+\\newcommand{\\ResumeDetail}[1]{#1\\par}
+\\newcommand{\\ResumeSkill}[2]{\\textbf{#1:} #2\\par}
+\\newenvironment{ResumeBullets}{\\begin{list}{$\\bullet$}{\\setlength{\\leftmargin}{1.15em}\\setlength{\\itemsep}{${itemSep}}\\setlength{\\topsep}{1pt}\\setlength{\\parsep}{0pt}\\setlength{\\partopsep}{0pt}}}{\\end{list}\\vspace{-2pt}}
+`;
+}
+
+/** Emits audited structure only. User values are escaped and cannot select
+ * packages, commands, files, or shell options. */
+export function renderResumeLatex(profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[] = []): { tex: string; resumeSpecHash: string; document: ResumeDocument } {
+  const document = buildResumeDocument(profile, applicant, draft, bankItems);
+  const template = RESUME_TEMPLATES[profile.template];
+  const contact = document.contact.map(({ value }) => tex(value)).join(' $|$ ');
+  const body = template.sectionOrder.flatMap((section) => {
+    const rendered = renderers[section](document);
+    return rendered ? [`\\ResumeSection{${sectionTitle[section]}}\n${rendered}`] : [];
+  }).join('\n');
+  const source = `${templatePreamble(profile)}\\begin{document}
+\\begin{center}{\\LARGE\\bfseries ${tex(document.name)}}\\\\[2pt]
+\\small ${contact}\\end{center}\\vspace{-4pt}
+${body || '% No selected resume content.'}
+\\end{document}\n`;
+  return {
+    tex: source,
+    document,
+    resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, draftId: draft.draftId, document, template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex'),
+  };
 }

@@ -1,14 +1,34 @@
 import { unzipSync } from 'fflate';
-import type { ResumeBankParentKind, ResumeBankRootKind } from './resume.js';
+import type { ResumeBankDetailsByKind, ResumeBankParentKind, ResumeBankRootKind } from './resume.js';
 
 export type ExtractedResumeItem =
-  | { localId: string; kind: ResumeBankRootKind; content: string; sourceLocation: string }
+  | { [Kind in ResumeBankRootKind]: { localId: string; kind: Kind; content: string; details?: ResumeBankDetailsByKind[Kind]; sourceLocation: string } }[ResumeBankRootKind]
   | { localId: string; kind: 'bullet'; parent: { kind: ResumeBankParentKind; localId: string }; content: string; sourceLocation: string };
 
 const cleanXml = (value: string) => value
   .replace(/<w:tab\/>/gu, ' ').replace(/<\/w:p>/gu, '\n').replace(/<[^>]+>/gu, '')
   .replace(/&amp;/gu, '&').replace(/&lt;/gu, '<').replace(/&gt;/gu, '>')
   .replace(/[\t ]+/gu, ' ').replace(/\n\s*/gu, '\n').trim();
+
+const dateRangeAtEnd = /\s+((?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|Spring|Summer|Fall|Winter)\s+)?\d{4}\s*(?:[-–—]\s*(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+)?(?:\d{4}|Present)|\(expected\)))$/iu;
+
+function splitTrailing(value: string, pattern: RegExp) {
+  const match = value.match(pattern);
+  return match ? { text: value.slice(0, match.index).trim(), trailing: match[1]!.trim() } : { text: value.trim(), trailing: undefined };
+}
+
+function splitLocationAtEnd(value: string) {
+  const match = value.match(/\s+([A-Z][A-Za-z.'-]+),\s*([A-Z]{2})$/u);
+  if (!match) return { text: value.trim(), location: undefined };
+  let text = value.slice(0, match.index).trim();
+  let city = match[1]!;
+  const compound = text.match(/\b(New|San|Los|Salt|Kansas)\s*$/u);
+  if (compound) {
+    city = `${compound[1]} ${city}`;
+    text = text.slice(0, compound.index).trim();
+  }
+  return { text, location: `${city}, ${match[2]}` };
+}
 
 class TextExtractionDomMatrix {
   a = 1;
@@ -101,25 +121,95 @@ function pdfTextItemsToLines(items: readonly unknown[]) {
 }
 
 export function extractResumeBankItems(text: string, limit = 500): ExtractedResumeItem[] {
-  let section: ResumeBankRootKind = 'project';
+  let section: ResumeBankRootKind | undefined;
   let parent: { kind: ResumeBankParentKind; localId: string } | undefined;
+  let awaitingSecondary = false;
   const items: ExtractedResumeItem[] = [];
   for (const [index, raw] of text.split(/\r?\n/gu).entries()) {
     const line = raw.replace(/\s+/gu, ' ').trim();
     if (!line) continue;
     const heading = line.toLowerCase().replace(/[^a-z]/gu, '');
-    if (/^(?:professional)?(?:experience|employment|workhistory)(?:bank)?$/u.test(heading)) { section = 'role'; parent = undefined; continue; }
-    if (/^(?:projects?|research)(?:bank.*)?$/u.test(heading)) { section = 'project'; parent = undefined; continue; }
-    if (/^(?:technical)?(?:skill|skills|technology|technologies|tools)(?:masterinventory)?$/u.test(heading)) { section = 'skill'; parent = undefined; continue; }
-    if (/^(?:coreprofile(?:and)?)?(?:education|coursework)(?:bank)?$/u.test(heading)) { section = 'education'; parent = undefined; continue; }
+    if (/^(?:professional)?(?:experience|employment|workhistory)(?:bank)?$/u.test(heading)) { section = 'role'; parent = undefined; awaitingSecondary = false; continue; }
+    if (/^(?:projects?)(?:bank.*)?$/u.test(heading)) { section = 'project'; parent = undefined; awaitingSecondary = false; continue; }
+    if (/^(?:research)(?:bank.*)?$/u.test(heading)) { section = 'research'; parent = undefined; awaitingSecondary = false; continue; }
+    if (/^(?:technical)?(?:skill|skills|technology|technologies|tools)(?:masterinventory)?$/u.test(heading)) { section = 'skill'; parent = undefined; awaitingSecondary = false; continue; }
+    if (/^(?:coreprofile(?:and)?)?(?:education|coursework)(?:bank)?$/u.test(heading)) { section = 'education'; parent = undefined; awaitingSecondary = false; continue; }
+    if (!section) continue;
     const isBullet = /^(?:[-•*]|\d+[.)])\s*/u.test(line);
-    const content = line.replace(/^(?:[-•*]|\d+[.)])\s*/u, '').trim();
+    let content = line.replace(/^(?:[-•*]|\d+[.)])\s*/u, '').trim();
     if (content.length < 2 || content.length > 2_000 || items.some((item) => item.content === content)) continue;
     const localId = `line-${index + 1}`;
-    if (isBullet && parent) items.push({ localId, kind: 'bullet', parent, content, sourceLocation: `line ${index + 1}` });
+    if (isBullet && parent) { items.push({ localId, kind: 'bullet', parent, content, sourceLocation: `line ${index + 1}` }); awaitingSecondary = false; }
     else {
-      items.push({ localId, kind: section, content, sourceLocation: `line ${index + 1}` });
+      const last = items.at(-1);
+      if (parent && !awaitingSecondary && last?.kind === 'bullet') {
+        const projectHeading = section === 'project' && /\s[-—–]{1,2}\s/u.test(content);
+        const likelyParentHeading = (section === 'role' || section === 'research') && content.length < 90 && /(?:,\s*[A-Z]{2}|\b(?:Remote|University|College|Institute|Laboratory|Lab))\s*$/u.test(content);
+        if (!projectHeading && !likelyParentHeading) {
+          const [continuation, possibleParent] = section === 'role' && content.includes(' | ') ? content.split(/\s+\|\s+(?=[^|]+$)/u) : [content];
+          last.content = `${last.content} ${continuation}`;
+          if (!possibleParent) continue;
+          content = possibleParent;
+        }
+      }
+      if (section === 'education' && parent && !awaitingSecondary && /^Relevant Coursework:/iu.test(content)) {
+        const root = items.find((item) => item.localId === parent?.localId);
+        if (root?.kind === 'education') root.details = { ...(root.details ?? { institution: root.content }), coursework: content.replace(/^Relevant Coursework:\s*/iu, '').split(',').map((value) => value.trim()).filter(Boolean) };
+        continue;
+      }
+      if (section === 'education' && parent && !awaitingSecondary && !/(?:University|College|Academy|School|Institute)\b/iu.test(content)) {
+        const root = items.find((item) => item.localId === parent?.localId);
+        if (root?.kind === 'education' && root.details?.coursework?.length) {
+          const coursework = [...root.details.coursework];
+          coursework[coursework.length - 1] = `${coursework.at(-1)} ${content}`;
+          root.details = { ...root.details, coursework };
+          continue;
+        }
+      }
+      if (parent && awaitingSecondary && (section === 'role' || section === 'research' || section === 'education')) {
+        const root = items.find((item) => item.localId === parent?.localId);
+        if (root && root.kind !== 'bullet') {
+          root.content = `${root.content} | ${content}`;
+          const dated = splitTrailing(content, dateRangeAtEnd);
+          if (root.kind === 'role') root.details = { ...(root.details ?? { organization: root.content.split(' | ')[0]! }), title: dated.text, ...(dated.trailing ? { dateRange: dated.trailing } : {}) };
+          if (root.kind === 'research') {
+            const [title, advisor] = dated.text.split(/,\s*advised by\s+/iu);
+            root.details = { ...(root.details ?? { organization: root.content.split(' | ')[0]! }), title: title?.trim(), ...(advisor?.trim() ? { advisor: advisor.trim() } : {}), ...(dated.trailing ? { dateRange: dated.trailing } : {}) };
+          }
+          if (root.kind === 'education') root.details = { ...(root.details ?? { institution: root.content.split(' | ')[0]! }), credential: dated.text, ...(dated.trailing ? { dateRange: dated.trailing } : {}) };
+          awaitingSecondary = false;
+          continue;
+        }
+      }
+      if (section === 'role') {
+        const located = splitLocationAtEnd(content);
+        items.push({ localId, kind: section, content, details: { organization: located.text, ...(located.location ? { location: located.location } : {}) }, sourceLocation: `line ${index + 1}` });
+      } else if (section === 'research') {
+        const located = splitLocationAtEnd(content);
+        items.push({ localId, kind: section, content, details: { organization: located.text, ...(located.location ? { location: located.location } : {}) }, sourceLocation: `line ${index + 1}` });
+      }
+      else if (section === 'project') {
+        const match = content.match(/^(.*?)\s+(?:[-—–]{1,2})\s+(.*?)(?:\s+\(([^)]+)\))?$/u);
+        items.push({ localId, kind: section, content, details: { name: match?.[1]?.trim() ?? content, tagline: match?.[2]?.trim(), technologies: match?.[3]?.split(',').map((value) => value.trim()).filter(Boolean) ?? [] }, sourceLocation: `line ${index + 1}` });
+      } else if (section === 'education') {
+        const [institution, ...metadata] = content.split(/\s+\|\s+/u);
+        const located = splitLocationAtEnd(metadata.join(' | '));
+        const compactAwards = !located.location && /^Awards:/iu.test(located.text);
+        if (compactAwards) {
+          const schoolParts = institution!.split(',').map((value) => value.trim()).filter(Boolean);
+          items.push({ localId, kind: section, content, details: { institution: schoolParts.shift()!, ...(schoolParts.length ? { credential: schoolParts.join(', ') } : {}), awards: located.text.replace(/^Awards:\s*/iu, '').split(',').map((value) => value.trim()).filter(Boolean) }, sourceLocation: `line ${index + 1}` });
+        } else {
+          const gpa = located.text.match(/(?:^|\|)\s*GPA:\s*([^|]+)/iu)?.[1]?.trim();
+          const testScores = [...located.text.matchAll(/(?:^|\|)\s*((?:SAT|ACT|GRE|GMAT):\s*[^|]+)/giu)].map((match) => match[1]!.trim());
+          items.push({ localId, kind: section, content, details: { institution: institution!.trim(), ...(located.location ? { location: located.location } : {}), ...(gpa ? { gpa } : {}), ...(testScores.length ? { testScores } : {}), ...(!gpa && !testScores.length && located.text ? { details: located.text } : {}) }, sourceLocation: `line ${index + 1}` });
+        }
+      }
+      else {
+        const [category, ...values] = content.split(':');
+        items.push({ localId, kind: section, content, details: { category: values.length ? category!.trim() : 'Technical', skills: (values.length ? values.join(':') : content).split(',').map((value) => value.trim()).filter(Boolean) }, sourceLocation: `line ${index + 1}` });
+      }
       parent = section === 'skill' ? undefined : { kind: section, localId };
+      awaitingSecondary = section === 'role' || section === 'research' || section === 'education';
     }
     if (items.length >= limit) break;
   }

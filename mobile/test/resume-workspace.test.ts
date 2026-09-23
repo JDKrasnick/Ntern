@@ -16,7 +16,11 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('type ResumeBankRef =');
     expect(app).toContain('kind: "bullet"; bankItemId: string; parent:');
     expect(app).toContain('bankEntryKind === "bullet" && selectedBankParent');
-    expect(app).toContain('Add a project, role, or education parent before adding its bullets.');
+    expect(app).toContain('Add a role, research entry, project, or education parent before adding its bullets.');
+    expect(app).toContain('"role", "research", "project", "education", "skill", "bullet"');
+    expect(app).toContain('api<{ templates: ResumeTemplateCard[] }>("/resume-templates", token)');
+    expect(app).toContain('selectedProfile.template !== selectedTemplate');
+    expect(app).toContain('revision: selectedProfile.revision, template: selectedTemplate');
   });
 
   it('offers an adaptive review workspace with evidence and explicit decisions', () => {
@@ -35,12 +39,12 @@ describe('resume workspace navigation contract', () => {
 
   it('keeps the master bank compact beside the active workbench', () => {
     expect(app).toContain('const wideWorkbench = width >= 1040;');
-    expect(app).toContain('bankItems.slice(0, 4)');
+    expect(app).toContain('bankRoots.slice(0, 4)');
     expect(app).toContain('styles.resumeSetupWorkspaceWide');
     expect(app).toContain('styles.resumeLibraryRail');
     expect(app).toContain('style={bankExpanded ? styles.resumeBankScroller : undefined}');
     expect(app).toContain('<Text numberOfLines={2} style={styles.resumeBankItemText}>');
-    expect(app).toContain('`Browse all ${bankItems.length} source items`');
+    expect(app).toContain('`Browse all ${bankRoots.length} entries`');
   });
 
   it('shows server-owned plans and disables new tailoring at the monthly limit', () => {

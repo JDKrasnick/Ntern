@@ -12,9 +12,10 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, parseResumeBankParentRef, recommendResumeProfiles, resumeBankItemRef, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, recommendResumeProfiles, resumeBankItemRef, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
+import { RESUME_TEMPLATES, resumeTemplateList } from './resume-templates.js';
 import type { ResumeSemanticIndex } from './resume-embeddings.js';
 import { effectiveResumeSubscriptionPlan, resumeSubscriptionPeriod, resumeSubscriptionSummary } from './subscription.js';
 
@@ -415,8 +416,8 @@ export interface ApiDependencies {
   resumeTunerEnabled?: boolean;
 }
 
-const resumeKinds = new Set<ResumeBankItem['kind']>(['role', 'project', 'skill', 'education', 'bullet']);
-const resumeTemplates = new Set<ResumeTemplateId>(['jake-technical', 'clean-standard', 'research-academic', 'project-compact']);
+const resumeKinds = new Set<ResumeBankItem['kind']>(['role', 'research', 'project', 'skill', 'education', 'bullet']);
+const resumeTemplates = new Set<ResumeTemplateId>(Object.keys(RESUME_TEMPLATES) as ResumeTemplateId[]);
 function resumeText(value: unknown, field: string, max = 8_000): string {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > max) throw new Error(`${field} must be non-empty text up to ${max} characters`);
   return value.trim();
@@ -429,6 +430,7 @@ function resumeSectionForItem(item: ResumeBankItem): string {
   const kind = item.kind === 'bullet' ? item.parent.kind : item.kind;
   if (kind === 'skill') return 'Skills';
   if (kind === 'project') return 'Projects';
+  if (kind === 'research') return 'Research';
   if (kind === 'education') return 'Education';
   return 'Experience';
 }
@@ -648,6 +650,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
         const period = resumeSubscriptionPeriod(timestamp);
         return reply(200, resumeSubscriptionSummary(subscription, await dependencies.users.getResumeDraftUsage(userId, period), timestamp));
       }
+      if (method === 'GET' && path === '/resume-templates') return reply(200, { templates: resumeTemplateList() });
       if (path.startsWith('/me/resume-')) {
         if (!resumeTunerEnabled) return reply(404, { message: 'Resume tailoring is not enabled' });
         const timestamp = dependencies.now?.() ?? now();
@@ -667,7 +670,10 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const bank = await dependencies.users.listResumeBank(userId);
             const item: ResumeBankItem = body.kind === 'bullet'
               ? { ...base, kind: 'bullet', parent: parseResumeBankParentRef(body.parent) }
-              : { ...base, kind: body.kind as ResumeBankRootKind };
+              : (() => {
+                const kind = body.kind as ResumeBankRootKind;
+                return { ...base, kind, details: parseResumeBankDetails(kind, body.details, base.content) } as ResumeBankItem;
+              })();
             validateResumeBankItemPlacement(item, bank);
             if (!await dependencies.users.putResumeBankItem(item)) return reply(409, { message: 'Resume bank item already exists; retry' });
             try { await dependencies.resumeSemanticIndex?.index(item); } catch { /* D1 remains authoritative if the derived cache is unavailable. */ }
@@ -688,7 +694,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const base = { userId, bankItemId: ids.get(extracted.localId)!, content: extracted.content, sourceDocumentId: document.documentId, sourceLocation: extracted.sourceLocation, verified: true, revision: 0, createdAt: timestamp, updatedAt: timestamp };
             return extracted.kind === 'bullet'
               ? { ...base, kind: 'bullet', parent: { kind: extracted.parent.kind, bankItemId: ids.get(extracted.parent.localId)! } }
-              : { ...base, kind: extracted.kind };
+              : { ...base, kind: extracted.kind, details: parseResumeBankDetails(extracted.kind, extracted.details, extracted.content) } as ResumeBankItem;
           });
           validateResumeBankGraph([...await dependencies.users.listResumeBank(userId), ...importedItems]);
           for (const item of importedItems) {
@@ -704,12 +710,13 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
           if (body.kind !== undefined || body.parent !== undefined) return reply(400, { message: 'kind and parent are immutable; create a new structured item instead' });
           if (body.verified !== undefined && typeof body.verified !== 'boolean') return reply(400, { message: 'verified must be a boolean' });
-          const updated: ResumeBankItem = {
+          const updated = {
             ...previous,
             ...(body.content === undefined ? {} : { content: resumeText(body.content, 'content') }),
+            ...(previous.kind === 'bullet' || body.details === undefined ? {} : { details: parseResumeBankDetails(previous.kind, body.details, body.content === undefined ? previous.content : resumeText(body.content, 'content')) }),
             ...(body.verified === undefined ? {} : { verified: body.verified }),
             revision: previous.revision + 1, updatedAt: timestamp,
-          };
+          } as ResumeBankItem;
           if (!await dependencies.users.putResumeBankItem(updated, previous.revision)) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
           try {
             if (updated.verified) await dependencies.resumeSemanticIndex?.index(updated);
