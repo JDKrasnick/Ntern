@@ -43,7 +43,7 @@ jobs:
       TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TF_VAR_public_api_url: ${{ vars.PUBLIC_API_URL }}
       TF_VAR_employer_portal_enabled: ${{ vars.EMPLOYER_PORTAL_ENABLED }}
-      TF_VAR_auth_from_email: ${{ vars.AUTH_FROM_EMAIL }}
+      TF_VAR_auth_from_email: ${{ secrets.AUTH_FROM_EMAIL }}
       TF_VAR_gmail_enabled: ${{ vars.GMAIL_ENABLED }}
       TF_VAR_gmail_client_id: ${{ vars.GMAIL_CLIENT_ID }}
       TF_VAR_gmail_redirect_uri: ${{ vars.GMAIL_REDIRECT_URI }}

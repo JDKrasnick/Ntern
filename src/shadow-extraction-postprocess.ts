@@ -9,7 +9,7 @@ import type { ShadowExtraction, ShadowField } from './shadow-extraction.js';
  * publication: callers must compare the returned changes against a labelled
  * set before enabling any variant in the Worker.
  */
-export type ShadowPostprocessReason = 'generic-e-verify' | 'statutory-wage-copy' | 'equal-opportunity-copy' | 'procedural-eligibility-copy' | 'generic-hybrid-benefit' | 'generic-office-copy' | 'eligibility-geography-not-location' | 'student-affiliation-not-location' | 'generic-language-requirement' | 'candidate-student-status' | 'candidate-graduation-date' | 'office-reference-not-mode' | 'incomplete-on-complete-input' | 'non-temporal-schedule-copy';
+export type ShadowPostprocessReason = 'generic-e-verify' | 'statutory-wage-copy' | 'equal-opportunity-copy' | 'procedural-eligibility-copy' | 'generic-hybrid-benefit' | 'generic-office-copy' | 'eligibility-geography-not-location' | 'student-affiliation-not-location' | 'non-role-location-copy' | 'generic-language-requirement' | 'candidate-student-status' | 'candidate-graduation-date' | 'office-reference-not-mode' | 'conditional-remote-not-hybrid' | 'incomplete-on-complete-input' | 'non-temporal-schedule-copy';
 
 export interface ShadowPostprocessChange {
   field: keyof ShadowExtraction['fields'];
@@ -27,15 +27,20 @@ const genericEverify = /\be-?verify\b/iu;
 const proceduralEligibility = /\b(?:e-?verify|drug[- ]?test|background[- ]?check|visa[- ]?(?:processing|application process)|visa application process|(?:application|applying)[^.\n]{0,120}\b(?:visa|permit|residen))\b/iu;
 const statutoryWage = /\b(?:minimum wage|wage notice|pay transparency)\b/iu;
 const genericHybridBenefit = /\b(?:hybrid work model|flexible work model|work[- ]life)\b/iu;
-const roleLocation = /\b(?:this|the) (?:role|position|internship|job)\b.*\b(?:in|at|based)\b|\b(?:intern|co-?op|new grad)\b.*\b(?:in|at)\b|\bbased(?: in person)? (?:at|in)\b|\bon[- ]site in\b|\bavailable\b.*\bin\b/iu;
+const roleLocation = /\b(?:this|the) (?:role|position|internship|job)\b.*\b(?:in|at|based)\b|\b(?:interns?|internships?|co-?ops?|new grads?)\b.*\b(?:in|at|based)\b|\bbased(?: in person)? (?:at|in)\b|\bon[- ]?site in\b|\bavailable\b.*\bin\b|\b(?:primary|primarily|work)\s+locations?\s+(?:are|is|include)\b/iu;
 const languageOnly = /\b(?:fluent|proficien(?:cy|t)|speak|language)\b/iu;
-const eligibilityTerms = /\b(?:work authorization|authorized to work|eligible for employment|citizen(?:ship|national(?:ity)?)|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]controlled|itar|international traffic in arms)\b/iu;
+const eligibilityTerms = /\b(?:work authorization|authorized to work|eligible for employment|citizen(?:ship|national(?:ity)?)|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]?control(?:led)?|itar|international traffic in arms)\b/iu;
 const studentStatus = /\b(?:current(?:ly)?|enrolled)\b[^.\n]{0,80}\b(?:student|co-?op)\b|\bstudents? only\b/iu;
+const applicantResidence = /\b(?:applicants?|candidates?|students?)\b[^.\n]{0,80}\b(?:must|need to|are required to|should)\b[^.\n]{0,80}\b(?:live|reside|be located|available)\b/iu;
+const companyIdentity = /\b(?:we|the company|our organization)\s+(?:are|is)\b|\babout (?:us|the company)\b/iu;
 const candidateAffiliation = /\b(?:student|recent graduate|degree|school|university|co-?op)\b/iu;
 const equalOpportunity = /\b(?:equal employment opportunity|equal opportunity employer)\b/iu;
 const graduationDate = /\bgraduat(?:e|ing|ion date)\b/iu;
-const explicitMode = /\b(?:remote|hybrid|on[- ]?site|in[- ]?office|in person)\b|\bin the office \d+ days?\b/iu;
-const roleTimingSignal = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:weeks?|months?)\b|\b(?:spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december|start(?:ing)?|end(?:ing)?|duration|until|through)\b/iu;
+const explicitMode = /\b(?:remote|hybrid|on[- ]?site|in[- ]?office|in[- ]person)\b|\bin the office \d+ days?\b/iu;
+const mandatoryOnsite = /\b(?:must|expected|required)\b[^.\n]{0,100}\b(?:on[- ]?site|in[- ]?office|in the office)\b/iu;
+const conditionalRemote = /\b(?:may|possible|subject to|discretionary|approval|approved)\b[^.\n]{0,120}\b(?:remote|from home|work from home)\b/iu;
+const primaryLocationList = /\b(?:primary|primarily|work)\s+locations?\s+(?:are|is|include)\s+([^.\n]+)/iu;
+const roleTimingSignal = /\b(?:\d+\s*[-–]?\s*|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+)(?:(?:[a-z]+(?:-[a-z]+){1,2})\s+)?(?:weeks?|months?)\b|\b(?:full|part)[- ]?time\b|\b\d+\s*(?:[-–]\s*\d+\s*)?hours?\s*(?:\/|per|a)\s*week\b|\b(?:spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december|start(?:ing)?|end(?:ing)?|duration|until|through)\b/iu;
 const locationInPassage = /\bin\s+([A-Z][a-z]+(?:[ -][A-Z][a-z]+){0,3})(?=$|[.,;:])/gu;
 
 function notStated(): ShadowField {
@@ -81,6 +86,10 @@ export function postprocessRoleScopedExtraction(extraction: ShadowExtraction, in
   if (workMode.status === 'present') {
     const text = fieldText(workMode);
     if (genericHybridBenefit.test(text) && !roleScoped.test(text)) clear('workMode', 'generic-hybrid-benefit');
+    else if (workMode.value === 'hybrid' && mandatoryOnsite.test(text) && conditionalRemote.test(text)) {
+      fields.workMode = { ...workMode, value: 'onsite', qualifiers: [] };
+      changes.push({ field: 'workMode', reason: 'conditional-remote-not-hybrid' });
+    }
   }
 
   const locations = fields.locations;
@@ -89,10 +98,14 @@ export function postprocessRoleScopedExtraction(extraction: ShadowExtraction, in
     const rolePassages = locations.evidence.filter((passage) => roleLocation.test(passage) && !eligibilityTerms.test(passage));
     if (rolePassages.length > 0 && Array.isArray(locations.value)) {
       const roleText = rolePassages.join('\n').toLocaleLowerCase();
+      const labelledLists = rolePassages.map((passage) => primaryLocationList.exec(passage)?.[1]?.toLocaleLowerCase()).filter((value): value is string => Boolean(value));
       const retained = locations.value.flatMap((value): string[] => {
         if (typeof value !== 'string') return [];
         const proseValue = /\b(?:available|spring|summer|fall|autumn|winter|intern|full[- ]time|part[- ]time)\b/iu.test(value);
-        if (value.length <= 60 && !proseValue) return roleText.includes(value.toLocaleLowerCase()) ? [value] : [];
+        if (value.length <= 60 && !proseValue) {
+          const normalized = value.toLocaleLowerCase();
+          return roleText.includes(normalized) && (labelledLists.length === 0 || labelledLists.some((list) => list.includes(normalized))) ? [value] : [];
+        }
         return [...value.matchAll(locationInPassage)].map((match) => match[1]);
       });
       if (retained.length === 0) clear('locations', 'generic-office-copy');
@@ -100,6 +113,8 @@ export function postprocessRoleScopedExtraction(extraction: ShadowExtraction, in
     } else if (genericPassages.length > 0) clear('locations', 'generic-office-copy');
     else if (locations.evidence.length > 0 && locations.evidence.every((passage) => eligibilityTerms.test(passage))) clear('locations', 'eligibility-geography-not-location');
     else if (locations.evidence.length > 0 && locations.evidence.every((passage) => studentStatus.test(passage))) clear('locations', 'student-affiliation-not-location');
+    else if (locations.evidence.length > 0 && locations.evidence.every((passage) => eligibilityTerms.test(passage)
+      || proceduralEligibility.test(passage) || applicantResidence.test(passage) || companyIdentity.test(passage))) clear('locations', 'non-role-location-copy');
     if (fields.locations.status === 'present' && fields.locations.evidence.length > 0
       && fields.locations.evidence.every((passage) => genericEverify.test(passage))) clear('locations', 'generic-office-copy');
   }

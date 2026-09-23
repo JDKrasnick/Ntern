@@ -66,6 +66,18 @@ describe('postprocessRoleScopedExtraction', () => {
     expect(role.extraction.fields.locations.status).toBe('present');
   });
 
+  it('removes non-work-site geography from compliance, applicant-residency, and company-identity passages', () => {
+    for (const evidence of [
+      ['This position is open only to individuals eligible for employment in the United States.', 'Drug-test completion requires availability within the United States.'],
+      ['Students must be located in the United States for the duration of the internship.'],
+      ['We are Dallas Fort Worth International Airport, one of the most successful airports in the world.'],
+    ]) {
+      const result = postprocessRoleScopedExtraction(extraction({ locations: field('present', ['United States'], evidence) }));
+      expect(result.extraction.fields.locations.status).toBe('not-stated');
+      expect(result.changes).toEqual([{ field: 'locations', reason: 'non-role-location-copy' }]);
+    }
+  });
+
   it('keeps only locations supported by a role-specific passage when office copy is mixed in', () => {
     const result = postprocessRoleScopedExtraction(extraction({
       locations: field('present', ['Los Angeles, CA', 'New York, NY'], [
@@ -75,6 +87,18 @@ describe('postprocessRoleScopedExtraction', () => {
     }));
     expect(result.extraction.fields.locations.value).toEqual(['Los Angeles, CA']);
     expect(result.extraction.fields.locations.evidence).toEqual(['This internship is on-site in Los Angeles, CA.']);
+  });
+
+  it('preserves work sites named by an internship or onsite weekly schedule', () => {
+    for (const [evidence, location] of [
+      ['This internship is based at our headquarters in McLean, Virginia.', 'McLean, Virginia'],
+      ['Must work onsite in either Needham, MA, Miami, FL, or New York, NY.', 'Needham, MA'],
+    ]) {
+      const result = postprocessRoleScopedExtraction(extraction({
+        locations: field('present', [location], [evidence]),
+      }));
+      expect(result.extraction.fields.locations.status).toBe('present');
+    }
   });
 
   it('removes language-only eligibility claims', () => {
@@ -95,14 +119,14 @@ describe('postprocessRoleScopedExtraction', () => {
     expect(result.extraction.fields.timing.status).toBe('not-stated');
   });
 
-  it('normalizes malformed location prose and rejects schedule or incomplete-field noise on complete input', () => {
+  it('normalizes malformed location prose and preserves an explicit schedule on complete input', () => {
     const result = postprocessRoleScopedExtraction(extraction({
       locations: field('present', ['This internship is available for Summer 2027 in San Francisco'], ['This internship is available for Summer 2027 in San Francisco.']),
       timing: field('present', 'Full-time, 40 hours per week', ['Full-time, 40 hours per week.']),
       eligibility: { value: null, status: 'incomplete', evidence: [], qualifiers: [] },
     }));
     expect(result.extraction.fields.locations.value).toEqual(['San Francisco']);
-    expect(result.extraction.fields.timing.status).toBe('not-stated');
+    expect(result.extraction.fields.timing.status).toBe('present');
     expect(result.extraction.fields.eligibility.status).toBe('not-stated');
   });
 
@@ -115,6 +139,33 @@ describe('postprocessRoleScopedExtraction', () => {
     expect(result.extraction.fields.locations.value).toEqual(['Vancouver']);
     expect(result.extraction.fields.workMode.status).toBe('present');
     expect(result.extraction.fields.eligibility.status).toBe('not-stated');
+  });
+
+  it('uses the mandatory arrangement when remote days are conditional', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      workMode: field('present', 'hybrid', ['During the first month, you are expected to work on-site 5 days per week. After the first month, there may be the possibility to work from home subject to project requirements and supervisor approval.']),
+    }));
+    expect(result.extraction.fields.workMode.value).toBe('onsite');
+    expect(result.changes).toEqual([{ field: 'workMode', reason: 'conditional-remote-not-hybrid' }]);
+  });
+
+  it('preserves hyphenated in-person work and descriptive term or weekly-hour timing', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      workMode: field('present', 'onsite', ['This role is based in-person at our Vancouver office.']),
+      timing: field('present', ['10 action-packed weeks', 'Expected 14–16 hour/week work schedule.'], [
+        'The internship explicitly runs for 10 action-packed weeks.',
+        'Expected 14–16 hour/week work schedule.',
+      ]),
+    }));
+    expect(result.extraction.fields.workMode.status).toBe('present');
+    expect(result.extraction.fields.timing.status).toBe('present');
+  });
+
+  it('preserves direct export-control access restrictions', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', 'export-control access restriction', ['Access is restricted by export-control requirements.']),
+    }));
+    expect(result.extraction.fields.eligibility.status).toBe('present');
   });
 
   it('preserves a worded role duration', () => {
@@ -163,6 +214,16 @@ describe('postprocessRoleScopedExtraction', () => {
       ]),
     }));
     expect(result.extraction.fields.locations.value).toEqual(['Auckland']);
+  });
+
+  it('keeps only places named in an explicit primary-location list', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['Cincinnati, OH', 'Lynn, MA', 'United States'], [
+        'Willingness and ability to work in the United States; primarily locations are Cincinnati, OH or Lynn, MA.',
+        'GE Aerospace will only employ those who are legally authorized to work in the United States for this opening.',
+      ]),
+    }));
+    expect(result.extraction.fields.locations.value).toEqual(['Cincinnati, OH', 'Lynn, MA']);
   });
 
   it('does not treat employment jurisdiction as a role location', () => {
