@@ -148,7 +148,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain("jq 'del(.vars)' wrangler.api.jsonc");
     expect(deployment).toContain('npx wrangler deploy --config "$config" --keep-vars');
     expect(deployment.indexOf('Require converged state')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));
-    expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive');
+    expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive texmf-dist-fontsrecommended');
     expect(compilerImage).not.toContain('texlive-full');
   });
 

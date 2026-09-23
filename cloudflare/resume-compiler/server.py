@@ -8,6 +8,31 @@ import zipfile
 MAX_PDF_BYTES = 2 * 1024 * 1024
 MAX_PREVIEW_BYTES = 2 * 1024 * 1024
 MAX_PAGES = 6
+MAX_SOURCE_BYTES = 256000
+
+def read_source(handler):
+    length = handler.headers.get('Content-Length')
+    if length is not None:
+        size = int(length)
+        if size <= 0 or size > MAX_SOURCE_BYTES: raise ValueError('invalid source length')
+        source = handler.rfile.read(size)
+        if len(source) != size: raise ValueError('incomplete source body')
+        return source
+    if handler.headers.get('Transfer-Encoding', '').lower() != 'chunked':
+        raise ValueError('source length required')
+    source = bytearray()
+    while True:
+        line = handler.rfile.readline(128)
+        if not line.endswith(b'\r\n'): raise ValueError('invalid chunk header')
+        size = int(line.split(b';', 1)[0].strip(), 16)
+        if size == 0:
+            while handler.rfile.readline(8192) not in (b'\r\n', b'\n', b''): pass
+            break
+        if len(source) + size > MAX_SOURCE_BYTES: raise ValueError('source exceeds limit')
+        source.extend(handler.rfile.read(size))
+        if handler.rfile.read(2) != b'\r\n': raise ValueError('invalid chunk terminator')
+    if not source: raise ValueError('empty source body')
+    return bytes(source)
 
 class Compiler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -17,9 +42,8 @@ class Compiler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != '/compile': self.send_error(404); return
-        size = int(self.headers.get('Content-Length', '0'))
-        if size <= 0 or size > 256000: self.send_error(413); return
-        source = self.rfile.read(size)
+        try: source = read_source(self)
+        except (ValueError, OverflowError): self.send_error(413); return
         with tempfile.TemporaryDirectory() as directory:
             tex = os.path.join(directory, 'resume.tex')
             with open(tex, 'wb') as output: output.write(source)
