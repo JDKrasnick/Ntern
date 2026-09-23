@@ -138,6 +138,7 @@ describe('Cloudflare deployment configuration', () => {
   it('deploys the resume PDF compiler with matching runtime and OpenTofu ownership', () => {
     const terraform = read('infra/cloudflare/main.tf');
     const deployment = read('.github/workflows/deploy-cloudflare.yml');
+    const compilerImage = read('cloudflare/resume-compiler/Dockerfile');
     expect(api.durable_objects?.bindings).toContainEqual({ name: 'RESUME_PDF_COMPILER', class_name: 'ResumePdfCompiler' });
     expect(api.migrations).toContainEqual({ tag: 'v2-resume-pdf-compiler', new_sqlite_classes: ['ResumePdfCompiler'] });
     expect(api.containers).toContainEqual({ class_name: 'ResumePdfCompiler', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 });
@@ -147,6 +148,8 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain("jq 'del(.vars)' wrangler.api.jsonc");
     expect(deployment).toContain('npx wrangler deploy --config "$config" --keep-vars');
     expect(deployment.indexOf('Require converged state')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));
+    expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive');
+    expect(compilerImage).not.toContain('texlive-full');
   });
 
   it('moves queue and cron state to ingestion ownership', () => {
