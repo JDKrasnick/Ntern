@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -30,6 +30,15 @@ const queue = (metrics: Queue['metrics']): Queue => ({
   async send() {},
   async sendBatch() {},
   metrics,
+});
+
+describe('Resume compiler transport', () => {
+  it('sends an explicit UTF-8 byte length to the bounded compiler server', async () => {
+    const request = resumeCompilerRequest('Résumé – PDF');
+    expect(request.headers.get('content-type')).toBe('application/x-tex');
+    expect(request.headers.get('content-length')).toBe(String(new TextEncoder().encode('Résumé – PDF').byteLength));
+    expect(new Uint8Array(await request.arrayBuffer())).toEqual(new TextEncoder().encode('Résumé – PDF'));
+  });
 });
 
 const publishedGreenhouseRecords: ReviewedSourceRecord[] = reviewedGreenhouseSources

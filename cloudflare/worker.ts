@@ -569,6 +569,15 @@ function documentStorage(env: Environment): DocumentStorage {
   };
 }
 
+export function resumeCompilerRequest(tex: string): Request {
+  const source = new TextEncoder().encode(tex);
+  return new Request('https://resume-compiler/compile', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-tex', 'content-length': String(source.byteLength) },
+    body: source,
+  });
+}
+
 function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
   return {
     async putTex(objectKey, tex) { const bytes = new TextEncoder().encode(tex); await env.DOCUMENTS.put(objectKey, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'application/x-tex; charset=utf-8' } }); },
@@ -576,7 +585,7 @@ function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
     async putPreview(objectKey, png) { await env.DOCUMENTS.put(objectKey, png, { httpMetadata: { contentType: 'image/png' } }); },
     async compile(tex, resumeSpecHash) {
       const stub = env.RESUME_PDF_COMPILER.get(env.RESUME_PDF_COMPILER.idFromName(resumeSpecHash));
-      const response = await stub.fetch('https://resume-compiler/compile', { method: 'POST', headers: { 'content-type': 'application/x-tex' }, body: tex });
+      const response = await stub.fetch(resumeCompilerRequest(tex));
       if (!response.ok) throw new Error('Resume PDF compiler did not produce an artifact');
       const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
       const pdf = files['resume.pdf']; const pageCountText = files['page-count.txt'];
