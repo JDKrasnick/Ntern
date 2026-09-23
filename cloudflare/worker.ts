@@ -49,6 +49,7 @@ import { destinationVerificationMessage, enqueueDueDestinationVerifications, pro
   sendAdmissionOperationalAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
+import { recentD1OverloadCount } from './d1-overload-alert.js';
 import { observeD1Delivery, observeQueueBatch } from './d1-traffic-observation.js';
 import { resilientD1 } from './resilient-d1.js';
 export { D1TrafficController } from './d1-traffic-controller.js';
@@ -1509,13 +1510,15 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
     const queueAgeMs = queueMetrics?.oldestMessageTimestamp
       ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
+    const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const operationalSignals = [
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),
+      ...(recentOverloads ? ['d1-overloaded'] : []),
     ];
     await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
       signals: operationalSignals, observedAt: observedAt.toISOString(),
-      details: `Destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}.`,
+      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}.`,
     }));
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
