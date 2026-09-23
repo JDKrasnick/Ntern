@@ -9,21 +9,23 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('resumeEnabled ? [{ key: "resume" as const, label: "Resume"');
     expect(app).toContain('resumeEnabled={publicConfig.resumeTunerEnabled}');
     expect(app).toContain('feature="tailor and save résumés"');
-    expect(app).toContain('Import a PDF or DOCX résumé');
+    expect(app).toContain('accessibilityLabel="Import PDF or DOCX resume"');
     expect(app).toContain('"/me/resume-bank/import"');
-    expect(app).toContain('label={item.verified ? "Mark for review" : "Verify item"}');
-    expect(app).toContain('method: "PATCH", body: JSON.stringify({ revision: item.revision, verified })');
+    expect(app).toContain('Sync all items to technical base');
+    expect(app).toContain('method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true })');
   });
 
   it('offers an adaptive review workspace with evidence and explicit decisions', () => {
     expect(app).toContain('reviewMode === "changes"');
     expect(app).toContain('resumeReviewWorkspaceWide');
-    expect(app).toContain('Master Bank evidence');
+    expect(app).toContain('Technical-base evidence');
     expect(app).toContain('label="Keep original"');
-    expect(app).toContain('label="Use suggestion"');
+    expect(app).toContain('label="Apply change"');
     expect(app).toContain('accessibilityLabel="Previous change"');
     expect(app).toContain('/finalize`');
-    expect(app).toContain('shareResumeArtifact(result.artifact.artifactId, token)');
+    expect(app).toContain('loadResumeArtifactPreview(result.artifact.artifactId, 1, token)');
+    expect(app).toContain('loadResumeArtifactSource(result.artifact.artifactId, token)');
+    expect(app).toContain('shareResumeArtifact(artifact.artifactId, token)');
     expect(app).toContain('pollResumeImport(() => api<ResumeImportCard>');
   });
 });
