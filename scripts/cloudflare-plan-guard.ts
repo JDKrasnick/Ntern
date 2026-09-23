@@ -145,6 +145,30 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   return addedController || plainTextUpdate;
 }
 
+function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
+  if (!Array.isArray(before) || !Array.isArray(after)) return false;
+  const name = 'CATALOG_R2_READ_ENABLED';
+  const oldBindings = before.filter((binding) => isRecord(binding) && binding.name === name);
+  const newBindings = after.filter((binding) => isRecord(binding) && binding.name === name);
+  if (newBindings.length !== 1 || !isRecord(newBindings[0])) return false;
+  const enabled = newBindings[0];
+  if (enabled.type !== 'plain_text' || !['true', 'false'].includes(String(enabled.text))) return false;
+  if (oldBindings.length === 0) {
+    // First enablement is the only permitted binding addition. Terraform may
+    // insert it into the ordered list, so compare everything after removal.
+    return isDeepStrictEqual(enabled, { name, type: 'plain_text', text: 'true' })
+      && after.length === before.length + 1
+      && isDeepStrictEqual(before, after.filter((binding) => !isRecord(binding) || binding.name !== name));
+  }
+  if (oldBindings.length !== 1 || before.length !== after.length || !isRecord(oldBindings[0])) return false;
+  if (!isDeepStrictEqual({ ...oldBindings[0], text: enabled.text }, enabled)) return false;
+  if (oldBindings[0].text === enabled.text) return false;
+  return isDeepStrictEqual(
+    before.filter((binding) => !isRecord(binding) || binding.name !== name),
+    after.filter((binding) => !isRecord(binding) || binding.name !== name),
+  );
+}
+
 function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): boolean {
   if (!isRecord(change.before) || !isRecord(change.after)) return false;
   const before = change.before;
@@ -153,7 +177,8 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   const contentChanged = [...allowedContentFields].some((field) => (
     !isDeepStrictEqual(before[field], after[field])
   ));
-  const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings);
+  const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings)
+    || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, after.bindings));
   // The ingestion Worker exhausted its 10,000-subrequest invocation budget
   // while finishing a bounded GitHub source slice. Permit only this reviewed
   // increase; all other Worker limits remain protected.
