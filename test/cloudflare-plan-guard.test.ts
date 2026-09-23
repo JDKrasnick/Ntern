@@ -65,6 +65,16 @@ describe('Cloudflare deployment plan guard', () => {
     expect(actionableChanges(plan([{ address: 'data.cloudflare_zone.application', actions: ['read'] }]))).toEqual([]);
   });
 
+  it('permits only the reviewed ingestion subrequest increase', () => {
+    const increase = { ...contentUpdate, address: 'cloudflare_workers_script.ingestion',
+      after: { ...worker, limits: { cpu_ms: 120_000, subrequests: 50_000 } },
+      before: { ...worker, limits: { cpu_ms: 120_000, subrequests: 10_000 } } };
+    expect(validateCloudflarePlan(plan([increase]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{ ...increase, address: 'cloudflare_workers_script.application' }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{ ...increase,
+      after: { ...increase.after, limits: { cpu_ms: 120_000, subrequests: 100_000 } } }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it.each([
     ['bindings', { bindings: [{ name: 'DB', type: 'd1', id: 'other-db' }] }],
     ['compatibility settings', { compatibility_date: '2026-09-09' }],

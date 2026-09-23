@@ -145,7 +145,7 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   return addedController || plainTextUpdate;
 }
 
-function isSafeWorkerUpdate(change: ResourceChange['change']): boolean {
+function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): boolean {
   if (!isRecord(change.before) || !isRecord(change.after)) return false;
   const before = change.before;
   const after = change.after;
@@ -154,9 +154,19 @@ function isSafeWorkerUpdate(change: ResourceChange['change']): boolean {
     !isDeepStrictEqual(before[field], after[field])
   ));
   const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings);
-  if (!contentChanged && !permittedBindingChanged) return false;
+  // The ingestion Worker exhausted its 10,000-subrequest invocation budget
+  // while finishing a bounded GitHub source slice. Permit only this reviewed
+  // increase; all other Worker limits remain protected.
+  const permittedSubrequestIncrease = address === 'cloudflare_workers_script.ingestion'
+    && isDeepStrictEqual(before.limits, { cpu_ms: 120_000, subrequests: 10_000 })
+    && isDeepStrictEqual(after.limits, { cpu_ms: 120_000, subrequests: 50_000 });
+  if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease) return false;
 
-  const beforeForComparison = permittedBindingChanged ? { ...before, bindings: after.bindings } : before;
+  const beforeForComparison = {
+    ...before,
+    ...(permittedBindingChanged ? { bindings: after.bindings } : {}),
+    ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
+  };
 
   const afterUnknown = change.after_unknown;
   if (!isDeepStrictEqual(
@@ -181,7 +191,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
     !allowedUpdates.has(address)
     || change.actions.length !== 1
     || change.actions[0] !== 'update'
-    || !isSafeWorkerUpdate(change)
+    || !isSafeWorkerUpdate(address, change)
   )).map(({ address, change }) => ({ address, actions: change.actions }));
 
   if (unsafe.length > 0) {
