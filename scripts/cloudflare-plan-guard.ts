@@ -20,6 +20,27 @@ const allowedUpdates = new Set([
   'cloudflare_workers_script.ingestion',
 ]);
 
+const resumeInfrastructureCreates = new Set([
+  'cloudflare_queue.work["resume-job-import"]',
+  'cloudflare_queue.dead_letter["resume-job-import"]',
+  'cloudflare_queue_consumer.ingestion["resume-job-import"]',
+]);
+
+const resumeWorkerBindings: Record<string, Array<Record<string, unknown>>> = {
+  'cloudflare_workers_script.application': [
+    { name: 'AI', type: 'ai' },
+    { name: 'RESUME_EMBEDDINGS', type: 'vectorize', index_name: 'intern-notifs-resume-bank-v1' },
+    { name: 'RESUME_PDF_COMPILER', type: 'durable_object_namespace', class_name: 'ResumePdfCompiler' },
+    { name: 'RESUME_JOB_IMPORT_QUEUE', type: 'queue', queue_name: 'intern-notifs-resume-job-import' },
+    { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' },
+  ],
+  'cloudflare_workers_script.ingestion': [
+    { name: 'RESUME_JOB_IMPORT_QUEUE', type: 'queue', queue_name: 'intern-notifs-resume-job-import' },
+    { name: 'RESUME_JOB_IMPORT_DLQ', type: 'queue', queue_name: 'intern-notifs-resume-job-import-dlq' },
+    { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' },
+  ],
+};
+
 const allowedContentFields = new Set(['content_file', 'content_sha256']);
 // Terraform redacts these production values in a Worker script update. They
 // are the only configuration bindings that the production release workflow is
@@ -202,6 +223,78 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   return !containsUnknown(protectedWorkerValue(afterUnknown, afterUnknown));
 }
 
+function isResumeWorkerUpdate(address: string, change: ResourceChange['change']): boolean {
+  if (!isRecord(change.before) || !isRecord(change.after)) return false;
+  const expectedBindings = resumeWorkerBindings[address];
+  if (!expectedBindings || !Array.isArray(change.before.bindings) || !Array.isArray(change.after.bindings)) return false;
+  const expectedNames = new Set(expectedBindings.map(({ name }) => name));
+  if (change.before.bindings.some((binding) => isRecord(binding) && expectedNames.has(binding.name))) return false;
+  for (const expected of expectedBindings) {
+    const matches = change.after.bindings.filter((binding) => isRecord(binding) && binding.name === expected.name);
+    if (matches.length !== 1 || !isRecord(matches[0])) return false;
+    if (Object.entries(matches[0]).some(([key, value]) => (
+      key in expected ? !isDeepStrictEqual(value, expected[key]) : value !== null
+    ))) return false;
+  }
+  const bindingsWithoutResume = change.after.bindings.filter((binding) => !isRecord(binding) || !expectedNames.has(binding.name));
+  if (!isDeepStrictEqual(change.before.bindings, bindingsWithoutResume)) return false;
+
+  const migrationChanged = address === 'cloudflare_workers_script.application';
+  if (migrationChanged && (!isRecord(change.after.migrations)
+    || change.after.migrations.new_tag !== 'v2-resume-pdf-compiler'
+    || !isDeepStrictEqual(change.after.migrations.new_sqlite_classes, ['ResumePdfCompiler'])
+    || Object.entries(change.after.migrations).some(([key, value]) => (
+      !['new_tag', 'new_sqlite_classes'].includes(key) && value !== null
+    )))) return false;
+  if (!migrationChanged && !isDeepStrictEqual(change.before.migrations, change.after.migrations)) return false;
+
+  const beforeForComparison = {
+    ...change.before,
+    bindings: change.after.bindings,
+    ...(migrationChanged ? { migrations: change.after.migrations } : {}),
+  };
+  let afterUnknown = change.after_unknown;
+  if (isRecord(afterUnknown) && Array.isArray(afterUnknown.bindings)) {
+    const compilerIndex = change.after.bindings.findIndex((binding) => isRecord(binding) && binding.name === 'RESUME_PDF_COMPILER');
+    const bindingUnknowns = afterUnknown.bindings;
+    if (compilerIndex >= 0 && !isDeepStrictEqual(bindingUnknowns[compilerIndex], { namespace_id: true })) return false;
+    afterUnknown = {
+      ...afterUnknown,
+      bindings: bindingUnknowns.map((unknown, index) => index === compilerIndex ? {} : unknown),
+    };
+  }
+  if (!isDeepStrictEqual(
+    protectedWorkerValue(beforeForComparison, afterUnknown),
+    protectedWorkerValue(change.after, afterUnknown),
+  )) return false;
+  return !containsUnknown(protectedWorkerValue(afterUnknown, afterUnknown));
+}
+
+function isResumeInfrastructureCreate(address: string, change: ResourceChange['change']): boolean {
+  if (!resumeInfrastructureCreates.has(address) || change.before !== null || !isRecord(change.after)) return false;
+  const after = change.after;
+  const accountId = after.account_id;
+  if (typeof accountId !== 'string' || accountId.length === 0) return false;
+
+  if (address === 'cloudflare_queue.work["resume-job-import"]') {
+    return after.queue_name === 'intern-notifs-resume-job-import'
+      && isDeepStrictEqual(after.settings, { delivery_paused: false, message_retention_period: 86_400 });
+  }
+  if (address === 'cloudflare_queue.dead_letter["resume-job-import"]') {
+    return after.queue_name === 'intern-notifs-resume-job-import-dlq'
+      && isDeepStrictEqual(after.settings, { message_retention_period: 1_209_600 });
+  }
+  return after.script_name === 'intern-notifs-ingestion'
+    && after.type === 'worker'
+    && after.dead_letter_queue === 'intern-notifs-resume-job-import-dlq'
+    && isRecord(after.settings)
+    && after.settings.batch_size === 1
+    && after.settings.max_concurrency === 1
+    && after.settings.max_retries === 2
+    && after.settings.max_wait_time_ms === 5_000
+    && Object.keys(after.settings).every((key) => ['batch_size', 'max_concurrency', 'max_retries', 'max_wait_time_ms'].includes(key));
+}
+
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
   return (plan.resource_changes ?? [])
     .filter(({ change }) => !change.actions.every((action) => action === 'no-op' || action === 'read'))
@@ -213,10 +306,13 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
     !change.actions.every((action) => action === 'no-op' || action === 'read')
   ));
   const unsafe = resourceChanges.filter(({ address, change }) => (
-    !allowedUpdates.has(address)
-    || change.actions.length !== 1
-    || change.actions[0] !== 'update'
-    || !isSafeWorkerUpdate(address, change)
+    change.actions.length !== 1
+    || !(
+      (change.actions[0] === 'update'
+        && allowedUpdates.has(address)
+        && (isSafeWorkerUpdate(address, change) || isResumeWorkerUpdate(address, change)))
+      || (change.actions[0] === 'create' && isResumeInfrastructureCreate(address, change))
+    )
   )).map(({ address, change }) => ({ address, actions: change.actions }));
 
   if (unsafe.length > 0) {
@@ -229,7 +325,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const plan = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as Plan;
   const changes = validateCloudflarePlan(plan);
-  console.log(`Safe plan: ${changes.length} Worker script update(s).`);
+  console.log(`Safe plan: ${changes.length} reviewed infrastructure change(s).`);
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changes.length > 0}\n`);
   }

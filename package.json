@@ -62,6 +62,7 @@
     "deploy:web": "npm run build:web && wrangler pages deploy mobile/dist --project-name internnotifs --branch main",
     "cloudflare:migrate:local": "wrangler d1 migrations apply intern-notifs-db --local --config wrangler.api.jsonc",
     "cloudflare:migrate:remote": "wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc",
+    "cloudflare:dev:provision": "bash scripts/provision-cloudflare-dev.sh",
     "terraform:fmt": "tofu -chdir=infra/cloudflare fmt -check -recursive",
     "terraform:validate": "tofu -chdir=infra/cloudflare validate",
     "deploy:cloudflare": "npm run build:cloudflare && tsx scripts/deploy-cloudflare.ts"

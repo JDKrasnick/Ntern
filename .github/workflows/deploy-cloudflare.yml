@@ -55,6 +55,8 @@ jobs:
       TF_VAR_shadow_extraction_enabled: ${{ vars.SHADOW_EXTRACTION_ENABLED }}
       TF_VAR_shadow_extraction_monthly_forecast_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS }}
       TF_VAR_shadow_extraction_monthly_headroom_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS }}
+      TF_VAR_resume_tuner_enabled: "false"
+      TF_VAR_resume_embedding_index_name: intern-notifs-resume-bank-v1
       OPERATIONS_SHARED_SECRET: ${{ secrets.OPERATIONS_SHARED_SECRET }}
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +102,17 @@ jobs:
             test "$conclusion" = success
           fi
       - run: npm ci
+      - name: Ensure the resume embedding index exists
+        shell: bash
+        run: |
+          index=$(npx wrangler vectorize list --json | jq -c --arg name "$TF_VAR_resume_embedding_index_name" '.[] | select(.name == $name)')
+          if test -z "$index"; then
+            npx wrangler vectorize create "$TF_VAR_resume_embedding_index_name" \
+              --preset '@cf/baai/bge-base-en-v1.5' \
+              --description 'Private user-namespaced resume bank embeddings'
+            index=$(npx wrangler vectorize list --json | jq -c --arg name "$TF_VAR_resume_embedding_index_name" '.[] | select(.name == $name)')
+          fi
+          jq -e '.config == {"dimensions":768,"metric":"cosine"}' <<<"$index" >/dev/null
       - run: npm run build:cloudflare
       - name: Initialize production state
         run: tofu -chdir=infra/cloudflare init -reconfigure

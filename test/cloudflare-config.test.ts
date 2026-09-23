@@ -13,6 +13,7 @@ function quotedValuesBetween(source: string, start: string, end: string): string
 }
 
 type WorkerConfig = {
+  ai?: { binding: string };
   browser?: { binding: string };
   containers?: Array<{ class_name: string; image: string; instance_type?: string; max_instances?: number }>;
   durable_objects?: { bindings: Array<{ name: string; class_name: string; script_name?: string }> };
@@ -30,6 +31,7 @@ type WorkerConfig = {
     }>;
   };
   services?: Array<{ binding: string; service: string }>;
+  vectorize?: Array<{ binding: string; index_name: string }>;
   triggers?: { crons: string[] };
   vars: Record<string, string>;
   workers_dev?: boolean;
@@ -39,6 +41,8 @@ type WorkerConfig = {
 describe('Cloudflare deployment configuration', () => {
   const api = JSON.parse(read('wrangler.api.jsonc')) as WorkerConfig;
   const ingestion = JSON.parse(read('wrangler.ingestion.jsonc')) as WorkerConfig;
+  const devApi = JSON.parse(read('wrangler.dev.api.jsonc')) as WorkerConfig;
+  const devIngestion = JSON.parse(read('wrangler.dev.ingestion.jsonc')) as WorkerConfig;
 
   it('keeps Wrangler and OpenTofu cron schedules synchronized', () => {
     const wranglerCrons = ingestion.triggers?.crons ?? [];
@@ -145,11 +149,31 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('{ name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompiler" }');
     expect(terraform).toContain('new_tag            = "v2-resume-pdf-compiler"');
     expect(terraform).toContain('new_sqlite_classes = ["ResumePdfCompiler"]');
+    expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "false"');
+    expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
+    expect(deployment.indexOf('Ensure the resume embedding index exists')).toBeLessThan(deployment.indexOf('Create and validate saved plan'));
     expect(deployment).toContain("jq 'del(.vars)' wrangler.api.jsonc");
     expect(deployment).toContain('npx wrangler deploy --config "$config" --keep-vars');
     expect(deployment.indexOf('Require converged state')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));
     expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive texmf-dist-fontsrecommended');
     expect(compilerImage).not.toContain('texlive-full');
+  });
+
+  it('keeps the Cloudflare development resume stack isolated and complete', () => {
+    const provision = read('scripts/provision-cloudflare-dev.sh');
+    expect(devApi.ai).toEqual({ binding: 'AI' });
+    expect(devApi.vectorize).toEqual([{ binding: 'RESUME_EMBEDDINGS', index_name: 'intern-notifs-dev-resume-bank-v1' }]);
+    expect(devApi.durable_objects?.bindings).toContainEqual({ name: 'RESUME_PDF_COMPILER', class_name: 'ResumePdfCompiler' });
+    expect(devApi.containers).toEqual([{ class_name: 'ResumePdfCompiler', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 }]);
+    expect(devApi.queues?.producers).toContainEqual({ binding: 'RESUME_JOB_IMPORT_QUEUE', queue: 'intern-notifs-dev-resume-job-import' });
+    expect(devApi.vars.RESUME_TUNER_ENABLED).toBe('true');
+    expect(devIngestion.vars.RESUME_TUNER_ENABLED).toBe('true');
+    expect(devIngestion.queues?.consumers).toContainEqual({
+      queue: 'intern-notifs-dev-resume-job-import', max_batch_size: 1, max_concurrency: 1,
+      max_retries: 2, dead_letter_queue: 'intern-notifs-dev-resume-job-import-dlq',
+    });
+    expect(provision).toContain("resume_index='intern-notifs-dev-resume-bank-v1'");
+    expect(provision).not.toContain("resume_index='intern-notifs-resume-bank-v1'");
   });
 
   it('moves queue and cron state to ingestion ownership', () => {

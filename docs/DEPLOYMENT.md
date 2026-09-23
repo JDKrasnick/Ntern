@@ -39,6 +39,7 @@ Use the committed, config-specific commands—never a bare Wrangler deploy:
 
 ```sh
 npm run build:cloudflare
+npm run cloudflare:dev:provision
 npx wrangler d1 migrations apply intern-notifs-dev-db --remote --config wrangler.dev.api.jsonc
 npx wrangler deploy --config wrangler.dev.ingestion.jsonc
 npx wrangler deploy --config wrangler.dev.api.jsonc
@@ -75,12 +76,15 @@ sandbox acceptance are complete. Never write an entitlement from an
 unverified mobile request. Accounts without an active or grace-period verified
 entitlement receive the Free allowance of two new tailored reviews per month.
 
-Before enabling the flag, provision the `intern-notifs-resume-bank-v1`
-Vectorize index using the `@cf/baai/bge-base-en-v1.5` preset and create its
-metadata indexes before inserting any vectors. The API stores no raw account ID
-or résumé text in Vectorize metadata: it uses a stable hashed account namespace
-and treats vectors as a delete-on-account-removal cache. Confirm the index name
-matches `resume_embedding_index_name` in the exact OpenTofu plan.
+The production workflow idempotently provisions the
+`intern-notifs-resume-bank-v1` Vectorize index with the
+`@cf/baai/bge-base-en-v1.5` preset before OpenTofu binds it. The API uses
+Vectorize's built-in namespace partition instead of metadata filters, so no
+metadata index is required. It stores no raw account ID or résumé text in
+Vectorize metadata: the namespace is a stable account hash and vectors remain a
+delete-on-account-removal cache. Confirm the index name and its 768-dimension
+cosine configuration match `resume_embedding_index_name` before approving the
+exact OpenTofu plan.
 
 Validate the API and ingestion Worker bindings, exercise a catalog hit, a
 cached import, a safe public-page import, Browser Rendering, and the
