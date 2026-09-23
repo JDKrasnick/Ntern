@@ -15,11 +15,10 @@ const row = (id: string): RawListing => ({
 });
 
 class Adapter implements SourceAdapter {
-  readonly id = sourceId;
-  constructor(readonly listings: RawListing[]) {}
+  constructor(readonly listings: RawListing[], readonly id = sourceId) {}
   async fetch(previous?: SourceCheckpoint): Promise<SourceFetchResult> {
-    return { sourceId, listings: this.listings, notModified: false,
-      checkpoint: { sourceId, successfulFetches: (previous?.successfulFetches ?? 0) + 1,
+    return { sourceId: this.id, listings: this.listings, notModified: false,
+      checkpoint: { sourceId: this.id, successfulFetches: (previous?.successfulFetches ?? 0) + 1,
         lastSuccessAt: '2026-09-06T12:00:00.000Z', lastRowCount: this.listings.length } };
   }
 }
@@ -31,6 +30,68 @@ const resolver = {
 };
 
 describe('bounded metadata refresh persistence failures', () => {
+  it.each([404, 410])('finishes a large admission-managed feed with a permanently gone row (%s)', async (status) => {
+    const store = new MemoryInternshipStore();
+    const feedSourceId = 'speedyapply-2027-ai';
+    const listings = Array.from({ length: 1_024 }, (_, index) => {
+      const listing = row(`role-${index}`);
+      return { ...listing, sourceId: feedSourceId, row: index + 1,
+        applyUrl: `https://jobs-${index % 4}.example.com/role-${index}`, provenance: 'reviewed-community' as const,
+        employerEvidence: { authority: 'source-row' as const },
+        providerIdentity: { provider: 'github' as const, sourceId: feedSourceId, sourceUrl: listing.sourceUrl, postingId: `role-${index}` } };
+    });
+    const adapter = new Adapter(listings, feedSourceId);
+    await store.putCheckpoint({ sourceId: feedSourceId, successfulFetches: 7, lastSuccessAt: '2026-09-05T12:00:00.000Z',
+      metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION - 1, metadataProcessingRevision: 1 });
+    const poll = () => new Poller([adapter], store, undefined, undefined,
+      async (url) => {
+        if (url.endsWith('/role-198')) throw new SourceFetchError(`HTTP ${status}`, 'http', status);
+        return { url, evidence: { url, title: 'Software Engineering Intern', postingIdPresent: true,
+          confidence: { score: 100, level: 'high' as const, recommendation: 'alert-eligible' as const, signals: [] } } };
+      }, false, undefined, resolver, true, true).poll({ maxAdmissionMigrationListingsPerSourceRun: 50, maxListingsPerSourceRun: 50 });
+
+    let complete = false;
+    for (let slice = 0; slice < 50; slice++) {
+      const report = await poll();
+      expect(report.failures).toEqual([]);
+      if (!report.continuationSources.length) { complete = true; break; }
+      expect(report.continuationSources).toEqual([feedSourceId]);
+    }
+    expect(complete).toBe(true);
+    const checkpoint = (await store.getCheckpoint(feedSourceId))!;
+    expect(checkpoint.metadataExtractionVersion).toBe(ROLE_METADATA_EXTRACTION_VERSION);
+    expect(checkpoint.pendingMetadataProcessedRows).toBeUndefined();
+    const gone = (await store.getSourceOccurrences(feedSourceId)).find((item) => item.externalId === 'role-198');
+    expect(gone?.occurrence.admission).toMatchObject({ catalogEligible: false, alertEligible: false,
+      destination: { classification: 'gone', closureSignal: 'http-gone' }, reasonCodes: expect.arrayContaining(['destination-gone']) });
+    expect((await store.listCatalog()).some((job) => job.applyUrl.endsWith('/role-198'))).toBe(false);
+    expect(store.notificationEvents.size).toBe(0);
+  }, 60_000);
+
+  it.each([429, 503, 'timeout'] as const)('keeps an admission-managed transient failure retryable (%s)', async (kind) => {
+    const store = new MemoryInternshipStore();
+    const pending = row(`managed-${kind}`);
+    const adapter = new Adapter([{ ...pending, provenance: 'reviewed-community',
+      employerEvidence: { authority: 'source-row' },
+      providerIdentity: { provider: 'github', sourceId, sourceUrl: pending.sourceUrl, postingId: pending.externalId } }]);
+    await store.putCheckpoint({ sourceId, successfulFetches: 7, lastSuccessAt: '2026-09-05T12:00:00.000Z',
+      metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION - 1, metadataProcessingRevision: 1 });
+    let unavailable = true;
+    const poll = () => new Poller([adapter], store, undefined, undefined,
+      async (url) => {
+        if (unavailable) throw kind === 'timeout' ? new SourceFetchError('timed out', 'transport') : new SourceFetchError(`HTTP ${kind}`, 'http', kind);
+        return { url, evidence: { url, title: pending.title, postingIdPresent: true,
+          confidence: { score: 100, level: 'high' as const, recommendation: 'alert-eligible' as const, signals: [] } } };
+      }, false, undefined, resolver).poll({ maxAdmissionMigrationListingsPerSourceRun: 50 });
+    const report = await poll();
+    expect(report.continuationSources).toEqual([sourceId]);
+    expect((await store.getCheckpoint(sourceId))!.metadataExtractionVersion).toBe(ROLE_METADATA_EXTRACTION_VERSION - 1);
+    expect((await store.getCheckpoint(sourceId))!.pendingMetadataProcessedRows).toEqual([]);
+    unavailable = false;
+    expect((await poll()).continuationSources).toEqual([]);
+    expect((await store.getCheckpoint(sourceId))!.metadataExtractionVersion).toBe(ROLE_METADATA_EXTRACTION_VERSION);
+  });
+
   it.each([404, 410])('completes a new legacy row that is gone (%s) without publishing or retrying it', async (status) => {
     const store = new MemoryInternshipStore();
     const gone = row(`gone-${status}`);
