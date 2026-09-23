@@ -527,6 +527,29 @@ describe('D1 role metadata evidence and guarded repair', () => {
     expect((await current.operations.metadataVerificationCandidates(1, { ...options, reserveAt: '2026-09-05T01:31:00.000Z' })).map((row) => row.jobId)).toEqual(['a']);
   });
 
+  it('scans metadata candidates through a replica session and reserves on the primary', async () => {
+    const current = subject();
+    await current.jobs.putInternship(jobWithVerifiedDestination());
+    const reads: string[] = [];
+    const primaryQueries: string[] = [];
+    const reader = { ...current.db, prepare(query: string) {
+      reads.push(query);
+      return current.db.prepare(query);
+    } };
+    const withSession = vi.fn(() => reader);
+    const primary = { ...current.db, withSession, prepare(query: string) {
+      primaryQueries.push(query);
+      return current.db.prepare(query);
+    } };
+    const candidates = await new D1CatalogAdmissionStore(primary).metadataVerificationCandidates(1, {
+      reserveAt: '2026-09-06T00:00:00.000Z',
+    });
+    expect(candidates).toHaveLength(1);
+    expect(withSession).toHaveBeenCalledExactlyOnceWith('first-unconstrained');
+    expect(reads.some((query) => query.includes("kind = 'internship'"))).toBe(true);
+    expect(primaryQueries).toEqual([expect.stringContaining('INSERT INTO role_metadata_acquisition')]);
+  });
+
   it('collects withheld open roles and ignores only superseded-version retry backoff', async () => {
     const current = subject(); const original = jobWithVerifiedDestination();
     const withheld = { ...original, admission: { ...original.admission!, catalogEligible: false, alertEligible: false } };

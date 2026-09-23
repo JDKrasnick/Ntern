@@ -16,6 +16,7 @@ export type Plan = {
 };
 
 const allowedUpdates = new Set([
+  'cloudflare_d1_database.application',
   'cloudflare_workers_script.application',
   'cloudflare_workers_script.ingestion',
 ]);
@@ -177,6 +178,16 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   return !containsUnknown(protectedWorkerValue(afterUnknown, afterUnknown));
 }
 
+function isSafeD1ReplicationUpdate(change: ResourceChange['change']): boolean {
+  if (!isRecord(change.before) || !isRecord(change.after)) return false;
+  const { read_replication: beforeReplication, ...beforeOther } = change.before;
+  const { read_replication: afterReplication, ...afterOther } = change.after;
+  return isDeepStrictEqual(beforeReplication, { mode: 'disabled' })
+    && isDeepStrictEqual(afterReplication, { mode: 'auto' })
+    && isDeepStrictEqual(beforeOther, afterOther)
+    && !containsUnknown(change.after_unknown);
+}
+
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
   return (plan.resource_changes ?? [])
     .filter(({ change }) => !change.actions.every((action) => action === 'no-op' || action === 'read'))
@@ -191,7 +202,9 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
     !allowedUpdates.has(address)
     || change.actions.length !== 1
     || change.actions[0] !== 'update'
-    || !isSafeWorkerUpdate(address, change)
+    || !(address === 'cloudflare_d1_database.application'
+      ? isSafeD1ReplicationUpdate(change)
+      : isSafeWorkerUpdate(address, change))
   )).map(({ address, change }) => ({ address, actions: change.actions }));
 
   if (unsafe.length > 0) {
