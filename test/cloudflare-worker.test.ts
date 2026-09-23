@@ -329,6 +329,44 @@ describe('Cloudflare DLQ route authentication', () => {
   });
 });
 
+describe('Cloudflare bulk operation admission', () => {
+  it('exposes a protected read-only preflight', async () => {
+    const empty = queue(async () => ({ backlogCount: 0, backlogBytes: 0 }));
+    const db = { prepare(query: string) { return { bind() { return this; },
+      async first() { return query.includes('queue_failure_events') ? { count: 0 } : null; } }; } };
+    const env = { OPERATIONS_SHARED_SECRET: 'secret', DB: db,
+      GREENHOUSE_QUEUE: empty, LEVER_QUEUE: empty, ASHBY_QUEUE: empty, GITHUB_QUEUE: empty,
+      GMAIL_QUEUE: empty, DESTINATION_VERIFICATION_QUEUE: empty, SHADOW_EXTRACTION_QUEUE: empty,
+    } as unknown as Environment;
+    const url = 'https://intern-notifs.test/internal/operations/bulk-window';
+    expect((await cloudflareWorker.fetch(new Request(url), env)).status).toBe(404);
+    const response = await cloudflareWorker.fetch(new Request(url, { headers: { 'X-Operations-Key': 'secret' } }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ready: true });
+  });
+
+  it.each(['/internal/posting-identity-repair', '/internal/catalog-quality-backfill'])(
+    'returns a retryable response before scanning %s when a work queue is busy', async (path) => {
+      const empty = queue(async () => ({ backlogCount: 0, backlogBytes: 0 }));
+      const busy = queue(async () => ({ backlogCount: 1, backlogBytes: 1 }));
+      const db = { prepare(query: string) { return { bind() { return this; },
+        async first() { return query.includes('queue_failure_events') ? { count: 0 } : null; } }; } };
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const response = await cloudflareWorker.fetch(new Request(`https://intern-notifs.test${path}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': 'secret' }, body: '{}',
+        }), { OPERATIONS_SHARED_SECRET: 'secret', DB: db,
+          GREENHOUSE_QUEUE: empty, LEVER_QUEUE: empty, ASHBY_QUEUE: empty, GITHUB_QUEUE: busy,
+          GMAIL_QUEUE: empty, DESTINATION_VERIFICATION_QUEUE: empty, SHADOW_EXTRACTION_QUEUE: empty,
+        } as unknown as Environment);
+        expect(response.status).toBe(503);
+        expect(response.headers.get('Retry-After')).toBe('300');
+        expect(await response.json()).toMatchObject({ reason: 'queue-busy', queues: ['github'] });
+      } finally { warning.mockRestore(); }
+    },
+  );
+});
+
 describe('Cloudflare queue continuation bounds', () => {
   it('rejects a queue send that never settles so the source message can retry', async () => {
     vi.useFakeTimers();

@@ -51,6 +51,7 @@ import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, r
 import { classifyD1Failure } from './d1-errors.js';
 import { recentD1OverloadCount } from './d1-overload-alert.js';
 import { measureDlqGrowth, recordDlqBaseline } from './dlq-growth-alert.js';
+import { assessBulkSafeWindow } from './bulk-safe-window.js';
 import { observeD1Delivery, observeQueueBatch } from './d1-traffic-observation.js';
 import { resilientD1 } from './resilient-d1.js';
 export { D1TrafficController } from './d1-traffic-controller.js';
@@ -396,6 +397,25 @@ function eventResponse(result: { body: string; statusCode: number; headers?: Rec
 function operationsAuthorized(request: Request, env: Environment): boolean {
   return Boolean(env.OPERATIONS_SHARED_SECRET)
     && request.headers.get('X-Operations-Key') === env.OPERATIONS_SHARED_SECRET;
+}
+
+async function bulkOperationWindow(env: Environment): Promise<Response | undefined> {
+  try {
+    const window = await assessBulkSafeWindow(env.DB, {
+      greenhouse: env.GREENHOUSE_QUEUE, lever: env.LEVER_QUEUE, ashby: env.ASHBY_QUEUE,
+      github: env.GITHUB_QUEUE, gmail: env.GMAIL_QUEUE,
+      'destination-verification': env.DESTINATION_VERIFICATION_QUEUE,
+      'shadow-extraction': env.SHADOW_EXTRACTION_QUEUE,
+    }, new Date());
+    if (window.ready) return undefined;
+    console.warn(JSON.stringify({ event: 'bulk_operation_deferred', reason: window.reason, queues: window.queues ?? [] }));
+    return Response.json({ message: 'Bulk operation requires a quiet queue and D1 window', ...window },
+      { status: 503, headers: { 'Retry-After': '300' } });
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'bulk_operation_window_unavailable', diagnostic: safeDiagnostic(error) }));
+    return Response.json({ message: 'Bulk operation window could not be verified' },
+      { status: 503, headers: { 'Retry-After': '300' } });
+  }
 }
 
 function apiEvent(request: Request, userId: string | undefined, body: string | null) {
@@ -774,6 +794,8 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   }
   if (request.method === 'POST' && url.pathname === '/internal/catalog-quality-backfill') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    const window = await bulkOperationWindow(env);
+    if (window) return withCors(window);
     const input = await request.json().catch(() => ({})) as { apply?: boolean; repairToken?: string; expectedChanged?: number };
     try {
       const report = await runCatalogQualityBackfill(env.DB, input);
@@ -786,6 +808,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     } catch (error) {
       return withCors(Response.json({ message: error instanceof Error ? error.message : 'Backfill failed' }, { status: 409 }));
     }
+  }
+  if (request.method === 'GET' && url.pathname === '/internal/operations/bulk-window') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    return withCors(await bulkOperationWindow(env) ?? Response.json({ ready: true }));
   }
   if (url.pathname.startsWith('/internal/admission/')) {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
@@ -804,6 +830,8 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   }
   if (request.method === 'POST' && url.pathname === '/internal/posting-identity-repair') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    const window = await bulkOperationWindow(env);
+    if (window) return withCors(window);
     const input = await request.json().catch(() => ({})) as {
       apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
       acceptCurrentSnapshot?: boolean; expectedEligibleDuplicateGroups?: number; expectedUnresolvedDuplicateGroups?: number;
