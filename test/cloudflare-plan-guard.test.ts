@@ -78,10 +78,12 @@ describe('Cloudflare deployment plan guard', () => {
   it('permits only enabling read replication on the existing D1 database', () => {
     const database = { account_id: 'account', id: 'production-db', name: 'intern-notifs-db', read_replication: { mode: 'disabled' } };
     const enabled = { ...database, read_replication: { mode: 'auto' } };
-    const change = { address: 'cloudflare_d1_database.application', actions: ['update'], before: database, after: enabled };
+    const change = { address: 'cloudflare_d1_database.application', actions: ['update'], before: database, after: enabled,
+      after_unknown: { created_at: true, file_size: true, num_tables: true, version: true, read_replication: {} } };
     expect(validateCloudflarePlan(plan([change]))).toHaveLength(1);
     expect(() => validateCloudflarePlan(plan([{ ...change, after: { ...enabled, name: 'replacement-db' } }]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([{ ...change, actions: ['delete', 'create'] }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{ ...change, after_unknown: { ...change.after_unknown, name: true } }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
   it.each([

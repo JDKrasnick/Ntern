@@ -182,10 +182,15 @@ function isSafeD1ReplicationUpdate(change: ResourceChange['change']): boolean {
   if (!isRecord(change.before) || !isRecord(change.after)) return false;
   const { read_replication: beforeReplication, ...beforeOther } = change.before;
   const { read_replication: afterReplication, ...afterOther } = change.after;
+  const computedFields = new Set(['created_at', 'file_size', 'num_tables', 'version']);
+  const unknown = change.after_unknown;
+  const ignored = new Set([...computedFields].filter((field) => isRecord(unknown) && unknown[field] === true));
+  const protectedValue = (value: Record<string, unknown>) => Object.fromEntries(
+    Object.entries(value).filter(([field]) => !ignored.has(field)));
   return isDeepStrictEqual(beforeReplication, { mode: 'disabled' })
     && isDeepStrictEqual(afterReplication, { mode: 'auto' })
-    && isDeepStrictEqual(beforeOther, afterOther)
-    && !containsUnknown(change.after_unknown);
+    && isDeepStrictEqual(protectedValue(beforeOther), protectedValue(afterOther))
+    && !containsUnknown(isRecord(unknown) ? protectedValue(unknown) : unknown);
 }
 
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
@@ -217,7 +222,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const plan = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as Plan;
   const changes = validateCloudflarePlan(plan);
-  console.log(`Safe plan: ${changes.length} Worker script update(s).`);
+  console.log(`Safe plan: ${changes.length} approved update(s).`);
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changes.length > 0}\n`);
   }
