@@ -768,15 +768,21 @@ export class D1InternshipStore implements InternshipStore {
       .sort(compareCatalogRecency).map(withEmployerCategory);
   }
   async listCatalog(): Promise<Internship[]> {
+    // Anchor the scan on the primary's latest version, then let later pages
+    // use read replicas while the session preserves monotonic reads.
+    const reader = this.db.withSession?.('first-primary') ?? this.db;
     const jobs: Internship[] = [];
+    let primaryPages = 0; let replicaPages = 0;
     let cursor: { pk: string; sk: string } | undefined;
     while (true) {
       const query = cursor
-        ? this.db.prepare(`SELECT pk, sk, value FROM catalog_items
+        ? reader.prepare(`SELECT pk, sk, value FROM catalog_items
             WHERE kind = 'internship' AND (pk > ? OR (pk = ? AND sk > ?))
             ORDER BY pk, sk LIMIT 100`).bind(cursor.pk, cursor.pk, cursor.sk)
-        : this.db.prepare("SELECT pk, sk, value FROM catalog_items WHERE kind = 'internship' ORDER BY pk, sk LIMIT 100");
+        : reader.prepare("SELECT pk, sk, value FROM catalog_items WHERE kind = 'internship' ORDER BY pk, sk LIMIT 100");
       const page = await query.all<{ pk: string; sk: string; value: string }>();
+      if (page.meta?.served_by_primary === true) primaryPages += 1;
+      if (page.meta?.served_by_primary === false) replicaPages += 1;
       for (const row of page.results) {
         const job = JSON.parse(row.value) as Internship;
         if (job.technical !== false && catalogEligible(job) && !isPastSeason(job.season)) jobs.push(job);
@@ -785,6 +791,7 @@ export class D1InternshipStore implements InternshipStore {
       const last = page.results.at(-1)!;
       cursor = { pk: last.pk, sk: last.sk };
     }
+    if (reader !== this.db) console.log(JSON.stringify({ event: 'catalog_scan_read_routing', primaryPages, replicaPages }));
     return jobs
       .sort(compareCatalogRecency).map(withEmployerCategory);
   }

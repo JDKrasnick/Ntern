@@ -86,6 +86,14 @@ second operator or CI starts applying infrastructure.
 
 ## Initialize D1 and secrets
 
+The production D1 database enables read replication through OpenTofu. The
+scheduled catalog scan starts a `first-primary` D1 session so its first page
+sees current writes and later pages may use replicas. Metadata candidate
+scanning uses `first-unconstrained`; its leases are still conditional writes to
+the primary. If replica routing causes trouble, switch `read_replication.mode`
+back to `disabled` in the reviewed infrastructure plan. The Worker also falls
+back to the primary when the Sessions API is unavailable.
+
 After apply, update the D1 identifier in both explicit Worker configurations
 only when provisioning a new database, then apply `cloudflare/migrations/` with
 `wrangler.api.jsonc`. Do not restore a shared default `wrangler.jsonc`.
