@@ -112,8 +112,9 @@ exact green SHA at the tip of `main`. The `cloudflare-workers-production`
 environment supplies the Cloudflare token, bucket-scoped state credentials,
 and live non-secret Terraform variables. The job rejects obsolete revisions
 and any plan containing creates, deletes, replacements, or updates outside the
-two Worker scripts. It applies the exact saved plan, requires a no-drift second
-plan, then performs the one supported container-specific deployment step: a
+reviewed résumé resources and two Worker scripts. After that guard passes, it
+applies pending D1 migrations before the exact saved plan, requires a no-drift
+second plan, then performs the one supported container-specific deployment step: a
 full API Wrangler deploy builds, publishes, and rolls out the résumé PDF
 compiler image. That step uses a generated config without `vars` plus
 `--keep-vars`, so OpenTofu-managed production values remain authoritative. It

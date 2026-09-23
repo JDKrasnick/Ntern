@@ -152,6 +152,9 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "false"');
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
     expect(deployment.indexOf('Ensure the resume embedding index exists')).toBeLessThan(deployment.indexOf('Create and validate saved plan'));
+    expect(deployment).toContain('wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc');
+    expect(deployment.indexOf('Create and validate saved plan')).toBeLessThan(deployment.indexOf('Apply production D1 migrations'));
+    expect(deployment.indexOf('Apply production D1 migrations')).toBeLessThan(deployment.indexOf('Apply exact saved plan'));
     expect(deployment).toContain("jq 'del(.vars)' wrangler.api.jsonc");
     expect(deployment).toContain('npx wrangler deploy --config "$config" --keep-vars');
     expect(deployment.indexOf('Require converged state')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));

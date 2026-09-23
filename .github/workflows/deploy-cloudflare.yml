@@ -137,6 +137,8 @@ jobs:
             "s3://intern-notifs-opentofu-state/$RELEASE_PREFIX/cloudflare.tfplan" \
             --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
           sha256sum "$RUNNER_TEMP/cloudflare.tfplan" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Apply production D1 migrations
+        run: npx wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc
       - name: Apply exact saved plan
         if: steps.plan.outputs.changed == 'true'
         run: tofu -chdir=infra/cloudflare apply -auto-approve "$RUNNER_TEMP/cloudflare.tfplan"
