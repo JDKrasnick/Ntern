@@ -124,6 +124,9 @@ describe('Cloudflare deployment plan guard', () => {
     const enabled = { name: 'CATALOG_R2_READ_ENABLED', type: 'plain_text', text: 'true' };
     const added = { ...contentUpdate, after: { ...contentUpdate.after, bindings: [enabled, ...worker.bindings] } };
     expect(validateCloudflarePlan(plan([added]))).toHaveLength(1);
+    const providerShaped = { ...enabled, service: null, bucket_name: null };
+    expect(validateCloudflarePlan(plan([{ ...added, after: { ...added.after,
+      bindings: [providerShaped, ...worker.bindings] } }]))).toHaveLength(1);
     expect(() => validateCloudflarePlan(plan([{ ...added, address: 'cloudflare_workers_script.ingestion' }]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([{ ...added, after: { ...added.after,
       bindings: [{ ...enabled, text: 'false' }, ...worker.bindings] } }]))).toThrow('Refusing unsafe Cloudflare plan');
