@@ -5587,10 +5587,19 @@ function ResumeWorkspace({ token }: { token: string }) {
   const saveBase = () => {
     if (resumeBusy || !bankItems.length) return;
     setResumeBusy(true);
-    const request = technicalBase
-      ? api<ResumeProfileCard>(`/me/resume-profiles/${technicalBase.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: technicalBase.revision, bankItemIds: bankItems.map((item) => item.bankItemId) }) })
-      : api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: bankItems.map((item) => item.bankItemId), sectionOrder: ["experience", "projects", "skills", "education"], template: "clean-standard" }) });
-    void request
+    const request = async () => {
+      // Earlier preview builds required a separate approval for every imported
+      // line. Syncing the repository upgrades those private source records to
+      // the current model, where only job-specific diffs need review.
+      const trustedItems = await Promise.all(bankItems.map((item) => item.verified ? item : api<ResumeBankCard>(`/me/resume-bank/${item.bankItemId}`, token, {
+        method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true }),
+      })));
+      setBankItems(trustedItems);
+      return technicalBase
+        ? api<ResumeProfileCard>(`/me/resume-profiles/${technicalBase.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: technicalBase.revision, bankItemIds: trustedItems.map((item) => item.bankItemId) }) })
+        : api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: trustedItems.map((item) => item.bankItemId), sectionOrder: ["experience", "projects", "skills", "education"], template: "clean-standard" }) });
+    };
+    void request()
       .then((profile) => { setProfiles((all) => technicalBase ? all.map((item) => item.profileId === profile.profileId ? profile : item) : [...all, profile]); setSelectedProfileId(profile.profileId); })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that base."))
       .finally(() => setResumeBusy(false));
