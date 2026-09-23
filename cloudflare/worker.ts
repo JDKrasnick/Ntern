@@ -1499,18 +1499,21 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // alert held the feed on a day-old snapshot.
     // See docs/197-ingestion-resource-bounds.md.
     const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store));
+    const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
-    // Bounded per pass and lease-protected, so running on every maintenance tick
-    // drains the backlog without overlapping work. Gating this on a specific
-    // minute made it depend on fragile clock arithmetic and unobservable.
-    const metadataCollection = await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt));
+    // Metadata collection scans the open catalog. When D1 recently refused
+    // queue writes, or pressure cannot be measured, defer this background scan
+    // so the public projection and source consumers keep their capacity.
+    const metadataCollection = recentOverloads === 0
+      ? await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt))
+      : { queued: 0, deferred: true };
+    if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'metadata_collection_deferred', recentOverloads: recentOverloads ?? null }));
     const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
     const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
     const queueAgeMs = queueMetrics?.oldestMessageTimestamp
       ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
-    const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const operationalSignals = [
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),

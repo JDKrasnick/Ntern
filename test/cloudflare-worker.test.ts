@@ -259,6 +259,7 @@ describe('Cloudflare maintenance cron', () => {
     vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
     const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
     const failing = vi.spyOn(D1CatalogAdmissionStore.prototype, 'listActiveIncidents').mockRejectedValue(new Error('Resend returned HTTP 422'));
+    const metadata = vi.spyOn(D1CatalogAdmissionStore.prototype, 'metadataVerificationCandidates');
     vi.spyOn(D1InternshipStore.prototype, 'listPendingProviderShadowVerifications').mockResolvedValue([]);
     vi.spyOn(D1InternshipStore.prototype, 'pendingSms').mockResolvedValue([]);
     vi.spyOn(D1UserStore.prototype, 'activeDevices').mockResolvedValue([]);
@@ -271,12 +272,13 @@ describe('Cloudflare maintenance cron', () => {
       await cloudflareWorker.scheduled({
         cron: '9-59/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:09:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
-        DB: { prepare: () => ({ async first() { return null; } }) },
+        DB: { prepare: () => ({ bind: () => ({ async first() { return { count: 2 }; } }), async first() { return null; } }) },
         DESTINATION_VERIFICATION_QUEUE: queue(undefined),
         DESTINATION_VERIFICATION_DLQ: queue(undefined),
       } as unknown as Environment);
       expect(failing).toHaveBeenCalled();
       expect(projection).toHaveBeenCalledOnce();
+      expect(metadata).not.toHaveBeenCalled();
       expect(errors).toHaveBeenCalledWith(expect.stringContaining('"step":"admission_verification_warnings"'));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
     } finally {
