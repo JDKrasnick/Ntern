@@ -570,7 +570,6 @@ function documentStorage(env: Environment): DocumentStorage {
 }
 
 function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
-  const base = env.PUBLIC_API_URL.replace(/\/$/u, '');
   return {
     async putTex(objectKey, tex) { const bytes = new TextEncoder().encode(tex); await env.DOCUMENTS.put(objectKey, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'application/x-tex; charset=utf-8' } }); },
     async putPdf(objectKey, pdf) { await env.DOCUMENTS.put(objectKey, pdf, { httpMetadata: { contentType: 'application/pdf' } }); },
@@ -586,7 +585,6 @@ function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
       if (!pdf || !Number.isInteger(pageCount) || pageCount < 1 || previewPngs.length !== pageCount) throw new Error('Resume PDF compiler returned an invalid artifact bundle');
       return { pdf: pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) as ArrayBuffer, pageCount, previewPngs };
     },
-    async createContentUrl(artifact) { return `${base}/me/resume-artifacts/${encodeURIComponent(artifact.artifactId)}/content`; },
   };
 }
 
@@ -1162,10 +1160,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
     const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactContentMatch[1]));
     if (!artifact) return withCors(Response.json({ message: 'Resume artifact not found' }, { status: 404 }));
+    if (!artifact.objectKey.endsWith('.pdf')) return withCors(Response.json({ message: 'Resume PDF is not available' }, { status: 409 }));
     const object = await env.DOCUMENTS.get(artifact.objectKey);
     if (!object) return withCors(Response.json({ message: 'Resume artifact content not found' }, { status: 404 }));
-    const pdf = artifact.objectKey.endsWith('.pdf');
-    return withCors(new Response(object.body, { headers: { 'Content-Type': pdf ? 'application/pdf' : 'application/x-tex; charset=utf-8', 'Content-Disposition': `attachment; filename="resume-${artifact.artifactId}.${pdf ? 'pdf' : 'tex'}"`, 'Cache-Control': 'private, no-store' } }));
+    return withCors(new Response(object.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="resume-${artifact.artifactId}.pdf"`, 'Cache-Control': 'private, no-store' } }));
   }
   const event = apiEvent(request, userId, request.method === 'GET' || request.method === 'HEAD' ? null : await request.text());
   const result = await handler(event);

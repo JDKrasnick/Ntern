@@ -55,14 +55,17 @@ describe('resume API ownership and revisions', () => {
     const imported = JSON.parse((await handler(event('student', 'POST', '/me/resume-imports', { url: 'https://careers.example.test/jobs/1', manualDescription: 'Seeking TypeScript engineers for a dashboard.' }))).body) as { importId: string };
     const draft = await handler(event('student', 'POST', '/me/resume-drafts', { profileId: profile.profileId, importId: imported.importId }));
     expect(draft.statusCode).toBe(201);
-    const value = JSON.parse(draft.body) as { changes: Array<{ evidenceIds: string[]; suggestion: string }> };
-    expect(value.changes).toEqual([expect.objectContaining({ evidenceIds: [bank.bankItemId], suggestion: 'Built a TypeScript dashboard' })]);
+    const value = JSON.parse(draft.body) as { changes: Array<{ evidenceIds: string[]; original: string; type: string }> };
+    expect(value.changes).toEqual([expect.objectContaining({ evidenceIds: [bank.bankItemId], original: 'Built a TypeScript dashboard', type: 'move' })]);
     expect((await handler(event('other', 'GET', `/me/resume-imports/${imported.importId}`))).statusCode).toBe(404);
   });
 
   it('supports the specified resolve, recommendation, decision, and finalization routes', async () => {
     const users = new MemoryUserStore();
-    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: {
+      putTex: async () => undefined, putPdf: async () => undefined, compile: async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [] }),
+    } });
     const bank = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank', { kind: 'skill', content: 'TypeScript' }))).body) as { bankItemId: string; revision: number };
     await handler(event('student', 'PATCH', `/me/resume-bank/${bank.bankItemId}`, { revision: bank.revision, verified: true }));
     const profile = JSON.parse((await handler(event('student', 'POST', '/me/resume-profiles', { name: 'Web', tags: ['typescript'], bankItemIds: [bank.bankItemId], sectionOrder: [], template: 'clean-standard' }))).body) as { profileId: string };
@@ -71,8 +74,11 @@ describe('resume API ownership and revisions', () => {
     expect(JSON.parse((await handler(event('student', 'POST', `/me/resume-jobs/${ready.importId}/recommendation`))).body)).toMatchObject({ recommendations: [expect.objectContaining({ profileId: profile.profileId })] });
     const draft = JSON.parse((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: profile.profileId, importId: ready.importId }))).body) as { draftId: string; revision: number; changes: Array<{ changeId: string }> };
     const decided = await handler(event('student', 'PATCH', `/me/resume-drafts/${draft.draftId}/changes/${draft.changes[0]!.changeId}`, { revision: draft.revision, decision: 'accepted' }));
-    const updated = JSON.parse(decided.body) as { revision: number };
-    expect((await handler(event('student', 'POST', `/me/resume-drafts/${draft.draftId}/finalize`, { revision: updated.revision }))).statusCode).toBe(200);
+    const updated = JSON.parse(decided.body) as { revision: number; status: string };
+    expect(updated.status).toBe('reviewing');
+    const finalized = await handler(event('student', 'POST', `/me/resume-drafts/${draft.draftId}/finalize`, { revision: updated.revision }));
+    expect(finalized.statusCode).toBe(200);
+    expect(JSON.parse(finalized.body)).toMatchObject({ draft: { status: 'finalized' }, artifact: { objectKey: expect.stringMatching(/\.pdf$/u) } });
   });
 
   it('resolves catalog records before cache or asynchronous public-page acquisition', async () => {
@@ -140,18 +146,35 @@ describe('resume API ownership and revisions', () => {
     expect(JSON.parse(response.body)).toMatchObject({ items: [expect.objectContaining({ content: 'Built a dashboard', sourceDocumentId: 'resume', sourceLocation: 'line 3', verified: false })] });
   });
 
-  it('finalizes reviewed drafts into private fixed-template TeX artifacts', async () => {
+  it('finalizes reviewed drafts into private fixed-template PDF artifacts with applicant contact details', async () => {
     const users = new MemoryUserStore();
+    await users.putProfile({ userId: 'student', contact: { name: 'Student Name', email: 'student@example.test' }, location: 'Ithaca, NY', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
     await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: [], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
     await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [{ changeId: 'change', type: 'add', section: 'Projects', suggestion: 'Built a dashboard', evidenceIds: ['bank'], reason: 'fit', decision: 'accepted' }], revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now' });
     const putTex = vi.fn(); const putPdf = vi.fn(); const putPreview = vi.fn();
-    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex, putPdf, putPreview, compile: async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer] }), createContentUrl: async () => 'https://example.test/artifact' } });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex, putPdf, putPreview, compile: async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer] }) } });
     const finalized = await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }));
     expect(finalized.statusCode).toBe(200);
     expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { draftId: 'draft', templateVersion: '2026-09-22.1', compilerVersion: 'fixed-template-tex-v1' } });
     expect(putTex).toHaveBeenCalledOnce();
+    expect(putTex.mock.calls[0]?.[1]).toContain('Student Name');
+    expect(putTex.mock.calls[0]?.[1]).toContain('student@example.test');
+    expect(putTex.mock.calls[0]?.[1]).not.toContain('Technical base');
     expect(putPdf).toHaveBeenCalledOnce();
     expect(putPreview).toHaveBeenCalledOnce();
     expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { objectKey: expect.stringMatching(/\.pdf$/u), texObjectKey: expect.stringMatching(/\.tex$/u), pageCount: 1, previewObjectKeys: [expect.stringMatching(/preview-1\.png$/u)] } });
+  });
+
+  it('does not finalize a draft when applicant contact details or PDF compilation are unavailable', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: [], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [], revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now' });
+    const storage = { putTex: async () => undefined, putPdf: async () => undefined, compile: async () => { throw new Error('compiler failed'); } };
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: storage });
+    expect((await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }))).statusCode).toBe(409);
+    expect((await users.getResumeDraft('student', 'draft'))?.status).toBe('reviewing');
+    await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
+    expect((await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }))).statusCode).toBe(503);
+    expect((await users.getResumeDraft('student', 'draft'))?.status).toBe('reviewing');
   });
 });

@@ -101,9 +101,14 @@ environment supplies the Cloudflare token, bucket-scoped state credentials,
 and live non-secret Terraform variables. The job rejects obsolete revisions
 and any plan containing creates, deletes, replacements, or updates outside the
 two Worker scripts. It applies the exact saved plan, requires a no-drift second
-plan, then monitors public and authentication-boundary smoke checks for two
-minutes. Keep environment approval rules enabled when a human deployment gate
-is required.
+plan, then performs the one supported container-specific deployment step: a
+full API Wrangler deploy builds, publishes, and rolls out the résumé PDF
+compiler image. That step uses a generated config without `vars` plus
+`--keep-vars`, so OpenTofu-managed production values remain authoritative. It
+then monitors public and authentication-boundary smoke checks for two minutes.
+Keep environment approval rules enabled when a human deployment gate is
+required. Do not run the container deploy separately or with the committed
+config's staged flag values.
 
 Configure these environment secrets: `CLOUDFLARE_API_TOKEN`,
 `R2_STATE_ACCESS_KEY_ID`, and `R2_STATE_SECRET_ACCESS_KEY`. The optional

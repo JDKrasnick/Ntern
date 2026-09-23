@@ -50,6 +50,8 @@ import { migrateLegacyAccountAlerts } from "./src/legacy-alert-migration";
 import { buildCompleteDataExport, DataExportFetchError, SharingUnavailableError, type AccountExportResponse } from "./src/account-data-export";
 import { accountDataActionState } from "./src/account-data-controls";
 import { shareDataExport } from "./src/account-data-share";
+import { shareResumeArtifact } from "./src/resume-artifact-share";
+import { pollResumeImport } from "./src/resume-import-poll";
 import { clearSession, confirmEmail, restoreSession, signIn, signOut, signUp } from "./src/auth";
 import { policyUrls } from "./src/policies";
 import {
@@ -5451,7 +5453,7 @@ function AccountGate({
 
 type ResumeBankCard = { bankItemId: string; kind: string; content: string; verified: boolean; revision: number };
 type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; revision: number };
-type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number };
+type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
 type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; section: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
 type ResumeArtifactCard = { artifactId: string };
 
@@ -5507,14 +5509,33 @@ function ResumeWorkspace({ token }: { token: string }) {
     void api<{ items: ResumeBankCard[] }>("/me/resume-bank", token)
       .then(async ({ items }) => {
         setBankItems(items);
-        const { profiles: savedProfiles } = await api<{ profiles: ResumeProfileCard[] }>("/me/resume-profiles", token);
+        const [{ profiles: savedProfiles }, { imports }] = await Promise.all([
+          api<{ profiles: ResumeProfileCard[] }>("/me/resume-profiles", token),
+          api<{ imports: ResumeImportCard[] }>("/me/resume-imports", token),
+        ]);
         setProfiles(savedProfiles);
         setSelectedProfileId((selected) => selected ?? savedProfiles[0]?.profileId);
+        setJobImport(imports.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]);
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't load your Master Bank."))
       .finally(() => setBankLoading(false));
   };
   useEffect(loadBank, [token]);
+  useEffect(() => {
+    if (jobImport?.status !== "pending") return;
+    let cancelled = false;
+    void pollResumeImport(() => api<ResumeImportCard>(`/me/resume-imports/${encodeURIComponent(jobImport.importId)}`, token))
+      .then(async (value) => {
+        if (cancelled) return;
+        setJobImport(value);
+        if (value.status === "ready") {
+          const result = await api<{ recommendations: Array<{ profileId: string }> }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
+          if (!cancelled && result.recommendations[0]) setSelectedProfileId(result.recommendations[0].profileId);
+        }
+      })
+      .catch((error) => { if (!cancelled) setBankError(error instanceof Error ? error.message : "We couldn't refresh that job import."); });
+    return () => { cancelled = true; };
+  }, [jobImport?.importId, jobImport?.status, token]);
   const addBankItem = () => {
     const content = bankDraft.trim();
     if (!content || bankSaving) return;
@@ -5606,8 +5627,7 @@ function ResumeWorkspace({ token }: { token: string }) {
       .then(async (result) => {
         setDraft(result.draft);
         if (!result.artifact) return;
-        const content = await api<{ downloadUrl: string }>(`/me/resume-artifacts/${result.artifact.artifactId}/content`, token);
-        await WebBrowser.openBrowserAsync(content.downloadUrl);
+        await shareResumeArtifact(result.artifact.artifactId, token);
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create that résumé."))
       .finally(() => setResumeBusy(false));
@@ -5697,10 +5717,10 @@ function ResumeWorkspace({ token }: { token: string }) {
           </View>
           <ActionButton label={resumeBusy ? "Checking…" : "Import job"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
         </View>
-        {jobImport?.status === "pending" ? (
+        {jobImport && jobImport.status !== "ready" ? (
           <View style={styles.resumeBankComposer}>
             <Text style={styles.inputLabel}>Paste the job description to continue</Text>
-            <Text style={styles.resumeSectionDescription}>The URL is queued for safe retrieval. Pasted text stays in your private resume workspace.</Text>
+            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : "We couldn't read the public page. Paste the description to continue."} Pasted text stays in your private resume workspace.</Text>
             <TextInput value={manualDescription} onChangeText={setManualDescription} accessibilityLabel="Job description" multiline placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} />
             <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
           </View>

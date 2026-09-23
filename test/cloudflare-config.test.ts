@@ -14,6 +14,9 @@ function quotedValuesBetween(source: string, start: string, end: string): string
 
 type WorkerConfig = {
   browser?: { binding: string };
+  containers?: Array<{ class_name: string; image: string; instance_type?: string; max_instances?: number }>;
+  durable_objects?: { bindings: Array<{ name: string; class_name: string; script_name?: string }> };
+  migrations?: Array<{ tag: string; new_sqlite_classes?: string[] }>;
   queues?: {
     producers?: Array<{ binding: string; queue: string }>;
     consumers?: Array<{
@@ -130,6 +133,20 @@ describe('Cloudflare deployment configuration', () => {
     expect(read('infra/cloudflare/variables.tf')).toMatch(/variable "identity_confirmed_coverage_floor"[\s\S]*?default\s+= 0/);
     expect(terraform).toContain('name = "ADMISSION_SUPPORT_RECIPIENT", type = "plain_text", text = var.admission_support_recipient');
     expect(read('infra/cloudflare/variables.tf')).toContain('variable "admission_support_recipient"');
+  });
+
+  it('deploys the resume PDF compiler with matching runtime and OpenTofu ownership', () => {
+    const terraform = read('infra/cloudflare/main.tf');
+    const deployment = read('.github/workflows/deploy-cloudflare.yml');
+    expect(api.durable_objects?.bindings).toContainEqual({ name: 'RESUME_PDF_COMPILER', class_name: 'ResumePdfCompiler' });
+    expect(api.migrations).toContainEqual({ tag: 'v2-resume-pdf-compiler', new_sqlite_classes: ['ResumePdfCompiler'] });
+    expect(api.containers).toContainEqual({ class_name: 'ResumePdfCompiler', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 });
+    expect(terraform).toContain('{ name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompiler" }');
+    expect(terraform).toContain('new_tag            = "v2-resume-pdf-compiler"');
+    expect(terraform).toContain('new_sqlite_classes = ["ResumePdfCompiler"]');
+    expect(deployment).toContain("jq 'del(.vars)' wrangler.api.jsonc");
+    expect(deployment).toContain('npx wrangler deploy --config "$config" --keep-vars');
+    expect(deployment.indexOf('Require converged state')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));
   });
 
   it('moves queue and cron state to ingestion ownership', () => {

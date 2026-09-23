@@ -106,6 +106,9 @@ export interface ResumeProfileRecommendation {
 }
 
 const resumeWords = (value: string) => new Set(value.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
+const groundingStopWords = new Set(['and', 'are', 'but', 'for', 'from', 'into', 'not', 'the', 'their', 'then', 'this', 'that', 'was', 'were', 'with']);
+
+const substantiveResumeWords = (value: string) => [...resumeWords(value)].filter((word) => !groundingStopWords.has(word));
 
 /** Deterministic first-pass base selection. Canonical records stay in D1; a later
  * Vectorize lookup may refine this score but must not replace its explanation. */
@@ -158,6 +161,17 @@ export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankI
       throw new Error('Each resume change must cite verified bank evidence.');
     }
     const evidence = change.evidenceIds.map((id) => verified.get(id)!.content).join(' ');
+    if ((change.type === 'add' && (!change.suggestion || change.original))
+      || (change.type === 'remove' && (!change.original || change.suggestion))
+      || (change.type === 'move' && (!change.original || change.suggestion))
+      || (change.type === 'rewrite' && (!change.original || !change.suggestion))) {
+      throw new Error('Resume changes must include the fields required by their change type.');
+    }
+    const evidenceWords = resumeWords(evidence);
+    const unsupportedWords = substantiveResumeWords(change.suggestion ?? '').filter((word) => !evidenceWords.has(word));
+    if (unsupportedWords.length) {
+      throw new Error(`Resume changes cannot add claims absent from verified evidence: ${unsupportedWords.join(', ')}.`);
+    }
     const numbers = (change.suggestion ?? '').match(/\b\d+(?:\.\d+)?%?\b/gu) ?? [];
     if (numbers.some((number) => !evidence.includes(number))) {
       throw new Error('Resume changes cannot add numeric claims absent from verified evidence.');

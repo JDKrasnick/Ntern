@@ -15,8 +15,14 @@ describe('resume safety contracts', () => {
 
   it('rejects unverified cross-user evidence and unsupported numeric claims', () => {
     const verified = { userId: 'owner', bankItemId: 'bank-1', kind: 'bullet' as const, content: 'Improved 20% with Python', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
-    expect(() => validateResumeChanges([{ changeId: 'c', type: 'rewrite', section: 'Experience', suggestion: 'Improved 30%', evidenceIds: ['bank-1'], reason: 'fit' }], [verified])).toThrow('numeric');
-    expect(() => validateResumeChanges([{ changeId: 'c', type: 'rewrite', section: 'Experience', suggestion: 'Improved 20%', evidenceIds: ['other'], reason: 'fit' }], [verified])).toThrow('verified');
+    expect(() => validateResumeChanges([{ changeId: 'c', type: 'rewrite', section: 'Experience', original: 'Improved 20% with Python', suggestion: 'Improved 30%', evidenceIds: ['bank-1'], reason: 'fit' }], [verified])).toThrow('numeric');
+    expect(() => validateResumeChanges([{ changeId: 'c', type: 'rewrite', section: 'Experience', original: 'Improved 20% with Python', suggestion: 'Improved 20%', evidenceIds: ['other'], reason: 'fit' }], [verified])).toThrow('verified');
+  });
+
+  it('rejects unrelated nonnumeric claims and invalid change shapes', () => {
+    const verified = { userId: 'owner', bankItemId: 'bank-1', kind: 'bullet' as const, content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    expect(() => validateResumeChanges([{ changeId: 'c', type: 'add', section: 'Experience', suggestion: 'Led a global security team', evidenceIds: ['bank-1'], reason: 'fit' }], [verified])).toThrow('claims');
+    expect(() => validateResumeChanges([{ changeId: 'c', type: 'move', section: 'Projects', suggestion: verified.content, evidenceIds: ['bank-1'], reason: 'fit' }], [verified])).toThrow('change type');
   });
 
   it('ranks bases with explainable verified-evidence coverage', () => {

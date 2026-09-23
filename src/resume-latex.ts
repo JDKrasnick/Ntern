@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { escapeLatex, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from './resume.js';
+import type { ApplicantProfile } from './types.js';
 
 export const RESUME_TEMPLATE_VERSION = '2026-09-22.1';
 export const RESUME_COMPILER_VERSION = 'fixed-template-tex-v1';
@@ -14,7 +15,7 @@ const sameText = (left: string, right: string) => left.trim() === right.trim();
 
 /** Builds a fixed-template document from the reviewed base, then applies every
  * accepted review decision. The bank remains the user-owned source of truth. */
-export function renderResumeLatex(profile: ResumeProfile, draft: ResumeDraft, bankItems: ResumeBankItem[] = []): { tex: string; resumeSpecHash: string } {
+export function renderResumeLatex(profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[] = []): { tex: string; resumeSpecHash: string } {
   const sections = new Map<string, string[]>();
   const add = (section: string, content: string) => {
     const normalizedSection = section.trim();
@@ -55,6 +56,7 @@ export function renderResumeLatex(profile: ResumeProfile, draft: ResumeDraft, ba
     .filter(([, lines]) => lines.length)
     .sort(([left], [right]) => (rank.get(left.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) || left.localeCompare(right))
     .map(([section, lines]) => `\\section*{${escapeLatex(section)}}\n\\begin{itemize}\n${lines.map((line) => `  \\item ${escapeLatex(line)}`).join('\n')}\n\\end{itemize}`).join('\n\n');
-  const tex = `\\documentclass[10pt]{article}\n\\usepackage[margin=0.65in]{geometry}\n\\usepackage[T1]{fontenc}\n\\begin{document}\n\\begin{center}\\Large ${escapeLatex(profile.name)}\\end{center}\n${body || '% No accepted changes.'}\n\\end{document}\n`;
-  return { tex, resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, draftId: draft.draftId, changes: draft.changes, approvedWording: profile.approvedWording, bank: bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified).map(({ bankItemId, kind, content, revision }) => ({ bankItemId, kind, content, revision })), template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex') };
+  const contact = [applicant.location, applicant.contact.email, applicant.contact.phone, ...Object.values(applicant.links)].filter((value): value is string => Boolean(value?.trim())).map(escapeLatex).join(' $\\cdot$ ');
+  const tex = `\\documentclass[10pt]{article}\n\\usepackage[margin=0.65in]{geometry}\n\\usepackage[T1]{fontenc}\n\\begin{document}\n\\begin{center}{\\Large ${escapeLatex(applicant.contact.name)}}\\\\\n${contact}\\end{center}\n${body || '% No accepted changes.'}\n\\end{document}\n`;
+  return { tex, resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, applicant: { contact: applicant.contact, location: applicant.location, links: applicant.links }, draftId: draft.draftId, changes: draft.changes, approvedWording: profile.approvedWording, bank: bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified).map(({ bankItemId, kind, content, revision }) => ({ bankItemId, kind, content, revision })), template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex') };
 }

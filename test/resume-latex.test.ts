@@ -5,9 +5,13 @@ describe('fixed resume LaTeX rendering', () => {
   it('escapes accepted changes without accepting arbitrary commands', () => {
     const result = renderResumeLatex(
       { userId: 'student', profileId: 'profile', name: 'Technical % base', tags: [], bankItemIds: [], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' },
+      { userId: 'student', contact: { name: 'Ada % Lovelace', email: 'ada@example.test', phone: '+1 555 0100' }, location: 'Ithaca, NY', workAuthorization: 'US', links: { portfolio: 'https://example.test/a_b' }, education: [], reusableAnswers: {}, updatedAt: 'now' },
       { userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [{ changeId: 'change', type: 'add', section: 'Projects', suggestion: 'Used C#_50%', evidenceIds: ['bank'], reason: 'fit', decision: 'accepted' }], revision: 0, status: 'finalized', createdAt: 'now', updatedAt: 'now' },
     );
-    expect(result.tex).toContain('Technical \\% base');
+    expect(result.tex).toContain('Ada \\% Lovelace');
+    expect(result.tex).toContain('ada@example.test');
+    expect(result.tex).toContain('https://example.test/a\\_b');
+    expect(result.tex).not.toContain('Technical \\% base');
     expect(result.tex).toContain('C\\#\\_50\\%');
     expect(result.resumeSpecHash).toMatch(/^[a-f0-9]{64}$/u);
   });
@@ -25,7 +29,8 @@ describe('fixed resume LaTeX rendering', () => {
       { userId: 'student', bankItemId: 'project', kind: 'project' as const, content: 'Built dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
       { userId: 'student', bankItemId: 'skill', kind: 'skill' as const, content: 'TypeScript', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
     ];
-    const { tex } = renderResumeLatex(profile, draft, bank);
+    const applicant = { userId: 'student', contact: { name: 'Candidate', email: 'candidate@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' };
+    const { tex } = renderResumeLatex(profile, applicant, draft, bank);
     expect(tex).toContain('Cornell University');
     expect(tex).toContain('Built an accessible dashboard');
     expect(tex).toContain('Shipped tests');

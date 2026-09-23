@@ -387,10 +387,9 @@ export interface ResumeDraftGenerator {
 
 export interface ResumeArtifactStorage {
   putTex(objectKey: string, tex: string): Promise<void>;
-  putPdf?(objectKey: string, pdf: ArrayBuffer): Promise<void>;
+  putPdf(objectKey: string, pdf: ArrayBuffer): Promise<void>;
   putPreview?(objectKey: string, png: ArrayBuffer): Promise<void>;
-  compile?(tex: string, resumeSpecHash: string): Promise<ResumeCompilation>;
-  createContentUrl(artifact: { userId: string; artifactId: string; objectKey: string }): Promise<string>;
+  compile(tex: string, resumeSpecHash: string): Promise<ResumeCompilation>;
 }
 
 export interface ApiDependencies {
@@ -430,7 +429,7 @@ function resumeDraftChanges(job: ImportedJob, bankItems: ResumeBankItem[]): Resu
   return bankItems.filter((item) => item.verified).flatMap((item) => {
     const matched = (item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []).filter((word) => jobWords.has(word));
     if (!matched.length) return [];
-    return [{ changeId: randomUUID(), type: 'add' as const, section: item.kind === 'skill' ? 'Skills' : 'Selected experience', suggestion: item.content, evidenceIds: [item.bankItemId], reason: `Matches job language: ${[...new Set(matched)].slice(0, 3).join(', ')}.` }];
+    return [{ changeId: randomUUID(), type: 'move' as const, section: item.kind === 'skill' ? 'Skills' : 'Selected experience', original: item.content, evidenceIds: [item.bankItemId], reason: `Matches job language: ${[...new Set(matched)].slice(0, 3).join(', ')}.` }];
   }).slice(0, 12);
 }
 export function createApiHandler(dependencies: ApiDependencies) {
@@ -815,13 +814,14 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (!previous) return reply(404, { message: 'Resume draft not found' });
           if (method === 'GET') return reply(200, previous);
           if (method === 'PATCH') {
+            if (previous.status === 'finalized') return reply(409, { message: 'Finalized resume drafts cannot be changed' });
             const body = parseBody(event);
             if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume draft changed; refresh and retry' });
             if (!Array.isArray(body.decisions)) return reply(400, { message: 'decisions must be a list' });
             const decisions = new Map(body.decisions.map((decision) => [typeof decision === 'object' && decision !== null ? (decision as Record<string, unknown>).changeId : undefined, typeof decision === 'object' && decision !== null ? (decision as Record<string, unknown>).decision : undefined]));
             if ([...decisions].some(([id, decision]) => typeof id !== 'string' || (decision !== 'accepted' && decision !== 'rejected')) || [...decisions.keys()].some((id) => !previous.changes.some((change) => change.changeId === id))) return reply(400, { message: 'decisions must name draft changes and use accepted or rejected' });
             const changes = previous.changes.map((change) => ({ ...change, ...(decisions.has(change.changeId) ? { decision: decisions.get(change.changeId) as 'accepted' | 'rejected' } : {}) }));
-            const updated: ResumeDraft = { ...previous, changes, status: changes.every((change) => change.decision) ? 'finalized' : 'reviewing', revision: previous.revision + 1, updatedAt: timestamp };
+            const updated: ResumeDraft = { ...previous, changes, status: 'reviewing', revision: previous.revision + 1, updatedAt: timestamp };
             if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
             return reply(200, updated);
           }
@@ -832,13 +832,14 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const changeId = decodeURIComponent(draftChangeMatch[2]!);
           const previous = await dependencies.users.getResumeDraft(userId, draftId);
           if (!previous) return reply(404, { message: 'Resume draft not found' });
+          if (previous.status === 'finalized') return reply(409, { message: 'Finalized resume drafts cannot be changed' });
           const body = parseBody(event);
           if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           if (body.decision !== 'accepted' && body.decision !== 'rejected') return reply(400, { message: 'decision must be accepted or rejected' });
           if (!previous.changes.some((change) => change.changeId === changeId)) return reply(404, { message: 'Resume change not found' });
           const decision = body.decision as NonNullable<ResumeChange['decision']>;
           const changes = previous.changes.map((change) => change.changeId === changeId ? { ...change, decision } : change);
-          const updated: ResumeDraft = { ...previous, changes, status: changes.every((change) => change.decision) ? 'finalized' : 'reviewing', revision: previous.revision + 1, updatedAt: timestamp };
+          const updated: ResumeDraft = { ...previous, changes, status: 'reviewing', revision: previous.revision + 1, updatedAt: timestamp };
           if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           return reply(200, updated);
         }
@@ -850,37 +851,39 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const body = parseBody(event);
           if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           if (!previous.changes.every((change) => change.decision)) return reply(409, { message: 'Review every change before finalizing' });
-          const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
-          if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
-          if (!dependencies.resumeArtifactStorage) return reply(200, { draft: updated });
-          const [profile, bankItems] = await Promise.all([
-            dependencies.users.getResumeProfile(userId, updated.profileId),
+          if (!dependencies.resumeArtifactStorage) return reply(503, { message: 'PDF generation is temporarily unavailable' });
+          const [profile, applicant, bankItems] = await Promise.all([
+            dependencies.users.getResumeProfile(userId, previous.profileId),
+            dependencies.users.getProfile(userId),
             dependencies.users.listResumeBank(userId),
           ]);
           if (!profile) return reply(404, { message: 'Resume profile not found' });
-          const rendered = renderResumeLatex(profile, updated, bankItems);
+          if (!applicant?.contact.name.trim() || !applicant.contact.email.trim()) return reply(409, { message: 'Complete your name and email in your profile before creating a PDF résumé' });
+          const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
+          const rendered = renderResumeLatex(profile, applicant, updated, bankItems);
           const existing = (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash
             && artifact.templateVersion === RESUME_TEMPLATE_VERSION && artifact.compilerVersion === RESUME_COMPILER_VERSION);
-          if (existing) return reply(200, { draft: updated, artifact: existing });
+          if (existing) {
+            if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
+            return reply(200, { draft: updated, artifact: existing });
+          }
           const artifactId = randomUUID();
           const texObjectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
+          let compilation: ResumeCompilation;
+          try {
+            compilation = await dependencies.resumeArtifactStorage.compile(rendered.tex, rendered.resumeSpecHash);
+          } catch {
+            return reply(503, { message: 'PDF generation is temporarily unavailable; your draft was not finalized' });
+          }
+          const objectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf`;
           await dependencies.resumeArtifactStorage.putTex(texObjectKey, rendered.tex);
-          const compilation = dependencies.resumeArtifactStorage.compile && dependencies.resumeArtifactStorage.putPdf
-            ? await dependencies.resumeArtifactStorage.compile(rendered.tex, rendered.resumeSpecHash) : undefined;
-          const objectKey = compilation ? `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf` : texObjectKey;
-          if (compilation) await dependencies.resumeArtifactStorage.putPdf!(objectKey, compilation.pdf);
-          const previewObjectKeys = compilation?.previewPngs.map((_, index) => `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/preview-${index + 1}.png`) ?? [];
-          if (compilation && dependencies.resumeArtifactStorage.putPreview) await Promise.all(compilation.previewPngs.map((png, index) => dependencies.resumeArtifactStorage!.putPreview!(previewObjectKeys[index]!, png)));
-          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, ...(compilation ? { pageCount: compilation.pageCount, previewObjectKeys } : {}), createdAt: timestamp };
+          await dependencies.resumeArtifactStorage.putPdf(objectKey, compilation.pdf);
+          const previewObjectKeys = compilation.previewPngs.map((_, index) => `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/preview-${index + 1}.png`);
+          if (dependencies.resumeArtifactStorage.putPreview) await Promise.all(compilation.previewPngs.map((png, index) => dependencies.resumeArtifactStorage!.putPreview!(previewObjectKeys[index]!, png)));
+          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, pageCount: compilation.pageCount, previewObjectKeys, createdAt: timestamp };
           if (!await dependencies.users.putResumeArtifact(artifact)) return reply(409, { message: 'Resume artifact changed; refresh and retry' });
+          if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           return reply(200, { draft: updated, artifact });
-        }
-        const artifactContentMatch = path.match(/^\/me\/resume-artifacts\/([^/]+)\/content$/u);
-        if (artifactContentMatch && method === 'GET') {
-          if (!dependencies.resumeArtifactStorage) return reply(503, { message: 'Resume artifact storage is unavailable' });
-          const artifact = await dependencies.users.getResumeArtifact(userId, decodeURIComponent(artifactContentMatch[1]!));
-          if (!artifact) return reply(404, { message: 'Resume artifact not found' });
-          return reply(200, { artifact, downloadUrl: await dependencies.resumeArtifactStorage.createContentUrl(artifact) });
         }
       }
       const releaseMatch = path.match(/^\/me\/releases\/([^/]+)$/);
