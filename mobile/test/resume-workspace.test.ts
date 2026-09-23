@@ -29,9 +29,20 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('pollResumeImport(() => api<ResumeImportCard>');
   });
 
+  it('keeps the master bank compact beside the active workbench', () => {
+    expect(app).toContain('const wideWorkbench = width >= 1040;');
+    expect(app).toContain('bankItems.slice(0, 4)');
+    expect(app).toContain('styles.resumeSetupWorkspaceWide');
+    expect(app).toContain('styles.resumeLibraryRail');
+    expect(app).toContain('style={bankExpanded ? styles.resumeBankScroller : undefined}');
+    expect(app).toContain('<Text numberOfLines={2} style={styles.resumeBankItemText}>');
+    expect(app).toContain('`Browse all ${bankItems.length} source items`');
+  });
+
   it('shows server-owned plans and disables new tailoring at the monthly limit', () => {
     expect(app).toContain('api<ResumeSubscriptionCard>("/me/subscription", token)');
     expect(app).toContain('<Text style={styles.sectionTitle}>Tailoring plan</Text>');
+    expect(app).toContain('planExpanded ? <View style={[styles.resumePlanGrid');
     expect(app).toContain('App Store purchase coming next');
     expect(app).toContain('subscription?.usage.remaining === 0 ? "Monthly limit reached"');
   });

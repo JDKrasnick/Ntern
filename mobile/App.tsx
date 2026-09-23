@@ -5467,6 +5467,7 @@ type ResumeSubscriptionCard = {
 function ResumeWorkspace({ token }: { token: string }) {
   const { width } = useWindowDimensions();
   const desktop = width >= 700;
+  const wideWorkbench = width >= 1040;
   const [jobUrl, setJobUrl] = useState("");
   const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
   const [bankDraft, setBankDraft] = useState("");
@@ -5474,6 +5475,7 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [bankSaving, setBankSaving] = useState(false);
   const [bankError, setBankError] = useState<string>();
   const [bankExpanded, setBankExpanded] = useState(false);
+  const [planExpanded, setPlanExpanded] = useState(false);
   const [profiles, setProfiles] = useState<ResumeProfileCard[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState<string>();
   const [jobImport, setJobImport] = useState<ResumeImportCard>();
@@ -5518,7 +5520,7 @@ function ResumeWorkspace({ token }: { token: string }) {
   };
   const accepted = draft?.changes.filter((change) => change.decision === "accepted").length ?? 0;
   const technicalBase = profiles.find((profile) => profile.name === "Technical base");
-  const visibleBankItems = bankExpanded ? bankItems : bankItems.slice(0, 12);
+  const visibleBankItems = bankExpanded ? bankItems : bankItems.slice(0, 4);
   const bankKindCounts = bankItems.reduce<Record<string, number>>((counts, item) => ({ ...counts, [item.kind]: (counts[item.kind] ?? 0) + 1 }), {});
   const loadBank = () => {
     setBankLoading(true);
@@ -5693,11 +5695,16 @@ function ResumeWorkspace({ token }: { token: string }) {
           <View style={styles.resumeSectionHeading}>
             <View>
               <Text style={styles.sectionTitle}>Tailoring plan</Text>
-              <Text style={styles.resumeSectionDescription}>{subscription.plan.name} · {subscription.usage.used} of {subscription.usage.limit} tailored reviews used this month. Your technical base, saved diffs, and downloads stay available.</Text>
+              <Text style={styles.resumeSectionDescription}>{subscription.plan.name} · {subscription.usage.used} of {subscription.usage.limit} reviews used this month. Saved work and downloads stay available.</Text>
             </View>
-            <Text style={styles.resumePlanRemaining}>{subscription.usage.remaining} left</Text>
+            <View style={styles.resumePlanActions}>
+              <Text style={styles.resumePlanRemaining}>{subscription.usage.remaining} left</Text>
+              <TouchableOpacity accessibilityRole="button" onPress={() => setPlanExpanded((value) => !value)} style={styles.resumeCompactAction}>
+                <Text style={styles.resumeCompactActionText}>{planExpanded ? "Hide plans" : "Compare plans"}</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-          <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
+          {planExpanded ? <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
             {subscription.plans.map((plan) => (
               <View key={plan.tier} style={[styles.resumePlanCard, subscription.tier === plan.tier && styles.resumePlanCardCurrent]}>
                 <Text style={styles.resumePlanName}>{plan.name}</Text>
@@ -5706,12 +5713,19 @@ function ResumeWorkspace({ token }: { token: string }) {
                 <Text style={styles.resumePlanState}>{subscription.tier === plan.tier ? "Current plan" : plan.tier === "free" ? "Included" : "App Store purchase coming next"}</Text>
               </View>
             ))}
-          </View>
+          </View> : null}
         </View>
       ) : null}
 
-      <View style={styles.resumeBankComposer}>
-        <Text style={styles.inputLabel}>Add source material</Text>
+      <View style={[styles.resumeSetupWorkspace, wideWorkbench && styles.resumeSetupWorkspaceWide]}>
+      <View style={[styles.resumeBankComposer, wideWorkbench && styles.resumeLibraryRail]}>
+        <View style={styles.resumeSourceHeading}>
+          <View style={styles.resumeSourceHeadingCopy}>
+            <Text style={styles.sectionTitle}>Source library</Text>
+            <Text style={styles.resumeSectionDescription}>{bankLoading ? "Loading…" : `${bankItems.length} verified item${bankItems.length === 1 ? "" : "s"}`} · full details open only when you browse.</Text>
+          </View>
+        </View>
+        <Text style={styles.inputLabel}>Add one item</Text>
         <TextInput
           value={bankDraft}
           onChangeText={setBankDraft}
@@ -5730,25 +5744,26 @@ function ResumeWorkspace({ token }: { token: string }) {
           <Text style={styles.resumeKeepAll}>{bankSaving ? "Importing source…" : "Import a résumé or master-bank DOCX"}</Text>
         </TouchableOpacity>
         {!bankLoading && bankItems.length ? (
-          <View style={styles.resumeBankItems}>
+          <ScrollView nestedScrollEnabled scrollEnabled={bankExpanded} style={bankExpanded ? styles.resumeBankScroller : undefined} contentContainerStyle={styles.resumeBankItems}>
             {visibleBankItems.map((item) => (
               <View key={item.bankItemId} style={styles.resumeBankItem}>
                 <Ionicons name={item.kind === "role" ? "briefcase-outline" : item.kind === "project" ? "code-slash-outline" : item.kind === "skill" ? "construct-outline" : item.kind === "education" ? "school-outline" : "document-text-outline"} size={17} color={colors.signal} />
                 <View style={styles.resumeBankItemCopy}>
-                  <Text style={styles.resumeBankItemText}>{item.content}</Text>
+                  <Text numberOfLines={2} style={styles.resumeBankItemText}>{item.content}</Text>
                   <Text style={styles.resumeBankItemStatus}>{item.kind} · source material</Text>
                 </View>
               </View>
             ))}
-            {bankItems.length > 12 ? (
-              <TouchableOpacity accessibilityRole="button" onPress={() => setBankExpanded((value) => !value)}>
-                <Text style={styles.resumeKeepAll}>{bankExpanded ? "Show a compact summary" : `Browse all ${bankItems.length} source items`}</Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
+          </ScrollView>
+        ) : null}
+        {bankItems.length > 4 ? (
+          <TouchableOpacity accessibilityRole="button" onPress={() => setBankExpanded((value) => !value)} style={styles.resumeCompactAction}>
+            <Text style={styles.resumeKeepAll}>{bankExpanded ? "Show a compact summary" : `Browse all ${bankItems.length} source items`}</Text>
+          </TouchableOpacity>
         ) : null}
       </View>
 
+      <View style={styles.resumeSetupMain}>
       <View style={styles.resumeSection}>
         <Text style={styles.sectionTitle}>Tailor for a job</Text>
         <Text style={styles.resumeSectionDescription}>Paste the employer’s official job URL. Ntern checks the catalog first and keeps any private fallback private.</Text>
@@ -5798,6 +5813,8 @@ function ResumeWorkspace({ token }: { token: string }) {
           )) : <Text style={styles.resumeSectionDescription}>Save a base after adding the experience you want to reuse.</Text>}
         </View>
         <View style={styles.resumeBankComposerAction}><ActionButton label={subscription?.usage.remaining === 0 ? "Monthly limit reached" : "Create grounded review"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy || subscription?.usage.remaining === 0} /></View>
+      </View>
+      </View>
       </View>
 
       <View style={styles.resumeSection}>
@@ -8379,19 +8396,20 @@ const styles = StyleSheet.create({
   catalogPaginationText: { color: colors.muted, fontSize: 14, lineHeight: 20, textAlign: "center" },
   catalogPaginationRetry: { alignItems: "center", justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },
   catalogPaginationRetryText: { color: colors.signal, fontSize: 14, fontWeight: "700" },
-  resumeContent: { maxWidth: 1040, paddingBottom: 44, paddingTop: 24, width: "100%" },
-  resumeOverview: { backgroundColor: colors.ink, borderRadius: 18, flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginBottom: 28, overflow: "hidden", padding: 22 },
+  resumeContent: { maxWidth: 1360, paddingBottom: 44, paddingTop: 24, width: "100%" },
+  resumeOverview: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 16, flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginBottom: 12, overflow: "hidden", paddingHorizontal: 18, paddingVertical: 14 },
   resumeOverviewCopy: { flexGrow: 1, flexShrink: 1, maxWidth: 570, minWidth: 220 },
   resumeCardLabel: { color: colors.signalGlow, fontSize: 12, fontWeight: "800", letterSpacing: 1.1, textTransform: "uppercase" },
-  resumeCardTitle: { color: colors.onDark, fontSize: 25, fontWeight: "800", letterSpacing: -0.5, lineHeight: 31, marginTop: 5 },
-  resumeCardCopy: { color: "#D1D5DB", fontSize: 15, lineHeight: 21, marginTop: 6 },
-  resumeBankStatus: { color: colors.signalGlow, fontSize: 13, fontWeight: "700", lineHeight: 18, marginTop: 15 },
+  resumeCardTitle: { color: colors.onDark, fontSize: 21, fontWeight: "800", letterSpacing: -0.4, lineHeight: 27, marginTop: 3 },
+  resumeCardCopy: { color: "#D1D5DB", fontSize: 14, lineHeight: 20, marginTop: 4 },
+  resumeBankStatus: { color: colors.signalGlow, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 8 },
   resumeInlineAction: { alignItems: "center", alignSelf: "flex-start", flexDirection: "row", gap: 6, marginTop: 16, minHeight: 36 },
   resumeInlineActionText: { color: colors.signalGlow, fontSize: 14, fontWeight: "800" },
-  resumeTrustCard: { backgroundColor: "rgba(255,255,255,0.1)", borderColor: "rgba(255,255,255,0.16)", borderRadius: 14, borderWidth: 1, flexBasis: 230, flexGrow: 0, padding: 14 },
-  resumeTrustTitle: { color: colors.onDark, fontSize: 15, fontWeight: "800", marginTop: 9 },
+  resumeTrustCard: { backgroundColor: "rgba(255,255,255,0.1)", borderColor: "rgba(255,255,255,0.16)", borderRadius: 12, borderWidth: 1, flexBasis: 260, flexGrow: 0, paddingHorizontal: 13, paddingVertical: 10 },
+  resumeTrustTitle: { color: colors.onDark, fontSize: 14, fontWeight: "800", marginTop: 5 },
   resumeTrustCopy: { color: "#D1D5DB", fontSize: 13, lineHeight: 18, marginTop: 3 },
-  resumePlanSection: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, marginBottom: 20, padding: 18 },
+  resumePlanSection: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, marginBottom: 12, paddingHorizontal: 16, paddingVertical: 12 },
+  resumePlanActions: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 8 },
   resumePlanRemaining: { backgroundColor: colors.signalSoft, borderRadius: 999, color: colors.signal, fontSize: 13, fontWeight: "800", overflow: "hidden", paddingHorizontal: 11, paddingVertical: 7 },
   resumePlanGrid: { gap: 10, marginTop: 15 },
   resumePlanGridWide: { flexDirection: "row" },
@@ -8401,12 +8419,19 @@ const styles = StyleSheet.create({
   resumePlanPrice: { color: colors.ink, fontSize: 14, fontWeight: "700", marginTop: 5 },
   resumePlanDetail: { color: colors.muted, fontSize: 13, lineHeight: 18, marginTop: 4 },
   resumePlanState: { color: colors.signal, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 10 },
+  resumeSetupWorkspace: { gap: 20 },
+  resumeSetupWorkspaceWide: { alignItems: "flex-start", flexDirection: "row" },
+  resumeLibraryRail: { flexBasis: 320, flexGrow: 0, flexShrink: 0, marginBottom: 0 },
+  resumeSetupMain: { flex: 1, minWidth: 0 },
   resumeBankComposer: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, marginBottom: 8, padding: 16 },
+  resumeSourceHeading: { alignItems: "flex-start", flexDirection: "row", gap: 10, justifyContent: "space-between", marginBottom: 14 },
+  resumeSourceHeadingCopy: { flex: 1, minWidth: 0 },
   resumeBankInput: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, color: colors.ink, fontSize: 15, lineHeight: 21, minHeight: 82, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: "top" },
   resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },
   resumeBankError: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 8 },
-  resumeBankItems: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 8, marginTop: 16, paddingTop: 12 },
-  resumeBankItem: { alignItems: "flex-start", flexDirection: "row", gap: 9, paddingVertical: 4 },
+  resumeBankScroller: { maxHeight: 340 },
+  resumeBankItems: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 8, marginTop: 16, paddingBottom: 2, paddingTop: 12 },
+  resumeBankItem: { alignItems: "flex-start", borderBottomColor: colors.separator, borderBottomWidth: 1, flexDirection: "row", gap: 9, paddingBottom: 9, paddingTop: 2 },
   resumeBankItemCopy: { flex: 1 },
   resumeBankItemText: { color: colors.ink, fontSize: 14, lineHeight: 20 },
   resumeBankItemStatus: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 1 },
@@ -8417,23 +8442,25 @@ const styles = StyleSheet.create({
   resumeUrlField: { alignItems: "center", backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 12, borderWidth: 1, flex: 1, flexDirection: "row", gap: 8, minHeight: 52, paddingHorizontal: 14 },
   resumeUrlInput: { color: colors.ink, flex: 1, fontSize: 15, minHeight: 50, outlineStyle: "none" as unknown as "solid" },
   resumeSectionHeading: { alignItems: "flex-start", flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between" },
+  resumeCompactAction: { alignItems: "center", justifyContent: "center", minHeight: 44, paddingHorizontal: 4 },
+  resumeCompactActionText: { color: colors.signal, fontSize: 13, fontWeight: "800" },
   resumeRecommendation: { backgroundColor: colors.signalSoft, borderRadius: 999, color: colors.signal, fontSize: 12, fontWeight: "800", overflow: "hidden", paddingHorizontal: 10, paddingVertical: 6 },
   resumeProfileGrid: { gap: 10, marginTop: 14 },
-  resumeProfileGridWide: { flexDirection: "row" },
-  resumeProfileCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, flex: 1, minHeight: 126, padding: 15 },
+  resumeProfileGridWide: { flexDirection: "row", flexWrap: "wrap" },
+  resumeProfileCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, flexGrow: 1, flexShrink: 1, minHeight: 112, minWidth: 220, padding: 15 },
   resumeProfileRecommended: { borderColor: colors.signal, borderWidth: 2 },
   resumeProfileName: { color: colors.ink, fontSize: 17, fontWeight: "800" },
   resumeProfileTags: { color: colors.body, fontSize: 13, lineHeight: 19, marginTop: 5 },
   resumeProfileNote: { color: colors.signal, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 12 },
   resumeReviewHeader: { alignItems: "flex-start", flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between" },
   resumeSegmentedControl: { backgroundColor: colors.separator, borderRadius: 9, flexDirection: "row", padding: 3 },
-  resumeSegment: { alignItems: "center", borderRadius: 7, justifyContent: "center", minHeight: 34, paddingHorizontal: 11 },
+  resumeSegment: { alignItems: "center", borderRadius: 7, justifyContent: "center", minHeight: 44, paddingHorizontal: 11 },
   resumeSegmentActive: { backgroundColor: colors.surface },
   resumeSegmentText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
   resumeSegmentTextActive: { color: colors.ink },
   resumeReviewWorkspace: { marginTop: 15 },
   resumeReviewWorkspaceWide: { alignItems: "stretch", flexDirection: "row", gap: 14 },
-  resumeChangePanel: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1, padding: 18 },
+  resumeChangePanel: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1.1, minWidth: 0, padding: 18 },
   resumeDiffHeader: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
   resumeChangeCounter: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.8, textTransform: "uppercase" },
   resumeDiffType: { backgroundColor: colors.separator, borderRadius: 999, color: colors.body, fontSize: 11, fontWeight: "800", overflow: "hidden", paddingHorizontal: 9, paddingVertical: 4, textTransform: "uppercase" },
@@ -8454,7 +8481,7 @@ const styles = StyleSheet.create({
   resumeEvidenceText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
   resumeReason: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },
   resumeDecisionRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 18 },
-  resumePreviewPanel: { backgroundColor: "#E9ECF1", borderRadius: 16, flex: 1, justifyContent: "center", minHeight: 390, overflow: "hidden", padding: 16 },
+  resumePreviewPanel: { backgroundColor: "#E9ECF1", borderRadius: 16, flex: 0.9, justifyContent: "center", minHeight: 390, minWidth: 0, overflow: "hidden", padding: 16 },
   resumePreviewPaper: { alignSelf: "center", backgroundColor: colors.surface, borderColor: "#D7DBE2", borderRadius: 2, borderWidth: 1, maxWidth: 430, minHeight: 330, padding: 24, shadowColor: "#1C1C1E", shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.12, shadowRadius: 8, width: "100%" },
   resumePreviewName: { color: colors.ink, fontSize: 21, fontWeight: "800", letterSpacing: -0.3 },
   resumePreviewContact: { color: colors.muted, fontSize: 11, marginTop: 4 },
@@ -8464,7 +8491,7 @@ const styles = StyleSheet.create({
   resumePreviewEmpty: { alignItems: "center", alignSelf: "center", maxWidth: 330, padding: 24 },
   resumePreviewEmptyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800", marginTop: 10 },
   resumeArtifactTabs: { alignSelf: "center", backgroundColor: "#DDE1E7", borderRadius: 9, flexDirection: "row", padding: 3 },
-  resumeArtifactTab: { alignItems: "center", borderRadius: 7, justifyContent: "center", minHeight: 34, paddingHorizontal: 12 },
+  resumeArtifactTab: { alignItems: "center", borderRadius: 7, justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },
   resumeArtifactTabActive: { backgroundColor: colors.surface },
   resumeArtifactTabText: { color: colors.muted, fontSize: 12, fontWeight: "700" },
   resumeArtifactTabTextActive: { color: colors.ink },
