@@ -808,6 +808,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
                 ? await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: resumeGenerationEvidence(imported, selected) })
                 : resumeDraftChanges(imported, selected);
               validateResumeChanges(changes, selected);
+              if (!changes.length) changes = resumeDraftChanges(imported, selected);
             } catch {
               // Generation availability must not make a verified base unusable.
               // The fallback remains evidence-linked and never invents a claim.

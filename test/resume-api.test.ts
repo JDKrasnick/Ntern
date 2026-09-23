@@ -146,7 +146,9 @@ describe('resume API ownership and revisions', () => {
     const received: Array<Array<{ content: string }>> = [];
     const generate = vi.fn(async (input: { bankItems: Array<{ content: string }> }) => { received.push(input.bankItems); return []; });
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeDraftGenerator: { generate } });
-    expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(201);
+    const response = await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }));
+    expect(response.statusCode).toBe(201);
+    expect(JSON.parse(response.body)).toMatchObject({ changes: expect.arrayContaining([expect.objectContaining({ evidenceIds: ['evidence-0'] })]) });
     const supplied = received[0]!;
     expect(supplied).toHaveLength(80);
     expect(supplied.every((item) => item.content.includes('TypeScript'))).toBe(true);
