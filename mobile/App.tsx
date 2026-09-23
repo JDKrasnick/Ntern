@@ -5452,10 +5452,12 @@ function AccountGate({
   );
 }
 
-type ResumeBankCard = { bankItemId: string; kind: string; content: string; verified: boolean; revision: number };
+type ResumeBankParentKind = "role" | "project" | "education";
+type ResumeBankCard = { bankItemId: string; kind: "role" | "project" | "skill" | "education" | "bullet"; parent?: { kind: ResumeBankParentKind; bankItemId: string }; content: string; verified: boolean; revision: number };
+type ResumeBankRef = { kind: "role" | "project" | "skill" | "education"; bankItemId: string } | { kind: "bullet"; bankItemId: string; parent: { kind: ResumeBankParentKind; bankItemId: string } };
 type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; revision: number };
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
-type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
+type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; target: ResumeBankRef; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
 type ResumeArtifactCard = { artifactId: string; pageCount?: number };
 type ResumeSubscriptionCard = {
   tier: "free" | "plus" | "pro";
@@ -5471,6 +5473,8 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [jobUrl, setJobUrl] = useState("");
   const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
   const [bankDraft, setBankDraft] = useState("");
+  const [bankEntryKind, setBankEntryKind] = useState<ResumeBankCard["kind"]>("project");
+  const [bankParentId, setBankParentId] = useState<string>();
   const [bankLoading, setBankLoading] = useState(true);
   const [bankSaving, setBankSaving] = useState(false);
   const [bankError, setBankError] = useState<string>();
@@ -5522,6 +5526,8 @@ function ResumeWorkspace({ token }: { token: string }) {
   const technicalBase = profiles.find((profile) => profile.name === "Technical base");
   const visibleBankItems = bankExpanded ? bankItems : bankItems.slice(0, 4);
   const bankKindCounts = bankItems.reduce<Record<string, number>>((counts, item) => ({ ...counts, [item.kind]: (counts[item.kind] ?? 0) + 1 }), {});
+  const bankParents = bankItems.filter((item): item is ResumeBankCard & { kind: ResumeBankParentKind } => item.kind === "role" || item.kind === "project" || item.kind === "education");
+  const selectedBankParent = bankParents.find((item) => item.bankItemId === bankParentId) ?? bankParents[0];
   const loadBank = () => {
     setBankLoading(true);
     setBankError(undefined);
@@ -5564,7 +5570,7 @@ function ResumeWorkspace({ token }: { token: string }) {
     setBankSaving(true);
     setBankError(undefined);
     void api<ResumeBankCard>("/me/resume-bank", token, {
-      method: "POST", body: JSON.stringify({ kind: "bullet", content }),
+      method: "POST", body: JSON.stringify({ kind: bankEntryKind, content, ...(bankEntryKind === "bullet" && selectedBankParent ? { parent: { kind: selectedBankParent.kind, bankItemId: selectedBankParent.bankItemId } } : {}) }),
     })
       .then((item) => {
         setBankItems((items) => [...items, item]);
@@ -5730,15 +5736,31 @@ function ResumeWorkspace({ token }: { token: string }) {
           value={bankDraft}
           onChangeText={setBankDraft}
           accessibilityLabel="Add a technical base item"
-          placeholder="e.g. Built a dashboard that gave the team a single view of experiment results"
+          placeholder={bankEntryKind === "bullet" ? "A verified bullet for the selected parent" : bankEntryKind === "skill" ? "e.g. TypeScript, React, Cloudflare Workers" : `Name or summary for this ${bankEntryKind}`}
           placeholderTextColor={colors.placeholder}
           selectionColor={colors.signal}
           multiline
           style={styles.resumeBankInput}
         />
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeBankKindPicker}>
+          {(["project", "role", "education", "skill", "bullet"] as const).map((kind) => (
+            <TouchableOpacity key={kind} accessibilityRole="button" aria-pressed={bankEntryKind === kind} onPress={() => setBankEntryKind(kind)} style={[styles.resumeBankKindOption, bankEntryKind === kind && styles.resumeBankKindOptionActive]}>
+              <Text style={[styles.resumeSegmentText, bankEntryKind === kind && styles.resumeSegmentTextActive]}>{kind === "bullet" ? "Child bullet" : kind[0]!.toUpperCase() + kind.slice(1)}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+        {bankEntryKind === "bullet" ? (
+          bankParents.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeParentPicker}>
+            {bankParents.map((parent) => (
+              <TouchableOpacity key={parent.bankItemId} accessibilityRole="button" aria-pressed={selectedBankParent?.bankItemId === parent.bankItemId} onPress={() => setBankParentId(parent.bankItemId)} style={[styles.resumeParentOption, selectedBankParent?.bankItemId === parent.bankItemId && styles.resumeParentOptionActive]}>
+                <Text numberOfLines={1} style={styles.resumeParentOptionText}>{parent.content}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView> : <Text style={styles.resumeBankError}>Add a project, role, or education parent before adding its bullets.</Text>
+        ) : null}
         {bankError ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
         <View style={styles.resumeBankComposerAction}>
-          <ActionButton label={bankSaving ? "Saving…" : "Add to technical base"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving} />
+          <ActionButton label={bankSaving ? "Saving…" : "Add to technical base"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving || bankEntryKind === "bullet" && !selectedBankParent} />
         </View>
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import PDF or DOCX resume" onPress={() => void importResume()} disabled={bankSaving}>
           <Text style={styles.resumeKeepAll}>{bankSaving ? "Importing source…" : "Import a résumé or master-bank DOCX"}</Text>
@@ -5750,7 +5772,7 @@ function ResumeWorkspace({ token }: { token: string }) {
                 <Ionicons name={item.kind === "role" ? "briefcase-outline" : item.kind === "project" ? "code-slash-outline" : item.kind === "skill" ? "construct-outline" : item.kind === "education" ? "school-outline" : "document-text-outline"} size={17} color={colors.signal} />
                 <View style={styles.resumeBankItemCopy}>
                   <Text numberOfLines={2} style={styles.resumeBankItemText}>{item.content}</Text>
-                  <Text style={styles.resumeBankItemStatus}>{item.kind} · source material</Text>
+                  <Text style={styles.resumeBankItemStatus}>{item.kind === "bullet" && item.parent ? `bullet · under ${bankItems.find((parent) => parent.bankItemId === item.parent?.bankItemId)?.content ?? item.parent.kind}` : `${item.kind} · source material`}</Text>
                 </View>
               </View>
             ))}
@@ -8427,6 +8449,13 @@ const styles = StyleSheet.create({
   resumeSourceHeading: { alignItems: "flex-start", flexDirection: "row", gap: 10, justifyContent: "space-between", marginBottom: 14 },
   resumeSourceHeadingCopy: { flex: 1, minWidth: 0 },
   resumeBankInput: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, color: colors.ink, fontSize: 15, lineHeight: 21, minHeight: 82, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: "top" },
+  resumeBankKindPicker: { gap: 6, paddingTop: 10 },
+  resumeBankKindOption: { alignItems: "center", backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 8, borderWidth: 1, justifyContent: "center", minHeight: 36, paddingHorizontal: 10 },
+  resumeBankKindOptionActive: { backgroundColor: colors.surface, borderColor: colors.signal },
+  resumeParentPicker: { gap: 7, paddingTop: 9 },
+  resumeParentOption: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 8, borderWidth: 1, maxWidth: 210, paddingHorizontal: 10, paddingVertical: 8 },
+  resumeParentOptionActive: { borderColor: colors.signal },
+  resumeParentOptionText: { color: colors.body, fontSize: 12, fontWeight: "600" },
   resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },
   resumeBankError: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 8 },
   resumeBankScroller: { maxHeight: 340 },

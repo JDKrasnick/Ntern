@@ -26,17 +26,25 @@ function minimalPdf(lines: string[]) {
 describe('resume document extraction', () => {
   it('assigns source lines to Technical base categories', () => {
     expect(extractResumeBankItems('Experience\n• Built a TypeScript dashboard\nProjects\n• Created an accessibility audit\nSkills\nTypeScript, React\nEducation\nCornell University')).toEqual([
-      { kind: 'role', content: 'Built a TypeScript dashboard', sourceLocation: 'line 2' },
-      { kind: 'project', content: 'Created an accessibility audit', sourceLocation: 'line 4' },
-      { kind: 'skill', content: 'TypeScript, React', sourceLocation: 'line 6' },
-      { kind: 'education', content: 'Cornell University', sourceLocation: 'line 8' },
+      { localId: 'line-2', kind: 'role', content: 'Built a TypeScript dashboard', sourceLocation: 'line 2' },
+      { localId: 'line-4', kind: 'project', content: 'Created an accessibility audit', sourceLocation: 'line 4' },
+      { localId: 'line-6', kind: 'skill', content: 'TypeScript, React', sourceLocation: 'line 6' },
+      { localId: 'line-8', kind: 'education', content: 'Cornell University', sourceLocation: 'line 8' },
+    ]);
+  });
+
+  it('keeps multiple bullets attached to their extracted project parent', () => {
+    expect(extractResumeBankItems('Projects\nCompiler Lab\n• Built a parser\n• Added type checking')).toEqual([
+      { localId: 'line-2', kind: 'project', content: 'Compiler Lab', sourceLocation: 'line 2' },
+      { localId: 'line-3', kind: 'bullet', parent: { kind: 'project', localId: 'line-2' }, content: 'Built a parser', sourceLocation: 'line 3' },
+      { localId: 'line-4', kind: 'bullet', parent: { kind: 'project', localId: 'line-2' }, content: 'Added type checking', sourceLocation: 'line 4' },
     ]);
   });
 
   it('extracts readable document.xml from a DOCX upload', async () => {
     const docx = zipSync({ 'word/document.xml': new TextEncoder().encode('<w:document><w:body><w:p><w:t>Projects</w:t></w:p><w:p><w:t>Built a TypeScript dashboard</w:t></w:p></w:body></w:document>') });
     await expect(extractResumeDocument(docx.buffer as ArrayBuffer, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')).resolves.toEqual([
-      { kind: 'project', content: 'Built a TypeScript dashboard', sourceLocation: 'line 2' },
+      { localId: 'line-2', kind: 'project', content: 'Built a TypeScript dashboard', sourceLocation: 'line 2' },
     ]);
   });
 
@@ -45,7 +53,7 @@ describe('resume document extraction', () => {
     Reflect.deleteProperty(globalThis, 'DOMMatrix');
     try {
       await expect(extractResumeDocument(minimalPdf(['Projects', 'Built a production dashboard']), 'application/pdf')).resolves.toEqual([
-        { kind: 'project', content: 'Built a production dashboard', sourceLocation: 'line 2' },
+        { localId: 'line-2', kind: 'project', content: 'Built a production dashboard', sourceLocation: 'line 2' },
       ]);
     } finally {
       if (original) Object.defineProperty(globalThis, 'DOMMatrix', original);

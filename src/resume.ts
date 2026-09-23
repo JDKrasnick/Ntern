@@ -2,14 +2,15 @@
  * Canonical, user-owned resume records. Generated PDFs, previews, embeddings,
  * and model output deliberately remain outside these contracts.
  */
-export type ResumeBankKind = 'role' | 'project' | 'skill' | 'education' | 'bullet';
+export type ResumeBankParentKind = 'role' | 'project' | 'education';
+export type ResumeBankRootKind = ResumeBankParentKind | 'skill';
+export type ResumeBankKind = ResumeBankRootKind | 'bullet';
 export type ResumeChangeType = 'rewrite' | 'add' | 'remove' | 'move';
 export type ResumeTemplateId = 'jake-technical' | 'clean-standard' | 'research-academic' | 'project-compact';
 
-export interface ResumeBankItem {
+interface ResumeBankItemBase {
   userId: string;
   bankItemId: string;
-  kind: ResumeBankKind;
   content: string;
   sourceDocumentId?: string;
   sourceLocation?: string;
@@ -17,6 +18,42 @@ export interface ResumeBankItem {
   revision: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** A tagged pointer is carried across every API and model boundary. The tag
+ * prevents a bullet from being represented as the child of another bullet or
+ * an untyped row identifier. */
+export type ResumeBankParentRef = {
+  [Kind in ResumeBankParentKind]: { kind: Kind; bankItemId: string }
+}[ResumeBankParentKind];
+
+export type ResumeBankItemRef =
+  | { [Kind in ResumeBankRootKind]: { kind: Kind; bankItemId: string } }[ResumeBankRootKind]
+  | { kind: 'bullet'; bankItemId: string; parent: ResumeBankParentRef };
+
+export type ResumeBankItem =
+  | (ResumeBankItemBase & { [Kind in ResumeBankRootKind]: { kind: Kind; parent?: never } }[ResumeBankRootKind])
+  | (ResumeBankItemBase & { kind: 'bullet'; parent: ResumeBankParentRef });
+
+const resumeParentKinds = new Set<ResumeBankParentKind>(['role', 'project', 'education']);
+const resumeRootKinds = new Set<ResumeBankRootKind>(['role', 'project', 'education', 'skill']);
+
+export function parseResumeBankParentRef(value: unknown): ResumeBankParentRef {
+  if (!value || typeof value !== 'object') throw new Error('parent must be a typed role, project, or education pointer');
+  const ref = value as Record<string, unknown>;
+  if (!resumeParentKinds.has(ref.kind as ResumeBankParentKind) || typeof ref.bankItemId !== 'string' || !ref.bankItemId.trim()) {
+    throw new Error('parent must be a typed role, project, or education pointer');
+  }
+  return { kind: ref.kind as ResumeBankParentKind, bankItemId: ref.bankItemId.trim() } as ResumeBankParentRef;
+}
+
+export function parseResumeBankItemRef(value: unknown): ResumeBankItemRef {
+  if (!value || typeof value !== 'object') throw new Error('target must be a typed resume bank pointer');
+  const ref = value as Record<string, unknown>;
+  if (typeof ref.bankItemId !== 'string' || !ref.bankItemId.trim()) throw new Error('target must be a typed resume bank pointer');
+  if (ref.kind === 'bullet') return { kind: 'bullet', bankItemId: ref.bankItemId.trim(), parent: parseResumeBankParentRef(ref.parent) };
+  if (!resumeRootKinds.has(ref.kind as ResumeBankRootKind)) throw new Error('target must be a typed resume bank pointer');
+  return { kind: ref.kind as ResumeBankRootKind, bankItemId: ref.bankItemId.trim() } as ResumeBankItemRef;
 }
 
 export interface ResumeProfile {
@@ -57,12 +94,63 @@ export interface ImportedJob {
 export interface ResumeChange {
   changeId: string;
   type: ResumeChangeType;
+  /** The exact bank object being changed (or parent receiving an added bullet). */
+  target: ResumeBankItemRef;
   section: string;
   original?: string;
   suggestion?: string;
   evidenceIds: string[];
   reason: string;
   decision?: 'accepted' | 'rejected';
+}
+
+export function resumeBankItemRef(item: ResumeBankItem): ResumeBankItemRef {
+  return item.kind === 'bullet'
+    ? { kind: item.kind, bankItemId: item.bankItemId, parent: item.parent }
+    : { kind: item.kind, bankItemId: item.bankItemId };
+}
+
+const sameResumeRef = (left: ResumeBankParentRef, right: ResumeBankParentRef) => left.kind === right.kind && left.bankItemId === right.bankItemId;
+
+/** Validates the in-memory object graph, independently of its storage shape. */
+export function validateResumeBankGraph(bank: readonly ResumeBankItem[]): void {
+  const byId = new Map<string, ResumeBankItem>();
+  const userId = bank[0]?.userId;
+  for (const item of bank) {
+    if (byId.has(item.bankItemId)) throw new Error('Resume bank item identifiers must be unique.');
+    if (item.userId !== userId) throw new Error('A resume bank graph may only contain one user\'s objects.');
+    if (item.kind !== 'bullet' && 'parent' in item && item.parent !== undefined) throw new Error('Only resume bullets may carry parent pointers.');
+    byId.set(item.bankItemId, item);
+  }
+  for (const item of bank) {
+    if (item.kind !== 'bullet') continue;
+    if (!item.parent || !resumeParentKinds.has(item.parent.kind) || !item.parent.bankItemId) {
+      throw new Error('Each resume bullet must carry a typed parent pointer.');
+    }
+    const parent = byId.get(item.parent.bankItemId);
+    if (!parent || parent.userId !== item.userId || parent.kind !== item.parent.kind) {
+      throw new Error('Each resume bullet must point to an owned role, project, or education parent of the declared kind.');
+    }
+  }
+}
+
+export function validateResumeBankItemPlacement(item: ResumeBankItem, bank: readonly ResumeBankItem[]): void {
+  validateResumeBankGraph([...bank.filter((existing) => existing.bankItemId !== item.bankItemId), item]);
+}
+
+function bankItemForRef(ref: ResumeBankItemRef, byId: ReadonlyMap<string, ResumeBankItem>): ResumeBankItem | undefined {
+  const item = byId.get(ref.bankItemId);
+  if (!item || item.kind !== ref.kind) return undefined;
+  if (item.kind === 'bullet') {
+    if (ref.kind !== 'bullet' || !sameResumeRef(item.parent, ref.parent)) return undefined;
+  }
+  return item;
+}
+
+function owningResumeParent(item: ResumeBankItem): ResumeBankParentRef | undefined {
+  if (item.kind === 'bullet') return item.parent;
+  if (item.kind === 'role' || item.kind === 'project' || item.kind === 'education') return { kind: item.kind, bankItemId: item.bankItemId };
+  return undefined;
 }
 
 export interface ResumeDraft {
@@ -155,12 +243,21 @@ export function escapeLatex(value: string): string {
 
 /** Model output cannot cite unknown or unverified facts, including numeric claims. */
 export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankItem[]): void {
+  validateResumeBankGraph(bank);
   const verified = new Map(bank.filter((item) => item.verified).map((item) => [item.bankItemId, item]));
   for (const change of changes) {
     if (!change.evidenceIds.length || change.evidenceIds.some((id) => !verified.has(id))) {
       throw new Error('Each resume change must cite verified bank evidence.');
     }
-    const evidence = change.evidenceIds.map((id) => verified.get(id)!.content).join(' ');
+    const target = bankItemForRef(change.target, verified);
+    if (!target) throw new Error('Each resume change must target an exact verified bank item and parent pointer.');
+    const evidenceItems = change.evidenceIds.map((id) => verified.get(id)!);
+    const targetParent = owningResumeParent(target);
+    if (evidenceItems.some((item) => {
+      const evidenceParent = owningResumeParent(item);
+      return targetParent || evidenceParent ? !targetParent || !evidenceParent || !sameResumeRef(targetParent, evidenceParent) : item.bankItemId !== target.bankItemId;
+    })) throw new Error('Resume changes cannot combine bullets or evidence from different parent objects.');
+    const evidence = evidenceItems.map((item) => item.content).join(' ');
     if ((change.type === 'add' && (!change.suggestion || change.original))
       || (change.type === 'remove' && (!change.original || change.suggestion))
       || (change.type === 'move' && (!change.original || change.suggestion))

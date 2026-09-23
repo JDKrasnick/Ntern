@@ -15,7 +15,8 @@ describe('resume API ownership and revisions', () => {
   it('keeps trusted source items private and allows optimistic source-status edits', async () => {
     const users = new MemoryUserStore();
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, now: () => '2026-09-22T00:00:00.000Z' });
-    const created = await handler(event('student-a', 'POST', '/me/resume-bank', { kind: 'bullet', content: 'Built a dashboard', verified: true }));
+    const project = JSON.parse((await handler(event('student-a', 'POST', '/me/resume-bank', { kind: 'project', content: 'Dashboard project' }))).body) as { bankItemId: string };
+    const created = await handler(event('student-a', 'POST', '/me/resume-bank', { kind: 'bullet', parent: { kind: 'project', bankItemId: project.bankItemId }, content: 'Built a dashboard', verified: true }));
     expect(created.statusCode).toBe(201);
     const item = JSON.parse(created.body) as { bankItemId: string; verified: boolean; revision: number };
     expect(item.verified).toBe(true);
@@ -24,6 +25,27 @@ describe('resume API ownership and revisions', () => {
     const updated = await handler(event('student-a', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: false }));
     expect(JSON.parse(updated.body)).toMatchObject({ verified: false, revision: 1 });
     expect((await handler(event('student-a', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: true }))).statusCode).toBe(409);
+  });
+
+  it('requires immutable, owned, kind-correct parent pointers for bullets', async () => {
+    const users = new MemoryUserStore();
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    const ownerProject = JSON.parse((await handler(event('owner', 'POST', '/me/resume-bank', { kind: 'project', content: 'Owner project' }))).body) as { bankItemId: string };
+    const otherProject = JSON.parse((await handler(event('other', 'POST', '/me/resume-bank', { kind: 'project', content: 'Other project' }))).body) as { bankItemId: string };
+    expect((await handler(event('owner', 'POST', '/me/resume-bank', { kind: 'bullet', content: 'Orphan bullet' }))).statusCode).toBe(400);
+    expect((await handler(event('owner', 'POST', '/me/resume-bank', { kind: 'bullet', parent: { kind: 'project', bankItemId: otherProject.bankItemId }, content: 'Cross-user bullet' }))).statusCode).toBe(400);
+    expect((await handler(event('owner', 'POST', '/me/resume-bank', { kind: 'bullet', parent: { kind: 'role', bankItemId: ownerProject.bankItemId }, content: 'Wrong-kind bullet' }))).statusCode).toBe(400);
+    const bullet = JSON.parse((await handler(event('owner', 'POST', '/me/resume-bank', { kind: 'bullet', parent: { kind: 'project', bankItemId: ownerProject.bankItemId }, content: 'Owned bullet' }))).body) as { bankItemId: string; revision: number };
+    expect((await handler(event('owner', 'PATCH', `/me/resume-bank/${bullet.bankItemId}`, { revision: bullet.revision, parent: { kind: 'project', bankItemId: otherProject.bankItemId } }))).statusCode).toBe(400);
+  });
+
+  it('requires saved bases to select a bullet together with its parent', async () => {
+    const users = new MemoryUserStore();
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    const project = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank', { kind: 'project', content: 'Compiler' }))).body) as { bankItemId: string };
+    const bullet = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank', { kind: 'bullet', parent: { kind: 'project', bankItemId: project.bankItemId }, content: 'Built parser' }))).body) as { bankItemId: string };
+    expect((await handler(event('student', 'POST', '/me/resume-profiles', { name: 'Invalid', bankItemIds: [bullet.bankItemId], template: 'clean-standard' }))).statusCode).toBe(403);
+    expect((await handler(event('student', 'POST', '/me/resume-profiles', { name: 'Valid', bankItemIds: [project.bankItemId, bullet.bankItemId], template: 'clean-standard' }))).statusCode).toBe(201);
   });
 
   it('rejects a saved-base reference to somebody else’s bank evidence', async () => {
@@ -146,7 +168,7 @@ describe('resume API ownership and revisions', () => {
     await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
     await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Web', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
     await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'TypeScript dashboard role', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
-    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeDraftGenerator: { generate: async () => [{ changeId: 'bad', type: 'add', section: 'Projects', suggestion: 'Claim 999 customers', evidenceIds: ['unknown'], reason: 'bad' }] } });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeDraftGenerator: { generate: async () => [{ changeId: 'bad', type: 'add', target: { kind: 'project', bankItemId: 'evidence' }, section: 'Projects', suggestion: 'Claim 999 customers', evidenceIds: ['unknown'], reason: 'bad' }] } });
     const response = await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }));
     expect(JSON.parse(response.body)).toMatchObject({ changes: [expect.objectContaining({ evidenceIds: ['evidence'] })] });
   });
@@ -177,7 +199,7 @@ describe('resume API ownership and revisions', () => {
     const handler = createApiHandler({
       jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
       documentStorage: { createUploadUrl: async () => '', createDownloadUrl: async () => '', deleteObject: async () => undefined, readContent: async () => new ArrayBuffer(0) },
-      resumeDocumentExtractor: async () => [{ kind: 'project', content: 'Built a dashboard', sourceLocation: 'line 3' }],
+      resumeDocumentExtractor: async () => [{ localId: 'line-3', kind: 'project', content: 'Built a dashboard', sourceLocation: 'line 3' }],
     });
     const response = await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }));
     expect(JSON.parse(response.body)).toMatchObject({ items: [expect.objectContaining({ content: 'Built a dashboard', sourceDocumentId: 'resume', sourceLocation: 'line 3', verified: true })] });
@@ -186,8 +208,9 @@ describe('resume API ownership and revisions', () => {
   it('finalizes reviewed drafts into private fixed-template PDF artifacts with applicant contact details', async () => {
     const users = new MemoryUserStore();
     await users.putProfile({ userId: 'student', contact: { name: 'Student Name', email: 'student@example.test' }, location: 'Ithaca, NY', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
-    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: [], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
-    await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [{ changeId: 'change', type: 'add', section: 'Projects', suggestion: 'Built a dashboard', evidenceIds: ['bank'], reason: 'fit', decision: 'accepted' }], revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'bank', kind: 'project', content: 'Built a dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: ['bank'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [{ changeId: 'change', type: 'add', target: { kind: 'project', bankItemId: 'bank' }, section: 'Projects', suggestion: 'Built a dashboard', evidenceIds: ['bank'], reason: 'fit', decision: 'accepted' }], revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now' });
     const putTex = vi.fn(); const putPdf = vi.fn(); const putPreview = vi.fn();
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex, putPdf, putPreview, compile: async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer] }) } });
     const finalized = await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }));

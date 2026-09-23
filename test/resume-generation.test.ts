@@ -4,10 +4,10 @@ import { parseResumeChanges } from '../src/resume-generation.js';
 describe('resume model output parsing', () => {
   it('accepts the four structured change types and assigns server identifiers', () => {
     const changes = parseResumeChanges({ response: JSON.stringify({ changes: [
-      { type: 'add', section: 'Projects', suggestion: 'Built dashboard', evidenceIds: ['a'], reason: 'matches role' },
-      { type: 'rewrite', section: 'Experience', original: 'Built app', suggestion: 'Built app', evidenceIds: ['b'], reason: 'clearer wording' },
-      { type: 'move', section: 'Skills', original: 'TypeScript', evidenceIds: ['c'], reason: 'surface relevant skill' },
-      { type: 'remove', section: 'Projects', original: 'Old item', evidenceIds: ['d'], reason: 'less relevant' },
+      { type: 'add', target: { kind: 'project', bankItemId: 'a' }, section: 'Projects', suggestion: 'Built dashboard', evidenceIds: ['a'], reason: 'matches role' },
+      { type: 'rewrite', target: { kind: 'role', bankItemId: 'b' }, section: 'Experience', original: 'Built app', suggestion: 'Built app', evidenceIds: ['b'], reason: 'clearer wording' },
+      { type: 'move', target: { kind: 'skill', bankItemId: 'c' }, section: 'Skills', original: 'TypeScript', evidenceIds: ['c'], reason: 'surface relevant skill' },
+      { type: 'remove', target: { kind: 'project', bankItemId: 'd' }, section: 'Projects', original: 'Old item', evidenceIds: ['d'], reason: 'less relevant' },
     ] }) });
     expect(changes).toHaveLength(4);
     expect(changes.map((change) => change.type)).toEqual(['add', 'rewrite', 'move', 'remove']);

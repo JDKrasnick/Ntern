@@ -8,7 +8,7 @@ import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolut
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
-import type { ImportedJob, ResumeArtifact, ResumeBankItem, ResumeDraft, ResumeProfile } from '../src/resume.js';
+import { validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
 import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
@@ -1057,6 +1057,7 @@ export class D1UserStore implements UserStore {
   async listResumeBank(userId: string) { return this.list<ResumeBankItem>(userId, 'RESUME_BANK#'); }
   getResumeBankItem(userId: string, bankItemId: string) { return this.get<ResumeBankItem>(userId, `RESUME_BANK#${bankItemId}`); }
   async putResumeBankItem(value: ResumeBankItem, expectedRevision?: number): Promise<boolean> {
+    validateResumeBankItemPlacement(value, await this.listResumeBank(value.userId));
     const key = `RESUME_BANK#${value.bankItemId}`;
     if (expectedRevision === undefined) {
       const result = await this.db.prepare(`

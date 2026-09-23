@@ -13,6 +13,10 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('"/me/resume-bank/import"');
     expect(app).toContain('Sync all items to technical base');
     expect(app).toContain('method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true })');
+    expect(app).toContain('type ResumeBankRef =');
+    expect(app).toContain('kind: "bullet"; bankItemId: string; parent:');
+    expect(app).toContain('bankEntryKind === "bullet" && selectedBankParent');
+    expect(app).toContain('Add a project, role, or education parent before adding its bullets.');
   });
 
   it('offers an adaptive review workspace with evidence and explicit decisions', () => {

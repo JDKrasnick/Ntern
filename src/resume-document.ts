@@ -1,6 +1,9 @@
 import { unzipSync } from 'fflate';
+import type { ResumeBankParentKind, ResumeBankRootKind } from './resume.js';
 
-export type ExtractedResumeItem = { kind: 'role' | 'project' | 'skill' | 'education' | 'bullet'; content: string; sourceLocation: string };
+export type ExtractedResumeItem =
+  | { localId: string; kind: ResumeBankRootKind; content: string; sourceLocation: string }
+  | { localId: string; kind: 'bullet'; parent: { kind: ResumeBankParentKind; localId: string }; content: string; sourceLocation: string };
 
 const cleanXml = (value: string) => value
   .replace(/<w:tab\/>/gu, ' ').replace(/<\/w:p>/gu, '\n').replace(/<[^>]+>/gu, '')
@@ -98,19 +101,26 @@ function pdfTextItemsToLines(items: readonly unknown[]) {
 }
 
 export function extractResumeBankItems(text: string, limit = 500): ExtractedResumeItem[] {
-  let section: ExtractedResumeItem['kind'] = 'bullet';
+  let section: ResumeBankRootKind = 'project';
+  let parent: { kind: ResumeBankParentKind; localId: string } | undefined;
   const items: ExtractedResumeItem[] = [];
   for (const [index, raw] of text.split(/\r?\n/gu).entries()) {
     const line = raw.replace(/\s+/gu, ' ').trim();
     if (!line) continue;
     const heading = line.toLowerCase().replace(/[^a-z]/gu, '');
-    if (/^(?:professional)?(?:experience|employment|workhistory)(?:bank)?$/u.test(heading)) { section = 'role'; continue; }
-    if (/^(?:projects?|research)(?:bank.*)?$/u.test(heading)) { section = 'project'; continue; }
-    if (/^(?:technical)?(?:skill|skills|technology|technologies|tools)(?:masterinventory)?$/u.test(heading)) { section = 'skill'; continue; }
-    if (/^(?:coreprofile(?:and)?)?(?:education|coursework)(?:bank)?$/u.test(heading)) { section = 'education'; continue; }
+    if (/^(?:professional)?(?:experience|employment|workhistory)(?:bank)?$/u.test(heading)) { section = 'role'; parent = undefined; continue; }
+    if (/^(?:projects?|research)(?:bank.*)?$/u.test(heading)) { section = 'project'; parent = undefined; continue; }
+    if (/^(?:technical)?(?:skill|skills|technology|technologies|tools)(?:masterinventory)?$/u.test(heading)) { section = 'skill'; parent = undefined; continue; }
+    if (/^(?:coreprofile(?:and)?)?(?:education|coursework)(?:bank)?$/u.test(heading)) { section = 'education'; parent = undefined; continue; }
+    const isBullet = /^(?:[-•*]|\d+[.)])\s*/u.test(line);
     const content = line.replace(/^(?:[-•*]|\d+[.)])\s*/u, '').trim();
     if (content.length < 2 || content.length > 2_000 || items.some((item) => item.content === content)) continue;
-    items.push({ kind: section, content, sourceLocation: `line ${index + 1}` });
+    const localId = `line-${index + 1}`;
+    if (isBullet && parent) items.push({ localId, kind: 'bullet', parent, content, sourceLocation: `line ${index + 1}` });
+    else {
+      items.push({ localId, kind: section, content, sourceLocation: `line ${index + 1}` });
+      parent = section === 'skill' ? undefined : { kind: section, localId };
+    }
     if (items.length >= limit) break;
   }
   return items;

@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, recommendResumeProfiles, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, parseResumeBankParentRef, recommendResumeProfiles, resumeBankItemRef, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 import type { ResumeSemanticIndex } from './resume-embeddings.js';
@@ -425,12 +425,19 @@ function resumeStrings(value: unknown, field: string, limit = 24): string[] {
   if (!Array.isArray(value) || value.length > limit || value.some((item) => typeof item !== 'string' || !item.trim() || item.length > 160)) throw new Error(`${field} must be a short text list`);
   return value.map((item) => item.trim());
 }
+function resumeSectionForItem(item: ResumeBankItem): string {
+  const kind = item.kind === 'bullet' ? item.parent.kind : item.kind;
+  if (kind === 'skill') return 'Skills';
+  if (kind === 'project') return 'Projects';
+  if (kind === 'education') return 'Education';
+  return 'Experience';
+}
 function resumeDraftChanges(job: ImportedJob, bankItems: ResumeBankItem[]): ResumeChange[] {
   const jobWords = new Set(job.description.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
   return bankItems.filter((item) => item.verified).flatMap((item) => {
     const matched = (item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []).filter((word) => jobWords.has(word));
     if (!matched.length) return [];
-    return [{ changeId: randomUUID(), type: 'move' as const, section: item.kind === 'skill' ? 'Skills' : 'Selected experience', original: item.content, evidenceIds: [item.bankItemId], reason: `Matches job language: ${[...new Set(matched)].slice(0, 3).join(', ')}.` }];
+    return [{ changeId: randomUUID(), type: 'move' as const, target: resumeBankItemRef(item), section: resumeSectionForItem(item), original: item.content, evidenceIds: [item.bankItemId], reason: `Matches job language: ${[...new Set(matched)].slice(0, 3).join(', ')}.` }];
   }).slice(0, 12);
 }
 
@@ -438,10 +445,30 @@ function resumeDraftChanges(job: ImportedJob, bankItems: ResumeBankItem[]): Resu
  * retaining the source records with the strongest direct job-language match. */
 function resumeGenerationEvidence(job: ImportedJob, bankItems: ResumeBankItem[], limit = 80): ResumeBankItem[] {
   const jobWords = new Set(`${job.title ?? ''} ${job.company ?? ''} ${job.description}`.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
-  return bankItems.map((item, index) => ({
+  const ranked = bankItems.map((item, index) => ({
     item, index,
     score: [...new Set(item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? [])].filter((word) => jobWords.has(word)).length,
-  })).filter(({ score }) => score > 0).sort((left, right) => right.score - left.score || left.index - right.index).slice(0, limit).map(({ item }) => item);
+  })).filter(({ score }) => score > 0).sort((left, right) => right.score - left.score || left.index - right.index).map(({ item }) => item);
+  const byId = new Map(bankItems.map((item) => [item.bankItemId, item]));
+  const selected = new Map<string, ResumeBankItem>();
+  for (const item of ranked) {
+    const required = item.kind === 'bullet' ? [byId.get(item.parent.bankItemId), item].filter((value): value is ResumeBankItem => Boolean(value)) : [item];
+    if (required.some((value) => !selected.has(value.bankItemId)) && selected.size + required.filter((value) => !selected.has(value.bankItemId)).length > limit) continue;
+    for (const value of required) selected.set(value.bankItemId, value);
+    if (selected.size >= limit) break;
+  }
+  return [...selected.values()];
+}
+
+function validateResumeProfileSelection(bankItemIds: readonly string[], bank: readonly ResumeBankItem[]): void {
+  validateResumeBankGraph(bank);
+  const selected = new Set(bankItemIds);
+  const byId = new Map(bank.map((item) => [item.bankItemId, item]));
+  if (bankItemIds.some((id) => !byId.has(id))) throw new Error('A resume profile may only reference your bank items');
+  if (bankItemIds.some((id) => {
+    const item = byId.get(id)!;
+    return item.kind === 'bullet' && !selected.has(item.parent.bankItemId);
+  })) throw new Error('A resume profile must include a bullet\'s parent object');
 }
 export function createApiHandler(dependencies: ApiDependencies) {
   const identityUnconfirmedPublicationEnabled = dependencies.identityUnconfirmedPublicationEnabled ?? true;
@@ -629,14 +656,19 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (method === 'POST') {
             const body = parseBody(event);
             if (!resumeKinds.has(body.kind as ResumeBankItem['kind'])) return reply(400, { message: 'kind is not supported' });
-            const item: ResumeBankItem = {
-              userId, bankItemId: randomUUID(), kind: body.kind as ResumeBankItem['kind'], content: resumeText(body.content, 'content'),
+            const base = {
+              userId, bankItemId: randomUUID(), content: resumeText(body.content, 'content'),
               ...(typeof body.sourceDocumentId === 'string' && body.sourceDocumentId ? { sourceDocumentId: body.sourceDocumentId.slice(0, 160) } : {}),
               ...(typeof body.sourceLocation === 'string' && body.sourceLocation ? { sourceLocation: body.sourceLocation.slice(0, 500) } : {}),
               // The user authored this private source material. Review is reserved
               // for job-specific changes derived from it, not every stored fact.
               verified: true, revision: 0, createdAt: timestamp, updatedAt: timestamp,
             };
+            const bank = await dependencies.users.listResumeBank(userId);
+            const item: ResumeBankItem = body.kind === 'bullet'
+              ? { ...base, kind: 'bullet', parent: parseResumeBankParentRef(body.parent) }
+              : { ...base, kind: body.kind as ResumeBankRootKind };
+            validateResumeBankItemPlacement(item, bank);
             if (!await dependencies.users.putResumeBankItem(item)) return reply(409, { message: 'Resume bank item already exists; retry' });
             try { await dependencies.resumeSemanticIndex?.index(item); } catch { /* D1 remains authoritative if the derived cache is unavailable. */ }
             return reply(201, item);
@@ -648,10 +680,18 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const documentId = resumeText(body.documentId, 'documentId', 160);
           const document = (await dependencies.users.listDocuments(userId)).find((item) => item.documentId === documentId);
           if (!document) return reply(404, { message: 'Document not found' });
-          const items = await (dependencies.resumeDocumentExtractor ?? extractResumeDocument)(await documentStorage.readContent(document), document.contentType);
+          const items = (await (dependencies.resumeDocumentExtractor ?? extractResumeDocument)(await documentStorage.readContent(document), document.contentType)).slice(0, 500);
           const created: ResumeBankItem[] = [];
-          for (const extracted of items.slice(0, 500)) {
-            const item: ResumeBankItem = { userId, bankItemId: randomUUID(), kind: extracted.kind, content: extracted.content, sourceDocumentId: document.documentId, sourceLocation: extracted.sourceLocation, verified: true, revision: 0, createdAt: timestamp, updatedAt: timestamp };
+          const ids = new Map(items.map((item) => [item.localId, randomUUID()]));
+          if (items.some((item) => item.kind === 'bullet' && !ids.has(item.parent.localId))) return reply(400, { message: 'An imported bullet is missing its parent object' });
+          const importedItems = [...items.filter((item) => item.kind !== 'bullet'), ...items.filter((item) => item.kind === 'bullet')].map((extracted): ResumeBankItem => {
+            const base = { userId, bankItemId: ids.get(extracted.localId)!, content: extracted.content, sourceDocumentId: document.documentId, sourceLocation: extracted.sourceLocation, verified: true, revision: 0, createdAt: timestamp, updatedAt: timestamp };
+            return extracted.kind === 'bullet'
+              ? { ...base, kind: 'bullet', parent: { kind: extracted.parent.kind, bankItemId: ids.get(extracted.parent.localId)! } }
+              : { ...base, kind: extracted.kind };
+          });
+          validateResumeBankGraph([...await dependencies.users.listResumeBank(userId), ...importedItems]);
+          for (const item of importedItems) {
             if (await dependencies.users.putResumeBankItem(item)) created.push(item);
           }
           return reply(201, { items: created });
@@ -662,12 +702,11 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (!previous) return reply(404, { message: 'Resume bank item not found' });
           const body = parseBody(event);
           if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
-          if (body.kind !== undefined && !resumeKinds.has(body.kind as ResumeBankItem['kind'])) return reply(400, { message: 'kind is not supported' });
+          if (body.kind !== undefined || body.parent !== undefined) return reply(400, { message: 'kind and parent are immutable; create a new structured item instead' });
           if (body.verified !== undefined && typeof body.verified !== 'boolean') return reply(400, { message: 'verified must be a boolean' });
           const updated: ResumeBankItem = {
             ...previous,
             ...(body.content === undefined ? {} : { content: resumeText(body.content, 'content') }),
-            ...(body.kind === undefined ? {} : { kind: body.kind as ResumeBankItem['kind'] }),
             ...(body.verified === undefined ? {} : { verified: body.verified }),
             revision: previous.revision + 1, updatedAt: timestamp,
           };
@@ -754,8 +793,8 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const template = body.template as ResumeTemplateId;
             if (!resumeTemplates.has(template)) return reply(400, { message: 'template is not supported' });
             const bankItemIds = resumeStrings(body.bankItemIds, 'bankItemIds', 500);
-            const owned = new Set((await dependencies.users.listResumeBank(userId)).map((item) => item.bankItemId));
-            if (bankItemIds.some((id) => !owned.has(id))) return reply(403, { message: 'A resume profile may only reference your bank items' });
+            try { validateResumeProfileSelection(bankItemIds, await dependencies.users.listResumeBank(userId)); }
+            catch (error) { return reply(403, { message: error instanceof Error ? error.message : 'Invalid resume profile selection' }); }
             const profile: ResumeProfile = {
               userId, profileId: randomUUID(), name: resumeText(body.name, 'name', 120), tags: resumeStrings(body.tags ?? [], 'tags'), bankItemIds,
               sectionOrder: resumeStrings(body.sectionOrder ?? [], 'sectionOrder', 32), template, approvedWording: {}, bankRevision: 0, revision: 0, createdAt: timestamp, updatedAt: timestamp,
@@ -782,8 +821,8 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const template = body.template === undefined ? previous.template : body.template as ResumeTemplateId;
             if (!resumeTemplates.has(template)) return reply(400, { message: 'template is not supported' });
             const bankItemIds = body.bankItemIds === undefined ? previous.bankItemIds : resumeStrings(body.bankItemIds, 'bankItemIds', 500);
-            const owned = new Set((await dependencies.users.listResumeBank(userId)).map((item) => item.bankItemId));
-            if (bankItemIds.some((id) => !owned.has(id))) return reply(403, { message: 'A resume profile may only reference your bank items' });
+            try { validateResumeProfileSelection(bankItemIds, await dependencies.users.listResumeBank(userId)); }
+            catch (error) { return reply(403, { message: error instanceof Error ? error.message : 'Invalid resume profile selection' }); }
             const updated: ResumeProfile = {
               ...previous, template, bankItemIds,
               ...(body.name === undefined ? {} : { name: resumeText(body.name, 'name', 120) }),
@@ -889,6 +928,14 @@ export function createApiHandler(dependencies: ApiDependencies) {
             dependencies.users.listResumeBank(userId),
           ]);
           if (!profile) return reply(404, { message: 'Resume profile not found' });
+          const allowed = new Set(profile.bankItemIds);
+          const selected = bankItems.filter((item) => allowed.has(item.bankItemId));
+          try {
+            validateResumeProfileSelection(profile.bankItemIds, bankItems);
+            validateResumeChanges(previous.changes, selected);
+          } catch (error) {
+            return reply(409, { message: error instanceof Error ? error.message : 'The resume source graph is no longer valid' });
+          }
           if (!applicant?.contact.name.trim() || !applicant.contact.email.trim()) return reply(409, { message: 'Complete your name and email in your profile before creating a PDF résumé' });
           const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
           const rendered = renderResumeLatex(profile, applicant, updated, bankItems);
