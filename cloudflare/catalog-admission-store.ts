@@ -1452,24 +1452,28 @@ export class D1CatalogAdmissionStore {
 
   async leaseDueVerifications(now: string, limit = DESTINATION_VERIFICATION_LEASE_LIMIT, leaseMs = 15 * 60_000): Promise<ScheduledDestinationVerification[]> {
     const boundedLimit = Math.max(1, Math.min(limit, DESTINATION_VERIFICATION_LEASE_LIMIT));
-    const rows = await this.db.prepare(`SELECT * FROM destination_verification_schedule
-      WHERE next_check_at <= ? AND (lease_until IS NULL OR lease_until <= ?)
-      ORDER BY next_check_at, occurrence_key LIMIT ?`).bind(now, now, boundedLimit).all<Record<string, unknown>>();
-    const leased: ScheduledDestinationVerification[] = [];
-    for (const row of rows.results) {
-      const leaseToken = crypto.randomUUID();
-      const leaseUntil = new Date(Date.parse(now) + leaseMs).toISOString();
-      const result = await this.db.prepare(`UPDATE destination_verification_schedule SET lease_token = ?, lease_until = ?, updated_at = ?
-        WHERE occurrence_key = ? AND (lease_until IS NULL OR lease_until <= ?)`).bind(leaseToken, leaseUntil, now, row.occurrence_key, now).run();
-      if (!result.meta.changes) continue;
-      leased.push({
-        occurrenceKey: row.occurrence_key as string, jobId: row.job_id as string, sourceId: row.source_id as string,
-        externalId: row.external_id as string, candidateUrl: row.candidate_url as string,
-        providerIdentity: JSON.parse(row.provider_identity as string) as ProviderIdentity,
-        nextCheckAt: row.next_check_at as string, leaseToken,
-      });
-    }
-    return leased;
+    const leaseUntil = new Date(Date.parse(now) + leaseMs).toISOString();
+    // Claim the ordered page atomically. A 300-row sweep used to issue one
+    // SELECT plus 300 UPDATE requests against the shared D1 database.
+    const rows = await this.db.prepare(`WITH due AS MATERIALIZED (
+        SELECT occurrence_key FROM destination_verification_schedule
+        WHERE next_check_at <= ? AND (lease_until IS NULL OR lease_until <= ?)
+        ORDER BY next_check_at, occurrence_key LIMIT ?
+      )
+      UPDATE destination_verification_schedule
+      SET lease_token = lower(hex(randomblob(16))), lease_until = ?, updated_at = ?
+      WHERE occurrence_key IN (SELECT occurrence_key FROM due)
+        AND next_check_at <= ? AND (lease_until IS NULL OR lease_until <= ?)
+      RETURNING occurrence_key, job_id, source_id, external_id, candidate_url,
+        provider_identity, next_check_at, lease_token`)
+      .bind(now, now, boundedLimit, leaseUntil, now, now, now)
+      .all<Record<string, unknown>>();
+    return rows.results.map((row) => ({
+      occurrenceKey: row.occurrence_key as string, jobId: row.job_id as string, sourceId: row.source_id as string,
+      externalId: row.external_id as string, candidateUrl: row.candidate_url as string,
+      providerIdentity: JSON.parse(row.provider_identity as string) as ProviderIdentity,
+      nextCheckAt: row.next_check_at as string, leaseToken: row.lease_token as string,
+    })).sort((a, b) => a.nextCheckAt.localeCompare(b.nextCheckAt) || a.occurrenceKey.localeCompare(b.occurrenceKey));
   }
 
   async markVerificationEnqueued(occurrenceKey: string, leaseToken: string, enqueuedAt: string): Promise<void> {

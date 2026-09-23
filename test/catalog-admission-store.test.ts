@@ -450,8 +450,16 @@ describe('D1 catalog admission operations', () => {
     expect(database.prepare('SELECT count(*) AS count FROM destination_verification_schedule').get()).toEqual({ count: 1_100 });
     expect(database.prepare('SELECT count(*) AS count FROM destination_verification_schedule_sync').get()).toEqual({ count: 0 });
     budget.used = 0;
-    await expect(store.leaseDueVerifications('2026-09-02T00:00:00Z', 1_000)).resolves.toHaveLength(DESTINATION_VERIFICATION_LEASE_LIMIT);
-    expect(budget.used).toBe(DESTINATION_VERIFICATION_LEASE_LIMIT + 1);
+    const leased = await store.leaseDueVerifications('2026-09-02T00:00:00Z', 1_000);
+    expect(leased).toHaveLength(DESTINATION_VERIFICATION_LEASE_LIMIT);
+    expect(new Set(leased.map((row) => row.leaseToken)).size).toBe(DESTINATION_VERIFICATION_LEASE_LIMIT);
+    expect(budget.used).toBe(1);
+    budget.used = 0;
+    const next = await store.leaseDueVerifications('2026-09-02T00:00:00Z', 1_000);
+    expect(next).toHaveLength(DESTINATION_VERIFICATION_LEASE_LIMIT);
+    const claimedKeys = new Set(leased.map((row) => row.occurrenceKey));
+    expect(next.some((row) => claimedKeys.has(row.occurrenceKey))).toBe(false);
+    expect(budget.used).toBe(1);
   });
 
   it('leases due occurrence checks once and resumes after the lease expires', async () => {
