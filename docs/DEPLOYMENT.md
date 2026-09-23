@@ -67,6 +67,14 @@ public job-page text; uploaded résumé source material, extracted bank cards,
 drafts, and generated artifacts remain user-scoped and are deleted with the
 account.
 
+The résumé API also stores a provider-neutral subscription entitlement and a
+UTC monthly usage counter in the same account-scoped D1 table. Paid upgrades
+must remain unavailable until App Store products, server-side transaction
+verification, App Store Server Notifications, restore-purchase behavior, and
+sandbox acceptance are complete. Never write an entitlement from an
+unverified mobile request. Accounts without an active or grace-period verified
+entitlement receive the Free allowance of two new tailored reviews per month.
+
 Before enabling the flag, provision the `intern-notifs-resume-bank-v1`
 Vectorize index using the `@cf/baai/bge-base-en-v1.5` preset and create its
 metadata indexes before inserting any vectors. The API stores no raw account ID

@@ -33,13 +33,14 @@ describe('account data controls', () => {
     const response = await handler(event('mock-full', 'GET', '/me/export'));
     expect(response.statusCode).toBe(200);
     expect(json(response)).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       exportedAt: '2026-08-26T12:00:00.000Z',
       account: {
         profile: expect.objectContaining({ userId: 'mock-full', contact: { name: 'QA Student', email: 'qa@example.test' } }),
         applications: [expect.objectContaining({ applicationId: 'application-1', status: 'interview' })],
         documents: [{ documentId: 'document-1', fileName: 'resume.pdf', contentType: 'application/pdf', createdAt: '2026-08-23T00:00:00.000Z' }],
         resume: { bankItems: [], profiles: [], drafts: [], imports: [], artifacts: [] },
+        subscription: { entitlement: null, tailoredDraftsUsedThisPeriod: 0, period: '2026-08' },
       },
     });
     expect(response.body).not.toContain('secret-storage-key');
@@ -50,8 +51,8 @@ describe('account data controls', () => {
   it('exports an empty account and rejects signed-out export and deletion', async () => {
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users: new MemoryUserStore(), now: () => '2026-08-26T12:00:00.000Z' });
     expect(json(await handler(event('mock-empty', 'GET', '/me/export')))).toEqual({
-      schemaVersion: 2, exportedAt: '2026-08-26T12:00:00.000Z',
-      account: { profile: null, applications: [], documents: [], resume: { bankItems: [], profiles: [], drafts: [], imports: [], artifacts: [] } },
+      schemaVersion: 3, exportedAt: '2026-08-26T12:00:00.000Z',
+      account: { profile: null, applications: [], documents: [], resume: { bankItems: [], profiles: [], drafts: [], imports: [], artifacts: [] }, subscription: { entitlement: null, tailoredDraftsUsedThisPeriod: 0, period: '2026-08' } },
     });
     expect((await handler(event(undefined, 'GET', '/me/export'))).statusCode).toBe(401);
     expect((await handler(event(undefined, 'DELETE', '/me'))).statusCode).toBe(401);

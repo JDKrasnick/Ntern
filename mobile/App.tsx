@@ -5457,6 +5457,12 @@ type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bank
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
 type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
 type ResumeArtifactCard = { artifactId: string; pageCount?: number };
+type ResumeSubscriptionCard = {
+  tier: "free" | "plus" | "pro";
+  plan: { name: string; priceUsdMonthly: number; tailoredDraftsPerMonth: number };
+  usage: { period: string; used: number; limit: number; remaining: number };
+  plans: Array<{ tier: "free" | "plus" | "pro"; name: string; priceUsdMonthly: number; tailoredDraftsPerMonth: number }>;
+};
 
 function ResumeWorkspace({ token }: { token: string }) {
   const { width } = useWindowDimensions();
@@ -5481,6 +5487,7 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [artifactPreview, setArtifactPreview] = useState<string>();
   const [artifactSource, setArtifactSource] = useState("");
   const [artifactLoading, setArtifactLoading] = useState(false);
+  const [subscription, setSubscription] = useState<ResumeSubscriptionCard>();
   const current = draft?.changes[activeChange];
   const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
   const decide = (decision: "accepted" | "rejected") => {
@@ -5519,13 +5526,15 @@ function ResumeWorkspace({ token }: { token: string }) {
     void api<{ items: ResumeBankCard[] }>("/me/resume-bank", token)
       .then(async ({ items }) => {
         setBankItems(items);
-        const [{ profiles: savedProfiles }, { imports }] = await Promise.all([
+        const [{ profiles: savedProfiles }, { imports }, currentSubscription] = await Promise.all([
           api<{ profiles: ResumeProfileCard[] }>("/me/resume-profiles", token),
           api<{ imports: ResumeImportCard[] }>("/me/resume-imports", token),
+          api<ResumeSubscriptionCard>("/me/subscription", token),
         ]);
         setProfiles(savedProfiles);
         setSelectedProfileId((selected) => selected ?? savedProfiles[0]?.profileId);
         setJobImport(imports.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]);
+        setSubscription(currentSubscription);
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't load your Master Bank."))
       .finally(() => setBankLoading(false));
@@ -5628,7 +5637,10 @@ function ResumeWorkspace({ token }: { token: string }) {
     if (!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy) return;
     setResumeBusy(true);
     void api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: selectedProfileId }) })
-      .then((value) => { setDraft(value); setActiveChange(0); setArtifact(undefined); setArtifactSource(""); setArtifactPreview(undefined); setReviewMode("changes"); })
+      .then((value) => {
+        setDraft(value); setActiveChange(0); setArtifact(undefined); setArtifactSource(""); setArtifactPreview(undefined); setReviewMode("changes");
+        setSubscription((currentPlan) => currentPlan ? { ...currentPlan, usage: { ...currentPlan.usage, used: currentPlan.usage.used + 1, remaining: Math.max(0, currentPlan.usage.remaining - 1) } } : currentPlan);
+      })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create a grounded draft."))
       .finally(() => setResumeBusy(false));
   };
@@ -5675,6 +5687,28 @@ function ResumeWorkspace({ token }: { token: string }) {
           <Text style={styles.resumeTrustCopy}>Your imported source stays trusted. Only job-specific additions, removals, moves, and rewrites need a decision.</Text>
         </View>
       </View>
+
+      {subscription ? (
+        <View style={styles.resumePlanSection}>
+          <View style={styles.resumeSectionHeading}>
+            <View>
+              <Text style={styles.sectionTitle}>Tailoring plan</Text>
+              <Text style={styles.resumeSectionDescription}>{subscription.plan.name} · {subscription.usage.used} of {subscription.usage.limit} tailored reviews used this month. Your technical base, saved diffs, and downloads stay available.</Text>
+            </View>
+            <Text style={styles.resumePlanRemaining}>{subscription.usage.remaining} left</Text>
+          </View>
+          <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
+            {subscription.plans.map((plan) => (
+              <View key={plan.tier} style={[styles.resumePlanCard, subscription.tier === plan.tier && styles.resumePlanCardCurrent]}>
+                <Text style={styles.resumePlanName}>{plan.name}</Text>
+                <Text style={styles.resumePlanPrice}>{plan.priceUsdMonthly ? `$${plan.priceUsdMonthly.toFixed(2)}/month` : "$0"}</Text>
+                <Text style={styles.resumePlanDetail}>{plan.tailoredDraftsPerMonth} tailored reviews/month</Text>
+                <Text style={styles.resumePlanState}>{subscription.tier === plan.tier ? "Current plan" : plan.tier === "free" ? "Included" : "App Store purchase coming next"}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      ) : null}
 
       <View style={styles.resumeBankComposer}>
         <Text style={styles.inputLabel}>Add source material</Text>
@@ -5763,7 +5797,7 @@ function ResumeWorkspace({ token }: { token: string }) {
             </TouchableOpacity>
           )) : <Text style={styles.resumeSectionDescription}>Save a base after adding the experience you want to reuse.</Text>}
         </View>
-        <View style={styles.resumeBankComposerAction}><ActionButton label="Create grounded review" onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy} /></View>
+        <View style={styles.resumeBankComposerAction}><ActionButton label={subscription?.usage.remaining === 0 ? "Monthly limit reached" : "Create grounded review"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy || subscription?.usage.remaining === 0} /></View>
       </View>
 
       <View style={styles.resumeSection}>
@@ -8357,6 +8391,16 @@ const styles = StyleSheet.create({
   resumeTrustCard: { backgroundColor: "rgba(255,255,255,0.1)", borderColor: "rgba(255,255,255,0.16)", borderRadius: 14, borderWidth: 1, flexBasis: 230, flexGrow: 0, padding: 14 },
   resumeTrustTitle: { color: colors.onDark, fontSize: 15, fontWeight: "800", marginTop: 9 },
   resumeTrustCopy: { color: "#D1D5DB", fontSize: 13, lineHeight: 18, marginTop: 3 },
+  resumePlanSection: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, marginBottom: 20, padding: 18 },
+  resumePlanRemaining: { backgroundColor: colors.signalSoft, borderRadius: 999, color: colors.signal, fontSize: 13, fontWeight: "800", overflow: "hidden", paddingHorizontal: 11, paddingVertical: 7 },
+  resumePlanGrid: { gap: 10, marginTop: 15 },
+  resumePlanGridWide: { flexDirection: "row" },
+  resumePlanCard: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 12, borderWidth: 1, flex: 1, minWidth: 170, padding: 14 },
+  resumePlanCardCurrent: { borderColor: colors.signal, borderWidth: 2 },
+  resumePlanName: { color: colors.ink, fontSize: 16, fontWeight: "800" },
+  resumePlanPrice: { color: colors.ink, fontSize: 14, fontWeight: "700", marginTop: 5 },
+  resumePlanDetail: { color: colors.muted, fontSize: 13, lineHeight: 18, marginTop: 4 },
+  resumePlanState: { color: colors.signal, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 10 },
   resumeBankComposer: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, marginBottom: 8, padding: 16 },
   resumeBankInput: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, color: colors.ink, fontSize: 15, lineHeight: 21, minHeight: 82, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: "top" },
   resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },

@@ -9,6 +9,7 @@ import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, typ
 import { catalogProjectionRoleMatches, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
 import type { ImportedJob, ResumeArtifact, ResumeBankItem, ResumeDraft, ResumeProfile } from '../src/resume.js';
+import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from '../src/identity/projection.js';
@@ -1132,6 +1133,25 @@ export class D1UserStore implements UserStore {
     const result = await this.db.prepare(`INSERT INTO user_items (user_id, item_key, kind, value)
       SELECT ?, ?, 'resume-artifact', ? WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
       ON CONFLICT(user_id, item_key) DO NOTHING`).bind(value.userId, `RESUME_ARTIFACT#${value.artifactId}`, JSON.stringify(value), this.deletionOwner(value.userId)).run();
+    return result.meta.changes > 0;
+  }
+  getResumeSubscription(userId: string) { return this.get<ResumeSubscription>(userId, 'RESUME_SUBSCRIPTION'); }
+  putResumeSubscription(value: ResumeSubscription) { return this.put(value.userId, 'RESUME_SUBSCRIPTION', 'resume-subscription', value); }
+  async getResumeDraftUsage(userId: string, period: string): Promise<number> {
+    const value = await this.get<{ used?: number }>(userId, `RESUME_USAGE#${period}`);
+    return Number.isFinite(value?.used) ? Math.max(0, Math.floor(value!.used!)) : 0;
+  }
+  async claimResumeDraftAllowance(userId: string, period: string, limit: number, timestamp: string): Promise<boolean> {
+    const key = `RESUME_USAGE#${period}`;
+    const result = await this.db.prepare(`
+      INSERT INTO user_items (user_id, item_key, kind, value)
+      SELECT ?, ?, 'resume-subscription-usage', ?
+      WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+      ON CONFLICT(user_id, item_key) DO UPDATE SET
+        value = json_set(user_items.value, '$.used', CAST(json_extract(user_items.value, '$.used') AS INTEGER) + 1, '$.updatedAt', ?)
+      WHERE user_items.kind = 'resume-subscription-usage'
+        AND CAST(json_extract(user_items.value, '$.used') AS INTEGER) < ?
+    `).bind(userId, key, JSON.stringify({ period, used: 1, updatedAt: timestamp }), this.deletionOwner(userId), timestamp, limit).run();
     return result.meta.changes > 0;
   }
   getReceipt(userId: string, dedupeKey: string, token: string) { return this.get<DeliveryReceipt>(userId, `RECEIPT#${dedupeKey}#${token}`); }

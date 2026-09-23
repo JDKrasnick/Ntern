@@ -16,6 +16,7 @@ import { normalizeResumeJobUrl, recommendResumeProfiles, validateResumeChanges, 
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 import type { ResumeSemanticIndex } from './resume-embeddings.js';
+import { effectiveResumeSubscriptionPlan, resumeSubscriptionPeriod, resumeSubscriptionSummary } from './subscription.js';
 
 type ApiEvent = { requestContext?: { authorizer?: { jwt?: { claims?: Record<string, string> } }; http?: { method?: string }; requestId?: string }; rawPath?: string; routeKey?: string; pathParameters?: Record<string, string>; queryStringParameters?: Record<string, string>; headers?: Record<string, string | undefined>; body?: string | null };
 type ApiResponse = { statusCode: number; headers: Record<string, string>; body: string };
@@ -614,6 +615,12 @@ export function createApiHandler(dependencies: ApiDependencies) {
       if (!deletingAccount && method !== 'GET' && method !== 'HEAD' && await dependencies.users.isUserDeletionPending(userId)) {
         return reply(409, { code: 'ACCOUNT_DELETION_IN_PROGRESS', retryable: false, message: 'Account deletion is already in progress. Finish or retry deletion before changing account data.' });
       }
+      if (method === 'GET' && path === '/me/subscription') {
+        const timestamp = dependencies.now?.() ?? now();
+        const subscription = await dependencies.users.getResumeSubscription(userId);
+        const period = resumeSubscriptionPeriod(timestamp);
+        return reply(200, resumeSubscriptionSummary(subscription, await dependencies.users.getResumeDraftUsage(userId, period), timestamp));
+      }
       if (path.startsWith('/me/resume-')) {
         if (!resumeTunerEnabled) return reply(404, { message: 'Resume tailoring is not enabled' });
         const timestamp = dependencies.now?.() ?? now();
@@ -800,6 +807,17 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (!profile) return reply(404, { message: 'Resume profile not found' });
             if (!imported) return reply(404, { message: 'Imported job not found' });
             if (imported.status !== 'ready') return reply(409, { message: 'The job description is still pending. Paste it manually to continue.' });
+            const subscription = await dependencies.users.getResumeSubscription(userId);
+            const plan = effectiveResumeSubscriptionPlan(subscription);
+            const period = resumeSubscriptionPeriod(timestamp);
+            if (!await dependencies.users.claimResumeDraftAllowance(userId, period, plan.tailoredDraftsPerMonth, timestamp)) {
+              const used = await dependencies.users.getResumeDraftUsage(userId, period);
+              return reply(402, {
+                code: 'RESUME_SUBSCRIPTION_LIMIT_REACHED',
+                message: `You've used all ${plan.tailoredDraftsPerMonth} ${plan.name} tailored reviews this month.`,
+                subscription: resumeSubscriptionSummary(subscription, used, timestamp),
+              });
+            }
             const allowed = new Set(profile.bankItemIds);
             const selected = bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified);
             let changes: ResumeChange[];
@@ -961,7 +979,9 @@ export function createApiHandler(dependencies: ApiDependencies) {
       if (method === 'GET' && path === '/me/profile') return reply(200, (await dependencies.users.getProfile(userId)) ?? null);
       if (method === 'PUT' && path === '/me/profile') { const profile = requireProfile(parseBody(event), userId); await dependencies.users.putProfile(profile); return reply(200, profile); }
       if (method === 'GET' && path === '/me/export') {
-        const [profile, applications, documents, resumeBank, resumeProfiles, resumeDrafts, resumeImports, resumeArtifacts] = await Promise.all([
+        const exportedAt = dependencies.now?.() ?? now();
+        const subscriptionPeriod = resumeSubscriptionPeriod(exportedAt);
+        const [profile, applications, documents, resumeBank, resumeProfiles, resumeDrafts, resumeImports, resumeArtifacts, subscription, tailoredDraftsUsedThisPeriod] = await Promise.all([
           dependencies.users.getProfile(userId),
           dependencies.users.listApplications(userId),
           dependencies.users.listDocuments(userId),
@@ -970,15 +990,18 @@ export function createApiHandler(dependencies: ApiDependencies) {
           dependencies.users.listResumeDrafts(userId),
           dependencies.users.listImportedResumeJobs(userId),
           dependencies.users.listResumeArtifacts(userId),
+          dependencies.users.getResumeSubscription(userId),
+          dependencies.users.getResumeDraftUsage(userId, subscriptionPeriod),
         ]);
         const exported: AccountDataExport = {
           schemaVersion: ACCOUNT_EXPORT_SCHEMA_VERSION,
-          exportedAt: dependencies.now?.() ?? now(),
+          exportedAt,
           account: {
             profile: profile ?? null,
             applications,
             documents: documents.map(({ documentId, fileName, contentType, createdAt }) => ({ documentId, fileName, contentType, createdAt })),
             resume: { bankItems: resumeBank, profiles: resumeProfiles, drafts: resumeDrafts, imports: resumeImports, artifacts: resumeArtifacts },
+            subscription: { entitlement: subscription ?? null, tailoredDraftsUsedThisPeriod, period: subscriptionPeriod },
           },
         };
         return reply(200, exported);

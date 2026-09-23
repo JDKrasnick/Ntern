@@ -28,4 +28,11 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('shareResumeArtifact(artifact.artifactId, token)');
     expect(app).toContain('pollResumeImport(() => api<ResumeImportCard>');
   });
+
+  it('shows server-owned plans and disables new tailoring at the monthly limit', () => {
+    expect(app).toContain('api<ResumeSubscriptionCard>("/me/subscription", token)');
+    expect(app).toContain('<Text style={styles.sectionTitle}>Tailoring plan</Text>');
+    expect(app).toContain('App Store purchase coming next');
+    expect(app).toContain('subscription?.usage.remaining === 0 ? "Monthly limit reached"');
+  });
 });

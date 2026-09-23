@@ -14,8 +14,12 @@
 - Prefer official employer career sources and openly maintained, attributed public lists.
 - Never automate a non-partner submission; users review and submit official forms themselves.
 - Core experience remains free, simple, privacy-respecting, and suitable for open-source development.
+- Browsing, alerts, application tracking, the technical résumé bank, diff review, and prior downloads stay free to access; only creation of new AI-tailored résumé reviews has a monthly allowance.
 
 ## Milestones
+
+- [x] Add the provider-neutral résumé subscription foundation: Free ($0, 2 tailored reviews/month), Plus ($4.99, 25/month), and Pro ($9.99, 100/month), with atomic server-side usage enforcement and no client-granted entitlement.
+- [ ] Configure App Store subscription products, verify transactions and App Store Server Notifications on the server, add purchase/restore controls, and complete sandbox review before enabling paid upgrades.
 
 | Milestone | Status | Exit criteria |
 | --- | --- | --- |

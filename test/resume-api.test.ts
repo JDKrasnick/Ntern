@@ -60,6 +60,23 @@ describe('resume API ownership and revisions', () => {
     expect((await handler(event('other', 'GET', `/me/resume-imports/${imported.importId}`))).statusCode).toBe(404);
   });
 
+  it('exposes the current plan and enforces the free monthly draft allowance', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript service', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'TypeScript engineering role', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const generate = vi.fn(async () => []);
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, now: () => '2026-09-23T00:00:00.000Z', resumeDraftGenerator: { generate } });
+
+    expect(JSON.parse((await handler(event('student', 'GET', '/me/subscription'))).body)).toMatchObject({ tier: 'free', plan: { priceUsdMonthly: 0, tailoredDraftsPerMonth: 2 }, usage: { period: '2026-09', used: 0, remaining: 2 } });
+    expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(201);
+    expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(201);
+    const limited = await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }));
+    expect(limited.statusCode).toBe(402);
+    expect(JSON.parse(limited.body)).toMatchObject({ code: 'RESUME_SUBSCRIPTION_LIMIT_REACHED', subscription: { usage: { used: 2, remaining: 0 } } });
+    expect(generate).toHaveBeenCalledTimes(2);
+  });
+
   it('supports the specified resolve, recommendation, decision, and finalization routes', async () => {
     const users = new MemoryUserStore();
     await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });

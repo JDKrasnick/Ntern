@@ -118,6 +118,7 @@ it with this table before publishing the App Privacy answers.
 | App activity → Other user-generated content | Optional | App functionality; application statuses, notes, and answers |
 | Messages → Emails | Optional | App functionality; Gmail sender/subject/date/labels and bounded message text for confirmation detection; message text is not retained |
 | Files and docs → Files and docs | Optional | App functionality; résumé/document storage |
+| Purchases → Purchase history | Optional | App functionality; the app stores subscription tier/status and a provider transaction reference, while Apple handles payment details |
 | Device or other IDs → Device or other IDs | Installation ID required; push token optional | App functionality; security; requested notifications |
 | App info and performance → Other app performance data | Required | App functionality; diagnostics; security |
 

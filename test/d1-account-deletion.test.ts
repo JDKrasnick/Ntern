@@ -41,6 +41,18 @@ function event(userId: string) {
 }
 
 describe('D1 account deletion barrier', () => {
+  it('atomically caps monthly resume draft usage', async () => {
+    const database = new DatabaseSync(':memory:');
+    accountSchema(database);
+    const users = new D1UserStore(sqliteD1(database));
+
+    const claims = await Promise.all(Array.from({ length: 8 }, () => users.claimResumeDraftAllowance('student', '2026-09', 2, '2026-09-23T00:00:00.000Z')));
+    expect(claims.filter(Boolean)).toHaveLength(2);
+    expect(await users.getResumeDraftUsage('student', '2026-09')).toBe(2);
+    expect(await users.getResumeDraftUsage('student', '2026-10')).toBe(0);
+    database.close();
+  });
+
   it("updates a user's release as an employer drop grows", async () => {
     const database = new DatabaseSync(':memory:');
     accountSchema(database);
