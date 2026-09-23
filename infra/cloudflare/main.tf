@@ -206,7 +206,7 @@ resource "cloudflare_workers_script_subdomain" "application" {
   account_id       = var.cloudflare_account_id
   script_name      = cloudflare_workers_script.application.script_name
   enabled          = true
-  previews_enabled = false
+  previews_enabled = true
 }
 
 resource "cloudflare_queue_consumer" "ingestion" {
