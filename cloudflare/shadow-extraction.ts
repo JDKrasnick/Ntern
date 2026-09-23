@@ -369,7 +369,10 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
         await finishRun(env.DB, message, leaseToken, 'invalid-output', now(), { error: 'input identity or version mismatch' }); queued.ack(); continue;
       }
       if (env.SHADOW_EXTRACTION_ENABLED !== 'true' || !inference) {
-        await finishRun(env.DB, message, leaseToken, 'disabled', now(), { error: 'live model execution disabled or credential unavailable' }); queued.ack(); continue;
+        const error = env.SHADOW_EXTRACTION_ENABLED !== 'true'
+          ? 'live model execution disabled by runtime flag'
+          : 'live model credential unavailable';
+        await finishRun(env.DB, message, leaseToken, 'disabled', now(), { error }); queued.ack(); continue;
       }
       const cached = await env.DB.prepare('SELECT response_key, validation, expires_at FROM shadow_extraction_cache WHERE cache_key = ?')
         .bind(message.cacheKey).first<{ response_key: string; validation: string; expires_at: string }>();
