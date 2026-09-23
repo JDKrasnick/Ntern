@@ -110,6 +110,27 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('allows only disabling the reviewed metadata canary', () => {
+    const name = 'LLM_METADATA_PUBLICATION_POLICY_JSON';
+    const enabled = JSON.stringify({ enabled: true, version: 'production-canary-2026-09-09-v1', allowedFields: ['compensation'], cohort: [{ sourceId: 'reviewed' }] });
+    const disabled = JSON.stringify({ enabled: false, version: 'disabled', allowedFields: [], cohort: [] });
+    const change = (beforeText: string, afterText: string) => ({
+      address: 'cloudflare_workers_script.ingestion', actions: ['update'],
+      before: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: beforeText }] },
+      after: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: afterText }] },
+    });
+    expect(validateCloudflarePlan(plan([change(enabled, disabled)]))).toHaveLength(1);
+    for (const next of [
+      JSON.stringify({ enabled: true, version: 'new-canary', allowedFields: [], cohort: [] }),
+      JSON.stringify({ enabled: false, version: 'disabled', allowedFields: ['compensation'], cohort: [] }),
+      '{invalid',
+    ]) {
+      expect(() => validateCloudflarePlan(plan([change(enabled, next)]))).toThrow('Refusing unsafe Cloudflare plan');
+    }
+    expect(() => validateCloudflarePlan(plan([change(disabled, enabled)]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([change(enabled.replace('production-canary-2026-09-09-v1', 'other-canary'), disabled)]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('accepts only the reviewed traffic-controller Durable Object binding addition', () => {
     expect(validateCloudflarePlan(plan([{
       ...contentUpdate,
