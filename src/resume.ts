@@ -235,6 +235,13 @@ export function validateResumeBankItemPlacement(item: ResumeBankItem, bank: read
   validateResumeBankGraph([...bank.filter((existing) => existing.bankItemId !== item.bankItemId), item]);
 }
 
+/** Stable content key for de-duplicating bank items across imports. Root items
+ * key on kind and normalized content; bullets also key on their resolved parent
+ * so the same bullet text under different objects stays distinct. */
+export function resumeBankContentKey(kind: ResumeBankItem['kind'], content: string, parentKey?: string): string {
+  return [kind, parentKey ?? '', content.trim().replace(/\s+/gu, ' ')].join('\u0000');
+}
+
 function bankItemForRef(ref: ResumeBankItemRef, byId: ReadonlyMap<string, ResumeBankItem>): ResumeBankItem | undefined {
   const item = byId.get(ref.bankItemId);
   if (!item || item.kind !== ref.kind) return undefined;

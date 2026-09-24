@@ -5897,6 +5897,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
       });
       if (result.canceled) return;
       setBankSaving(true);
+      const newProfiles: ResumeProfileCard[] = [];
       for (const asset of result.assets) {
         const contentType = asset.mimeType ?? (asset.name.toLowerCase().endsWith(".docx") ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/pdf");
         const response = await api<{ document: { documentId: string }; uploadUrl: string }>("/me/documents", token, { method: "POST", body: JSON.stringify({ fileName: asset.name, contentType }) });
@@ -5904,10 +5905,15 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
         await uploadDocumentContent({ uploadUrl: response.uploadUrl, token, contentType, body: await file.blob() }, { deleteMetadata: () => api(`/me/documents/${encodeURIComponent(response.document.documentId)}`, token, { method: "DELETE" }) });
         const imported = await api<{ items: ResumeBankCard[] }>("/me/resume-bank/import", token, { method: "POST", body: JSON.stringify({ documentId: response.document.documentId }) });
         if (!imported.items.length) throw new Error(`We couldn't find structured résumé content in ${asset.name}.`);
-        const profile = await api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: asset.name.replace(/\.(pdf|docx)$/iu, ""), tags: [], bankItemIds: imported.items.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
-        setBankItems((items) => [...items, ...imported.items]);
-        setProfiles((items) => [...items, profile]);
-        setSelectedProfileId(profile.profileId);
+        // Import reconciles against the existing bank, so a re-import returns the
+        // same item ids. Reuse a saved base with exactly this item set instead of
+        // creating a duplicate, and merge items rather than appending twice.
+        const importedIds = imported.items.map((item) => item.bankItemId).sort();
+        const matchingProfile = [...profiles, ...newProfiles].find((profile) => profile.name !== "Technical base" && profile.bankItemIds.length === importedIds.length && [...profile.bankItemIds].sort().every((id, index) => id === importedIds[index]));
+        const profile = matchingProfile ?? await api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: asset.name.replace(/\.(pdf|docx)$/iu, ""), tags: [], bankItemIds: imported.items.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
+        setBankItems((items) => { const byId = new Map(items.map((item) => [item.bankItemId, item])); for (const item of imported.items) byId.set(item.bankItemId, item); return [...byId.values()]; });
+        if (matchingProfile) setSelectedProfileId(matchingProfile.profileId);
+        else { newProfiles.push(profile); setProfiles((items) => [...items, profile]); setSelectedProfileId(profile.profileId); }
       }
     } catch (error) {
       setBankError(error instanceof Error ? error.message : "We couldn't import that résumé.");

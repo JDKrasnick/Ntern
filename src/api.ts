@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankItemRef, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 import { RESUME_TEMPLATES, resumeTemplateList } from './resume-templates.js';
@@ -434,6 +434,57 @@ function resumeSectionForItem(item: ResumeBankItem): string {
   if (kind === 'education') return 'Education';
   return 'Experience';
 }
+
+/** Reconciles an extracted résumé against the existing bank so re-importing the
+ * same document (or importing overlapping ones) reuses the facts already stored
+ * instead of creating a parallel copy. Returns the full resolved item set for
+ * the new saved base plus only the items that still need to be written. */
+function resolveImportedResumeBank(items: ExtractedResumeItem[], existing: ResumeBankItem[], documentId: string, userId: string, timestamp: string): { items: ResumeBankItem[]; created: ResumeBankItem[] } {
+  const rootByKey = new Map<string, ResumeBankItem>();
+  const bulletByKey = new Map<string, ResumeBankItem>();
+  const signatureById = new Map<string, string>();
+  for (const item of existing) {
+    if (item.kind === 'bullet') continue;
+    const key = resumeBankContentKey(item.kind, item.content);
+    signatureById.set(item.bankItemId, key);
+    if (!rootByKey.has(key)) rootByKey.set(key, item);
+  }
+  for (const item of existing) {
+    if (item.kind !== 'bullet') continue;
+    const parentKey = signatureById.get(item.parent.bankItemId);
+    if (!parentKey) continue;
+    const key = resumeBankContentKey('bullet', item.content, parentKey);
+    signatureById.set(item.bankItemId, key);
+    if (!bulletByKey.has(key)) bulletByKey.set(key, item);
+  }
+  const resolved = new Map<string, ResumeBankItem>();
+  const resolvedLocalIds = new Map<string, string>();
+  const created: ResumeBankItem[] = [];
+  const build = (extracted: ExtractedResumeItem, parentId?: string): ResumeBankItem => {
+    const base = { userId, bankItemId: randomUUID(), content: extracted.content, sourceDocumentId: documentId, sourceLocation: extracted.sourceLocation, verified: true as const, revision: 0, createdAt: timestamp, updatedAt: timestamp };
+    return extracted.kind === 'bullet'
+      ? { ...base, kind: 'bullet', parent: { kind: extracted.parent.kind, bankItemId: parentId! } }
+      : { ...base, kind: extracted.kind, details: parseResumeBankDetails(extracted.kind, extracted.details, extracted.content) } as ResumeBankItem;
+  };
+  for (const extracted of items.filter((item) => item.kind !== 'bullet')) {
+    const key = resumeBankContentKey(extracted.kind, extracted.content);
+    const match = rootByKey.get(key);
+    if (match) { resolved.set(match.bankItemId, match); resolvedLocalIds.set(extracted.localId, match.bankItemId); signatureById.set(match.bankItemId, key); continue; }
+    const item = build(extracted);
+    created.push(item); resolved.set(item.bankItemId, item); resolvedLocalIds.set(extracted.localId, item.bankItemId); signatureById.set(item.bankItemId, key); rootByKey.set(key, item);
+  }
+  for (const extracted of items.filter((item) => item.kind === 'bullet')) {
+    const parentId = resolvedLocalIds.get(extracted.parent.localId);
+    if (!parentId) continue;
+    const key = resumeBankContentKey('bullet', extracted.content, signatureById.get(parentId));
+    const match = bulletByKey.get(key);
+    if (match) { resolved.set(match.bankItemId, match); continue; }
+    const item = build(extracted, parentId);
+    created.push(item); resolved.set(item.bankItemId, item); signatureById.set(item.bankItemId, key); bulletByKey.set(key, item);
+  }
+  return { items: [...resolved.values()], created };
+}
+
 function resumeDraftChanges(job: ImportedJob, bankItems: ResumeBankItem[]): ResumeChange[] {
   const jobWords = new Set(job.description.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
   return bankItems.filter((item) => item.verified).flatMap((item) => {
@@ -477,6 +528,10 @@ export function createApiHandler(dependencies: ApiDependencies) {
   const integrations = dependencies.integrations ?? new EmployerIntegrationRegistry();
   const documentStorage = dependencies.documentStorage;
   const resumeTunerEnabled = dependencies.resumeTunerEnabled === true;
+  // Semantic ranking is a paid-plan capability. Writes stay gated too, so free
+  // accounts never pay for embeddings; the recommendation route warms a paid
+  // account's derived cache when it upgrades after importing.
+  const semanticRankingEnabled = async (userId: string) => effectiveResumeSubscriptionPlan(await dependencies.users.getResumeSubscription(userId)).tier !== 'free';
   return async (event: ApiEvent): Promise<ApiResponse> => {
     try {
       const method = event.requestContext?.http?.method ?? event.routeKey?.split(' ')[0] ?? 'GET'; const path = event.rawPath ?? event.routeKey?.split(' ')[1] ?? '/';
@@ -676,7 +731,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
               })();
             validateResumeBankItemPlacement(item, bank);
             if (!await dependencies.users.putResumeBankItem(item)) return reply(409, { message: 'Resume bank item already exists; retry' });
-            try { await dependencies.resumeSemanticIndex?.index(item); } catch { /* D1 remains authoritative if the derived cache is unavailable. */ }
+            if (await semanticRankingEnabled(userId)) { try { await dependencies.resumeSemanticIndex?.index(item); } catch { /* D1 remains authoritative if the derived cache is unavailable. */ } }
             return reply(201, item);
           }
         }
@@ -686,21 +741,24 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const documentId = resumeText(body.documentId, 'documentId', 160);
           const document = (await dependencies.users.listDocuments(userId)).find((item) => item.documentId === documentId);
           if (!document) return reply(404, { message: 'Document not found' });
-          const items = (await (dependencies.resumeDocumentExtractor ?? extractResumeDocument)(await documentStorage.readContent(document), document.contentType)).slice(0, 500);
-          const created: ResumeBankItem[] = [];
-          const ids = new Map(items.map((item) => [item.localId, randomUUID()]));
-          if (items.some((item) => item.kind === 'bullet' && !ids.has(item.parent.localId))) return reply(400, { message: 'An imported bullet is missing its parent object' });
-          const importedItems = [...items.filter((item) => item.kind !== 'bullet'), ...items.filter((item) => item.kind === 'bullet')].map((extracted): ResumeBankItem => {
-            const base = { userId, bankItemId: ids.get(extracted.localId)!, content: extracted.content, sourceDocumentId: document.documentId, sourceLocation: extracted.sourceLocation, verified: true, revision: 0, createdAt: timestamp, updatedAt: timestamp };
-            return extracted.kind === 'bullet'
-              ? { ...base, kind: 'bullet', parent: { kind: extracted.parent.kind, bankItemId: ids.get(extracted.parent.localId)! } }
-              : { ...base, kind: extracted.kind, details: parseResumeBankDetails(extracted.kind, extracted.details, extracted.content) } as ResumeBankItem;
-          });
-          validateResumeBankGraph([...await dependencies.users.listResumeBank(userId), ...importedItems]);
-          for (const item of importedItems) {
-            if (await dependencies.users.putResumeBankItem(item)) created.push(item);
+          const extracted = (await (dependencies.resumeDocumentExtractor ?? extractResumeDocument)(await documentStorage.readContent(document), document.contentType)).slice(0, 500);
+          const rootIds = new Set(extracted.filter((item) => item.kind !== 'bullet').map((item) => item.localId));
+          if (extracted.some((item) => item.kind === 'bullet' && !rootIds.has(item.parent.localId))) return reply(400, { message: 'An imported bullet is missing its parent object' });
+          const { items: resolvedItems, created } = resolveImportedResumeBank(extracted, await dependencies.users.listResumeBank(userId), document.documentId, userId, timestamp);
+          try {
+            // The store validates the merged graph once and writes the new items
+            // in bounded batches, instead of re-reading the entire bank per item.
+            await dependencies.users.putResumeBankItems(created);
+          } catch (error) {
+            return reply(400, { message: error instanceof Error ? error.message : 'The imported résumé graph is invalid' });
           }
-          return reply(201, { items: created });
+          try {
+            if (created.length && dependencies.resumeSemanticIndex && await semanticRankingEnabled(userId)) {
+              if (dependencies.resumeSemanticIndex.indexMany) await dependencies.resumeSemanticIndex.indexMany(created);
+              else for (const item of created) await dependencies.resumeSemanticIndex.index(item);
+            }
+          } catch { /* D1 remains authoritative; a later verification edit retries this cache. */ }
+          return reply(201, { items: resolvedItems });
         }
         const bankMatch = path.match(/^\/me\/resume-bank\/([^/]+)$/u);
         if (bankMatch && method === 'PATCH') {
@@ -719,8 +777,10 @@ export function createApiHandler(dependencies: ApiDependencies) {
           } as ResumeBankItem;
           if (!await dependencies.users.putResumeBankItem(updated, previous.revision)) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
           try {
-            if (updated.verified) await dependencies.resumeSemanticIndex?.index(updated);
-            else await dependencies.resumeSemanticIndex?.remove(userId, [updated.bankItemId]);
+            // Unverifying always clears the derived vector, even on a downgrade;
+            // adding or re-verifying only indexes for a paid plan.
+            if (!updated.verified) await dependencies.resumeSemanticIndex?.remove(userId, [updated.bankItemId]);
+            else if (await semanticRankingEnabled(userId)) await dependencies.resumeSemanticIndex?.index(updated);
           } catch { /* D1 remains authoritative; a later verification edit retries this cache. */ }
           return reply(200, updated);
         }
@@ -730,11 +790,13 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const body = parseBody(event);
             const canonicalUrl = normalizeResumeJobUrl(resumeText(body.url, 'url', 2_000));
             const manualDescription = body.manualDescription === undefined ? undefined : resumeText(body.manualDescription, 'manualDescription', 30_000);
+            // A catalog hit supplies trusted title/company. Its compact role
+            // summary is only a provisional fallback: tailoring needs the full
+            // public description, so a catalog URL still queues acquisition
+            // unless a shared cache already holds the complete text. The shared
+            // cache never contains private résumé material.
             const catalog = manualDescription ? undefined : await dependencies.jobs.findByUrl(canonicalUrl);
-            const cached = manualDescription || catalog ? undefined : await dependencies.resumeImportCache?.get(canonicalUrl);
-            // The catalog has already passed the application's normal source and URL
-            // admission checks. It is still deliberately a compact role summary: no
-            // private résumé text is ever put into the shared acquisition cache.
+            const cached = manualDescription ? undefined : await dependencies.resumeImportCache?.get(canonicalUrl);
             const catalogDescription = catalog && [
               `${catalog.title} at ${catalog.company}.`,
               catalog.location ? `Location: ${catalog.location}.` : '',
@@ -742,13 +804,14 @@ export function createApiHandler(dependencies: ApiDependencies) {
               catalog.requirements?.requiresUsCitizenship ? 'US citizenship required.' : '',
               catalog.requirements?.advancedDegreeRequired ? 'Advanced degree required.' : '',
             ].filter(Boolean).join(' ');
-            const description = manualDescription ?? catalogDescription ?? cached?.description ?? '';
+            const fullDescriptionAvailable = Boolean(manualDescription || cached);
+            const description = manualDescription ?? cached?.description ?? catalogDescription ?? '';
             const imported: ImportedJob = {
               importId: randomUUID(), canonicalUrl: cached?.canonicalUrl ?? canonicalUrl,
               ...(catalog ? { title: catalog.title, company: catalog.company } : cached?.title || cached?.company ? { title: cached?.title, company: cached?.company } : {}),
-              description, source: manualDescription ? 'manual' : catalog ? 'catalog' : 'cache',
+              description, source: manualDescription ? 'manual' : cached ? 'cache' : catalog ? 'catalog' : 'cache',
               contentHash: cached?.contentHash ?? createHash('sha256').update(description || canonicalUrl).digest('hex'),
-              status: manualDescription || catalog || cached ? 'ready' : 'pending', revision: 0, createdAt: timestamp, updatedAt: timestamp,
+              status: fullDescriptionAvailable ? 'ready' : 'pending', revision: 0, createdAt: timestamp, updatedAt: timestamp,
             };
             if (!await dependencies.users.putImportedResumeJob(userId, imported)) return reply(409, { message: 'Job import already exists; retry' });
             if (imported.status === 'pending' && dependencies.resumeImportQueue) await dependencies.resumeImportQueue.send({ userId, importId: imported.importId, canonicalUrl });
@@ -789,7 +852,21 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (imported.status !== 'ready') return reply(409, { message: 'The job description is still pending. Paste it manually to continue.' });
             const [profiles, bankItems] = await Promise.all([dependencies.users.listResumeProfiles(userId), dependencies.users.listResumeBank(userId)]);
             let semanticScores = new Map<string, number>();
-            try { semanticScores = await dependencies.resumeSemanticIndex?.scores(userId, imported.description, bankItems.filter((item) => item.verified).map((item) => item.bankItemId)) ?? semanticScores; } catch { /* deterministic ranking is the safe cache-miss fallback */ }
+            if (await semanticRankingEnabled(userId)) {
+              const verified = bankItems.filter((item) => item.verified);
+              try {
+                if (dependencies.resumeSemanticIndex) {
+                  semanticScores = await dependencies.resumeSemanticIndex.scores(userId, imported.description, verified.map((item) => item.bankItemId));
+                  if (!semanticScores.size && verified.length) {
+                    // The derived cache can be cold when a user upgrades after
+                    // importing; warm it once, then re-score.
+                    if (dependencies.resumeSemanticIndex.indexMany) await dependencies.resumeSemanticIndex.indexMany(verified);
+                    else for (const item of verified) await dependencies.resumeSemanticIndex.index(item);
+                    semanticScores = await dependencies.resumeSemanticIndex.scores(userId, imported.description, verified.map((item) => item.bankItemId));
+                  }
+                }
+              } catch { /* deterministic ranking is the safe cache-miss fallback */ }
+            }
             return reply(200, { recommendations: recommendResumeProfiles(imported.description, profiles, bankItems, semanticScores) });
           }
         }
@@ -1164,7 +1241,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
         return reply(result.statusCode, result.body);
       }
       if (method === 'GET' && path === '/me/documents') return reply(200, { documents: await dependencies.users.listDocuments(userId) });
-      if (method === 'POST' && path === '/me/documents') { if (!documentStorage) return reply(503, { message: 'Document storage is unavailable' }); const body = parseBody(event); if (typeof body.fileName !== 'string' || typeof body.contentType !== 'string') return reply(400, { message: 'fileName and contentType are required' }); const documentId = randomUUID(); const objectKey = `private/${userId}/${documentId}`; const document = { userId, documentId, fileName: body.fileName.slice(0, 255), contentType: body.contentType, objectKey, createdAt: now() }; const uploadUrl = await documentStorage.createUploadUrl(document); await dependencies.users.putDocument(document); return reply(201, { document, uploadUrl }); }
+      if (method === 'POST' && path === '/me/documents') { if (!documentStorage) return reply(503, { message: 'Document storage is unavailable' }); const body = parseBody(event); if (typeof body.fileName !== 'string' || typeof body.contentType !== 'string') return reply(400, { message: 'fileName and contentType are required' }); const documentId = randomUUID(); const objectKey = `private/${userId}/${documentId}`; const document = { userId, documentId, fileName: body.fileName.slice(0, 255), contentType: body.contentType, objectKey, createdAt: now() }; const uploadUrl = await documentStorage.createUploadUrl(document); try { await dependencies.users.putDocument(document); } catch (error) { if (error instanceof Error && error.message === 'Document storage quota reached') return reply(409, { message: 'You can keep up to 5 résumé documents. Delete one before uploading another.' }); throw error; } return reply(201, { document, uploadUrl }); }
       const docMatch = path.match(/^\/me\/documents\/([^/]+)$/);
       if (method === 'GET' && docMatch) { if (!documentStorage) return reply(503, { message: 'Document storage is unavailable' }); const document = (await dependencies.users.listDocuments(userId)).find((item) => item.documentId === decodeURIComponent(docMatch[1])); if (!document) return reply(404, { message: 'Document not found' }); return reply(200, { document, downloadUrl: await documentStorage.createDownloadUrl(document) }); }
       if (method === 'DELETE' && docMatch) { const document = (await dependencies.users.listDocuments(userId)).find((item) => item.documentId === decodeURIComponent(docMatch[1])); if (!document) return reply(404, { message: 'Document not found' }); if (documentStorage) await documentStorage.deleteObject(document.objectKey); await dependencies.users.deleteDocument(userId, document.documentId); return reply(204, {}); }

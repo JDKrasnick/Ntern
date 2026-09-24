@@ -170,6 +170,11 @@ ${body || '% No selected resume content.'}
   return {
     tex: source,
     document,
-    resumeSpecHash: createHash('sha256').update(JSON.stringify({ profileId: profile.profileId, draftId: draft.draftId, document, template: profile.template, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex'),
+    // The hash must address the rendered artifact bytes, not the requesting
+    // draft or profile. Otherwise identical documents from the same base
+    // recompile and store duplicate PDF/TeX/preview objects. `source` already
+    // encodes the template, section order, and escaped content; the versions
+    // force a rebuild when the template or compiler output changes.
+    resumeSpecHash: createHash('sha256').update(JSON.stringify({ source, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION })).digest('hex'),
   };
 }

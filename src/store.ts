@@ -4,7 +4,7 @@ import { employerCategory } from './core/employers.js';
 import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency } from './catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from './types.js';
-import { validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from './resume.js';
+import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from './resume.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from './identity/posting.js';
 import type { ApplicationSession } from './application-automation.js';
 import type { ReviewedLeverSource } from './sources/lever-config.js';
@@ -332,6 +332,9 @@ export interface UserStore {
   listResumeBank(userId: string): Promise<ResumeBankItem[]>;
   getResumeBankItem(userId: string, bankItemId: string): Promise<ResumeBankItem | undefined>;
   putResumeBankItem(value: ResumeBankItem, expectedRevision?: number): Promise<boolean>;
+  /** Validates the merged graph once and persists every item in bounded batches.
+   * Returns only the items actually created. Avoids one full-bank read per item. */
+  putResumeBankItems(values: ResumeBankItem[]): Promise<ResumeBankItem[]>;
   listResumeProfiles(userId: string): Promise<ResumeProfile[]>;
   getResumeProfile(userId: string, profileId: string): Promise<ResumeProfile | undefined>;
   putResumeProfile(value: ResumeProfile, expectedRevision?: number): Promise<boolean>;
@@ -401,6 +404,7 @@ export class MemoryUserStore implements UserStore {
   async listResumeBank(userId: string) { return [...this.resumeBank.values()].filter((item) => item.userId === userId).map((item) => structuredClone(item)); }
   async getResumeBankItem(userId: string, bankItemId: string) { const item = this.resumeBank.get(`${userId}#${bankItemId}`); return item && structuredClone(item); }
   async putResumeBankItem(value: ResumeBankItem, expectedRevision?: number) { if (this.deletedUsers.has(deletedUserTombstoneKey(value.userId).pk)) return false; const key = `${value.userId}#${value.bankItemId}`; const previous = this.resumeBank.get(key); if ((expectedRevision === undefined && previous) || (expectedRevision !== undefined && previous?.revision !== expectedRevision)) return false; validateResumeBankItemPlacement(value, await this.listResumeBank(value.userId)); this.resumeBank.set(key, structuredClone(value)); return true; }
+  async putResumeBankItems(values: ResumeBankItem[]) { if (!values.length) return []; if (this.deletedUsers.has(deletedUserTombstoneKey(values[0]!.userId).pk)) return []; validateResumeBankGraph([...await this.listResumeBank(values[0]!.userId), ...values]); const created: ResumeBankItem[] = []; for (const value of values) { const key = `${value.userId}#${value.bankItemId}`; if (this.resumeBank.has(key)) continue; this.resumeBank.set(key, structuredClone(value)); created.push(structuredClone(value)); } return created; }
   async listResumeProfiles(userId: string) { return [...this.resumeProfiles.values()].filter((item) => item.userId === userId).map((item) => structuredClone(item)); }
   async getResumeProfile(userId: string, profileId: string) { const item = this.resumeProfiles.get(`${userId}#${profileId}`); return item && structuredClone(item); }
   async putResumeProfile(value: ResumeProfile, expectedRevision?: number) { if (this.deletedUsers.has(deletedUserTombstoneKey(value.userId).pk)) return false; const key = `${value.userId}#${value.profileId}`; const previous = this.resumeProfiles.get(key); if ((expectedRevision === undefined && previous) || (expectedRevision !== undefined && previous?.revision !== expectedRevision)) return false; this.resumeProfiles.set(key, structuredClone(value)); return true; }

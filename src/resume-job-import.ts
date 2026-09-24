@@ -1,3 +1,7 @@
+import { metadataApiRoute, parseMetadataApiResponse, type MetadataAcquisition } from './metadata-acquisition.js';
+import { providerPostingReference } from './identity/posting.js';
+import type { ProviderIdentity } from './types.js';
+
 /** Treat fetched employer pages as untrusted text. This deliberately extracts no
  * instructions, scripts, or embedded markup for downstream generation. */
 export function extractResumeJobText(markup: string, maxCharacters = 30_000): { title?: string; description: string } {
@@ -11,4 +15,42 @@ export function extractResumeJobText(markup: string, maxCharacters = 30_000): { 
     .replace(/[\t ]+/gu, ' ').replace(/\n\s*/gu, '\n').replace(/\n{3,}/gu, '\n\n').trim()
     .slice(0, maxCharacters);
   return { ...(title ? { title: title.slice(0, 240) } : {}), description };
+}
+
+/** A reviewed provider's public JSON route plus a parser for the exact posting.
+ * The caller owns the bounded, public-HTTPS fetch so this stays pure and
+ * testable; parse returns undefined when the payload is not the requested job. */
+export interface ResumeJobStructuredRoute {
+  /** Provider-owned API URL to request with an explicit JSON Accept header. */
+  requestUrl: string;
+  method: MetadataAcquisition['method'];
+  parse(payload: unknown): { title?: string; description: string } | undefined;
+}
+
+/** Modern ATS pages (Ashby, Lever, Greenhouse) are client-rendered shells or
+ * exceed the HTML budget, so scraping them yields empty or boilerplate text.
+ * When the URL names a reviewed provider posting, resolve the structured public
+ * API instead — the same immutable IDs the catalog ingestion path trusts. */
+export function resumeJobStructuredRoute(canonicalUrl: string): ResumeJobStructuredRoute | undefined {
+  let reference: ReturnType<typeof providerPostingReference>;
+  try { reference = providerPostingReference(canonicalUrl); } catch { return undefined; }
+  if (!reference.postingId || reference.provider === 'unknown') return undefined;
+  const identity: ProviderIdentity = {
+    provider: reference.provider,
+    ...(reference.tenant ? { tenant: reference.tenant } : {}),
+    postingId: reference.postingId,
+    sourceId: 'resume-import',
+    sourceUrl: canonicalUrl,
+  };
+  const route = metadataApiRoute(identity, canonicalUrl);
+  if (!route) return undefined;
+  return {
+    requestUrl: route.url,
+    method: route.method,
+    parse(payload) {
+      const artifact = parseMetadataApiResponse(route.identity ?? identity, route.method, payload, route.url);
+      if (!artifact?.text) return undefined;
+      return { title: artifact.title, description: artifact.text };
+    },
+  };
 }

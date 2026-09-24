@@ -43,7 +43,7 @@ import { companyIconResponse } from './company-icon.js';
 import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
 import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
-import { extractResumeJobText } from '../src/resume-job-import.js';
+import { extractResumeJobText, resumeJobStructuredRoute } from '../src/resume-job-import.js';
 import { workersAiResumeDraftGenerator, type WorkersAi } from '../src/resume-generation.js';
 import { workersAiResumeSemanticIndex, type ResumeVectorIndex } from '../src/resume-embeddings.js';
 import type { EmployerVerificationChallenge } from '../src/employer-types.js';
@@ -1918,18 +1918,34 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         const startedAt = new Date().toISOString();
         await env.DB.prepare(`UPDATE resume_job_import_tasks SET state = 'leased', attempts = attempts + 1, lease_until = ?, updated_at = ? WHERE task_id = ?`)
           .bind(new Date(Date.now() + 30_000).toISOString(), startedAt, body.taskId).run();
-        let importedUrl: string;
-        let extracted: ReturnType<typeof extractResumeJobText>;
-        try {
-          const fetched = await safeFetchText(body.canonicalUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 3, maxBodyBytes: 128 * 1024, headers: { Accept: 'text/html,application/xhtml+xml' } });
-          if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
-          extracted = extractResumeJobText(fetched.body);
-          if (extracted.description.length < 40) throw new Error('Job import did not contain enough readable role text');
-          importedUrl = fetched.url;
-        } catch {
-          const rendered = await browserResumeJobText(body.canonicalUrl, env);
-          importedUrl = rendered.url;
-          extracted = rendered;
+        let importedUrl = body.canonicalUrl;
+        let extracted: ReturnType<typeof extractResumeJobText> | undefined;
+        // Reviewed ATS providers publish a structured public API for the exact
+        // posting. Use it before scraping: Ashby serves an empty client-rendered
+        // shell and Lever's page exceeds the HTML byte budget, so both otherwise
+        // fall through to the slow browser path or fail.
+        const structured = resumeJobStructuredRoute(body.canonicalUrl);
+        if (structured) {
+          try {
+            const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 2 * 1024 * 1024, headers: { Accept: 'application/json' } });
+            if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
+            extracted = structured.parse(JSON.parse(fetched.body));
+            if (!extracted || extracted.description.length < 40) throw new Error('Structured job import did not contain enough readable role text');
+            importedUrl = body.canonicalUrl;
+          } catch { extracted = undefined; }
+        }
+        if (!extracted) {
+          try {
+            const fetched = await safeFetchText(body.canonicalUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 3, maxBodyBytes: 128 * 1024, headers: { Accept: 'text/html,application/xhtml+xml' } });
+            if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
+            extracted = extractResumeJobText(fetched.body);
+            if (extracted.description.length < 40) throw new Error('Job import did not contain enough readable role text');
+            importedUrl = fetched.url;
+          } catch {
+            const rendered = await browserResumeJobText(body.canonicalUrl, env);
+            importedUrl = rendered.url;
+            extracted = rendered;
+          }
         }
         const contentHash = createHash('sha256').update(extracted.description).digest('hex');
         const objectKey = `resume-imports/${contentHash}.txt`;

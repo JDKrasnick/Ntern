@@ -23,4 +23,21 @@ describe('resume semantic cache', () => {
     expect(deleteByIds.mock.calls[0]![0]).toHaveLength(1_000);
     expect(deleteByIds.mock.calls[1]![0]).toEqual(['item-1000']);
   });
+
+  it('indexes a large imported bank in embedding batches instead of one call per item', async () => {
+    const upsert = vi.fn().mockResolvedValue(undefined);
+    const run = vi.fn(async (_model: string, input: unknown) => {
+      const texts = (input as { text: string[] }).text;
+      return { data: texts.map(() => vector) };
+    });
+    const index = workersAiResumeSemanticIndex({ run }, { upsert, deleteByIds: vi.fn(), query: vi.fn() });
+    const items = Array.from({ length: 120 }, (_, position) => ({ userId: 'student-a', bankItemId: `item-${position}`, kind: 'project' as const, content: `Project ${position}`, verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' }));
+    items.push({ ...items[0]!, bankItemId: 'unverified', verified: false });
+    await index.indexMany!(items);
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(upsert).toHaveBeenCalledTimes(3);
+    expect(upsert.mock.calls[0]![0]).toHaveLength(50);
+    expect(upsert.mock.calls[2]![0]).toHaveLength(20);
+    expect(upsert.mock.calls.flatMap((call) => call[0]).some((entry: { id: string }) => entry.id === 'unverified')).toBe(false);
+  });
 });
