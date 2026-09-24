@@ -4,13 +4,22 @@ Company icons are stored against `canonical_employers`, not provider mappings or
 
 ## Discovery preview
 
-Use the preview command to collect candidates from an employer website that has already been matched to the canonical employer. It never uploads or changes D1:
+Use the preview command to collect candidates from an employer website that has already been matched to the canonical employer. With `LOGO_DEV_PUBLISHABLE_KEY`, it queries Logo.dev first, then continues to the official-site fallback regardless of the Logo.dev result. It never uploads or changes D1:
 
 ```sh
 npm run preview:employer-icon -- --company "Figma" --domain figma.com
 ```
 
-The result ranks an Organization JSON-LD logo above Open Graph, Apple touch, and favicon candidates. It also makes a bounded `HEAD` request for each candidate and rejects unsupported image types, failed responses, and assets larger than 1.5 MB before review. A candidate remains review-only: confirm the page belongs to the employer and that the rendered asset is their logo before using the upload workflow below. Logo-provider results follow the same rule; they suggest a domain or asset, but do not bypass review.
+Set the publishable key only in the local shell or CI secret; the command redacts it from the JSON review artifact:
+
+```sh
+read -s LOGO_DEV_PUBLISHABLE_KEY
+export LOGO_DEV_PUBLISHABLE_KEY
+npm run preview:employer-icon -- --company "Figma" --domain figma.com
+unset LOGO_DEV_PUBLISHABLE_KEY
+```
+
+The result places the Logo.dev candidate first, then ranks Organization JSON-LD above Open Graph, Apple touch, and favicon candidates. It also makes a bounded `HEAD` request for each candidate and rejects unsupported image types, failed responses, and assets larger than 1.5 MB before review. A candidate remains review-only: confirm the page belongs to the employer and that the rendered asset is their logo before using the upload workflow below. Logo-provider results follow the same rule; they suggest a domain or asset, but do not bypass review.
 
 If the website is challenge-gated or returns non-HTML, the command returns an empty candidate set with `blockedReason`. Record that outcome and continue to the ATS-board or manual-review rung; never substitute an ATS provider's own logo.
 

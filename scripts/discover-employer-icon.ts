@@ -1,4 +1,4 @@
-import { discoverEmployerIcon, verifyEmployerIconAsset } from '../src/employer-icon-discovery.js';
+import { discoverEmployerIcon, logoDevIconRequest, verifyEmployerIconAsset } from '../src/employer-icon-discovery.js';
 
 const argument = (name: string) => {
   const index = process.argv.indexOf(name);
@@ -21,9 +21,15 @@ const contentType = response.headers.get('content-type') ?? '';
 const discovery = contentType.includes('text/html')
   ? discoverEmployerIcon(company, final.href, await response.text())
   : { pageUrl: final.href, verifiedName: false, candidates: [], blockedReason: `website returned ${contentType || 'no content type'}, not HTML` };
-const candidates = await Promise.all(discovery.candidates.map(async (candidate) => {
+const logoDev = logoDevIconRequest(domain, process.env.LOGO_DEV_PUBLISHABLE_KEY ?? '');
+const candidates = await Promise.all([...(logoDev ? [logoDev.candidate] : []), ...discovery.candidates].map(async (candidate) => {
   try {
-    const asset = await fetch(candidate.assetUrl, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(10_000) });
+    let asset = await fetch(candidate.source === 'logo-dev' ? logoDev!.requestUrl : candidate.assetUrl, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(10_000) });
+    if (asset.status === 405) {
+      await asset.body?.cancel();
+      asset = await fetch(candidate.source === 'logo-dev' ? logoDev!.requestUrl : candidate.assetUrl, { redirect: 'follow', signal: AbortSignal.timeout(10_000) });
+    }
+    await asset.body?.cancel();
     return { ...candidate, asset: verifyEmployerIconAsset(asset) };
   } catch { return { ...candidate, asset: { accepted: false, reason: 'asset request failed' } }; }
 }));

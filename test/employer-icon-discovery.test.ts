@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { discoverEmployerIcon, verifyEmployerIconAsset } from '../src/employer-icon-discovery.js';
+import { discoverEmployerIcon, logoDevIconRequest, verifyEmployerIconAsset } from '../src/employer-icon-discovery.js';
 
 describe('employer icon discovery', () => {
   it('prioritizes a verified organization JSON-LD logo over presentation assets', () => {
@@ -29,5 +29,13 @@ describe('employer icon discovery', () => {
     expect(verifyEmployerIconAsset(new Response('', { headers: { 'Content-Type': 'image/webp', 'Content-Length': '1500001' } }))).toMatchObject({ accepted: false, reason: 'asset exceeds the 1.5 MB review limit' });
     expect(verifyEmployerIconAsset(new Response('', { headers: { 'Content-Type': 'image/webp', 'Content-Length': '512' } }))).toEqual({ accepted: true, contentType: 'image/webp', bytes: 512 });
     expect(verifyEmployerIconAsset(new Response('', { headers: { 'Content-Type': 'image/svg+xml', 'Content-Length': '0' } }))).toEqual({ accepted: true, contentType: 'image/svg+xml' });
+  });
+
+  it('uses Logo.dev first without leaking its publishable token into review output', () => {
+    const candidate = logoDevIconRequest('figma.com', 'public-token')!;
+    expect(candidate.requestUrl).toContain('token=public-token');
+    expect(candidate.candidate).toMatchObject({ source: 'logo-dev', assetUrl: 'https://img.logo.dev/figma.com?format=webp&size=256' });
+    expect(JSON.stringify(candidate.candidate)).not.toContain('public-token');
+    expect(logoDevIconRequest('not/a-domain', 'public-token')).toBeUndefined();
   });
 });

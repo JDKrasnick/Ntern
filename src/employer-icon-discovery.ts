@@ -1,4 +1,4 @@
-export type EmployerIconCandidateSource = 'json-ld-logo' | 'open-graph-image' | 'apple-touch-icon' | 'favicon';
+export type EmployerIconCandidateSource = 'logo-dev' | 'json-ld-logo' | 'open-graph-image' | 'apple-touch-icon' | 'favicon';
 
 export interface EmployerIconCandidate {
   source: EmployerIconCandidateSource;
@@ -22,6 +22,11 @@ export interface EmployerIconDiscovery {
   blockedReason?: string;
 }
 
+export interface LogoDevIconRequest {
+  candidate: EmployerIconCandidate;
+  requestUrl: string;
+}
+
 const compact = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, '');
 const decodeHtml = (value: string) => value.replace(/&amp;/giu, '&').replace(/&#x2f;/giu, '/');
 const absoluteUrl = (raw: string, page: URL): string | undefined => {
@@ -32,6 +37,19 @@ const absoluteUrl = (raw: string, page: URL): string | undefined => {
 };
 const htmlAttribute = (tag: string, name: string) => new RegExp(`${name}\\s*=\\s*["']([^"']+)["']`, 'iu').exec(tag)?.[1];
 const tags = (html: string, name: string) => html.match(new RegExp(`<${name}\\b[^>]*>`, 'giu')) ?? [];
+
+/** Keeps the publishable Logo.dev token in the request URL, never the review output. */
+export function logoDevIconRequest(domain: string, token: string): LogoDevIconRequest | undefined {
+  if (!/^[a-z0-9.-]+$/iu.test(domain) || domain.includes('..') || !token.trim()) return undefined;
+  const parameters = new URLSearchParams({ token: token.trim(), format: 'webp', size: '256' });
+  return {
+    candidate: {
+      source: 'logo-dev', assetUrl: `https://img.logo.dev/${domain}?format=webp&size=256`, pageUrl: `https://${domain}/`, confidence: 'medium',
+      evidence: ['Logo.dev candidate for supplied domain', 'needs official-site and reviewer confirmation'],
+    },
+    requestUrl: `https://img.logo.dev/${domain}?${parameters}`,
+  };
+}
 
 function jsonLdValues(html: string): Array<Record<string, unknown>> {
   return [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/giu)]
