@@ -53,7 +53,7 @@ describe('resume safety contracts', () => {
       content: index === 0 ? `Built a TypeScript ${project.content}` : `Documented ${project.content} result ${index}`,
     })));
     const changes = proposeResumeReadabilityChanges({ importId: 'job', canonicalUrl: 'https://example.test/job', description: 'TypeScript engineering', source: 'manual', contentHash: 'hash', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' }, [...projects, ...bullets]);
-    expect(changes).toHaveLength(4);
+    expect(changes).toHaveLength(6);
     expect(changes.every((change) => change.type === 'remove' && change.target.kind === 'bullet')).toBe(true);
     expect(changes.map((change) => change.target.bankItemId)).not.toContain('compiler-0');
     expect(changes.map((change) => change.target.bankItemId)).not.toContain('dashboard-0');

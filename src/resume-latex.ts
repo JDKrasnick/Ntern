@@ -5,6 +5,14 @@ import { RESUME_TEMPLATES, RESUME_TEMPLATE_VERSION } from './resume-templates.js
 
 export { RESUME_TEMPLATE_VERSION } from './resume-templates.js';
 export const RESUME_COMPILER_VERSION = 'typed-fixed-template-tex-v2';
+export const RESUME_LAYOUT_FLOORS = Object.freeze({
+  pageMarginInches: 0.55,
+  sectionBeforePoints: 8,
+  sectionAfterPoints: 4,
+  entryContentGapPoints: 2,
+  bulletGapPoints: 2,
+  bulletBlockGapPoints: 3,
+});
 
 const sectionTitle = { education: 'Education', experience: 'Experience', research: 'Research', projects: 'Projects', skills: 'Technical Skills' } as const;
 
@@ -114,17 +122,16 @@ const renderers = { education: renderEducation, experience: renderExperience, re
 
 function templatePreamble(profile: ResumeProfile) {
   const template = RESUME_TEMPLATES[profile.template];
-  const dense = template.density === 'dense';
   const comfortable = template.density === 'comfortable';
   const jake = profile.template === 'jake-technical';
-  // Jake stays one-page dense, but retains a readable frame and visible rhythm
-  // between bullets, entries, and section rules. Project Compact remains the
-  // deliberately tighter option when a larger source selection needs it.
-  const margin = jake ? '0.55in' : dense ? '0.45in' : comfortable ? '0.64in' : '0.55in';
-  const itemSep = jake ? '1pt' : dense ? '0.5pt' : comfortable ? '2pt' : '1pt';
-  const sectionBefore = jake ? '6pt' : dense ? '5pt' : comfortable ? '10pt' : '7pt';
-  const sectionAfter = jake ? '3pt' : dense ? '2pt' : '4pt';
-  const compactPull = jake ? '-1pt' : '-2pt';
+  // Template density may add whitespace, but it cannot compress below these
+  // readability floors. Content selection, never negative space, keeps a page short.
+  const margin = `${comfortable ? 0.68 : jake ? 0.6 : RESUME_LAYOUT_FLOORS.pageMarginInches}in`;
+  const itemSep = `${comfortable ? 3 : RESUME_LAYOUT_FLOORS.bulletGapPoints}pt`;
+  const sectionBefore = `${comfortable ? 10 : RESUME_LAYOUT_FLOORS.sectionBeforePoints}pt`;
+  const sectionAfter = `${comfortable ? 5 : RESUME_LAYOUT_FLOORS.sectionAfterPoints}pt`;
+  const entryContentGap = `${RESUME_LAYOUT_FLOORS.entryContentGapPoints}pt`;
+  const bulletBlockGap = `${comfortable ? 4 : RESUME_LAYOUT_FLOORS.bulletBlockGapPoints}pt`;
   return `\\documentclass[letterpaper,10pt]{article}
 \\usepackage[margin=${margin}]{geometry}
 \\usepackage[T1]{fontenc}
@@ -136,12 +143,12 @@ ${jake ? '\\linespread{0.99}' : ''}
 \\raggedbottom
 \\raggedright
 \\newcommand{\\ResumeSection}[1]{\\vspace{${sectionBefore}}{\\large\\bfseries\\MakeUppercase{#1}}\\par\\vspace{1pt}\\hrule\\vspace{${sectionAfter}}}
-\\newcommand{\\ResumeHeading}[4]{\\begin{tabular*}{\\textwidth}{@{}l@{\\extracolsep{\\fill}}r@{}}\\textbf{#1} & #2 \\\\ \\textit{#3} & \\textit{#4}\\end{tabular*}\\vspace{${compactPull}}}
-\\newcommand{\\ResumeEducationCompact}[2]{\\textbf{#1}, #2\\par}
-\\newcommand{\\ResumeProject}[3]{\\textbf{#1}${profile.template === 'clean-standard' ? ' \\textit{#2}' : ' --- #2'}\\hfill #3\\par\\vspace{${compactPull}}}
-\\newcommand{\\ResumeDetail}[1]{#1\\par}
-\\newcommand{\\ResumeSkill}[2]{\\textbf{#1:} #2\\par}
-\\newenvironment{ResumeBullets}{\\begin{list}{$\\bullet$}{\\setlength{\\leftmargin}{1.2em}\\setlength{\\itemsep}{${itemSep}}\\setlength{\\topsep}{1.25pt}\\setlength{\\parsep}{0pt}\\setlength{\\partopsep}{0pt}}}{\\end{list}\\vspace{${compactPull}}}
+\\newcommand{\\ResumeHeading}[4]{\\begin{tabular*}{\\textwidth}{@{}l@{\\extracolsep{\\fill}}r@{}}\\textbf{#1} & #2 \\\\ \\textit{#3} & \\textit{#4}\\end{tabular*}\\vspace{${entryContentGap}}}
+\\newcommand{\\ResumeEducationCompact}[2]{\\textbf{#1}, #2\\par\\vspace{${bulletBlockGap}}}
+\\newcommand{\\ResumeProject}[3]{\\textbf{#1}${profile.template === 'clean-standard' ? ' \\textit{#2}' : ' --- #2'}\\hfill #3\\par\\vspace{${entryContentGap}}}
+\\newcommand{\\ResumeDetail}[1]{#1\\par\\vspace{${entryContentGap}}}
+\\newcommand{\\ResumeSkill}[2]{\\textbf{#1:} #2\\par\\vspace{${entryContentGap}}}
+\\newenvironment{ResumeBullets}{\\begin{list}{$\\bullet$}{\\setlength{\\leftmargin}{1.2em}\\setlength{\\itemsep}{${itemSep}}\\setlength{\\topsep}{${entryContentGap}}\\setlength{\\parsep}{0pt}\\setlength{\\partopsep}{0pt}}}{\\end{list}\\vspace{${bulletBlockGap}}}
 `;
 }
 

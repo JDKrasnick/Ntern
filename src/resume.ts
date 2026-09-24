@@ -322,7 +322,7 @@ const substantiveResumeWords = (value: string) => [...resumeWords(value)].filter
  * Nothing is deleted silently: every lower-relevance bullet becomes an explicit
  * removal diff, and at least one bullet per represented parent is retained when
  * the budget permits it. */
-export function proposeResumeReadabilityChanges(job: ImportedJob, bankItems: ResumeBankItem[], bulletLimit = 12): ResumeChange[] {
+export function proposeResumeReadabilityChanges(job: ImportedJob, bankItems: ResumeBankItem[], bulletLimit = 10): ResumeChange[] {
   const bullets = bankItems.filter((item): item is Extract<ResumeBankItem, { kind: 'bullet' }> => item.kind === 'bullet' && item.verified);
   if (bullets.length <= bulletLimit) return [];
   const jobWords = resumeWords(`${job.title ?? ''} ${job.company ?? ''} ${job.description}`);

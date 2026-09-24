@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderResumeLatex } from '../src/resume-latex.js';
+import { RESUME_LAYOUT_FLOORS, renderResumeLatex } from '../src/resume-latex.js';
 
 describe('fixed resume LaTeX rendering', () => {
   it('escapes accepted changes without accepting arbitrary commands', () => {
@@ -57,10 +57,24 @@ describe('fixed resume LaTeX rendering', () => {
     const result = renderResumeLatex(profile, applicant, draft, bank);
     expect(result.document.experience[0]?.bullets).toEqual(['Raised ingestion success above 98%.']);
     expect(result.document.projects[0]?.bullets).toEqual(['Maintained 99.9% metadata presence.']);
-    expect(result.tex).toContain('margin=0.55in');
-    expect(result.tex).toContain('\\setlength{\\itemsep}{1pt}');
+    expect(result.tex).toContain('margin=0.6in');
+    expect(result.tex).toContain(`\\setlength{\\itemsep}{${RESUME_LAYOUT_FLOORS.bulletGapPoints}pt}`);
+    expect(result.tex).toContain(`\\end{list}\\vspace{${RESUME_LAYOUT_FLOORS.bulletBlockGapPoints}pt}`);
+    expect(result.tex).toContain(`\\vspace{${RESUME_LAYOUT_FLOORS.sectionBeforePoints}pt}{\\large`);
+    expect(result.tex).not.toMatch(/\\vspace\{-/u);
     expect(result.tex.indexOf('\\ResumeSection{Experience}')).toBeLessThan(result.tex.indexOf('\\ResumeSection{Projects}'));
     const projectFirst = renderResumeLatex({ ...profile, template: 'project-compact' }, applicant, draft, bank).tex;
     expect(projectFirst.indexOf('\\ResumeSection{Projects}')).toBeLessThan(projectFirst.indexOf('\\ResumeSection{Experience}'));
+    for (const template of ['jake-technical', 'clean-standard', 'research-academic', 'project-compact'] as const) {
+      const source = renderResumeLatex({ ...profile, template }, applicant, draft, bank).tex;
+      const margin = Number(/margin=([\d.]+)in/u.exec(source)?.[1]);
+      const bulletGap = Number(/\\setlength\{\\itemsep\}\{([\d.]+)pt\}/u.exec(source)?.[1]);
+      const sectionGaps = /\\ResumeSection\}\[1\]\{\\vspace\{([\d.]+)pt\}.*?\\hrule\\vspace\{([\d.]+)pt\}/u.exec(source);
+      expect(margin).toBeGreaterThanOrEqual(RESUME_LAYOUT_FLOORS.pageMarginInches);
+      expect(bulletGap).toBeGreaterThanOrEqual(RESUME_LAYOUT_FLOORS.bulletGapPoints);
+      expect(Number(sectionGaps?.[1])).toBeGreaterThanOrEqual(RESUME_LAYOUT_FLOORS.sectionBeforePoints);
+      expect(Number(sectionGaps?.[2])).toBeGreaterThanOrEqual(RESUME_LAYOUT_FLOORS.sectionAfterPoints);
+      expect(source).not.toMatch(/\\vspace\{-/u);
+    }
   });
 });
