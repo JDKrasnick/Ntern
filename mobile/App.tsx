@@ -31,6 +31,7 @@ import {
 import * as WebBrowser from "expo-web-browser";
 import * as Notifications from "expo-notifications";
 import * as DocumentPicker from "expo-document-picker";
+import * as Clipboard from "expo-clipboard";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
@@ -54,6 +55,7 @@ import { accountDataActionState } from "./src/account-data-controls";
 import { shareDataExport } from "./src/account-data-share";
 import { loadResumeArtifactPreview, loadResumeArtifactSource, releaseResumeArtifactPreview, shareResumeArtifact } from "./src/resume-artifact-share";
 import { pollResumeImport } from "./src/resume-import-poll";
+import { resumeBankPrompt, type ResumeBankPromptKind } from "./src/resume-bank-prompts";
 import { clearSession, confirmEmail, restoreSession, signIn, signOut, signUp } from "./src/auth";
 import { policyUrls } from "./src/policies";
 import {
@@ -5696,6 +5698,9 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [bankExpanded, setBankExpanded] = useState(false);
   const [bankManagerOpen, setBankManagerOpen] = useState(false);
   const [manualEntryOpen, setManualEntryOpen] = useState(false);
+  const [promptGuideOpen, setPromptGuideOpen] = useState(false);
+  const [promptKind, setPromptKind] = useState<ResumeBankPromptKind>("build");
+  const [copiedPrompt, setCopiedPrompt] = useState<ResumeBankPromptKind>();
   const [planExpanded, setPlanExpanded] = useState(false);
   const [profiles, setProfiles] = useState<ResumeProfileCard[]>([]);
   const [resumeTemplates, setResumeTemplates] = useState<ResumeTemplateCard[]>([]);
@@ -5753,6 +5758,11 @@ function ResumeWorkspace({ token }: { token: string }) {
   const importedResumeCount = new Set(bankItems.map((item) => item.sourceDocumentId).filter(Boolean)).size;
   const bankParents = bankItems.filter((item): item is Extract<ResumeBankCard, { kind: ResumeBankParentKind }> => item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education");
   const selectedBankParent = bankParents.find((item) => item.bankItemId === bankParentId) ?? bankParents[0];
+  const copyBankPrompt = () => {
+    void Clipboard.setStringAsync(resumeBankPrompt(promptKind))
+      .then(() => setCopiedPrompt(promptKind))
+      .catch(() => setBankError("We couldn't copy that prompt. Select the text and copy it manually."));
+  };
   const loadBank = () => {
     setBankLoading(true);
     setBankError(undefined);
@@ -6070,6 +6080,39 @@ function ResumeWorkspace({ token }: { token: string }) {
               <Text style={styles.resumeImportStageActionText}>Choose files</Text>
             </View>
           </TouchableOpacity>
+
+          <TouchableOpacity accessibilityRole="button" aria-expanded={promptGuideOpen} onPress={() => setPromptGuideOpen((value) => !value)} style={styles.resumePromptAccess}>
+            <Ionicons name="sparkles-outline" size={17} color={colors.signal} />
+            <Text style={styles.resumePromptAccessText}>{promptGuideOpen ? "Hide LLM prompts" : "No clean source file? Use an LLM prompt"}</Text>
+            <Ionicons name={promptGuideOpen ? "chevron-up" : "chevron-down"} size={16} color={colors.signal} />
+          </TouchableOpacity>
+
+          {promptGuideOpen ? <View style={styles.resumePromptPanel}>
+            <View style={styles.resumePromptHeader}>
+              <View style={styles.resumeSourceHeadingCopy}>
+                <Text style={styles.resumeMasterBankTitle}>Prepare a parseable master bank</Text>
+                <Text style={styles.resumeSectionDescription}>Use either prompt with the LLM you prefer. It produces the strict parent-and-bullet text format Ntern can validate after you save it as a PDF or DOCX.</Text>
+              </View>
+            </View>
+            <View accessibilityRole="tablist" style={styles.resumePromptTabs}>
+              {(["build", "convert"] as const).map((kind) => (
+                <TouchableOpacity key={kind} accessibilityRole="tab" aria-selected={promptKind === kind} onPress={() => { setPromptKind(kind); setCopiedPrompt(undefined); }} style={[styles.resumePromptTab, promptKind === kind && styles.resumePromptTabActive]}>
+                  <Text style={[styles.resumePromptTabText, promptKind === kind && styles.resumePromptTabTextActive]}>{kind === "build" ? "Build from scratch" : "Convert existing material"}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.resumePromptPurpose}>{promptKind === "build" ? "The LLM interviews the user one parent at a time, then exports only confirmed facts." : "The LLM restructures an existing résumé or giant content bank without reassigning or inventing facts."}</Text>
+            <ScrollView nestedScrollEnabled style={styles.resumePromptScroller} contentContainerStyle={styles.resumePromptContent}>
+              <Text selectable style={styles.resumePromptText}>{resumeBankPrompt(promptKind)}</Text>
+            </ScrollView>
+            <View style={styles.resumePromptFooter}>
+              <Text style={styles.resumePromptFootnote}>After the LLM exports the bank, save it as PDF or DOCX and add it above. Ntern still rejects broken parent pointers.</Text>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Copy ${promptKind === "build" ? "build from scratch" : "convert existing material"} prompt`} onPress={copyBankPrompt} style={styles.resumePromptCopy}>
+                <Ionicons name={copiedPrompt === promptKind ? "checkmark" : "copy-outline"} size={17} color={colors.onDark} />
+                <Text style={styles.resumePromptCopyText}>{copiedPrompt === promptKind ? "Copied" : "Copy prompt"}</Text>
+              </TouchableOpacity>
+            </View>
+          </View> : null}
 
           <View style={styles.resumeMasterBankSummary}>
             <View style={styles.resumeMasterBankCopy}>
@@ -8838,6 +8881,23 @@ const styles = StyleSheet.create({
   resumeImportStageMeta: { color: colors.muted, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 12 },
   resumeImportStageAction: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 10, flexDirection: "row", gap: 7, justifyContent: "center", minHeight: 48, paddingHorizontal: 16 },
   resumeImportStageActionText: { color: colors.onDark, fontSize: 14, fontWeight: "800" },
+  resumePromptAccess: { alignItems: "center", alignSelf: "flex-start", flexDirection: "row", gap: 7, minHeight: 44, paddingHorizontal: 2 },
+  resumePromptAccessText: { color: colors.signal, fontSize: 13, fontWeight: "800" },
+  resumePromptPanel: { borderColor: colors.separator, borderRadius: 14, borderWidth: 1, padding: 16 },
+  resumePromptHeader: { alignItems: "flex-start", flexDirection: "row" },
+  resumePromptTabs: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 14 },
+  resumePromptTab: { alignItems: "center", borderColor: colors.border, borderRadius: 10, borderWidth: 1, justifyContent: "center", minHeight: 44, paddingHorizontal: 13 },
+  resumePromptTabActive: { backgroundColor: colors.signalSoft, borderColor: colors.signal },
+  resumePromptTabText: { color: colors.body, fontSize: 13, fontWeight: "700" },
+  resumePromptTabTextActive: { color: colors.signal },
+  resumePromptPurpose: { color: colors.body, fontSize: 13, lineHeight: 19, marginTop: 12, maxWidth: 760 },
+  resumePromptScroller: { backgroundColor: colors.canvas, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, marginTop: 12, maxHeight: 260 },
+  resumePromptContent: { padding: 14 },
+  resumePromptText: { color: colors.body, fontSize: 13, lineHeight: 20 },
+  resumePromptFooter: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between", marginTop: 12 },
+  resumePromptFootnote: { color: colors.muted, flex: 1, fontSize: 12, lineHeight: 18, minWidth: 240 },
+  resumePromptCopy: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 10, flexDirection: "row", gap: 7, justifyContent: "center", minHeight: 44, paddingHorizontal: 14 },
+  resumePromptCopyText: { color: colors.onDark, fontSize: 13, fontWeight: "800" },
   resumeMasterBankSummary: { alignItems: "flex-start", backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 18, justifyContent: "space-between", padding: 16 },
   resumeMasterBankCopy: { flex: 1, minWidth: 240 },
   resumeMasterBankTitle: { color: colors.ink, fontSize: 18, fontWeight: "800", lineHeight: 24 },

@@ -47,6 +47,9 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('{bankManagerOpen ? (');
     expect(app.indexOf('Paste the job URL')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
     expect(app).toContain('<Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>');
+    expect(app).toContain('No clean source file? Use an LLM prompt');
+    expect(app).toContain('"Build from scratch" : "Convert existing material"');
+    expect(app).toContain('Clipboard.setStringAsync(resumeBankPrompt(promptKind))');
     expect(app).toContain('<Text style={styles.resumeMasterBankTitle}>Master bank</Text>');
     expect(app).toContain('const [manualEntryOpen, setManualEntryOpen] = useState(false);');
     expect(app).toContain('manualEntryOpen ? <View style={styles.resumeManualEntry}>');
