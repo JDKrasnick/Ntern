@@ -20,6 +20,15 @@ function reviewReason(input: Record<string, unknown>, fallback: string): string 
   return typeof input.reason === 'string' && input.reason.trim() ? input.reason.trim().slice(0, 500) : fallback;
 }
 
+function iconKey(value: unknown, employerId: string): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const key = text(value, 'iconKey', 300);
+  if (!new RegExp(`^company-icons/${employerId}/[a-zA-Z0-9][a-zA-Z0-9._-]*$`, 'u').test(key)) {
+    throw new Error('iconKey must be a first-party company icon for this employer');
+  }
+  return key;
+}
+
 export async function handleCatalogAdmissionOperations(
   request: Request,
   store: D1CatalogAdmissionStore,
@@ -52,8 +61,13 @@ export async function handleCatalogAdmissionOperations(
     if (request.method === 'GET' && path === '/internal/admission/employers') return json(200, { employers: await store.listCanonicalEmployers() });
     if (request.method === 'PUT' && path === '/internal/admission/employers') {
       const input = await body(request);
+      const id = text(input.id, 'id', 160);
+      const existing = (await store.listCanonicalEmployers()).find((item) => item.id === id);
+      const nextIconKey = iconKey(input.iconKey, id);
+      if (!existing && !nextIconKey) throw new Error('iconKey is required for a new canonical employer');
       const employer: CanonicalEmployer = {
-        id: text(input.id, 'id', 160), displayName: text(input.displayName, 'displayName', 160),
+        id, displayName: text(input.displayName, 'displayName', 160),
+        ...(nextIconKey ? { iconKey: nextIconKey, iconUpdatedAt: timestamp } : existing?.iconKey ? { iconKey: existing.iconKey, iconUpdatedAt: existing.iconUpdatedAt } : {}),
         reviewedAt: timestamp, reviewedBy: actor,
         ...(typeof input.parentEmployerId === 'string' && input.parentEmployerId.trim() ? { parentEmployerId: input.parentEmployerId.trim() } : {}),
         ...(typeof input.brandOfEmployerId === 'string' && input.brandOfEmployerId.trim() ? { brandOfEmployerId: input.brandOfEmployerId.trim() } : {}),

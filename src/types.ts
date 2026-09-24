@@ -382,6 +382,9 @@ export type OccurrenceProvenance =
 export interface CanonicalEmployer {
   id: string;
   displayName: string;
+  /** First-party R2 key for the reviewed company icon. */
+  iconKey?: string;
+  iconUpdatedAt?: string;
   reviewedAt: string;
   reviewedBy: string;
   parentEmployerId?: string;
