@@ -745,6 +745,58 @@ describe('Catalog queue setup failures', () => {
     expect(failureRows).toHaveLength(1);
     vi.restoreAllMocks();
   });
+
+  it('defers the GitHub lane when the structured registry read fails on the final delivery', async () => {
+    const failureRows: unknown[][] = [];
+    const prepare = vi.fn(() => ({
+      async first() { return null; },
+      bind: (...values: unknown[]) => ({
+        async all() { return { results: [] }; },
+        async run() { failureRows.push(values); return { meta: { changes: 1 } }; },
+      }),
+    }));
+    // The structured registry read gates every GitHub delivery, so a source-scoped
+    // message that survives all attempts here is still work the dispatcher owns.
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources')
+      .mockRejectedValue(new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'));
+    const first = { id: 'first', body: { sourceId: defaultSources[0]!.id }, attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [first] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.ack).toHaveBeenCalledOnce();
+    expect(first.retry).not.toHaveBeenCalled();
+    expect(failureRows).toHaveLength(1);
+    vi.restoreAllMocks();
+  });
+
+  it('still retries a GitHub setup failure the dispatcher cannot re-own', async () => {
+    const prepare = vi.fn(() => ({
+      async first() { return null; },
+      bind: () => ({
+        async all() { return { results: [] }; },
+        async run() { return { meta: { changes: 1 } }; },
+      }),
+    }));
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources')
+      .mockRejectedValue(new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'));
+    // A body without a source ID names no work the dispatcher could re-issue, so
+    // it stays on the retry path even on the final delivery.
+    const first = { id: 'first', body: 'not-json', attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [first] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.retry).toHaveBeenCalledOnce();
+    expect(first.ack).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
 });
 
 describe('Cloudflare DNS resolver queries', () => {

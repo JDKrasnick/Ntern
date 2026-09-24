@@ -49,16 +49,37 @@ export const SOURCE_MESSAGE_DEADLINE_MS = 5 * 60_000;
 export const CATALOG_DELIVERY_MAX_ATTEMPTS = 3;
 
 /**
- * A source-scoped catalog failure that survives every delivery is deferred to
- * the scheduled dispatcher rather than dead-lettered: the source's health row
- * and checkpoint are the durable retry state, and the dispatcher re-issues the
- * poll on its next sweep (or its next recovery probe when quarantined). Only a
- * message the dispatcher can never own — an unknown source or a malformed body —
- * is poison and dead-letters. `error` is the failure from the final delivery.
+ * A message the scheduled dispatcher can never re-own stays on the retry path
+ * so the platform dead-letters it for a human: an unknown reviewed source, a
+ * malformed work message, a thrown non-Error, or a D1 schema/migration defect.
+ * Those recur on every re-issue, so deferring them would hide a bug instead of
+ * retrying work. Everything else is a source-scoped failure the source's health
+ * row and checkpoint can retry. `error` is the failure from the final delivery.
  */
 export function catalogFailureIsPoison(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /^Unknown reviewed /.test(message) || /^Invalid .* work message/.test(message);
+  if (!(error instanceof Error)) return true;
+  return /^Unknown reviewed /.test(error.message)
+    || /^Invalid .* work message/.test(error.message)
+    || /no such (?:table|column)/i.test(error.message);
+}
+
+/**
+ * Whether a failed catalog delivery should be deferred to the scheduled
+ * dispatcher instead of dead-lettered. True only for a source-scoped message
+ * that has exhausted every delivery and is not poison. A repeated deferral is
+ * safe because the dispatcher re-issues the source from its next sweep, or from
+ * its recovery probe when it is quarantined; the source's health row and
+ * checkpoint are the durable retry state. Keeps the one deferral rule in one
+ * place so the GitHub lane and the shared Greenhouse/Lever/Ashby path cannot
+ * drift.
+ */
+export function catalogDeliveryIsDeferred(
+  error: unknown,
+  sourceId: string | undefined,
+  attempts: number | undefined,
+): boolean {
+  return Boolean(sourceId) && (attempts ?? 0) >= CATALOG_DELIVERY_MAX_ATTEMPTS
+    && !catalogFailureIsPoison(error);
 }
 
 function stableSourceBucket(sourceId: string, buckets: number): number {

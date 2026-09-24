@@ -30,8 +30,8 @@ import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRep
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
-import { CATALOG_DELIVERY_MAX_ATTEMPTS, catalogFailureIsPoison, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
-import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
+import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
+import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary } from './shadow-extraction.js';
 import { handleShadowPublication, publishProspectiveShadowMetadata } from './shadow-publication.js';
 import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
@@ -2008,7 +2008,16 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         });
         console.error(JSON.stringify({ command: 'github-poll-setup', messageId: queued.id, error: safeDiagnostic(error) }));
         await completeTraffic(queued.id, 'failure', error);
-        queued.retry({ delaySeconds: d1QueueRetryDelay(error, queued.attempts) });
+        // This registry read gates the whole GitHub lane, so a source-scoped
+        // message that fails every attempt here is still work the dispatcher
+        // re-issues from its next sweep. Only poison stays on the retry path.
+        if (catalogDeliveryIsDeferred(error, parsed?.sourceId, queued.attempts)) {
+          console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
+            sourceId: parsed?.sourceId, messageId: queued.id, attempts: queued.attempts, error: safeDiagnostic(error) }));
+          queued.ack();
+        } else {
+          queued.retry({ delaySeconds: d1QueueRetryDelay(error, queued.attempts) });
+        }
       }
       return;
     }
@@ -2134,10 +2143,9 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         // all deliveries is deferred instead of dead-lettered. Only a message
         // the dispatcher can never re-issue (unknown source, malformed body)
         // stays on the retry path.
-        if (parsedMessage?.sourceId && (queued.attempts ?? 0) >= CATALOG_DELIVERY_MAX_ATTEMPTS
-          && !catalogFailureIsPoison(error)) {
+        if (catalogDeliveryIsDeferred(error, parsedMessage?.sourceId, queued.attempts)) {
           console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
-            sourceId: parsedMessage.sourceId, messageId: record.messageId, attempts: queued.attempts,
+            sourceId: parsedMessage?.sourceId, messageId: record.messageId, attempts: queued.attempts,
             error: safeDiagnostic(error) }));
         } else {
           failed.add(record.messageId);
@@ -2168,6 +2176,28 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     const queued = messageById.get(record.messageId);
     const delay = d1QueueRetryDelay(error, queued?.attempts);
     if (delay) overloadDelays.set(record.messageId, delay);
+    // The ATS workers write failure health for every error their own poll
+    // throws, but `processFifoBatch` raises a message-deadline rejection around
+    // the record, outside that catch. Recording it here keeps `lastAttemptAt`
+    // advancing for a stalled board instead of letting the cadence-slip alarm
+    // fire on a source the dispatcher is in fact re-issuing.
+    if (error instanceof QueueMessageDeadlineError && parsed?.sourceId) {
+      try {
+        const completedAt = new Date().toISOString();
+        const healthStore = new D1InternshipStore(env.DB);
+        await healthStore.putSourceHealth(failedSourceHealth({
+          sourceId: parsed.sourceId,
+          provider: catalogProvider,
+          previous: await healthStore.getSourceHealth(parsed.sourceId),
+          startedAt: queued?.timestamp?.toISOString() ?? completedAt,
+          completedAt,
+          error,
+        }));
+      } catch (healthError) {
+        console.error(JSON.stringify({ command: 'catalog-health', provider: catalogProvider,
+          messageId: record.messageId, error: safeDiagnostic(healthError) }));
+      }
+    }
     await recordQueueFailureBestEffort({
       db: env.DB, queueName: batch.queue, messageId: record.messageId,
       attempts: queued?.attempts, timestamp: queued?.timestamp, sourceId: parsed?.sourceId,
@@ -2176,13 +2206,11 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     await completeTraffic(record.messageId, 'failure', error);
     // The provider dispatcher re-issues any reviewed source on its cadence, so a
     // source-scoped failure that survives all deliveries is deferred instead of
-    // dead-lettered. Only a message the dispatcher can never re-issue (unknown
-    // source, malformed body) stays on the retry path.
-    if (parsed?.sourceId && (queued?.attempts ?? 0) >= CATALOG_DELIVERY_MAX_ATTEMPTS
-      && !catalogFailureIsPoison(error)) {
+    // dead-lettered. Only poison stays on the retry path.
+    if (catalogDeliveryIsDeferred(error, parsed?.sourceId, queued?.attempts)) {
       deferred.add(record.messageId);
       console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: catalogProvider,
-        sourceId: parsed.sourceId, messageId: record.messageId, attempts: queued?.attempts, error: safeDiagnostic(error) }));
+        sourceId: parsed?.sourceId, messageId: record.messageId, attempts: queued?.attempts, error: safeDiagnostic(error) }));
     }
   };
   let registry: Awaited<ReturnType<typeof reviewedProviderRegistry>>;
