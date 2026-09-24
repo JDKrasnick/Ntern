@@ -462,7 +462,7 @@ describe('Cloudflare deployment plan guard', () => {
     expect(validateCloudflarePlan(plan([{
       ...contentUpdate,
       before: { ...worker, bindings: [...worker.bindings, disabled] },
-      after: { ...contentUpdate.after, bindings: [...worker.bindings, enabled] },
+      after: { ...contentUpdate.after, bindings: [enabled, ...[...worker.bindings].reverse()] },
     }]))).toHaveLength(1);
     expect(() => validateCloudflarePlan(plan([{
       ...contentUpdate,

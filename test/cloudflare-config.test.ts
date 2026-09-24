@@ -144,9 +144,11 @@ describe('Cloudflare deployment configuration', () => {
     const deployment = read('.github/workflows/deploy-cloudflare.yml');
     const compilerImage = read('cloudflare/resume-compiler/Dockerfile');
     expect(api.durable_objects?.bindings).toContainEqual({ name: 'RESUME_PDF_COMPILER', class_name: 'ResumePdfCompilerV2' });
+    expect(api.durable_objects?.bindings).toContainEqual({ name: 'D1_TRAFFIC_CONTROLLER', class_name: 'D1TrafficController', script_name: 'intern-notifs-ingestion' });
     expect(api.migrations).toContainEqual({ tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] });
     expect(api.containers).toContainEqual({ class_name: 'ResumePdfCompilerV2', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 });
     expect(terraform).toContain('{ name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompilerV2" }');
+    expect(terraform).toContain('{ name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController", script_name = cloudflare_workers_script.ingestion.script_name }');
     expect(terraform).not.toMatch(/\bmigrations\s*=\s*\{/);
     expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "true"');
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
