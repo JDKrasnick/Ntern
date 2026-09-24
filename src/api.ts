@@ -15,6 +15,7 @@ import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.j
 import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
+import { buildResumeReviewRows } from './resume-review.js';
 import { RESUME_TEMPLATES, resumeTemplateList } from './resume-templates.js';
 import type { ResumeSemanticIndex } from './resume-embeddings.js';
 import { effectiveResumeSubscriptionPlan, resumeSubscriptionPeriod, resumeSubscriptionSummary } from './subscription.js';
@@ -384,7 +385,8 @@ export interface ResumeImportCache {
 
 /** Model implementations return only proposed structured changes; API guards own validation. */
 export interface ResumeDraftGenerator {
-  generate(input: { job: ImportedJob; profile: ResumeProfile; bankItems: ResumeBankItem[] }): Promise<ResumeChange[]>;
+  /** `feedback` carries the previous attempt's validation error so the model can correct it. */
+  generate(input: { job: ImportedJob; profile: ResumeProfile; bankItems: ResumeBankItem[]; feedback?: string }): Promise<ResumeChange[]>;
 }
 
 export interface ResumeArtifactStorage {
@@ -982,18 +984,41 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (exhausted) return reply(402, exhausted);
             const allowed = new Set(profile.bankItemIds);
             const selected = bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified);
+            const evidence = resumeGenerationEvidence(imported, selected);
+            const generationStartedAt = Date.now();
             let changes: ResumeChange[];
+            let generation: { outcome: 'model' | 'model-retry' | 'fallback'; reason?: string };
             try {
-              changes = dependencies.resumeDraftGenerator
-                ? await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: resumeGenerationEvidence(imported, selected) })
-                : resumeDraftChanges(imported, selected);
-              validateResumeChanges(changes, selected);
-              if (!changes.length) changes = resumeDraftChanges(imported, selected);
-            } catch {
+              if (!dependencies.resumeDraftGenerator) {
+                changes = resumeDraftChanges(imported, selected);
+                generation = { outcome: 'fallback', reason: 'no generator configured' };
+              } else {
+                // The first attempt covers schema and validation failures alike:
+                // either way the model gets one corrective retry with the error.
+                try {
+                  changes = await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence });
+                  validateResumeChanges(changes, selected);
+                  generation = { outcome: 'model' };
+                } catch (firstError) {
+                  const feedback = firstError instanceof Error ? firstError.message : 'The changes did not match the required schema.';
+                  changes = await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, feedback });
+                  validateResumeChanges(changes, selected);
+                  generation = { outcome: 'model-retry' };
+                }
+                if (!changes.length) {
+                  changes = resumeDraftChanges(imported, selected);
+                  generation = { outcome: 'fallback', reason: 'model returned no changes' };
+                }
+              }
+            } catch (error) {
               // Generation availability must not make a verified base unusable.
               // The fallback remains evidence-linked and never invents a claim.
               changes = resumeDraftChanges(imported, selected);
+              generation = { outcome: 'fallback', reason: error instanceof Error ? error.message : String(error) };
             }
+            // Outcomes are logged so a silent fallback rate is visible in logs.
+            console.log(JSON.stringify({ event: 'resume_draft_generation', outcome: generation.outcome, reason: generation.reason,
+              changes: changes.length, evidence: evidence.length, durationMs: Date.now() - generationStartedAt }));
             const readabilityChanges = proposeResumeReadabilityChanges(imported, selected);
             const readabilityTargets = new Set(readabilityChanges.map((change) => change.target.bankItemId));
             changes = [...readabilityChanges, ...changes.filter((change) => !readabilityTargets.has(change.target.bankItemId))].slice(0, 12);
@@ -1035,6 +1060,20 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
             return reply(200, updated);
           }
+        }
+        const reviewMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/review$/u);
+        if (reviewMatch && method === 'GET') {
+          const draftId = decodeURIComponent(reviewMatch[1]!);
+          const previous = await dependencies.users.getResumeDraft(userId, draftId);
+          if (!previous) return reply(404, { message: 'Resume draft not found' });
+          const [profile, applicant, bankItems] = await Promise.all([
+            dependencies.users.getResumeProfile(userId, previous.profileId),
+            dependencies.users.getProfile(userId),
+            dependencies.users.listResumeBank(userId),
+          ]);
+          if (!profile) return reply(404, { message: 'Resume profile not found' });
+          const fallbackApplicant: ApplicantProfile = { userId, contact: { name: '', email: '' }, location: '', workAuthorization: '', links: {}, education: [], reusableAnswers: {}, updatedAt: timestamp };
+          return reply(200, { rows: buildResumeReviewRows(profile, applicant ?? fallbackApplicant, previous, bankItems), profileName: profile.name, template: profile.template });
         }
         const draftChangeMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/changes\/([^/]+)$/u);
         if (draftChangeMatch && method === 'PATCH') {

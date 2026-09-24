@@ -39,13 +39,16 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('Sign in to import PDF or DOCX');
   });
 
-  it('offers an adaptive review workspace with evidence and explicit decisions', () => {
+  it('offers an adaptive review workspace with a side-by-side decision diff', () => {
     expect(app).toContain('reviewMode === "changes"');
     expect(app).toContain('resumeReviewWorkspaceWide');
-    expect(app).toContain('Technical-base evidence');
-    expect(app).toContain('label="Keep original"');
-    expect(app).toContain('label="Apply change"');
-    expect(app).toContain('accessibilityLabel="Previous change"');
+    expect(app).toContain('function ResumeReviewDiff');
+    expect(app).toContain('resumeDiffBoard');
+    expect(app).toContain('onDecide={decideChange}');
+    expect(app).toContain('decideChange');
+    expect(app).toContain('/review`');
+    expect(app).toContain('your résumé → tailored');
+    expect(app).toContain('No job-specific changes found');
     expect(app).toContain('/finalize`');
     expect(app).toContain('loadResumeArtifactPreview(result.artifact.artifactId, 1, token)');
     expect(app).toContain('loadResumeArtifactSource(result.artifact.artifactId, token)');

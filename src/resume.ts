@@ -457,7 +457,8 @@ export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankI
       || (change.type === 'remove' && (!change.original || change.suggestion))
       || (change.type === 'move' && (!change.original || change.suggestion))
       || (change.type === 'rewrite' && (!change.original || !change.suggestion))) {
-      throw new Error('Resume changes must include the fields required by their change type.');
+      const expected = change.type === 'add' ? 'suggestion only' : change.type === 'rewrite' ? 'original and suggestion' : 'original only';
+      throw new Error(`Resume change ${change.changeId} of type ${change.type} must include ${expected}.`);
     }
     const evidenceWords = resumeWords(evidence);
     const unsupportedWords = substantiveResumeWords(change.suggestion ?? '').filter((word) => !evidenceWords.has(word));

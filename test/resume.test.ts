@@ -24,7 +24,7 @@ describe('resume safety contracts', () => {
     const verified = { userId: 'owner', bankItemId: 'bank-1', kind: 'project' as const, content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
     const target = { kind: 'project' as const, bankItemId: 'bank-1' };
     expect(() => validateResumeChanges([{ changeId: 'c', type: 'add', target, section: 'Experience', suggestion: 'Led a global security team', evidenceIds: ['bank-1'], reason: 'fit' }], [verified])).toThrow('claims');
-    expect(() => validateResumeChanges([{ changeId: 'c', type: 'move', target, section: 'Projects', suggestion: verified.content, evidenceIds: ['bank-1'], reason: 'fit' }], [verified])).toThrow('change type');
+    expect(() => validateResumeChanges([{ changeId: 'c', type: 'move', target, section: 'Projects', suggestion: verified.content, evidenceIds: ['bank-1'], reason: 'fit' }], [verified])).toThrow('must include original only');
   });
 
   it('rejects bullet evidence and targets that cross project parents', () => {

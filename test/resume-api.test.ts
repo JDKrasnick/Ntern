@@ -117,6 +117,40 @@ describe('resume API ownership and revisions', () => {
     expect(generate).toHaveBeenCalledTimes(2);
   });
 
+  it('retries generation with validation feedback before falling back', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'TypeScript dashboard role', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const feedback: Array<string | undefined> = [];
+    const generate = vi.fn(async (input: { feedback?: string }) => {
+      feedback.push(input.feedback);
+      if (!input.feedback) return [{ changeId: 'bad', type: 'add' as const, target: { kind: 'project' as const, bankItemId: 'evidence' }, section: 'Projects', suggestion: 'Led a global security team', evidenceIds: ['evidence'], reason: 'bad' }];
+      return [{ changeId: 'good', type: 'add' as const, target: { kind: 'project' as const, bankItemId: 'evidence' }, section: 'Projects', suggestion: 'Built a TypeScript dashboard', evidenceIds: ['evidence'], reason: 'fits' }];
+    });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeDraftGenerator: { generate }, now: () => '2026-09-23T00:00:00.000Z' });
+    const response = await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }));
+    expect(response.statusCode).toBe(201);
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(feedback[1]).toContain('evidence');
+    expect((JSON.parse(response.body) as { changes: unknown[] }).changes.length).toBeGreaterThan(0);
+  });
+
+  it('serves aligned review rows for a draft', async () => {
+    const users = new MemoryUserStore();
+    await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'project', kind: 'project', content: 'Compiler Lab', details: { name: 'Compiler Lab', technologies: ['TypeScript'] }, verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['project'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now', changes: [
+      { changeId: 'rewrite', type: 'rewrite', target: { kind: 'project', bankItemId: 'project' }, section: 'Projects', original: 'Compiler Lab', suggestion: 'Compiler Lab — compiler', evidenceIds: ['project'], reason: 'fits' },
+    ] });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    const response = await handler(event('student', 'GET', '/me/resume-drafts/draft/review'));
+    expect(response.statusCode).toBe(200);
+    const rows = (JSON.parse(response.body) as { rows: Array<{ changeId?: string }> }).rows;
+    expect(rows.some((row) => row.changeId === 'rewrite')).toBe(true);
+  });
+
   it('refunds the monthly allowance when a draft cannot be persisted', async () => {
     class ConflictStore extends MemoryUserStore {
       async putResumeDraft(): Promise<boolean> { return false; }

@@ -162,6 +162,33 @@ test('resolves a pasted description into a ready import through the compiled API
   assert.equal((await listed.json()).imports.length, 1);
 });
 
+test('serves a side-by-side review diff for a tailored draft through the compiled API Worker', async () => {
+  const { token, userId } = await signIn();
+  await seedDocument(userId);
+  await api.fetch('https://api.example.test/me/resume-bank/import', authorized(token, { method: 'POST', body: JSON.stringify({ documentId: 'resume' }) }));
+  const bank = await api.fetch('https://api.example.test/me/resume-bank', authorized(token));
+  const items = (await bank.json()).items;
+  const profile = await api.fetch('https://api.example.test/me/resume-profiles', authorized(token, {
+    method: 'POST', body: JSON.stringify({ name: 'Review base', tags: [], bankItemIds: items.map((item) => item.bankItemId), sectionOrder: [], template: 'clean-standard' }),
+  }));
+  const profileBody = await profile.json();
+  const resolved = await api.fetch('https://api.example.test/me/resume-jobs/resolve', authorized(token, {
+    method: 'POST', body: JSON.stringify({ url: 'https://careers.example.test/jobs/review', manualDescription: 'Seeking a compiler engineer to build a parser and add type checking.' }),
+  }));
+  const job = await resolved.json();
+  const draftResponse = await api.fetch('https://api.example.test/me/resume-drafts', authorized(token, { method: 'POST', body: JSON.stringify({ profileId: profileBody.profileId, importId: job.importId }) }));
+  assert.equal(draftResponse.status, 201);
+  const draft = await draftResponse.json();
+  assert.ok(draft.changes.length > 0);
+
+  const review = await api.fetch(`https://api.example.test/me/resume-drafts/${draft.draftId}/review`, authorized(token));
+  assert.equal(review.status, 200);
+  const rows = (await review.json()).rows;
+  assert.ok(rows.length > 0);
+  assert.ok(rows.every((row) => row.before !== undefined || row.after !== undefined));
+  assert.deepEqual(new Set(rows.filter((row) => row.changeId).map((row) => row.changeId)), new Set(draft.changes.map((change) => change.changeId)));
+});
+
 test('deletes an imported résumé through the compiled API Worker and prunes its saved base', async () => {
   const { token, userId } = await signIn();
   await seedDocument(userId);

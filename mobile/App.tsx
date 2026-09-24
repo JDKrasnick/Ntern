@@ -5648,6 +5648,7 @@ type ResumeProfileRecommendationCard = { profileId: string; score: number; expla
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
 type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; target: ResumeBankRef; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
 type ResumeArtifactCard = { artifactId: string; pageCount?: number };
+type ResumeReviewRow = { rowId: string; kind: "context" | "change"; section: string; label: string; before?: string; after?: string; changeId?: string; type?: "rewrite" | "add" | "remove" | "move"; decision?: "accepted" | "rejected"; note?: string };
 type ResumeSubscriptionCard = {
   tier: "free" | "plus" | "pro";
   plan: { name: string; priceUsdMonthly: number; tailoredDraftsPerMonth: number };
@@ -5660,8 +5661,48 @@ function bestSavedResumeRecommendation(recommendations: ResumeProfileRecommendat
   return recommendations.find((recommendation) => savedIds.has(recommendation.profileId));
 }
 
-function ResumeSavedProfilesGhost() {
-  const motionAllowed = useContext(MotionAllowedContext);
+function ResumeReviewDiff({ rows, busy, onDecide }: { rows: ResumeReviewRow[]; busy: boolean; onDecide: (changeId: string, decision: "accepted" | "rejected") => void }) {
+  let lastLabel = "";
+  return (
+    <View style={styles.resumeDiffBoard}>
+      {rows.map((row) => {
+        const changed = row.kind === "change";
+        const showLabel = row.label !== lastLabel;
+        lastLabel = row.label;
+        const leftChanged = changed && row.before !== undefined && row.before !== row.after;
+        const rightChanged = changed && row.after !== undefined && row.before !== row.after;
+        return (
+          <View key={row.rowId}>
+            {showLabel ? <Text style={styles.resumeDiffRowLabel}>{row.label}</Text> : null}
+            <View style={styles.resumeDiffRow}>
+              <View style={[styles.resumeDiffCell, leftChanged && styles.resumeDiffCellRemoved, changed && row.before === undefined && styles.resumeDiffCellEmpty]}>
+                {row.before !== undefined ? <Text style={[styles.resumeDiffLineText, leftChanged && styles.resumeDiffRemovedText]}>{row.before}</Text> : null}
+              </View>
+              <View style={styles.resumeDiffGutter}>
+                {row.changeId ? (
+                  <View style={styles.resumeDiffGutterActions}>
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel={row.decision === "accepted" ? "Change applied" : "Apply this change"} disabled={busy} onPress={() => onDecide(row.changeId!, "accepted")} style={[styles.resumeDiffArrow, row.decision === "accepted" && styles.resumeDiffArrowAccepted]}>
+                      <Ionicons name={row.decision === "accepted" ? "checkmark" : "arrow-forward"} size={15} color={row.decision === "accepted" ? colors.onDark : colors.signal} />
+                    </TouchableOpacity>
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel={row.decision === "rejected" ? "Original kept" : "Keep this original"} disabled={busy} onPress={() => onDecide(row.changeId!, "rejected")} style={[styles.resumeDiffReject, row.decision === "rejected" && styles.resumeDiffRejectActive]}>
+                      <Ionicons name="close" size={12} color={row.decision === "rejected" ? colors.onDark : colors.muted} />
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
+              </View>
+              <View style={[styles.resumeDiffCell, rightChanged && styles.resumeDiffCellAdded, changed && row.after === undefined && styles.resumeDiffCellEmpty]}>
+                {row.after !== undefined ? <Text style={[styles.resumeDiffLineText, rightChanged && styles.resumeDiffAddedText]}>{row.after}</Text> : null}
+              </View>
+            </View>
+            {row.note ? <Text style={styles.resumeDiffNote}>{row.note}{row.type ? ` · ${row.type}` : ""}</Text> : null}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function ResumeSavedProfilesGhost() {  const motionAllowed = useContext(MotionAllowedContext);
   const opacity = useRef(new Animated.Value(0.48)).current;
   useEffect(() => {
     if (!motionAllowed) {
@@ -5730,14 +5771,14 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [subscription, setSubscription] = useState<ResumeSubscriptionCard>();
   const [documents, setDocuments] = useState<ResumeSourceDocument[]>([]);
-  const current = draft?.changes[activeChange];
+  const [reviewRows, setReviewRows] = useState<ResumeReviewRow[]>([]);
+  const [reviewLoading, setReviewLoading] = useState(false);
   const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
-  const decide = (decision: "accepted" | "rejected") => {
-    if (!draft || !current || resumeBusy) return;
+  const decideChange = (changeId: string, decision: "accepted" | "rejected") => {
+    if (!draft || resumeBusy) return;
     setResumeBusy(true);
-    const changes = draft.changes.map((change) => change.changeId === current.changeId ? { ...change, decision } : change);
-    void api<ResumeDraftCard>(`/me/resume-drafts/${draft.draftId}/changes/${current.changeId}`, token, { method: "PATCH", body: JSON.stringify({ revision: draft.revision, decision }) })
-      .then((updated) => { setDraft(updated); if (activeChange < updated.changes.length - 1) setActiveChange((index) => index + 1); })
+    void api<ResumeDraftCard>(`/me/resume-drafts/${draft.draftId}/changes/${changeId}`, token, { method: "PATCH", body: JSON.stringify({ revision: draft.revision, decision }) })
+      .then((updated) => setDraft(updated))
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that decision."))
       .finally(() => setResumeBusy(false));
   };
@@ -5838,6 +5879,16 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
     return () => { cancelled = true; };
   }, [jobImport?.importId, jobImport?.status, profiles, token]);
   useEffect(() => () => releaseResumeArtifactPreview(artifactPreview), [artifactPreview]);
+  useEffect(() => {
+    if (!signedIn || !draft) { setReviewRows([]); return; }
+    let cancelled = false;
+    setReviewLoading(true);
+    void api<{ rows: ResumeReviewRow[] }>(`/me/resume-drafts/${encodeURIComponent(draft.draftId)}/review`, token)
+      .then(({ rows }) => { if (!cancelled) setReviewRows(rows); })
+      .catch(() => { if (!cancelled) setReviewRows([]); })
+      .finally(() => { if (!cancelled) setReviewLoading(false); });
+    return () => { cancelled = true; };
+  }, [draft?.draftId, draft?.revision, signedIn, token]);
   const addBankItem = () => {
     const content = bankDraft.trim();
     if (!content || bankSaving) return;
@@ -6404,38 +6455,26 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
             </View>
           ) : null}
         </View>
-        {draft?.changes.length ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
+        {draft ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
           {(desktop || reviewMode === "changes") ? (
             <View style={styles.resumeChangePanel}>
               <View style={styles.resumeDiffHeader}>
-                <Text style={styles.resumeChangeCounter}>Diff {activeChange + 1} of {draft.changes.length}</Text>
-                <Text style={styles.resumeDiffType}>{current?.type}</Text>
+                <Text style={styles.resumeChangeCounter}>{reviewed} of {draft.changes.length} reviewed</Text>
+                <Text style={styles.resumeDiffType}>your résumé → tailored</Text>
               </View>
-              <Text style={styles.resumeChangeSection}>{current?.section}</Text>
-              <View style={styles.resumeDiffCode}>
-                {current?.original ? (
-                  <View style={[styles.resumeDiffLine, styles.resumeDiffRemoved]}>
-                    <Text style={[styles.resumeDiffMarker, styles.resumeDiffRemovedText]}>−</Text>
-                    <Text style={[styles.resumeDiffText, styles.resumeDiffRemovedText]}>{current.original}</Text>
-                  </View>
-                ) : null}
-                {current?.suggestion || current?.type === "move" ? (
-                  <View style={[styles.resumeDiffLine, styles.resumeDiffAdded]}>
-                    <Text style={[styles.resumeDiffMarker, styles.resumeDiffAddedText]}>+</Text>
-                    <Text style={[styles.resumeDiffText, styles.resumeDiffAddedText]}>{current.suggestion ?? current.original}</Text>
-                  </View>
-                ) : null}
-              </View>
-              <View style={styles.resumeEvidence}>
-                <Ionicons name="link-outline" size={16} color={colors.signal} />
-                <Text style={styles.resumeEvidenceText}>Technical-base evidence · {current?.evidenceIds.length} source item{current?.evidenceIds.length === 1 ? "" : "s"}</Text>
-              </View>
-              <Text style={styles.resumeReason}>{current?.reason}</Text>
-              <View style={styles.resumeDecisionRow}>
-                {activeChange > 0 ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous change" onPress={() => setActiveChange((index) => index - 1)} disabled={resumeBusy}><Text style={styles.resumeKeepAll}>Previous</Text></TouchableOpacity> : null}
-                <ActionButton label="Keep original" variant="secondary" onPress={() => decide("rejected")} />
-                <ActionButton label="Apply change" onPress={() => decide("accepted")} />
-              </View>
+              {draft.changes.length ? (
+                reviewLoading && !reviewRows.length ? <Text style={styles.resumePreviewCaption}>Building the diff…</Text> : (
+                  <ScrollView nestedScrollEnabled style={styles.resumeDiffScroller}>
+                    <ResumeReviewDiff rows={reviewRows} busy={resumeBusy} onDecide={decideChange} />
+                  </ScrollView>
+                )
+              ) : (
+                <View style={styles.resumePreviewEmpty}>
+                  <Ionicons name="sparkles-outline" size={28} color={colors.muted} />
+                  <Text style={styles.resumePreviewEmptyTitle}>No job-specific changes found</Text>
+                  <Text style={styles.resumePreviewCaption}>Your saved base already fits this job. Compile it to inspect and save the PDF.</Text>
+                </View>
+              )}
             </View>
           ) : null}
           {(desktop || reviewMode === "preview") ? (
@@ -9169,6 +9208,22 @@ const styles = StyleSheet.create({
   resumeDiffText: { flex: 1, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 13, lineHeight: 20 },
   resumeDiffRemovedText: { color: colors.danger },
   resumeDiffAddedText: { color: colors.success },
+  resumeDiffBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, marginTop: 12, overflow: "hidden" },
+  resumeDiffScroller: { marginTop: 12, maxHeight: 560 },
+  resumeDiffRowLabel: { backgroundColor: colors.canvas, color: colors.muted, fontSize: 11, fontWeight: "800", letterSpacing: 0.6, paddingHorizontal: 12, paddingVertical: 5, textTransform: "uppercase" },
+  resumeDiffRow: { alignItems: "stretch", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row" },
+  resumeDiffCell: { flex: 1, justifyContent: "center", minHeight: 42, minWidth: 0, paddingHorizontal: 10, paddingVertical: 9 },
+  resumeDiffCellEmpty: { backgroundColor: colors.canvas },
+  resumeDiffCellRemoved: { backgroundColor: colors.dangerSoft },
+  resumeDiffCellAdded: { backgroundColor: colors.successSoft },
+  resumeDiffLineText: { color: colors.body, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 12.5, lineHeight: 18 },
+  resumeDiffGutter: { alignItems: "center", borderLeftColor: colors.separator, borderLeftWidth: 1, justifyContent: "center", paddingHorizontal: 4, width: 52 },
+  resumeDiffGutterActions: { alignItems: "center", gap: 5 },
+  resumeDiffArrow: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 999, height: 27, justifyContent: "center", width: 27 },
+  resumeDiffArrowAccepted: { backgroundColor: colors.success },
+  resumeDiffReject: { alignItems: "center", borderColor: colors.border, borderRadius: 999, borderWidth: 1, height: 21, justifyContent: "center", width: 21 },
+  resumeDiffRejectActive: { backgroundColor: colors.muted, borderColor: colors.muted },
+  resumeDiffNote: { backgroundColor: colors.canvas, color: colors.muted, fontSize: 11, fontStyle: "italic", paddingHorizontal: 12, paddingVertical: 4 },
   resumeEvidence: { alignItems: "center", flexDirection: "row", gap: 6, marginTop: 14 },
   resumeEvidenceText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
   resumeReason: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },
