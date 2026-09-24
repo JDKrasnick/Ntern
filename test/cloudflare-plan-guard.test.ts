@@ -53,6 +53,44 @@ describe('Cloudflare deployment plan guard', () => {
     ]))).toHaveLength(2);
   });
 
+  it('accepts a computed namespace ID for an unchanged Durable Object binding', () => {
+    const namespace = {
+      name: 'RESUME_PDF_COMPILER',
+      type: 'durable_object_namespace',
+      class_name: 'ResumePdfCompilerV2',
+    };
+    expect(validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      before: {
+        ...worker,
+        bindings: [...worker.bindings, { ...namespace, namespace_id: 'stable-namespace-id' }],
+      },
+      after: {
+        ...contentUpdate.after,
+        bindings: [...worker.bindings, { ...namespace, namespace_id: null }],
+      },
+      after_unknown: {
+        ...contentUpdate.after_unknown,
+        bindings: [{}, { namespace_id: true }],
+      },
+    }]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      before: {
+        ...worker,
+        bindings: [...worker.bindings, { ...namespace, namespace_id: 'stable-namespace-id' }],
+      },
+      after: {
+        ...contentUpdate.after,
+        bindings: [...worker.bindings, { ...namespace, class_name: 'OtherCompiler', namespace_id: null }],
+      },
+      after_unknown: {
+        ...contentUpdate.after_unknown,
+        bindings: [{}, { namespace_id: true }],
+      },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it.each([
     ['creates', 'cloudflare_workers_script.ingestion', ['create']],
     ['replacements', 'cloudflare_workers_script.application', ['delete', 'create']],
