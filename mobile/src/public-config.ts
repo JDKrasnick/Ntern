@@ -16,5 +16,5 @@ export const publicConfig = {
     ? configuredApiUrl
     : productionApiUrl,
   /** Public rollout switch; private records remain guarded by the Worker flag. */
-  resumeTunerEnabled: process.env.EXPO_PUBLIC_RESUME_TUNER_ENABLED === "true",
+  resumeTunerEnabled: process.env.EXPO_PUBLIC_RESUME_TUNER_ENABLED !== "false",
 };

@@ -55,7 +55,7 @@ jobs:
       TF_VAR_shadow_extraction_enabled: ${{ vars.SHADOW_EXTRACTION_ENABLED }}
       TF_VAR_shadow_extraction_monthly_forecast_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS }}
       TF_VAR_shadow_extraction_monthly_headroom_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS }}
-      TF_VAR_resume_tuner_enabled: "false"
+      TF_VAR_resume_tuner_enabled: "true"
       TF_VAR_resume_embedding_index_name: intern-notifs-resume-bank-v1
       OPERATIONS_SHARED_SECRET: ${{ secrets.OPERATIONS_SHARED_SECRET }}
     steps:

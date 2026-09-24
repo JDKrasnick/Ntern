@@ -148,7 +148,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(api.containers).toContainEqual({ class_name: 'ResumePdfCompilerV2', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 });
     expect(terraform).toContain('{ name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompilerV2" }');
     expect(terraform).not.toMatch(/\bmigrations\s*=\s*\{/);
-    expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "false"');
+    expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "true"');
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.ingestion intern-notifs-ingestion');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.application intern-notifs');
