@@ -199,8 +199,24 @@ describe('Cloudflare deployment plan guard', () => {
   it('accepts only the reviewed traffic-controller Durable Object binding addition', () => {
     expect(validateCloudflarePlan(plan([{
       ...contentUpdate,
-      after: { ...contentUpdate.after, bindings: [...worker.bindings, { name: 'D1_TRAFFIC_CONTROLLER', type: 'durable_object_namespace', class_name: 'D1TrafficController' }] },
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, migrations: null },
+      after: {
+        ...contentUpdate.after,
+        bindings: [...worker.bindings, { name: 'D1_TRAFFIC_CONTROLLER', type: 'durable_object_namespace', class_name: 'D1TrafficController' }],
+        migrations: { new_tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] },
+      },
     }]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, migrations: null },
+      after: {
+        ...contentUpdate.after,
+        bindings: [...worker.bindings, { name: 'D1_TRAFFIC_CONTROLLER', type: 'durable_object_namespace', class_name: 'D1TrafficController' }],
+        migrations: { new_tag: 'v1-wrong-class', new_sqlite_classes: ['OtherController'] },
+      },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([{
       ...contentUpdate,
       after: { ...contentUpdate.after, bindings: [...worker.bindings, { name: 'UNRELATED', type: 'durable_object_namespace', class_name: 'D1TrafficController' }] },
