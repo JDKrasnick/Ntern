@@ -127,6 +127,20 @@ jobs:
       - name: Apply exact saved plan
         if: steps.plan.outputs.changed == 'true'
         run: tofu -chdir=infra/cloudflare apply -auto-approve "$RUNNER_TEMP/cloudflare.tfplan"
+      - name: Restore operations binding if its deployment check rejects the key
+        shell: bash
+        run: |
+          if test -n "$OPERATIONS_SHARED_SECRET"; then
+            status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
+              "$TF_VAR_public_api_url/internal/deployment")"
+            if test "$status" = 404; then
+              printf '%s' "$OPERATIONS_SHARED_SECRET" \
+                | npx wrangler secret put OPERATIONS_SHARED_SECRET --config wrangler.ingestion.jsonc
+              printf '%s' "$OPERATIONS_SHARED_SECRET" \
+                | npx wrangler secret put OPERATIONS_SHARED_SECRET --config wrangler.api.jsonc
+            fi
+          fi
       - name: Require converged state
         run: tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode
       - name: Back up post-deploy state
