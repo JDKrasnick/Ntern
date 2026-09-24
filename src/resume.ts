@@ -318,6 +318,37 @@ const groundingStopWords = new Set(['and', 'are', 'but', 'for', 'from', 'into', 
 
 const substantiveResumeWords = (value: string) => [...resumeWords(value)].filter((word) => !groundingStopWords.has(word));
 
+/** Turns an intentionally comprehensive base into a reviewable one-page target.
+ * Nothing is deleted silently: every lower-relevance bullet becomes an explicit
+ * removal diff, and at least one bullet per represented parent is retained when
+ * the budget permits it. */
+export function proposeResumeReadabilityChanges(job: ImportedJob, bankItems: ResumeBankItem[], bulletLimit = 12): ResumeChange[] {
+  const bullets = bankItems.filter((item): item is Extract<ResumeBankItem, { kind: 'bullet' }> => item.kind === 'bullet' && item.verified);
+  if (bullets.length <= bulletLimit) return [];
+  const jobWords = resumeWords(`${job.title ?? ''} ${job.company ?? ''} ${job.description}`);
+  const scored = bullets.map((item, index) => ({ item, index, score: substantiveResumeWords(item.content).filter((word) => jobWords.has(word)).length }));
+  const bestByParent = new Map<string, (typeof scored)[number]>();
+  for (const candidate of scored) {
+    const current = bestByParent.get(candidate.item.parent.bankItemId);
+    if (!current || candidate.score > current.score) bestByParent.set(candidate.item.parent.bankItemId, candidate);
+  }
+  const ranked = [...scored].sort((left, right) => right.score - left.score || left.index - right.index);
+  const keep = new Set([...bestByParent.values()].sort((left, right) => right.score - left.score || left.index - right.index).slice(0, bulletLimit).map(({ item }) => item.bankItemId));
+  for (const { item } of ranked) {
+    if (keep.size >= bulletLimit) break;
+    keep.add(item.bankItemId);
+  }
+  return scored.filter(({ item }) => !keep.has(item.bankItemId)).map(({ item }, index) => ({
+    changeId: `readability-${index}-${item.bankItemId}`,
+    type: 'remove',
+    target: resumeBankItemRef(item),
+    section: item.parent.kind === 'project' ? 'Projects' : item.parent.kind === 'research' ? 'Research' : item.parent.kind === 'education' ? 'Education' : 'Experience',
+    original: item.content,
+    evidenceIds: [item.bankItemId],
+    reason: `Keeps the final resume near ${bulletLimit} bullets for readable one-page spacing; this bullet has lower direct overlap with the job than retained material.`,
+  }));
+}
+
 /** Deterministic first-pass base selection. Canonical records stay in D1; a later
  * Vectorize lookup may refine this score but must not replace its explanation. */
 export function recommendResumeProfiles(jobDescription: string, profiles: ResumeProfile[], bankItems: ResumeBankItem[], semanticScores = new Map<string, number>()): ResumeProfileRecommendation[] {

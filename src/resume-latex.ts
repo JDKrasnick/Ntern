@@ -120,16 +120,16 @@ function templatePreamble(profile: ResumeProfile) {
   // Jake stays one-page dense, but retains a readable frame and visible rhythm
   // between bullets, entries, and section rules. Project Compact remains the
   // deliberately tighter option when a larger source selection needs it.
-  const margin = jake ? '0.50in' : dense ? '0.45in' : comfortable ? '0.64in' : '0.55in';
-  const itemSep = jake ? '0.75pt' : dense ? '0.5pt' : comfortable ? '2pt' : '1pt';
-  const sectionBefore = jake ? '5.5pt' : dense ? '5pt' : comfortable ? '10pt' : '7pt';
-  const sectionAfter = jake ? '2.5pt' : dense ? '2pt' : '4pt';
-  const compactPull = jake ? '-1.75pt' : '-2pt';
+  const margin = jake ? '0.55in' : dense ? '0.45in' : comfortable ? '0.64in' : '0.55in';
+  const itemSep = jake ? '1pt' : dense ? '0.5pt' : comfortable ? '2pt' : '1pt';
+  const sectionBefore = jake ? '6pt' : dense ? '5pt' : comfortable ? '10pt' : '7pt';
+  const sectionAfter = jake ? '3pt' : dense ? '2pt' : '4pt';
+  const compactPull = jake ? '-1pt' : '-2pt';
   return `\\documentclass[letterpaper,10pt]{article}
 \\usepackage[margin=${margin}]{geometry}
 \\usepackage[T1]{fontenc}
 ${template.typography === 'sans' ? '\\renewcommand{\\familydefault}{\\sfdefault}' : ''}
-${jake ? '\\linespread{0.96}' : ''}
+${jake ? '\\linespread{0.99}' : ''}
 \\pagestyle{empty}
 \\setlength{\\parindent}{0pt}
 \\setlength{\\tabcolsep}{0pt}

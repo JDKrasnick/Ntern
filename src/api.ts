@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, recommendResumeProfiles, resumeBankItemRef, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankItemRef, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 import { RESUME_TEMPLATES, resumeTemplateList } from './resume-templates.js';
@@ -878,6 +878,9 @@ export function createApiHandler(dependencies: ApiDependencies) {
               // The fallback remains evidence-linked and never invents a claim.
               changes = resumeDraftChanges(imported, selected);
             }
+            const readabilityChanges = proposeResumeReadabilityChanges(imported, selected);
+            const readabilityTargets = new Set(readabilityChanges.map((change) => change.target.bankItemId));
+            changes = [...readabilityChanges, ...changes.filter((change) => !readabilityTargets.has(change.target.bankItemId))].slice(0, 12);
             validateResumeChanges(changes, selected);
             const draft: ResumeDraft = { userId, draftId: randomUUID(), profileId, importId, changes, revision: 0, status: 'reviewing', createdAt: timestamp, updatedAt: timestamp };
             if (!await dependencies.users.putResumeDraft(draft)) return reply(409, { message: 'Resume draft already exists; retry' });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { escapeLatex, normalizeResumeJobUrl, recommendResumeProfiles, validateResumeChanges } from '../src/resume.js';
+import { escapeLatex, normalizeResumeJobUrl, proposeResumeReadabilityChanges, recommendResumeProfiles, validateResumeChanges } from '../src/resume.js';
 
 describe('resume safety contracts', () => {
   it('normalizes public HTTPS job URLs without retaining fragments', () => {
@@ -42,5 +42,20 @@ describe('resume safety contracts', () => {
       { userId: 'student', profileId: 'ml', name: 'ML', tags: ['machine-learning'], bankItemIds: [], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' },
     ], [{ userId: 'student', bankItemId: 'dashboard', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' }]);
     expect(recommendation[0]).toMatchObject({ profileId: 'web', score: 110, explanation: expect.stringContaining('verified bank item') });
+  });
+
+  it('proposes explicit removals to keep a large base readable without starving a parent', () => {
+    const common = { userId: 'student', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    const projects = ['compiler', 'dashboard'].map((bankItemId) => ({ ...common, bankItemId, kind: 'project' as const, content: bankItemId }));
+    const bullets = projects.flatMap((project) => Array.from({ length: 8 }, (_, index) => ({
+      ...common, bankItemId: `${project.bankItemId}-${index}`, kind: 'bullet' as const,
+      parent: { kind: 'project' as const, bankItemId: project.bankItemId },
+      content: index === 0 ? `Built a TypeScript ${project.content}` : `Documented ${project.content} result ${index}`,
+    })));
+    const changes = proposeResumeReadabilityChanges({ importId: 'job', canonicalUrl: 'https://example.test/job', description: 'TypeScript engineering', source: 'manual', contentHash: 'hash', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' }, [...projects, ...bullets]);
+    expect(changes).toHaveLength(4);
+    expect(changes.every((change) => change.type === 'remove' && change.target.kind === 'bullet')).toBe(true);
+    expect(changes.map((change) => change.target.bankItemId)).not.toContain('compiler-0');
+    expect(changes.map((change) => change.target.bankItemId)).not.toContain('dashboard-0');
   });
 });
