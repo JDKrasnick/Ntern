@@ -141,12 +141,18 @@ resource "cloudflare_workers_script" "ingestion" {
       { name = "DOCUMENTS", type = "r2_bucket", bucket_name = cloudflare_r2_bucket.documents.name },
       { name = "SHADOW_EXTRACTION_ARTIFACTS", type = "r2_bucket", bucket_name = cloudflare_r2_bucket.shadow_extraction.name },
       { name = "DESTINATION_BROWSER", type = "browser" },
+      { name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController" },
       { name = "VERSION_METADATA", type = "version_metadata" },
     ],
     [for queue in local.asynchronous_queues : { name = "${upper(replace(queue, "-", "_"))}_QUEUE", type = "queue", queue_name = cloudflare_queue.work[queue].queue_name }],
     [for queue in local.asynchronous_queues : { name = "${upper(replace(queue, "-", "_"))}_DLQ", type = "queue", queue_name = cloudflare_queue.dead_letter[queue].queue_name }],
     local.ingestion_plain_bindings,
   )
+
+  migrations = {
+    new_tag            = "v1-d1-traffic-controller"
+    new_sqlite_classes = ["D1TrafficController"]
+  }
 
   limits = { cpu_ms = 120000, subrequests = 50000 }
   observability = {

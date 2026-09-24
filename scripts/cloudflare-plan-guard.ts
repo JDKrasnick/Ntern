@@ -246,12 +246,20 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   const permittedSubrequestIncrease = address === 'cloudflare_workers_script.ingestion'
     && isDeepStrictEqual(before.limits, { cpu_ms: 120_000, subrequests: 10_000 })
     && isDeepStrictEqual(after.limits, { cpu_ms: 120_000, subrequests: 50_000 });
-  if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease) return false;
+  const permittedControllerMigration = address === 'cloudflare_workers_script.ingestion'
+    && permittedBindingChanged
+    && (before.migrations === null || before.migrations === undefined)
+    && isDeepStrictEqual(after.migrations, {
+      new_tag: 'v1-d1-traffic-controller',
+      new_sqlite_classes: ['D1TrafficController'],
+    });
+  if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease && !permittedControllerMigration) return false;
 
   const beforeForComparison = {
     ...before,
     ...(permittedBindingChanged ? { bindings: after.bindings } : {}),
     ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
+    ...(permittedControllerMigration ? { migrations: after.migrations } : {}),
   };
 
   const afterUnknown = change.after_unknown;

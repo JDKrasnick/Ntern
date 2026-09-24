@@ -162,6 +162,15 @@ describe('Cloudflare deployment configuration', () => {
     expect(compilerImage).not.toContain('texlive-full');
   });
 
+  it('registers the ingestion traffic controller before the API binds to it', () => {
+    const terraform = read('infra/cloudflare/main.tf');
+    expect(ingestion.durable_objects?.bindings).toContainEqual({ name: 'D1_TRAFFIC_CONTROLLER', class_name: 'D1TrafficController' });
+    expect(ingestion.migrations).toContainEqual({ tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] });
+    expect(terraform).toContain('{ name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController" }');
+    expect(terraform).toContain('new_tag            = "v1-d1-traffic-controller"');
+    expect(terraform).toContain('new_sqlite_classes = ["D1TrafficController"]');
+  });
+
   it('keeps the Cloudflare development resume stack isolated and complete', () => {
     const provision = read('scripts/provision-cloudflare-dev.sh');
     expect(devApi.ai).toEqual({ binding: 'AI' });
