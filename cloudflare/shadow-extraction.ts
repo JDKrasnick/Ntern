@@ -97,6 +97,44 @@ function parseCents(value: string | undefined): number | undefined {
 
 function month(now: Date): string { return now.toISOString().slice(0, 7); }
 
+const providerMonthlyShadowLimitCents = 2_000;
+const providerMonthlyCombinedLimitCents = 3_500;
+const providerRunReservationCents = 20;
+
+function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOrigin, forecast: number, headroom: number): number {
+  if (origin === 'provider-poll') {
+    // During promotion the old 500¢ binding retains its existing September
+    // allowance until the reviewed 2000¢ binding is applied.
+    if (headroom < providerMonthlyShadowLimitCents) {
+      const septemberIncreaseCents = period === '2026-09' ? 400 : 0;
+      return Math.min(headroom + septemberIncreaseCents,
+        Math.max(0, 2_000 + septemberIncreaseCents - forecast));
+    }
+    return Math.min(headroom, providerMonthlyShadowLimitCents,
+      Math.max(0, providerMonthlyCombinedLimitCents - forecast));
+  }
+  // Keep the previously approved September backfill limit; prospective work
+  // alone receives the new $20 monthly allowance.
+  const septemberIncreaseCents = period === '2026-09' ? 300 : 0;
+  return Math.min(Math.min(headroom, 500) + septemberIncreaseCents,
+    Math.max(0, 2_000 + septemberIncreaseCents - forecast));
+}
+
+export async function providerShadowBudgetStatus(db: D1Database, now: Date,
+  env: Pick<ShadowExtractionEnvironment, 'SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS' | 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS'>,
+): Promise<{ period: string; allowanceCents: number; spentCents: number; exhausted: boolean } | undefined> {
+  const forecast = parseCents(env.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS);
+  const headroom = parseCents(env.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS);
+  if (forecast === undefined || headroom === undefined) return undefined;
+  const period = month(now);
+  const allowanceCents = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom);
+  const row = await db.prepare(`SELECT COALESCE(SUM(CASE WHEN state = 'reserved' AND reserved_cents > actual_cents THEN reserved_cents
+      WHEN state IN ('reserved', 'reconciled') THEN actual_cents ELSE 0 END), 0) AS spent_cents
+    FROM shadow_extraction_cost_ledger WHERE period = ?`).bind(period).first<{ spent_cents: number }>();
+  const spentCents = row?.spent_cents ?? 0;
+  return { period, allowanceCents, spentCents, exhausted: spentCents + providerRunReservationCents > allowanceCents };
+}
+
 function r2Key(contentHash: string): string { return `shadow-input/${safeKeyPart(contentHash)}.json`; }
 
 async function r2Text(bucket: R2Bucket, key: string): Promise<string> {
@@ -182,12 +220,9 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
   const prior = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger
     WHERE period = ? AND lease_token = ?`).bind(period, leaseToken).first<{ state: string; reserved_cents: number }>();
   if (prior?.state === 'reserved' && prior.reserved_cents >= reserveCents) return true;
-  // Keep the final $1 of September's owner-approved $4 increase for natural provider-poll work.
-  // Other origins retain the previous $3 increase; October returns to the usual envelope.
   const run = await db.prepare('SELECT origin FROM shadow_extraction_runs WHERE run_key = ?')
     .bind(runKey).first<{ origin: ShadowExtractionOrigin }>();
-  const septemberIncreaseCents = period === '2026-09' ? (run?.origin === 'provider-poll' ? 400 : 300) : 0;
-  const allowance = Math.min(headroom + septemberIncreaseCents, Math.max(0, 2_000 + septemberIncreaseCents - forecast));
+  const allowance = monthlyShadowAllowanceCents(period, run?.origin ?? 'legacy-unknown', forecast, headroom);
   if (reserveCents > allowance) return false;
   const result = await db.prepare(`INSERT INTO shadow_extraction_cost_ledger (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
     SELECT ?, ?, ?, ?, 0, 'reserved', ?, ?
