@@ -279,7 +279,7 @@ describe('Cloudflare deployment plan guard', () => {
           new_classes: null,
           new_sqlite_classes: ['D1TrafficController'],
           new_tag: 'v1-d1-traffic-controller',
-          old_tag: null,
+          old_tag: '',
           renamed_classes: null,
           steps: null,
           transferred_classes: null,
@@ -306,7 +306,7 @@ describe('Cloudflare deployment plan guard', () => {
           { name: 'DB', type: 'd1', id: 'production-db' },
           { name: 'AUTH_FROM_EMAIL', type: 'plain_text', text: 'new@example.test' },
         ],
-        migrations: { new_tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] },
+        migrations: { old_tag: '', new_tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] },
       },
       after_unknown: {
         ...contentUpdate.after_unknown,
@@ -320,7 +320,17 @@ describe('Cloudflare deployment plan guard', () => {
       after: {
         ...contentUpdate.after,
         bindings: [...worker.bindings, { name: 'D1_TRAFFIC_CONTROLLER', type: 'durable_object_namespace', class_name: 'D1TrafficController' }],
-        migrations: { new_tag: 'v1-wrong-class', new_sqlite_classes: ['OtherController'] },
+        migrations: { old_tag: '', new_tag: 'v1-wrong-class', new_sqlite_classes: ['OtherController'] },
+      },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, migrations: null },
+      after: {
+        ...contentUpdate.after,
+        bindings: [...worker.bindings, { name: 'D1_TRAFFIC_CONTROLLER', type: 'durable_object_namespace', class_name: 'D1TrafficController' }],
+        migrations: { old_tag: 'unverified', new_tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] },
       },
     }]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([{
@@ -348,7 +358,7 @@ describe('Cloudflare deployment plan guard', () => {
           ...worker.bindings,
           { name: 'UNRELATED', type: 'plain_text', text: 'unsafe' },
         ],
-        migrations: { new_tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] },
+        migrations: { old_tag: '', new_tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] },
       },
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
