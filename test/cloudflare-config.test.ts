@@ -153,6 +153,10 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.ingestion intern-notifs-ingestion');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.application intern-notifs');
+    expect(deployment).toContain('Bootstrap Worker migrations with Wrangler');
+    expect(deployment).toContain('jq \'del(.vars)\' wrangler.ingestion.jsonc');
+    expect(deployment.indexOf('Back up pre-deploy state')).toBeLessThan(deployment.indexOf('Bootstrap Worker migrations with Wrangler'));
+    expect(deployment.indexOf('Bootstrap Worker migrations with Wrangler')).toBeLessThan(deployment.indexOf('Create and validate saved plan'));
     expect(deployment.indexOf('Ensure the resume embedding index exists')).toBeLessThan(deployment.indexOf('Create and validate saved plan'));
     expect(deployment).toContain('wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc');
     expect(deployment.indexOf('Create and validate saved plan')).toBeLessThan(deployment.indexOf('Apply production D1 migrations'));

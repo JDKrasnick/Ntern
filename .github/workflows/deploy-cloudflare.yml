@@ -126,6 +126,16 @@ jobs:
           aws s3 cp "$RUNNER_TEMP/cloudflare-before.tfstate" \
             "s3://intern-notifs-opentofu-state/$release/cloudflare-before.tfstate" \
             --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
+      - name: Bootstrap Worker migrations with Wrangler
+        shell: bash
+        run: |
+          ingestion_config="$GITHUB_WORKSPACE/.wrangler.ingestion.bootstrap.jsonc"
+          api_config="$GITHUB_WORKSPACE/.wrangler.api.bootstrap.jsonc"
+          trap 'rm -f "$ingestion_config" "$api_config"' EXIT
+          jq 'del(.vars)' wrangler.ingestion.jsonc > "$ingestion_config"
+          jq 'del(.vars)' wrangler.api.jsonc > "$api_config"
+          npx wrangler deploy --config "$ingestion_config" --keep-vars
+          npx wrangler deploy --config "$api_config" --keep-vars
       - name: Reconcile Worker migration state
         shell: bash
         run: |
