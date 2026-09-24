@@ -192,7 +192,8 @@ function normalizeStableDurableObjectNamespaceIds(
     if (!isRecord(previous) || previous.type !== 'durable_object_namespace') return;
     const { namespace_id: previousNamespaceId, ...previousIdentity } = previous;
     const { namespace_id: nextNamespaceId, ...nextIdentity } = binding;
-    if (typeof previousNamespaceId !== 'string' || nextNamespaceId !== null) return;
+    if (typeof previousNamespaceId !== 'string' && previousNamespaceId !== null) return;
+    if (nextNamespaceId !== null && nextNamespaceId !== undefined) return;
     if (!isDeepStrictEqual(previousIdentity, nextIdentity)) return;
     normalizedAfter[index] = { ...binding, namespace_id: previousNamespaceId };
     normalizedUnknown[index] = {};

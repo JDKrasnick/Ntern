@@ -63,11 +63,11 @@ describe('Cloudflare deployment plan guard', () => {
       ...contentUpdate,
       before: {
         ...worker,
-        bindings: [...worker.bindings, { ...namespace, namespace_id: 'stable-namespace-id' }],
+        bindings: [...worker.bindings, { ...namespace, namespace_id: null }],
       },
       after: {
         ...contentUpdate.after,
-        bindings: [...worker.bindings, { ...namespace, namespace_id: null }],
+        bindings: [...worker.bindings, namespace],
       },
       after_unknown: {
         ...contentUpdate.after_unknown,
@@ -78,11 +78,11 @@ describe('Cloudflare deployment plan guard', () => {
       ...contentUpdate,
       before: {
         ...worker,
-        bindings: [...worker.bindings, { ...namespace, namespace_id: 'stable-namespace-id' }],
+        bindings: [...worker.bindings, { ...namespace, namespace_id: null }],
       },
       after: {
         ...contentUpdate.after,
-        bindings: [...worker.bindings, { ...namespace, class_name: 'OtherCompiler', namespace_id: null }],
+        bindings: [...worker.bindings, { ...namespace, class_name: 'OtherCompiler' }],
       },
       after_unknown: {
         ...contentUpdate.after_unknown,
