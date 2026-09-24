@@ -760,7 +760,7 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
-  it('keeps genuinely different reviewed employer IDs as a presentation blocker', async () => {
+  it('accepts differing reviewed employer IDs when they share an exact official application URL', async () => {
     const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
     const postingId = '910004'; const tenant = 'aquaticcapitalmanagement';
     const sourceId = `greenhouse-${tenant}`;
@@ -775,9 +775,31 @@ describe('D1 posting identity repair', () => {
     ], { employerId: 'same-legacy-id', admission: { canonicalEmployer: { id: 'reviewed-two', displayName: 'Reviewed Two' } } }));
 
     expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
-      eligibleDuplicateGroups: 0,
-      unresolvedDuplicateGroups: 1,
-      presentationDisagreements: [expect.objectContaining({ fields: ['employerIdentity'] })],
+      eligibleDuplicateGroups: 1,
+      unresolvedDuplicateGroups: 0,
+      presentationDisagreements: [],
+    });
+    sqlite.close();
+  });
+
+  it('accepts an allowlisted employer alias even when the application URLs differ', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const postingId = '910005'; const tenant = 'sig'; const sourceId = `greenhouse-${tenant}`;
+    const officialUrl = `https://job-boards.greenhouse.io/${tenant}/jobs/${postingId}`;
+    const evidence: ProviderPostingEvidence = { provider: 'greenhouse', tenant, postingId, sourceId, urls: [officialUrl] };
+    await store.putCheckpoint({ sourceId, successfulFetches: 10, activeExternalIds: [postingId] });
+    const community = job('sig-community', officialUrl, '2026-08-01T00:00:00.000Z', [
+      occurrence('community-list', 'sig-community', officialUrl),
+    ], { employerId: 'legacy-sig', admission: { canonicalEmployer: { id: 'sig', displayName: 'SIG' } } });
+    await store.putInternship(community);
+    sqlite.prepare("UPDATE catalog_items SET value = json_set(value, '$.applyUrl', ?) WHERE pk = ? AND sk = 'META'")
+      .run('https://community.example.invalid/sig-role', 'JOB#sig-community');
+    await store.putInternship(job('sig-official', officialUrl, '2026-08-02T00:00:00.000Z', [
+      { ...occurrence(sourceId, postingId, officialUrl, evidence), provenance: 'official-ats' },
+    ], { employerId: 'legacy-sig', admission: { canonicalEmployer: { id: 'susquehanna', displayName: 'Susquehanna' } } }));
+
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
+      eligibleDuplicateGroups: 1, unresolvedDuplicateGroups: 0, presentationDisagreements: [],
     });
     sqlite.close();
   });
@@ -789,9 +811,11 @@ describe('D1 posting identity repair', () => {
     const url = `https://job-boards.greenhouse.io/${tenant}/jobs/${postingId}`;
     const evidence: ProviderPostingEvidence = { provider: 'greenhouse', tenant, postingId, sourceId, urls: [url] };
     await store.putCheckpoint({ sourceId, successfulFetches: 10, activeExternalIds: [postingId] });
-    await store.putInternship(job('blocked-older', url, '2026-08-01T00:00:00.000Z', [
+    const blockedOlder = job('blocked-older', url, '2026-08-01T00:00:00.000Z', [
       occurrence('community-list', 'blocked-older', url),
-    ], { employerId: 'same-legacy-id', admission: { canonicalEmployer: { id: 'reviewed-one', displayName: 'Reviewed One' } } }));
+    ], { employerId: 'same-legacy-id', admission: { canonicalEmployer: { id: 'reviewed-one', displayName: 'Reviewed One' } } });
+    blockedOlder.applyUrl = '';
+    await store.putInternship(blockedOlder);
     await store.putInternship(job('blocked-newer', url, '2026-08-02T00:00:00.000Z', [
       { ...occurrence(sourceId, postingId, url, evidence), provenance: 'official-ats' },
     ], { employerId: 'same-legacy-id', admission: { canonicalEmployer: { id: 'reviewed-two', displayName: 'Reviewed Two' } } }));
