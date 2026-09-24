@@ -109,9 +109,17 @@ export function sourcePresentation(references: SourceReference[]) {
     ...(provenance.has('official-structured') ? ['Official structured source'] : []),
     ...(provenance.has('reviewed-community') ? ['Reviewed community source'] : []),
   ];
+  // "ATS" describes our connector, not the student's decision. Keep the
+  // precise provenance for detail/audit surfaces but use a plain trust label in
+  // the role list so a feed is not visually dominated by provider jargon.
+  const readerLabels = [...new Set(labels.map((label) => (
+    label === 'Official ATS' || label === 'Official structured source'
+      ? 'Verified employer listing'
+      : label
+  )))];
   return {
-    primary: labels[0] ?? 'Source unavailable',
-    corroboration: labels.length > 1 ? `Also: ${labels.slice(1).join(' · ')}` : undefined,
+    primary: readerLabels[0] ?? 'Source unavailable',
+    corroboration: readerLabels.length > 1 ? `Also: ${readerLabels.slice(1).join(' · ')}` : undefined,
     labels,
   };
 }
