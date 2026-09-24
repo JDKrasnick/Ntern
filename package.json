@@ -50,6 +50,7 @@
     "audit:posting-identity": "tsx scripts/posting-identity-repair.ts --audit --gate",
     "migrate:catalog-quality": "tsx scripts/catalog-quality-backfill.ts",
     "migrate:role-metadata": "tsx scripts/role-metadata-backfill.ts",
+    "preview:employer-icon": "tsx scripts/discover-employer-icon.ts",
     "eval:shadow:offline": "tsx scripts/shadow-extraction-eval.ts --offline test/fixtures/shadow-extraction-recorded.json --report eval/shadow-extraction-results",
     "eval:shadow:live": "tsx scripts/shadow-extraction-eval.ts --live --report eval/shadow-extraction-results",
     "build:browser-companion": "esbuild browser-companion/content.ts --bundle --format=iife --platform=browser --outfile=browser-companion/dist/content.js",
