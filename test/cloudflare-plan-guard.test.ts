@@ -117,6 +117,10 @@ describe('Cloudflare deployment plan guard', () => {
       ...bootstrap,
       after: { ...contentUpdate.after, migrations: { ...migration, old_tag: 'wrong-tag' } },
     }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(validateCloudflarePlan(plan([{
+      ...bootstrap,
+      before: { ...worker, migrations: null },
+    }]))).toHaveLength(1);
   });
 
   it.each([

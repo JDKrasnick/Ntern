@@ -202,16 +202,20 @@ function normalizeStableDurableObjectNamespaceIds(
   return { after: normalizedAfter, unknown: normalizedUnknown };
 }
 
-function isResumeMigrationTagTransition(before: unknown, after: unknown): boolean {
-  if (!isRecord(before) || !isRecord(after)) return false;
-  const hasExpectedMigration = (migration: Record<string, unknown>) => (
-    migration.new_tag === 'v4-resume-pdf-compiler-v2'
+function isExpectedResumeMigration(migration: unknown, oldTag: null | ''): boolean {
+  return isRecord(migration)
+    && migration.new_tag === 'v4-resume-pdf-compiler-v2'
     && isDeepStrictEqual(migration.new_sqlite_classes, ['ResumePdfCompilerV2'])
+    && migration.old_tag === oldTag
     && Object.entries(migration).every(([key, value]) => (
       ['new_tag', 'new_sqlite_classes', 'old_tag'].includes(key) || value === null
-    ))
-  );
-  if (!hasExpectedMigration(before) || !hasExpectedMigration(after)) return false;
+    ));
+}
+
+function isResumeMigrationTagTransition(before: unknown, after: unknown): boolean {
+  if (!isRecord(before) || !isRecord(after)) return false;
+  if (!isExpectedResumeMigration(before, before.old_tag === '' ? '' : null)
+    || !isExpectedResumeMigration(after, after.old_tag === '' ? '' : null)) return false;
   return (before.old_tag === null && after.old_tag === '')
     || (before.old_tag === '' && after.old_tag === null);
 }
@@ -323,8 +327,12 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     ));
   const permittedResumeMigrationTagTransition = address === 'cloudflare_workers_script.application'
     && isResumeMigrationTagTransition(before.migrations, after.migrations);
+  const permittedResumeMigrationBootstrap = address === 'cloudflare_workers_script.application'
+    && (before.migrations === null || before.migrations === undefined)
+    && isExpectedResumeMigration(after.migrations, '');
   if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease
-    && !permittedControllerMigration && !permittedResumeMigrationTagTransition) return false;
+    && !permittedControllerMigration && !permittedResumeMigrationTagTransition
+    && !permittedResumeMigrationBootstrap) return false;
 
   const beforeForComparison = {
     ...before,
@@ -332,6 +340,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
     ...(permittedControllerMigration ? { migrations: after.migrations } : {}),
     ...(permittedResumeMigrationTagTransition ? { migrations: after.migrations } : {}),
+    ...(permittedResumeMigrationBootstrap ? { migrations: after.migrations } : {}),
   };
 
   let afterUnknown = change.after_unknown;
