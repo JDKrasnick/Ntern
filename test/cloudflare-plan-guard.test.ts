@@ -456,6 +456,21 @@ describe('Cloudflare deployment plan guard', () => {
     expect(() => validateCloudflarePlan(plan([{ ...changes[0]!, after: { ...changes[0]!.after, bindings: [...worker.bindings, ...apiBindings.map((binding) => binding.name === 'RESUME_TUNER_ENABLED' ? { ...binding, text: 'true' } : binding)] } }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits enabling the existing resume feature flag but not disabling it', () => {
+    const disabled = { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' };
+    const enabled = { ...disabled, text: 'true' };
+    expect(validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      before: { ...worker, bindings: [...worker.bindings, disabled] },
+      after: { ...contentUpdate.after, bindings: [...worker.bindings, enabled] },
+    }]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      before: { ...worker, bindings: [...worker.bindings, enabled] },
+      after: { ...contentUpdate.after, bindings: [...worker.bindings, disabled] },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('rejects unknown values in protected Worker fields', () => {
     expect(() => validateCloudflarePlan(plan([{
       ...contentUpdate,

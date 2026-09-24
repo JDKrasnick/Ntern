@@ -297,6 +297,16 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
       permittedBindingChanged = true;
       return true;
     }
+    if (binding.name === 'RESUME_TUNER_ENABLED') {
+      if (binding.type !== 'plain_text' || nextBinding.type !== 'plain_text') return false;
+      const { text: beforeText, ...beforeRest } = binding;
+      const { text: afterText, ...afterRest } = nextBinding;
+      if (!isDeepStrictEqual(beforeRest, afterRest)) return false;
+      if (beforeText === afterText) return true;
+      if (beforeText !== 'false' || afterText !== 'true') return false;
+      permittedBindingChanged = true;
+      return true;
+    }
     if (!permittedPlainTextBindings.has(String(binding.name))) return isDeepStrictEqual(binding, nextBinding);
     if (binding.type !== 'plain_text' || nextBinding.type !== 'plain_text') return false;
     const { text: beforeText, ...beforeRest } = binding;
