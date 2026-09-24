@@ -24,4 +24,12 @@ describe('manual bulk operation window', () => {
     expect(await assessBulkSafeWindow(db(0), { github: queue(0), greenhouse: queue(0) }, now))
       .toEqual({ ready: true });
   });
+
+  it('allows a low-impact operation alongside queued work only when D1 is healthy', async () => {
+    const busy = queue(3);
+    expect(await assessBulkSafeWindow(db(0), { github: busy }, now, { allowQueuedWork: true }))
+      .toEqual({ ready: true });
+    expect(await assessBulkSafeWindow(db(1), { github: busy }, now, { allowQueuedWork: true }))
+      .toEqual({ ready: false, reason: 'recent-d1-overload' });
+  });
 });
