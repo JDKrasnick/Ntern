@@ -13,6 +13,13 @@ An account is requested only when a person chooses a feature that stores or pers
 
 This is intentionally not an anonymous shared account. Private data is scoped to a verified Cloudflare-authenticated user once someone elects to create an account.
 
+## Résumé tailoring subscription
+
+- The role catalog, alerts, saved applications, technical résumé bank, diff review, and access to previously generated artifacts remain available without a paid subscription.
+- Creating a new job-specific tailored review consumes one monthly allowance: Free has 2, Plus is $4.99/month for 25, and Pro is $9.99/month for 100. Compiling, revisiting, or downloading an existing review does not consume another allowance.
+- Paid access is provider-neutral in the API but may only be granted from a server-verified purchase. The iOS client must use App Store in-app purchase and support restore purchases; it must not unlock a tier from client input alone.
+- Product identifiers, transaction verification, App Store Server Notifications, purchase/restore UI, and customer-support tooling remain release blockers for paid upgrades. Until those land, every account safely resolves to Free unless an explicitly trusted server-side entitlement exists.
+
 ## Authentication roadmap
 
 - **Now:** Cloudflare-backed email/password sign-up with email verification, used only after a user opts into private features.

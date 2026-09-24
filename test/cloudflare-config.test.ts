@@ -13,7 +13,11 @@ function quotedValuesBetween(source: string, start: string, end: string): string
 }
 
 type WorkerConfig = {
+  ai?: { binding: string };
   browser?: { binding: string };
+  containers?: Array<{ class_name: string; image: string; instance_type?: string; max_instances?: number }>;
+  durable_objects?: { bindings: Array<{ name: string; class_name: string; script_name?: string }> };
+  migrations?: Array<{ tag: string; new_sqlite_classes?: string[] }>;
   queues?: {
     producers?: Array<{ binding: string; queue: string }>;
     consumers?: Array<{
@@ -27,6 +31,7 @@ type WorkerConfig = {
     }>;
   };
   services?: Array<{ binding: string; service: string }>;
+  vectorize?: Array<{ binding: string; index_name: string }>;
   triggers?: { crons: string[] };
   vars: Record<string, string>;
   workers_dev?: boolean;
@@ -36,6 +41,8 @@ type WorkerConfig = {
 describe('Cloudflare deployment configuration', () => {
   const api = JSON.parse(read('wrangler.api.jsonc')) as WorkerConfig;
   const ingestion = JSON.parse(read('wrangler.ingestion.jsonc')) as WorkerConfig;
+  const devApi = JSON.parse(read('wrangler.dev.api.jsonc')) as WorkerConfig;
+  const devIngestion = JSON.parse(read('wrangler.dev.ingestion.jsonc')) as WorkerConfig;
 
   it('keeps Wrangler and OpenTofu cron schedules synchronized', () => {
     const wranglerCrons = ingestion.triggers?.crons ?? [];
@@ -50,10 +57,10 @@ describe('Cloudflare deployment configuration', () => {
   it('assigns every cron and queue consumer to ingestion only', () => {
     expect(api.queues?.consumers ?? []).toEqual([]);
     expect(api.triggers).toBeUndefined();
-    expect(api.queues?.producers?.map(({ binding }) => binding)).toEqual(['GMAIL_QUEUE']);
+    expect(api.queues?.producers?.map(({ binding }) => binding)).toEqual(['GMAIL_QUEUE', 'RESUME_JOB_IMPORT_QUEUE']);
     expect(ingestion.queues?.consumers?.map(({ queue }) => queue)).toEqual([
       'intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby', 'intern-notifs-github', 'intern-notifs-gmail', 'intern-notifs-destination-verification',
-      'intern-notifs-shadow-extraction',
+      'intern-notifs-shadow-extraction', 'intern-notifs-resume-job-import',
     ]);
     expect(ingestion.triggers?.crons).toHaveLength(9);
     expect(ingestion.workers_dev).toBe(false);
@@ -106,7 +113,7 @@ describe('Cloudflare deployment configuration', () => {
       .map(([, provider, value]) => [provider, Number(value)]));
 
     expect(Object.keys(declared).sort()).toEqual([
-      'ashby', 'destination-verification', 'github', 'gmail', 'greenhouse', 'lever', 'shadow-extraction',
+      'ashby', 'destination-verification', 'github', 'gmail', 'greenhouse', 'lever', 'resume-job-import', 'shadow-extraction',
     ]);
     for (const consumer of ingestion.queues?.consumers ?? []) {
       expect(consumer.max_concurrency).toBe(declared[consumer.queue.replace('intern-notifs-', '')]);
@@ -130,6 +137,48 @@ describe('Cloudflare deployment configuration', () => {
     expect(read('infra/cloudflare/variables.tf')).toMatch(/variable "identity_confirmed_coverage_floor"[\s\S]*?default\s+= 0/);
     expect(terraform).toContain('name = "ADMISSION_SUPPORT_RECIPIENT", type = "plain_text", text = var.admission_support_recipient');
     expect(read('infra/cloudflare/variables.tf')).toContain('variable "admission_support_recipient"');
+  });
+
+  it('deploys the resume PDF compiler with matching runtime and OpenTofu ownership', () => {
+    const terraform = read('infra/cloudflare/main.tf');
+    const deployment = read('.github/workflows/deploy-cloudflare.yml');
+    const compilerImage = read('cloudflare/resume-compiler/Dockerfile');
+    expect(api.durable_objects?.bindings).toContainEqual({ name: 'RESUME_PDF_COMPILER', class_name: 'ResumePdfCompilerV2' });
+    expect(api.migrations).toContainEqual({ tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] });
+    expect(api.containers).toContainEqual({ class_name: 'ResumePdfCompilerV2', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 });
+    expect(terraform).toContain('{ name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompilerV2" }');
+    expect(terraform).toContain('new_tag            = "v4-resume-pdf-compiler-v2"');
+    expect(terraform).toContain('new_sqlite_classes = ["ResumePdfCompilerV2"]');
+    expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "false"');
+    expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
+    expect(deployment.indexOf('Ensure the resume embedding index exists')).toBeLessThan(deployment.indexOf('Create and validate saved plan'));
+    expect(deployment).toContain('wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc');
+    expect(deployment.indexOf('Create and validate saved plan')).toBeLessThan(deployment.indexOf('Apply production D1 migrations'));
+    expect(deployment.indexOf('Apply production D1 migrations')).toBeLessThan(deployment.indexOf('Apply exact saved plan'));
+    expect(deployment).toContain("jq 'del(.vars)' wrangler.api.jsonc");
+    expect(deployment).toContain('npx wrangler deploy --config "$config" --keep-vars');
+    expect(deployment.indexOf('Require converged state')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));
+    expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive texmf-dist-fontsrecommended');
+    expect(compilerImage).not.toContain('texlive-full');
+  });
+
+  it('keeps the Cloudflare development resume stack isolated and complete', () => {
+    const provision = read('scripts/provision-cloudflare-dev.sh');
+    expect(devApi.ai).toEqual({ binding: 'AI' });
+    expect(devApi.vectorize).toEqual([{ binding: 'RESUME_EMBEDDINGS', index_name: 'intern-notifs-dev-resume-bank-v1' }]);
+    expect(devApi.durable_objects?.bindings).toContainEqual({ name: 'RESUME_PDF_COMPILER', class_name: 'ResumePdfCompilerV2' });
+    expect(devApi.migrations).toContainEqual({ tag: 'v3-retire-resume-pdf-compiler', deleted_classes: ['ResumePdfCompiler'] });
+    expect(devApi.migrations).toContainEqual({ tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] });
+    expect(devApi.containers).toEqual([{ class_name: 'ResumePdfCompilerV2', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 }]);
+    expect(devApi.queues?.producers).toContainEqual({ binding: 'RESUME_JOB_IMPORT_QUEUE', queue: 'intern-notifs-dev-resume-job-import' });
+    expect(devApi.vars.RESUME_TUNER_ENABLED).toBe('true');
+    expect(devIngestion.vars.RESUME_TUNER_ENABLED).toBe('true');
+    expect(devIngestion.queues?.consumers).toContainEqual({
+      queue: 'intern-notifs-dev-resume-job-import', max_batch_size: 1, max_concurrency: 1,
+      max_retries: 2, dead_letter_queue: 'intern-notifs-dev-resume-job-import-dlq',
+    });
+    expect(provision).toContain("resume_index='intern-notifs-dev-resume-bank-v1'");
+    expect(provision).not.toContain("resume_index='intern-notifs-resume-bank-v1'");
   });
 
   it('moves queue and cron state to ingestion ownership', () => {
@@ -185,6 +234,7 @@ describe('Cloudflare deployment configuration', () => {
       max_batch_timeout: 60, max_retries: 2, retry_delay: 300, dead_letter_queue: 'intern-notifs-shadow-extraction-dlq',
     });
     expect(ingestion.vars.SHADOW_EXTRACTION_ENABLED).toBe('true');
+    expect(ingestion.vars.RESUME_TUNER_ENABLED).toBe('false');
     expect(ingestion.vars.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS).toBe('1500');
     expect(ingestion.vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS).toBe('2000');
     expect(ingestion.vars.SHADOW_EXTRACTION_QUEUE_NAME).toBe('intern-notifs-shadow-extraction');
@@ -193,6 +243,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('"shadow-extraction"');
     expect(terraform).toContain('{ name = "SHADOW_EXTRACTION_QUEUE_ID", type = "plain_text"');
     expect(terraform).toContain('{ name = "SHADOW_EXTRACTION_QUEUE_NAME", type = "plain_text"');
+    expect(terraform).toContain('{ name = "RESUME_TUNER_ENABLED", type = "plain_text", text = tostring(var.resume_tuner_enabled) }');
     expect(terraform).toContain('contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000');
     expect(terraform).toContain('retry_delay      = each.key == "shadow-extraction" ? 300 : null');
     expect(worker).toContain('env.SHADOW_EXTRACTION_QUEUE_ID');

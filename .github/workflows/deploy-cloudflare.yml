@@ -55,6 +55,8 @@ jobs:
       TF_VAR_shadow_extraction_enabled: ${{ vars.SHADOW_EXTRACTION_ENABLED }}
       TF_VAR_shadow_extraction_monthly_forecast_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS }}
       TF_VAR_shadow_extraction_monthly_headroom_cents: ${{ vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS }}
+      TF_VAR_resume_tuner_enabled: "false"
+      TF_VAR_resume_embedding_index_name: intern-notifs-resume-bank-v1
       OPERATIONS_SHARED_SECRET: ${{ secrets.OPERATIONS_SHARED_SECRET }}
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +102,17 @@ jobs:
             test "$conclusion" = success
           fi
       - run: npm ci
+      - name: Ensure the resume embedding index exists
+        shell: bash
+        run: |
+          index=$(npx wrangler vectorize list --json | jq -c --arg name "$TF_VAR_resume_embedding_index_name" '.[] | select(.name == $name)')
+          if test -z "$index"; then
+            npx wrangler vectorize create "$TF_VAR_resume_embedding_index_name" \
+              --preset '@cf/baai/bge-base-en-v1.5' \
+              --description 'Private user-namespaced resume bank embeddings'
+            index=$(npx wrangler vectorize list --json | jq -c --arg name "$TF_VAR_resume_embedding_index_name" '.[] | select(.name == $name)')
+          fi
+          jq -e '.config == {"dimensions":768,"metric":"cosine"}' <<<"$index" >/dev/null
       - run: npm run build:cloudflare
       - name: Initialize production state
         run: tofu -chdir=infra/cloudflare init -reconfigure
@@ -124,6 +137,8 @@ jobs:
             "s3://intern-notifs-opentofu-state/$RELEASE_PREFIX/cloudflare.tfplan" \
             --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
           sha256sum "$RUNNER_TEMP/cloudflare.tfplan" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Apply production D1 migrations
+        run: npx wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc
       - name: Apply exact saved plan
         if: steps.plan.outputs.changed == 'true'
         run: tofu -chdir=infra/cloudflare apply -auto-approve "$RUNNER_TEMP/cloudflare.tfplan"
@@ -143,6 +158,13 @@ jobs:
           fi
       - name: Require converged state
         run: tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode
+      - name: Publish and roll out the resume PDF compiler container
+        shell: bash
+        run: |
+          config="$GITHUB_WORKSPACE/.wrangler.api.production.jsonc"
+          trap 'rm -f "$config"' EXIT
+          jq 'del(.vars)' wrangler.api.jsonc > "$config"
+          npx wrangler deploy --config "$config" --keep-vars
       - name: Back up post-deploy state
         if: always() && steps.backup_before.outcome == 'success'
         shell: bash

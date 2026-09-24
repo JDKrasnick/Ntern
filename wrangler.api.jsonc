@@ -4,9 +4,16 @@
   "main": "cloudflare/api-worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
-  "durable_objects": { "bindings": [{ "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController", "script_name": "intern-notifs-ingestion" }] },
+  "durable_objects": { "bindings": [
+    { "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController", "script_name": "intern-notifs-ingestion" },
+    { "name": "RESUME_PDF_COMPILER", "class_name": "ResumePdfCompilerV2" }
+  ] },
+  "migrations": [{ "tag": "v4-resume-pdf-compiler-v2", "new_sqlite_classes": ["ResumePdfCompilerV2"] }],
+  "containers": [{ "class_name": "ResumePdfCompilerV2", "image": "./cloudflare/resume-compiler/Dockerfile", "instance_type": "basic", "max_instances": 2 }],
   "limits": { "cpu_ms": 30000, "subrequests": 10000 },
   "observability": { "enabled": true },
+  "ai": { "binding": "AI" },
+  "vectorize": [{ "binding": "RESUME_EMBEDDINGS", "index_name": "intern-notifs-resume-bank-v1" }],
   "d1_databases": [
     { "binding": "DB", "database_name": "intern-notifs-db", "database_id": "4e389f1c-7c6d-48e1-aa97-dc4cb1769bb8", "migrations_dir": "cloudflare/migrations" }
   ],
@@ -14,7 +21,8 @@
     { "binding": "DOCUMENTS", "bucket_name": "intern-notifs-documents" }
   ],
   "queues": { "producers": [
-    { "binding": "GMAIL_QUEUE", "queue": "intern-notifs-gmail" }
+    { "binding": "GMAIL_QUEUE", "queue": "intern-notifs-gmail" },
+    { "binding": "RESUME_JOB_IMPORT_QUEUE", "queue": "intern-notifs-resume-job-import" }
   ] },
   "services": [
     { "binding": "INGESTION", "service": "intern-notifs-ingestion" }
@@ -30,6 +38,7 @@
     "IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED": "false",
     "IDENTITY_CONFIRMED_COVERAGE_FLOOR": "0",
     "GMAIL_ENABLED": "true",
+    "RESUME_TUNER_ENABLED": "false",
     "GMAIL_CLIENT_ID": "17433524169-4753680goh32205can9g00ijqan3hic5.apps.googleusercontent.com",
     "GMAIL_REDIRECT_URI": "https://intern-notifs.jdkrasnick.workers.dev/oauth/gmail/callback",
     "DEPLOYMENT_ROLE": "api"

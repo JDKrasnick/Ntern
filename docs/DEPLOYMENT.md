@@ -39,6 +39,7 @@ Use the committed, config-specific commands—never a bare Wrangler deploy:
 
 ```sh
 npm run build:cloudflare
+npm run cloudflare:dev:provision
 npx wrangler d1 migrations apply intern-notifs-dev-db --remote --config wrangler.dev.api.jsonc
 npx wrangler deploy --config wrangler.dev.ingestion.jsonc
 npx wrangler deploy --config wrangler.dev.api.jsonc
@@ -57,6 +58,43 @@ bare `wrangler deploy`. The cutover sequence, binding inventory, smoke checks,
 and rollback procedure are in [`api-ingestion-split.md`](api-ingestion-split.md).
 The coordinator alone performs that cutover.
 
+### Resume Tuner staged rollout
+
+`RESUME_TUNER_ENABLED` is `false` in both Worker configs and must remain false
+until a separate security review approves an exact OpenTofu plan. The feature
+uses authenticated `/me/resume-*` routes, private user-store records, and the
+`intern-notifs-resume-job-import` queue. Its shared import cache contains only
+public job-page text; uploaded résumé source material, extracted bank cards,
+drafts, and generated artifacts remain user-scoped and are deleted with the
+account.
+
+The résumé API also stores a provider-neutral subscription entitlement and a
+UTC monthly usage counter in the same account-scoped D1 table. Paid upgrades
+must remain unavailable until App Store products, server-side transaction
+verification, App Store Server Notifications, restore-purchase behavior, and
+sandbox acceptance are complete. Never write an entitlement from an
+unverified mobile request. Accounts without an active or grace-period verified
+entitlement receive the Free allowance of two new tailored reviews per month.
+
+The production workflow idempotently provisions the
+`intern-notifs-resume-bank-v1` Vectorize index with the
+`@cf/baai/bge-base-en-v1.5` preset before OpenTofu binds it. The API uses
+Vectorize's built-in namespace partition instead of metadata filters, so no
+metadata index is required. It stores no raw account ID or résumé text in
+Vectorize metadata: the namespace is a stable account hash and vectors remain a
+delete-on-account-removal cache. Confirm the index name and its 768-dimension
+cosine configuration match `resume_embedding_index_name` before approving the
+exact OpenTofu plan.
+
+Validate the API and ingestion Worker bindings, exercise a catalog hit, a
+cached import, a safe public-page import, Browser Rendering, and the
+manual-description fallback. Confirm that private-network, credential-bearing,
+and non-HTTPS URLs are rejected; check the import queue and its DLQ without
+consuming messages. Compile a fixture through the internet-disabled Container
+and inspect the bounded PDF, TeX, page-count metadata, and private PNG previews.
+Account deletion must remove every one of those R2 objects and the associated
+Vectorize IDs before the flag can be enabled.
+
 ## OpenTofu state adoption
 
 The production Cloudflare stack uses the private
@@ -74,10 +112,16 @@ exact green SHA at the tip of `main`. The `cloudflare-workers-production`
 environment supplies the Cloudflare token, bucket-scoped state credentials,
 and live non-secret Terraform variables. The job rejects obsolete revisions
 and any plan containing creates, deletes, replacements, or updates outside the
-two Worker scripts. It applies the exact saved plan, requires a no-drift second
-plan, then monitors public and authentication-boundary smoke checks for two
-minutes. Keep environment approval rules enabled when a human deployment gate
-is required.
+reviewed résumé resources and two Worker scripts. After that guard passes, it
+applies pending D1 migrations before the exact saved plan, requires a no-drift
+second plan, then performs the one supported container-specific deployment step: a
+full API Wrangler deploy builds, publishes, and rolls out the résumé PDF
+compiler image. That step uses a generated config without `vars` plus
+`--keep-vars`, so OpenTofu-managed production values remain authoritative. It
+then monitors public and authentication-boundary smoke checks for two minutes.
+Keep environment approval rules enabled when a human deployment gate is
+required. Do not run the container deploy separately or with the committed
+config's staged flag values.
 
 Configure these environment secrets: `CLOUDFLARE_API_TOKEN`,
 `R2_STATE_ACCESS_KEY_ID`, and `R2_STATE_SECRET_ACCESS_KEY`. The optional

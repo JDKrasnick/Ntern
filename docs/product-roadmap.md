@@ -14,8 +14,14 @@
 - Prefer official employer career sources and openly maintained, attributed public lists.
 - Never automate a non-partner submission; users review and submit official forms themselves.
 - Core experience remains free, simple, privacy-respecting, and suitable for open-source development.
+- Browsing, alerts, application tracking, the technical résumé bank, diff review, and prior downloads stay free to access; only creation of new AI-tailored résumé reviews has a monthly allowance.
 
 ## Milestones
+
+- [x] Add the provider-neutral résumé subscription foundation: Free ($0, 2 tailored reviews/month), Plus ($4.99, 25/month), and Pro ($9.99, 100/month), with atomic server-side usage enforcement and no client-granted entitlement.
+- [x] Make the Master Bank hierarchical by contract: role, project, and education objects own typed bullet pointers; imports, saved bases, model diffs, persistence, and finalization reject orphaned, wrong-kind, cross-user, and cross-parent references.
+- [x] Validate the résumé backend in isolated Cloudflare development: D1 migration, private R2 artifacts, Workers AI, Vectorize, queue/DLQ, and a two-instance PDF compiler pool complete a real authenticated PDF/TeX/PNG lifecycle while production remains disabled.
+- [ ] Configure App Store subscription products, verify transactions and App Store Server Notifications on the server, add purchase/restore controls, and complete sandbox review before enabling paid upgrades.
 
 | Milestone | Status | Exit criteria |
 | --- | --- | --- |
@@ -37,6 +43,13 @@
 
 ### Codex
 
+- [x] Complete the authenticated web-first Resume workspace in code; the production flag remains disabled pending the documented staged security and infrastructure rollout.
+  - [x] Gate the fifth navigation tab behind `RESUME_TUNER_ENABLED`, persist a private Technical base content repository, saved-base recipes, imported-job records, and review drafts with revisions, account export, and account deletion cleanup.
+  - [x] Provide a responsive GitHub-style diff review path that asks for approval only on job-specific changes, rejects private/non-HTTPS import targets, keeps pasted job descriptions per-user, and creates deterministic evidence-linked suggestions.
+  - [x] Add the asynchronous catalog/cache/browser import worker, document extraction, managed model generation, user-namespaced semantic ranking, and isolated PDF/LaTeX artifact compiler with derived page previews before enabling the production flag.
+  - [x] Replace flat line rendering with typed education, experience, research, project, skill, and parent-bound bullet objects; ship four fixed template recipes and preserve the complete selected base when applying reviewed diffs.
+  - [x] Offer free copyable prompts that build or convert a typed master bank in any user-selected LLM without consuming a résumé-review allowance.
+  - [ ] Add a subscription-gated hosted master-bank builder that can ingest user-authorized LinkedIn, GitHub, and personal-site sources, preserve provenance, and require user review before any extracted claim enters the typed bank.
 - [x] Implement the Cloudflare replacement substrate with Workers, D1, R2, Queues, Cron Triggers, provider v5 Terraform, Cloudflare-native mobile authentication, and local end-to-end smoke coverage.
 - [x] Provision the Cloudflare account, apply remote D1 migrations and Worker secrets, verify the source backfill, cut every mobile environment over, and retire AWS deployment paths.
 - [x] Bound sparse grouped-catalog filter scans, reconcile legacy notification markers through durable Expo receipts, isolate iOS plain-text accessibility state from secure authentication fields, and make account switching/sign-out race-safe with server-side session revocation.

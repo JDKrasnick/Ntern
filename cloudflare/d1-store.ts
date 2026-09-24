@@ -8,6 +8,8 @@ import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolut
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
+import { validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
+import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from '../src/identity/projection.js';
@@ -1052,6 +1054,107 @@ export class D1UserStore implements UserStore {
     return result.meta.changes > 0;
   }
   async deleteDocument(userId: string, documentId: string) { await this.db.prepare('DELETE FROM user_items WHERE user_id = ? AND item_key = ?').bind(userId, `DOCUMENT#${documentId}`).run(); }
+  async listResumeBank(userId: string) { return this.list<ResumeBankItem>(userId, 'RESUME_BANK#'); }
+  getResumeBankItem(userId: string, bankItemId: string) { return this.get<ResumeBankItem>(userId, `RESUME_BANK#${bankItemId}`); }
+  async putResumeBankItem(value: ResumeBankItem, expectedRevision?: number): Promise<boolean> {
+    validateResumeBankItemPlacement(value, await this.listResumeBank(value.userId));
+    const key = `RESUME_BANK#${value.bankItemId}`;
+    if (expectedRevision === undefined) {
+      const result = await this.db.prepare(`
+        INSERT INTO user_items (user_id, item_key, kind, value)
+        SELECT ?, ?, 'resume-bank', ?
+        WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+        ON CONFLICT(user_id, item_key) DO NOTHING
+      `).bind(value.userId, key, JSON.stringify(value), this.deletionOwner(value.userId)).run();
+      return result.meta.changes > 0;
+    }
+    const result = await this.db.prepare(`
+      UPDATE user_items SET value = ?, kind = 'resume-bank'
+      WHERE user_id = ? AND item_key = ? AND CAST(json_extract(value, '$.revision') AS INTEGER) = ?
+        AND NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+    `).bind(JSON.stringify(value), value.userId, key, expectedRevision, this.deletionOwner(value.userId)).run();
+    return result.meta.changes > 0;
+  }
+  async listResumeProfiles(userId: string) { return this.list<ResumeProfile>(userId, 'RESUME_PROFILE#'); }
+  getResumeProfile(userId: string, profileId: string) { return this.get<ResumeProfile>(userId, `RESUME_PROFILE#${profileId}`); }
+  async putResumeProfile(value: ResumeProfile, expectedRevision?: number): Promise<boolean> {
+    const key = `RESUME_PROFILE#${value.profileId}`;
+    if (expectedRevision === undefined) {
+      const result = await this.db.prepare(`INSERT INTO user_items (user_id, item_key, kind, value)
+        SELECT ?, ?, 'resume-profile', ? WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+        ON CONFLICT(user_id, item_key) DO NOTHING`).bind(value.userId, key, JSON.stringify(value), this.deletionOwner(value.userId)).run();
+      return result.meta.changes > 0;
+    }
+    const result = await this.db.prepare(`UPDATE user_items SET value = ?, kind = 'resume-profile'
+      WHERE user_id = ? AND item_key = ? AND CAST(json_extract(value, '$.revision') AS INTEGER) = ?
+        AND NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')`).bind(JSON.stringify(value), value.userId, key, expectedRevision, this.deletionOwner(value.userId)).run();
+    return result.meta.changes > 0;
+  }
+  async deleteResumeProfile(userId: string, profileId: string, expectedRevision: number): Promise<boolean> {
+    const result = await this.db.prepare(`DELETE FROM user_items
+      WHERE user_id = ? AND item_key = ? AND CAST(json_extract(value, '$.revision') AS INTEGER) = ?
+        AND NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')`)
+      .bind(userId, `RESUME_PROFILE#${profileId}`, expectedRevision, this.deletionOwner(userId)).run();
+    return result.meta.changes > 0;
+  }
+  getResumeDraft(userId: string, draftId: string) { return this.get<ResumeDraft>(userId, `RESUME_DRAFT#${draftId}`); }
+  async listResumeDrafts(userId: string) { return this.list<ResumeDraft>(userId, 'RESUME_DRAFT#'); }
+  async putResumeDraft(value: ResumeDraft, expectedRevision?: number): Promise<boolean> {
+    const key = `RESUME_DRAFT#${value.draftId}`;
+    if (expectedRevision === undefined) {
+      const result = await this.db.prepare(`INSERT INTO user_items (user_id, item_key, kind, value)
+        SELECT ?, ?, 'resume-draft', ? WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+        ON CONFLICT(user_id, item_key) DO NOTHING`).bind(value.userId, key, JSON.stringify(value), this.deletionOwner(value.userId)).run();
+      return result.meta.changes > 0;
+    }
+    const result = await this.db.prepare(`UPDATE user_items SET value = ?, kind = 'resume-draft'
+      WHERE user_id = ? AND item_key = ? AND CAST(json_extract(value, '$.revision') AS INTEGER) = ?
+        AND NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')`).bind(JSON.stringify(value), value.userId, key, expectedRevision, this.deletionOwner(value.userId)).run();
+    return result.meta.changes > 0;
+  }
+  async listImportedResumeJobs(userId: string) { return this.list<ImportedJob>(userId, 'RESUME_IMPORT#'); }
+  getImportedResumeJob(userId: string, importId: string) { return this.get<ImportedJob>(userId, `RESUME_IMPORT#${importId}`); }
+  async putImportedResumeJob(userId: string, value: ImportedJob, expectedRevision?: number): Promise<boolean> {
+    const key = `RESUME_IMPORT#${value.importId}`;
+    if (expectedRevision === undefined) {
+      const result = await this.db.prepare(`INSERT INTO user_items (user_id, item_key, kind, value)
+        SELECT ?, ?, 'resume-import', ? WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+        ON CONFLICT(user_id, item_key) DO NOTHING`).bind(userId, key, JSON.stringify(value), this.deletionOwner(userId)).run();
+      return result.meta.changes > 0;
+    }
+    const result = await this.db.prepare(`UPDATE user_items SET value = ?, kind = 'resume-import'
+      WHERE user_id = ? AND item_key = ? AND CAST(json_extract(value, '$.revision') AS INTEGER) = ?
+        AND NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')`)
+      .bind(JSON.stringify(value), userId, key, expectedRevision, this.deletionOwner(userId)).run();
+    return result.meta.changes > 0;
+  }
+  async listResumeArtifacts(userId: string) { return this.list<ResumeArtifact>(userId, 'RESUME_ARTIFACT#'); }
+  getResumeArtifact(userId: string, artifactId: string) { return this.get<ResumeArtifact>(userId, `RESUME_ARTIFACT#${artifactId}`); }
+  async putResumeArtifact(value: ResumeArtifact): Promise<boolean> {
+    const result = await this.db.prepare(`INSERT INTO user_items (user_id, item_key, kind, value)
+      SELECT ?, ?, 'resume-artifact', ? WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+      ON CONFLICT(user_id, item_key) DO NOTHING`).bind(value.userId, `RESUME_ARTIFACT#${value.artifactId}`, JSON.stringify(value), this.deletionOwner(value.userId)).run();
+    return result.meta.changes > 0;
+  }
+  getResumeSubscription(userId: string) { return this.get<ResumeSubscription>(userId, 'RESUME_SUBSCRIPTION'); }
+  putResumeSubscription(value: ResumeSubscription) { return this.put(value.userId, 'RESUME_SUBSCRIPTION', 'resume-subscription', value); }
+  async getResumeDraftUsage(userId: string, period: string): Promise<number> {
+    const value = await this.get<{ used?: number }>(userId, `RESUME_USAGE#${period}`);
+    return Number.isFinite(value?.used) ? Math.max(0, Math.floor(value!.used!)) : 0;
+  }
+  async claimResumeDraftAllowance(userId: string, period: string, limit: number, timestamp: string): Promise<boolean> {
+    const key = `RESUME_USAGE#${period}`;
+    const result = await this.db.prepare(`
+      INSERT INTO user_items (user_id, item_key, kind, value)
+      SELECT ?, ?, 'resume-subscription-usage', ?
+      WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+      ON CONFLICT(user_id, item_key) DO UPDATE SET
+        value = json_set(user_items.value, '$.used', CAST(json_extract(user_items.value, '$.used') AS INTEGER) + 1, '$.updatedAt', ?)
+      WHERE user_items.kind = 'resume-subscription-usage'
+        AND CAST(json_extract(user_items.value, '$.used') AS INTEGER) < ?
+    `).bind(userId, key, JSON.stringify({ period, used: 1, updatedAt: timestamp }), this.deletionOwner(userId), timestamp, limit).run();
+    return result.meta.changes > 0;
+  }
   getReceipt(userId: string, dedupeKey: string, token: string) { return this.get<DeliveryReceipt>(userId, `RECEIPT#${dedupeKey}#${token}`); }
   async claimReceipt(value: DeliveryReceipt): Promise<boolean> {
     const key = `RECEIPT#${value.dedupeKey ?? value.jobId}#${value.token}`;

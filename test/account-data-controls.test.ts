@@ -33,12 +33,14 @@ describe('account data controls', () => {
     const response = await handler(event('mock-full', 'GET', '/me/export'));
     expect(response.statusCode).toBe(200);
     expect(json(response)).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 3,
       exportedAt: '2026-08-26T12:00:00.000Z',
       account: {
         profile: expect.objectContaining({ userId: 'mock-full', contact: { name: 'QA Student', email: 'qa@example.test' } }),
         applications: [expect.objectContaining({ applicationId: 'application-1', status: 'interview' })],
         documents: [{ documentId: 'document-1', fileName: 'resume.pdf', contentType: 'application/pdf', createdAt: '2026-08-23T00:00:00.000Z' }],
+        resume: { bankItems: [], profiles: [], drafts: [], imports: [], artifacts: [] },
+        subscription: { entitlement: null, tailoredDraftsUsedThisPeriod: 0, period: '2026-08' },
       },
     });
     expect(response.body).not.toContain('secret-storage-key');
@@ -49,8 +51,8 @@ describe('account data controls', () => {
   it('exports an empty account and rejects signed-out export and deletion', async () => {
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users: new MemoryUserStore(), now: () => '2026-08-26T12:00:00.000Z' });
     expect(json(await handler(event('mock-empty', 'GET', '/me/export')))).toEqual({
-      schemaVersion: 1, exportedAt: '2026-08-26T12:00:00.000Z',
-      account: { profile: null, applications: [], documents: [] },
+      schemaVersion: 3, exportedAt: '2026-08-26T12:00:00.000Z',
+      account: { profile: null, applications: [], documents: [], resume: { bankItems: [], profiles: [], drafts: [], imports: [], artifacts: [] }, subscription: { entitlement: null, tailoredDraftsUsedThisPeriod: 0, period: '2026-08' } },
     });
     expect((await handler(event(undefined, 'GET', '/me/export'))).statusCode).toBe(401);
     expect((await handler(event(undefined, 'DELETE', '/me'))).statusCode).toBe(401);
@@ -113,6 +115,18 @@ describe('account data controls', () => {
     expect((await handler(event('mock-account', 'DELETE', '/me'))).statusCode).toBe(204);
     expect(await users.getPreferences('mock-account')).toBeUndefined();
     expect(await users.getPreferences('installation:mock-device')).toMatchObject({ alertsEnabled: true, filter: { includeKeywords: ['security'] } });
+  });
+
+  it('removes private resume artifact objects before deleting the account record', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeArtifact({ userId: 'mock-artifact', artifactId: 'artifact-1', draftId: 'draft-1', objectKey: 'private/mock-artifact/resume-artifacts/spec.pdf', texObjectKey: 'private/mock-artifact/resume-artifacts/spec.tex', previewObjectKeys: ['private/mock-artifact/resume-artifacts/spec/preview-1.png'], templateVersion: 'test', compilerVersion: 'test', resumeSpecHash: 'spec', createdAt: 'now' });
+    const deleteObject = vi.fn().mockResolvedValue(undefined);
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, deleteIdentity: vi.fn().mockResolvedValue(undefined), documentStorage: { createUploadUrl: vi.fn(), createDownloadUrl: vi.fn(), deleteObject } });
+    expect((await handler(event('mock-artifact', 'DELETE', '/me'))).statusCode).toBe(204);
+    expect(deleteObject).toHaveBeenCalledWith('private/mock-artifact/resume-artifacts/spec.pdf');
+    expect(deleteObject).toHaveBeenCalledWith('private/mock-artifact/resume-artifacts/spec.tex');
+    expect(deleteObject).toHaveBeenCalledWith('private/mock-artifact/resume-artifacts/spec/preview-1.png');
+    expect(await users.listResumeArtifacts('mock-artifact')).toEqual([]);
   });
 
   it('cleans up linked providers before deleting account data and identity', async () => {

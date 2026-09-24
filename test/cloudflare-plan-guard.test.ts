@@ -217,6 +217,57 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits only the reviewed resume infrastructure rollout', () => {
+    const apiBindings = [
+      { name: 'AI', type: 'ai' },
+      { name: 'RESUME_EMBEDDINGS', type: 'vectorize', index_name: 'intern-notifs-resume-bank-v1' },
+      { name: 'RESUME_PDF_COMPILER', type: 'durable_object_namespace', class_name: 'ResumePdfCompilerV2' },
+      { name: 'RESUME_JOB_IMPORT_QUEUE', type: 'queue', queue_name: 'intern-notifs-resume-job-import' },
+      { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' },
+    ];
+    const ingestionBindings = [
+      { name: 'RESUME_JOB_IMPORT_QUEUE', type: 'queue', queue_name: 'intern-notifs-resume-job-import' },
+      { name: 'RESUME_JOB_IMPORT_DLQ', type: 'queue', queue_name: 'intern-notifs-resume-job-import-dlq' },
+      { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' },
+    ];
+    const changes = [
+      {
+        ...contentUpdate,
+        before: { ...worker, migrations: null },
+        after: {
+          ...contentUpdate.after,
+          bindings: [...worker.bindings, ...apiBindings],
+          migrations: { new_tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] },
+        },
+        after_unknown: {
+          bindings: [...worker.bindings.map(() => ({})), {}, {}, { namespace_id: true }, {}, {}],
+          etag: true,
+        },
+      },
+      {
+        ...contentUpdate,
+        address: 'cloudflare_workers_script.ingestion',
+        after: { ...contentUpdate.after, bindings: [...worker.bindings, ...ingestionBindings] },
+      },
+      {
+        address: 'cloudflare_queue.work["resume-job-import"]', actions: ['create'], before: null,
+        after: { account_id: 'account', queue_name: 'intern-notifs-resume-job-import', settings: { delivery_paused: false, message_retention_period: 86_400 } },
+      },
+      {
+        address: 'cloudflare_queue.dead_letter["resume-job-import"]', actions: ['create'], before: null,
+        after: { account_id: 'account', queue_name: 'intern-notifs-resume-job-import-dlq', settings: { message_retention_period: 1_209_600 } },
+      },
+      {
+        address: 'cloudflare_queue_consumer.ingestion["resume-job-import"]', actions: ['create'], before: null,
+        after: { account_id: 'account', script_name: 'intern-notifs-ingestion', type: 'worker', dead_letter_queue: 'intern-notifs-resume-job-import-dlq', settings: { batch_size: 1, max_concurrency: 1, max_retries: 2, max_wait_time_ms: 5_000 } },
+      },
+    ];
+
+    expect(validateCloudflarePlan(plan(changes))).toHaveLength(5);
+    expect(() => validateCloudflarePlan(plan([{ ...changes[2]!, after: { ...changes[2]!.after, queue_name: 'other' } }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{ ...changes[0]!, after: { ...changes[0]!.after, bindings: [...worker.bindings, ...apiBindings.map((binding) => binding.name === 'RESUME_TUNER_ENABLED' ? { ...binding, text: 'true' } : binding)] } }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('rejects unknown values in protected Worker fields', () => {
     expect(() => validateCloudflarePlan(plan([{
       ...contentUpdate,

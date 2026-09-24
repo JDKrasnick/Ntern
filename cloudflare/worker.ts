@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
+import { unzipSync } from 'fflate';
 import { decodeMetadataCursor, encodeMetadataCursor } from '../src/metadata-audit.js';
-import { createApiHandler, type DocumentStorage } from '../src/api.js';
+import { createApiHandler, type DocumentStorage, type ResumeArtifactStorage, type ResumeImportCache, type ResumeImportQueue } from '../src/api.js';
 import { ashbyWorkMessages, isAshbySourceDue } from '../src/ashby-dispatch.js';
 import { processAshbyQueue } from '../src/ashby-worker.js';
 import { greenhouseWorkMessages, isGreenhouseSourceDue } from '../src/greenhouse-dispatch.js';
@@ -41,12 +42,15 @@ import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { companyIconResponse } from './company-icon.js';
 import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
-import { assertPublicHttpsUrl, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
+import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
+import { extractResumeJobText } from '../src/resume-job-import.js';
+import { workersAiResumeDraftGenerator, type WorkersAi } from '../src/resume-generation.js';
+import { workersAiResumeSemanticIndex, type ResumeVectorIndex } from '../src/resume-embeddings.js';
 import type { EmployerVerificationChallenge } from '../src/employer-types.js';
 import { reviewedProviderRegistry, reviewedStructuredRegistry } from './employer-registry.js';
 import { StructuredCareerSourceConnector } from '../src/sources/structured/index.js';
 import { failedSourceHealth, safeDiagnostic, successfulSourceHealth } from '../src/source-health.js';
-import type { BrowserWorker } from '@cloudflare/puppeteer';
+import puppeteer, { type BrowserWorker } from '@cloudflare/puppeteer';
 import { destinationVerificationMessage, enqueueDueDestinationVerifications, processDestinationVerificationBatch,
   sendAdmissionOperationalAlert, sendShadowBudgetAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
@@ -70,6 +74,8 @@ import {
 } from '../src/integration-registry.js';
 
 export interface Environment extends AuthEnvironment {
+  AI: WorkersAi;
+  RESUME_EMBEDDINGS?: ResumeVectorIndex;
   DOCUMENTS: R2Bucket;
   SHADOW_EXTRACTION_ARTIFACTS: R2Bucket;
   GREENHOUSE_QUEUE: Queue;
@@ -79,6 +85,8 @@ export interface Environment extends AuthEnvironment {
   GMAIL_QUEUE: Queue;
   DESTINATION_VERIFICATION_QUEUE: Queue;
   SHADOW_EXTRACTION_QUEUE: Queue;
+  RESUME_JOB_IMPORT_QUEUE: Queue;
+  RESUME_PDF_COMPILER: DurableObjectNamespace;
   D1_TRAFFIC_CONTROLLER?: DurableObjectNamespace;
   DESTINATION_BROWSER: BrowserWorker;
   GREENHOUSE_DLQ: Queue;
@@ -120,6 +128,7 @@ export interface Environment extends AuthEnvironment {
   METADATA_SCHEDULED_COLLECTION_LIMIT?: string;
   GMAIL_ENABLED?: string;
   SHADOW_EXTRACTION_ENABLED?: string;
+  RESUME_TUNER_ENABLED?: string;
   SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS?: string;
   SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS?: string;
   /** Default-disabled, exact-cohort policy for reviewer-receipted shadow data. */
@@ -616,6 +625,89 @@ function documentStorage(env: Environment): DocumentStorage {
     async createUploadUrl(document) { return `${base}/me/documents/${encodeURIComponent(document.documentId)}/content`; },
     async createDownloadUrl(document) { return `${base}/me/documents/${encodeURIComponent(document.documentId)}/content`; },
     async deleteObject(objectKey) { await env.DOCUMENTS.delete(objectKey); },
+    async readContent(document) {
+      const object = await env.DOCUMENTS.get(document.objectKey);
+      if (!object) throw new Error('Document content not found');
+      return new Response(object.body).arrayBuffer();
+    },
+  };
+}
+
+export function resumeCompilerRequest(tex: string): Request {
+  const source = new TextEncoder().encode(tex);
+  return new Request('https://resume-compiler/compile', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-tex', 'content-length': String(source.byteLength) },
+    body: source,
+  });
+}
+
+/** Keep container-backed Durable Objects within the configured container pool.
+ * A Durable Object name per resume would request an unbounded number of
+ * container instances and fail as soon as a burst exceeds max_instances. */
+export const RESUME_PDF_COMPILER_POOL_SIZE = 2;
+export function resumeCompilerPoolName(resumeSpecHash: string, poolSize = RESUME_PDF_COMPILER_POOL_SIZE): string {
+  if (!/^[a-f0-9]{8,}$/u.test(resumeSpecHash) || !Number.isSafeInteger(poolSize) || poolSize < 1) {
+    throw new Error('Resume compiler pool selection requires a digest and a positive pool size');
+  }
+  return `resume-pdf-compiler-${Number.parseInt(resumeSpecHash.slice(0, 8), 16) % poolSize}`;
+}
+
+function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
+  return {
+    async putTex(objectKey, tex) { const bytes = new TextEncoder().encode(tex); await env.DOCUMENTS.put(objectKey, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'application/x-tex; charset=utf-8' } }); },
+    async putPdf(objectKey, pdf) { await env.DOCUMENTS.put(objectKey, pdf, { httpMetadata: { contentType: 'application/pdf' } }); },
+    async putPreview(objectKey, png) { await env.DOCUMENTS.put(objectKey, png, { httpMetadata: { contentType: 'image/png' } }); },
+    async compile(tex, resumeSpecHash) {
+      const stub = env.RESUME_PDF_COMPILER.get(env.RESUME_PDF_COMPILER.idFromName(resumeCompilerPoolName(resumeSpecHash)));
+      const response = await stub.fetch(resumeCompilerRequest(tex));
+      if (!response.ok) throw new Error('Resume PDF compiler did not produce an artifact');
+      const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
+      const pdf = files['resume.pdf']; const pageCountText = files['page-count.txt'];
+      const pageCount = pageCountText && Number.parseInt(new TextDecoder().decode(pageCountText), 10);
+      const previewPngs = Object.entries(files).filter(([name]) => /^preview-\d+\.png$/u.test(name)).sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true })).map(([, value]) => value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
+      if (!pdf || !Number.isInteger(pageCount) || pageCount < 1 || previewPngs.length !== pageCount) throw new Error('Resume PDF compiler returned an invalid artifact bundle');
+      return { pdf: pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) as ArrayBuffer, pageCount, previewPngs };
+    },
+  };
+}
+
+function resumeImportCache(env: Environment): ResumeImportCache {
+  return {
+    async get(canonicalUrl) {
+      const row = await env.DB.prepare(`SELECT imports.canonical_url, imports.content_hash, imports.title, imports.company, imports.description_object_key
+        FROM resume_job_aliases aliases JOIN resume_job_imports imports ON imports.import_id = aliases.import_id
+        WHERE aliases.alias_url = ? AND imports.status = 'ready' LIMIT 1`).bind(canonicalUrl).first<{
+          canonical_url: string; content_hash: string; title: string | null; company: string | null; description_object_key: string | null;
+        }>();
+      if (!row?.description_object_key) return undefined;
+      const object = await env.DOCUMENTS.get(row.description_object_key);
+      if (!object) return undefined;
+      return { canonicalUrl: row.canonical_url, contentHash: row.content_hash, description: await new Response(object.body).text(),
+        ...(row.title ? { title: row.title } : {}), ...(row.company ? { company: row.company } : {}) };
+    },
+  };
+}
+
+function resumeImportQueue(env: Environment): ResumeImportQueue {
+  return {
+    async send(message) {
+      const timestamp = new Date().toISOString();
+      const taskId = crypto.randomUUID();
+      const cacheImportId = crypto.randomUUID();
+      // This shared row contains public job material only. The user-owned import
+      // remains in the user store and is updated only after an owned-ID check.
+      await env.DB.prepare(`INSERT INTO resume_job_imports (import_id, canonical_url, content_hash, status, created_at, updated_at)
+          VALUES (?, ?, ?, 'pending', ?, ?) ON CONFLICT(canonical_url) DO NOTHING`)
+          .bind(cacheImportId, message.canonicalUrl, createHash('sha256').update(message.canonicalUrl).digest('hex'), timestamp, timestamp).run();
+      const shared = await env.DB.prepare('SELECT import_id FROM resume_job_imports WHERE canonical_url = ? LIMIT 1')
+        .bind(message.canonicalUrl).first<{ import_id: string }>();
+      if (!shared) throw new Error('Resume import cache row was not created');
+      await env.DB.prepare(`INSERT INTO resume_job_import_tasks (task_id, import_id, state, attempts, created_at, updated_at)
+          VALUES (?, ?, 'queued', 0, ?, ?)`)
+          .bind(taskId, shared.import_id, timestamp, timestamp).run();
+      await env.RESUME_JOB_IMPORT_QUEUE.send({ ...message, cacheImportId: shared.import_id, taskId });
+    },
   };
 }
 
@@ -1115,7 +1207,13 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     users: new D1UserStore(env.DB),
     releases: new D1ReleaseStore(env.DB),
     documentStorage: documentStorage(env),
+    resumeArtifactStorage: resumeArtifactStorage(env),
+    resumeImportQueue: resumeImportQueue(env),
+    resumeImportCache: resumeImportCache(env),
+    resumeDraftGenerator: workersAiResumeDraftGenerator(env.AI),
+    ...(env.RESUME_EMBEDDINGS ? { resumeSemanticIndex: workersAiResumeSemanticIndex(env.AI, env.RESUME_EMBEDDINGS) } : {}),
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
+    resumeTunerEnabled: env.RESUME_TUNER_ENABLED === 'true',
     beforeDeleteUser: (userId) => disconnectGmail(userId, env),
     deleteIdentity: async (id) => {
       const email = await accountEmail(env, id);
@@ -1156,6 +1254,40 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   if (contentMatch && (request.method === 'GET' || request.method === 'PUT')) {
     if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
     return withCors(await documentContent(request, env, userId, decodeURIComponent(contentMatch[1])));
+  }
+  const artifactContentMatch = url.pathname.match(/^\/me\/resume-artifacts\/([^/]+)\/content$/u);
+  if (artifactContentMatch && request.method === 'GET') {
+    if (env.RESUME_TUNER_ENABLED !== 'true') return withCors(Response.json({ message: 'Resume tailoring is not enabled' }, { status: 404 }));
+    if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
+    const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactContentMatch[1]));
+    if (!artifact) return withCors(Response.json({ message: 'Resume artifact not found' }, { status: 404 }));
+    if (!artifact.objectKey.endsWith('.pdf')) return withCors(Response.json({ message: 'Resume PDF is not available' }, { status: 409 }));
+    const object = await env.DOCUMENTS.get(artifact.objectKey);
+    if (!object) return withCors(Response.json({ message: 'Resume artifact content not found' }, { status: 404 }));
+    return withCors(new Response(object.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="resume-${artifact.artifactId}.pdf"`, 'Cache-Control': 'private, no-store' } }));
+  }
+  const artifactSourceMatch = url.pathname.match(/^\/me\/resume-artifacts\/([^/]+)\/source$/u);
+  if (artifactSourceMatch && request.method === 'GET') {
+    if (env.RESUME_TUNER_ENABLED !== 'true') return withCors(Response.json({ message: 'Resume tailoring is not enabled' }, { status: 404 }));
+    if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
+    const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactSourceMatch[1]!));
+    if (!artifact?.texObjectKey) return withCors(Response.json({ message: 'Resume LaTeX source is not available' }, { status: 404 }));
+    const object = await env.DOCUMENTS.get(artifact.texObjectKey);
+    if (!object) return withCors(Response.json({ message: 'Resume LaTeX source was not found' }, { status: 404 }));
+    return withCors(new Response(object.body, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': `inline; filename="resume-${artifact.artifactId}.tex"`, 'Cache-Control': 'private, no-store' } }));
+  }
+  const artifactPreviewMatch = url.pathname.match(/^\/me\/resume-artifacts\/([^/]+)\/preview\/(\d+)$/u);
+  if (artifactPreviewMatch && request.method === 'GET') {
+    if (env.RESUME_TUNER_ENABLED !== 'true') return withCors(Response.json({ message: 'Resume tailoring is not enabled' }, { status: 404 }));
+    if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
+    const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactPreviewMatch[1]!));
+    if (!artifact) return withCors(Response.json({ message: 'Resume artifact not found' }, { status: 404 }));
+    const page = Number(artifactPreviewMatch[2]);
+    const objectKey = Number.isSafeInteger(page) && page > 0 ? artifact.previewObjectKeys?.[page - 1] : undefined;
+    if (!objectKey) return withCors(Response.json({ message: 'Resume preview page is not available' }, { status: 404 }));
+    const object = await env.DOCUMENTS.get(objectKey);
+    if (!object) return withCors(Response.json({ message: 'Resume preview content was not found' }, { status: 404 }));
+    return withCors(new Response(object.body, { headers: { 'Content-Type': 'image/png', 'Content-Disposition': `inline; filename="resume-${artifact.artifactId}-page-${page}.png"`, 'Cache-Control': 'private, no-store' } }));
   }
   const event = apiEvent(request, userId, request.method === 'GET' || request.method === 'HEAD' ? null : await request.text());
   const result = await handler(event);
@@ -1712,6 +1844,24 @@ export function d1TrafficWorkloadForQueue(queue: string) {
         : undefined;
 }
 
+async function browserResumeJobText(canonicalUrl: string, env: Environment): Promise<{ url: string; title?: string; description: string }> {
+  const browser = await puppeteer.launch(env.DESTINATION_BROWSER);
+  try {
+    const page = await browser.newPage();
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      void assertPublicHttpsUrl(request.url(), publicHostResolver)
+        .then(() => request.continue())
+        .catch(() => request.abort('blockedbyclient'));
+    });
+    await page.goto(canonicalUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    const finalUrl = (await assertPublicHttpsUrl(page.url(), publicHostResolver)).href;
+    const result = extractResumeJobText(await page.content());
+    if (result.description.length < 40) throw new Error('Browser Rendering did not contain enough readable role text');
+    return { url: finalUrl, ...result };
+  } finally { await browser.close(); }
+}
+
 async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Promise<void> {
   const catalogProvider = providerForQueueName(batch.queue);
   const trafficWorkload = d1TrafficWorkloadForQueue(batch.queue);
@@ -1747,6 +1897,57 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   if (batch.queue.includes('shadow-extraction')) {
     await observeQueueBatch(batch, trafficObservations, (observed) => processShadowExtractionBatch(observed, env));
+    return;
+  }
+  if (batch.queue.includes('resume-job-import')) {
+    for (const message of batch.messages) {
+      const body = message.body as { userId?: string; importId?: string; canonicalUrl?: string; cacheImportId?: string; taskId?: string };
+      if (!body.userId || !body.importId || !body.canonicalUrl || !body.cacheImportId || !body.taskId) { message.ack(); continue; }
+      try {
+        const startedAt = new Date().toISOString();
+        await env.DB.prepare(`UPDATE resume_job_import_tasks SET state = 'leased', attempts = attempts + 1, lease_until = ?, updated_at = ? WHERE task_id = ?`)
+          .bind(new Date(Date.now() + 30_000).toISOString(), startedAt, body.taskId).run();
+        let importedUrl: string;
+        let extracted: ReturnType<typeof extractResumeJobText>;
+        try {
+          const fetched = await safeFetchText(body.canonicalUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 3, maxBodyBytes: 128 * 1024, headers: { Accept: 'text/html,application/xhtml+xml' } });
+          if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
+          extracted = extractResumeJobText(fetched.body);
+          if (extracted.description.length < 40) throw new Error('Job import did not contain enough readable role text');
+          importedUrl = fetched.url;
+        } catch {
+          const rendered = await browserResumeJobText(body.canonicalUrl, env);
+          importedUrl = rendered.url;
+          extracted = rendered;
+        }
+        const contentHash = createHash('sha256').update(extracted.description).digest('hex');
+        const objectKey = `resume-imports/${contentHash}.txt`;
+        const descriptionBytes = new TextEncoder().encode(extracted.description);
+        await env.DOCUMENTS.put(objectKey, descriptionBytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'text/plain; charset=utf-8' } });
+        const timestamp = new Date().toISOString();
+        await env.DB.prepare(`INSERT INTO resume_job_imports (import_id, canonical_url, content_hash, status, title, description_object_key, created_at, updated_at)
+          VALUES (?, ?, ?, 'ready', ?, ?, ?, ?)
+          ON CONFLICT(import_id) DO UPDATE SET canonical_url = excluded.canonical_url, content_hash = excluded.content_hash, status = 'ready', title = excluded.title, description_object_key = excluded.description_object_key, updated_at = excluded.updated_at`)
+          .bind(body.cacheImportId, importedUrl, contentHash, extracted.title ?? null, objectKey, timestamp, timestamp).run();
+        await env.DB.prepare(`INSERT INTO resume_job_aliases (alias_url, import_id, created_at) VALUES (?, ?, ?)
+          ON CONFLICT(alias_url) DO UPDATE SET import_id = excluded.import_id`).bind(body.canonicalUrl, body.cacheImportId, timestamp).run();
+        await env.DB.prepare(`UPDATE resume_job_import_tasks SET state = 'succeeded', lease_until = NULL, updated_at = ? WHERE task_id = ?`).bind(timestamp, body.taskId).run();
+        const users = new D1UserStore(env.DB);
+        const current = await users.getImportedResumeJob(body.userId, body.importId);
+        if (current && current.canonicalUrl === body.canonicalUrl && current.status === 'pending') {
+          await users.putImportedResumeJob(body.userId, { ...current, canonicalUrl: importedUrl, title: extracted.title, description: extracted.description, source: 'cache', contentHash, status: 'ready', revision: current.revision + 1, updatedAt: timestamp }, current.revision);
+        }
+        message.ack();
+      } catch (error) {
+        await env.DB.prepare(`UPDATE resume_job_import_tasks SET state = 'failed', lease_until = NULL, updated_at = ? WHERE task_id = ?`)
+          .bind(new Date().toISOString(), body.taskId).run();
+        const users = new D1UserStore(env.DB);
+        const current = await users.getImportedResumeJob(body.userId, body.importId);
+        if (current?.status === 'pending') await users.putImportedResumeJob(body.userId, { ...current, status: 'manual-description-required', revision: current.revision + 1, updatedAt: new Date().toISOString() }, current.revision);
+        console.warn(JSON.stringify({ command: 'resume-job-import', importId: body.importId, error: safeDiagnostic(error) }));
+        message.ack();
+      }
+    }
     return;
   }
   const records = batch.messages.map((message) => ({ messageId: message.id, body: typeof message.body === 'string' ? message.body : JSON.stringify(message.body) }));

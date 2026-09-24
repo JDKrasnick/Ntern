@@ -9,6 +9,13 @@ const repositoryRoot = resolve(mobileRoot, "..");
 const outputDirectory = resolve(mobileRoot, "dist");
 const publicApiUrl = process.env.EXPO_PUBLIC_API_URL?.trim()
   || "https://intern-notifs.jdkrasnick.workers.dev";
+const approvedApiOrigins = new Set([
+  "https://intern-notifs.jdkrasnick.workers.dev",
+  "https://intern-notifs-dev.jdkrasnick.workers.dev",
+]);
+if (!approvedApiOrigins.has(publicApiUrl)) {
+  throw new Error(`Web export requires an approved Cloudflare API origin; received ${new URL(publicApiUrl).origin}`);
+}
 const policyFiles = [
   "policy.css",
   "privacy.html",

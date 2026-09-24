@@ -1,6 +1,8 @@
 import type { JobFilter } from './core/filters.js';
 import type { EmployerCategory } from './core/employers.js';
 import type { EducationLevel } from '../shared/education-display.js';
+import type { ImportedJob, ResumeArtifact, ResumeBankItem, ResumeDraft, ResumeProfile } from './resume.js';
+import type { ResumeSubscription } from './subscription.js';
 
 export type { EducationLevel };
 
@@ -97,7 +99,7 @@ export interface UserDocument {
   createdAt: string;
 }
 
-export const ACCOUNT_EXPORT_SCHEMA_VERSION = 1 as const;
+export const ACCOUNT_EXPORT_SCHEMA_VERSION = 3 as const;
 
 export interface AccountDataExport {
   schemaVersion: typeof ACCOUNT_EXPORT_SCHEMA_VERSION;
@@ -106,6 +108,14 @@ export interface AccountDataExport {
     profile: ApplicantProfile | null;
     applications: ApplicationRecord[];
     documents: Array<Pick<UserDocument, 'documentId' | 'fileName' | 'contentType' | 'createdAt'>>;
+    resume: {
+      bankItems: ResumeBankItem[];
+      profiles: ResumeProfile[];
+      drafts: ResumeDraft[];
+      imports: ImportedJob[];
+      artifacts: ResumeArtifact[];
+    };
+    subscription: { entitlement: ResumeSubscription | null; tailoredDraftsUsedThisPeriod: number; period: string };
   };
 }
 

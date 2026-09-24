@@ -27,5 +27,6 @@ Before inviting testers:
 - Open Privacy Policy, Terms, Data Retention, Sources and corrections, and Support in Profile. Verify every HTTPS page is public and readable without sign-in.
 - Create an account only after checking both the 18+ and policy acknowledgments. Verify the unchecked state cannot submit signup.
 - Verify account deletion removes the signed-in user’s profile, applications, assistance records, documents, Cloudflare sessions, and sign-in identity while leaving device alerts and app settings intact.
+- If the separately reviewed Resume Tuner flag is enabled, create a private Master Bank from a PDF and DOCX, confirm every extracted card starts unverified, import a public role URL, reject all remaining suggested changes, and verify its downloaded artifact never appears in another account. Do not treat the TeX-source artifact as a TestFlight PDF-export acceptance test until the isolated compiler rollout is approved.
 - Reconcile the final archive and native privacy report against [`store-disclosures.md`](store-disclosures.md), then record the published Apple/Google answers and release build in that worksheet.
 - Inspect the installed icon, launch splash, app version, and auto-incremented build number in TestFlight.
