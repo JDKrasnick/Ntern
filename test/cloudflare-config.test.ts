@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { CATALOG_DELIVERY_MAX_ATTEMPTS } from '../src/source-poll-cadence.js';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -119,6 +120,23 @@ describe('Cloudflare deployment configuration', () => {
       expect(consumer.max_concurrency).toBe(declared[consumer.queue.replace('intern-notifs-', '')]);
     }
     expect(terraform).toContain('max_concurrency  = lookup(local.consumer_max_concurrency, each.key, 1)');
+  });
+
+  it('keeps the catalog deferral threshold synchronized with the queue retry budget', () => {
+    // CATALOG_DELIVERY_MAX_ATTEMPTS acks a source-scoped failure on its final
+    // delivery. If a catalog queue's max_retries changes without the constant,
+    // the threshold either fires early or never fires and DLQ growth returns.
+    // This suite reads Wrangler; OpenTofu is the deployed authority and its
+    // catalog retry value is pinned by the max_retries assertion in the
+    // destination-verification configuration test above.
+    const catalogQueues = ['intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby', 'intern-notifs-github'];
+    const matched = (ingestion.queues?.consumers ?? []).filter(({ queue }) => catalogQueues.includes(queue));
+    // Assert the matched set first so a renamed or removed catalog consumer
+    // fails loudly instead of letting the loop below pass vacuously.
+    expect(matched.map(({ queue }) => queue).sort()).toEqual([...catalogQueues].sort());
+    for (const consumer of matched) {
+      expect(consumer.max_retries + 1).toBe(CATALOG_DELIVERY_MAX_ATTEMPTS);
+    }
   });
 
   it('keeps behavior-critical API variables synchronized across Wrangler and OpenTofu', () => {

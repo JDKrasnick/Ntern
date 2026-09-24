@@ -40,6 +40,68 @@ export const SOURCE_RETRY_DELAY_CAP_MS = 60_000;
  * D1 write took 147 s) and one sixth of the published cadence. */
 export const SOURCE_MESSAGE_DEADLINE_MS = 5 * 60_000;
 
+/**
+ * Deliveries Cloudflare allows for one catalog message. The catalog consumers
+ * run with `max_retries: 2`, so a message is delivered three times before the
+ * platform moves it to the dead-letter queue. Keep this in sync with
+ * `max_retries` in the Wrangler ingestion configs.
+ */
+export const CATALOG_DELIVERY_MAX_ATTEMPTS = 3;
+
+/**
+ * A message the scheduled dispatcher can never re-own stays on the retry path
+ * so the platform dead-letters it for a human: an unknown reviewed source, a
+ * malformed work message, a thrown non-Error, or a D1 schema/migration defect.
+ * Those recur on every re-issue, so deferring them would hide a bug instead of
+ * retrying work. Everything else is a source-scoped failure the source's health
+ * row and checkpoint can retry. `error` is the failure from the final delivery.
+ */
+export function catalogFailureIsPoison(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  return /^Unknown reviewed /.test(error.message)
+    || /^Invalid .* work message/.test(error.message)
+    || /no such (?:table|column)/i.test(error.message);
+}
+
+/** Caller-supplied facts about whether the scheduled dispatcher re-owns the
+ * message's source. The default describes the Greenhouse/Lever/Ashby lanes,
+ * whose next sweep or daily recovery probe re-issues a quarantined source. */
+export interface CatalogDeferralContext {
+  /** False when this message is one the dispatcher can never re-issue, so
+   * deferring it would drop work with no automatic retry. The GitHub lane
+   * passes false for a forced recovery: its scheduled dispatch skips
+   * quarantined sources and it has no recovery probe, so that recovery is the
+   * only thing that would ever re-issue them and must dead-letter for a human.
+   *
+   * A normal GitHub poll that leaves its source quarantined is still deferred.
+   * Quarantine is the intended terminal state for a broken board, the source
+   * stays visible in source health for a manual recovery, and the earlier
+   * attempts that quarantined it are acked by the blocked-source path anyway,
+   * so dead-lettering only the final attempt would add noise, not signal. */
+  dispatcherCanReissue?: boolean;
+}
+
+/**
+ * Whether a failed catalog delivery should be deferred to the scheduled
+ * dispatcher instead of dead-lettered. True only for a source-scoped message
+ * that has exhausted every delivery, is not poison, and whose source the
+ * dispatcher re-owns. Deferral is safe only while the dispatcher re-owns the
+ * source: Greenhouse/Lever/Ashby sources are re-issued from their next sweep or
+ * their daily recovery probe, so their health row and checkpoint are the
+ * durable retry state. Keeping the rule in one place stops the GitHub lane and
+ * the shared Greenhouse/Lever/Ashby path from drifting.
+ */
+export function catalogDeliveryIsDeferred(
+  error: unknown,
+  sourceId: string | undefined,
+  attempts: number | undefined,
+  context: CatalogDeferralContext = {},
+): boolean {
+  return context.dispatcherCanReissue !== false
+    && Boolean(sourceId) && (attempts ?? 0) >= CATALOG_DELIVERY_MAX_ATTEMPTS
+    && !catalogFailureIsPoison(error);
+}
+
 function stableSourceBucket(sourceId: string, buckets: number): number {
   let hash = 2166136261;
   for (const character of sourceId) {

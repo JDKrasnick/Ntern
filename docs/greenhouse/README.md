@@ -31,7 +31,11 @@ token or application host.
 - Published boards use the catalog poller, quiet first baseline, link
   validation, atomic D1 reconciliation, and user alert path.
 - Each request to the Greenhouse jobs API has an eight-second timeout.
-- Failed messages retry twice and then move to the dedicated Greenhouse DLQ.
+- Failed messages retry twice. A source-scoped failure that survives the final
+  delivery records its health and failure-ledger rows and is acknowledged,
+  because the dispatcher re-issues the source from its health row and
+  checkpoint. Only a message the dispatcher cannot re-own (an unknown source or
+  a malformed body) moves to the dedicated Greenhouse DLQ.
 
 No reviewed board is promoted merely because the worker exists. Promotion
 still requires its registry status to change from `shadow` to `published`.
