@@ -14,6 +14,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('"/me/resume-bank/import"');
     expect(app).toContain('multiple: true');
     expect(app).toContain('bankItemIds: imported.items.map((item) => item.bankItemId)');
+    expect(app).toContain('profile.template === selectedTemplate && profile.bankItemIds.length === importedIds.length');
     expect(app).toContain('setProfiles((items) => [...items, profile])');
     expect(app).toContain('method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true })');
     expect(app).toContain('type ResumeBankCard =');

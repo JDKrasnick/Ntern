@@ -379,6 +379,26 @@ describe('resume API ownership and revisions', () => {
     expect(indexMany.mock.calls[0]![0]).toHaveLength(1);
   });
 
+  it('clears a stale derived vector when a free plan edits a verified item', async () => {
+    const users = new MemoryUserStore();
+    const remove = vi.fn(async () => undefined);
+    const index = vi.fn(async () => undefined);
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
+      resumeSemanticIndex: { index, remove, scores: async () => new Map() } });
+    const item = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank', { kind: 'project', content: 'Built a compiler' }))).body) as { bankItemId: string; revision: number };
+    // A free plan must not index the edit, but must clear any previous vector so
+    // the derived cache can never contradict the authoritative content.
+    const patched = await handler(event('student', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: true, content: 'Built a query compiler' }));
+    expect(patched.statusCode).toBe(200);
+    expect(index).not.toHaveBeenCalled();
+    expect(remove).toHaveBeenCalledWith('student', [item.bankItemId]);
+    // A paid plan re-indexes the same edit instead of clearing it.
+    await users.putResumeSubscription({ userId: 'student', tier: 'plus', status: 'active', provider: 'apple', updatedAt: 'now' });
+    const revision = JSON.parse(patched.body).revision as number;
+    await handler(event('student', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision, verified: true, content: 'Built a query planner' }));
+    expect(index).toHaveBeenCalledTimes(1);
+  });
+
   it('reports the résumé document cap instead of failing silently', async () => {
     class CappedStore extends MemoryUserStore {
       async putDocument(): Promise<void> { throw new Error('Document storage quota reached'); }

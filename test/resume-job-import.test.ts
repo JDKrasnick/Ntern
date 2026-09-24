@@ -37,4 +37,11 @@ describe('resume job URL provider resolution', () => {
   it('falls back to scraping for employer domains without a reviewed provider route', () => {
     expect(resumeJobStructuredRoute('https://careers.example.test/jobs/1')).toBeUndefined();
   });
+
+  it('never returns the HTML iCIMS frame route, whose host would come from a URL path segment', () => {
+    // metadataApiRoute resolves this to an icims-page route, but that response is
+    // HTML and the tenant is a path segment rather than a reviewed tenant, so the
+    // JSON-only structured path declines it and the importer scrapes instead.
+    expect(resumeJobStructuredRoute('https://careers.rivianvw.tech/acme/jobs/1234/job')).toBeUndefined();
+  });
 });
