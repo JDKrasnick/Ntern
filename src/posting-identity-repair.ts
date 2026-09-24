@@ -497,8 +497,12 @@ function comparablePresentationValue(field: PresentationField, value: unknown): 
  * references, so a name, title or URL difference settles itself. A disagreement
  * about the *reviewed employer identity* is two different employers unless the
  * records name a reviewed alias family or resolve to the same nonempty official
- * application URL. A shared application destination is direct employer evidence:
- * we preserve its canonical record and merge only that exact posting.
+ * application URL, or a reviewer recorded the employer shown by the official
+ * page for this exact provider identity. A shared application destination is
+ * direct employer evidence: we preserve its canonical record and merge only that
+ * exact posting. A reviewed presentation outranks the member attributions: the
+ * immutable record already names the employer for this exact posting, so a
+ * differing list spelling is a source-attribution error, not a second employer.
  */
 const MERGE_BLOCKING_PRESENTATION_FIELDS: readonly PresentationField[] = ['employerIdentity'];
 
@@ -543,6 +547,7 @@ function presentationDisagreement(
   canonicalJobId: string,
   members: Internship[],
   employerMappings: Map<string, string>,
+  reviewedPresentation: boolean,
 ): PresentationDisagreement | undefined {
   const values = {} as PresentationDisagreement['values'];
   const fields: PresentationField[] = [];
@@ -551,7 +556,8 @@ function presentationDisagreement(
     if (!MERGE_BLOCKING_PRESENTATION_FIELDS.includes(field)) continue;
     const observed = members.map((job) => ({ jobId: job.jobId, value: presentation(job, employerMappings)[field] }));
     if (new Set(observed.map((item) => JSON.stringify(stable(comparablePresentationValue(field, item.value))))).size <= 1) continue;
-    if (field === 'employerIdentity' && (sharedApplicationUrl || hasReviewedEmployerAlias(observed))) continue;
+    if (field === 'employerIdentity'
+      && (reviewedPresentation || sharedApplicationUrl || hasReviewedEmployerAlias(observed))) continue;
     fields.push(field);
     values[field] = observed;
   }
@@ -813,10 +819,11 @@ export function postingIdentityRepairPlan(
     const canonical = ordered[0]!;
     const presentationMembers = ordered.map((item) => ({ ...item.job, sourceReferences: item.job.sourceReferences
       .map((reference) => classifiedOccurrence(reference, firstSeen(item.job))) }));
+    const reviewedPresentation = presentationReviews.get(key);
     const official = officialPresentation(presentationMembers, canonical.evidence)
-      ?? presentationReviews.get(key);
+      ?? reviewedPresentation;
     const disagreement = ordered.length > 1
-      ? presentationDisagreement(key, canonical.job.jobId, presentationMembers, employerMappings)
+      ? presentationDisagreement(key, canonical.job.jobId, presentationMembers, employerMappings, Boolean(reviewedPresentation))
       : undefined;
     if (ordered.length > 1) {
       duplicateGroups += 1;

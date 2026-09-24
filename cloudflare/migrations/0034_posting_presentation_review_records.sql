@@ -1,0 +1,161 @@
+-- Issue #262 employer-presentation review, 2026-09-24. Every row below was
+-- taken from the employer-owned posting page for that exact provider identity:
+-- employer name as shown, exact title, exact location, and the canonical
+-- application URL. Rows are append-only; the table's immutability triggers
+-- reject any later update or delete. Groups whose page was withdrawn, reposted
+-- under a different posting id, or is otherwise unavailable were left
+-- unresolved and carry no row here.
+INSERT INTO posting_identity_presentation_reviews
+  (id, provider, tenant, posting_id, company, title, location, locations_json,
+   apply_url, evidence_url, evidence_hash, reviewed_at, reviewed_by)
+VALUES
+  (
+    'pr262-amazon-10517567',
+    'amazon',
+    'amazon',
+    '10517567',
+    'Amazon',
+    'Software Development Engineer Intern, Annapurna Labs - 2027',
+    'USA, TX, Austin',
+    '["USA, TX, Austin", "USA, WA, Seattle", "USA, NY, New York", "USA, CA, Cupertino"]',
+    'https://www.amazon.jobs/en/jobs/10517567/software-development-engineer-intern-annapurna-labs-2027',
+    'https://www.amazon.jobs/en/jobs/10517567',
+    '091ee990dbf92cb9a22e3f2a9f574280e6d3e05401dc84535cfb1e5ba0b9dd80',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000142898574',
+    'smartrecruiters',
+    'boschgroup',
+    '744000142898574',
+    'Bosch Group',
+    'Powertrain Controls Software Engineering Intern (6-Months, Full-Time)',
+    'Hills Tech Dr, Farmington Hills, MI 48331, USA',
+    '["Hills Tech Dr, Farmington Hills, MI 48331, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000142898574-powertrain-controls-software-engineering-intern-6-months-full-time-',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000142898574',
+    '85b5777bedbf0dbfa460ebe0f667fba898dee9581a55820a27763f9629cd27c1',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000145507908',
+    'smartrecruiters',
+    'boschgroup',
+    '744000145507908',
+    'Bosch Group',
+    'AI Security Research Intern',
+    '2555 Smallman St, Pittsburgh, PA 15222, USA',
+    '["2555 Smallman St, Pittsburgh, PA 15222, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000145507908-ai-security-research-intern',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000145507908',
+    '0785bc4c4773902af6eb91eba17baadc5b049d427a32ba90fc3583ec40f391f3',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000145785190',
+    'smartrecruiters',
+    'boschgroup',
+    '744000145785190',
+    'Bosch Group',
+    'Phone as a Key Software Engineering - Intern',
+    '15000 N Haggerty Rd, Plymouth, MI 48170, USA',
+    '["15000 N Haggerty Rd, Plymouth, MI 48170, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000145785190-phone-as-a-key-software-engineering-intern',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000145785190',
+    '6fafd6d64294f1a04775f5e8ca8d71c18706b139e5b368b7ee39e6d707cdcb64',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000146546699',
+    'smartrecruiters',
+    'boschgroup',
+    '744000146546699',
+    'Bosch Group',
+    'Calibration Process Data Science Intern (8 months/40 hours per week)',
+    '38000 Hills Tech Dr, Farmington Hills, MI 48331, USA',
+    '["38000 Hills Tech Dr, Farmington Hills, MI 48331, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000146546699-calibration-process-data-science-intern-8-months-40-hours-per-week-',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000146546699',
+    'e6d074a5c34fc6466d7f8cc4c7e2ec1a2f92d61e1c723b78e5c7a33227704c8e',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000146546849',
+    'smartrecruiters',
+    'boschgroup',
+    '744000146546849',
+    'Bosch Group',
+    'Software Engineering Intern (8 months/40hrs per week)',
+    '38000 Hills Tech Dr, Farmington Hills, MI 48331, USA',
+    '["38000 Hills Tech Dr, Farmington Hills, MI 48331, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000146546849-software-engineering-intern-8-months-40hrs-per-week-',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000146546849',
+    '8454d78acd8d2cf962ec571883d1dd9fecf7b275b38016cc68bda5f3b0f604dc',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000146547599',
+    'smartrecruiters',
+    'boschgroup',
+    '744000146547599',
+    'Bosch Group',
+    'AI Application Intern (8 months/40 hours per week)',
+    '38000 Hills Tech Dr, Farmington Hills, MI 48331, USA',
+    '["38000 Hills Tech Dr, Farmington Hills, MI 48331, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000146547599-ai-application-intern-8-months-40-hours-per-week-',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000146547599',
+    'cbcffca80d13f75fd8a0b094caa2652cb3fff2a8311b758a11163f92f8b45a94',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000148575999',
+    'smartrecruiters',
+    'boschgroup',
+    '744000148575999',
+    'Bosch Group',
+    'Product Management AI-Tool Intern (8 months/40hrs per week)',
+    '38000 Hills Tech Dr, Farmington Hills, MI 48331, USA',
+    '["38000 Hills Tech Dr, Farmington Hills, MI 48331, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000148575999-product-management-ai-tool-intern-8-months-40hrs-per-week-',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000148575999',
+    'bb3f004baa8a9bb9328cdc2bf7992393839c0f43767b71a1999ad68e3c4ff23c',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000148595878',
+    'smartrecruiters',
+    'boschgroup',
+    '744000148595878',
+    'Bosch Group',
+    'Data Analytics Intern - Engineering & SAP Operations',
+    '500 Barclay Blvd, Lincolnshire, IL 60069, USA',
+    '["500 Barclay Blvd, Lincolnshire, IL 60069, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000148595878-data-analytics-intern-engineering-sap-operations',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000148595878',
+    '79afebb5d3ce6c36250c1fea694ee6e1f5722bb59468554842d838fdf2f4e66c',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  ),
+  (
+    'pr262-boschgroup-744000150217869',
+    'smartrecruiters',
+    'boschgroup',
+    '744000150217869',
+    'Bosch Group',
+    'AI Engineering Intern (October 2026 - August 2027)',
+    '15000 N Haggerty Rd, Plymouth, MI 48170, USA',
+    '["15000 N Haggerty Rd, Plymouth, MI 48170, USA"]',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000150217869',
+    'https://jobs.smartrecruiters.com/BoschGroup/744000150217869',
+    '6245c95c56b5d5af34859e394880e2b8b2059db92448174025ea3d3ebb8671ec',
+    '2026-09-24T00:00:00Z',
+    'owner-directed-official-page-review'
+  );

@@ -49,7 +49,7 @@ function sqliteD1(database: DatabaseSync, metrics?: QueryMetrics): D1Database {
 
 function database() {
   const value = new DatabaseSync(':memory:');
-  for (const name of ['0001_initial.sql', '0002_cost_guards.sql', '0003_billing_shutdown.sql', '0004_auth_rate_limits.sql', '0005_auth_consent.sql', '0006_employer_channel.sql', '0007_catalog_admission.sql', '0013_posting_presentation_reviews.sql']) {
+  for (const name of ['0001_initial.sql', '0002_cost_guards.sql', '0003_billing_shutdown.sql', '0004_auth_rate_limits.sql', '0005_auth_consent.sql', '0006_employer_channel.sql', '0007_catalog_admission.sql', '0013_posting_presentation_reviews.sql', '0034_posting_presentation_review_records.sql']) {
     value.exec(readFileSync(new URL(`../cloudflare/migrations/${name}`, import.meta.url), 'utf8'));
   }
   return value;
@@ -666,6 +666,71 @@ describe('D1 posting identity repair', () => {
       postingIdentity: { provider: 'meta', tenant: 'meta', providerPostingId: '1027438186737957' },
     });
     expect(await store.getJob('meta-newer')).toMatchObject({ jobId: 'meta-older' });
+    sqlite.close();
+  });
+
+  it('uses the reviewed employer identity to merge a group whose lists disagree about the employer', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    // Production shape from #262: two community lists carry the same exact
+    // SmartRecruiters posting and name different employers. The reviewed row for
+    // that identity names the employer the official page shows, so the group
+    // merges instead of waiting for a second review round.
+    const canonicalUrl = 'https://jobs.smartrecruiters.com/BoschGroup/744000142898574-powertrain-controls-software-engineering-intern-6-months-full-time-';
+    await store.putInternship(job('bosch-community', canonicalUrl, '2026-08-01T00:00:00.000Z', [
+      occurrence('speedyapply-2027-swe', 'bosch-a', canonicalUrl),
+    ], { company: 'Bosch', internshipIdentity: { company: { canonicalId: 'bosch' } } }));
+    await store.putInternship(job('bosch-second-list', 'https://jobs.smartrecruiters.com/BoschGroup/744000142898574', '2026-08-02T00:00:00.000Z', [
+      occurrence('zapply-2027', 'bosch-b', 'https://jobs.smartrecruiters.com/BoschGroup/744000142898574'),
+    ], { company: 'Bosch Group', internshipIdentity: { company: { canonicalId: 'bosch group' } } }));
+
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({
+      duplicateGroups: 1,
+      eligibleDuplicateGroups: 1,
+      unresolvedDuplicateGroups: 0,
+      presentationDisagreements: [],
+      conflicts: [],
+    });
+    await runPostingIdentityRepair(db, {
+      apply: true,
+      repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges,
+      expectedDuplicateJobs: dry.duplicateJobs,
+      scope: 'identity',
+    });
+    expect(await store.getJob('bosch-community')).toMatchObject({
+      company: 'Bosch Group',
+      title: 'Powertrain Controls Software Engineering Intern (6-Months, Full-Time)',
+      location: 'Hills Tech Dr, Farmington Hills, MI 48331, USA',
+      locations: ['Hills Tech Dr, Farmington Hills, MI 48331, USA'],
+      applyUrl: canonicalUrl,
+      postingIdentity: { provider: 'smartrecruiters', tenant: 'boschgroup', providerPostingId: '744000142898574' },
+    });
+    expect(await store.getJob('bosch-second-list')).toMatchObject({ jobId: 'bosch-community' });
+    sqlite.close();
+  });
+
+  it('keeps an employer-identity disagreement blocked when no reviewed presentation exists', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const url = 'https://jobs.smartrecruiters.com/GDMSI/744000146822449';
+    await store.putInternship(job('gdmsi-community', `${url}-co-op-may-2026-software-engineering-8-months?oga=true`, '2026-08-01T00:00:00.000Z', [
+      occurrence('speedyapply-2027-swe', 'gdmsi-a', `${url}-co-op-may-2026-software-engineering-8-months?oga=true`),
+    ], { company: 'General Dynamics Mission Systems', internshipIdentity: { company: { canonicalId: 'general dynamics mission systems' } } }));
+    await store.putInternship(job('gdmsi-second-list', url, '2026-08-02T00:00:00.000Z', [
+      occurrence('canadian-tech-2027', 'gdmsi-b', url),
+    ], { company: 'General Dynamics UK', internshipIdentity: { company: { canonicalId: 'general dynamics uk' } } }));
+
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
+      duplicateGroups: 1,
+      eligibleDuplicateGroups: 0,
+      unresolvedDuplicateGroups: 1,
+      expectedChanges: 0,
+      conflicts: [],
+      presentationDisagreements: [expect.objectContaining({
+        providerIdentity: 'smartrecruiters:gdmsi:744000146822449',
+        fields: ['employerIdentity'],
+      })],
+    });
     sqlite.close();
   });
 
