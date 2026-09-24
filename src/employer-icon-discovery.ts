@@ -98,8 +98,13 @@ function providerDomains(value: unknown, displayName: string): string[] {
 /** Bounded public page metadata that can independently name the employer. */
 export interface IconOrganizationEvidence {
   name?: string;
-  /** Registrable domain the node's `url` resolved to. */
-  domain?: string;
+  /**
+   * Registrable domains the node's canonical-URL properties resolve to. `url` is
+   * the obvious one, but publishers routinely put an Organization's site in
+   * `sameAs` (the schema.org property for exactly that), so both are read. Asset
+   * properties such as `logo` are deliberately ignored.
+   */
+  domains?: string[];
 }
 
 export interface IconPageEvidence {
@@ -112,6 +117,14 @@ export interface IconPageEvidence {
 function metaContent(html: string, property: string): string | undefined {
   const pattern = new RegExp(`<meta[^>]+(?:property|name)=["']${property}["'][^>]+content=["']([^"']+)["']`, 'iu');
   return pattern.exec(html)?.[1]?.replace(/\s+/gu, ' ').trim().slice(0, 300);
+}
+
+function registrableDomainOf(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  try {
+    const domain = registrableDomain(new URL(value).hostname);
+    return domain.includes('.') ? domain : undefined;
+  } catch { return undefined; }
 }
 
 /**
@@ -129,14 +142,12 @@ function collectOrganizations(node: unknown, found: IconOrganizationEvidence[], 
     .filter((type): type is string => typeof type === 'string');
   if (types.some((type) => ORGANIZATION_TYPES.test(type.toLowerCase()))) {
     const name = typeof record.name === 'string' && record.name.trim() ? record.name.trim().slice(0, 200) : undefined;
-    let domain: string | undefined;
-    if (typeof record.url === 'string') {
-      try {
-        const candidate = registrableDomain(new URL(record.url).hostname);
-        if (candidate.includes('.')) domain = candidate;
-      } catch { /* A malformed publisher URL is not evidence. */ }
+    const sameAs = Array.isArray(record.sameAs) ? record.sameAs : [record.sameAs];
+    const domains = [...new Set([registrableDomainOf(record.url), ...sameAs.map(registrableDomainOf)]
+      .filter((domain): domain is string => Boolean(domain)))];
+    if (name || domains.length) {
+      found.push({ ...(name ? { name } : {}), ...(domains.length ? { domains } : {}) });
     }
-    if (name || domain) found.push({ ...(name ? { name } : {}), ...(domain ? { domain } : {}) });
   }
   for (const value of Object.values(record)) collectOrganizations(value, found, depth + 1);
 }

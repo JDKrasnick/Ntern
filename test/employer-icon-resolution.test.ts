@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { registrableDomain, sameRegistrableDomain } from '../src/core/registrable-domain.js';
 import {
-  acceptIconTieBreak, decideIconDomain, employerDistinctiveTerms, iconEvidenceFingerprint,
-  iconTextMatchesEmployer, isIconTransportHost, parseIconTieBreakDecision, providerNameMatchesEmployer,
-  scoreIconCandidate, scoreIconCandidates, tenantCorroboratesEmployer,
+  acceptIconTieBreak, decideIconDomain, employerDistinctiveTerms, employerNamesDomain,
+  iconEvidenceFingerprint, iconTextMatchesEmployer, isIconTransportHost, parseIconTieBreakDecision,
+  providerNameMatchesEmployer, scoreIconCandidate, scoreIconCandidates, tenantCorroboratesEmployer,
 } from '../src/employer-icon-resolution.js';
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from '../shared/company-icon.js';
 import type { IconCandidateScore, IconDomainCandidate, IconTieBreakDecision } from '../src/employer-icon-resolution.js';
@@ -139,6 +139,11 @@ describe('employer text matching', () => {
     expect(tenantCorroboratesEmployer(undefined, 'acme')).toBe(false);
     expect(tenantCorroboratesEmployer('acme', 'ab')).toBe(false);
     expect(tenantCorroboratesEmployer('fintechcorp', 'tech')).toBe(false);
+    // A four-character employer still counts when the board starts or ends with it,
+    // but never on a mere substring.
+    expect(tenantCorroboratesEmployer('axontalentcommunity', 'axon')).toBe(true);
+    expect(tenantCorroboratesEmployer('metacareers', 'meta')).toBe(true);
+    expect(tenantCorroboratesEmployer('contechsystems', 'tech')).toBe(false);
   });
 });
 
@@ -182,6 +187,35 @@ describe('candidate scoring', () => {
       domain: 'acme.com', score: 0, rejected: true,
       rejectionReason: 'candidate carries no supporting signal',
     });
+  });
+
+  it('lets a platform domain be the employer that owns it, and no one else', () => {
+    // Google, GitHub, and Rippling are employers whose own site is a platform
+    // domain. Without the exemption they could never have an icon.
+    expect(employerNamesDomain('Google', 'google.com')).toBe(true);
+    expect(employerNamesDomain('GitHub', 'github.com')).toBe(true);
+    expect(employerNamesDomain('Rippling', 'rippling.com')).toBe(true);
+    expect(employerNamesDomain('Acme', 'greenhouse.io')).toBe(false);
+    expect(employerNamesDomain('Acme', 'lever.co')).toBe(false);
+
+    const owned = scoreIconCandidate(
+      { domain: 'google.com', signals: ['final-url', 'page-title'], employerNamesDomain: true },
+    );
+    expect(owned).toMatchObject({ rejected: false });
+    expect(owned.score).toBeCloseTo(0.6, 10);
+
+    // The same host stays unreachable for an employer it merely hosts.
+    const hosted = scoreIconCandidate({ domain: 'google.com', signals: ['final-url'] });
+    expect(hosted).toMatchObject({ rejected: true, rejectionReason: 'ATS or job-board host without employer evidence' });
+  });
+
+  it('rejects a profile platform an organization lists as its own URL', () => {
+    // `sameAs` legitimately contains social profiles; none of them is the
+    // employer's site, so none of them may become an icon candidate.
+    for (const domain of ['twitter.com', 'x.com', 'linkedin.com', 'facebook.com', 'youtube.com', 'substack.com']) {
+      expect(isIconTransportHost(domain)).toBe(true);
+      expect(scoreIconCandidate(candidate(domain, ['jsonld-url', 'jsonld-name'])).rejected).toBe(true);
+    }
   });
 
   it('orders candidates best-first', () => {

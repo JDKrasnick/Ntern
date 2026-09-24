@@ -10,7 +10,7 @@
 
 import { validCompanyIconEmployerId } from './company-icon.js';
 import { enqueueEmployerIconResolution } from './employer-icon-resolver.js';
-import { isIconTransportHost } from '../src/employer-icon-resolution.js';
+import { employerNamesDomain, isIconTransportHost } from '../src/employer-icon-resolution.js';
 import { normalizeCompanyDomain } from '../src/employer/domain.js';
 import { registrableDomain } from '../src/core/registrable-domain.js';
 import type { D1EmployerIconStore, EmployerIconMode } from './employer-icon-store.js';
@@ -116,7 +116,11 @@ export async function handleEmployerIconOperations(
       // Verified and served through the same registrable domain, so what an
       // operator confirms is exactly what the read path later requests.
       const domain = registrableDomain(hostname);
-      if (isIconTransportHost(domain)) throw new Error('domain cannot be an ATS or job-board host');
+      // A platform domain is refused unless it is this employer's own — Google may
+      // confirm google.com, but nobody may confirm a board that hosts others.
+      if (isIconTransportHost(domain) && !employerNamesDomain(context.displayName, domain)) {
+        throw new Error('domain cannot be an ATS or job-board host');
+      }
       if (!verifyDomain) throw new Error('Domain verification is not configured');
       // A person may confirm a domain, but never an unverified icon: the same
       // real-image gate that an automatic decision passes applies here too.

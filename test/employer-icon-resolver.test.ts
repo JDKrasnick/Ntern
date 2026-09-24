@@ -277,6 +277,70 @@ describe('employer icon diagnosis', () => {
     expect(winner?.signals).toEqual(['ats-tenant', 'logo-dev']);
     expect(diagnostic.decision.outcome).toBe('llm-review');
   });
+
+  it('reads an organization domain from sameAs and uses it as a candidate', async () => {
+    // The shape real publishers emit: schema.org puts the site in `sameAs`.
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/acme/jobs/4001': () => html(
+        '<!doctype html><html><head><title>Job Application for Software Engineering Intern</title>'
+        + `<script type="application/ld+json">${JSON.stringify({
+          '@type': 'JobPosting', title: 'Software Engineering Intern',
+          hiringOrganization: { '@type': 'Organization', name: 'Acme', sameAs: 'https://acme.com' },
+        })}</script></head></html>`,
+      ),
+    });
+    const diagnostic = await diagnoseEmployerIcon({
+      // No board corroboration and no provider, so only the structured data can decide.
+      seed: { ...employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'), tenant: 'board-1' },
+      credentials: {}, deps: DEPENDENCIES(fetchImpl),
+    });
+
+    expect(diagnostic.pageOrganizations).toEqual(['acme.com']);
+    const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
+    expect(winner?.signals).toEqual(expect.arrayContaining(['jsonld-url', 'jsonld-name']));
+    // 0.35 for the structured organization. It is its own identity evidence, but it
+    // is the same signal group, so it cannot also add the metadata weight.
+    expect(winner?.score).toBeCloseTo(0.35, 10);
+  });
+
+  it('corroborates a provider nomination with a structured organization that publishes no site', async () => {
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/acme/jobs/4001': () => html(
+        '<!doctype html><html><head><title>Open role</title>'
+        + `<script type="application/ld+json">${JSON.stringify({ '@type': 'Organization', name: 'Acme' })}</script></head></html>`,
+      ),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+    });
+    const diagnostic = await diagnoseEmployerIcon({
+      seed: { ...employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'), tenant: 'board-1' },
+      credentials: { logoDevToken: LOGO_TOKEN }, deps: DEPENDENCIES(fetchImpl),
+    });
+
+    expect(diagnostic.pageOrganizations).toEqual([]);
+    const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
+    expect(winner?.signals).toEqual(['jsonld-name', 'logo-dev']);
+    expect(diagnostic.decision.outcome).toBe('llm-review');
+  });
+
+  it('lets an employer own a platform domain without opening it to anyone else', async () => {
+    const fetchImpl = scriptedFetch({
+      'https://www.google.com/about/careers/applications/': () => html(
+        '<!doctype html><html><head><title>Build for everyone | Google Careers</title>'
+        + '<meta property="og:site_name" content="Google"></head></html>',
+      ),
+    });
+    const diagnostic = await diagnoseEmployerIcon({
+      seed: {
+        canonicalEmployerId: 'google', displayName: 'Google', roleTitle: '',
+        applicationUrl: 'https://www.google.com/about/careers/applications/', provider: 'employer-career', sourceId: 'bench:google',
+      },
+      credentials: {}, deps: DEPENDENCIES(fetchImpl),
+    });
+
+    const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'google.com');
+    expect(winner?.rejected).toBe(false);
+    expect(winner?.signals).toEqual(expect.arrayContaining(['final-url', 'page-title']));
+  });
 });
 
 describe('employer icon provider plumbing', () => {

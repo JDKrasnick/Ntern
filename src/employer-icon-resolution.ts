@@ -44,8 +44,8 @@ export interface IconDomainCandidate {
   /** Registrable domain (eTLD+1). Callers normalize before constructing. */
   domain: string;
   signals: readonly IconEvidenceSignal[];
-  /** The provider returned a real image, not a monogram/placeholder fallback. */
-  imageAvailable?: boolean;
+  /** The employer's own name denotes this domain, so a transport host is its real site. */
+  employerNamesDomain?: boolean;
 }
 
 export interface IconCandidateScore {
@@ -108,7 +108,30 @@ const ICON_TRANSPORT_HOSTS: Record<string, true> = {
   'levels.fyi': true, 'angel.co': true, 'github.com': true, 'web.archive.org': true,
   'google.com': true, 'bing.com': true, 'duckduckgo.com': true, 'crunchbase.com': true,
   'medium.com': true, 'reddit.com': true, 'wikipedia.org': true, 'notion.site': true,
+  // Profile and social platforms: an Organization's `sameAs` routinely points at
+  // one of these, which is a profile, never the employer's own site.
+  'twitter.com': true, 'x.com': true, 'facebook.com': true, 'instagram.com': true,
+  'youtube.com': true, 'tiktok.com': true, 'threads.net': true, 'gitlab.com': true,
+  'bit.ly': true, 'linktr.ee': true, 'about.me': true, 'wordpress.com': true, 'substack.com': true,
 };
+
+/**
+ * Whether a transport host is in fact the employer's own domain.
+ *
+ * The transport list names the platforms that host *other* employers' postings,
+ * so a candidate on one of them is normally rejected. Some of those platforms are
+ * also employers in their own right — Google, GitHub, LinkedIn, Rippling, Ashby —
+ * and blocking them outright would mean those employers could never have an icon.
+ * The exemption is narrow: every distinctive term of the employer's name must
+ * appear in the domain itself, so `google.com` is reachable for an employer named
+ * Google while `greenhouse.io` stays unreachable for anyone but Greenhouse.
+ */
+export function employerNamesDomain(displayName: string, domain: string): boolean {
+  const terms = employerDistinctiveTerms(displayName);
+  if (!terms.length) return false;
+  const label = registrableDomain(domain).toLowerCase().replace(/[^a-z0-9]/gu, '');
+  return label !== '' && terms.every((term) => label.includes(term));
+}
 
 /** True when a host can only transport a posting, never vouch for an employer brand. */
 export function isIconTransportHost(host: string): boolean {
@@ -215,8 +238,10 @@ export function tenantCorroboratesEmployer(tenant: string | undefined, canonical
   const segments = (tenant ?? '').toLowerCase().split(/[^a-z0-9]+/u).map(simplify).filter(Boolean);
   if (segments.includes(employer)) return true;
   // Affix matching needs a distinctive employer slug: "tech" occurs inside
-  // "fintechcorp" without either naming the other.
-  return employer.length >= 5 && (board.startsWith(employer) || board.endsWith(employer));
+  // "fintechcorp" without either naming the other, so a whole-segment or exact
+  // match is always required, and an affix only from four characters up. Prefixes
+  // are how real boards name short employers ("axontalentcommunity" hosts "axon").
+  return employer.length >= 4 && (board.startsWith(employer) || board.endsWith(employer));
 }
 
 /** Stable evidence identifier a decision may cite, e.g. `logo-dev:example.com`. */
@@ -235,11 +260,12 @@ export function scoreIconCandidate(
   const domain = registrableDomain(candidate.domain);
   const signals = [...new Set(candidate.signals)];
   const evidenceIds = signals.map((signal) => iconEvidenceId(signal, domain));
-  if (!domain || isIconTransportHost(domain) || !signals.length) {
+  const transport = isIconTransportHost(domain) && candidate.employerNamesDomain !== true;
+  if (!domain || transport || !signals.length) {
     return {
       domain, score: 0, signals, evidenceIds, rejected: true,
       rejectionReason: !domain ? 'candidate has no registrable domain'
-        : isIconTransportHost(domain) ? 'ATS or job-board host without employer evidence'
+        : transport ? 'ATS or job-board host without employer evidence'
           : 'candidate carries no supporting signal',
     };
   }

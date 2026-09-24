@@ -18,7 +18,7 @@ import { registrableDomain } from '../src/core/registrable-domain.js';
 import {
   MAX_PROVIDER_CANDIDATES, decideIconDomain, acceptIconTieBreak, iconEvidenceFingerprint,
   iconTextMatchesEmployer, iconTieBreakSchema, isIconTransportHost, parseIconTieBreakDecision,
-  tenantCorroboratesEmployer,
+  tenantCorroboratesEmployer, employerNamesDomain,
   type IconCandidateScore, type IconDomainCandidate, type IconDomainDecision, type IconEvidenceSignal,
   type IconTieBreakDecision, type EmployerIconSeed,
 } from '../src/employer-icon-resolution.js';
@@ -469,7 +469,7 @@ function tieBreakInput(seed: EmployerIconSeed, gathered: GatheredIconEvidence | 
     page: {
       ...(gathered?.page.title ? { title: gathered.page.title.slice(0, 200) } : {}),
       ...(gathered?.page.ogSiteName ? { siteName: gathered.page.ogSiteName.slice(0, 200) } : {}),
-      organizationDomains: (gathered?.page.organizations ?? []).flatMap((organization) => organization.domain ?? []).slice(0, 5),
+      organizationDomains: (gathered?.page.organizations ?? []).flatMap((organization) => organization.domains ?? []).slice(0, 5),
     },
     candidates: submitted.map((candidate) => ({
       domain: candidate.domain, score: candidate.score, evidenceIds: [...candidate.evidenceIds],
@@ -625,36 +625,50 @@ function iconCandidates(
   providers: ProviderLookup,
 ): IconDomainCandidate[] {
   const signals: Record<string, IconEvidenceSignal[]> = {};
+  const exempt: Record<string, boolean> = {};
   const add = (hostOrDomain: string, signal: IconEvidenceSignal) => {
     const domain = registrableDomain(hostOrDomain);
     if (!domain) return;
     signals[domain] = [...(signals[domain] ?? []), signal];
+    exempt[domain] ||= employerNamesDomain(context.displayName, domain);
   };
   add(hostOf(seed.applicationUrl) ?? '', 'final-url');
   let titleMatches = false;
   let siteMatches = false;
+  let organizationNameMatches = false;
   let pageNamedDomain: string | undefined;
   if (gathered) {
     add(hostOf(gathered.finalUrl) ?? '', 'final-url');
     for (const host of gathered.redirectHosts.slice(0, -1)) add(host, 'redirect-host');
-    const matchedDomains = (gathered.page.organizations ?? [])
-      .filter((organization) => organization.name && organization.domain
-        && iconTextMatchesEmployer(organization.name, context.displayName))
-      .flatMap((organization) => organization.domain!);
+    const matched = (gathered.page.organizations ?? [])
+      .filter((organization) => organization.name && organization.domains?.length
+        && iconTextMatchesEmployer(organization.name, context.displayName));
+    const matchedDomains = matched.flatMap((organization) => organization.domains!);
     for (const domain of matchedDomains) { add(domain, 'jsonld-url'); add(domain, 'jsonld-name'); }
+    // A structured Organization block that names the employer but publishes no
+    // canonical URL still proves *who* is hiring, so it corroborates a provider
+    // nomination exactly as the document title does.
+    organizationNameMatches = matched.length > 0 || (gathered.page.organizations ?? []).some(
+      (organization) => organization.name && !organization.domains?.length
+        && iconTextMatchesEmployer(organization.name, context.displayName),
+    );
     titleMatches = iconTextMatchesEmployer(gathered.page.title, context.displayName);
     siteMatches = iconTextMatchesEmployer(gathered.page.ogSiteName, context.displayName)
       || iconTextMatchesEmployer(gathered.page.ogTitle, context.displayName);
     const fallback = hostOf(gathered.finalUrl);
+    // A transport host can still be the page's own domain when it is the employer's
+    // own site, so the page's naming evidence reaches Google or GitHub too.
     pageNamedDomain = matchedDomains[0]
-      ?? (fallback && !isIconTransportHost(fallback) ? registrableDomain(fallback) : undefined);
+      ?? (fallback && (!isIconTransportHost(fallback) || employerNamesDomain(context.displayName, fallback))
+        ? registrableDomain(fallback) : undefined);
   }
-  // Employer-identity evidence — the page naming the employer and the posting's own
-  // reviewed board slug — corroborates the domains a provider nominated whenever the
-  // page names no domain itself. Those are independent assertions about the same
-  // employer: the page and the board establish *which* employer is hiring, the
-  // provider establishes that employer's domain. It is never attached to a host the
-  // page did not name, so it cannot vouch for an unrelated domain.
+  // Employer-identity evidence — the page naming the employer, its structured
+  // Organization block, and the posting's own reviewed board slug — corroborates the
+  // domains a provider nominated whenever the page names no domain itself. Those are
+  // independent assertions about the same employer: the page and the board establish
+  // *which* employer is hiring, the provider establishes that employer's domain. It is
+  // never attached to a host the page did not name, so it cannot vouch for an
+  // unrelated domain.
   const identityTargets = pageNamedDomain
     ? [pageNamedDomain]
     : [...providers.logoDev, ...providers.brandfetch];
@@ -662,11 +676,15 @@ function iconCandidates(
   for (const target of identityTargets) {
     if (titleMatches) add(target, 'page-title');
     if (siteMatches) add(target, 'opengraph');
+    if (organizationNameMatches) add(target, 'jsonld-name');
     if (tenantCorroborates) add(target, 'ats-tenant');
   }
   for (const domain of providers.logoDev) add(domain, 'logo-dev');
   for (const domain of providers.brandfetch) add(domain, 'brandfetch');
-  return Object.entries(signals).map(([domain, domainSignals]) => ({ domain, signals: domainSignals }));
+  return Object.entries(signals).map(([domain, domainSignals]) => ({
+    domain, signals: domainSignals,
+    ...(exempt[domain] ? { employerNamesDomain: true } : {}),
+  }));
 }
 
 function hostOf(url: string): string | undefined {
@@ -901,7 +919,7 @@ export async function diagnoseEmployerIcon(input: {
     ...(gathered ? { finalUrl: gathered.finalUrl } : {}),
     redirectHosts: gathered?.redirectHosts ?? [],
     ...(gathered?.failure ? { pageFailure: gathered.failure } : {}),
-    pageOrganizations: (gathered?.page.organizations ?? []).flatMap((organization) => organization.domain ?? []),
+    pageOrganizations: (gathered?.page.organizations ?? []).flatMap((organization) => organization.domains ?? []),
     providerFailures: providers.failures,
     logoDevDomains: providers.logoDev,
     brandfetchDomains: providers.brandfetch,
