@@ -11,7 +11,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('feature="tailor and save résumés"');
     expect(app).toContain('accessibilityLabel="Import PDF or DOCX resume"');
     expect(app).toContain('"/me/resume-bank/import"');
-    expect(app).toContain('Sync all items to technical base');
+    expect(app).toContain('technicalBase ? "Sync technical base" : "Create technical base"');
     expect(app).toContain('method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true })');
     expect(app).toContain('type ResumeBankRef =');
     expect(app).toContain('kind: "bullet"; bankItemId: string; parent:');
@@ -37,7 +37,11 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('pollResumeImport(() => api<ResumeImportCard>');
   });
 
-  it('keeps the master bank compact beside the active workbench', () => {
+  it('keeps the technical base behind progressive disclosure', () => {
+    expect(app).toContain('const [bankManagerOpen, setBankManagerOpen] = useState(false);');
+    expect(app).toContain('bankManagerOpen ? "Done editing" : "Edit technical base"');
+    expect(app).toContain('{bankManagerOpen ? (');
+    expect(app.indexOf('Paste the job URL')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
     expect(app).toContain('const wideWorkbench = width >= 1040;');
     expect(app).toContain('bankRoots.slice(0, 4)');
     expect(app).toContain('styles.resumeSetupWorkspaceWide');
@@ -47,10 +51,10 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('`Browse all ${bankRoots.length} entries`');
   });
 
-  it('shows server-owned plans and disables new tailoring at the monthly limit', () => {
+  it('keeps server-owned plans collapsed and disables new tailoring at the monthly limit', () => {
     expect(app).toContain('api<ResumeSubscriptionCard>("/me/subscription", token)');
-    expect(app).toContain('<Text style={styles.sectionTitle}>Tailoring plan</Text>');
-    expect(app).toContain('planExpanded ? <View style={[styles.resumePlanGrid');
+    expect(app).toContain('planExpanded ? "Hide plan details" : "Plan details"');
+    expect(app).toContain('subscription && planExpanded ? <View style={[styles.resumePlanGrid');
     expect(app).toContain('App Store purchase coming next');
     expect(app).toContain('subscription?.usage.remaining === 0 ? "Monthly limit reached"');
   });

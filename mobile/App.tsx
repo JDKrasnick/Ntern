@@ -5657,6 +5657,7 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [bankSaving, setBankSaving] = useState(false);
   const [bankError, setBankError] = useState<string>();
   const [bankExpanded, setBankExpanded] = useState(false);
+  const [bankManagerOpen, setBankManagerOpen] = useState(false);
   const [planExpanded, setPlanExpanded] = useState(false);
   const [profiles, setProfiles] = useState<ResumeProfileCard[]>([]);
   const [resumeTemplates, setResumeTemplates] = useState<ResumeTemplateCard[]>([]);
@@ -5706,7 +5707,6 @@ function ResumeWorkspace({ token }: { token: string }) {
   const technicalBase = profiles.find((profile) => profile.name === "Technical base");
   const bankRoots = bankItems.filter((item) => item.kind !== "bullet");
   const visibleBankItems = bankExpanded ? bankRoots : bankRoots.slice(0, 4);
-  const bankKindCounts = bankItems.reduce<Record<string, number>>((counts, item) => ({ ...counts, [item.kind]: (counts[item.kind] ?? 0) + 1 }), {});
   const bankParents = bankItems.filter((item): item is ResumeBankCard & { kind: ResumeBankParentKind } => item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education");
   const selectedBankParent = bankParents.find((item) => item.bankItemId === bankParentId) ?? bankParents[0];
   const loadBank = () => {
@@ -5883,124 +5883,13 @@ function ResumeWorkspace({ token }: { token: string }) {
     <ScrollView style={styles.list} contentContainerStyle={styles.resumeContent}>
       <PageHeading
         eyebrow="Resume"
-        title="Tailor from what you have done."
-        description="Keep one comprehensive technical base, then review only the changes proposed for each role."
+        title="Tailor your résumé."
+        description="Paste a job link. Ntern compares it with your saved experience and shows only the changes for you to review."
       />
 
-      <View style={styles.resumeOverview}>
-        <View style={styles.resumeOverviewCopy}>
-          <Text style={styles.resumeCardLabel}>Technical base</Text>
-          <Text style={styles.resumeCardTitle}>Your complete content bank</Text>
-          <Text style={styles.resumeCardCopy}>Store every useful role, project, skill, and bullet here. Ntern selects from this library; it never squeezes the whole bank into one résumé.</Text>
-          <Text style={styles.resumeBankStatus}>{bankLoading ? "Loading your private bank…" : `${bankItems.length} source item${bankItems.length === 1 ? "" : "s"} · ${Object.entries(bankKindCounts).map(([kind, count]) => `${count} ${kind}`).join(" · ")}`}</Text>
-        </View>
-        <View style={styles.resumeTrustCard}>
-          <Ionicons name="shield-checkmark-outline" size={22} color={colors.signal} />
-          <Text style={styles.resumeTrustTitle}>Review the diff</Text>
-          <Text style={styles.resumeTrustCopy}>Your imported source stays trusted. Only job-specific additions, removals, moves, and rewrites need a decision.</Text>
-        </View>
-      </View>
-
-      {subscription ? (
-        <View style={styles.resumePlanSection}>
-          <View style={styles.resumeSectionHeading}>
-            <View>
-              <Text style={styles.sectionTitle}>Tailoring plan</Text>
-              <Text style={styles.resumeSectionDescription}>{subscription.plan.name} · {subscription.usage.used} of {subscription.usage.limit} reviews used this month. Saved work and downloads stay available.</Text>
-            </View>
-            <View style={styles.resumePlanActions}>
-              <Text style={styles.resumePlanRemaining}>{subscription.usage.remaining} left</Text>
-              <TouchableOpacity accessibilityRole="button" onPress={() => setPlanExpanded((value) => !value)} style={styles.resumeCompactAction}>
-                <Text style={styles.resumeCompactActionText}>{planExpanded ? "Hide plans" : "Compare plans"}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-          {planExpanded ? <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
-            {subscription.plans.map((plan) => (
-              <View key={plan.tier} style={[styles.resumePlanCard, subscription.tier === plan.tier && styles.resumePlanCardCurrent]}>
-                <Text style={styles.resumePlanName}>{plan.name}</Text>
-                <Text style={styles.resumePlanPrice}>{plan.priceUsdMonthly ? `$${plan.priceUsdMonthly.toFixed(2)}/month` : "$0"}</Text>
-                <Text style={styles.resumePlanDetail}>{plan.tailoredDraftsPerMonth} tailored reviews/month</Text>
-                <Text style={styles.resumePlanState}>{subscription.tier === plan.tier ? "Current plan" : plan.tier === "free" ? "Included" : "App Store purchase coming next"}</Text>
-              </View>
-            ))}
-          </View> : null}
-        </View>
-      ) : null}
-
-      <View style={[styles.resumeSetupWorkspace, wideWorkbench && styles.resumeSetupWorkspaceWide]}>
-      <View style={[styles.resumeBankComposer, wideWorkbench && styles.resumeLibraryRail]}>
-        <View style={styles.resumeSourceHeading}>
-          <View style={styles.resumeSourceHeadingCopy}>
-            <Text style={styles.sectionTitle}>Source library</Text>
-            <Text style={styles.resumeSectionDescription}>{bankLoading ? "Loading…" : `${bankItems.length} verified item${bankItems.length === 1 ? "" : "s"}`} · full details open only when you browse.</Text>
-          </View>
-        </View>
-        <Text style={styles.inputLabel}>{bankEntryKind === "bullet" ? "Add a bullet" : "Add a structured entry"}</Text>
-        <TextInput
-          value={bankDraft}
-          onChangeText={setBankDraft}
-          accessibilityLabel="Add a technical base item"
-          placeholder={bankEntryKind === "bullet" ? "A verified bullet for the selected parent" : bankEntryKind === "skill" ? "Skill category, e.g. Backend & Cloud" : bankEntryKind === "education" ? "Institution" : bankEntryKind === "project" ? "Project name" : "Organization"}
-          placeholderTextColor={colors.placeholder}
-          selectionColor={colors.signal}
-          multiline
-          style={styles.resumeBankInput}
-        />
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeBankKindPicker}>
-          {(["role", "research", "project", "education", "skill", "bullet"] as const).map((kind) => (
-            <TouchableOpacity key={kind} accessibilityRole="button" aria-pressed={bankEntryKind === kind} onPress={() => setBankEntryKind(kind)} style={[styles.resumeBankKindOption, bankEntryKind === kind && styles.resumeBankKindOptionActive]}>
-              <Text style={[styles.resumeSegmentText, bankEntryKind === kind && styles.resumeSegmentTextActive]}>{kind === "bullet" ? "Child bullet" : kind[0]!.toUpperCase() + kind.slice(1)}</Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-        {bankEntryKind !== "bullet" ? (
-          <View style={styles.resumeStructuredFields}>
-            <TextInput value={bankSecondary} onChangeText={setBankSecondary} accessibilityLabel="Entry subtitle" placeholder={bankEntryKind === "skill" ? "Comma-separated skills" : bankEntryKind === "education" ? "Degree, field, GPA" : bankEntryKind === "project" ? "One-line project label" : "Title"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} />
-            {bankEntryKind !== "skill" ? <TextInput value={bankLocation} onChangeText={setBankLocation} accessibilityLabel="Entry location or technologies" placeholder={bankEntryKind === "project" ? "Technologies, comma separated" : "Location"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} /> : null}
-            {bankEntryKind !== "skill" ? <TextInput value={bankDateRange} onChangeText={setBankDateRange} accessibilityLabel="Entry dates or URL" placeholder={bankEntryKind === "project" ? "Project URL (optional)" : "Dates"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} /> : null}
-          </View>
-        ) : null}
-        {bankEntryKind === "bullet" ? (
-          bankParents.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeParentPicker}>
-            {bankParents.map((parent) => (
-              <TouchableOpacity key={parent.bankItemId} accessibilityRole="button" aria-pressed={selectedBankParent?.bankItemId === parent.bankItemId} onPress={() => setBankParentId(parent.bankItemId)} style={[styles.resumeParentOption, selectedBankParent?.bankItemId === parent.bankItemId && styles.resumeParentOptionActive]}>
-                <Text numberOfLines={1} style={styles.resumeParentOptionText}>{parent.content}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView> : <Text style={styles.resumeBankError}>Add a role, research entry, project, or education parent before adding its bullets.</Text>
-        ) : null}
-        {bankError ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
-        <View style={styles.resumeBankComposerAction}>
-          <ActionButton label={bankSaving ? "Saving…" : "Add to technical base"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving || bankEntryKind === "bullet" && !selectedBankParent} />
-        </View>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import PDF or DOCX resume" onPress={() => void importResume()} disabled={bankSaving}>
-          <Text style={styles.resumeKeepAll}>{bankSaving ? "Importing source…" : "Import a résumé or master-bank DOCX"}</Text>
-        </TouchableOpacity>
-        {!bankLoading && bankItems.length ? (
-          <ScrollView nestedScrollEnabled scrollEnabled={bankExpanded} style={bankExpanded ? styles.resumeBankScroller : undefined} contentContainerStyle={styles.resumeBankItems}>
-            {visibleBankItems.map((item) => (
-              <View key={item.bankItemId} style={styles.resumeBankItem}>
-                <Ionicons name={item.kind === "role" ? "briefcase-outline" : item.kind === "project" ? "code-slash-outline" : item.kind === "skill" ? "construct-outline" : item.kind === "education" ? "school-outline" : "document-text-outline"} size={17} color={colors.signal} />
-                <View style={styles.resumeBankItemCopy}>
-                  <Text numberOfLines={2} style={styles.resumeBankItemText}>{item.content}</Text>
-                  <Text style={styles.resumeBankItemStatus}>{item.kind} · {bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length} bullet{bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length === 1 ? "" : "s"}</Text>
-                </View>
-              </View>
-            ))}
-          </ScrollView>
-        ) : null}
-        {bankRoots.length > 4 ? (
-          <TouchableOpacity accessibilityRole="button" onPress={() => setBankExpanded((value) => !value)} style={styles.resumeCompactAction}>
-            <Text style={styles.resumeKeepAll}>{bankExpanded ? "Show a compact summary" : `Browse all ${bankRoots.length} entries`}</Text>
-          </TouchableOpacity>
-        ) : null}
-      </View>
-
-      <View style={styles.resumeSetupMain}>
-      <View style={styles.resumeSection}>
-        <Text style={styles.sectionTitle}>Tailor for a job</Text>
-        <Text style={styles.resumeSectionDescription}>Paste the employer’s official job URL. Ntern checks the catalog first and keeps any private fallback private.</Text>
+      <View style={styles.resumePrimaryTask}>
+        <Text style={styles.sectionTitle}>Paste the job URL</Text>
+        <Text style={styles.resumeSectionDescription}>Use the employer’s official posting.</Text>
         <View style={[styles.resumeUrlRow, !desktop && styles.resumeUrlRowStacked]}>
           <View style={styles.resumeUrlField}>
             <Ionicons name="link-outline" size={18} color={colors.muted} />
@@ -6017,25 +5906,121 @@ function ResumeWorkspace({ token }: { token: string }) {
               style={styles.resumeUrlInput}
             />
           </View>
-          <ActionButton label={resumeBusy ? "Checking…" : "Import job"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
+          <ActionButton label={resumeBusy ? "Checking…" : "Continue"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
         </View>
+        {bankError ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
         {jobImport && jobImport.status !== "ready" ? (
-          <View style={styles.resumeBankComposer}>
+          <View style={styles.resumeManualFallback}>
             <Text style={styles.inputLabel}>Paste the job description to continue</Text>
             <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : "We couldn't read the public page. Paste the description to continue."} Pasted text stays in your private resume workspace.</Text>
             <TextInput value={manualDescription} onChangeText={setManualDescription} accessibilityLabel="Job description" multiline placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} />
             <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
           </View>
         ) : null}
+        <View style={styles.resumeBaseAccessRow}>
+          <Text style={styles.resumeBaseAccessStatus}>{bankLoading ? "Checking your saved experience…" : bankItems.length ? `${bankItems.length} saved source item${bankItems.length === 1 ? "" : "s"}` : "No saved experience yet"}</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={bankManagerOpen ? "Close technical base editor" : "Edit technical base"} aria-expanded={bankManagerOpen} onPress={() => setBankManagerOpen((value) => !value)} style={styles.resumeCompactAction}>
+            <Text style={styles.resumeCompactActionText}>{bankManagerOpen ? "Done editing" : "Edit technical base"}</Text>
+          </TouchableOpacity>
+        </View>
+        {subscription ? (
+          <View style={styles.resumePlanAccessRow}>
+            <Text style={styles.resumePlanSummary}>{subscription.plan.name} plan · {subscription.usage.remaining} review{subscription.usage.remaining === 1 ? "" : "s"} left this month</Text>
+            <TouchableOpacity accessibilityRole="button" aria-expanded={planExpanded} onPress={() => setPlanExpanded((value) => !value)} style={styles.resumeCompactAction}>
+              <Text style={styles.resumeCompactActionText}>{planExpanded ? "Hide plan details" : "Plan details"}</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </View>
 
-      <View style={styles.resumeSection}>
+      {subscription && planExpanded ? <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
+        {subscription.plans.map((plan) => (
+          <View key={plan.tier} style={[styles.resumePlanCard, subscription.tier === plan.tier && styles.resumePlanCardCurrent]}>
+            <Text style={styles.resumePlanName}>{plan.name}</Text>
+            <Text style={styles.resumePlanPrice}>{plan.priceUsdMonthly ? `$${plan.priceUsdMonthly.toFixed(2)}/month` : "$0"}</Text>
+            <Text style={styles.resumePlanDetail}>{plan.tailoredDraftsPerMonth} tailored reviews/month</Text>
+            <Text style={styles.resumePlanState}>{subscription.tier === plan.tier ? "Current plan" : plan.tier === "free" ? "Included" : "App Store purchase coming next"}</Text>
+          </View>
+        ))}
+      </View> : null}
+
+      {bankManagerOpen ? (
+        <View style={styles.resumeBankWorkspace}>
+          <View style={styles.resumeSourceHeading}>
+            <View style={styles.resumeSourceHeadingCopy}>
+              <Text style={styles.sectionTitle}>Technical base</Text>
+              <Text style={styles.resumeSectionDescription}>Keep your complete, verified experience here. This source stays private and is only used when you tailor a résumé.</Text>
+            </View>
+          </View>
+          <View style={[styles.resumeSetupWorkspace, wideWorkbench && styles.resumeSetupWorkspaceWide]}>
+            <View style={[styles.resumeBankComposer, wideWorkbench && styles.resumeLibraryRail]}>
+              <Text style={styles.inputLabel}>{bankEntryKind === "bullet" ? "Add a bullet" : "Add a structured entry"}</Text>
+              <TextInput value={bankDraft} onChangeText={setBankDraft} accessibilityLabel="Add a technical base item" placeholder={bankEntryKind === "bullet" ? "A verified bullet for the selected parent" : bankEntryKind === "skill" ? "Skill category, e.g. Backend & Cloud" : bankEntryKind === "education" ? "Institution" : bankEntryKind === "project" ? "Project name" : "Organization"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} multiline style={styles.resumeBankInput} />
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeBankKindPicker}>
+                {(["role", "research", "project", "education", "skill", "bullet"] as const).map((kind) => (
+                  <TouchableOpacity key={kind} accessibilityRole="button" aria-pressed={bankEntryKind === kind} onPress={() => setBankEntryKind(kind)} style={[styles.resumeBankKindOption, bankEntryKind === kind && styles.resumeBankKindOptionActive]}>
+                    <Text style={[styles.resumeSegmentText, bankEntryKind === kind && styles.resumeSegmentTextActive]}>{kind === "bullet" ? "Child bullet" : kind[0]!.toUpperCase() + kind.slice(1)}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+              {bankEntryKind !== "bullet" ? (
+                <View style={styles.resumeStructuredFields}>
+                  <TextInput value={bankSecondary} onChangeText={setBankSecondary} accessibilityLabel="Entry subtitle" placeholder={bankEntryKind === "skill" ? "Comma-separated skills" : bankEntryKind === "education" ? "Degree, field, GPA" : bankEntryKind === "project" ? "One-line project label" : "Title"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} />
+                  {bankEntryKind !== "skill" ? <TextInput value={bankLocation} onChangeText={setBankLocation} accessibilityLabel="Entry location or technologies" placeholder={bankEntryKind === "project" ? "Technologies, comma separated" : "Location"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} /> : null}
+                  {bankEntryKind !== "skill" ? <TextInput value={bankDateRange} onChangeText={setBankDateRange} accessibilityLabel="Entry dates or URL" placeholder={bankEntryKind === "project" ? "Project URL (optional)" : "Dates"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} /> : null}
+                </View>
+              ) : null}
+              {bankEntryKind === "bullet" ? (
+                bankParents.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeParentPicker}>
+                  {bankParents.map((parent) => (
+                    <TouchableOpacity key={parent.bankItemId} accessibilityRole="button" aria-pressed={selectedBankParent?.bankItemId === parent.bankItemId} onPress={() => setBankParentId(parent.bankItemId)} style={[styles.resumeParentOption, selectedBankParent?.bankItemId === parent.bankItemId && styles.resumeParentOptionActive]}>
+                      <Text numberOfLines={1} style={styles.resumeParentOptionText}>{parent.content}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView> : <Text style={styles.resumeBankError}>Add a role, research entry, project, or education parent before adding its bullets.</Text>
+              ) : null}
+              <View style={styles.resumeBankComposerAction}><ActionButton label={bankSaving ? "Saving…" : "Add to technical base"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving || bankEntryKind === "bullet" && !selectedBankParent} /></View>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import PDF or DOCX resume" onPress={() => void importResume()} disabled={bankSaving}>
+                <Text style={styles.resumeKeepAll}>{bankSaving ? "Importing source…" : "Import a résumé or master-bank DOCX"}</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.resumeSetupMain}>
+              <View style={styles.resumeSourceHeading}>
+                <View style={styles.resumeSourceHeadingCopy}>
+                  <Text style={styles.sectionTitle}>Saved experience</Text>
+                  <Text style={styles.resumeSectionDescription}>{bankLoading ? "Loading…" : `${bankItems.length} verified item${bankItems.length === 1 ? "" : "s"}`}</Text>
+                </View>
+                <TouchableOpacity accessibilityRole="button" onPress={saveBase} disabled={!bankItems.length || resumeBusy}><Text style={styles.resumeRecommendation}>{technicalBase ? "Sync technical base" : "Create technical base"}</Text></TouchableOpacity>
+              </View>
+              {!bankLoading && bankItems.length ? (
+                <ScrollView nestedScrollEnabled scrollEnabled={bankExpanded} style={bankExpanded ? styles.resumeBankScroller : undefined} contentContainerStyle={styles.resumeBankItems}>
+                  {visibleBankItems.map((item) => (
+                    <View key={item.bankItemId} style={styles.resumeBankItem}>
+                      <Ionicons name={item.kind === "role" ? "briefcase-outline" : item.kind === "project" ? "code-slash-outline" : item.kind === "skill" ? "construct-outline" : item.kind === "education" ? "school-outline" : "document-text-outline"} size={17} color={colors.signal} />
+                      <View style={styles.resumeBankItemCopy}>
+                        <Text numberOfLines={2} style={styles.resumeBankItemText}>{item.content}</Text>
+                        <Text style={styles.resumeBankItemStatus}>{item.kind} · {bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length} bullet{bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length === 1 ? "" : "s"}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </ScrollView>
+              ) : <Text style={styles.resumeSectionDescription}>Add an entry or import an existing résumé to get started.</Text>}
+              {bankRoots.length > 4 ? (
+                <TouchableOpacity accessibilityRole="button" onPress={() => setBankExpanded((value) => !value)} style={styles.resumeCompactAction}>
+                  <Text style={styles.resumeKeepAll}>{bankExpanded ? "Show less" : `Browse all ${bankRoots.length} entries`}</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          </View>
+        </View>
+      ) : null}
+
+      {jobImport?.status === "ready" ? <View style={styles.resumeSection}>
         <View style={styles.resumeSectionHeading}>
           <View>
-            <Text style={styles.sectionTitle}>Resume bases</Text>
-            <Text style={styles.resumeSectionDescription}>A base is a reusable repository, not a one-page résumé. The technical base should include your full content bank.</Text>
+            <Text style={styles.sectionTitle}>Choose the output</Text>
+            <Text style={styles.resumeSectionDescription}>Use a saved base and pick the template you want to review.</Text>
           </View>
-          <TouchableOpacity accessibilityRole="button" onPress={saveBase} disabled={!bankItems.length || resumeBusy}><Text style={styles.resumeRecommendation}>{technicalBase ? "Sync all items to technical base" : "Create technical base from all items"}</Text></TouchableOpacity>
         </View>
         <View style={[styles.resumeProfileGrid, desktop && styles.resumeProfileGridWide]}>
           {profiles.length ? profiles.map((profile) => (
@@ -6056,11 +6041,9 @@ function ResumeWorkspace({ token }: { token: string }) {
           ))}
         </ScrollView>
         <View style={styles.resumeBankComposerAction}><ActionButton label={subscription?.usage.remaining === 0 ? "Monthly limit reached" : "Create grounded review"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy || subscription?.usage.remaining === 0} /></View>
-      </View>
-      </View>
-      </View>
+      </View> : null}
 
-      <View style={styles.resumeSection}>
+      {draft ? <View style={styles.resumeSection}>
         <View style={styles.resumeReviewHeader}>
           <View>
             <Text style={styles.sectionTitle}>Review changes</Text>
@@ -6147,7 +6130,7 @@ function ResumeWorkspace({ token }: { token: string }) {
           </TouchableOpacity>
           <ActionButton label={resumeBusy ? "Compiling…" : `Compile résumé${accepted ? ` with ${accepted} applied change${accepted === 1 ? "" : "s"}` : ""}`} onPress={finalizeDraft} disabled={!draft || draft.status === "finalized" || reviewed !== draft.changes.length || resumeBusy} />
         </View>
-      </View>
+      </View> : null}
     </ScrollView>
   );
 }
@@ -8647,6 +8630,13 @@ const styles = StyleSheet.create({
   catalogPaginationRetry: { alignItems: "center", justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },
   catalogPaginationRetryText: { color: colors.signal, fontSize: 14, fontWeight: "700" },
   resumeContent: { maxWidth: 1360, paddingBottom: 44, paddingTop: 24, width: "100%" },
+  resumePrimaryTask: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 900, padding: 20 },
+  resumeManualFallback: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 18, paddingTop: 18 },
+  resumeBaseAccessRow: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between", marginTop: 18, paddingTop: 10 },
+  resumeBaseAccessStatus: { color: colors.body, fontSize: 13, lineHeight: 18 },
+  resumePlanSummary: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 2 },
+  resumePlanAccessRow: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between" },
+  resumeBankWorkspace: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 28, paddingTop: 24 },
   resumeOverview: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 16, flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginBottom: 12, overflow: "hidden", paddingHorizontal: 18, paddingVertical: 14 },
   resumeOverviewCopy: { flexGrow: 1, flexShrink: 1, maxWidth: 570, minWidth: 220 },
   resumeCardLabel: { color: colors.signalGlow, fontSize: 12, fontWeight: "800", letterSpacing: 1.1, textTransform: "uppercase" },
