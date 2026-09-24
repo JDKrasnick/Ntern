@@ -33,7 +33,8 @@ type SqliteValue = string | number | bigint | null | Uint8Array;
 function sqliteD1(
   database: DatabaseSync,
   inspectRows?: (query: string, rows: unknown[]) => void,
-  rpc?: { maxBatchBytes: number; batchBytes: number[] },
+  rpc?: { maxBatchBytes: number; batchBytes: number[]; batchSizes?: number[] },
+  beforeRun?: (query: string) => void | Promise<void>,
 ): D1Database {
   const prepared = (query: string, values: unknown[] = []): D1PreparedStatement => {
     const statement: StatementSync = database.prepare(query);
@@ -48,7 +49,7 @@ function sqliteD1(
         inspectRows?.(query, results);
         return { results };
       },
-      async run() { return { meta: { changes: Number(statement.run(...bound).changes) } }; },
+      async run() { await beforeRun?.(query); return { meta: { changes: Number(statement.run(...bound).changes) } }; },
     } as D1PreparedStatement & { __payload: number };
   };
   return {
@@ -58,6 +59,7 @@ function sqliteD1(
       // over 32 MiB, so the fake enforces the same ceiling on the bound payload.
       const bytes = statements.reduce((total, statement) => total + (statement as D1PreparedStatement & { __payload: number }).__payload, 0);
       rpc?.batchBytes.push(bytes);
+      rpc?.batchSizes?.push(statements.length);
       if (rpc && bytes > rpc.maxBatchBytes) {
         throw new Error(`D1_ERROR: Serialized RPC arguments or return values are limited to ${rpc.maxBatchBytes} bytes, but the size of this value was: ${bytes} bytes.`);
       }
@@ -180,7 +182,8 @@ describe('D1 filtered catalog projection', () => {
     } finally {
       database.close();
     }
-  });
+    // A production-sized projection write is a heavy local simulation.
+  }, 30_000);
 
   it('writes only the pointer when the projection content has not changed', async () => {
     const database = new DatabaseSync(':memory:');
@@ -286,7 +289,9 @@ describe('D1 filtered catalog projection', () => {
     expect(batchBytes.reduce((total, bytes) => total + bytes, 0)).toBeGreaterThan(3 * 1024 * 1024);
   });
 
-  it('writes multi-row projection batches with stable global ordering', async () => {
+  it('writes only the cards a refresh changed and orders them by the card itself', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-18T00:00:00.000Z'));
     const database = new DatabaseSync(':memory:');
     database.exec(`
       CREATE TABLE catalog_items (
@@ -301,18 +306,275 @@ describe('D1 filtered catalog projection', () => {
     const template = catalogGroupDetails(groupCatalogJobs([job('template', 'Software Engineering Intern')])[0]!);
     const groups = Array.from({ length: 26 }, (_, index) => ({
       ...template,
-      group: { ...template.group, groupId: `group-${index}` },
+      group: { ...template.group, groupId: `group-${String(index).padStart(2, '0')}` },
       roles: template.roles.map((role) => ({ ...role, jobId: `job-${index}` })),
     }));
+    const rows = () => database.prepare("SELECT sk, value, catalog_sort_key FROM catalog_items WHERE kind = 'catalog-projection' ORDER BY sk").all() as Array<{ sk: string; value: string; catalog_sort_key: string }>;
     try {
-      await new D1InternshipStore(sqliteD1(database)).putCatalogProjection(groups, '2026-08-27T00:00:00.000Z');
+      const store = new D1InternshipStore(sqliteD1(database));
+      // The reader rejects a projection older than the recovery window, so the
+      // pointer is stamped now and only its content digest decides a rewrite.
+      const generatedAt = new Date().toISOString();
+      await store.putCatalogProjection(groups, generatedAt);
       expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 26 });
+      // The order key is the card's own recency, so a card's position never
+      // depends on how many cards happened to be built before it.
       expect(database.prepare("SELECT MIN(catalog_sort_key) AS first, MAX(catalog_sort_key) AS last FROM catalog_items WHERE kind = 'catalog-projection'").get())
-        .toEqual({ first: '00000000', last: '00000025' });
+        .toEqual({ first: `${template.group.updatedAt}#group-00`, last: `${template.group.updatedAt}#group-25` });
+      const page = await store.listCatalogProjection(undefined, 25);
+      expect(page?.groups.map((group) => group.group.groupId))
+        .toEqual(Array.from({ length: 25 }, (_, index) => `group-${String(25 - index).padStart(2, '0')}`));
+      expect(page?.cursor).toBe('25');
+
+      // The old row remains briefly for requests that already read its pointer,
+      // but the new manifest makes only the renamed card visible.
+      const before = rows();
+      const changed = structuredClone(groups);
+      changed[3]!.group.titles = ['Renamed Intern'];
+      await store.putCatalogProjection(changed, generatedAt);
+      const after = rows();
+      expect(after).toHaveLength(before.length + 1);
+      const beforeKeys = new Set(before.map((row) => row.sk));
+      const afterKeys = new Set(after.map((row) => row.sk));
+      expect([...afterKeys].filter((key) => !beforeKeys.has(key))).toHaveLength(1);
+      expect([...beforeKeys].filter((key) => !afterKeys.has(key))).toHaveLength(0);
+      expect(after.filter((row) => beforeKeys.has(row.sk))).toEqual(before);
+      expect((await store.listCatalogProjection(undefined, 50))?.groups).toHaveLength(26);
+
+      // A group that leaves the catalog takes its row with it, and a group that
+      // arrives adds exactly one row.
+      const withoutFirst = changed.slice(1);
+      const arrived = { ...template, group: { ...template.group, groupId: 'group-99' },
+        roles: template.roles.map((role) => ({ ...role, jobId: 'job-new' })) };
+      await store.putCatalogProjection([...withoutFirst, arrived], generatedAt);
+      const current = rows();
+      expect(current).toHaveLength(after.length + 1);
+      expect(current.some((row) => row.sk.startsWith('GROUP#group-00#'))).toBe(true);
+      expect(current.some((row) => row.sk.startsWith('GROUP#group-99#'))).toBe(true);
+      const stored = await store.getCatalogProjectionGroup('group-99');
+      expect(stored?.group.groupId).toBe('group-99');
+      await expect(store.getCatalogProjectionGroup('group-00')).resolves.toBeUndefined();
+      vi.advanceTimersByTime(3 * 60_000);
+      await store.putCatalogProjection([...withoutFirst, arrived], new Date().toISOString());
+      expect(rows()).toHaveLength(26);
+      expect(rows().some((row) => row.sk.startsWith('GROUP#group-00#'))).toBe(false);
     } finally {
       database.close();
     }
   });
+
+  it('serves one complete manifest when a refresh stops before switching the pointer', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-18T00:00:00.000Z'));
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const groups = ['first', 'second'].map((id) => {
+      const details = catalogGroupDetails(groupCatalogJobs([job(id, `Software Engineering Intern ${id}`)])[0]!);
+      details.roles[0]!.releaseDay = '2026-09-18';
+      return details;
+    });
+    const store = new D1InternshipStore(sqliteD1(database));
+    const changed = structuredClone(groups);
+    changed[0]!.group.titles = ['Renamed Intern'];
+    const published = async (title: string) => {
+      const page = await store.listCatalogProjection(undefined, 25);
+      expect(page?.groups).toHaveLength(2);
+      expect(page?.groups.find((entry) => entry.group.groupId === groups[0]!.group.groupId)?.group.titles).toEqual([title]);
+      const filtered = await store.listCatalogProjectionFiltered(undefined, 25, { status: 'open' });
+      expect(filtered?.groups).toHaveLength(2);
+      expect(await store.listCatalogProjectionRoles({ status: 'open' }, {})).toHaveLength(2);
+      expect((await store.getCatalogProjectionGroup(groups[0]!.group.groupId))?.group.titles).toEqual([title]);
+    };
+    try {
+      await store.putCatalogProjection(groups, new Date().toISOString());
+      let interrupt = true;
+      const interrupted = new D1InternshipStore(sqliteD1(database, undefined, undefined, (query) => {
+        if (interrupt && query.includes("'catalog-projection-pointer'") && query.includes('WHERE catalog_items.value IS ?')) {
+          interrupt = false;
+          throw new Error('pointer write interrupted');
+        }
+      }));
+      await expect(interrupted.putCatalogProjection(changed, new Date().toISOString())).rejects.toThrow('pointer write interrupted');
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 3 });
+      await published(groups[0]!.group.titles[0]!);
+      await store.putCatalogProjection(changed, new Date().toISOString());
+      await published('Renamed Intern');
+    } finally {
+      database.close();
+    }
+  });
+
+  it('keeps the published card visible and retries an interrupted cleanup', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-18T00:00:00.000Z'));
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const store = new D1InternshipStore(sqliteD1(database));
+    const original = [catalogGroupDetails(groupCatalogJobs([job('first', 'Software Engineering Intern')])[0]!)];
+    const changed = structuredClone(original);
+    changed[0]!.group.titles = ['Renamed Intern'];
+    try {
+      await store.putCatalogProjection(original, new Date().toISOString());
+      await store.putCatalogProjection(changed, new Date().toISOString());
+      vi.advanceTimersByTime(3 * 60_000);
+      let interrupt = true;
+      const interrupted = new D1InternshipStore(sqliteD1(database, undefined, undefined, (query) => {
+        if (interrupt && query.includes('AND EXISTS (SELECT 1 FROM catalog_items AS candidate')) {
+          interrupt = false;
+          throw new Error('cleanup interrupted');
+        }
+      }));
+      const cleanupLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await expect(interrupted.putCatalogProjection(changed, new Date().toISOString())).resolves.toBeUndefined();
+        expect(cleanupLog).toHaveBeenCalledWith(expect.stringContaining('catalog_projection_cleanup_failed'));
+      } finally {
+        cleanupLog.mockRestore();
+      }
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 2 });
+      expect((await store.listCatalogProjection())?.groups.map((entry) => entry.group.titles)).toEqual([['Renamed Intern']]);
+      expect((await store.getCatalogProjectionGroup(original[0]!.group.groupId))?.group.titles).toEqual(['Renamed Intern']);
+      await store.putCatalogProjection(changed, new Date().toISOString());
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('refuses a stale pointer switch when another refresh publishes first', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-18T00:00:00.000Z'));
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const store = new D1InternshipStore(sqliteD1(database));
+    const original = [catalogGroupDetails(groupCatalogJobs([job('first', 'Software Engineering Intern')])[0]!)];
+    const first = structuredClone(original);
+    first[0]!.group.titles = ['First publisher'];
+    const second = structuredClone(original);
+    second[0]!.group.titles = ['Second publisher'];
+    try {
+      await store.putCatalogProjection(original, new Date().toISOString());
+      let overlap = true;
+      const stale = new D1InternshipStore(sqliteD1(database, undefined, undefined, async (query) => {
+        if (overlap && query.includes("'catalog-projection-pointer'") && query.includes('WHERE catalog_items.value IS ?')) {
+          overlap = false;
+          await store.putCatalogProjection(second, new Date().toISOString());
+        }
+      }));
+      await expect(stale.putCatalogProjection(first, new Date().toISOString()))
+        .rejects.toThrow('Catalog projection pointer changed during refresh');
+      expect((await store.listCatalogProjection())?.groups.map((entry) => entry.group.titles)).toEqual([['Second publisher']]);
+      expect((await store.getCatalogProjectionGroup(original[0]!.group.groupId))?.group.titles).toEqual(['Second publisher']);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('raises an error if the published manifest is missing', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const store = new D1InternshipStore(sqliteD1(database));
+    try {
+      await store.putCatalogProjection([catalogGroupDetails(groupCatalogJobs([job('first', 'Software Engineering Intern')])[0]!)], new Date().toISOString());
+      database.prepare("DELETE FROM catalog_items WHERE pk = 'CATALOG_PROJECTION#MANIFESTS'").run();
+      await expect(store.listCatalogProjection()).rejects.toThrow('Published catalog projection manifest is missing');
+    } finally {
+      database.close();
+    }
+  });
+
+  it('migrates a version-5 pointer without serving its unscoped rows', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const details = catalogGroupDetails(groupCatalogJobs([job('first', 'Software Engineering Intern')])[0]!);
+    const insert = database.prepare('INSERT INTO catalog_items (pk, sk, kind, value, catalog_sort_key) VALUES (?, ?, ?, ?, ?)');
+    insert.run('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer',
+      JSON.stringify({ version: 'version-five', generatedAt: new Date().toISOString(), schemaVersion: 5 }), null);
+    insert.run('CATALOG_PROJECTION#GROUPS', 'GROUP#old#00000000000000000000', 'catalog-projection', JSON.stringify(details), details.group.updatedAt);
+    const store = new D1InternshipStore(sqliteD1(database));
+    try {
+      await expect(store.listCatalogProjection()).resolves.toBeUndefined();
+      await store.putCatalogProjection([details], new Date().toISOString());
+      expect((await store.listCatalogProjection())?.groups.map((entry) => entry.group.groupId)).toEqual([details.group.groupId]);
+      expect(JSON.parse((database.prepare("SELECT value FROM catalog_items WHERE pk = 'CATALOG_PROJECTION' AND sk = 'CURRENT'").get() as { value: string }).value).schemaVersion).toBe(6);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('keeps version-4 rows through the reader grace period during migration', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-18T00:00:00.000Z'));
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const old = catalogGroupDetails(groupCatalogJobs([job('first', 'Software Engineering Intern')])[0]!);
+    const changed = structuredClone(old);
+    changed.group.titles = ['Renamed Intern'];
+    const insert = database.prepare('INSERT INTO catalog_items (pk, sk, kind, value, catalog_sort_key) VALUES (?, ?, ?, ?, ?)');
+    insert.run('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer',
+      JSON.stringify({ version: 'version-four', generatedAt: new Date().toISOString(), schemaVersion: 4 }), null);
+    insert.run('CATALOG_PROJECTION#version-four', `GROUP#${old.group.groupId}`, 'catalog-projection', JSON.stringify(old), '00000000');
+    const store = new D1InternshipStore(sqliteD1(database));
+    try {
+      await store.putCatalogProjection([changed], new Date().toISOString());
+      expect((await store.getCatalogProjectionGroup(old.group.groupId))?.group.titles).toEqual(['Renamed Intern']);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE pk = 'CATALOG_PROJECTION#version-four'").get()).toEqual({ count: 1 });
+      vi.advanceTimersByTime(3 * 60_000);
+      await store.putCatalogProjection([changed], new Date().toISOString());
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE pk = 'CATALOG_PROJECTION#version-four'").get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('reports a changed refresh against a full publish at production card size', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-18T00:00:00.000Z'));
+    const template = catalogGroupDetails(groupCatalogJobs([job('template', `Software Engineering Intern ${'x'.repeat(9_000)}`)])[0]!);
+    const groups = Array.from({ length: 300 }, (_, index) => ({
+      ...template,
+      group: { ...template.group, groupId: `group-${String(index).padStart(4, '0')}` },
+      roles: template.roles.map((role) => ({ ...role, jobId: `job-${index}` })),
+    }));
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (
+        pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL,
+        catalog_sort_key TEXT, PRIMARY KEY (pk, sk)
+      )
+    `);
+    const batchBytes: number[] = []; const batchSizes: number[] = [];
+    try {
+      const store = new D1InternshipStore(sqliteD1(database, undefined, { maxBatchBytes: 32 * 1024 * 1024, batchBytes, batchSizes }));
+      const generatedAt = new Date().toISOString();
+      await store.putCatalogProjection(groups, generatedAt);
+      const publishBatches = batchSizes.length;
+      const publishStatements = batchSizes.reduce((total, size) => total + size, 0);
+      const publishBytes = batchBytes.reduce((total, bytes) => total + bytes, 0);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 300 });
+
+      // One card changes in a projection of a production card size. The deployed
+      // projection carried 2,608 cards and 80.6 MiB on 2026-09-17, and the version
+      // this replaced rewrote and deleted all of them on every changed tick.
+      const changed = structuredClone(groups);
+      changed[7]!.group.titles = ['Renamed Intern'];
+      await store.putCatalogProjection(changed, generatedAt);
+      const refreshStatements = batchSizes.slice(publishBatches).reduce((total, size) => total + size, 0);
+      const refreshBytes = batchBytes.reduce((total, bytes) => total + bytes, 0) - publishBytes;
+      console.log(`catalog projection writes: full publish=${publishStatements} statements/${publishBytes} bytes, `
+        + `one changed card=${refreshStatements} statements/${refreshBytes} bytes`);
+      // The old card is retained for in-flight readers, then collected on a
+      // later tick. Only the changed card is written in the refresh batch.
+      expect(refreshStatements).toBe(1);
+      expect(refreshBytes * 50).toBeLessThan(publishBytes);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 301 });
+      vi.advanceTimersByTime(3 * 60_000);
+      await store.putCatalogProjection(changed, new Date().toISOString());
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 300 });
+    } finally {
+      database.close();
+    }
+  }, 30_000);
 
   it('matches normalized role locations when the raw label is generic', async () => {
     const database = new DatabaseSync(':memory:');

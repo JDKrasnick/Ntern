@@ -40,7 +40,14 @@ function sqliteD1(database: DatabaseSync, inspectRows?: (query: string, rows: un
   };
 }
 
-function subject() {
+interface MetadataD1Subject {
+  database: DatabaseSync;
+  db: D1Database;
+  operations: D1CatalogAdmissionStore;
+  jobs: D1InternshipStore;
+}
+
+function subject(): MetadataD1Subject {
   const database = new DatabaseSync(':memory:');
   for (const migration of ['0001_initial.sql', '0007_catalog_admission.sql', '0015_role_metadata_enrichment.sql', '0016_role_metadata_repair_plans.sql', '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
     '0020_shadow_extraction.sql', '0021_shadow_extraction_fencing.sql', '0022_shadow_extraction_cache_expiry.sql']) {
@@ -87,10 +94,9 @@ function jobWithVerifiedDestination(): Internship {
   return { ...current, admission, sourceReferences: [{ ...current.sourceReferences[0]!, admission }] };
 }
 
-async function disputedPay(current: ReturnType<typeof subject>, jobId = 'job-1', changed = false) {
+async function disputedPay(current: MetadataD1Subject, jobId = 'job-1', changed = false, observedAt = '2026-09-06T12:00:00.000Z') {
   const original = { ...jobWithVerifiedDestination(), jobId };
   if (!await current.jobs.getJob(jobId)) await current.jobs.putInternship(original);
-  const observedAt = '2026-09-06T12:00:00.000Z';
   const evidence = extractPostingMetadataEvidence({ artifact: { title: original.title,
     text: `${changed ? 'Revised employer wording. ' : ''}USD $8500 monthly salary.\nUSD $2500 monthly housing stipend.`,
     compensationText: 'USD $11000 monthly salary.' }, sourceClass: 'official-api', sourceId: 'community-acme',
@@ -830,5 +836,203 @@ describe('D1 role metadata evidence and guarded repair', () => {
     const legacySnapshot = hash(rows.map(row => `${row.job_id}\0${hash(row.evidence)}`).sort().join('\n'));
     expect(current.database.prepare('SELECT evidence_snapshot FROM role_metadata_repair_plans WHERE token = ?')
       .get(plan.repairToken)).toEqual({ evidence_snapshot: legacySnapshot });
+  });
+});
+
+describe('differential metadata evidence writes', () => {
+  // `total_changes` counts rows changed by triggers too, which is what D1 bills.
+  const rowsWritten = (database: DatabaseSync) =>
+    Number((database.prepare('SELECT total_changes() AS total').get() as { total: number }).total);
+  const snapshot = (current: MetadataD1Subject) => ({
+    evidence: current.database.prepare(`SELECT job_id, source_class, source_id, source_url, artifact_hash, extraction_version,
+      evidence, observed_at, is_current FROM role_metadata_evidence ORDER BY job_id, source_class, artifact_hash`).all(),
+    conflicts: current.database.prepare(`SELECT id, state, evidence_hashes, values_json, opened_at, updated_at
+      FROM role_metadata_conflicts ORDER BY id`).all(),
+    revisions: current.database.prepare('SELECT revision FROM role_metadata_revision WHERE id = 1').get(),
+    jobRevisions: current.database.prepare('SELECT job_id, revision FROM role_metadata_job_revision ORDER BY job_id').all(),
+    attempts: current.database.prepare('SELECT id, outcome, observed_at, backfill_token FROM role_metadata_extraction_attempts ORDER BY id').all(),
+  });
+
+  it('replays an unchanged artifact without rewriting evidence, conflicts, or review revisions', async () => {
+    const current = subject();
+    const writtenBeforeFirst = rowsWritten(current.database);
+    await disputedPay(current);
+    const firstObservation = rowsWritten(current.database) - writtenBeforeFirst;
+    const before = snapshot(current);
+    const writtenBefore = rowsWritten(current.database);
+    const replayAt = '2026-10-06T12:00:00.000Z';
+    const { evidence } = await disputedPay(current, 'job-1', false, replayAt);
+    const replayed = rowsWritten(current.database) - writtenBefore;
+    const after = snapshot(current);
+
+    expect(evidence[0]!.observedAt).toBe(replayAt);
+    // Only the extraction attempt moved. Its row and the evidence trigger it
+    // fires are the entire cost of a replay; before this change the same call
+    // also rewrote the evidence row every time.
+    expect(replayed).toBe(2);
+    expect(after.attempts).toEqual([{ id: before.attempts[0]!.id, outcome: 'extracted', observed_at: replayAt, backfill_token: null }]);
+    expect(after.evidence).toEqual(before.evidence);
+    expect(after.conflicts).toEqual(before.conflicts);
+    // No evidence or conflict row changed, so a staged review stays valid.
+    expect(after.jobRevisions).toEqual(before.jobRevisions);
+    // Reported measurement, including trigger side effects: the observation that
+    // created these rows billed `firstObservation`; the identical replay bills
+    // `replayed`, and that difference is the saving this change is claiming.
+    console.log(`metadata evidence rows_written: first observation=${firstObservation} unchanged replay=${replayed}`);
+  });
+
+  it('writes only the changed keys of a replacement set', async () => {
+    const current = subject();
+    const at = '2026-09-06T12:00:00.000Z';
+    const later = '2026-10-06T12:00:00.000Z';
+    const page = (artifactHash: string, compensationText: string, observedAt: string) => extractPostingMetadataEvidence({
+      artifact: { title: job().title, compensationText }, artifactHash, sourceClass: 'official-page',
+      sourceId: 'community-acme', sourceUrl: job().applyUrl, observedAt, exactPosting: true })[0]!;
+    const jsonLd = extractPostingMetadataEvidence({
+      artifact: { title: job().title, text: 'USD $900 monthly housing stipend.' }, artifactHash: 'json-ld-hash',
+      sourceClass: 'official-json-ld', sourceId: 'community-acme', sourceUrl: job().applyUrl, observedAt: at, exactPosting: true })[0]!;
+    const replace = { sourceId: 'community-acme', sourceClasses: ['official-page', 'official-json-ld'] as const };
+    const storedJsonLd = () => current.database.prepare(
+      "SELECT evidence, observed_at, is_current FROM role_metadata_evidence WHERE source_class = 'official-json-ld'").get();
+    await current.operations.recordRoleMetadataEvidence('job-1', [page('page-hash-a', 'USD $45/hour', at), jsonLd], [], at, replace);
+    const retained = storedJsonLd();
+
+    const writtenBefore = rowsWritten(current.database);
+    await current.operations.recordRoleMetadataEvidence('job-1',
+      [page('page-hash-b', 'USD $50/hour', later), { ...jsonLd, observedAt: later }], [], later, replace);
+    const changed = rowsWritten(current.database) - writtenBefore;
+    expect(current.database.prepare(
+      "SELECT artifact_hash, is_current FROM role_metadata_evidence WHERE source_class = 'official-page' ORDER BY artifact_hash").all())
+      .toEqual([{ artifact_hash: 'page-hash-a', is_current: 0 }, { artifact_hash: 'page-hash-b', is_current: 1 }]);
+    // The re-observed JSON-LD item is identical, so its row — and its time — holds.
+    expect(storedJsonLd()).toEqual(retained);
+    // One insert, one retirement, and the two revision triggers each fires.
+    expect(changed).toBe(6);
+
+    // An empty replacement retires only the class it names.
+    await current.operations.recordRoleMetadataEvidence('job-1', [], [], later,
+      { sourceId: 'community-acme', sourceClasses: ['official-page'] });
+    expect(current.database.prepare(
+      "SELECT artifact_hash, is_current FROM role_metadata_evidence WHERE source_class = 'official-page' ORDER BY artifact_hash").all())
+      .toEqual([{ artifact_hash: 'page-hash-a', is_current: 0 }, { artifact_hash: 'page-hash-b', is_current: 0 }]);
+    expect(storedJsonLd()).toEqual(retained);
+  });
+
+  it('rewrites evidence only when its content or extraction version changes', async () => {
+    const current = subject();
+    const item = (observedAt: string, compensationText = 'USD $45/hour') => extractPostingMetadataEvidence({
+      artifact: { title: job().title, compensationText }, artifactHash: 'page-hash', sourceClass: 'official-page',
+      sourceId: 'community-acme', sourceUrl: job().applyUrl, observedAt, exactPosting: true })[0]!;
+    const stored = () => current.database.prepare(
+      "SELECT evidence, observed_at, extraction_version FROM role_metadata_evidence WHERE source_class = 'official-page'")
+      .get() as { evidence: string; observed_at: string; extraction_version: number };
+    await current.operations.recordRoleMetadataEvidence('job-1', [item('2026-09-06T12:00:00.000Z')], [], '2026-09-06T12:00:00.000Z');
+    const first = stored();
+
+    await current.operations.recordRoleMetadataEvidence('job-1', [item('2026-10-06T12:00:00.000Z')], [], '2026-10-06T12:00:00.000Z');
+    expect(stored()).toEqual(first);
+
+    await current.operations.recordRoleMetadataEvidence('job-1', [item('2026-11-06T12:00:00.000Z', 'USD $55/hour')], [], '2026-11-06T12:00:00.000Z');
+    expect(stored()).toMatchObject({ observed_at: '2026-11-06T12:00:00.000Z' });
+    expect(JSON.parse(stored().evidence).compensationRanges[0]).toMatchObject({ minAmount: 55, currency: 'USD' });
+
+    await current.operations.recordRoleMetadataEvidence('job-1',
+      [{ ...item('2026-12-06T12:00:00.000Z', 'USD $55/hour'), extractionVersion: ROLE_METADATA_EXTRACTION_VERSION + 1 }],
+      [], '2026-12-06T12:00:00.000Z');
+    expect(stored()).toMatchObject({ extraction_version: ROLE_METADATA_EXTRACTION_VERSION + 1,
+      observed_at: '2026-12-06T12:00:00.000Z' });
+  });
+
+  it('keeps the newest observation when an older delivery arrives late', async () => {
+    const current = subject();
+    const attempt = (observedAt: string, outcome: 'extracted' | 'no-explicit-metadata') => current.operations.recordRoleMetadataExtraction({
+      jobId: 'job-1', sourceId: 'community-acme', sourceUrl: job().applyUrl, artifactHash: 'page-hash',
+      extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, outcome, observedAt, backfillToken: 'collection-1' });
+    await attempt('2026-10-06T12:00:00.000Z', 'extracted');
+    const writtenBefore = rowsWritten(current.database);
+    await attempt('2026-09-06T12:00:00.000Z', 'no-explicit-metadata');
+    expect(rowsWritten(current.database) - writtenBefore).toBe(0);
+    expect(current.database.prepare('SELECT outcome, observed_at, backfill_token FROM role_metadata_extraction_attempts').get())
+      .toEqual({ outcome: 'extracted', observed_at: '2026-10-06T12:00:00.000Z', backfill_token: 'collection-1' });
+  });
+
+  it('keeps coverage fresh from the extraction attempt while the evidence row holds still', async () => {
+    const current = subject();
+    const original = jobWithVerifiedDestination();
+    await current.jobs.putInternship(original);
+    const at = '2026-09-06T12:00:00.000Z';
+    const evidence = extractPostingMetadataEvidence({ artifact: { title: original.title, compensationText: 'USD $45/hour' },
+      sourceClass: 'official-page', sourceId: 'community-acme', sourceUrl: original.applyUrl, observedAt: at, exactPosting: true });
+    await current.operations.recordRoleMetadataEvidence(original.jobId, evidence, [], at);
+    const attempt = (observedAt: string, outcome: 'extracted' | 'no-explicit-metadata') => current.operations.recordRoleMetadataExtraction({
+      jobId: original.jobId, sourceId: 'community-acme', sourceUrl: original.applyUrl,
+      artifactHash: evidence[0]!.artifactHash, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, outcome, observedAt });
+
+    // 44 days after the page evidence was written, only the attempt is new.
+    await attempt('2026-10-20T12:00:00.000Z', 'extracted');
+    expect((await current.operations.roleMetadataAudit(new Date('2026-10-20T12:00:00.000Z'))).collectionCoverage)
+      .toMatchObject({ eligible: 1, current: 1, pendingOrUnobserved: 0, stale: 0, complete: true, outcomes: { extracted: 1 } });
+
+    // A fieldless attempt re-observed the page without re-verifying its fields,
+    // so the evidence keeps its own time and the 30-day window applies.
+    await attempt('2026-11-01T12:00:00.000Z', 'no-explicit-metadata');
+    expect((await current.operations.roleMetadataAudit(new Date('2026-11-01T12:00:00.000Z'))).collectionCoverage)
+      .toMatchObject({ eligible: 1, current: 0, pendingOrUnobserved: 0, stale: 1, complete: false, outcomes: { extracted: 1 } });
+    expect(current.database.prepare('SELECT observed_at FROM role_metadata_evidence').get()).toEqual({ observed_at: at });
+  });
+
+  it('resolves only conflicts that left the set', async () => {
+    const current = subject();
+    const { evidence } = await disputedPay(current);
+    const conflicts = reconcileRoleMetadata(evidence).conflicts;
+    expect(conflicts.length).toBeGreaterThan(0);
+    const opened = current.database.prepare('SELECT id, state, updated_at FROM role_metadata_conflicts ORDER BY id').all();
+    expect(opened.every((row) => row.state === 'open')).toBe(true);
+
+    // Replaying the same conflicts and evidence writes no row at all.
+    const writtenBefore = rowsWritten(current.database);
+    await current.operations.recordRoleMetadataEvidence('job-1', evidence, conflicts, '2026-10-06T12:00:00.000Z');
+    expect(rowsWritten(current.database) - writtenBefore).toBe(0);
+
+    await current.operations.recordRoleMetadataEvidence('job-1', evidence, [], '2026-11-06T12:00:00.000Z');
+    expect(current.database.prepare('SELECT id, state, updated_at FROM role_metadata_conflicts ORDER BY id').all())
+      .toEqual(opened.map((row) => ({ ...row, state: 'resolved', updated_at: '2026-11-06T12:00:00.000Z' })));
+  });
+
+  it('reads a re-observation of unchanged content as no projection delta', async () => {
+    const current = subject();
+    const original = jobWithVerifiedDestination();
+    await current.jobs.putInternship(original);
+    const at = '2026-09-06T12:00:00.000Z';
+    const later = '2026-10-06T12:00:00.000Z';
+    const observe = (observedAt: string) => extractPostingMetadataEvidence({ artifact: { title: original.title,
+      compensationText: 'USD $45/hour' }, sourceClass: 'official-page', sourceId: 'community-acme',
+      sourceUrl: original.applyUrl, observedAt, exactPosting: true });
+    await current.operations.recordRoleMetadataEvidence(original.jobId, observe(at), [], at);
+    // The job is projected from the later observation of the same artifact while
+    // the evidence row, whose content did not change, keeps the first one.
+    const reference = { ...original.sourceReferences[0]!, metadataEvidence: observe(later) };
+    await current.jobs.putInternship(projectRoleMetadata({ ...original, sourceReferences: [reference] }).job);
+
+    const audit = await current.operations.roleMetadataAudit(new Date(later));
+    expect(audit.projectionOnlyOmissions).toEqual([]);
+    expect(audit.deferredProjections).toEqual([]);
+    expect((await current.operations.stageRoleMetadataRepair(later)).expectedJobs).toBe(0);
+  });
+
+  it('keeps a staged omission valid across an unchanged replay and rejects a substantive change', async () => {
+    const current = subject();
+    const { observedAt } = await disputedPay(current);
+    const review = await current.operations.stageRoleMetadataOmission('job-1', observedAt);
+    await disputedPay(current, 'job-1', false, '2026-10-06T12:00:00.000Z');
+    await expect(current.operations.approveRoleMetadataOmission(review.reviewToken, 1, '2026-10-06T12:00:00.000Z'))
+      .resolves.toMatchObject({ approvedDecisions: 1 });
+
+    const revisedAt = '2026-11-06T12:00:00.000Z';
+    await current.operations.recordRoleMetadataEvidence('job-1', extractPostingMetadataEvidence({
+      artifact: { title: job().title, text: 'USD $9500 monthly salary.\nUSD $2500 monthly housing stipend.',
+        compensationText: 'USD $11000 monthly salary.' }, sourceClass: 'official-api', sourceId: 'community-acme',
+      sourceUrl: job().applyUrl, observedAt: revisedAt, exactPosting: true }), [], revisedAt);
+    await expect(current.operations.approveRoleMetadataOmission(review.reviewToken, 1, revisedAt)).rejects.toThrow();
   });
 });

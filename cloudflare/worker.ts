@@ -16,7 +16,7 @@ import {
   readIdentityCoverageBaseline, writeIdentityCoverageBaseline,
 } from './identity-coverage-ratchet.js';
 import { runRuntimeCommand } from '../src/runtime.js';
-import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
+import { catalogGroupDetails, compareCatalogProjectionGroups, groupCatalogJobs } from '../src/catalog-groups.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
 import type { reviewedAshbySources } from '../src/sources/ashby-config.js';
 import type { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
@@ -1450,7 +1450,11 @@ async function runScheduledStep<T>(step: string, run: () => Promise<T>): Promise
 }
 
 async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket) {
-  const groups = groupCatalogJobs(await store.listCatalog(), { includeClosed: true }).map(catalogGroupDetails);
+  // One order for both read models: the card's own `updatedAt` (with its group id
+  // breaking ties) is stored on each D1 row as its sort key, and R2 pages are
+  // written in the same order, so a reader of either sees the same sequence.
+  const groups = groupCatalogJobs(await store.listCatalog(), { includeClosed: true })
+    .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
   const generatedAt = new Date().toISOString();
   await store.putCatalogProjection(groups, generatedAt);
   if (bucket) {

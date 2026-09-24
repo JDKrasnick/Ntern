@@ -210,13 +210,29 @@ export function roleMetadataArtifactHash(artifact: RoleMetadataArtifact): string
   return createHash('sha256').update(stable(artifact)).digest('hex');
 }
 
+/**
+ * JSON with observation timestamps removed at every depth, including nested
+ * provenance. Two observations of one unchanged artifact — or of one artifact
+ * at different times — are equal under this projection, which is what lets an
+ * unchanged replay skip its writes and a projection diff ignore re-observation.
+ */
+export function withoutObservationTimestamps(value: unknown): unknown {
+  const strip = (node: unknown): unknown => Array.isArray(node) ? node.map(strip)
+    : record(node) ? Object.fromEntries(Object.entries(node).filter(([key]) => key !== 'observedAt')
+      .map(([key, child]) => [key, strip(child)])) : node;
+  return strip(value);
+}
+
+/** Semantic evidence content: the evidence itself without any observation time. */
+export function roleMetadataEvidenceContent(value: RoleMetadataEvidence): string {
+  return stable(withoutObservationTimestamps(value));
+}
+
 /** Re-observing identical evidence keeps a review; any content/version change expires it. */
 export function roleMetadataReviewFingerprint(evidence: readonly RoleMetadataEvidence[]): string {
-  const withoutObservation = (value: unknown): unknown => Array.isArray(value) ? value.map(withoutObservation)
-    : record(value) ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'observedAt').map(([key, child]) => [key, withoutObservation(child)])) : value;
   return createHash('sha256').update(stable({ extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
     evidence: evidence.filter(item => item.extractionVersion === ROLE_METADATA_EXTRACTION_VERSION && item.exactPosting)
-      .map(item => stable(withoutObservation(item))).sort() })).digest('hex');
+      .map(roleMetadataEvidenceContent).sort() })).digest('hex');
 }
 
 function provenance(input: ExtractRoleMetadataInput, artifactHash: string, evidenceCode: string): FieldProvenance {
