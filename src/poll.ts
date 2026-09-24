@@ -77,6 +77,7 @@ function sourceOwnedMaterial(value: ProcessedListing | SourceOccurrence): string
   // GitHub row numbers and fetch timestamps move whenever a maintainer edits
   // the Markdown around a role. Compare only facts the source owns so that
   // layout churn does not force a catalog read/write cycle for every row.
+  const sourceEvidence = value.metadataEvidence?.filter((item) => item.sourceUrl === value.sourceUrl);
   return stableSourceMaterial({
     provenance: value.provenance,
     document: value.document,
@@ -87,9 +88,9 @@ function sourceOwnedMaterial(value: ProcessedListing | SourceOccurrence): string
     // Destination verification can append page/browser evidence to a durable
     // occurrence. Exclude it from the source comparison so an unchanged ATS
     // row can still take the fast path on its next poll.
-    metadataEvidence: withoutObservationTimestamps(
-      value.metadataEvidence?.filter((item) => item.sourceUrl === value.sourceUrl),
-    ),
+    // Page evidence can be appended to a stored occurrence. An empty filtered
+    // array is equivalent to no source evidence on the freshly fetched row.
+    metadataEvidence: sourceEvidence?.length ? withoutObservationTimestamps(sourceEvidence) : undefined,
     company: value.company,
     title: value.title,
     location: value.location,
@@ -828,7 +829,19 @@ export class IngestionRunner {
       };
       const admissionAlreadyApplied = Boolean(admissionConfigurationVersion
         && priorOccurrence?.occurrence.admissionConfigurationVersion === admissionConfigurationVersion);
-      if (!stampSourceMetadata && !trustedCommunityPolicy && (reuseUnchangedOccurrences || admissionAlreadyApplied) && priorOccurrence
+      // Reviewed community lists currently publish catalog roles without alerts.
+      // Once a row has completed that policy, another row changing on the same
+      // Markdown board must not re-probe and rewrite this unchanged occurrence.
+      // Keep suppressed rows in the publication path until they are released.
+      const settledCatalogOnlyCommunityRow = trustedCommunityPolicy?.alertMode === 'disabled'
+        && admissionAlreadyApplied
+        && priorOccurrence?.present === true
+        && priorOccurrence?.occurrence.trustedCommunityAlertQualification
+        && priorOccurrence.occurrence.trustedCommunityAlertQualification.basis !== undefined
+        && priorOccurrence.occurrence.trustedCommunityAlertQualification.catalogPublicationSuppressed !== true
+        && Date.parse(priorOccurrence.occurrence.admission?.destination.nextCheckAt ?? '') > this.now().getTime();
+      if (!stampSourceMetadata && (!trustedCommunityPolicy || settledCatalogOnlyCommunityRow)
+        && (reuseUnchangedOccurrences || admissionAlreadyApplied) && priorOccurrence
         && sourceOwnedMaterial(priorOccurrence.occurrence) === sourceOwnedMaterial(listing)) {
         handledExternalIds.add(id);
         return;
