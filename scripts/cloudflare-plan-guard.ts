@@ -158,16 +158,39 @@ function containsUnknown(value: unknown): boolean {
   return false;
 }
 
+function bindingsMatchByName(before: unknown[], after: unknown[]): boolean {
+  if (before.length !== after.length) return false;
+  const indexed = new Map<string, Record<string, unknown>>();
+  for (const binding of after) {
+    if (!isRecord(binding) || typeof binding.name !== 'string' || indexed.has(binding.name)) return false;
+    indexed.set(binding.name, binding);
+  }
+  const seen = new Set<string>();
+  return before.every((binding) => {
+    if (!isRecord(binding) || typeof binding.name !== 'string' || seen.has(binding.name)) return false;
+    seen.add(binding.name);
+    return isDeepStrictEqual(binding, indexed.get(binding.name));
+  });
+}
+
 function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after)) return false;
-  const controller = after.find((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER');
+  const controllers = after.filter((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER');
+  const controller = controllers[0];
   const afterWithoutController = after.filter((binding) => !isRecord(binding) || binding.name !== 'D1_TRAFFIC_CONTROLLER');
   const addedController = !before.some((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER')
+    && controllers.length === 1
     && afterWithoutController.length + 1 === after.length
     && isRecord(controller)
     && controller.type === 'durable_object_namespace'
-    && controller.class_name === 'D1TrafficController';
-  if (addedController) return isDeepStrictEqual(before, afterWithoutController);
+    && controller.class_name === 'D1TrafficController'
+    && Object.entries(controller).every(([key, value]) => (
+      ['name', 'type', 'class_name'].includes(key) || value === null
+    ));
+  if (addedController) {
+    return bindingsMatchByName(before, afterWithoutController)
+      || isPermittedBindingUpdate(before, afterWithoutController);
+  }
   if (before.length !== after.length) return false;
   let permittedBindingChanged = false;
   const plainTextUpdate = before.every((binding, index) => {
@@ -249,10 +272,12 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   const permittedControllerMigration = address === 'cloudflare_workers_script.ingestion'
     && permittedBindingChanged
     && (before.migrations === null || before.migrations === undefined)
-    && isDeepStrictEqual(after.migrations, {
-      new_tag: 'v1-d1-traffic-controller',
-      new_sqlite_classes: ['D1TrafficController'],
-    });
+    && isRecord(after.migrations)
+    && after.migrations.new_tag === 'v1-d1-traffic-controller'
+    && isDeepStrictEqual(after.migrations.new_sqlite_classes, ['D1TrafficController'])
+    && Object.entries(after.migrations).every(([key, value]) => (
+      ['new_tag', 'new_sqlite_classes'].includes(key) || value === null
+    ));
   if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease && !permittedControllerMigration) return false;
 
   const beforeForComparison = {
@@ -262,7 +287,18 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     ...(permittedControllerMigration ? { migrations: after.migrations } : {}),
   };
 
-  const afterUnknown = change.after_unknown;
+  let afterUnknown = change.after_unknown;
+  if (permittedControllerMigration && isRecord(afterUnknown) && Array.isArray(afterUnknown.bindings)) {
+    const controllerIndex = Array.isArray(after.bindings)
+      ? after.bindings.findIndex((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER')
+      : -1;
+    const controllerUnknown = afterUnknown.bindings[controllerIndex];
+    if (controllerIndex < 0 || !isDeepStrictEqual(controllerUnknown, { namespace_id: true })) return false;
+    afterUnknown = {
+      ...afterUnknown,
+      bindings: afterUnknown.bindings.map((binding, index) => (index === controllerIndex ? {} : binding)),
+    };
+  }
   if (!isDeepStrictEqual(
     protectedWorkerValue(beforeForComparison, afterUnknown),
     protectedWorkerValue(after, afterUnknown),
