@@ -789,6 +789,14 @@ append-only, validates its evidence hash and both official URLs at runtime, and
 can resolve only the matching exact identity. A route-level provider match alone
 never authorizes a title, location, employer name, or destination choice.
 
+A reviewed row is authoritative for its exact provider identity: it supplies the
+merged record's company, title, location, and application URL, and it settles a
+member-level employer-name disagreement for that posting, because the immutable
+decision already names the employer the official page shows. Reviews for other
+posting ids, aliases, or tenants never apply. Groups whose page is withdrawn,
+reposted under a different posting id, or otherwise unavailable stay unresolved
+and must not receive a row.
+
 Run the deterministic integrity audit against the same snapshot before any
 apply and archive its legacy/classified counts. Exit status `2` is expected
 while legacy occurrences still require backfill; it also reports any exact
