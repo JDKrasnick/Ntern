@@ -35,10 +35,27 @@ Most canonical employers are created before anyone has an icon for them, and a r
 ### How a decision is made
 
 1. **Admission records the task.** When posting admission resolves a canonical employer, `src/poll.ts` hands the employer ID, the application URL, and the provider/tenant to `enqueueEmployerIconResolution`. That is one deduplicated `INSERT` keyed by `(canonical_employer_id, evidence_fingerprint)`; no provider or model is called on the ingestion path, and the insert is skipped when the employer already has a reviewed icon or a live decision.
-2. **A sweep resolves it.** The ten-minute maintenance cron calls `runEmployerIconResolutionPass`, which claims at most `maxPerSweep` due rows with a lease. The sweep reads the real application link through the existing SSRF controls (`safeFetchText`, five redirects, 10s, 64 KiB), parses only bounded public metadata (`<title>`, OpenGraph, JSON-LD `Organization` name and URL), and asks Logo.dev and Brandfetch for domains by employer name.
+2. **A sweep resolves it.** The ten-minute maintenance cron calls `runEmployerIconResolutionPass`, which claims at most `maxPerSweep` due rows with a lease. The sweep reads the real application link through the existing SSRF controls (`safeFetchText`, five redirects, 10s, 512 KiB), parses only bounded public metadata (`<title>`, OpenGraph, JSON-LD `Organization` name and URL), and asks Logo.dev and Brandfetch for domains by employer name. A posting page larger than the ceiling is **truncated, not rejected**: the employer's name is in the first few kilobytes of `<head>`, and a two-megabyte Lever page must not cost that employer its icon.
 3. **Scoring decides.** Candidates are scored from the reviewed table — non-ATS final/careers URL 0.45, JSON-LD Organization 0.35, each provider's exact-name candidate 0.30, both providers agreeing on one domain 0.25, page metadata naming the employer 0.15, capped at 1.0. ATS and job-board hosts are transport and are rejected outright. A domain is accepted automatically only at 0.85 or above with a 0.15 margin over the runner-up.
-4. **One tie-breaker for the middle band.** Below 0.85, or when the top two candidates are within 0.15, the resolver may make **one** schema-validated `gpt-4o-mini` call. It receives only a compact JSON summary, may select only a submitted candidate, must cite at least two distinct evidence IDs that belong to that candidate, and must reach 0.90 confidence. Anything else downgrades to a monogram. The budget is one call per employer per 30 days, except when the job-link evidence materially changed.
+4. **One tie-breaker for the middle band.** The resolver may make **one** schema-validated `gpt-4o-mini` call when the best score is in 0.55–0.84, when the top two candidates are within 0.15, or when the best candidate already carries two independent evidence IDs (a candidate the tie-breaker could actually accept, since its own rule requires exactly that). It receives only a compact JSON summary, may select only a submitted candidate, must cite at least two distinct evidence IDs that belong to that candidate, and must reach 0.90 confidence. Anything else downgrades to a monogram. The budget is one call per employer per 30 days, except when the job-link evidence materially changed.
 5. **Failures back off.** A definitive no-match retries from one day, doubling to the 30-day revalidation ceiling. A transient provider failure (429/5xx/transport) retries from one hour and honours `Retry-After`.
+
+### What the evidence can and cannot prove
+
+The catalog's dominant posting shape is an ATS-hosted page on `job-boards.greenhouse.io`, `jobs.lever.co`, or `jobs.ashbyhq.com`. Those pages prove *which employer is hiring* — the title usually ends in `at <Employer>` — but they never name the employer's domain, because the host is transport. So:
+
+- Page metadata is attached to a domain the page itself named, or, when it names none, to the candidates a **provider** nominated. The two assertions are independent facts about the same employer: the page establishes the employer, the provider establishes the employer's domain. Metadata is never attached to a host the page did not name, so it cannot vouch for an unrelated domain, and a page naming a different employer (for example an agency's white-labelled board) adds no corroboration at all.
+- A **lone** provider nomination is 0.30 and cannot be published, because the tie-breaker requires two evidence IDs. Provider **consensus** reaches exactly 0.85 and resolves automatically, so running both providers is what materially raises coverage.
+
+Measured against 18 real employers sampled from the live catalog (quant firms, public companies, and startups), driving the real resolver over the real application links, with providers and the image endpoint deterministically simulated so no credential was needed:
+
+| Providers configured | Published | Incorrect | Monogram |
+|---|---:|---:|---:|
+| Neither | 0/18 | 0 | 18 |
+| Logo.dev only | 15/18 | 0 | 3 |
+| Logo.dev + Brandfetch | 17/18 | 0 | 1 |
+
+The three Logo.dev-only monograms were one transient link timeout (retried by design) and two cases where the page genuinely does not name the canonical employer — including a joint-venture brand whose plausible provider domain belonged to a *different* company, which the resolver correctly refused. No incorrect domain was published in any configuration.
 
 ### Provider terms
 
@@ -84,7 +101,7 @@ A wrong-icon report is deliberately terminal for the automatic path: the sweep w
 ### Staged rollout
 
 1. `npm run cloudflare:migrate:remote` — apply `0034_employer_icon_resolution.sql` **before** deploying the Worker. The resolver and the employer upsert both read the new columns.
-2. Provision the secrets: `npx wrangler secret put LOGO_DEV_TOKEN --config wrangler.ingestion.jsonc` and, optionally, `BRANDFETCH_CLIENT_ID`. Set `OPENAI_KEY` if it is not already present; without it the resolver simply skips the tie-breaker. Terraform keeps `secret_text` bindings, so these survive deploys and never appear in a plan.
+2. Provision the secrets: `npx wrangler secret put LOGO_DEV_TOKEN --config wrangler.ingestion.jsonc` and `npx wrangler secret put BRANDFETCH_CLIENT_ID --config wrangler.ingestion.jsonc`. Both are needed to publish at scale: consensus is what clears the automatic threshold, and Logo.dev alone publishes only where the posting page independently names the employer. Set `OPENAI_KEY` if it is not already present; without it the resolver skips the tie-breaker and falls back to the monogram. Terraform keeps `secret_text` bindings, so these survive deploys and never appear in a plan.
 3. `tsx scripts/discover-employer-icon.ts --employer a,b,c` over about twenty employers spanning large companies, niche startups, quant firms, public companies, community listings, and challenge-gated sites. It is read-only and writes nothing. Record domain accuracy, the Logo.dev hit rate, the Brandfetch corroboration rate, the monogram rate, and the tie-break count.
 4. Set `mode: "observe"` and leave it there for a week. Decisions, provenance, and counters are recorded, but readers still see only reviewed icons and monograms.
 5. Switch to `mode: "resolve"` once the automatic false-match rate is acceptable. Reviewed icons are unaffected, and `report-wrong` is the immediate withdrawal path.

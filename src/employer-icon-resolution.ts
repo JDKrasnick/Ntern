@@ -218,13 +218,21 @@ export function decideIconDomain(candidates: readonly IconDomainCandidate[]): Ic
     };
   }
   const closeCompetition = runnerUp !== undefined && margin < ICON_AUTO_RESOLVE_MARGIN;
-  if (best.score >= ICON_LLM_BAND_MINIMUM || closeCompetition) {
+  // A candidate that carries two independent evidence ids is one the tie-breaker
+  // could actually accept, because its own acceptance rule requires exactly that.
+  // Escalating it costs one bounded call and is the only path by which a posting
+  // hosted on an ATS host — whose page proves the employer but names no domain —
+  // can reach a decision at all.
+  const corroborated = best.evidenceIds.length >= 2;
+  if (best.score >= ICON_LLM_BAND_MINIMUM || closeCompetition || corroborated) {
     return {
       outcome: 'llm-review', scores, selectedDomain: best.domain, selectedScore: best.score,
       ...(runnerUp ? { runnerUpScore: runnerUp.score } : {}),
       reason: closeCompetition && best.score < ICON_LLM_BAND_MINIMUM
         ? `Two candidates within ${ICON_AUTO_RESOLVE_MARGIN} of each other`
-        : `Score ${best.score.toFixed(2)} needs a bounded tie-breaker`,
+        : best.score < ICON_LLM_BAND_MINIMUM
+          ? `Score ${best.score.toFixed(2)} carries ${best.evidenceIds.length} independent evidence sources and needs a bounded tie-breaker`
+          : `Score ${best.score.toFixed(2)} needs a bounded tie-breaker`,
     };
   }
   return {

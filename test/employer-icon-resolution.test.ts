@@ -193,6 +193,21 @@ describe('domain decision', () => {
     expect(decision.reason).toMatch(/below the 0.55 evidence floor/u);
   });
 
+  it('escalates a corroborated candidate below the band, and only a corroborated one', () => {
+    // A lone provider nomination can never be accepted by the tie-breaker, whose
+    // own rule requires two independent evidence ids, so it stays a monogram
+    // rather than spending a model call that cannot succeed.
+    const alone = decideIconDomain([candidate('acme.com', ['logo-dev'])]);
+    expect(alone).toMatchObject({ outcome: 'unresolved', selectedScore: 0.30 });
+
+    // The posting page naming the employer is a second, independent fact about
+    // the same employer, so this candidate is worth one bounded call.
+    const corroborated = decideIconDomain([candidate('acme.com', ['logo-dev', 'page-title'])]);
+    expect(corroborated.outcome).toBe('llm-review');
+    expect(corroborated.selectedScore).toBeCloseTo(0.45, 10);
+    expect(corroborated.reason).toContain('2 independent evidence sources');
+  });
+
   it('leaves an empty or fully rejected candidate set unresolved', () => {
     const empty = decideIconDomain([]);
     expect(empty).toMatchObject({ outcome: 'unresolved', scores: [], reason: 'No eligible employer domain candidate' });

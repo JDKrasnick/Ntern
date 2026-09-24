@@ -299,7 +299,7 @@ Provision the provider credentials interactively; never put their values in Git,
 
 ```bash
 npx wrangler secret put LOGO_DEV_TOKEN --config wrangler.ingestion.jsonc
-npx wrangler secret put BRANDFETCH_CLIENT_ID --config wrangler.ingestion.jsonc   # optional corroboration only
+npx wrangler secret put BRANDFETCH_CLIENT_ID --config wrangler.ingestion.jsonc   # corroboration: consensus is the automatic path
 ```
 
 `OPENAI_KEY` is needed only for the middle-band tie-breaker; without it the resolver records an unresolved decision and renders a monogram. Terraform sets `keep_bindings = ["secret_text"]`, so these secrets survive a deploy and never appear in a plan.

@@ -15,6 +15,14 @@ export interface SafeFetchOptions {
   maxRedirects?: number;
   maxBodyBytes?: number;
   headers?: HeadersInit;
+  /**
+   * What to do when a body exceeds `maxBodyBytes`. `fail` (the default) rejects
+   * the response; `truncate` keeps the bounded prefix and stops reading. Both
+   * honour the same hard cap, so truncation is only ever a difference in
+   * availability — a caller that needs only the leading bytes of a page should
+   * not lose them because the page is large.
+   */
+  onOversize?: 'fail' | 'truncate';
 }
 
 export interface SafeFetchResult {
@@ -151,9 +159,11 @@ async function withFetchTimeout<T>(
   }
 }
 
-async function readBoundedBytes(response: Response, maxBodyBytes: number): Promise<Uint8Array> {
+async function readBoundedBytes(response: Response, maxBodyBytes: number, onOversize: 'fail' | 'truncate'): Promise<Uint8Array> {
   const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > maxBodyBytes) throw new Error('Response body exceeds limit');
+  if (Number.isFinite(declared) && declared > maxBodyBytes && onOversize === 'fail') {
+    throw new Error('Response body exceeds limit');
+  }
   if (!response.body) return new Uint8Array(0);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -162,14 +172,20 @@ async function readBoundedBytes(response: Response, maxBodyBytes: number): Promi
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (total + value.byteLength > maxBodyBytes) {
+        if (onOversize === 'fail') throw new Error('Response body exceeds limit');
+        chunks.push(value.subarray(0, maxBodyBytes - total));
+        total = maxBodyBytes;
+        break;
+      }
       total += value.byteLength;
-      if (total > maxBodyBytes) throw new Error('Response body exceeds limit');
       chunks.push(value);
     }
   } catch (error) {
     await reader.cancel().catch(() => undefined);
     throw error;
   }
+  await reader.cancel().catch(() => undefined);
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -194,6 +210,7 @@ export async function safeFetchBytes(value: string, options: SafeFetchOptions): 
   if (timeoutMs <= 0 || maxRedirects < 0 || maxBodyBytes <= 0) throw new Error('Fetch limits must be positive');
   let current = await assertPublicHttpsUrl(value, options.resolver);
   const redirects = [current.href];
+  const onOversize = options.onOversize ?? 'fail';
 
   for (let hops = 0; ; hops += 1) {
     const { response, body } = await withFetchTimeout(
@@ -205,7 +222,7 @@ export async function safeFetchBytes(value: string, options: SafeFetchOptions): 
         response: received,
         body: received.status >= 300 && received.status < 400
           ? undefined
-          : await readBoundedBytes(received, maxBodyBytes),
+          : await readBoundedBytes(received, maxBodyBytes, onOversize),
       }),
     );
     if (response.status >= 300 && response.status < 400) {

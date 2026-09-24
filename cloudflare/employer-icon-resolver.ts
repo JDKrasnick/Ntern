@@ -44,7 +44,12 @@ const ICON_TRANSIENT_MAX_RETRY_MS = 24 * 60 * 60 * 1_000;
 const ICON_LEASE_MS = 5 * 60_000;
 const ICON_LINK_TIMEOUT_MS = 10_000;
 const ICON_LINK_MAX_REDIRECTS = 5;
-/** The same 512 KiB ceiling `application-url.ts` uses to read an application page. */
+/**
+ * The same 512 KiB ceiling `application-url.ts` uses to read an application page.
+ * A posting page larger than this is truncated rather than rejected: the
+ * employer's name lives in the first few kilobytes of `<head>`, and a two-megabyte
+ * Lever page must not cost this employer its icon.
+ */
 const ICON_LINK_MAX_BYTES = 512 * 1024;
 const ICON_PROVIDER_MAX_BYTES = 128 * 1024;
 const MAX_ICON_EVIDENCE_BYTES = 16 * 1024;
@@ -478,6 +483,7 @@ async function gatherIconEvidence(seed: EmployerIconSeed, deps: EmployerIconReso
     const result = await safeFetchText(seed.applicationUrl, {
       resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch,
       timeoutMs: ICON_LINK_TIMEOUT_MS, maxRedirects: ICON_LINK_MAX_REDIRECTS, maxBodyBytes: ICON_LINK_MAX_BYTES,
+      onOversize: 'truncate',
     });
     return {
       finalUrl: result.url,
@@ -629,9 +635,18 @@ function iconCandidates(
       || iconTextMatchesEmployer(gathered.page.ogTitle, context.displayName);
     if (titleMatches || siteMatches) {
       const fallback = hostOf(gathered.finalUrl);
-      const target = matchedDomains[0]
+      const pageNamedDomain = matchedDomains[0]
         ?? (fallback && !isIconTransportHost(fallback) ? registrableDomain(fallback) : undefined);
-      if (target) {
+      // A page hosted on an ATS proves *which employer* is hiring but names no
+      // domain of its own. That proof is still independent corroboration of a
+      // provider nomination, because the two assertions are different facts about
+      // the same employer: the page establishes the employer, the provider
+      // establishes the employer's domain. It is never attached to a host the
+      // page did not itself name, so it cannot vouch for an unrelated domain.
+      const targets = pageNamedDomain
+        ? [pageNamedDomain]
+        : [...providers.logoDev, ...providers.brandfetch];
+      for (const target of targets) {
         if (titleMatches) add(target, 'page-title');
         if (siteMatches) add(target, 'opengraph');
       }

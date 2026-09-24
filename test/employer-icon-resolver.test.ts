@@ -211,6 +211,48 @@ describe('employer icon diagnosis', () => {
     expect(own?.score).toBeCloseTo(0.45, 10);
     expect(own?.signals).toEqual(['final-url']);
   });
+
+  it('corroborates a provider nomination with an ATS page that names the employer', async () => {
+    // The dominant shape in this catalog: the posting is hosted on a transport
+    // host, so the page proves *who* is hiring but names no domain of its own.
+    // Without attaching that proof to the provider's nomination the employer
+    // could never leave a monogram, because a lone provider signal is 0.30.
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/acme/jobs/4001': () => html(
+        '<!doctype html><html><head><title>Job Application for Software Engineering Intern at Acme</title></head></html>',
+      ),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+    });
+    const diagnostic = await diagnoseEmployerIcon({
+      seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'),
+      credentials: { logoDevToken: LOGO_TOKEN }, deps: DEPENDENCIES(fetchImpl),
+    });
+
+    const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
+    expect(winner?.signals).toEqual(expect.arrayContaining(['logo-dev', 'page-title']));
+    expect(winner?.evidenceIds).toHaveLength(2);
+    expect(diagnostic.decision.outcome).toBe('llm-review');
+    // The transport host itself is still never selectable.
+    expect(diagnostic.decision.scores.find((candidate) => candidate.domain === 'greenhouse.io')?.rejected).toBe(true);
+  });
+
+  it('does not corroborate a provider nomination with a page that names another employer', async () => {
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/acme/jobs/4001': () => html(
+        '<!doctype html><html><head><title>Job Application for Data Scientist Intern at Globex</title></head></html>',
+      ),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+    });
+    const diagnostic = await diagnoseEmployerIcon({
+      seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'),
+      credentials: { logoDevToken: LOGO_TOKEN }, deps: DEPENDENCIES(fetchImpl),
+    });
+
+    const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
+    expect(winner?.signals).toEqual(['logo-dev']);
+    expect(winner?.evidenceIds).toHaveLength(1);
+    expect(diagnostic.decision.outcome).toBe('unresolved');
+  });
 });
 
 describe('employer icon provider plumbing', () => {
