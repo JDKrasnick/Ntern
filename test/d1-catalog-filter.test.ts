@@ -169,7 +169,7 @@ describe('D1 filtered catalog projection', () => {
     const batchBytes: number[] = [];
     try {
       const store = new D1InternshipStore(sqliteD1(database, undefined, { maxBatchBytes: 32 * 1024 * 1024, batchBytes }));
-      await expect(store.putCatalogProjection(groups, '2026-09-17T00:00:00.000Z')).resolves.toBeUndefined();
+      await expect(store.putCatalogProjection(groups, new Date().toISOString())).resolves.toBeUndefined();
       expect(batchBytes.length).toBeGreaterThan(1);
       expect(Math.max(...batchBytes)).toBeLessThanOrEqual(CATALOG_PROJECTION_BATCH_BYTES);
       expect(batchBytes.reduce((total, bytes) => total + bytes, 0)).toBeGreaterThan(32 * 1024 * 1024);
