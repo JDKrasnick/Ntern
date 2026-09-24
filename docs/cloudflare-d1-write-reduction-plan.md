@@ -27,21 +27,65 @@ Measure each change against a comparable production workload before claiming sav
 - Replay and out-of-order queue tests preserve the newest observation and do not resurrect superseded evidence. A reviewed omission becomes invalid when its substantive evidence changes.
 - A local D1 test reports before/after `rows_written` for the replay case, including trigger side effects. Production D1 Insights shows a sustained reduction for the evidence and `is_current` update query families without a rise in stale coverage or retry backlog.
 
-## 2. Publish only changed catalog projection chunks to D1
+## 2. Publish only changed catalog projection cards to D1
 
-### Current behavior
+**Landed 2026-09-24.** Each card is already a self-contained chunk, so it is not
+re-cut into buckets. D1 stores
+each card under the group's own identity with a content-addressed suffix
+(`GROUP#<groupId>#<digest>` in one `CATALOG_PROJECTION#GROUPS` partition), and the
+display order became a key the card carries (`updatedAt`, with the group id breaking
+ties) instead of a positional index. Inserting or removing a card therefore never
+renumbers the others. A small manifest of active card keys is written before the
+cards, then the schema-version-6 pointer is switched with a compare-and-swap.
+Readers select only keys in that published manifest, so pending and retired rows
+cannot appear in a page or group lookup. Old manifests and cards remain for two
+minutes for in-flight readers; an unchanged tick retries interrupted cleanup.
 
-[`putCatalogProjection`](../cloudflare/d1-store.ts) hashes the complete grouped catalog. An unchanged refresh only updates the pointer, but any changed card writes **every** group under a new version and deletes the prior version. [`refreshCatalogProjection`](../cloudflare/worker.ts) publishes D1 first and R2 second. R2 is the primary read model; [`R2CatalogReadStore`](../cloudflare/r2-catalog-projection.ts) falls back to D1 when R2 is absent or fails. The D1 fallback serves unfiltered pages, filtered pages, role ranges, and individual groups. Keep that fallback complete and current.
+Measured locally on 2026-09-24 with a 300-card fixture (~8.8 MB of cards, the
+deployed projection carried 2,608 cards / 80.6 MiB):
 
-### Implementation
+| refresh | card batch statements | card batch payload | other rows written |
+| --- | ---: | ---: | --- |
+| full publish | 12 | 8,805,466 B | manifest and pointer |
+| one card changed | 1 | 20,526 B | manifest and pointer |
+| unchanged, no cleanup due | 0 | 0 B | pointer only |
 
-1. Capture a representative projection baseline: group count, serialized bytes, groups changed per refresh, `rows_written` and `rows_read`, refresh duration, and D1 fallback latency for each read shape. Use an exported or synthesized local fixture for design testing; do not repeatedly scan production D1 for a benchmark.
-2. Prototype a schema-versioned, content-addressed chunk format. Give chunks stable membership based on group identity, with byte bounds, so adding or removing one group does not shift every later chunk. Identify each chunk by its content digest. Store display order and group-to-chunk lookup in a small, bounded manifest or manifest pages. On refresh, write only new chunks, publish the new manifest after all chunks exist, then switch the current pointer. Refresh the pointer timestamp even when content is unchanged. Preserve the existing byte-bounded D1 batch behavior and verify D1 row and parameter limits with the largest observed group.
-3. Implement all four D1 fallback reads against one captured manifest version per request. Keep page order, filters, role-range results, group lookup, and cursor behavior equivalent to the current schema. Bound chunk reads and Worker memory. If the new format moves too much filtering work into the Worker or increases D1 read charges enough to erase the write savings, revise the chunk size or stop the migration.
-4. Retain the previous complete manifest and its chunks until no active reader can reference them. Garbage-collect unreferenced chunks in bounded batches after a grace period, so cleanup writes do not become a new cost spike. Handle overlapping refreshes and failed publication without deleting data referenced by a winning pointer.
-5. Roll out reader compatibility before the new writer. Support the existing schema-version-4 pointer during migration and rollback. Keep the current D1-then-R2 publication order and the R2 invalidation behavior on publish failure, so a stale R2 snapshot cannot override a newer admission decision. Remove old-format rows only after read parity and rollback checks pass.
+The version this replaced wrote every card and deleted every card of the previous
+version on any change — 2,608 writes and 2,608 deletes per changed tick at the
+deployed size. The first refresh after the deploy still rewrites every card once,
+because a version-4 copy is keyed by its version and cannot be reused.
 
-### Acceptance
+### How the acceptance criteria are met
+
+- **Unchanged refresh writes only the pointer when no cleanup is due** — the pointer
+  carries the new `generatedAt` because readers cap a projection by its age.
+- **A small change writes only the affected cards and a key manifest** — one
+  changed card writes one card, plus the manifest and pointer. Superseded cards
+  are deleted after the reader grace period in batches of 100. Covered for an
+  edited card, an inserted card and a removed card in
+  `test/d1-catalog-filter.test.ts` ("writes only the cards a refresh changed and
+  orders them by the card itself").
+- **All four reads keep their order and cursor semantics** — unfiltered pages,
+  filtered pages, role ranges and group lookup select keys from the published
+  manifest. The extra manifest existence check and SQL membership have a read
+  cost that must be measured in dev and production. The parity tests also cover
+  legacy version-4 rows, oversized payloads and byte budgets.
+- **No partially published catalog** — D1 is still published before R2, R2 is still
+  invalidated when its publish fails, and the pointer is switched after all cards
+  are ready. Tests interrupt a card publish and a card cleanup, overlap two
+  publishers, and remove a published manifest to check the visible outcomes.
+- **Rollback needs a compatible reader** — schema-version-6 readers still accept
+  version-4 pointers. A version-5 pointer is republished by the writer rather
+  than served from its unscoped partition. An older reader does not understand a
+  version-6 pointer; a rollback must republish a compatible projection before
+  routing readers to older code, or roll forward with a repair.
+
+One deliberate behaviour change: cards that share an `updatedAt` are now ordered by
+group id rather than by the order they happened to be built in. Both read models use
+that one order (the refresh sorts before it publishes to either), so the tie-break is
+deterministic instead of incidental.
+
+### Original acceptance (kept)
 
 - An unchanged refresh writes only its freshness pointer. A small catalog change writes only affected chunks, manifest data, and bounded cleanup; it does not rewrite every group. The prototype must demonstrate this for an inserted group as well as an edited group.
 - Interrupted publication, concurrent refreshes, missing chunks, and rollback always leave a complete readable snapshot or a visible error. No partially published catalog is served.
@@ -51,10 +95,26 @@ Measure each change against a comparable production workload before claiming sav
 ## Sequence and rollout
 
 1. Land the metadata optimization and its focused tests first. It has a smaller schema surface and should reduce repeated evidence and trigger writes independently of projection work.
-2. Prototype and benchmark the chunked projection locally. Land compatible readers, then the writer, in separate reversible changes. Keep the old format available until parity is established.
+2. ~~Prototype and benchmark the chunked projection locally. Land compatible readers, then the writer, in separate reversible changes.~~ Landed 2026-09-24 with a schema-version-6 key manifest and compatible readers. Use the rollback sequence above after a version-6 publish; the benchmark is the local measurement above.
 3. For each production release, use the repository's guarded Cloudflare plan and deployment process, including `npx wrangler whoami`, build, OpenTofu plan/apply where infrastructure changes are needed, and read-only post-deploy verification. Do not force a protected audit through a busy queue.
 4. Compare seven-day D1 Insights windows with similar ingestion volume after deployment. Watch rows written **and** rows read, billable usage, catalog age, projection errors, metadata coverage, review-token failures, queue depth, and D1 overloads. Roll back if freshness or correctness regresses even if write volume falls.
 
 ## Decision gate
 
-Proceed with the projection migration only if the local prototype proves a net D1 cost reduction under the actual catalog size and filter traffic. If chunk manifests or fallback reads erase the savings, keep the current versioned D1 fallback and revisit the projection format with measured data.
+**Met locally 2026-09-24** for both sections: a one-card projection refresh writes
+one card, one manifest and its pointer where it wrote 5,216 card rows at the
+deployed size, and the metadata path
+writes an observation row where it rewrote evidence, conflict and review rows. Both
+measurements are local, so the remaining check is the production one below.
+
+## Writes beyond the two sections
+
+A survey of every D1 write path found the same redundancy outside these sections —
+writers that re-store a row D1 bills whether or not its bytes changed. `catalog_items`
+job, occurrence, checkpoint, health, dispatch and monitoring upserts now compare the
+stored row with the value they would store (including the derived index columns, so a
+changed derivation still repairs the row); the acquisition report, shadow handoff,
+verification evidence, incident and incident-notification writers compare too. The
+`catalog_items` upserts also carry the two review triggers, so skipping an identical
+write saves three billed rows, not one. `test/d1-write-reduction.test.ts` replays each
+writer and counts the rows D1 would bill.

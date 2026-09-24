@@ -784,7 +784,11 @@ export class D1CatalogAdmissionStore {
   async recordMetadataAcquisition(jobId: string, sourceId: string, observedAt: string, report: Record<string, unknown>, retryAfter: string): Promise<void> {
     await this.db.prepare(`INSERT INTO role_metadata_acquisition(job_id, source_id, lease_until, retry_after, observed_at, report)
       VALUES (?, ?, '', ?, ?, ?) ON CONFLICT(job_id, source_id) DO UPDATE SET
-      lease_until='', retry_after=excluded.retry_after, observed_at=excluded.observed_at, report=excluded.report`)
+      lease_until='', retry_after=excluded.retry_after, observed_at=excluded.observed_at, report=excluded.report
+      WHERE role_metadata_acquisition.lease_until IS NOT ''
+        OR role_metadata_acquisition.retry_after IS NOT excluded.retry_after
+        OR role_metadata_acquisition.observed_at IS NOT excluded.observed_at
+        OR role_metadata_acquisition.report IS NOT excluded.report`)
       .bind(jobId, sourceId, retryAfter, observedAt, JSON.stringify(report)).run();
   }
 
@@ -794,12 +798,16 @@ export class D1CatalogAdmissionStore {
     descriptionBytes: number;
     observedAt: string;
   }): Promise<void> {
-    await this.db.prepare(`UPDATE role_metadata_acquisition SET report = json_set(report,
-      '$.shadowHandoff.outcome', ?, '$.shadowHandoff.method', ?, '$.shadowHandoff.descriptionBytes', ?,
-      '$.shadowHandoff.observedAt', ?)
-      WHERE job_id = ? AND source_id = ? AND observed_at = ?`)
+    // The handoff outcome is written into the acquisition report. Re-recording
+    // the same handoff must not rewrite the row, so the assignment is compared
+    // with the value it would store instead of matching and overwriting.
+    const handoff = `json_set(report, '$.shadowHandoff.outcome', ?, '$.shadowHandoff.method', ?,
+      '$.shadowHandoff.descriptionBytes', ?, '$.shadowHandoff.observedAt', ?)`;
+    await this.db.prepare(`UPDATE role_metadata_acquisition SET report = ${handoff}
+      WHERE job_id = ? AND source_id = ? AND observed_at = ? AND report IS NOT ${handoff}`)
       .bind(input.outcome, input.method, input.descriptionBytes, input.observedAt,
-        jobId, sourceId, acquisitionObservedAt).run();
+        jobId, sourceId, acquisitionObservedAt,
+        input.outcome, input.method, input.descriptionBytes, input.observedAt).run();
   }
 
   async metadataHostAvailable(host: string, now = new Date().toISOString()): Promise<boolean> {
@@ -809,7 +817,8 @@ export class D1CatalogAdmissionStore {
 
   async deferMetadataHost(host: string, retryAfter: string): Promise<void> {
     await this.db.prepare(`INSERT INTO role_metadata_api_backoff(host, retry_after) VALUES (?, ?)
-      ON CONFLICT(host) DO UPDATE SET retry_after=max(role_metadata_api_backoff.retry_after, excluded.retry_after)`)
+      ON CONFLICT(host) DO UPDATE SET retry_after=max(role_metadata_api_backoff.retry_after, excluded.retry_after)
+      WHERE role_metadata_api_backoff.retry_after < excluded.retry_after`)
       .bind(host, retryAfter).run();
   }
 
@@ -1804,7 +1813,10 @@ export class D1CatalogAdmissionStore {
       .bind(value.id, value.jobId, value.sourceId, value.candidateUrl, value.state, value.classification ?? null, value.error ?? null, value.attemptedAt, value.completedAt)];
     if (evidence) statements.push(this.db.prepare(`INSERT INTO destination_verification_evidence
       (job_id, evidence_hash, classification, value, observed_at) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(job_id, evidence_hash) DO UPDATE SET classification=excluded.classification, value=excluded.value, observed_at=excluded.observed_at`)
+      ON CONFLICT(job_id, evidence_hash) DO UPDATE SET classification=excluded.classification, value=excluded.value, observed_at=excluded.observed_at
+      WHERE destination_verification_evidence.classification IS NOT excluded.classification
+        OR destination_verification_evidence.value IS NOT excluded.value
+        OR destination_verification_evidence.observed_at IS NOT excluded.observed_at`)
       .bind(value.jobId, evidence.hash, evidence.classification, JSON.stringify(evidence.value), evidence.observedAt));
     await this.db.batch(statements);
   }
@@ -1837,7 +1849,12 @@ export class D1CatalogAdmissionStore {
       ON CONFLICT(id) DO UPDATE SET state=excluded.state, reason_code=excluded.reason_code,
         updated_at=excluded.updated_at, grace_deadline=excluded.grace_deadline,
         warning_sent_at=coalesce(excluded.warning_sent_at, admission_incidents.warning_sent_at),
-        quarantine_sent_at=coalesce(excluded.quarantine_sent_at, admission_incidents.quarantine_sent_at)`)
+        quarantine_sent_at=coalesce(excluded.quarantine_sent_at, admission_incidents.quarantine_sent_at)
+      WHERE admission_incidents.state IS NOT excluded.state
+        OR admission_incidents.reason_code IS NOT excluded.reason_code
+        OR admission_incidents.grace_deadline IS NOT excluded.grace_deadline
+        OR (excluded.warning_sent_at IS NOT NULL AND admission_incidents.warning_sent_at IS NOT excluded.warning_sent_at)
+        OR (excluded.quarantine_sent_at IS NOT NULL AND admission_incidents.quarantine_sent_at IS NOT excluded.quarantine_sent_at)`)
       .bind(value.id, value.jobId, value.sourceId, value.host, value.reasonCode, value.state,
         value.openedAt, value.updatedAt, value.graceDeadline ?? null, value.warningSentAt ?? null, value.quarantineSentAt ?? null).run();
   }
@@ -1853,7 +1870,8 @@ export class D1CatalogAdmissionStore {
 
   async markIncidentNotification(id: string, messageType: 'grace-warning' | 'quarantine', sentAt: string): Promise<void> {
     const column = messageType === 'grace-warning' ? 'warning_sent_at' : 'quarantine_sent_at';
-    await this.db.prepare(`UPDATE admission_incidents SET ${column} = ?, updated_at = ? WHERE id = ?`)
+    // The first send wins; a repeat records nothing instead of rewriting the row.
+    await this.db.prepare(`UPDATE admission_incidents SET ${column} = ?, updated_at = ? WHERE id = ? AND ${column} IS NULL`)
       .bind(sentAt, sentAt, id).run();
   }
 
