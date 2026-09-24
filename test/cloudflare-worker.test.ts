@@ -993,9 +993,10 @@ describe('Cloudflare GitHub queue continuation', () => {
    * structured registry is empty, so the delivery reaches the reviewed GitHub
    * branch, and the source reports no prior health so quarantine cannot block it.
    */
-  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth; sendError?: Error; attempts?: number; pollError?: Error } = {}) => {
+  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth; sendError?: Error; attempts?: number; pollError?: Error; expectNoPoll?: boolean } = {}) => {
     const sent: unknown[] = [];
     const handled: string[] = [];
+    const statements: string[] = [];
     const polls: Array<{ command: string; sourceIds: string[]; maxListingsPerSourceRun: number | undefined }> = [];
     const workQueue: Queue = {
       async send(message) {
@@ -1023,21 +1024,38 @@ describe('Cloudflare GitHub queue continuation', () => {
     };
     try {
       await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [message] }, {
-        DB: { prepare: () => ({ async first() { return null; } }), async batch() { return []; } },
+        // The health and failure-ledger writes run on the real path, so the fake
+        // DB supports `bind`; without it they threw and the ledger assertions
+        // could never observe a write.
+        DB: {
+          prepare: (query: string) => {
+            statements.push(query);
+            return {
+              async first() { return null; },
+              bind: () => ({
+                async all() { return { results: [] }; },
+                async run() { return { meta: { changes: 1 } }; },
+              }),
+            };
+          },
+          async batch() { return []; },
+        },
         GITHUB_QUEUE: workQueue,
       } as unknown as Environment);
     } finally {
       vi.restoreAllMocks();
     }
     // One bounded poll slice per delivery is the delivery's whole reason to
-    // re-enqueue itself, so every case pins the poll it issued.
-    expect(polls).toEqual([{
+    // re-enqueue itself, so every case pins the poll it issued. A blocked source
+    // is skipped before the poll, so it asserts the opposite.
+    if (options.expectNoPoll) expect(polls).toEqual([]);
+    else expect(polls).toEqual([{
       command: 'poll', sourceIds: [reviewedGithub.id],
       maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
     }]);
     const sliceEvents = logged.map((line) => JSON.parse(line) as Record<string, unknown>)
       .filter((event) => event.event === 'github_admission_migration_slice');
-    return { sent, handled, sliceEvents };
+    return { sent, handled, statements, sliceEvents };
   };
 
   it('re-enqueues the source once and acks while the delivery leaves a pending resolution slice', async () => {
@@ -1065,13 +1083,32 @@ describe('Cloudflare GitHub queue continuation', () => {
   });
 
   it('defers a source failure that survives every delivery instead of dead-lettering it', async () => {
-    const { sent, handled } = await deliver({}, {
+    const { sent, handled, statements } = await deliver({}, {
       attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
       pollError: new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'),
     });
 
     expect(sent).toEqual([]);
     expect(handled).toEqual(['ack']);
+    // A deferred message is acked and never redelivered, so its failure row is
+    // resolved here instead of inflating the unresolved count.
+    expect(statements.some((query) => query.includes('UPDATE queue_failure_events') && query.includes('resolved_at'))).toBe(true);
+  });
+
+  it('resolves an earlier failure row when a blocked source is acked', async () => {
+    const { handled, statements } = await deliver({}, {
+      attempts: 2,
+      expectNoPoll: true,
+      priorHealth: {
+        sourceId: reviewedGithub.id, state: 'quarantined', sourceStatus: 'paused',
+        lastAttemptAt: '2026-08-26T12:00:00.000Z', consecutiveFailures: 2, durationMs: 4,
+      },
+    });
+
+    // The blocked source runs no poll, so the delivery is acked; its earlier
+    // failed attempt's row must still be resolved rather than lingering.
+    expect(handled).toEqual(['ack']);
+    expect(statements.some((query) => query.includes('UPDATE queue_failure_events') && query.includes('resolved_at'))).toBe(true);
   });
 
   it('retries a source failure before the final delivery', async () => {

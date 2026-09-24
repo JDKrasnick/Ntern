@@ -130,8 +130,11 @@ describe('Cloudflare deployment configuration', () => {
     // catalog retry value is pinned by the max_retries assertion in the
     // destination-verification configuration test above.
     const catalogQueues = ['intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby', 'intern-notifs-github'];
-    for (const consumer of ingestion.queues?.consumers ?? []) {
-      if (!catalogQueues.includes(consumer.queue)) continue;
+    const matched = (ingestion.queues?.consumers ?? []).filter(({ queue }) => catalogQueues.includes(queue));
+    // Assert the matched set first so a renamed or removed catalog consumer
+    // fails loudly instead of letting the loop below pass vacuously.
+    expect(matched.map(({ queue }) => queue).sort()).toEqual([...catalogQueues].sort());
+    for (const consumer of matched) {
       expect(consumer.max_retries + 1).toBe(CATALOG_DELIVERY_MAX_ATTEMPTS);
     }
   });

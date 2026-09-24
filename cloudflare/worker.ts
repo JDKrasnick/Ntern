@@ -2061,6 +2061,11 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
             await resolveFailures(queued.id, queued.attempts);
             await completeTraffic(queued.id, 'success');
           } else {
+            // The source is paused, quarantined, or backed off, so this delivery
+            // runs no poll and the message is acked. Resolve any row an earlier
+            // attempt wrote: a blocked source is never re-polled on its own, so
+            // the row would otherwise stay unresolved until the 30-day cleanup.
+            await resolveFailures(queued.id, queued.attempts);
             await completeTraffic(queued.id, 'cancelled');
           }
           continue;
@@ -2070,6 +2075,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         if (githubSourceRunBlocked(priorHealth, message.force)) {
           console.log(JSON.stringify({ event: 'source_poll_skipped', command: 'github-poll', sourceId: source.id,
             reason: priorHealth?.state === 'quarantined' ? 'quarantined' : priorHealth?.sourceStatus === 'paused' ? 'paused' : 'backoff' }));
+          // A blocked source is acked and never re-polled on its own, so an
+          // earlier attempt's failure row would sit unresolved until the 30-day
+          // cleanup. Resolve it here, matching the ATS lane's ack path.
+          await resolveFailures(queued.id, queued.attempts);
           await completeTraffic(queued.id, 'cancelled');
           continue;
         }
@@ -2163,7 +2172,13 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         // Acking one that fails every delivery would hide it with no automatic
         // retry, so it stays on the retry path and dead-letters for a human.
         // Ordinary polls carry no `force` flag and are still re-issued from the
-        // dispatcher's next sweep.
+        // dispatcher's next sweep. A poll that leaves its source quarantined is
+        // acked like any other deferral rather than dead-lettered: quarantine is
+        // the intended terminal state for a broken board, the scheduled dispatch
+        // skips it either way, and the source stays visible in source health for
+        // a manual recovery. Deferring it also keeps the quarantine ack
+        // consistent with the earlier attempts, which the blocked-source path
+        // above already acks.
         if (catalogDeliveryIsDeferred(error, parsedMessage?.sourceId, queued.attempts,
           { dispatcherCanReissue: parsedMessage?.force !== true })) {
           console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
@@ -2212,17 +2227,22 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     // a blocked record is not recorded as a stalled board.
     if (error instanceof QueueMessageDeadlineError && parsed?.sourceId) {
       try {
-        const completedAt = new Date().toISOString();
+        // Capture both timestamps before the health read: a slow `getSourceHealth`
+        // would otherwise push `startedAt` past `completedAt` and clamp
+        // `durationMs` to zero.
+        const observedAt = new Date();
+        const completedAt = observedAt.toISOString();
+        // The deadline fires after the record ran for `deadlineMs`, so the
+        // attempt began then. `queued.timestamp` is the message send time, so
+        // using it here would fold the queue wait and every earlier retry into
+        // `durationMs`.
+        const startedAt = new Date(observedAt.getTime() - error.deadlineMs).toISOString();
         const healthStore = new D1InternshipStore(env.DB);
         await healthStore.putSourceHealth(failedSourceHealth({
           sourceId: parsed.sourceId,
           provider: catalogProvider,
           previous: await healthStore.getSourceHealth(parsed.sourceId),
-          // The deadline fires after the record ran for `deadlineMs`, so the
-          // attempt began then. `queued.timestamp` is the message send time, so
-          // using it here would fold the queue wait and every earlier retry into
-          // `durationMs`.
-          startedAt: new Date(Date.now() - error.deadlineMs).toISOString(),
+          startedAt,
           completedAt,
           error,
         }));

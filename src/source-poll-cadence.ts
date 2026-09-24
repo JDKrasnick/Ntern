@@ -71,7 +71,13 @@ export interface CatalogDeferralContext {
    * deferring it would drop work with no automatic retry. The GitHub lane
    * passes false for a forced recovery: its scheduled dispatch skips
    * quarantined sources and it has no recovery probe, so that recovery is the
-   * only thing that would ever re-issue them and must dead-letter for a human. */
+   * only thing that would ever re-issue them and must dead-letter for a human.
+   *
+   * A normal GitHub poll that leaves its source quarantined is still deferred.
+   * Quarantine is the intended terminal state for a broken board, the source
+   * stays visible in source health for a manual recovery, and the earlier
+   * attempts that quarantined it are acked by the blocked-source path anyway,
+   * so dead-lettering only the final attempt would add noise, not signal. */
   dispatcherCanReissue?: boolean;
 }
 
