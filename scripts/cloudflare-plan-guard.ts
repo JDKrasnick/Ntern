@@ -192,9 +192,13 @@ function normalizeStableDurableObjectNamespaceIds(
     if (!isRecord(previous) || previous.type !== 'durable_object_namespace') return;
     const { namespace_id: previousNamespaceId, ...previousIdentity } = previous;
     const { namespace_id: nextNamespaceId, ...nextIdentity } = binding;
-    if (typeof previousNamespaceId !== 'string' || nextNamespaceId !== null) return;
+    // Cloudflare assigns the namespace ID on apply and the provider reports a
+    // stable binding without one, so a state entry that never captured an ID is
+    // as stable as one that stored the provider's string.
+    if (nextNamespaceId !== null && nextNamespaceId !== undefined) return;
+    if (previousNamespaceId !== null && previousNamespaceId !== undefined && typeof previousNamespaceId !== 'string') return;
     if (!isDeepStrictEqual(previousIdentity, nextIdentity)) return;
-    normalizedAfter[index] = { ...binding, namespace_id: previousNamespaceId };
+    normalizedAfter[index] = previousNamespaceId === undefined ? nextIdentity : { ...binding, namespace_id: previousNamespaceId };
     normalizedUnknown[index] = {};
   });
 

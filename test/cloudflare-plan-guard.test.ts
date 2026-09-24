@@ -372,6 +372,26 @@ describe('Cloudflare deployment plan guard', () => {
     expect(() => validateCloudflarePlan(plan([{ ...changes[0]!, after: { ...changes[0]!.after, bindings: [...worker.bindings, ...apiBindings.map((binding) => binding.name === 'RESUME_TUNER_ENABLED' ? { ...binding, text: 'true' } : binding)] } }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('accepts a provider-computed namespace ID on an established resume compiler binding', () => {
+    const compiler = { name: 'RESUME_PDF_COMPILER', type: 'durable_object_namespace', class_name: 'ResumePdfCompilerV2' };
+    const migrations = { new_tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] };
+    // The first resume rollout applied the binding, but the provider never
+    // stored a namespace ID, so every later plan re-reports it as computed.
+    const change = (beforeCompiler: Record<string, unknown>) => ({
+      ...contentUpdate,
+      before: { ...worker, bindings: [...worker.bindings, beforeCompiler], migrations },
+      after: { ...contentUpdate.after, bindings: [...worker.bindings, { ...compiler, namespace_id: null }], migrations },
+      after_unknown: {
+        ...contentUpdate.after_unknown,
+        bindings: [...worker.bindings.map(() => ({})), { namespace_id: true }],
+      },
+    });
+    expect(validateCloudflarePlan(plan([change({ ...compiler, namespace_id: null })]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([change(compiler)]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([change({ ...compiler, class_name: 'OtherCompiler', namespace_id: null })])))
+      .toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('rejects unknown values in protected Worker fields', () => {
     expect(() => validateCloudflarePlan(plan([{
       ...contentUpdate,
