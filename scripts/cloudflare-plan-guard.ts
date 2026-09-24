@@ -220,6 +220,22 @@ function isResumeMigrationTagTransition(before: unknown, after: unknown): boolea
     || (before.old_tag === '' && after.old_tag === null);
 }
 
+function isControllerMigrationTagTransition(before: unknown, after: unknown): boolean {
+  if (!isRecord(before) || !isRecord(after)) return false;
+  const isExpected = (migration: Record<string, unknown>) => (
+    migration.new_tag === 'v1-d1-traffic-controller'
+    && isDeepStrictEqual(migration.new_sqlite_classes, ['D1TrafficController'])
+    && (migration.old_tag === '' || migration.old_tag === null)
+    && Object.entries(migration).every(([key, value]) => (
+      ['new_tag', 'new_sqlite_classes', 'old_tag'].includes(key) || value === null
+    ))
+  );
+  return isExpected(before)
+    && isExpected(after)
+    && before.old_tag === ''
+    && after.old_tag === null;
+}
+
 function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after)) return false;
   const controllers = after.filter((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER');
@@ -325,13 +341,16 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     && Object.entries(after.migrations).every(([key, value]) => (
       ['old_tag', 'new_tag', 'new_sqlite_classes'].includes(key) || value === null
     ));
+  const permittedControllerMigrationTagTransition = address === 'cloudflare_workers_script.ingestion'
+    && isControllerMigrationTagTransition(before.migrations, after.migrations);
   const permittedResumeMigrationTagTransition = address === 'cloudflare_workers_script.application'
     && isResumeMigrationTagTransition(before.migrations, after.migrations);
   const permittedResumeMigrationBootstrap = address === 'cloudflare_workers_script.application'
     && (before.migrations === null || before.migrations === undefined)
     && isExpectedResumeMigration(after.migrations, '');
   if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease
-    && !permittedControllerMigration && !permittedResumeMigrationTagTransition
+    && !permittedControllerMigration && !permittedControllerMigrationTagTransition
+    && !permittedResumeMigrationTagTransition
     && !permittedResumeMigrationBootstrap) return false;
 
   const beforeForComparison = {
@@ -339,6 +358,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     ...(permittedBindingChanged ? { bindings: after.bindings } : {}),
     ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
     ...(permittedControllerMigration ? { migrations: after.migrations } : {}),
+    ...(permittedControllerMigrationTagTransition ? { migrations: after.migrations } : {}),
     ...(permittedResumeMigrationTagTransition ? { migrations: after.migrations } : {}),
     ...(permittedResumeMigrationBootstrap ? { migrations: after.migrations } : {}),
   };
