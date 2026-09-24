@@ -126,6 +126,19 @@ jobs:
           aws s3 cp "$RUNNER_TEMP/cloudflare-before.tfstate" \
             "s3://intern-notifs-opentofu-state/$release/cloudflare-before.tfstate" \
             --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
+      - name: Reconcile the resume Worker migration state
+        shell: bash
+        run: |
+          if ! rg -q 'old_tag\s*=\s*""' infra/cloudflare/main.tf; then
+            exit 0
+          fi
+          tofu -chdir=infra/cloudflare state rm cloudflare_workers_script.application
+          if ! tofu -chdir=infra/cloudflare import \
+            cloudflare_workers_script.application \
+            "$TF_VAR_cloudflare_account_id/intern-notifs"; then
+            tofu -chdir=infra/cloudflare state push -force "$RUNNER_TEMP/cloudflare-before.tfstate"
+            exit 1
+          fi
       - name: Create and validate saved plan
         id: plan
         shell: bash
