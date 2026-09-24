@@ -351,6 +351,57 @@ describe('employer icon image gating', () => {
     expect(r2.puts).toHaveLength(0);
   });
 
+  it('never publishes a domain the tie-breaker chose when it has no real image', async () => {
+    const { database, db, admission, icons } = subject();
+    const r2 = r2Stub();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'), NOW);
+    // An ATS page that names the employer and a lone provider nomination: two
+    // independent evidence ids, so this is a candidate the model may choose.
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/acme/jobs/4001': () => html(
+        '<!doctype html><html><head><title>Job Application for Software Engineering Intern at Acme</title></head></html>',
+      ),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => status(404),
+    });
+    const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => {
+      const input = JSON.parse(request.prompt.user) as { candidates: Array<{ domain: string; evidenceIds: string[] }> };
+      const chosen = input.candidates.find((candidate) => candidate.domain === 'acme.com')!;
+      return {
+        response: {
+          decision: 'accept', officialDomain: 'acme.com', confidence: 0.95,
+          evidenceIds: chosen.evidenceIds, reason: 'provider nomination corroborated by the posting page',
+        },
+        inputTokens: 200, outputTokens: 40, actualCostCents: 1,
+      };
+    };
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, OPENAI_KEY: 'sk-test' }), NOW,
+      { ...DEPENDENCIES(fetchImpl), infer },
+    );
+
+    // The verified-image gate applies to a model's choice exactly as it does to a
+    // deterministic one, so a plausible answer still cannot publish a broken icon.
+    expect(result.resolved).toBe(0);
+    expect(result.unresolved).toBe(1);
+    expect(result.reasonCodes).toEqual(['image-unavailable']);
+    const context = await icons.context('acme');
+    expect(context?.resolutionStatus).toBe('unresolved');
+    expect(context?.websiteDomain).toBeUndefined();
+    expect(r2.puts).toHaveLength(0);
+
+    // What the model cited is recorded, so an exception reviewer can see the basis
+    // for a middle-band decision without replaying the request.
+    const row = database.prepare('SELECT evidence_json FROM employer_icon_resolutions WHERE canonical_employer_id = ?')
+      .get('acme') as { evidence_json: string };
+    const evidence = JSON.parse(row.evidence_json) as { tieBreak?: { citedEvidenceIds?: string[]; inputTokens?: number } };
+    expect([...(evidence.tieBreak?.citedEvidenceIds ?? [])].sort()).toEqual(['logo-dev:acme.com', 'page-title:acme.com']);
+    expect(evidence.tieBreak?.inputTokens).toBe(200);
+  });
+
   it('resolves when the provider serves a real WebP', async () => {
     const { icons, r2, result } = await resolvedAcme(() => webp());
 

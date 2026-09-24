@@ -284,6 +284,8 @@ interface AcceptInput extends ResolveTaskInput {
   providers: ProviderLookup;
   attempt: number;
   at: string;
+  /** Present when a tie-breaker chose this domain, so the review record can show what it cited. */
+  tieBreak?: { citedEvidenceIds: readonly string[]; inputTokens: number; outputTokens: number; reasonCode: string };
 }
 
 /**
@@ -318,6 +320,7 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
         taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
         evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
           outcome: 'unresolved', reasonCode: 'image-unavailable',
+          ...(input.tieBreak ? { tieBreak: input.tieBreak } : {}),
         })),
         nextRetryAt: revalidateAt, now: at,
       });
@@ -341,6 +344,7 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
     confidence: decision.selectedScore ?? 0,
     evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
       outcome: 'resolved', reasonCode: 'domain-accepted', imageVerified,
+      ...(input.tieBreak ? { tieBreak: input.tieBreak } : {}),
       ...(iconKey ? { iconKey } : {}),
     })),
     revalidateAt: new Date(now.getTime() + ICON_REVALIDATE_MS).toISOString(),
@@ -384,6 +388,10 @@ async function escalateToTieBreak(input: AcceptInput): Promise<ResolveOutcome | 
   if (!result.accepted || !result.domain) return undefined;
   return acceptSelectedDomain({
     ...input,
+    tieBreak: {
+      citedEvidenceIds: result.decision?.evidenceIds ?? [],
+      inputTokens: result.inputTokens, outputTokens: result.outputTokens, reasonCode: result.reasonCode,
+    },
     decision: {
       outcome: 'resolved', scores: decision.scores, selectedDomain: result.domain,
       selectedScore: submitted.find((candidate) => candidate.domain === result.domain)?.score ?? 0,
@@ -754,6 +762,7 @@ interface EvidenceRecordInput {
   attempt?: number;
   imageVerified?: boolean;
   iconKey?: string;
+  tieBreak?: { citedEvidenceIds: readonly string[]; inputTokens: number; outputTokens: number; reasonCode: string };
 }
 
 /**
@@ -800,6 +809,16 @@ function evidenceRecord(
     outcome: outcome.outcome,
     reasonCode: outcome.reasonCode,
     ...(outcome.imageVerified === undefined ? {} : { imageVerified: outcome.imageVerified }),
+    // What the model cited is the whole basis for a middle-band decision, so the
+    // exception reviewer can see it without replaying the request.
+    ...(outcome.tieBreak ? {
+      tieBreak: {
+        reasonCode: outcome.tieBreak.reasonCode,
+        citedEvidenceIds: [...outcome.tieBreak.citedEvidenceIds],
+        inputTokens: outcome.tieBreak.inputTokens,
+        outputTokens: outcome.tieBreak.outputTokens,
+      },
+    } : {}),
     ...(outcome.iconKey ? { iconKey: outcome.iconKey } : {}),
   };
 }
