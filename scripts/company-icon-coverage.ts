@@ -17,6 +17,12 @@
  * Everything here is real: the real page fetch, the real candidate extraction, and the
  * real asset rules. Nothing is written — no D1 row, no R2 object, no queue message.
  *
+ * A platform can rate-limit a host that reads a few hundred pages: Greenhouse answers
+ * 406 to every job page from such a host, whatever the user agent, while its JSON API
+ * keeps answering. Production is unaffected, because the Worker fetches from
+ * Cloudflare's egress; to re-measure from a blocked host, route the fetches through a
+ * throwaway Worker (`wrangler dev --remote`) instead of assuming the platform broke.
+ *
  * Usage:
  *   tsx scripts/company-icon-coverage.ts [--json] [--local] [--database <name>]
  *     [--concurrency <n>] [--employer <id[,id]>] [--platform greenhouse|lever|ashby]
