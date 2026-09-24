@@ -1,0 +1,170 @@
+/**
+ * Provider client shapes and page evidence for company-icon resolution.
+ *
+ * Two independent providers are queried by employer name and both may only
+ * nominate a domain; neither may nominate an asset. Asset URLs are always
+ * rebuilt here from a validated domain, so a provider response can never smuggle
+ * an arbitrary host into the catalog or into R2.
+ *
+ * Brandfetch's standard Logo API is hotlink-only and forbids persisting its
+ * data, so its results are used as in-memory corroboration and are never stored
+ * or fetched as bytes. Logo.dev is fetched only after its domain has been
+ * selected by scoring.
+ */
+
+import { canonicalCompanyKey } from './core/normalize.js';
+import { registrableDomain } from './core/registrable-domain.js';
+import { MAX_PROVIDER_CANDIDATES } from './employer-icon-resolution.js';
+
+export const logoDevSearchEndpoint = 'https://api.logo.dev/search';
+export const logoDevImageEndpoint = 'https://img.logo.dev';
+export const brandfetchSearchEndpoint = 'https://api.brandfetch.io/v2/search';
+
+/** One provider request may not outlive this, whatever the provider does. */
+export const ICON_PROVIDER_TIMEOUT_MS = 10_000;
+/** A downloaded icon larger than this is rejected rather than stored. */
+export const MAX_ICON_ASSET_BYTES = 2 * 1024 * 1024;
+/** Squared, non-SVG raster types only: an SVG can run script on the API origin. */
+const ICON_ASSET_CONTENT_TYPES: Record<string, true> = {
+  'image/png': true, 'image/webp': true, 'image/avif': true, 'image/jpeg': true,
+};
+
+const MAX_JSON_LD_DOCUMENTS = 20;
+const MAX_JSON_LD_NODES = 500;
+const ORGANIZATION_TYPES = /(?:^|[^a-z])(?:organization|corporation|company|institution|agency|university|college)(?:[^a-z]|$)/u;
+
+export function logoDevSearchUrl(displayName: string): string {
+  return `${logoDevSearchEndpoint}?q=${encodeURIComponent(displayName.trim().slice(0, 100))}`;
+}
+
+export function brandfetchSearchUrl(displayName: string, clientId: string): string {
+  return `${brandfetchSearchEndpoint}/${encodeURIComponent(displayName.trim().slice(0, 100))}?c=${encodeURIComponent(clientId)}`;
+}
+
+/**
+ * The image URL used for the post-selection existence probe and for the
+ * server-side asset fetch. `fallback=404` is what keeps Logo.dev's generated
+ * monogram tile from being mistaken for a real logo.
+ */
+export function logoDevImageUrl(domain: string, token: string, size = 128): string {
+  const params = new URLSearchParams({ token, size: String(size), format: 'webp', fallback: '404' });
+  return `${logoDevImageEndpoint}/${encodeURIComponent(registrableDomain(domain))}?${params.toString()}`;
+}
+
+/** True only for a raster icon within the size ceiling. */
+export function validIconAsset(contentType: string | null | undefined, byteLength: number): boolean {
+  const normalized = contentType?.split(';')[0]?.trim().toLowerCase();
+  return Boolean(normalized && ICON_ASSET_CONTENT_TYPES[normalized])
+    && byteLength > 0 && byteLength <= MAX_ICON_ASSET_BYTES;
+}
+
+/**
+ * A provider nominates a domain only when its own reported brand name matches
+ * the canonical employer name exactly. A fuzzy provider hit is not evidence of
+ * employer identity, and accepting one is how a wrong logo reaches the catalog.
+ */
+function exactProviderName(providerName: unknown, displayName: string): boolean {
+  if (typeof providerName !== 'string' || !providerName.trim()) return false;
+  const reported = canonicalCompanyKey(providerName);
+  const expected = canonicalCompanyKey(displayName);
+  return reported !== '' && reported === expected;
+}
+
+/** Domains Logo.dev reported for the employer name, deduplicated and capped. */
+export function logoDevCandidateDomains(value: unknown, displayName: string): string[] {
+  return providerDomains(value, displayName);
+}
+
+/**
+ * Domains Brandfetch reported for the employer name. Callers must treat these
+ * as ephemeral corroboration: they are never persisted and never fetched.
+ */
+export function brandfetchCandidateDomains(value: unknown, displayName: string): string[] {
+  return providerDomains(value, displayName);
+}
+
+function providerDomains(value: unknown, displayName: string): string[] {
+  if (!Array.isArray(value)) return [];
+  const domains: string[] = [];
+  for (const entry of value) {
+    if (domains.length >= MAX_PROVIDER_CANDIDATES) break;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    if (!exactProviderName(record.name, displayName)) continue;
+    const domain = typeof record.domain === 'string' ? registrableDomain(record.domain) : '';
+    if (!domain.includes('.')) continue;
+    if (!domains.includes(domain)) domains.push(domain);
+  }
+  return domains;
+}
+
+/** Bounded public page metadata that can independently name the employer. */
+export interface IconOrganizationEvidence {
+  name?: string;
+  /** Registrable domain the node's `url` resolved to. */
+  domain?: string;
+}
+
+export interface IconPageEvidence {
+  organizations: IconOrganizationEvidence[];
+  title?: string;
+  ogSiteName?: string;
+  ogTitle?: string;
+}
+
+function metaContent(html: string, property: string): string | undefined {
+  const pattern = new RegExp(`<meta[^>]+(?:property|name)=["']${property}["'][^>]+content=["']([^"']+)["']`, 'iu');
+  return pattern.exec(html)?.[1]?.replace(/\s+/gu, ' ').trim().slice(0, 300);
+}
+
+/**
+ * Names and domains are collected together so a domain can never be attributed
+ * to an employer on the strength of a different node's name.
+ */
+function collectOrganizations(node: unknown, found: IconOrganizationEvidence[], depth: number): void {
+  if (depth > 6 || typeof node !== 'object' || node === null) return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectOrganizations(item, found, depth + 1);
+    return;
+  }
+  const record = node as Record<string, unknown>;
+  const types = (Array.isArray(record['@type']) ? record['@type'] : [record['@type']])
+    .filter((type): type is string => typeof type === 'string');
+  if (types.some((type) => ORGANIZATION_TYPES.test(type.toLowerCase()))) {
+    const name = typeof record.name === 'string' && record.name.trim() ? record.name.trim().slice(0, 200) : undefined;
+    let domain: string | undefined;
+    if (typeof record.url === 'string') {
+      try {
+        const candidate = registrableDomain(new URL(record.url).hostname);
+        if (candidate.includes('.')) domain = candidate;
+      } catch { /* A malformed publisher URL is not evidence. */ }
+    }
+    if (name || domain) found.push({ ...(name ? { name } : {}), ...(domain ? { domain } : {}) });
+  }
+  for (const value of Object.values(record)) collectOrganizations(value, found, depth + 1);
+}
+
+/**
+ * Reads only the bounded metadata a page publishes about its owning employer.
+ * Page HTML is never stored; callers keep at most the normalized domains and a
+ * short matched string.
+ */
+export function parseIconPageEvidence(html: string): IconPageEvidence {
+  const organizations: IconOrganizationEvidence[] = [];
+  const documents = [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/giu)]
+    .slice(0, MAX_JSON_LD_DOCUMENTS);
+  for (const document of documents) {
+    if (organizations.length >= MAX_JSON_LD_NODES) break;
+    try { collectOrganizations(JSON.parse(document[1] ?? ''), organizations, 0); }
+    catch { /* Malformed publisher blocks are non-fatal. */ }
+  }
+  const title = /<title[^>]*>\s*([^<]+?)\s*<\/title>/iu.exec(html)?.[1]?.replace(/\s+/gu, ' ').trim().slice(0, 300);
+  const ogSiteName = metaContent(html, 'og:site_name');
+  const ogTitle = metaContent(html, 'og:title');
+  return {
+    organizations: organizations.slice(0, MAX_JSON_LD_NODES),
+    ...(title ? { title } : {}),
+    ...(ogSiteName ? { ogSiteName } : {}),
+    ...(ogTitle ? { ogTitle } : {}),
+  };
+}
