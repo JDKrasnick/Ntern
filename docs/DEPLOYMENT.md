@@ -847,7 +847,7 @@ deserialising the whole catalog.
   last 30 minutes contain no recorded D1 overload. A missing queue metric or D1
   check returns retryable `503`; the endpoints repeat this check immediately
   before scanning. A read-only identity audit, duplicate-only identity plan, or
-  capped identity apply batch may proceed with normal queue work only when the
+  identity apply batch capped at 100 jobs and 125 references may proceed with normal queue work only when the
   D1-overload check is clean. Full repairs and projection refreshes still
   require the strict window.
 
