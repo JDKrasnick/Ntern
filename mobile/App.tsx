@@ -5908,7 +5908,7 @@ function ResumeWorkspace({ token }: { token: string }) {
           </View>
           <ActionButton label={resumeBusy ? "Checking…" : "Continue"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
         </View>
-        {bankError ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
+        {bankError && (bankManagerOpen || jobImport || jobUrl.trim()) ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
         {jobImport && jobImport.status !== "ready" ? (
           <View style={styles.resumeManualFallback}>
             <Text style={styles.inputLabel}>Paste the job description to continue</Text>
