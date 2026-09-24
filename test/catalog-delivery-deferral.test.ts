@@ -47,8 +47,8 @@ const database = () => ({
   })),
 });
 
-const deliver = async (attempts: number) => {
-  const message = { id: 'greenhouse-first', body: { sourceId: 'greenhouse-acme' }, attempts,
+const deliver = async (attempts: number, body: Record<string, unknown> = {}) => {
+  const message = { id: 'greenhouse-first', body: { sourceId: 'greenhouse-acme', ...body }, attempts,
     ack: vi.fn(), retry: vi.fn() };
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
   await cloudflareWorker.queue({ queue: 'intern-notifs-greenhouse', messages: [message] },
@@ -105,6 +105,19 @@ describe('Catalog delivery deferral', () => {
 
     expect(message.retry).toHaveBeenCalledOnce();
     expect(message.ack).not.toHaveBeenCalled();
+  });
+
+  it('defers a forced ATS recovery probe the provider dispatcher re-issues', async () => {
+    vi.spyOn(D1InternshipStore.prototype, 'putSourceHealth').mockResolvedValue(undefined);
+    vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(undefined);
+    greenhouse.failure = new QueueMessageDeadlineError(300_000);
+
+    // Unlike GitHub, the ATS dispatcher re-issues a quarantined source on its
+    // daily recovery probe, so a forced probe is still safe to defer.
+    const message = await deliver(CATALOG_DELIVERY_MAX_ATTEMPTS, { force: true });
+
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(message.retry).not.toHaveBeenCalled();
   });
 });
 

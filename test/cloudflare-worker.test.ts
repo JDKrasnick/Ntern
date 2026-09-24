@@ -797,6 +797,32 @@ describe('Catalog queue setup failures', () => {
     expect(first.ack).not.toHaveBeenCalled();
     vi.restoreAllMocks();
   });
+
+  it('still retries a forced GitHub recovery the dispatcher cannot re-issue', async () => {
+    const prepare = vi.fn(() => ({
+      async first() { return null; },
+      bind: () => ({
+        async all() { return { results: [] }; },
+        async run() { return { meta: { changes: 1 } }; },
+      }),
+    }));
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources')
+      .mockRejectedValue(new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'));
+    // The scheduled GitHub dispatch skips quarantined sources and the lane has
+    // no recovery probe, so a forced recovery is the only message that would
+    // re-issue one: it must dead-letter instead of being acked into silence.
+    const first = { id: 'first', body: { sourceId: defaultSources[0]!.id, force: true },
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS, ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [first] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.retry).toHaveBeenCalledOnce();
+    expect(first.ack).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
 });
 
 describe('Cloudflare DNS resolver queries', () => {
@@ -1045,6 +1071,19 @@ describe('Cloudflare GitHub queue continuation', () => {
       pollError: new Error('Unknown reviewed source "ghost"'),
     });
 
+    expect(handled).toEqual(['retry']);
+  });
+
+  it('keeps a forced recovery on the retry path so a failed recovery dead-letters', async () => {
+    const { handled } = await deliver({}, {
+      force: true,
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      pollError: new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'),
+    });
+
+    // The scheduled GitHub dispatch skips quarantined sources and the lane has
+    // no recovery probe, so a forced recovery is the only message that would
+    // re-issue one. It must dead-letter instead of being acked into silence.
     expect(handled).toEqual(['retry']);
   });
 

@@ -66,12 +66,16 @@ export function catalogFailureIsPoison(error: unknown): boolean {
 /**
  * Whether a failed catalog delivery should be deferred to the scheduled
  * dispatcher instead of dead-lettered. True only for a source-scoped message
- * that has exhausted every delivery and is not poison. A repeated deferral is
- * safe because the dispatcher re-issues the source from its next sweep, or from
- * its recovery probe when it is quarantined; the source's health row and
- * checkpoint are the durable retry state. Keeps the one deferral rule in one
- * place so the GitHub lane and the shared Greenhouse/Lever/Ashby path cannot
- * drift.
+ * that has exhausted every delivery and is not poison. Deferral is safe only
+ * while the dispatcher re-owns the source: Greenhouse/Lever/Ashby sources are
+ * re-issued from their next sweep or their daily recovery probe, so their health
+ * row and checkpoint are the durable retry state. Callers must exclude any
+ * message the dispatcher can never re-issue; the GitHub lane does this for a
+ * forced recovery, because its scheduled dispatch skips quarantined sources and
+ * has no recovery probe, so that message is the only thing that would ever
+ * re-issue them and must dead-letter for a human. Keeping the rule in one place
+ * stops the GitHub lane and the shared Greenhouse/Lever/Ashby path from
+ * drifting.
  */
 export function catalogDeliveryIsDeferred(
   error: unknown,

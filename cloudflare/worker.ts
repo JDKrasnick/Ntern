@@ -1998,7 +1998,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     } catch (error) {
       for (const queued of batch.messages) {
         const parsed = (() => {
-          try { return JSON.parse(typeof queued.body === 'string' ? queued.body : JSON.stringify(queued.body)) as { sourceId?: string; sourceKind?: string }; }
+          try { return JSON.parse(typeof queued.body === 'string' ? queued.body : JSON.stringify(queued.body)) as { sourceId?: string; sourceKind?: string; force?: boolean }; }
           catch { return undefined; }
         })();
         await recordQueueFailureBestEffort({
@@ -2010,8 +2010,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         await completeTraffic(queued.id, 'failure', error);
         // This registry read gates the whole GitHub lane, so a source-scoped
         // message that fails every attempt here is still work the dispatcher
-        // re-issues from its next sweep. Only poison stays on the retry path.
-        if (catalogDeliveryIsDeferred(error, parsed?.sourceId, queued.attempts)) {
+        // re-issues from its next sweep. Only poison, and a forced recovery the
+        // dispatcher can never re-issue, stay on the retry path. No poll ran, so
+        // no source health is written; the dispatch lease is what re-issues it.
+        if (parsed?.force !== true && catalogDeliveryIsDeferred(error, parsed?.sourceId, queued.attempts)) {
           console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
             sourceId: parsed?.sourceId, messageId: queued.id, attempts: queued.attempts, error: safeDiagnostic(error) }));
           queued.ack();
@@ -2141,9 +2143,17 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         // The scheduled dispatcher owns every reviewed source's retry through
         // its health row and cadence, so a source-scoped failure that survives
         // all deliveries is deferred instead of dead-lettered. Only a message
-        // the dispatcher can never re-issue (unknown source, malformed body)
-        // stays on the retry path.
-        if (catalogDeliveryIsDeferred(error, parsedMessage?.sourceId, queued.attempts)) {
+        // the dispatcher can never re-issue stays on the retry path.
+        //
+        // A forced recovery is that message here: the scheduled GitHub dispatch
+        // skips quarantined sources and this lane has no recovery probe, so a
+        // forced recovery is the only thing that would ever re-issue them.
+        // Acking one that fails every delivery would hide it with no automatic
+        // retry, so it stays on the retry path and dead-letters for a human.
+        // Ordinary polls carry no `force` flag and are still re-issued from the
+        // dispatcher's next sweep.
+        if (parsedMessage?.force !== true
+          && catalogDeliveryIsDeferred(error, parsedMessage?.sourceId, queued.attempts)) {
           console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
             sourceId: parsedMessage?.sourceId, messageId: record.messageId, attempts: queued.attempts,
             error: safeDiagnostic(error) }));
@@ -2189,7 +2199,11 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           sourceId: parsed.sourceId,
           provider: catalogProvider,
           previous: await healthStore.getSourceHealth(parsed.sourceId),
-          startedAt: queued?.timestamp?.toISOString() ?? completedAt,
+          // The deadline fires after the record ran for `deadlineMs`, so the
+          // attempt began then. `queued.timestamp` is the message send time, so
+          // using it here would fold the queue wait and every earlier retry into
+          // `durationMs`.
+          startedAt: new Date(Date.now() - error.deadlineMs).toISOString(),
           completedAt,
           error,
         }));

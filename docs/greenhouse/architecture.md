@@ -71,12 +71,16 @@ retired SSM cohort or a provider-specific deployment stack.
 - Cloudflare Queue maximum concurrency: six consumer invocations.
 - Per-message deadline: five minutes; timed-out work is recorded as a retryable
   transport failure instead of holding a consumer slot until the platform limit.
-- Queue retries: two before the message is sent to the dead-letter queue.
+- Queue retries: two. A source-scoped failure that survives the final delivery
+  records its health and failure-ledger rows and is then acknowledged, because
+  the dispatcher re-issues the source from its health row and checkpoint. Only a
+  message the dispatcher cannot re-own (an unknown source or a malformed body)
+  dead-letters.
 - Greenhouse API timeout: eight seconds per identity or admission request, and
   fifteen seconds per board fetch, which covers headers and the whole body.
 - Queue retention: one day.
 - Dead-letter retention: fourteen days.
-- Dead-letter threshold: three total attempts.
+- Dead-letter threshold: three total attempts; catalog dead letters are poison only.
 
 Worker observability and the operations API surface invocation failures, stale
 sources, queue age, and any message arriving in the Greenhouse DLQ.
