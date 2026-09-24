@@ -31,7 +31,7 @@ import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore 
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
 import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
-import { processShadowExtractionBatch, shadowExtractionSummary } from './shadow-extraction.js';
+import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary } from './shadow-extraction.js';
 import { handleShadowPublication, publishProspectiveShadowMetadata } from './shadow-publication.js';
 import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
 import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork, recordGmailFailure, type GmailWorkMessage } from './gmail.js';
@@ -47,7 +47,7 @@ import { StructuredCareerSourceConnector } from '../src/sources/structured/index
 import { failedSourceHealth, safeDiagnostic, successfulSourceHealth } from '../src/source-health.js';
 import type { BrowserWorker } from '@cloudflare/puppeteer';
 import { destinationVerificationMessage, enqueueDueDestinationVerifications, processDestinationVerificationBatch,
-  sendAdmissionOperationalAlert } from './destination-verification.js';
+  sendAdmissionOperationalAlert, sendShadowBudgetAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
 import { recentD1OverloadCount } from './d1-overload-alert.js';
@@ -1599,6 +1599,12 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     }));
     if (dlqGrowth?.changed && (!Object.keys(dlqGrowth.increases).length || alertSent)) {
       await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts));
+    }
+    const shadowBudget = await runScheduledStep('shadow_budget_status', () => providerShadowBudgetStatus(env.DB, observedAt, env));
+    if (shadowBudget?.exhausted) {
+      await runScheduledStep('shadow_budget_alert', () => sendShadowBudgetAlert(new D1CatalogAdmissionStore(env.DB), env, {
+        ...shadowBudget, observedAt: observedAt.toISOString(),
+      }));
     }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));

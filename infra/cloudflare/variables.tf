@@ -131,7 +131,7 @@ variable "shadow_extraction_monthly_forecast_cents" {
 variable "shadow_extraction_monthly_headroom_cents" {
   description = "Maximum monthly spend available to shadow extraction inside the combined cost guard."
   type        = number
-  default     = 500
+  default     = 2000
 }
 
 variable "gmail_client_id" {
