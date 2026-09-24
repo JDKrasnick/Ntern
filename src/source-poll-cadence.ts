@@ -40,6 +40,27 @@ export const SOURCE_RETRY_DELAY_CAP_MS = 60_000;
  * D1 write took 147 s) and one sixth of the published cadence. */
 export const SOURCE_MESSAGE_DEADLINE_MS = 5 * 60_000;
 
+/**
+ * Deliveries Cloudflare allows for one catalog message. The catalog consumers
+ * run with `max_retries: 2`, so a message is delivered three times before the
+ * platform moves it to the dead-letter queue. Keep this in sync with
+ * `max_retries` in the Wrangler ingestion configs.
+ */
+export const CATALOG_DELIVERY_MAX_ATTEMPTS = 3;
+
+/**
+ * A source-scoped catalog failure that survives every delivery is deferred to
+ * the scheduled dispatcher rather than dead-lettered: the source's health row
+ * and checkpoint are the durable retry state, and the dispatcher re-issues the
+ * poll on its next sweep (or its next recovery probe when quarantined). Only a
+ * message the dispatcher can never own — an unknown source or a malformed body —
+ * is poison and dead-letters. `error` is the failure from the final delivery.
+ */
+export function catalogFailureIsPoison(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /^Unknown reviewed /.test(message) || /^Invalid .* work message/.test(message);
+}
+
 function stableSourceBucket(sourceId: string, buckets: number): number {
   let hash = 2166136261;
   for (const character of sourceId) {

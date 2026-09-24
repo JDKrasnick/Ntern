@@ -8,7 +8,7 @@ import { catalogProviderIds, integrationRegistry } from '../src/integration-regi
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import { D1EmployerStore } from '../cloudflare/employer-store.js';
-import { isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
+import { CATALOG_DELIVERY_MAX_ATTEMPTS, isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
 import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
 import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
@@ -719,6 +719,32 @@ describe('Catalog queue setup failures', () => {
     ]);
     vi.restoreAllMocks();
   });
+
+  it('defers source-scoped setup failures on the final delivery instead of dead-lettering', async () => {
+    const failureRows: unknown[][] = [];
+    const prepare = vi.fn((query: string) => ({
+      async first() { return null; },
+      bind: (...values: unknown[]) => ({
+        async all() {
+          if (query.includes('reviewed_source_registry')) throw new Error('D1 DB is overloaded. Requests queued for too long.');
+          return { results: [] };
+        },
+        async run() { failureRows.push(values); return { meta: { changes: 1 } }; },
+      }),
+    }));
+    const first = { id: 'first', body: { sourceId: 'greenhouse-acme' }, attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-greenhouse', messages: [first] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.ack).toHaveBeenCalledOnce();
+    expect(first.retry).not.toHaveBeenCalled();
+    expect(failureRows).toHaveLength(1);
+    vi.restoreAllMocks();
+  });
 });
 
 describe('Cloudflare DNS resolver queries', () => {
@@ -871,7 +897,7 @@ describe('Cloudflare GitHub queue continuation', () => {
    * structured registry is empty, so the delivery reaches the reviewed GitHub
    * branch, and the source reports no prior health so quarantine cannot block it.
    */
-  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth; sendError?: Error } = {}) => {
+  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth; sendError?: Error; attempts?: number; pollError?: Error } = {}) => {
     const sent: unknown[] = [];
     const handled: string[] = [];
     const polls: Array<{ command: string; sourceIds: string[]; maxListingsPerSourceRun: number | undefined }> = [];
@@ -891,11 +917,12 @@ describe('Cloudflare GitHub queue continuation', () => {
         sourceIds: (dependencies.sources ?? []).map((source) => source.id),
         maxListingsPerSourceRun: dependencies.maxListingsPerSourceRun,
       });
+      if (options.pollError) throw options.pollError;
       return { poll: report };
     });
     vi.spyOn(console, 'log').mockImplementation((line) => { logged.push(String(line)); });
     const message = {
-      id: 'github-first', body: { sourceId: reviewedGithub.id, ...(options.force ? { force: true } : {}) }, attempts: 1,
+      id: 'github-first', body: { sourceId: reviewedGithub.id, ...(options.force ? { force: true } : {}) }, attempts: options.attempts ?? 1,
       ack() { handled.push('ack'); }, retry() { handled.push('retry'); },
     };
     try {
@@ -939,6 +966,34 @@ describe('Cloudflare GitHub queue continuation', () => {
     expect(sent).toEqual([]);
     expect(handled).toEqual(['ack']);
     expect(sliceEvents).toEqual([expect.objectContaining({ resolutionPending: 4, failureCount: 0 })]);
+  });
+
+  it('defers a source failure that survives every delivery instead of dead-lettering it', async () => {
+    const { sent, handled } = await deliver({}, {
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      pollError: new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'),
+    });
+
+    expect(sent).toEqual([]);
+    expect(handled).toEqual(['ack']);
+  });
+
+  it('retries a source failure before the final delivery', async () => {
+    const { handled } = await deliver({}, {
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS - 1,
+      pollError: new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'),
+    });
+
+    expect(handled).toEqual(['retry']);
+  });
+
+  it('still returns a message the dispatcher cannot re-own to the platform', async () => {
+    const { handled } = await deliver({}, {
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      pollError: new Error('Unknown reviewed source "ghost"'),
+    });
+
+    expect(handled).toEqual(['retry']);
   });
 
   it('keeps forced recovery on every continuation while the source remains paused', async () => {
