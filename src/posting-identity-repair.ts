@@ -107,6 +107,9 @@ export type PostingIdentityApplyBatch = {
   repairToken: string;
   expectedChanges: number;
   expectedDuplicateJobs: number;
+  /** Per-batch bounds that permit a revalidated apply after unrelated catalog writes. */
+  eligibleDuplicateGroups: number;
+  unresolvedDuplicateGroups: number;
 };
 
 export type PostingIdentityRepairScope = 'all' | 'identity' | 'occurrences';

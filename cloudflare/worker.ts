@@ -889,7 +889,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
           || !Array.isArray(input.applyBatch.occurrenceKeys)
           || input.applyBatch.occurrenceKeys.some((item) => !Array.isArray(item) || item.length !== 2 || item.some((part) => typeof part !== 'string'))
           || typeof input.repairToken !== 'string' || typeof input.expectedChanges !== 'number'
-          || typeof input.expectedDuplicateJobs !== 'number') throw new Error('Identity repair batch is invalid');
+          || typeof input.expectedDuplicateJobs !== 'number'
+          || (input.acceptCurrentSnapshot === true && (!Number.isInteger(input.expectedEligibleDuplicateGroups)
+            || !Number.isInteger(input.expectedUnresolvedDuplicateGroups)))) throw new Error('Identity repair batch is invalid');
         report = await runBoundedPostingIdentityRepairBatch(env.DB, {
           jobIds: input.applyBatch.jobIds as string[],
           contextRows: input.applyBatch.contextRows as Array<{ pk: string; sk: string; kind: string; value: string }>,
@@ -897,6 +899,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
           repairToken: input.repairToken,
           expectedChanges: input.expectedChanges,
           expectedDuplicateJobs: input.expectedDuplicateJobs,
+          acceptCurrentSnapshot: input.acceptCurrentSnapshot,
+          expectedEligibleDuplicateGroups: input.expectedEligibleDuplicateGroups,
+          expectedUnresolvedDuplicateGroups: input.expectedUnresolvedDuplicateGroups,
         });
         if (input.finalize) await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         return withCors(Response.json(report));

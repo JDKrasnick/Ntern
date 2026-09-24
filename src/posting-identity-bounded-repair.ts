@@ -311,6 +311,8 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
       jobIds: [...jobIds].sort(), contextRows: batchContextRows.filter((row) => row.kind !== 'checkpoint'), occurrenceKeys: keys,
       repairToken: plan.repairToken, expectedChanges: plan.expectedChanges,
       expectedDuplicateJobs: plan.duplicateJobs,
+      eligibleDuplicateGroups: plan.eligibleDuplicateGroups,
+      unresolvedDuplicateGroups: plan.unresolvedDuplicateGroups,
     });
     for (const conflict of plan.conflicts) batchConflicts.add(conflict);
     for (const write of plan.catalogWrites) coalesceWriteFacts(catalogWriteFacts, `${write.pk}\0${write.sk}`, {
@@ -433,6 +435,9 @@ export async function runBoundedPostingIdentityRepairBatch(db: D1Database, optio
   repairToken: string;
   expectedChanges: number;
   expectedDuplicateJobs: number;
+  acceptCurrentSnapshot?: boolean;
+  expectedEligibleDuplicateGroups?: number;
+  expectedUnresolvedDuplicateGroups?: number;
 }): Promise<PostingIdentityRepairPlan> {
   if (!options.jobIds.length || options.jobIds.length > 500) throw new Error('Identity repair batch must contain 1 to 500 jobs');
   if (options.occurrenceKeys.length > 5_000) throw new Error('Identity repair batch contains too many occurrence keys');
