@@ -376,7 +376,10 @@ describe('Cloudflare bulk operation admission', () => {
       jobIds: ['one'], contextRows: [], occurrenceKeys: [],
     } })).toBe(false);
     expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
-      jobIds: Array.from({ length: 21 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
+      jobIds: Array.from({ length: 100 }, (_, index) => String(index)), contextRows: Array.from({ length: 125 }, () => ({})), occurrenceKeys: Array.from({ length: 125 }, () => []),
+    } })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
+      jobIds: Array.from({ length: 101 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
     } })).toBe(false);
   });
 });

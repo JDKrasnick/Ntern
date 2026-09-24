@@ -408,8 +408,12 @@ type PostingIdentityRepairInput = {
   applyBatch?: { jobIds?: unknown; contextRows?: unknown; occurrenceKeys?: unknown }; finalize?: boolean;
 };
 
-const MAX_LOW_IMPACT_REPAIR_JOBS = 20;
-const MAX_LOW_IMPACT_REPAIR_REFERENCES = 100;
+// A single reviewed duplicate family can be larger than the original
+// per-batch planning default. Keep this queue-tolerant path below the normal
+// 500-job repair limit, while admitting that bounded family without requiring
+// an indefinitely empty production queue.
+const MAX_LOW_IMPACT_REPAIR_JOBS = 100;
+const MAX_LOW_IMPACT_REPAIR_REFERENCES = 125;
 
 export function isLowImpactPostingIdentityRequest(input: PostingIdentityRepairInput): boolean {
   if (input.audit === true) return true;
