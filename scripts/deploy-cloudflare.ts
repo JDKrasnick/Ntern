@@ -27,6 +27,20 @@ function tofu(args: string[], options: { allowExitCodes?: number[] } = {}): { st
   return { status, stdout: result.stdout ?? '' };
 }
 
+function restoreOperationsSecret() {
+  const secret = process.env.OPERATIONS_SHARED_SECRET;
+  if (!secret) throw new Error('OPERATIONS_SHARED_SECRET is required to restore protected production operations after deployment');
+  for (const config of ['wrangler.ingestion.jsonc', 'wrangler.api.jsonc']) {
+    const result = spawnSync('npx', ['wrangler', 'secret', 'put', 'OPERATIONS_SHARED_SECRET', '--config', config], {
+      input: secret,
+      encoding: 'utf8',
+      stdio: ['pipe', 'ignore', 'inherit'],
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`Could not restore operations secret in ${config}`);
+  }
+}
+
 tofu(['init', '-reconfigure', '-input=false']);
 const planPath = join(tmpdir(), `cloudflare-${process.pid}.tfplan`);
 try {
@@ -41,6 +55,7 @@ try {
     process.exit(0);
   }
   tofu(['apply', '-input=false', '-auto-approve', planPath]);
+  restoreOperationsSecret();
   const converged = tofu(['plan', '-input=false', '-lock-timeout=5m', '-detailed-exitcode'], { allowExitCodes: [0, 2] });
   if (converged.status !== 0) throw new Error('Production still differs from this working tree after apply; inspect the plan above.');
   console.log('Deployed and converged.');
