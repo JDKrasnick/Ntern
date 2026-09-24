@@ -765,6 +765,28 @@ describe('trusted rollout repair boundaries', { timeout: 20_000 }, () => {
     vi.useRealTimers();
   });
 
+  it('reuses settled community rows when another row changes on the board', async () => {
+    const { store, rows, state, poll, sourceId } = migrationFixture();
+    const first = await poll(true);
+    expect(first.failures).toEqual([]);
+    const settled = await poll(true);
+    expect(settled.failures).toEqual([]);
+    const prior = await store.getSourceOccurrences(sourceId);
+    const commit = vi.spyOn(store, 'commitPostingObservation');
+    const probesBefore = state.calls;
+    rows[0]!.title = 'Updated Software Engineering Intern';
+
+    const changed = await poll(true);
+
+    expect(changed.failures).toEqual([]);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(state.calls - probesBefore).toBe(1);
+    expect((await store.getSourceOccurrences(sourceId)).find((item) => item.externalId === rows[0]!.externalId)?.occurrence.title)
+      .toBe('Updated Software Engineering Intern');
+    expect((await store.getSourceOccurrences(sourceId)).find((item) => item.externalId === rows[1]!.externalId))
+      .toEqual(prior.find((item) => item.externalId === rows[1]!.externalId));
+  });
+
   it('revokes without upstream access and can reverse an interrupted rollback', async () => {
     const { store, rows, state, poll, sourceId } = migrationFixture();
     await poll(true);
