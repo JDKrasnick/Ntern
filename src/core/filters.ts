@@ -110,6 +110,9 @@ const strongTechnicalPattern = new RegExp([
   String.raw`\b(?:machine learning|deep learning|gen(?:erative)? ?ai|artificial intelligence|\bml\b|\bnlp\b|\bllm\b|inference)\b`,
   String.raw`\bdata (?:engineer\w*|analyst\w*|analytics|scien\w+|pipeline|platform|integration|extraction|warehouse|modeling)\b`,
   String.raw`\b(?:sdet|test automation|quality (?:assurance|engineer(?:ing)?)|technical staff)\b`,
+  // Explicit technical delivery roles coordinate engineering work even when
+  // the posting does not list a programming stack.
+  String.raw`\btechnical (?:project|program) manage(?:ment|r)\b`,
   String.raw`\b(?:ios|android|front ?end|back ?end|full ?stack)\b`,
   // Quantitative finance is in scope, and its titles often also say "sales".
   String.raw`\b(?:quant|quantitative|trading|trader|algorithmic)\b`,

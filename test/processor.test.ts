@@ -17,6 +17,15 @@ const posting = (overrides: Partial<SourcedPosting> = {}): SourcedPosting => ({
 });
 
 describe('shared posting processor', () => {
+  it('includes an explicitly technical project management internship from an official board', () => {
+    const result = processSnapshot({ sourceId: 'greenhouse-astranis', outcome: 'changed', complete: true,
+      postings: [posting({ sourceId: 'greenhouse-astranis', title: 'Technical Project Management Intern (Summer 2027)',
+        content: [{ kind: 'description', format: 'plain', value: 'Coordinate mission schedules and engineering risk reviews.' }] })],
+      rawCount: 1, contentHash: 'hash', checkpoint: { sourceId: 'greenhouse-astranis', successfulFetches: 1 },
+    });
+    expect(result.counts).toMatchObject({ eligible: 1, shelved: 0 });
+    expect(result.listings[0]?.technical).toBe(true);
+  });
   it('normalizes content and emits a reason-coded included decision', () => {
     const result = processSnapshot({
       sourceId: 'lever-acme', outcome: 'changed', complete: true, postings: [posting()],
