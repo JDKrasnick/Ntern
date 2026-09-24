@@ -408,14 +408,29 @@ describe('Cloudflare bulk operation admission', () => {
       jobIds: Array.from({ length: 101 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
     } })).toBe(false);
     expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences' })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, finalize: false, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: [['simplify-summer-2026', 'README.md:1']],
+    } })).toBe(true);
+    // An omitted finalize defers the R2 rebuild exactly like an explicit false.
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: [],
+    } })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, finalize: true, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: [],
+    } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, applyBatch: {
+      jobIds: Array.from({ length: 101 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
+    } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: Array.from({ length: 126 }, (_, index) => [`source-${index}`, 'role']),
+    } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, applyBatch: {
+      jobIds: ['one'], contextRows: Array.from({ length: 126 }, () => ({})), occurrenceKeys: [],
+    } })).toBe(false);
+    // The catalog-wide occurrence apply no longer exists: the repair applies one
+    // signed batch at a time, so a bare apply must not admit queued work.
     expect(isLowImpactPostingIdentityRequest({
-      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 250, expectedDuplicateJobs: 0,
-    })).toBe(true);
-    expect(isLowImpactPostingIdentityRequest({
-      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 251, expectedDuplicateJobs: 0,
-    })).toBe(false);
-    expect(isLowImpactPostingIdentityRequest({
-      scope: 'occurrences', apply: true, repairToken: 'a'.repeat(64), expectedChanges: 1, expectedDuplicateJobs: 0,
+      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 1, expectedDuplicateJobs: 0,
     })).toBe(false);
   });
 });

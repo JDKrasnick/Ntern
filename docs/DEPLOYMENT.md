@@ -846,8 +846,9 @@ deserialising the whole catalog.
   `200 {"ready":true}` only when every work queue reports zero backlog and the
   last 30 minutes contain no recorded D1 overload. A missing queue metric or D1
   check returns retryable `503`; the endpoints repeat this check immediately
-  before scanning. A read-only identity audit, duplicate-only identity plan, or
-  identity apply batch capped at 100 jobs and 125 references may proceed with normal queue work only when the
+  before scanning. A read-only identity audit, duplicate-only identity plan,
+  paged occurrence plan, or identity/occurrence apply batch capped at 100 jobs
+  and 125 references may proceed with normal queue work only when the
   D1-overload check is clean. Full repairs and projection refreshes still
   require the strict window.
 
@@ -857,9 +858,15 @@ outbox facts in 20 pages at the default batch, used 14 s of CPU, and completed
 under a 104 MB V8 heap cap (96 MB at a 250-job batch). The single-pass plan
 needs 787 MB resident and over 256 MB of heap before it fails. That envelope
 still has to be confirmed in the deployed Worker before the daily gate is
-trusted. The guarded repair plan and apply are unchanged and still read the
-whole catalog: plan or apply a repair from a bounded scope, or outside the
-Worker, until a batch-scoped repair read is reviewed.
+trusted. The catalog-wide identity plan and apply still read the whole catalog:
+plan or apply them from a bounded scope, or outside the Worker. Occurrence
+synchronization is paged instead. `scope: "occurrences"` reads the job-ID alias
+table plus a job-ID-projected occurrence index, plans only the canonical jobs
+those aliases reach, and returns signed batches that
+`npm run migrate:posting-identity -- --batch-file PLAN.json --batch-index N --apply`
+applies one at a time with `finalize:false` (add `--accept-current-snapshot`
+when ingestion rewrote a job after the plan); the R2 projection is rebuilt by
+the separate authorized refresh.
 
 #### Issue #50 staged production execution
 
