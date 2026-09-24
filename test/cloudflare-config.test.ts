@@ -147,8 +147,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(api.migrations).toContainEqual({ tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] });
     expect(api.containers).toContainEqual({ class_name: 'ResumePdfCompilerV2', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 });
     expect(terraform).toContain('{ name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompilerV2" }');
-    expect(terraform).toContain('new_tag            = "v4-resume-pdf-compiler-v2"');
-    expect(terraform).toContain('new_sqlite_classes = ["ResumePdfCompilerV2"]');
+    expect(terraform).not.toMatch(/\bmigrations\s*=\s*\{/);
     expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "false"');
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.ingestion intern-notifs-ingestion');
@@ -169,9 +168,9 @@ describe('Cloudflare deployment configuration', () => {
     expect(ingestion.durable_objects?.bindings).toContainEqual({ name: 'D1_TRAFFIC_CONTROLLER', class_name: 'D1TrafficController' });
     expect(ingestion.migrations).toContainEqual({ tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] });
     expect(terraform).toContain('{ name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController" }');
-    expect(terraform).not.toMatch(/old_tag\s+= ""\s+new_tag\s+= "v1-d1-traffic-controller"/);
-    expect(terraform).toContain('new_tag            = "v1-d1-traffic-controller"');
-    expect(terraform).toContain('new_sqlite_classes = ["D1TrafficController"]');
+    // Wrangler keeps the bootstrap history; production OpenTofu updates existing
+    // classes without replaying a migration tag on every script upload.
+    expect(terraform).not.toMatch(/\bmigrations\s*=\s*\{/);
   });
 
   it('keeps the Cloudflare development resume stack isolated and complete', () => {

@@ -149,11 +149,9 @@ resource "cloudflare_workers_script" "ingestion" {
     local.ingestion_plain_bindings,
   )
 
-  migrations = {
-    new_tag            = "v1-d1-traffic-controller"
-    new_sqlite_classes = ["D1TrafficController"]
-  }
-
+  # The class was provisioned under v1-d1-traffic-controller. Sending that
+  # one-time migration on every code update makes Cloudflare reject the upload.
+  # Keep the history in wrangler.ingestion.jsonc for fresh bootstraps.
   limits = { cpu_ms = 120000, subrequests = 50000 }
   observability = {
     enabled            = true
@@ -195,11 +193,8 @@ resource "cloudflare_workers_script" "application" {
     local.api_plain_bindings,
   )
 
-  migrations = {
-    new_tag            = "v4-resume-pdf-compiler-v2"
-    new_sqlite_classes = ["ResumePdfCompilerV2"]
-  }
-
+  # The class was provisioned under v4-resume-pdf-compiler-v2. Routine code
+  # updates must not replay that migration; wrangler.api.jsonc keeps its history.
   limits = { cpu_ms = 30000, subrequests = 10000 }
   observability = {
     enabled            = true
