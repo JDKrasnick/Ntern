@@ -40,7 +40,8 @@ Most canonical employers are created before anyone has an icon for them, and a r
 
    The 0.40 exists because a role admitted from an official ATS, structured, or employer-submitted source has already had its destination reviewed as the employer's own application form. If that form is served from a host that is not a transport platform, that host *is* the employer's application host, and nothing further needs to confirm what the catalog already established. Community listings are deliberately excluded: their links are not the employer's own destination. Scores are settled to six decimals before the threshold comparison, so `0.45 + 0.40` cannot miss 0.85 to a binary rounding error.
 4. **One tie-breaker for the middle band.** The resolver may make **one** schema-validated `gpt-4o-mini` call when the best score is in 0.55–0.84, when the top two candidates are within 0.15, or when the best candidate already carries two independent evidence IDs (a candidate the tie-breaker could actually accept, since its own rule requires exactly that). It receives only a compact JSON summary, may select only a submitted candidate, must cite at least two distinct evidence IDs that belong to that candidate, and must reach 0.90 confidence. Anything else downgrades to a monogram. The budget is one call per employer per 30 days, except when the job-link evidence materially changed.
-5. **Failures back off.** A definitive no-match retries from one day, doubling to the 30-day revalidation ceiling. A transient provider failure (429/5xx/transport) retries from one hour and honours `Retry-After`.
+5. **A domain may be proposed when there is nothing to rank.** On a platform host the page can prove *who* is hiring and still name no domain, so when the candidate set is empty the same single model call is used in proposal mode: it answers with a registrable domain, and **nothing about that answer is trusted**. Transport hosts are refused outright, the proposed domain is fetched through the same SSRF controls as any other link, and it must present itself as this employer in its own metadata — naming either the catalog name or the name the employer's own board declares. A proposal that fails verification is recorded and discarded, and an accepted one still passes the verified-image gate, is stored as `selected_source = 'proposed'`, and carries a `proposed-domain` evidence ID so the review queue can tell how it was decided.
+6. **Failures back off.** A definitive no-match retries from one day, doubling to the 30-day revalidation ceiling. A transient provider failure (429/5xx/transport) retries from one hour and honours `Retry-After`.
 
 ### What the evidence can and cannot prove
 
@@ -57,7 +58,21 @@ Four kinds of employer-identity evidence are collected, and any two are enough t
 3. **The provider's own reported brand name**, matched symmetrically: it must contain every distinctive employer term and add no distinctive term of its own. `Flagship Pioneering` describes `Flagship Pioneering Co-Op Program` and `IMC Trading` describes `IMC`; `Scale Computing` never describes `Scale AI`.
 4. **The posting's reviewed ATS board slug**, compared against the canonical employer ID on whole segments and affixes from four characters. It is independent of whatever domain a provider nominates, and it carries the case where the page is challenge-gated or names an agency (`axontalentcommunity` hosts `axon`).
 
-Each provider is searched twice when the first attempt finds nothing: once with the full catalog name and once with the employer's distinctive brand token, because real catalog names are not what a search index holds (`Flagship Pioneering Co-Op Program` versus `Flagship Pioneering`). Both attempts use the same exact-name rule, so a retry can only recover a nomination the shorter query legitimately matches.
+Each provider is searched twice when the first attempt finds nothing: once with the full catalog name and once with the employer's distinctive brand token, because real catalog names are not what a search index holds (`Flagship Pioneering Co-Op Program` versus `Flagship Pioneering`). A third query uses the name the employer's own ATS board declares, which is what makes a renamed employer reachable at all: the board says `Rivian and Volkswagen Group Technologies` where the catalog says `RV Tech`. Every attempt matches the provider's answer against the name it asked for, and a query that fails or finds nothing does not stop the ones after it.
+
+### What a platform declares about its employer
+
+The posting page is already fetched for evidence, and the platforms publish more than a title in it:
+
+| Platform | Employer's own site | Employer's name |
+|---|---|---|
+| Ashby | **`publicWebsite`** in the board payload, else the careers page it hosts | page title |
+| Greenhouse | not published | **`company_name`** |
+| Lever | not published | page title |
+
+Either declaration is read from the page in hand, so it costs no extra request and no credential. An Ashby board's `publicWebsite` is the employer's own statement about its domain, so it carries the same weight as a JSON-LD Organization URL, and it is what lets an Ashby-hosted role resolve with no provider configured.
+
+A declared name is only used when it denotes a company. ATS boards sometimes carry a landing-page title — Axon's board declares `Join Our Talent Community` — which names a page rather than an employer and would send a provider search and a logo lookup in the wrong direction, so those are rejected.
 
 Identity evidence is attached to a domain the page itself named, or, when it names none, only to the candidates a **provider** nominated. It is never attached to an arbitrary host, so it cannot vouch for an unrelated domain, and a page naming a *different* employer contributes no page evidence at all.
 
@@ -75,15 +90,29 @@ Two cohorts from the live catalog, driven through the real resolver over real ap
 | Own domain (28) | none | yes | **28** | **28** | **0** |
 | Own domain (28) | Logo.dev | yes | 28 | 28 | **0** |
 | Own domain (28) | Logo.dev + Brandfetch | yes | 28 | 28 | **0** |
-| Platform host (26) | none | yes | 5 | 5 | **0** |
+| Platform host (26) | none | yes | **23** | **23** | **0** |
 | Platform host (26) | Logo.dev | yes | 26 | 26 | **0** |
 | Platform host (26) | Logo.dev + Brandfetch | yes | 26 | 26 | **0** |
+
+The platform-hosted cohort went from 5 to 23 published with **no provider configured at all**, and 18 of those 23 were decided by a domain the model proposed and the domain itself then confirmed. The three that remain are domains that refuse to identify themselves to our fetch — `genscript.com` and `worldquant.com` answer 403 and `togetherai.ai` renders its name client-side — so the resolver declines rather than publishing on the model's word alone. A provider resolves those, because a provider nomination does not depend on the domain answering us.
 
 The own-domain cohort is complete **without any provider at all**. Before the reviewed application host counted, eight employers — Coinbase, Jump Trading, Jane Street, Goldman Sachs, OpenAI, Uber, Tesla, and Google — were stranded at 0.45 with a single evidence ID, so they rendered a monogram even though their own application link was in hand. They now resolve automatically at 0.85.
 
 Four platform-hosted employers are excluded from the denominator because no domain of theirs could be verified at all; they are program or confidential boards (`walleyecapital-external-students`, `samsungresearchamericainternship`, `stackadapt-confidential`, `toshiba-global-commerce-solutions`).
 
-Read across: a role on the employer's own domain needs no provider, and a platform-hosted role needs one. Provider consensus resolves every platform-hosted employer automatically, and Logo.dev alone reaches all of them through the tie-breaker. Provider-free operation on a platform host is deliberately partial: a posting whose page declares nothing yields a monogram and no wrong domains.
+Read across: a role on the employer's own domain needs no provider, and a platform-hosted role is now mostly resolvable without one too. Provider consensus resolves every platform-hosted employer automatically, and Logo.dev alone reaches all of them. What remains a monogram is a domain that will not confirm who it belongs to.
+
+**The residual risk of a proposal is a name collision.** Verification asks whether the domain presents itself as this employer, and two companies can share a name — a domain titled `ACME Industrial Supply` does confirm an employer named `Acme`. That risk is inherent to any name-to-domain lookup, including a provider's own search, and it is bounded by the same guardrails: observe mode before anything is rendered, the exception queue, and `report-wrong` withdrawing a decision within a minute. Proposal decisions are marked `selected_source = 'proposed'` so they can be reviewed as their own class.
+
+### An option that was investigated and not taken
+
+Greenhouse and Lever serve the employer's uploaded logo as the posting's `og:image`, on their own CDN (`s101-recruiting.cdn.greenhouse.io/...`, `lever-client-logos.s3-us-west-2.amazonaws.com/...`), and Greenhouse's filename often carries the employer name. That is a real image for the right employer, and it would raise rendered coverage further. It is not used because:
+
+- it is a third-party asset, so rendering it is a hotlink and storing it needs the same kind of agreement Logo.dev self-hosting needs — the terms question Brandfetch already forced;
+- its quality varies: Axon's board serves a marketing banner rather than a mark;
+- the reviewed direction treats an image URL found on a page as evidence of nothing, so adopting it is a product decision about what an icon may be, not an implementation detail.
+
+Deciding to adopt it would be a small change — the same verified-image path, keyed on the ATS asset — and it is recorded here so the decision is explicit rather than accidental.
 
 **No incorrect domain was published in any configuration.** Every evidence signal and every decision path was exercised by the run:
 
