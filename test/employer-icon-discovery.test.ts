@@ -21,6 +21,7 @@ describe('employer icon discovery', () => {
       <link rel="apple-touch-icon" href="/touch.png">`);
     expect(result.verifiedName).toBe(false);
     expect(result.candidates).toEqual([expect.objectContaining({ source: 'apple-touch-icon', confidence: 'low' })]);
+    expect(discoverEmployerIcon('Acme', 'https://acme.test/', '<link rel="icon" href="#">').candidates).toEqual([]);
   });
 
   it('rejects unusable candidate assets before they reach review', () => {
@@ -28,6 +29,7 @@ describe('employer icon discovery', () => {
     expect(verifyEmployerIconAsset(new Response('', { headers: { 'Content-Type': 'text/html' } }))).toMatchObject({ accepted: false, reason: 'asset is not a supported image' });
     expect(verifyEmployerIconAsset(new Response('', { headers: { 'Content-Type': 'image/webp', 'Content-Length': '1500001' } }))).toMatchObject({ accepted: false, reason: 'asset exceeds the 1.5 MB review limit' });
     expect(verifyEmployerIconAsset(new Response('', { headers: { 'Content-Type': 'image/webp', 'Content-Length': '512' } }))).toEqual({ accepted: true, contentType: 'image/webp', bytes: 512 });
+    expect(verifyEmployerIconAsset(new Response('', { headers: { 'Content-Type': 'image/jpeg' } }))).toEqual({ accepted: true, contentType: 'image/jpeg' });
     expect(verifyEmployerIconAsset(new Response('', { headers: { 'Content-Type': 'image/svg+xml', 'Content-Length': '0' } }))).toEqual({ accepted: true, contentType: 'image/svg+xml' });
   });
 

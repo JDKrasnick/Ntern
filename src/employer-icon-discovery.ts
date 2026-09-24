@@ -31,6 +31,7 @@ const compact = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, ''
 const decodeHtml = (value: string) => value.replace(/&amp;/giu, '&').replace(/&#x2f;/giu, '/');
 const absoluteUrl = (raw: string, page: URL): string | undefined => {
   try {
+    if (raw.trim().startsWith('#')) return undefined;
     const url = new URL(decodeHtml(raw).trim(), page);
     return url.protocol === 'https:' ? url.href : undefined;
   } catch { return undefined; }
@@ -107,7 +108,7 @@ export function discoverEmployerIcon(company: string, pageUrl: string, html: str
 export function verifyEmployerIconAsset(response: Response): EmployerIconAssetCheck {
   if (!response.ok) return { accepted: false, reason: `asset returned HTTP ${response.status}` };
   const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase();
-  if (!contentType || !['image/avif', 'image/png', 'image/svg+xml', 'image/webp', 'image/x-icon', 'image/vnd.microsoft.icon'].includes(contentType)) {
+  if (!contentType || !['image/avif', 'image/jpeg', 'image/png', 'image/svg+xml', 'image/webp', 'image/x-icon', 'image/vnd.microsoft.icon'].includes(contentType)) {
     return { accepted: false, ...(contentType ? { contentType } : {}), reason: 'asset is not a supported image' };
   }
   const length = Number(response.headers.get('content-length'));

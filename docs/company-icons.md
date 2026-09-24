@@ -19,7 +19,7 @@ npm run preview:employer-icon -- --company "Figma" --domain figma.com
 unset LOGO_DEV_PUBLISHABLE_KEY
 ```
 
-The result places the Logo.dev candidate first, then ranks Organization JSON-LD above Open Graph, Apple touch, and favicon candidates. It also makes a bounded `HEAD` request for each candidate and rejects unsupported image types, failed responses, and assets larger than 1.5 MB before review. A candidate remains review-only: confirm the page belongs to the employer and that the rendered asset is their logo before using the upload workflow below. Logo-provider results follow the same rule; they suggest a domain or asset, but do not bypass review.
+The result places the Logo.dev candidate first, then ranks Organization JSON-LD above Open Graph, Apple touch, and favicon candidates. It also makes a bounded `HEAD` request for each candidate and rejects unsupported image types, failed responses, and assets larger than 1.5 MB before review. PNG, WebP, SVG, AVIF, and JPEG are valid review candidates; approved JPEG/AVIF candidates must be converted to WebP before upload. A candidate remains review-only: confirm the page belongs to the employer and that the rendered asset is their logo before using the upload workflow below. Logo-provider results follow the same rule; they suggest a domain or asset, but do not bypass review.
 
 If the website is challenge-gated or returns non-HTML, the command returns an empty candidate set with `blockedReason`. Record that outcome and continue to the ATS-board or manual-review rung; never substitute an ATS provider's own logo.
 
