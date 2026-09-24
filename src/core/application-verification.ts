@@ -69,7 +69,7 @@ export function reachabilityFromFailure(error: unknown): Reachability {
   const message = error instanceof Error ? error.message : String(error);
   const status = Number(/HTTP (\d{3})/.exec(message)?.[1]);
   if (status === 404 || status === 410) return 'gone';
-  if (status === 401 || status === 403 || status === 429) return 'blocked';
+  if (status === 401 || status === 403 || status === 406 || status === 429) return 'blocked';
   return 'unreachable';
 }
 

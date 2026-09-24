@@ -47,6 +47,7 @@ describe('reachability', () => {
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 410'))).toBe('gone');
     expect(reachabilityFromFailure(new Error('Application page returned HTTP 404'))).toBe('gone');
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 403'))).toBe('blocked');
+    expect(reachabilityFromFailure(new Error('Application page returned HTTP 406'))).toBe('blocked');
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 503'))).toBe('unreachable');
     expect(reachabilityFromFailure(new Error('fetch timed out'))).toBe('unreachable');
     expect(reachabilityFromSignals(['destination reached', 'access restricted to scraper'])).toBe('blocked');
