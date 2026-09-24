@@ -405,6 +405,23 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it('allows an explicitly revalidated batch when its counts still match', async () => {
+    const { sqlite, db } = await historicalDatabase({ presentationAgrees: true });
+    const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 1, duplicateGroupsOnly: true });
+    const batch = dry.applyBatches?.[0];
+    expect(batch).toBeDefined();
+    sqlite.prepare("UPDATE catalog_items SET value = json_set(value, '$.lastSeenAt', '2026-08-03T00:00:00.000Z') WHERE pk = ? AND sk = 'META'")
+      .run(`JOB#${batch!.jobIds[0]}`);
+
+    await expect(runBoundedPostingIdentityRepairBatch(db, batch!)).rejects.toThrow('Catalog changed after dry run');
+    await expect(runBoundedPostingIdentityRepairBatch(db, {
+      ...batch!, acceptCurrentSnapshot: true,
+      expectedEligibleDuplicateGroups: batch!.eligibleDuplicateGroups,
+      expectedUnresolvedDuplicateGroups: batch!.unresolvedDuplicateGroups,
+    })).resolves.toMatchObject({ applied: true });
+    sqlite.close();
+  });
+
   it('can plan only duplicate identity groups for a narrow production apply', async () => {
     const { sqlite, db } = await historicalDatabase();
     const all = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
