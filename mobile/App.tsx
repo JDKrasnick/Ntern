@@ -8,6 +8,7 @@ import {
   Easing,
   FlatList,
   InteractionManager,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -22,6 +23,7 @@ import {
   TextInput,
   type TextInputProps,
   type TextStyle,
+  type ViewStyle,
   TouchableOpacity,
   useWindowDimensions,
   View,
@@ -32,7 +34,6 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
-import { catalogGridColumnCount } from "./src/catalog-layout";
 import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
@@ -40,6 +41,7 @@ import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth,
 import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
 import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, laneSelection, type BeltItem } from "./src/newness-belt";
 import { loadCatalogFilters, saveCatalogFilters } from "./src/catalog-filter-storage";
+import { catalogGridColumnCount } from "./src/catalog-layout";
 import { type EducationLevel } from "../shared/education-display";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
@@ -347,6 +349,56 @@ const colors = {
   success: "#067647",
   danger: "#B42318",
 };
+
+type DesktopRolesVariant = "simplify" | "yc" | "blend";
+
+const companyLogoUris: Record<string, string> = {
+  astranis: "https://icons.duckduckgo.com/ip3/astranis.com.ico",
+  figma: "https://cdn.simpleicons.org/figma",
+  freeform: "https://icons.duckduckgo.com/ip3/freeform.co.ico",
+  newsbreak: "https://icons.duckduckgo.com/ip3/newsbreak.com.ico",
+  palantir: "https://cdn.simpleicons.org/palantir",
+  ramp: "https://icons.duckduckgo.com/ip3/ramp.com.ico",
+  vercel: "https://cdn.simpleicons.org/vercel",
+};
+const companyMarkColors = ["#E6F6F8", "#F0E8FF", "#FFF0E7", "#E8F5EA", "#E8EEFF", "#FCE8F1"];
+
+function companyInitials(company: string) {
+  const words = company.trim().split(/\s+/u).filter(Boolean);
+  return words.slice(0, 2).map((word) => word.slice(0, 1).toUpperCase()).join("") || "?";
+}
+
+function companyMarkColor(company: string) {
+  return company.split("").reduce((total, character) => total + character.charCodeAt(0), 0) % companyMarkColors.length;
+}
+
+function CompanyMark({ company, size = 38 }: { company: string; size?: number }) {
+  const [imageUnavailable, setImageUnavailable] = useState(false);
+  const logoUri = companyLogoUris[company.trim().toLowerCase()];
+  const backgroundColor = companyMarkColors[companyMarkColor(company)];
+  const label = `${company} logo`;
+  return (
+    <View accessibilityLabel={label} style={[styles.companyMark, { backgroundColor, borderRadius: Math.round(size * 0.29), height: size, width: size }]}>
+      {logoUri && !imageUnavailable ? (
+        <Image
+          accessibilityLabel={label}
+          onError={() => setImageUnavailable(true)}
+          source={{ uri: logoUri }}
+          style={{ height: Math.round(size * 0.66), width: Math.round(size * 0.66) }}
+        />
+      ) : <Text style={[styles.companyMarkFallback, { fontSize: Math.max(11, Math.round(size * 0.32)) }]}>{companyInitials(company)}</Text>}
+    </View>
+  );
+}
+
+/** Preview-only web variants are intentionally explicit so each localhost URL
+ * can exercise the real Roles feed with identical data. */
+function desktopRolesVariant(): DesktopRolesVariant {
+  if (Platform.OS !== "web" || typeof window === "undefined") return "yc";
+  const variant = new URLSearchParams(window.location.search).get("rolesVariant");
+  return variant === "simplify" || variant === "blend" ? variant : "yc";
+}
+
 if (Platform.OS === 'web' && typeof document !== 'undefined') {
   document.documentElement.style.backgroundColor = colors.canvas;
   document.body.style.backgroundColor = colors.canvas;
@@ -552,7 +604,7 @@ function useWebKeyboardShortcuts(shortcuts: WebShortcut[]) {
 function JobSource({ source, showIdentityUnconfirmed = false }: { source: ReturnType<typeof sourcePresentation>; showIdentityUnconfirmed?: boolean }) {
   const icon = source.primary === "Employer submitted"
     ? "business-outline"
-    : source.primary.startsWith("Official")
+    : source.labels.some((label) => label === "Official ATS" || label === "Official structured source")
     ? "shield-checkmark-outline"
     : source.primary === "Reviewed community source"
       ? "people-outline"
@@ -739,6 +791,8 @@ function JobCard({
   isAddingToQueue = false,
   onHideLocally,
   onRemoveFromQueue,
+  roleTable = false,
+  roleFeed = false,
 }: {
   job: Job;
   onOpen: () => void;
@@ -751,10 +805,19 @@ function JobCard({
   isAddingToQueue?: boolean;
   onHideLocally?: () => void;
   onRemoveFromQueue?: () => void;
+  /** Desktop Roles uses a compact, column-led job index. */
+  roleTable?: boolean;
+  /** Roles keeps its mobile identity cues without changing Catalog cards. */
+  roleFeed?: boolean;
 }) {
   const display = presentCatalogRole(job);
   const { width } = useWindowDimensions();
   const compactMobile = width < 600;
+  // Inspired by Linear's issue list: wide screens use stable information and
+  // action rails, while the compact experience keeps its single-column order.
+  const wideEditorialRow = Platform.OS === "web" && width >= 900;
+  const desktopVariant = roleTable && wideEditorialRow ? desktopRolesVariant() : null;
+  const showMobileRoleIdentity = compactMobile && roleFeed;
   const source = sourcePresentation(job.sourceReferences);
   const canAddToQueue = Boolean(onAddToQueue) && !isAddingToQueue && (!applicationStatus || (applicationStatus === "saved" && !(isQueued ?? true)));
   const inQueue = isQueued ?? applicationStatus === "saved";
@@ -781,7 +844,7 @@ function JobCard({
 
   return (
     <Animated.View style={{ opacity: hideFade, transform: [{ scale: hideScale }, { translateY: hideTranslateY }] }}>
-      <View style={styles.swipeCard}>
+      <View style={[styles.swipeCard, styles.editorialSwipeRow]}>
         {canAddToQueue || isAddingToQueue ? (
           <Animated.View
             pointerEvents="none"
@@ -828,73 +891,145 @@ function JobCard({
               if (event.nativeEvent.actionName === "removeFromQueue") handleRemoveFromQueue();
               if (event.nativeEvent.actionName === "hide") handleHide();
             }}
-            style={[styles.card, styles.swipeCardSurface, compactMobile && styles.mobileRoleCard]}
+            style={[
+              styles.editorialRoleRow,
+              styles.swipeCardSurface,
+              wideEditorialRow && styles.editorialRoleRowWide,
+              roleTable && styles.roleTableRow,
+              roleTable && wideEditorialRow && styles.roleTableRowWide,
+              compactMobile && styles.mobileEditorialRoleRow,
+            ]}
             onPress={onOpen}
           >
-            <View style={styles.jobCompanyRow}>
-              <View style={styles.jobCompanyLeft}>
-                <Text style={styles.company} numberOfLines={1}>{display.company}</Text>
-              </View>
-              {job.disciplines?.length || recencyBadge ? (
-                <View style={styles.jobCardTopTags}>
-                  {job.disciplines?.slice(0, 2).map((d) => {
-                    const s = disciplineStyleFor(d);
-                    return (
-                      <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
-                        <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
-                      </View>
-                    );
-                  })}
-                  {/* The marker closes the row so its position never depends on the
-                      company name or the discipline pill beside it. */}
-                  {recencyBadge ? (
-                    <View style={styles.newSpark} accessibilityLabel={`${recencyBadge} role`}>
-                      <Ionicons name="sparkles-outline" size={13} color={colors.signal} />
-                      <Text style={styles.newSparkText}>{recencyBadge}</Text>
+            {desktopVariant === "simplify" ? (
+              <View style={styles.simplifyRoleContent}>
+                <View style={styles.simplifyRoleTopline}>
+                  <View style={styles.desktopRoleIdentity}>
+                    <CompanyMark company={display.company} />
+                    <View style={styles.simplifyRoleCopy}>
+                      <Text style={styles.simplifyRoleCompany} numberOfLines={1}>{display.company}</Text>
+                      <Text style={styles.simplifyRoleTitle} numberOfLines={2}>{display.title}</Text>
                     </View>
-                  ) : null}
+                  </View>
+                  <Text style={styles.simplifyRoleOpen}>Open ›</Text>
                 </View>
-              ) : null}
+                <Text style={styles.simplifyRoleMeta} numberOfLines={2}>
+                  {display.location} · {display.season}<Text style={styles.roleSourceInline}> · {source.primary}</Text>
+                </Text>
+                <View style={styles.simplifyRoleUtilities}>
+                  {canAddToQueue ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" onPress={handleQueue}><Text style={styles.simplifyRoleUtility}>Queue</Text></TouchableOpacity> : null}
+                  {canHideLocally ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide}><Text style={styles.simplifyRoleUtility}>Hide</Text></TouchableOpacity> : null}
+                </View>
+              </View>
+            ) : desktopVariant === "yc" ? (
+              <View style={styles.ycRoleContent}>
+                <View style={styles.desktopRoleIdentity}>
+                  <CompanyMark company={display.company} />
+                  <View style={styles.ycRoleCopy}>
+                    <Text style={styles.ycRoleCompany} numberOfLines={1}>{display.company}</Text>
+                    <Text style={styles.ycRoleSource} numberOfLines={1}>{source.primary}</Text>
+                  </View>
+                </View>
+                <Text style={styles.ycRoleTitle} numberOfLines={2}>{display.title}</Text>
+                <Text style={styles.ycRoleMeta} numberOfLines={2}>
+                  {display.season} · {display.location}<Text style={styles.ycRoleDiscipline}> · {job.disciplines?.[0] ?? "Technical"}</Text>
+                </Text>
+                <View style={styles.ycRoleActions}>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="View role" onPress={onOpen}>
+                    <Text style={styles.ycRoleOpen}>View role ›</Text>
+                  </TouchableOpacity>
+                  <View style={styles.ycRoleUtilities}>
+                    {canHideLocally ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={styles.ycRoleHideAction}><Text style={styles.ycRoleHideText}>Hide</Text></TouchableOpacity> : null}
+                    {canAddToQueue ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Save to apply queue" onPress={handleQueue} style={styles.ycRoleSaveAction}><Text style={styles.ycRoleSaveText}>Save to queue</Text></TouchableOpacity> : null}
+                  </View>
+                </View>
+              </View>
+            ) : desktopVariant === "blend" ? (
+              <View style={styles.blendRoleContent}>
+                <View style={styles.blendRoleTopline}>
+                  <View style={styles.desktopRoleIdentity}>
+                    <CompanyMark company={display.company} />
+                    <Text style={styles.blendRoleCompany} numberOfLines={1}>{display.company}</Text>
+                  </View>
+                  <Text style={styles.blendRoleOpen}>View role ›</Text>
+                </View>
+                <Text style={styles.blendRoleTitle} numberOfLines={2}>{display.title}</Text>
+                <Text style={styles.blendRoleMeta} numberOfLines={2}>
+                  {display.location} · {display.season}
+                  {display.compensation ? <Text> · {display.compensation}</Text> : null}
+                </Text>
+                <Text style={styles.blendRoleProof} numberOfLines={1}><Text style={styles.blendRoleSource}>✓ {source.primary}</Text> · {postingTiming.summary}</Text>
+                <View style={styles.blendRoleUtilities}>
+                  {canAddToQueue ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" onPress={handleQueue}><Text style={styles.blendRoleUtility}>Queue</Text></TouchableOpacity> : null}
+                  {canHideLocally ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide}><Text style={styles.blendRoleUtility}>Hide</Text></TouchableOpacity> : null}
+                </View>
+              </View>
+            ) : <>
+            <View style={[wideEditorialRow && styles.editorialRolePrimary, roleTable && styles.appleResultPrimary]}>
+              <View style={styles.jobCompanyRow}>
+                <View style={[styles.jobCompanyLeft, showMobileRoleIdentity && styles.mobileRoleCompanyIdentity]}>
+                  {showMobileRoleIdentity ? <CompanyMark company={display.company} size={30} /> : null}
+                  <Text style={styles.company} numberOfLines={1}>{display.company}</Text>
+                </View>
+                {job.disciplines?.length || recencyBadge ? (
+                  <View style={styles.jobCardTopTags}>
+                    {job.disciplines?.slice(0, 2).map((d) => {
+                      const s = disciplineStyleFor(d);
+                      return (
+                        <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
+                          <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
+                        </View>
+                      );
+                    })}
+                    {recencyBadge ? (
+                      <View style={styles.newSpark} accessibilityLabel={`${recencyBadge} role`}>
+                        <Ionicons name="sparkles-outline" size={13} color={colors.signal} />
+                        <Text style={styles.newSparkText}>{recencyBadge}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
+              </View>
+              <Text style={[styles.title, compactMobile && styles.mobileRoleTitle]} numberOfLines={2}>{display.title}</Text>
+              <Text style={[styles.muted, compactMobile && styles.mobileRoleMeta]} numberOfLines={3}>
+                {display.location} · {display.season}
+                {display.compensation ? <Text style={styles.payInline}> · {display.compensation}</Text> : null}
+              </Text>
             </View>
-            <Text style={[styles.title, compactMobile && styles.mobileRoleTitle]} numberOfLines={2}>{display.title}</Text>
-            <Text style={[styles.muted, compactMobile && styles.mobileRoleMeta]} numberOfLines={3}>
-              {display.location} · {display.season}
-              {display.compensation ? <Text style={styles.payInline}> · {display.compensation}</Text> : null}
-            </Text>
-            <View style={compactMobile && styles.mobileRoleSource}><JobSource source={source} showIdentityUnconfirmed={job.postingIdentityStatus === "unconfirmed"} /></View>
-            <Text style={[styles.postingTiming, compactMobile && styles.mobileRoleTiming]}>{postingTiming.summary}</Text>
-            {!job.open ? <Text style={styles.closedStatus}>Closed</Text> : null}
-            <View style={[styles.jobCardFooterLeft, compactMobile && styles.mobileRoleFooter]}>
+            <View style={[wideEditorialRow && styles.editorialRoleEvidence, roleTable && styles.appleResultEvidence, compactMobile && styles.mobileRoleSource]}>
+              <JobSource source={source} showIdentityUnconfirmed={job.postingIdentityStatus === "unconfirmed"} />
+              <Text style={[styles.postingTiming, compactMobile && styles.mobileRoleTiming]}>{postingTiming.summary}</Text>
+              {!job.open ? <Text style={styles.closedStatus}>Closed</Text> : null}
+            </View>
+            <View style={[styles.jobCardFooterLeft, wideEditorialRow && styles.editorialRoleActions, roleTable && styles.appleResultActions, compactMobile && styles.mobileRoleFooter]}>
               <View style={styles.jobCardActionCompact}>
                 <Text style={styles.jobCardActionText}>View role</Text>
                 <Text style={styles.jobCardActionArrow}>›</Text>
               </View>
               <View style={styles.jobCardBottomActions}>
                 {canHideLocally ? (
-                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={styles.webHideButtonCompact}>
-                    <Ionicons name="eye-off-outline" size={14} color={colors.muted} />
-                    <Text style={styles.webHideButtonText}>Hide</Text>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={showMobileRoleIdentity ? styles.mobileRoleHideAction : styles.webHideButtonCompact}>
+                    {showMobileRoleIdentity ? <Text style={styles.mobileRoleHideText}>Hide</Text> : <><Ionicons name="eye-off-outline" size={14} color={colors.muted} /><Text style={styles.webHideButtonText}>Hide</Text></>}
                   </TouchableOpacity>
                 ) : null}
                 {!isAddingToQueue && inQueue && onRemoveFromQueue ? (
-                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Remove from queue" onPress={handleRemoveFromQueue} style={styles.webInQueueButtonCompact}>
-                    <Ionicons name="bookmark" size={14} color={colors.signal} />
-                    <Text style={styles.webInQueueButtonText}>In queue</Text>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Remove from queue" onPress={handleRemoveFromQueue} style={showMobileRoleIdentity ? styles.mobileRoleSaveAction : styles.webInQueueButtonCompact}>
+                    {showMobileRoleIdentity ? <Text style={styles.mobileRoleSaveText}>In queue</Text> : <><Ionicons name="bookmark" size={14} color={colors.signal} /><Text style={styles.webInQueueButtonText}>In queue</Text></>}
                   </TouchableOpacity>
                 ) : null}
                 {isAddingToQueue ? (
-                  <View style={styles.webQueueButtonCompact}>
-                    <Text style={styles.webQueueButtonText}>{queueProgressLabel}</Text>
+                  <View style={showMobileRoleIdentity ? styles.mobileRoleSaveAction : styles.webQueueButtonCompact}>
+                    <Text style={showMobileRoleIdentity ? styles.mobileRoleSaveText : styles.webQueueButtonText}>{queueProgressLabel}</Text>
                   </View>
                 ) : null}
                 {canAddToQueue ? (
-                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" accessibilityHint="Adds this role to the apply queue" onPress={handleQueue} style={styles.webQueueButtonCompact}>
-                    <Ionicons name="bookmark" size={14} color={colors.ink} />
-                    <Text style={styles.webQueueButtonText}>Queue</Text>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Save to apply queue" accessibilityHint="Saves this role to the apply queue" onPress={handleQueue} style={showMobileRoleIdentity ? styles.mobileRoleSaveAction : styles.webQueueButtonCompact}>
+                    {showMobileRoleIdentity ? <Text style={styles.mobileRoleSaveText}>Save to queue</Text> : <><Ionicons name="bookmark" size={14} color={colors.ink} /><Text style={styles.webQueueButtonText}>Queue</Text></>}
                   </TouchableOpacity>
                 ) : null}
               </View>
             </View>
+            </>}
           </TouchableOpacity>
         </Animated.View>
       </View>
@@ -1651,6 +1786,7 @@ function CatalogGroupCard({
   applicationStatus,
   isQueued,
   onRemoveFromQueue,
+  roleTable = false,
 }: {
   group: CatalogGroupRow;
   onOpenGroup: () => void;
@@ -1663,7 +1799,10 @@ function CatalogGroupCard({
   /** Explicit queue membership; defaults to saved status when omitted (guest). */
   isQueued?: boolean;
   onRemoveFromQueue?: () => void;
+  roleTable?: boolean;
 }) {
+  const { width } = useWindowDimensions();
+  const wideEditorialRow = Platform.OS === "web" && width >= 900;
   const inQueue = isQueued ?? applicationStatus === "saved";
   const queueProgressLabel = inQueue ? "Removing…" : "Adding…";
   const canAddToQueue = Boolean(onAddToQueue) && !isAddingToQueue && (!applicationStatus || (applicationStatus === "saved" && !inQueue));
@@ -1681,7 +1820,7 @@ function CatalogGroupCard({
   } = useCardGestures({ queueable: canAddToQueue, hideable: canHideLocally, onQueue: onAddToQueue, onHide: onHideLocally });
   if (catalogCardKind(group) === "role") {
     const job = catalogRoleJob(group.featuredRole);
-    return <JobCard job={job} onOpen={() => onOpenRole(job)} onAddToQueue={onAddToQueue} isAddingToQueue={isAddingToQueue} onHideLocally={onHideLocally} applicationStatus={applicationStatus} isQueued={isQueued} onRemoveFromQueue={onRemoveFromQueue} />;
+    return <JobCard job={job} onOpen={() => onOpenRole(job)} onAddToQueue={onAddToQueue} isAddingToQueue={isAddingToQueue} onHideLocally={onHideLocally} applicationStatus={applicationStatus} isQueued={isQueued} onRemoveFromQueue={onRemoveFromQueue} roleTable={roleTable} />;
   }
   const label = catalogGroupAvailabilityLabel(group, status);
   const education = group.education
@@ -1699,7 +1838,7 @@ function CatalogGroupCard({
   const groupLocation = compactLocations(group.locations);
   return (
     <Animated.View style={{ opacity: hideFade, transform: [{ scale: hideScale }, { translateY: hideTranslateY }] }}>
-      <View style={styles.swipeCard}>
+      <View style={[styles.swipeCard, styles.editorialSwipeRow]}>
         {canAddToQueue || isAddingToQueue ? (
           <Animated.View pointerEvents="none" style={[styles.swipeSaveAction, { opacity: queueProgress }]}>
             <Ionicons name="bookmark" size={20} color="#FFFFFF" />
@@ -1718,42 +1857,46 @@ function CatalogGroupCard({
             accessibilityLabel={`${groupCompany}, ${label}, ${boundedCatalogText(groupTitles.join(", "), 480)}${group.unconfirmedRoleCount ? `, ${group.unconfirmedRoleCount} ${group.unconfirmedRoleCount === 1 ? "role has" : "roles have"} unconfirmed identity` : ""}`}
             accessibilityHint="Opens every role in this group"
             onPress={onOpenGroup}
-            style={styles.catalogGroupCard}
+            style={[styles.editorialGroupRow, wideEditorialRow && styles.editorialGroupRowWide, roleTable && styles.roleTableRow, roleTable && wideEditorialRow && styles.roleTableRowWide]}
           >
-            <View style={styles.catalogGroupTopline}>
-              <View style={styles.jobCompanyLeft}>
-                <Text style={styles.company} numberOfLines={1}>{groupCompany}</Text>
-                <Text style={styles.catalogGroupCount}>{label}</Text>
-              </View>
-              {group.disciplines?.length ? (
-                <View style={styles.catalogGroupTopTags}>
-                  {group.disciplines.slice(0, 2).map((d) => {
-                    const s = disciplineStyleFor(d);
-                    return (
-                      <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
-                        <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
-                      </View>
-                    );
-                  })}
+            <View style={wideEditorialRow && styles.editorialGroupPrimary}>
+              <View style={styles.catalogGroupTopline}>
+                <View style={styles.jobCompanyLeft}>
+                  <Text style={styles.company} numberOfLines={1}>{groupCompany}</Text>
+                  <Text style={styles.catalogGroupCount}>{label}</Text>
                 </View>
+                {group.disciplines?.length ? (
+                  <View style={styles.catalogGroupTopTags}>
+                    {group.disciplines.slice(0, 2).map((d) => {
+                      const s = disciplineStyleFor(d);
+                      return (
+                        <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
+                          <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : null}
+              </View>
+              <Text style={styles.catalogGroupTitle} numberOfLines={group.roleCount === 1 ? 2 : 3}>
+                {groupTitles.join(" · ")}
+              </Text>
+              <Text style={styles.catalogGroupMeta} numberOfLines={3}>
+                {[groupLocation, group.seasons.map(seasonLabel).join(" · ")].filter(Boolean).join("  •  ")}
+                {compensation.length ? <Text style={styles.payInline}> · {compensation.slice(0, 2).join(" · ")}{compensation.length > 2 ? ` + ${compensation.length - 2} more` : ""}</Text> : null}
+              </Text>
+            </View>
+            <View style={wideEditorialRow && styles.editorialGroupEvidence}>
+              {featuredRole ? <JobSource source={source} /> : null}
+              {postingTiming ? <Text style={styles.postingTiming}>{postingTiming.summary}</Text> : null}
+              {education ? <Text style={styles.catalogGroupEducation} numberOfLines={2}>{education}</Text> : null}
+              {group.unconfirmedRoleCount ? (
+                <Text style={styles.catalogGroupIdentity} accessibilityLabel={`${group.unconfirmedRoleCount} ${group.unconfirmedRoleCount === 1 ? "role" : "roles"}: identity unconfirmed`}>
+                  {group.unconfirmedRoleCount} {group.unconfirmedRoleCount === 1 ? "role" : "roles"}: identity unconfirmed
+                </Text>
               ) : null}
             </View>
-            <Text style={styles.catalogGroupTitle} numberOfLines={group.roleCount === 1 ? 2 : 3}>
-              {groupTitles.join(" · ")}
-            </Text>
-            <Text style={styles.catalogGroupMeta} numberOfLines={3}>
-              {[groupLocation, group.seasons.map(seasonLabel).join(" · ")].filter(Boolean).join("  •  ")}
-              {compensation.length ? <Text style={styles.payInline}> · {compensation.slice(0, 2).join(" · ")}{compensation.length > 2 ? ` + ${compensation.length - 2} more` : ""}</Text> : null}
-            </Text>
-            {featuredRole ? <JobSource source={source} /> : null}
-            {postingTiming ? <Text style={styles.postingTiming}>{postingTiming.summary}</Text> : null}
-            {education ? <Text style={styles.catalogGroupEducation} numberOfLines={2}>{education}</Text> : null}
-            {group.unconfirmedRoleCount ? (
-              <Text style={styles.catalogGroupIdentity} accessibilityLabel={`${group.unconfirmedRoleCount} ${group.unconfirmedRoleCount === 1 ? "role" : "roles"}: identity unconfirmed`}>
-                {group.unconfirmedRoleCount} {group.unconfirmedRoleCount === 1 ? "role" : "roles"}: identity unconfirmed
-              </Text>
-            ) : null}
-            <View style={styles.catalogGroupFooterLeft}>
+            <View style={[styles.catalogGroupFooterLeft, wideEditorialRow && styles.editorialRoleActions]}>
               <View style={styles.jobCardActionCompact}>
                 <Text style={styles.jobCardActionText}>View roles</Text>
                 <Ionicons name="chevron-forward" size={17} color={colors.signal} />
@@ -1889,74 +2032,6 @@ function CatalogGroupLoadingSkeleton() {
         ))}
       </View>
     </View>
-  );
-}
-
-function NewRoleCard({
-  job,
-  onOpen,
-  applicationStatus,
-  isQueued,
-  index,
-  onAddToQueue,
-  isAddingToQueue,
-  onHideLocally,
-  onRemoveFromQueue,
-}: {
-  job: Job;
-  onOpen: () => void;
-  applicationStatus?: string;
-  isQueued?: boolean;
-  index: number;
-  onAddToQueue?: () => void;
-  isAddingToQueue?: boolean;
-  onHideLocally?: () => void;
-  onRemoveFromQueue?: () => void;
-}) {
-  const opacity = useRef(new Animated.Value(1)).current;
-  const lift = useRef(new Animated.Value(0)).current;
-  const glow = useRef(new Animated.Value(0)).current;
-  const motionAllowed = useContext(MotionAllowedContext);
-
-  useEffect(() => {
-    if (!motionAllowed) {
-      opacity.setValue(1);
-      lift.setValue(0);
-      glow.setValue(0);
-      return;
-    }
-    opacity.setValue(0);
-    lift.setValue(8);
-    glow.setValue(0);
-    const animation = Animated.sequence([
-      Animated.delay(Math.min(index, 4) * 80),
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 1, duration: 220, useNativeDriver: true }),
-        Animated.spring(lift, { toValue: 0, friction: 9, tension: 100, useNativeDriver: true }),
-        Animated.sequence([
-          Animated.timing(glow, { toValue: 0.18, duration: 160, useNativeDriver: true }),
-          Animated.timing(glow, { toValue: 0, duration: 420, useNativeDriver: true }),
-        ]),
-      ]),
-    ]);
-    animation.start();
-    return () => animation.stop();
-  }, [glow, index, lift, motionAllowed, opacity]);
-  return (
-    <Animated.View style={{ opacity, transform: [{ translateY: lift }] }}>
-      <JobCard
-        job={job}
-        onOpen={onOpen}
-        applicationStatus={applicationStatus}
-        isQueued={isQueued}
-        isNew
-        onAddToQueue={onAddToQueue}
-        isAddingToQueue={isAddingToQueue}
-        onHideLocally={onHideLocally}
-        onRemoveFromQueue={onRemoveFromQueue}
-      />
-      <Animated.View pointerEvents="none" style={[styles.newRoleGlow, { opacity: glow }]} />
-    </Animated.View>
   );
 }
 
@@ -3064,6 +3139,10 @@ function launchInterval(previousOpenedAt: string | null) {
 
 function LaunchInbox({
   inbox,
+  kind = "new",
+  loading = false,
+  error,
+  onRetry,
   onOpen,
   onViewAll,
   applicationStatuses,
@@ -3080,6 +3159,12 @@ function LaunchInbox({
   onOpenQueue,
 }: {
   inbox: LaunchInbox;
+  /** The Roles tab falls back to the current catalog when there is no release. */
+  kind?: "new" | "latest";
+  /** The standalone Roles feed must not look empty while its public page is loading. */
+  loading?: boolean;
+  error?: string;
+  onRetry?: () => void;
   onOpen: (job: Job) => void;
   onViewAll: () => void;
   applicationStatuses: Map<string, string>;
@@ -3095,17 +3180,20 @@ function LaunchInbox({
   queueCount?: number;
   onOpenQueue?: () => void;
 }) {
+  const { width } = useWindowDimensions();
+  const isLatest = kind === "latest";
+  const showRolesTable = isLatest && Platform.OS === "web" && width >= 900;
   const visibleJobs = inbox.jobs.filter(
     (job) => !hiddenJobIds.has(job.jobId) || hiddenFeedbackJob?.jobId === job.jobId,
   );
   const groupedRows = inbox.groups?.map((details) => details.group) ?? [];
   if (groupedRows.length) return (
     <FlatList
-      style={styles.list}
+      style={[styles.list, styles.webScrollbarHidden]}
       data={groupedRows}
       extraData={[applicationStatuses, queuingJobIds]}
       keyExtractor={(group) => group.groupId}
-      contentContainerStyle={styles.feedListContent}
+      contentContainerStyle={[styles.feedListContent, styles.rolesFeedListContent]}
       ListHeaderComponent={
         <View style={styles.inboxHeader}>
           <Text accessibilityLabel={`${inbox.total} new matches`} style={styles.inboxCount}>{inbox.total}</Text>
@@ -3127,16 +3215,18 @@ function LaunchInbox({
           : undefined;
         if (role) {
           return (
-            <NewRoleCard
+            <JobCard
               job={role}
               onOpen={() => onOpen(role)}
               applicationStatus={applicationStatuses.get(role.jobId)}
               isQueued={queuedJobIds?.has(role.jobId)}
-              index={index}
+              isNew
               onAddToQueue={() => onAddToQueue(role)}
               isAddingToQueue={queuingJobIds.has(role.jobId)}
               onHideLocally={() => onHideLocally(role)}
               onRemoveFromQueue={onRemoveFromQueue ? () => onRemoveFromQueue(role) : undefined}
+              roleTable={showRolesTable}
+              roleFeed={isLatest}
             />
           );
         }
@@ -3151,6 +3241,7 @@ function LaunchInbox({
             applicationStatus={item.featuredRole ? applicationStatuses.get(item.featuredRole.jobId) : undefined}
             isQueued={item.featuredRole ? queuedJobIds?.has(item.featuredRole.jobId) : undefined}
             onRemoveFromQueue={item.featuredRole && onRemoveFromQueue ? () => onRemoveFromQueue(catalogRoleJob(item.featuredRole)) : undefined}
+            roleTable={showRolesTable}
           />
         );
       }}
@@ -3167,25 +3258,30 @@ function LaunchInbox({
   );
   return (
     <FlatList
-      style={styles.list}
+      style={[styles.list, styles.webScrollbarHidden]}
       data={visibleJobs}
       extraData={[applicationStatuses, queuingJobIds]}
       keyExtractor={(job) => job.jobId}
-      contentContainerStyle={styles.feedListContent}
+      contentContainerStyle={[styles.feedListContent, styles.rolesFeedListContent]}
       ListHeaderComponent={
         <View style={styles.inboxHeader}>
-          <Text style={styles.eyebrow}>Your radar</Text>
-          <Text accessibilityLabel={`${visibleJobs.length} new matches`} style={styles.inboxCount}>
-            {visibleJobs.length}
-          </Text>
-          <Text style={styles.inboxTitle}>new matches</Text>
+          {isLatest ? (
+            <Text accessibilityLabel={`${visibleJobs.length} latest roles`} style={styles.inboxLatestTitle}>Latest roles</Text>
+          ) : (
+            <>
+              <Text accessibilityLabel={`${visibleJobs.length} new matches`} style={styles.inboxCount}>
+                {visibleJobs.length}
+              </Text>
+              <Text style={styles.inboxTitle}>new matches</Text>
+            </>
+          )}
           <Text style={styles.inboxDescription}>
-            Matched your alerts since {launchInterval(inbox.previousOpenedAt)}
+            {isLatest ? "The newest verified roles in the catalog" : `Matched your alerts since ${launchInterval(inbox.previousOpenedAt)}`}
           </Text>
           {inbox.hasMore ? (
             <Text style={styles.inboxOverflow}>Showing the newest 50.</Text>
           ) : null}
-          <View style={styles.inboxActions}>
+          {!isLatest ? <View style={styles.inboxActions}>
             <TouchableOpacity
               accessibilityRole="button"
               onPress={onViewAll}
@@ -3196,32 +3292,49 @@ function LaunchInbox({
             {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
               <QueuePillButton count={queueCount} onPress={onOpenQueue} />
             ) : null}
-          </View>
-          <Text style={styles.inboxSectionLabel}>New matches</Text>
+          </View> : null}
+          {!isLatest ? <Text style={styles.inboxSectionLabel}>New matches</Text> : null}
         </View>
       }
       renderItem={({ item, index }) =>
         hiddenFeedbackJob?.jobId === item.jobId ? (
           <HiddenRolePlaceholder onUndo={onUndoHide} />
         ) : (
-          <NewRoleCard
+          <JobCard
             job={item}
-            index={index}
             onOpen={() => onOpen(item)}
             applicationStatus={applicationStatuses.get(item.jobId)}
             isQueued={queuedJobIds?.has(item.jobId)}
+            isNew={!isLatest}
             onAddToQueue={() => onAddToQueue(item)}
             isAddingToQueue={queuingJobIds.has(item.jobId)}
             onHideLocally={() => onHideLocally(item)}
             onRemoveFromQueue={onRemoveFromQueue ? () => onRemoveFromQueue(item) : undefined}
+            roleTable={showRolesTable}
+            roleFeed={isLatest}
           />
         )}
       ListEmptyComponent={
-        <EmptyState
-          eyebrow="New matches"
-          title="Those roles are hidden on this device."
-          description="You can restore them from Profile whenever you want."
-        />
+        loading && isLatest ? (
+          <View accessibilityRole="progressbar" accessibilityLabel="Loading roles" style={styles.emptyState}>
+            <Text style={styles.eyebrow}>Latest roles</Text>
+            <Text style={styles.emptyTitle}>Loading roles…</Text>
+            <Text style={styles.emptyCopy}>Checking the public catalog.</Text>
+          </View>
+        ) : error && isLatest ? (
+          <View accessibilityRole="alert" style={styles.emptyState}>
+            <Text style={styles.eyebrow}>Latest roles</Text>
+            <Text style={styles.emptyTitle}>We couldn’t load roles.</Text>
+            <Text style={styles.emptyCopy}>Check your connection and try again.</Text>
+            {onRetry ? <ActionButton label="Try again" onPress={onRetry} compact /> : null}
+          </View>
+        ) : (
+          <EmptyState
+            eyebrow={isLatest ? "Latest roles" : "New matches"}
+            title={isLatest ? "No roles are available right now." : "Those roles are hidden on this device."}
+            description={isLatest ? "The catalog is up to date. Check back soon." : "You can restore them from Profile whenever you want."}
+          />
+        )
       }
       ListFooterComponent={
         visibleJobs.length ? (
@@ -3397,9 +3510,6 @@ function CatalogScreen({
     () => groups.filter((group) => !isHiddenGroup(group) || isUndoGroup(group)),
     [groups, hiddenJobIds, hiddenFeedbackJob],
   );
-  // A lane exists whenever the catalog has anything to lead with: the release
-  // lens first, and the newest roles when the lens has nothing new.
-  const lane = useMemo(() => laneSelection(visibleGroups, newJobIds), [visibleGroups, newJobIds]);
   const rows = useMemo(() => {
     const chunked: CatalogGroupRow[][] = [];
     for (let index = 0; index < visibleGroups.length; index += columns) {
@@ -3407,6 +3517,9 @@ function CatalogScreen({
     }
     return chunked;
   }, [columns, visibleGroups]);
+  // A lane exists whenever the catalog has anything to lead with: the release
+  // lens first, and the newest roles when the lens has nothing new.
+  const lane = useMemo(() => laneSelection(visibleGroups, newJobIds), [visibleGroups, newJobIds]);
   const searchFieldRef = useRef<TextInput>(null);
   const openNextQueuedRole = () => {
     const target = queue
@@ -3751,6 +3864,11 @@ function AppContent() {
   const [preferenceError, setPreferenceError] = useState<string>();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [catalogGroups, setCatalogGroups] = useState<CatalogGroupRow[]>([]);
+  // Roles is browse-first: it must remain populated even if Catalog is narrowed
+  // to a search or a saved filter, or a release check returns no new matches.
+  const [roleFeedGroups, setRoleFeedGroups] = useState<CatalogGroupRow[]>([]);
+  const [roleFeedLoading, setRoleFeedLoading] = useState(true);
+  const [roleFeedError, setRoleFeedError] = useState<string>();
   const [catalogError, setCatalogError] = useState<string>();
   const [catalogInitialLoading, setCatalogInitialLoading] = useState(true);
   const [catalogLoadingMore, setCatalogLoadingMore] = useState(false);
@@ -3777,6 +3895,22 @@ function AppContent() {
     // Saving before the stored filters load would overwrite them with the defaults.
     if (catalogFiltersHydrated) void saveCatalogFilters(catalogFilters);
   }, [catalogFilters, catalogFiltersHydrated]);
+  useEffect(() => {
+    let active = true;
+    setRoleFeedLoading(true);
+    setRoleFeedError(undefined);
+    void api<GroupedCatalogPage<CatalogGroupRow>>("/catalog?status=open&source=all&limit=50", "")
+      .then((page) => {
+        if (active) setRoleFeedGroups(page.groups);
+      })
+      .catch((error) => {
+        if (active) setRoleFeedError(error instanceof Error ? error.message : "We couldn't load roles right now.");
+      })
+      .finally(() => {
+        if (active) setRoleFeedLoading(false);
+      });
+    return () => { active = false; };
+  }, [catalogRefresh]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string>();
   const [selectedGroup, setSelectedGroup] = useState<CatalogGroupDetails>();
@@ -4361,6 +4495,14 @@ function AppContent() {
       ...jobs.filter((job) => !newJobs.some((newJob) => newJob.jobId === job.jobId)),
     ];
   }, [catalogFilters.jobStatus, jobs, launchInbox]);
+  // A release may be empty even though the public catalog is populated. Roles
+  // owns an unfiltered public page, rather than borrowing Catalog's current
+  // search/filter state, so it stays a scrollable browse surface.
+  const latestCatalogJobs = useMemo(
+    () => roleFeedGroups.flatMap((group) => group.featuredRole ? [catalogRoleJob(group.featuredRole)] : []),
+    [roleFeedGroups],
+  );
+  const hasLaunchRoles = Boolean(launchInbox && (launchInbox.jobs.length || launchInbox.groups?.length));
   // The catalog's newness lane reads the same release the Roles tab shows, so
   // "new" means one thing across both surfaces.
   const newCatalogJobIds = useMemo(
@@ -4706,7 +4848,7 @@ function AppContent() {
         <View style={styles.appMain}>
           {tab === "roles" ? (
             <View style={styles.pageColumn}>
-            {launchInbox ? (
+            {hasLaunchRoles && launchInbox ? (
               <LaunchInbox
                 inbox={launchInbox}
                 onOpen={openCatalogJob}
@@ -4725,14 +4867,27 @@ function AppContent() {
                 onOpenQueue={() => setQueueSheetVisible(true)}
               />
             ) : (
-              <View style={styles.catalogUnavailable}>
-                <EmptyState
-                  eyebrow="New matches"
-                  title="Nothing new right now."
-                  description="Roles that match your alerts land here when they appear. Search the catalog for everything we track."
-                />
-                <ActionButton label="Browse the catalog" onPress={() => changeTab("catalog")} />
-              </View>
+              <LaunchInbox
+                inbox={{ jobs: latestCatalogJobs, groups: [], total: latestCatalogJobs.length, hasMore: false, previousOpenedAt: null, openedAt: "" }}
+                kind="latest"
+                loading={roleFeedLoading}
+                error={roleFeedError}
+                onRetry={() => setCatalogRefresh((value) => value + 1)}
+                onOpen={openCatalogJob}
+                onOpenGroup={openCatalogGroup}
+                onViewAll={() => changeTab("catalog")}
+                applicationStatuses={applicationStatuses}
+                queuedJobIds={queuedJobIds}
+                onAddToQueue={addToQueue}
+                queuingJobIds={queuingJobIds}
+                hiddenJobIds={hiddenJobIds}
+                onHideLocally={hideLocally}
+                onRemoveFromQueue={removeFromQueue}
+                hiddenFeedbackJob={hiddenFeedbackJob}
+                onUndoHide={undoHideLocally}
+                queueCount={applyQueue.length}
+                onOpenQueue={() => setQueueSheetVisible(true)}
+              />
             )}
             </View>
           ) : tab === "queue" ? (
@@ -5257,8 +5412,16 @@ function GuestExperience({
 }) {
   const { width } = useWindowDimensions();
   const usesNavigationRail = width >= 700;
-  const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "profile">("catalog");
+  const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "profile">(() =>
+    Platform.OS === "web" && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("rolesVariant")
+      ? "roles"
+      : "catalog",
+  );
   const [showAccount, setShowAccount] = useState(false);
+  const latestCatalogJobs = useMemo(
+    () => groups.flatMap((group) => group.featuredRole ? [catalogRoleJob(group.featuredRole)] : []),
+    [groups],
+  );
   const openAccount = () => {
     setShowAccount(true);
     if (Platform.OS === "web" && typeof window !== "undefined") {
@@ -5347,14 +5510,20 @@ function GuestExperience({
                   onUndoHide={onUndoHide}
                 />
               ) : (
-                <View style={styles.catalogUnavailable}>
-                  <EmptyState
-                    eyebrow="New matches"
-                    title="Nothing new right now."
-                    description="Roles that match your alerts land here when they appear. Search the catalog for everything we track."
-                  />
-                  <ActionButton label="Browse the catalog" onPress={() => setTab("catalog")} />
-                </View>
+                <LaunchInbox
+                  inbox={{ jobs: latestCatalogJobs, groups: [], total: latestCatalogJobs.length, hasMore: false, previousOpenedAt: null, openedAt: "" }}
+                  kind="latest"
+                  onOpen={onOpenJob}
+                  onOpenGroup={onOpenGroup}
+                  onViewAll={() => setTab("catalog")}
+                  applicationStatuses={applicationStatuses}
+                  onAddToQueue={() => { openAccount(); }}
+                  queuingJobIds={queuingJobIds}
+                  hiddenJobIds={hiddenJobIds}
+                  onHideLocally={onHideLocally}
+                  hiddenFeedbackJob={hiddenFeedbackJob}
+                  onUndoHide={onUndoHide}
+                />
               )}
               </View>
             ) : tab === "queue" ? (
@@ -7645,6 +7814,7 @@ const styles = StyleSheet.create({
     lineHeight: 82,
   },
   inboxTitle: { color: colors.ink, fontSize: 30, fontWeight: "800", letterSpacing: -0.7, lineHeight: 36 },
+  inboxLatestTitle: { color: colors.ink, fontSize: 32, fontWeight: "800", letterSpacing: -0.7, lineHeight: 38 },
   inboxDescription: { color: colors.muted, fontSize: 16, lineHeight: 22, marginTop: 6 },
   inboxOverflow: { color: colors.muted, fontSize: 14, lineHeight: 20, marginTop: 6 },
   inboxViewAll: {
@@ -7663,7 +7833,14 @@ const styles = StyleSheet.create({
   inboxActions: { alignItems: "center", flexDirection: "row", gap: 8, marginTop: 16 },
   inboxViewAllInline: { alignSelf: "auto", marginTop: 0 },
   inboxSectionLabel: { color: colors.signal, fontSize: 12, fontWeight: "700", letterSpacing: 1, marginTop: 28 },
+  rolesRailHeader: { alignItems: "center", borderBottomColor: colors.ink, borderBottomWidth: 2, flexDirection: "row", marginTop: 28, minHeight: 38, paddingHorizontal: 20 },
+  rolesRailHeading: { color: colors.muted, fontSize: 11, fontWeight: "800", letterSpacing: 0.7, textTransform: "uppercase" },
+  rolesRailRoleHeading: { flex: 1, paddingRight: 24 },
+  rolesRailSourceHeading: { paddingLeft: 18, paddingRight: 12, width: 184 },
+  rolesRailActionHeading: { textAlign: "right", width: 132 },
   list: { flex: 1 },
+  // RN Web forwards this to CSS: scrollbar chrome is hidden, scrolling remains native.
+  webScrollbarHidden: { scrollbarWidth: "none" } as unknown as ViewStyle,
   /** One content column for every tab: same gutter, same left edge, and a height
    * the lists inside can actually scroll in. */
   pageColumn: {
@@ -7678,6 +7855,9 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     width: "100%",
   },
+  // The editorial Roles feed should use the whole desktop content rail rather
+  // than ending at a narrow fixed measure halfway across the viewport.
+  rolesFeedListContent: { maxWidth: "100%" },
   applicationsListContent: { paddingBottom: 44, paddingTop: 20 },
   catalogSearchBlock: {
     alignSelf: "center",
@@ -7849,11 +8029,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     flexDirection: "row",
     justifyContent: "space-between",
-    // Sit on the card's floor so the actions line up across a row whatever the
-    // card above them says. Cards without a pay line were floating their buttons
-    // fifty points higher than their neighbours.
     marginTop: "auto",
-    // Give the last action row a little air above the card edge.
     paddingBottom: 8,
     paddingTop: 12,
   },
@@ -7965,12 +8141,85 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.separator,
   },
-  mobileRoleCard: { marginBottom: 10, padding: 13 },
+  /** Role surfaces are continuous editorial rows.  The list owns the gutter;
+   * individual roles carry only a quiet rule, never a rounded card frame. */
+  editorialRoleRow: {
+    borderBottomColor: colors.separator,
+    borderBottomWidth: 1,
+    minHeight: 132,
+    paddingVertical: 20,
+  },
+  editorialRoleRowWide: {
+    alignItems: "center",
+    flexDirection: "row",
+    minHeight: 126,
+    paddingHorizontal: 20,
+  },
+  // Desktop Roles previews remain continuous rows; no source or action column.
+  roleTableRow: { minHeight: 118, paddingVertical: 16 },
+  roleTableRowWide: { minHeight: 122, paddingHorizontal: 20, paddingVertical: 16 },
+  appleResultPrimary: { flex: 1, paddingRight: 24 },
+  appleResultEvidence: { borderLeftColor: colors.separator, borderLeftWidth: 1, flexShrink: 0, marginTop: 0, minWidth: 160, paddingLeft: 18, paddingRight: 12, width: 184 },
+  appleResultActions: { alignItems: "flex-end", alignSelf: "stretch", justifyContent: "center", marginTop: 0, width: 132 },
+  simplifyRoleContent: { flex: 1, minWidth: 0 },
+  simplifyRoleTopline: { alignItems: "flex-start", flexDirection: "row", gap: 16, justifyContent: "space-between" },
+  desktopRoleIdentity: { alignItems: "center", flex: 1, flexDirection: "row", gap: 11, minWidth: 0 },
+  companyMark: { alignItems: "center", flexShrink: 0, justifyContent: "center", overflow: "hidden" },
+  companyMarkFallback: { color: colors.ink, fontWeight: "800", letterSpacing: -0.3 },
+  simplifyRoleCopy: { flex: 1, minWidth: 0 },
+  simplifyRoleCompany: { color: colors.signal, fontSize: 12, fontWeight: "800", lineHeight: 17 },
+  simplifyRoleTitle: { color: colors.ink, fontSize: 17, fontWeight: "700", lineHeight: 23, marginTop: 3 },
+  simplifyRoleOpen: { color: colors.signal, fontSize: 13, fontWeight: "800", lineHeight: 18, paddingTop: 2 },
+  simplifyRoleMeta: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },
+  roleSourceInline: { color: colors.signal, fontWeight: "700" },
+  simplifyRoleUtilities: { flexDirection: "row", gap: 14, marginTop: 9 },
+  simplifyRoleUtility: { color: colors.muted, fontSize: 12, fontWeight: "700", lineHeight: 17 },
+  ycRoleContent: { flex: 1, minWidth: 0, paddingVertical: 2 },
+  ycRoleCopy: { flex: 1, minWidth: 0 },
+  ycRoleCompany: { color: colors.signal, fontSize: 14, fontWeight: "800", lineHeight: 20 },
+  ycRoleSource: { color: "#4B6B7A", fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 2 },
+  ycRoleTitle: { color: colors.ink, fontSize: 17, fontWeight: "700", lineHeight: 23, marginTop: 8 },
+  ycRoleMeta: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },
+  ycRoleDiscipline: { color: "#5B4AA8", fontWeight: "700" },
+  ycRoleActions: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", marginTop: 10 },
+  ycRoleOpen: { color: colors.signal, fontSize: 13, fontWeight: "800", lineHeight: 18 },
+  ycRoleUtilities: { alignItems: "center", flexDirection: "row", gap: 12 },
+  ycRoleHideAction: { justifyContent: "center", minHeight: 32, paddingHorizontal: 4 },
+  ycRoleHideText: { color: colors.muted, fontSize: 12, fontWeight: "700", lineHeight: 17, textDecorationColor: "#C9CBD2", textDecorationLine: "underline" },
+  ycRoleSaveAction: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 999, justifyContent: "center", minHeight: 32, paddingHorizontal: 13 },
+  ycRoleSaveText: { color: colors.signal, fontSize: 12, fontWeight: "800", lineHeight: 17 },
+  blendRoleContent: { flex: 1, minWidth: 0 },
+  blendRoleTopline: { alignItems: "baseline", flexDirection: "row", gap: 16, justifyContent: "space-between" },
+  blendRoleCompany: { color: colors.signal, flex: 1, fontSize: 12, fontWeight: "800", lineHeight: 17 },
+  blendRoleOpen: { color: colors.signal, fontSize: 13, fontWeight: "800", lineHeight: 18 },
+  blendRoleTitle: { color: colors.ink, fontSize: 17, fontWeight: "700", lineHeight: 23, marginTop: 3 },
+  blendRoleMeta: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 5 },
+  blendRoleProof: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 8 },
+  blendRoleSource: { color: colors.signal, fontWeight: "700" },
+  blendRoleUtilities: { alignItems: "center", flexDirection: "row", gap: 14, justifyContent: "flex-end", marginTop: 8 },
+  blendRoleUtility: { color: colors.muted, fontSize: 12, fontWeight: "700", lineHeight: 17 },
+  editorialRolePrimary: { flex: 1, minWidth: 0, paddingRight: 24 },
+  editorialRoleEvidence: { flexShrink: 0, minWidth: 176, paddingRight: 20, width: 206 },
+  editorialRoleActions: {
+    alignItems: "flex-end",
+    alignSelf: "stretch",
+    flexDirection: "column",
+    flexShrink: 0,
+    justifyContent: "center",
+    marginTop: 0,
+    width: 164,
+  },
+  mobileEditorialRoleRow: { minHeight: 122, paddingVertical: 18 },
+  mobileRoleCompanyIdentity: { gap: 8 },
   mobileRoleTitle: { fontSize: 16, lineHeight: 22, marginTop: 3 },
   mobileRoleMeta: { fontSize: 13, lineHeight: 19, marginTop: 3 },
   mobileRoleSource: { marginTop: -2 },
   mobileRoleTiming: { fontSize: 12, lineHeight: 17 },
   mobileRoleFooter: { marginTop: 9 },
+  mobileRoleHideAction: { justifyContent: "center", minHeight: 32, paddingHorizontal: 4 },
+  mobileRoleHideText: { color: colors.muted, fontSize: 12, fontWeight: "700", lineHeight: 17, textDecorationColor: "#C9CBD2", textDecorationLine: "underline" },
+  mobileRoleSaveAction: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 999, justifyContent: "center", minHeight: 32, paddingHorizontal: 13 },
+  mobileRoleSaveText: { color: colors.signal, fontSize: 12, fontWeight: "800", lineHeight: 17 },
   catalogGroupCard: {
     backgroundColor: colors.surface,
     borderColor: colors.separator,
@@ -7979,6 +8228,20 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     padding: 16,
   },
+  editorialGroupRow: {
+    borderBottomColor: colors.separator,
+    borderBottomWidth: 1,
+    minHeight: 148,
+    paddingVertical: 20,
+  },
+  editorialGroupRowWide: {
+    alignItems: "center",
+    flexDirection: "row",
+    minHeight: 144,
+    paddingHorizontal: 20,
+  },
+  editorialGroupPrimary: { flex: 1, minWidth: 0, paddingRight: 24 },
+  editorialGroupEvidence: { flexShrink: 0, minWidth: 176, paddingRight: 20, width: 206 },
   catalogGroupTopline: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", gap: 12 },
   catalogGroupCount: {
     backgroundColor: colors.signalSoft,
@@ -8023,6 +8286,7 @@ const styles = StyleSheet.create({
   catalogGroupRoleMeta: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 3 },
   catalogGroupRolePay: { color: colors.success, fontSize: 13, fontWeight: "700", marginTop: 6 },
   swipeCard: { marginBottom: 12, position: "relative" },
+  editorialSwipeRow: { marginBottom: 0 },
   swipeCardSurface: { marginBottom: 0 },
   swipeSaveAction: {
     alignItems: "center",
@@ -8077,15 +8341,6 @@ const styles = StyleSheet.create({
   webHideButton: { alignItems: "center", backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 999, borderWidth: 1, flexDirection: "row", gap: 6, justifyContent: "center", minHeight: 36, paddingHorizontal: 12 },
   webHideButtonCompact: { alignItems: "center", backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 999, borderWidth: 1, flexDirection: "row", gap: 6, justifyContent: "center", minHeight: 32, paddingHorizontal: 10 },
   webHideButtonText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
-  newRoleGlow: {
-    backgroundColor: colors.signalGlow,
-    borderRadius: 14,
-    bottom: 0,
-    left: 0,
-    position: "absolute",
-    right: 0,
-    top: 0,
-  },
   sheetOverlay: {
     flex: 1,
     backgroundColor: colors.overlay,
