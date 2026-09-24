@@ -14,6 +14,8 @@ describe('company icon route', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('image/webp');
     expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, must-revalidate');
+    expect(response.headers.get('Content-Security-Policy')).toBe('sandbox');
+    expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
   });
 
   it('revalidates the stable URL after an icon changes or is removed', async () => {
@@ -44,5 +46,7 @@ describe('company icon route', () => {
     const asset = { async get() { return object('text/html'); } } as unknown as R2Bucket;
     await expect(companyIconResponse('not%2Fa-company', employer, asset)).resolves.toMatchObject({ status: 404 });
     await expect(companyIconResponse('acme', employer, asset)).resolves.toMatchObject({ status: 404 });
+    await expect(companyIconResponse('acme', employer, { async get() { return object('image/svg+xml'); } } as unknown as R2Bucket))
+      .resolves.toMatchObject({ status: 404 });
   });
 });

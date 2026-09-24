@@ -2,6 +2,7 @@ import { POSTING_PROVIDERS, type CanonicalEmployer, type DestinationReviewRule, 
 import type { DestinationVerificationRequest } from '../src/destination-verification.js';
 import { ATOMIC_REPAIR_RECORD_LIMIT, BACKFILL_REPAIR_RECORD_LIMIT } from './catalog-admission-store.js';
 import type { D1CatalogAdmissionStore, RepairChange } from './catalog-admission-store.js';
+import { validCompanyIconEmployerId } from './company-icon.js';
 
 const json = (status: number, body: unknown) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
@@ -62,6 +63,7 @@ export async function handleCatalogAdmissionOperations(
     if (request.method === 'PUT' && path === '/internal/admission/employers') {
       const input = await body(request);
       const id = text(input.id, 'id', 160);
+      if (!validCompanyIconEmployerId(id)) throw new Error('id must use lowercase letters, digits, and hyphens');
       const existing = (await store.listCanonicalEmployers()).find((item) => item.id === id);
       const clearIcon = input.iconKey === null;
       const nextIconKey = iconKey(input.iconKey, id);

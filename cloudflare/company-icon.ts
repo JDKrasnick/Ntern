@@ -2,7 +2,11 @@ import type { CanonicalEmployer } from '../src/types.js';
 import type { R2Bucket } from './types.js';
 
 const COMPANY_ICON_ID = /^[a-z0-9][a-z0-9-]{0,159}$/u;
-const PUBLIC_ICON_CONTENT_TYPES = new Set(['image/avif', 'image/png', 'image/svg+xml', 'image/webp']);
+const PUBLIC_ICON_CONTENT_TYPES = new Set(['image/avif', 'image/png', 'image/webp']);
+
+export function validCompanyIconEmployerId(id: string): boolean {
+  return COMPANY_ICON_ID.test(id);
+}
 
 export interface CanonicalEmployerIconStore {
   getCanonicalEmployer(id: string): Promise<CanonicalEmployer | undefined>;
@@ -16,7 +20,7 @@ export async function companyIconResponse(
 ): Promise<Response> {
   let employerId: string;
   try { employerId = decodeURIComponent(encodedEmployerId); } catch { return notFound(); }
-  if (!COMPANY_ICON_ID.test(employerId)) return notFound();
+  if (!validCompanyIconEmployerId(employerId)) return notFound();
 
   const employer = await employers.getCanonicalEmployer(employerId);
   if (!employer?.iconKey) return notFound();
@@ -26,6 +30,8 @@ export async function companyIconResponse(
 
   const headers = new Headers({
     'Content-Type': contentType,
+    'Content-Security-Policy': 'sandbox',
+    'X-Content-Type-Options': 'nosniff',
     // The public URL is stable even when the reviewed R2 key changes.
     'Cache-Control': 'public, max-age=60, must-revalidate',
   });

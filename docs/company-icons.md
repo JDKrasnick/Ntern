@@ -4,7 +4,7 @@ Company icons are stored against `canonical_employers`, not provider mappings or
 
 ## Operator workflow
 
-For a reviewed square PNG, WebP, or SVG, use a canonical ID such as `acme` and an immutable filename such as `logo-v1.webp`. Upload the asset to the existing documents bucket, then attach that exact key while creating or updating the employer. The API rejects a key outside that employer's `company-icons/<id>/` prefix, and rejects a new employer without a key.
+For a reviewed square PNG, WebP, or AVIF, use a lowercase canonical ID containing only letters, digits, and hyphens, such as `acme`, and an immutable filename such as `logo-v1.webp`. Upload the asset to the existing documents bucket, then attach that exact key while creating or updating the employer. The API rejects a key outside that employer's `company-icons/<id>/` prefix, and rejects a new employer without a key. SVG is not served because opening an SVG directly can run scripts on the API origin.
 
 ```bash
 # The bucket name is derived from the API worker name: intern-notifs-documents.

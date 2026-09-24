@@ -108,6 +108,16 @@ describe('D1 catalog admission operations', () => {
     expect(database.prepare("SELECT count(*) AS count FROM admission_reviewer_decisions WHERE subject_id = ? AND decision = 'icon-withdrawn'").get('acme'))
       .toEqual({ count: 1 });
   });
+  it.each(['Acme', 'acme_inc', 'a/b'])('rejects an employer ID that the public icon route cannot serve: %s', async (id) => {
+    const { database, admission: store } = subject();
+    const response = await handleCatalogAdmissionOperations(new Request('https://api.test/internal/admission/employers', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, displayName: 'Acme', iconKey: `company-icons/${id}/logo-v1.webp` }),
+    }), store, async () => undefined);
+    expect(response.status).toBe(409);
+    expect(await store.getCanonicalEmployer(id)).toBeUndefined();
+    database.close();
+  });
   it('forwards verified-page replacement through the internship store adapter', async () => {
     const { database, jobs } = subject();
     const evidence = (sourceClass: 'official-json-ld' | 'official-page', artifactHash: string) => ({
