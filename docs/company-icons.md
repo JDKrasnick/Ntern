@@ -36,7 +36,9 @@ Most canonical employers are created before anyone has an icon for them, and a r
 
 1. **Admission records the task.** When posting admission resolves a canonical employer, `src/poll.ts` hands the employer ID, the application URL, and the provider/tenant to `enqueueEmployerIconResolution`. That is one deduplicated `INSERT` keyed by `(canonical_employer_id, evidence_fingerprint)`; no provider or model is called on the ingestion path, and the insert is skipped when the employer already has a reviewed icon or a live decision.
 2. **A sweep resolves it.** The ten-minute maintenance cron calls `runEmployerIconResolutionPass`, which claims at most `maxPerSweep` due rows with a lease. The sweep reads the real application link through the existing SSRF controls (`safeFetchText`, five redirects, 10s, 512 KiB), parses only bounded public metadata (`<title>`, OpenGraph, JSON-LD `Organization` name and URL), and asks Logo.dev and Brandfetch for domains by employer name. A posting page larger than the ceiling is **truncated, not rejected**: the employer's name is in the first few kilobytes of `<head>`, and a two-megabyte Lever page must not cost that employer its icon.
-3. **Scoring decides.** Candidates are scored from the reviewed table — non-ATS final/careers URL 0.45, JSON-LD Organization 0.35, each provider's exact-name candidate 0.30, both providers agreeing on one domain 0.25, employer-identity evidence naming the employer 0.15, capped at 1.0. ATS and job-board hosts are transport and are rejected outright. A domain is accepted automatically only at 0.85 or above with a 0.15 margin over the runner-up.
+3. **Scoring decides.** Candidates are scored from the reviewed table — non-ATS final/careers URL 0.45, the reviewed application host of an officially-admitted role 0.40 on top of that, JSON-LD Organization 0.35, each provider's exact-name candidate 0.30, both providers agreeing on one domain 0.25, employer-identity evidence naming the employer 0.15, capped at 1.0. ATS and job-board hosts are transport and are rejected outright. A domain is accepted automatically only at 0.85 or above with a 0.15 margin over the runner-up.
+
+   The 0.40 exists because a role admitted from an official ATS, structured, or employer-submitted source has already had its destination reviewed as the employer's own application form. If that form is served from a host that is not a transport platform, that host *is* the employer's application host, and nothing further needs to confirm what the catalog already established. Community listings are deliberately excluded: their links are not the employer's own destination. Scores are settled to six decimals before the threshold comparison, so `0.45 + 0.40` cannot miss 0.85 to a binary rounding error.
 4. **One tie-breaker for the middle band.** The resolver may make **one** schema-validated `gpt-4o-mini` call when the best score is in 0.55–0.84, when the top two candidates are within 0.15, or when the best candidate already carries two independent evidence IDs (a candidate the tie-breaker could actually accept, since its own rule requires exactly that). It receives only a compact JSON summary, may select only a submitted candidate, must cite at least two distinct evidence IDs that belong to that candidate, and must reach 0.90 confidence. Anything else downgrades to a monogram. The budget is one call per employer per 30 days, except when the job-link evidence materially changed.
 5. **Failures back off.** A definitive no-match retries from one day, doubling to the 30-day revalidation ceiling. A transient provider failure (429/5xx/transport) retries from one hour and honours `Retry-After`.
 
@@ -55,6 +57,8 @@ Four kinds of employer-identity evidence are collected, and any two are enough t
 3. **The provider's own reported brand name**, matched symmetrically: it must contain every distinctive employer term and add no distinctive term of its own. `Flagship Pioneering` describes `Flagship Pioneering Co-Op Program` and `IMC Trading` describes `IMC`; `Scale Computing` never describes `Scale AI`.
 4. **The posting's reviewed ATS board slug**, compared against the canonical employer ID on whole segments and affixes from four characters. It is independent of whatever domain a provider nominates, and it carries the case where the page is challenge-gated or names an agency (`axontalentcommunity` hosts `axon`).
 
+Each provider is searched twice when the first attempt finds nothing: once with the full catalog name and once with the employer's distinctive brand token, because real catalog names are not what a search index holds (`Flagship Pioneering Co-Op Program` versus `Flagship Pioneering`). Both attempts use the same exact-name rule, so a retry can only recover a nomination the shorter query legitimately matches.
+
 Identity evidence is attached to a domain the page itself named, or, when it names none, only to the candidates a **provider** nominated. It is never attached to an arbitrary host, so it cannot vouch for an unrelated domain, and a page naming a *different* employer contributes no page evidence at all.
 
 A platform domain is normally rejected outright. One narrow exemption keeps the platform owners reachable: `employerNamesDomain` unblocks the host when the employer's own name denotes it, so `google.com` is reachable for Google, `github.com` for GitHub, and `rippling.com` for Rippling, while `greenhouse.io` stays unreachable for anyone but Greenhouse.
@@ -68,16 +72,18 @@ Two cohorts from the live catalog, driven through the real resolver over real ap
 | Cohort | Providers | Model | Published | Correct | Incorrect |
 |---|---|---:|---:|---:|---:|
 | Own domain (28) | none | no | 3 | 3 | **0** |
-| Own domain (28) | none | yes | 20 | 20 | **0** |
+| Own domain (28) | none | yes | **28** | **28** | **0** |
 | Own domain (28) | Logo.dev | yes | 28 | 28 | **0** |
 | Own domain (28) | Logo.dev + Brandfetch | yes | 28 | 28 | **0** |
 | Platform host (26) | none | yes | 5 | 5 | **0** |
 | Platform host (26) | Logo.dev | yes | 26 | 26 | **0** |
 | Platform host (26) | Logo.dev + Brandfetch | yes | 26 | 26 | **0** |
 
+The own-domain cohort is complete **without any provider at all**. Before the reviewed application host counted, eight employers — Coinbase, Jump Trading, Jane Street, Goldman Sachs, OpenAI, Uber, Tesla, and Google — were stranded at 0.45 with a single evidence ID, so they rendered a monogram even though their own application link was in hand. They now resolve automatically at 0.85.
+
 Four platform-hosted employers are excluded from the denominator because no domain of theirs could be verified at all; they are program or confidential boards (`walleyecapital-external-students`, `samsungresearchamericainternship`, `stackadapt-confidential`, `toshiba-global-commerce-solutions`).
 
-Read across: on its own domain a role resolves without **any** provider once structured data is present, and with one provider the coverage is complete. On a platform host, provider consensus resolves everything automatically, and Logo.dev alone reaches every employer through the tie-breaker. Provider-free operation is deliberately partial: a platform-hosted posting whose page declares nothing yields 21 monograms and no wrong domains.
+Read across: a role on the employer's own domain needs no provider, and a platform-hosted role needs one. Provider consensus resolves every platform-hosted employer automatically, and Logo.dev alone reaches all of them through the tie-breaker. Provider-free operation on a platform host is deliberately partial: a posting whose page declares nothing yields a monogram and no wrong domains.
 
 **No incorrect domain was published in any configuration.** Every evidence signal and every decision path was exercised by the run:
 
@@ -147,7 +153,7 @@ A wrong-icon report is deliberately terminal for the automatic path: the sweep w
 
 ### Observability
 
-The sweep emits one structured line per pass, `company_icon_resolution_complete`, carrying `company_icon_resolution_attempted_total`, `..._resolved_total`, `..._monogram_total`, `..._retryable_total`, `..._backfilled_total`, and a reason-code tally. Each accepted or declined tie-breaker also emits `company_icon_resolution_tie_break` with `accepted` and the validation reason code. Token counts are stored per employer in `icon_tie_break_input_tokens`/`icon_tie_break_output_tokens`. Provider tokens, full pages, and raw provider payloads are never logged.
+The sweep emits one structured line per pass, `company_icon_resolution_complete`, carrying `company_icon_resolution_attempted_total`, `..._resolved_total`, `..._monogram_total`, `..._retryable_total`, `..._backfilled_total`, `company_icon_resolution_provider_outcomes`, and a reason-code tally. The provider outcomes are the honest measure of a provider's real hit rate: `logo-dev:nominated`, `logo-dev:miss`, `logo-dev:failed`, and `logo-dev:unconfigured` are counted separately, because a miss and an unconfigured provider both yield no candidates and would otherwise be indistinguishable. Each accepted or declined tie-breaker also emits `company_icon_resolution_tie_break` with `accepted` and the validation reason code. Token counts are stored per employer in `icon_tie_break_input_tokens`/`icon_tie_break_output_tokens`. Provider tokens, full pages, and raw provider payloads are never logged.
 
 ### Reviewing the work without a live host
 
