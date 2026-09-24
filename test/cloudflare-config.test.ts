@@ -182,8 +182,10 @@ describe('Cloudflare deployment configuration', () => {
     expect(devApi.ai).toEqual({ binding: 'AI' });
     expect(devApi.vectorize).toEqual([{ binding: 'RESUME_EMBEDDINGS', index_name: 'intern-notifs-dev-resume-bank-v1' }]);
     expect(devApi.durable_objects?.bindings).toContainEqual({ name: 'RESUME_PDF_COMPILER', class_name: 'ResumePdfCompilerV2' });
-    expect(devApi.migrations).toContainEqual({ tag: 'v3-retire-resume-pdf-compiler', deleted_classes: ['ResumePdfCompiler'] });
-    expect(devApi.migrations).toContainEqual({ tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] });
+    // Dev never carried the retired ResumePdfCompiler class, so its first Durable
+    // Object migration must create ResumePdfCompilerV2 directly; a deleted_classes
+    // migration cannot be the first tag on a Worker with no DO history.
+    expect(devApi.migrations).toEqual([{ tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] }]);
     expect(devApi.containers).toEqual([{ class_name: 'ResumePdfCompilerV2', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 }]);
     expect(devApi.queues?.producers).toContainEqual({ binding: 'RESUME_JOB_IMPORT_QUEUE', queue: 'intern-notifs-dev-resume-job-import' });
     expect(devApi.vars.RESUME_TUNER_ENABLED).toBe('true');
