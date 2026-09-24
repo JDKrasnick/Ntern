@@ -179,8 +179,11 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
   const prior = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger
     WHERE period = ? AND lease_token = ?`).bind(period, leaseToken).first<{ state: string; reserved_cents: number }>();
   if (prior?.state === 'reserved' && prior.reserved_cents >= reserveCents) return true;
-  // Owner-approved $3 increase applies only to September 2026; October returns to the usual envelope.
-  const septemberIncreaseCents = period === '2026-09' ? 300 : 0;
+  // Keep the final $1 of September's owner-approved $4 increase for natural provider-poll work.
+  // Other origins retain the previous $3 increase; October returns to the usual envelope.
+  const run = await db.prepare('SELECT origin FROM shadow_extraction_runs WHERE run_key = ?')
+    .bind(runKey).first<{ origin: ShadowExtractionOrigin }>();
+  const septemberIncreaseCents = period === '2026-09' ? (run?.origin === 'provider-poll' ? 400 : 300) : 0;
   const allowance = Math.min(headroom + septemberIncreaseCents, Math.max(0, 2_000 + septemberIncreaseCents - forecast));
   if (reserveCents > allowance) return false;
   const result = await db.prepare(`INSERT INTO shadow_extraction_cost_ledger (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
