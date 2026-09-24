@@ -173,6 +173,34 @@ function bindingsMatchByName(before: unknown[], after: unknown[]): boolean {
   });
 }
 
+function normalizeStableDurableObjectNamespaceIds(
+  before: unknown,
+  after: unknown,
+  unknown: unknown,
+): { after: unknown; unknown: unknown } {
+  if (!Array.isArray(before) || !Array.isArray(after) || !Array.isArray(unknown)) return { after, unknown };
+  const beforeByName = new Map(before.flatMap((binding) => (
+    isRecord(binding) && typeof binding.name === 'string' ? [[binding.name, binding] as const] : []
+  )));
+  const normalizedAfter = [...after];
+  const normalizedUnknown = [...unknown];
+
+  after.forEach((binding, index) => {
+    if (!isRecord(binding) || binding.type !== 'durable_object_namespace' || typeof binding.name !== 'string') return;
+    if (!isDeepStrictEqual(unknown[index], { namespace_id: true })) return;
+    const previous = beforeByName.get(binding.name);
+    if (!isRecord(previous) || previous.type !== 'durable_object_namespace') return;
+    const { namespace_id: previousNamespaceId, ...previousIdentity } = previous;
+    const { namespace_id: nextNamespaceId, ...nextIdentity } = binding;
+    if (typeof previousNamespaceId !== 'string' || nextNamespaceId !== null) return;
+    if (!isDeepStrictEqual(previousIdentity, nextIdentity)) return;
+    normalizedAfter[index] = { ...binding, namespace_id: previousNamespaceId };
+    normalizedUnknown[index] = {};
+  });
+
+  return { after: normalizedAfter, unknown: normalizedUnknown };
+}
+
 function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after)) return false;
   const controllers = after.filter((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER');
@@ -288,6 +316,16 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   };
 
   let afterUnknown = change.after_unknown;
+  let afterForComparison = after;
+  if (isRecord(afterUnknown)) {
+    const normalized = normalizeStableDurableObjectNamespaceIds(
+      before.bindings,
+      after.bindings,
+      afterUnknown.bindings,
+    );
+    afterForComparison = { ...after, bindings: normalized.after };
+    afterUnknown = { ...afterUnknown, bindings: normalized.unknown };
+  }
   if (permittedControllerMigration && isRecord(afterUnknown) && Array.isArray(afterUnknown.bindings)) {
     const controllerIndex = Array.isArray(after.bindings)
       ? after.bindings.findIndex((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER')
@@ -301,7 +339,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   }
   if (!isDeepStrictEqual(
     protectedWorkerValue(beforeForComparison, afterUnknown),
-    protectedWorkerValue(after, afterUnknown),
+    protectedWorkerValue(afterForComparison, afterUnknown),
   )) return false;
 
   return !containsUnknown(protectedWorkerValue(afterUnknown, afterUnknown));
