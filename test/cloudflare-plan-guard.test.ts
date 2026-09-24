@@ -170,6 +170,14 @@ describe('Cloudflare deployment plan guard', () => {
       after: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: afterText }] } });
     expect(validateCloudflarePlan(plan([update(disabled, JSON.stringify(policy))]))).toHaveLength(1);
     expect(validateCloudflarePlan(plan([update(JSON.stringify(policy), disabled)]))).toHaveLength(1);
+    const unlimited = { ...policy, maxReceipts: null };
+    expect(validateCloudflarePlan(plan([update(JSON.stringify(policy), JSON.stringify(unlimited))]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([update(JSON.stringify(unlimited), disabled)]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([update(disabled, JSON.stringify(unlimited))]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([update(JSON.stringify(policy), JSON.stringify({ ...unlimited,
+      startsAt: '2026-09-23T00:00:00.000Z' }))]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([update(JSON.stringify(policy), JSON.stringify({ ...unlimited,
+      allowedFields: ['locations'] }))]))).toThrow('Refusing unsafe Cloudflare plan');
     for (const invalid of [{ ...policy, allowedFields: ['workMode'] }, { ...policy, maxReceipts: 26 },
       { ...policy, cohort: [{ sourceId: 'old' }] }, { ...policy, mode: 'all' }]) {
       expect(() => validateCloudflarePlan(plan([update(disabled, JSON.stringify(invalid))]))).toThrow('Refusing unsafe Cloudflare plan');

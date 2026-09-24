@@ -20,7 +20,7 @@ export interface ShadowPublicationPolicy {
   cohort: ShadowPublicationCohortEntry[];
   mode?: 'prospective-provider-poll';
   startsAt?: string;
-  maxReceipts?: number;
+  maxReceipts?: number | null;
 }
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -46,10 +46,11 @@ export function parseShadowPublicationPolicy(raw: string | undefined): ShadowPub
       if (cohort.length || value.cohort.length || !allowedFields.length
         || allowedFields.some((field) => !prospectivePublicationFields.includes(field as typeof prospectivePublicationFields[number]))
         || allowedFields.length !== value.allowedFields.length || new Set(allowedFields).size !== allowedFields.length
-        || !Number.isSafeInteger(value.maxReceipts) || Number(value.maxReceipts) < 1 || Number(value.maxReceipts) > 25
+        || (value.maxReceipts !== null && (!Number.isSafeInteger(value.maxReceipts)
+          || Number(value.maxReceipts) < 1 || Number(value.maxReceipts) > 25))
         || !Number.isFinite(date.getTime()) || date.toISOString() !== startsAt || raw.length > 100_000) throw new Error('invalid prospective policy');
       return { version: value.version.trim(), enabled: true, allowedFields, cohort: [], mode: 'prospective-provider-poll',
-        startsAt, maxReceipts: Number(value.maxReceipts) };
+        startsAt, maxReceipts: value.maxReceipts === null ? null : Number(value.maxReceipts) };
     }
     if (value.mode !== undefined || value.startsAt !== undefined || value.maxReceipts !== undefined) throw new Error('invalid exact policy');
     if (!allowedFields.length || allowedFields.length !== value.allowedFields.length || cohort.length !== value.cohort.length

@@ -49,7 +49,7 @@ function disablesReviewedMetadataCanary(before: string, after: string): boolean 
   }
 }
 
-function isProspectiveMetadataPolicy(value: unknown): boolean {
+function isProspectiveMetadataPolicy(value: unknown, allowUnlimited = false): boolean {
   if (!isRecord(value)) return false;
   const fields = value.allowedFields;
   const startsAt = value.startsAt;
@@ -60,7 +60,8 @@ function isProspectiveMetadataPolicy(value: unknown): boolean {
     && Array.isArray(value.cohort) && value.cohort.length === 0
     && Array.isArray(fields) && fields.length > 0 && fields.length <= 2
     && new Set(fields).size === fields.length && fields.every(field => field === 'compensation' || field === 'locations')
-    && Number.isSafeInteger(value.maxReceipts) && Number(value.maxReceipts) >= 1 && Number(value.maxReceipts) <= 25
+    && ((allowUnlimited && value.maxReceipts === null)
+      || (Number.isSafeInteger(value.maxReceipts) && Number(value.maxReceipts) >= 1 && Number(value.maxReceipts) <= 25))
     && typeof startsAt === 'string' && Number.isFinite(Date.parse(startsAt))
     && new Date(startsAt).toISOString() === startsAt;
 }
@@ -70,7 +71,10 @@ function permitsProspectiveMetadataPolicy(before: string, after: string): boolea
     const prior = JSON.parse(before) as unknown;
     const next = JSON.parse(after) as unknown;
     return (isDeepStrictEqual(prior, disabledMetadataPolicy) && isProspectiveMetadataPolicy(next))
-      || (isProspectiveMetadataPolicy(prior) && isDeepStrictEqual(next, disabledMetadataPolicy));
+      || (isProspectiveMetadataPolicy(prior, true) && isDeepStrictEqual(next, disabledMetadataPolicy))
+      || (isProspectiveMetadataPolicy(prior) && isProspectiveMetadataPolicy(next, true)
+        && isRecord(prior) && isRecord(next) && prior.maxReceipts === 25 && next.maxReceipts === null
+        && isDeepStrictEqual({ ...prior, maxReceipts: null }, next));
   } catch { return false; }
 }
 // These provider-computed values may legitimately change after uploading new
