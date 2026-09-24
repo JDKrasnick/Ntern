@@ -51,6 +51,15 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('`Browse all ${bankRoots.length} entries`');
   });
 
+  it('offers saved resume variants as a quick horizontal picker', () => {
+    expect(app).toContain('const savedResumeProfiles = profiles.filter((profile) => profile.name !== "Technical base");');
+    expect(app).toContain('<Text style={styles.sectionTitle}>Saved résumés</Text>');
+    expect(app).toContain('savedResumeProfiles.map((profile) =>');
+    expect(app).toContain('aria-pressed={selected}');
+    expect(app).toContain('onPress={() => setSelectedProfileId(profile.profileId)}');
+    expect(app.indexOf('<Text style={styles.sectionTitle}>Saved résumés</Text>')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
+  });
+
   it('keeps server-owned plans collapsed and disables new tailoring at the monthly limit', () => {
     expect(app).toContain('api<ResumeSubscriptionCard>("/me/subscription", token)');
     expect(app).toContain('planExpanded ? "Hide plan details" : "Plan details"');

@@ -5705,6 +5705,8 @@ function ResumeWorkspace({ token }: { token: string }) {
   };
   const accepted = draft?.changes.filter((change) => change.decision === "accepted").length ?? 0;
   const technicalBase = profiles.find((profile) => profile.name === "Technical base");
+  const savedResumeProfiles = profiles.filter((profile) => profile.name !== "Technical base");
+  const selectedProfile = profiles.find((profile) => profile.profileId === selectedProfileId);
   const bankRoots = bankItems.filter((item) => item.kind !== "bullet");
   const visibleBankItems = bankExpanded ? bankRoots : bankRoots.slice(0, 4);
   const bankParents = bankItems.filter((item): item is ResumeBankCard & { kind: ResumeBankParentKind } => item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education");
@@ -5722,7 +5724,7 @@ function ResumeWorkspace({ token }: { token: string }) {
           api<{ templates: ResumeTemplateCard[] }>("/resume-templates", token),
         ]);
         setProfiles(savedProfiles);
-        setSelectedProfileId((selected) => selected ?? savedProfiles[0]?.profileId);
+        setSelectedProfileId((selected) => selected ?? savedProfiles.find((profile) => profile.name !== "Technical base")?.profileId ?? savedProfiles[0]?.profileId);
         setJobImport(imports.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]);
         setSubscription(currentSubscription);
         setResumeTemplates(templates);
@@ -5933,6 +5935,41 @@ function ResumeWorkspace({ token }: { token: string }) {
         ) : null}
       </View>
 
+      <View style={styles.resumeSavedSection}>
+        <View style={styles.resumeSavedHeader}>
+          <View style={styles.resumeSavedHeaderCopy}>
+            <Text style={styles.sectionTitle}>Saved résumés</Text>
+            <Text style={styles.resumeSectionDescription}>Choose a starting point now, or let Ntern recommend one after reading the job.</Text>
+          </View>
+          {selectedProfile && selectedProfile.name !== "Technical base" ? <Text style={styles.resumeSavedSelection}>Using {selectedProfile.name}</Text> : null}
+        </View>
+        {bankLoading ? <Text style={styles.resumeSavedEmpty}>Loading your saved résumés…</Text> : savedResumeProfiles.length ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeSavedScroller}>
+            {savedResumeProfiles.map((profile) => {
+              const selected = selectedProfileId === profile.profileId;
+              return (
+                <TouchableOpacity key={profile.profileId} accessibilityRole="button" accessibilityLabel={`Use ${profile.name} resume`} aria-pressed={selected} onPress={() => setSelectedProfileId(profile.profileId)} style={[styles.resumeSavedCard, selected && styles.resumeSavedCardSelected]}>
+                  <View style={styles.resumeSavedCardTop}>
+                    <View style={[styles.resumeSavedIcon, selected && styles.resumeSavedIconSelected]}>
+                      <Ionicons name="document-text-outline" size={18} color={selected ? colors.onDark : colors.signal} />
+                    </View>
+                    {selected ? <Ionicons name="checkmark-circle" size={19} color={colors.signal} /> : null}
+                  </View>
+                  <Text numberOfLines={1} style={styles.resumeSavedName}>{profile.name}</Text>
+                  <Text numberOfLines={1} style={styles.resumeSavedTags}>{profile.tags.join(" · ") || "General"}</Text>
+                  <Text style={styles.resumeSavedMeta}>{profile.bankItemIds.length} source item{profile.bankItemIds.length === 1 ? "" : "s"}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        ) : (
+          <View style={styles.resumeSavedEmptyState}>
+            <Ionicons name="documents-outline" size={20} color={colors.muted} />
+            <Text style={styles.resumeSavedEmpty}>No saved résumé variants yet. Open your technical base to create your first one.</Text>
+          </View>
+        )}
+      </View>
+
       {subscription && planExpanded ? <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
         {subscription.plans.map((plan) => (
           <View key={plan.tier} style={[styles.resumePlanCard, subscription.tier === plan.tier && styles.resumePlanCardCurrent]}>
@@ -6018,18 +6055,9 @@ function ResumeWorkspace({ token }: { token: string }) {
       {jobImport?.status === "ready" ? <View style={styles.resumeSection}>
         <View style={styles.resumeSectionHeading}>
           <View>
-            <Text style={styles.sectionTitle}>Choose the output</Text>
-            <Text style={styles.resumeSectionDescription}>Use a saved base and pick the template you want to review.</Text>
+            <Text style={styles.sectionTitle}>Choose a template</Text>
+            <Text style={styles.resumeSectionDescription}>{selectedProfile ? `Starting from ${selectedProfile.name}. Pick the layout you want to review.` : "Select a saved résumé above, then pick the layout you want to review."}</Text>
           </View>
-        </View>
-        <View style={[styles.resumeProfileGrid, desktop && styles.resumeProfileGridWide]}>
-          {profiles.length ? profiles.map((profile) => (
-            <TouchableOpacity key={profile.profileId} accessibilityRole="button" accessibilityLabel={`Use ${profile.name} resume`} onPress={() => setSelectedProfileId(profile.profileId)} style={[styles.resumeProfileCard, selectedProfileId === profile.profileId && styles.resumeProfileRecommended]}>
-              <Text style={styles.resumeProfileName}>{profile.name}</Text>
-              <Text style={styles.resumeProfileTags}>{profile.tags.join(" · ") || "No tags yet"}</Text>
-              <Text style={styles.resumeProfileNote}>{profile.bankItemIds.length} source item{profile.bankItemIds.length === 1 ? "" : "s"} available for tailoring</Text>
-            </TouchableOpacity>
-          )) : <Text style={styles.resumeSectionDescription}>Save a base after adding the experience you want to reuse.</Text>}
         </View>
         <Text style={[styles.inputLabel, styles.resumeTemplateLabel]}>Output template</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeTemplatePicker}>
@@ -8636,6 +8664,21 @@ const styles = StyleSheet.create({
   resumeBaseAccessStatus: { color: colors.body, fontSize: 13, lineHeight: 18 },
   resumePlanSummary: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 2 },
   resumePlanAccessRow: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between" },
+  resumeSavedSection: { marginTop: 28 },
+  resumeSavedHeader: { alignItems: "flex-end", flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between" },
+  resumeSavedHeaderCopy: { flexGrow: 1, flexShrink: 1, minWidth: 240 },
+  resumeSavedSelection: { color: colors.signal, fontSize: 13, fontWeight: "800", lineHeight: 18 },
+  resumeSavedScroller: { gap: 10, paddingBottom: 4, paddingTop: 14 },
+  resumeSavedCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, minHeight: 144, padding: 14, width: 224 },
+  resumeSavedCardSelected: { borderColor: colors.signal, borderWidth: 2, padding: 13 },
+  resumeSavedCardTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
+  resumeSavedIcon: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 10, height: 36, justifyContent: "center", width: 36 },
+  resumeSavedIconSelected: { backgroundColor: colors.signal },
+  resumeSavedName: { color: colors.ink, fontSize: 16, fontWeight: "800", lineHeight: 22, marginTop: 12 },
+  resumeSavedTags: { color: colors.body, fontSize: 13, lineHeight: 18, marginTop: 2, textTransform: "capitalize" },
+  resumeSavedMeta: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 10 },
+  resumeSavedEmptyState: { alignItems: "center", flexDirection: "row", gap: 9, minHeight: 64, paddingVertical: 12 },
+  resumeSavedEmpty: { color: colors.muted, fontSize: 13, lineHeight: 19 },
   resumeBankWorkspace: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 28, paddingTop: 24 },
   resumeOverview: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 16, flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginBottom: 12, overflow: "hidden", paddingHorizontal: 18, paddingVertical: 14 },
   resumeOverviewCopy: { flexGrow: 1, flexShrink: 1, maxWidth: 570, minWidth: 220 },
