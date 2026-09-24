@@ -161,3 +161,30 @@ test('resolves a pasted description into a ready import through the compiled API
   assert.equal(listed.status, 200);
   assert.equal((await listed.json()).imports.length, 1);
 });
+
+test('deletes an imported résumé through the compiled API Worker and prunes its saved base', async () => {
+  const { token, userId } = await signIn();
+  await seedDocument(userId);
+  const imported = await api.fetch('https://api.example.test/me/resume-bank/import', authorized(token, { method: 'POST', body: JSON.stringify({ documentId: 'resume' }) }));
+  assert.equal(imported.status, 201);
+  const items = (await imported.json()).items;
+  const project = items.find((item) => item.kind === 'project');
+  assert.ok(project);
+
+  const saved = await api.fetch('https://api.example.test/me/resume-profiles', authorized(token, {
+    method: 'POST', body: JSON.stringify({ name: 'Delete base', tags: [], bankItemIds: items.map((item) => item.bankItemId), sectionOrder: [], template: 'clean-standard' }),
+  }));
+  assert.equal(saved.status, 201);
+  const profile = await saved.json();
+
+  const deleted = await api.fetch(`https://api.example.test/me/resume-bank/${project.bankItemId}`, authorized(token, { method: 'DELETE', body: JSON.stringify({ revision: project.revision }) }));
+  assert.equal(deleted.status, 200);
+  assert.equal((await deleted.json()).removed.length, 3);
+
+  const bank = await api.fetch('https://api.example.test/me/resume-bank', authorized(token));
+  assert.equal((await bank.json()).items.length, 0);
+  const profiles = await api.fetch('https://api.example.test/me/resume-profiles', authorized(token));
+  const pruned = (await profiles.json()).profiles.find((candidate) => candidate.profileId === profile.profileId);
+  assert.deepEqual(pruned.bankItemIds, []);
+  assert.equal(pruned.revision, 1);
+});
