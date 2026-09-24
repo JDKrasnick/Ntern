@@ -5642,6 +5642,7 @@ type ResumeBankCard =
   | (ResumeBankCardBase & { kind: "bullet"; parent: { kind: ResumeBankParentKind; bankItemId: string }; details?: never });
 type ResumeBankRef = { kind: "role" | "research" | "project" | "skill" | "education"; bankItemId: string } | { kind: "bullet"; bankItemId: string; parent: { kind: ResumeBankParentKind; bankItemId: string } };
 type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; template: ResumeTemplateId; revision: number };
+type ResumeSourceDocument = { documentId: string; fileName: string; contentType: string; createdAt: string };
 type ResumeTemplateCard = { template: ResumeTemplateId; displayName: string; description: string; bestFor: string };
 type ResumeProfileRecommendationCard = { profileId: string; score: number; explanation: string };
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
@@ -5728,6 +5729,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   const [artifactSource, setArtifactSource] = useState("");
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [subscription, setSubscription] = useState<ResumeSubscriptionCard>();
+  const [documents, setDocuments] = useState<ResumeSourceDocument[]>([]);
   const current = draft?.changes[activeChange];
   const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
   const decide = (decision: "accepted" | "rejected") => {
@@ -5782,13 +5784,15 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
     void api<{ items: ResumeBankCard[] }>("/me/resume-bank", token)
       .then(async ({ items }) => {
         setBankItems(items);
-        const [{ profiles: savedProfiles }, { imports }, currentSubscription, { templates }] = await Promise.all([
+        const [{ profiles: savedProfiles }, { imports }, currentSubscription, { templates }, { documents: sourceDocuments }] = await Promise.all([
           api<{ profiles: ResumeProfileCard[] }>("/me/resume-profiles", token),
           api<{ imports: ResumeImportCard[] }>("/me/resume-imports", token),
           api<ResumeSubscriptionCard>("/me/subscription", token),
           api<{ templates: ResumeTemplateCard[] }>("/resume-templates", token),
+          api<{ documents: ResumeSourceDocument[] }>("/me/documents", token),
         ]);
         setProfiles(savedProfiles);
+        setDocuments(sourceDocuments);
         setSelectedProfileId((selected) => selected ?? savedProfiles.find((profile) => profile.name !== "Technical base")?.profileId ?? savedProfiles[0]?.profileId);
         const latestImport = imports.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
         setJobImport(latestImport);
@@ -5921,6 +5925,37 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
     } catch (error) {
       setBankError(error instanceof Error ? error.message : "We couldn't import that résumé.");
     } finally { setBankSaving(false); }
+  };
+  const deleteResumeProfile = (profile: ResumeProfileCard) => {
+    if (resumeBusy) return;
+    setResumeBusy(true); setBankError(undefined);
+    void api(`/me/resume-profiles/${encodeURIComponent(profile.profileId)}`, token, { method: "DELETE", body: JSON.stringify({ revision: profile.revision }) })
+      .then(() => {
+        setProfiles((items) => items.filter((item) => item.profileId !== profile.profileId));
+        if (selectedProfileId === profile.profileId) setSelectedProfileId(undefined);
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't delete that saved résumé."))
+      .finally(() => setResumeBusy(false));
+  };
+  const deleteBankItem = (item: ResumeBankCard) => {
+    if (bankSaving) return;
+    setBankSaving(true); setBankError(undefined);
+    void api<{ removed: string[] }>(`/me/resume-bank/${encodeURIComponent(item.bankItemId)}`, token, { method: "DELETE", body: JSON.stringify({ revision: item.revision }) })
+      .then(({ removed }) => {
+        const gone = new Set(removed);
+        setBankItems((items) => items.filter((candidate) => !gone.has(candidate.bankItemId)));
+        setProfiles((items) => items.map((profile) => ({ ...profile, bankItemIds: profile.bankItemIds.filter((id) => !gone.has(id)) })));
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't delete that bank item."))
+      .finally(() => setBankSaving(false));
+  };
+  const deleteSourceDocument = (documentId: string) => {
+    if (bankSaving) return;
+    setBankSaving(true); setBankError(undefined);
+    void api(`/me/documents/${encodeURIComponent(documentId)}`, token, { method: "DELETE" })
+      .then(() => setDocuments((items) => items.filter((item) => item.documentId !== documentId)))
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't delete that source file."))
+      .finally(() => setBankSaving(false));
   };
   const syncTechnicalBase = async () => {
     // Earlier preview builds required a separate approval for every imported
@@ -6105,7 +6140,12 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
                     <View style={[styles.resumeSavedIcon, selected && styles.resumeSavedIconSelected]}>
                       <Ionicons name="document-text-outline" size={18} color={selected ? colors.onDark : colors.signal} />
                     </View>
-                    {selected ? <Ionicons name="checkmark-circle" size={19} color={colors.signal} /> : null}
+                    <View style={styles.resumeSavedCardTopActions}>
+                      {selected ? <Ionicons name="checkmark-circle" size={19} color={colors.signal} /> : null}
+                      <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Delete ${profile.name} résumé`} disabled={resumeBusy} onPress={() => deleteResumeProfile(profile)} style={styles.resumeDeleteAction}>
+                        <Ionicons name="trash-outline" size={17} color={colors.muted} />
+                      </TouchableOpacity>
+                    </View>
                   </View>
                   <Text numberOfLines={1} style={styles.resumeSavedName}>{profile.name}</Text>
                   <Text numberOfLines={1} style={styles.resumeSavedTags}>{profile.tags.join(" · ") || "General"}</Text>
@@ -6144,6 +6184,23 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
                   <Text style={styles.resumeImportStageActionText}>Choose files</Text>
                 </View>
               </TouchableOpacity>
+
+              {documents.length ? <View style={styles.resumeSourceDocuments}>
+                <Text style={styles.resumeSourceDocumentsTitle}>Source files</Text>
+                <Text style={styles.resumeSectionDescription}>Delete an uploaded file to free an upload slot. Any facts already merged into the master bank stay there.</Text>
+                {documents.map((document) => (
+                  <View key={document.documentId} style={styles.resumeSourceDocumentRow}>
+                    <Ionicons name="document-outline" size={16} color={colors.muted} />
+                    <View style={styles.resumeSourceDocumentCopy}>
+                      <Text numberOfLines={1} style={styles.resumeSourceDocumentName}>{document.fileName}</Text>
+                      <Text style={styles.resumeSourceDocumentMeta}>{document.contentType.includes("pdf") ? "PDF" : "DOCX"} · {new Date(document.createdAt).toLocaleDateString()}</Text>
+                    </View>
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Delete source file ${document.fileName}`} disabled={bankSaving} onPress={() => deleteSourceDocument(document.documentId)} style={styles.resumeDeleteAction}>
+                      <Ionicons name="trash-outline" size={17} color={colors.danger} />
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </View> : null}
 
               <TouchableOpacity accessibilityRole="button" aria-expanded={promptGuideOpen} onPress={() => setPromptGuideOpen((value) => !value)} style={styles.resumePromptAccess}>
                 <Ionicons name="sparkles-outline" size={17} color={colors.signal} />
@@ -6215,6 +6272,9 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
                         <Text numberOfLines={2} style={styles.resumeBankItemText}>{item.content}</Text>
                         <Text style={styles.resumeBankItemStatus}>{item.kind} · {bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length} bullet{bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length === 1 ? "" : "s"}</Text>
                       </View>
+                      <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Delete ${item.content}`} disabled={bankSaving} onPress={() => deleteBankItem(item)} style={styles.resumeDeleteAction}>
+                        <Ionicons name="trash-outline" size={17} color={colors.danger} />
+                      </TouchableOpacity>
                     </View>
                   ))}
                 </ScrollView>
@@ -8943,6 +9003,14 @@ const styles = StyleSheet.create({
   resumeSavedCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, minHeight: 144, padding: 14, width: 224 },
   resumeSavedCardSelected: { borderColor: colors.signal, borderWidth: 2, padding: 13 },
   resumeSavedCardTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
+  resumeSavedCardTopActions: { alignItems: "center", flexDirection: "row", gap: 6 },
+  resumeDeleteAction: { alignItems: "center", justifyContent: "center", padding: 2 },
+  resumeSourceDocuments: { marginTop: 12 },
+  resumeSourceDocumentsTitle: { color: colors.ink, fontSize: 13, fontWeight: "600", marginBottom: 2 },
+  resumeSourceDocumentRow: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", gap: 8, paddingVertical: 8 },
+  resumeSourceDocumentCopy: { flex: 1 },
+  resumeSourceDocumentName: { color: colors.ink, fontSize: 13 },
+  resumeSourceDocumentMeta: { color: colors.muted, fontSize: 11 },
   resumeSavedIcon: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 10, height: 36, justifyContent: "center", width: 36 },
   resumeSavedIconSelected: { backgroundColor: colors.signal },
   resumeSavedName: { color: colors.ink, fontSize: 16, fontWeight: "800", lineHeight: 22, marginTop: 12 },

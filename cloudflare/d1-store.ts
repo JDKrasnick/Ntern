@@ -1326,6 +1326,12 @@ export class D1UserStore implements UserStore {
     }
     return created;
   }
+  async deleteResumeBankItems(userId: string, bankItemIds: string[]): Promise<void> {
+    if (!bankItemIds.length) return;
+    const statements = bankItemIds.map((bankItemId) => this.db.prepare('DELETE FROM user_items WHERE user_id = ? AND item_key = ?')
+      .bind(userId, `RESUME_BANK#${bankItemId}`));
+    for (let offset = 0; offset < statements.length; offset += 50) await this.db.batch(statements.slice(offset, offset + 50));
+  }
   async listResumeProfiles(userId: string) { return this.list<ResumeProfile>(userId, 'RESUME_PROFILE#'); }
   getResumeProfile(userId: string, profileId: string) { return this.get<ResumeProfile>(userId, `RESUME_PROFILE#${profileId}`); }
   async putResumeProfile(value: ResumeProfile, expectedRevision?: number): Promise<boolean> {
@@ -1405,6 +1411,12 @@ export class D1UserStore implements UserStore {
         AND CAST(json_extract(user_items.value, '$.used') AS INTEGER) < ?
     `).bind(userId, key, JSON.stringify({ period, used: 1, updatedAt: timestamp }), this.deletionOwner(userId), timestamp, limit).run();
     return result.meta.changes > 0;
+  }
+  async releaseResumeDraftAllowance(userId: string, period: string): Promise<void> {
+    await this.db.prepare(`UPDATE user_items
+      SET value = json_set(value, '$.used', MAX(0, CAST(json_extract(value, '$.used') AS INTEGER) - 1))
+      WHERE user_id = ? AND item_key = ? AND kind = 'resume-subscription-usage'`)
+      .bind(userId, `RESUME_USAGE#${period}`).run();
   }
   getReceipt(userId: string, dedupeKey: string, token: string) { return this.get<DeliveryReceipt>(userId, `RECEIPT#${dedupeKey}#${token}`); }
   async claimReceipt(value: DeliveryReceipt): Promise<boolean> {

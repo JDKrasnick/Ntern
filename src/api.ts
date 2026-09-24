@@ -799,6 +799,28 @@ export function createApiHandler(dependencies: ApiDependencies) {
           } catch { /* D1 remains authoritative; a later verification edit retries this cache. */ }
           return reply(200, updated);
         }
+        if (bankMatch && method === 'DELETE') {
+          const bankItemId = decodeURIComponent(bankMatch[1]!);
+          const previous = await dependencies.users.getResumeBankItem(userId, bankItemId);
+          if (!previous) return reply(404, { message: 'Resume bank item not found' });
+          const body = parseBody(event);
+          if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
+          const bank = await dependencies.users.listResumeBank(userId);
+          // A parent and everything attached to it leave together; a bullet
+          // leaves alone. Saved bases are pruned first so they never point at a
+          // removed fact, and a mid-flight conflict leaves the bank untouched.
+          const removed = new Set<string>([bankItemId, ...bank.filter((item) => item.kind === 'bullet' && item.parent.bankItemId === bankItemId).map((item) => item.bankItemId)]);
+          for (const profile of await dependencies.users.listResumeProfiles(userId)) {
+            if (!profile.bankItemIds.some((id) => removed.has(id))) continue;
+            const bankItemIds = profile.bankItemIds.filter((id) => !removed.has(id));
+            if (!await dependencies.users.putResumeProfile({ ...profile, bankItemIds, revision: profile.revision + 1, updatedAt: timestamp }, profile.revision)) {
+              return reply(409, { message: 'A saved résumé changed; refresh and retry' });
+            }
+          }
+          await dependencies.users.deleteResumeBankItems(userId, [...removed]);
+          try { await dependencies.resumeSemanticIndex?.remove(userId, [...removed]); } catch { /* D1 remains authoritative; the derived cache can be rebuilt. */ }
+          return reply(200, { removed: [...removed] });
+        }
         if (path === '/me/resume-imports' || path === '/me/resume-jobs/resolve') {
           if (method === 'GET') return reply(200, { imports: await dependencies.users.listImportedResumeJobs(userId) });
           if (method === 'POST') {
@@ -952,14 +974,12 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const subscription = await dependencies.users.getResumeSubscription(userId);
             const plan = effectiveResumeSubscriptionPlan(subscription);
             const period = resumeSubscriptionPeriod(timestamp);
-            if (!await dependencies.users.claimResumeDraftAllowance(userId, period, plan.tailoredDraftsPerMonth, timestamp)) {
-              const used = await dependencies.users.getResumeDraftUsage(userId, period);
-              return reply(402, {
-                code: 'RESUME_SUBSCRIPTION_LIMIT_REACHED',
-                message: `You've used all ${plan.tailoredDraftsPerMonth} ${plan.name} tailored reviews this month.`,
-                subscription: resumeSubscriptionSummary(subscription, used, timestamp),
-              });
-            }
+            // Reject an exhausted allowance before spending any model budget.
+            const used = await dependencies.users.getResumeDraftUsage(userId, period);
+            const exhausted = used >= plan.tailoredDraftsPerMonth
+              ? { code: 'RESUME_SUBSCRIPTION_LIMIT_REACHED', message: `You've used all ${plan.tailoredDraftsPerMonth} ${plan.name} tailored reviews this month.`, subscription: resumeSubscriptionSummary(subscription, used, timestamp) }
+              : undefined;
+            if (exhausted) return reply(402, exhausted);
             const allowed = new Set(profile.bankItemIds);
             const selected = bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified);
             let changes: ResumeChange[];
@@ -978,8 +998,22 @@ export function createApiHandler(dependencies: ApiDependencies) {
             const readabilityTargets = new Set(readabilityChanges.map((change) => change.target.bankItemId));
             changes = [...readabilityChanges, ...changes.filter((change) => !readabilityTargets.has(change.target.bankItemId))].slice(0, 12);
             validateResumeChanges(changes, selected);
+            // Claim the allowance only once a draft is ready to persist, then
+            // release it if persistence fails, so a failed generation or write
+            // never costs the student a monthly credit.
+            if (!await dependencies.users.claimResumeDraftAllowance(userId, period, plan.tailoredDraftsPerMonth, timestamp)) {
+              return reply(402, { code: 'RESUME_SUBSCRIPTION_LIMIT_REACHED', message: `You've used all ${plan.tailoredDraftsPerMonth} ${plan.name} tailored reviews this month.`, subscription: resumeSubscriptionSummary(subscription, await dependencies.users.getResumeDraftUsage(userId, period), timestamp) });
+            }
             const draft: ResumeDraft = { userId, draftId: randomUUID(), profileId, importId, changes, revision: 0, status: 'reviewing', createdAt: timestamp, updatedAt: timestamp };
-            if (!await dependencies.users.putResumeDraft(draft)) return reply(409, { message: 'Resume draft already exists; retry' });
+            try {
+              if (!await dependencies.users.putResumeDraft(draft)) {
+                await dependencies.users.releaseResumeDraftAllowance(userId, period);
+                return reply(409, { message: 'Resume draft already exists; retry' });
+              }
+            } catch (error) {
+              await dependencies.users.releaseResumeDraftAllowance(userId, period).catch(() => undefined);
+              throw error;
+            }
             return reply(201, draft);
           }
         }

@@ -117,6 +117,47 @@ describe('resume API ownership and revisions', () => {
     expect(generate).toHaveBeenCalledTimes(2);
   });
 
+  it('refunds the monthly allowance when a draft cannot be persisted', async () => {
+    class ConflictStore extends MemoryUserStore {
+      async putResumeDraft(): Promise<boolean> { return false; }
+    }
+    const users = new ConflictStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript service', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'TypeScript role', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, now: () => '2026-09-23T00:00:00.000Z' });
+    expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(409);
+    expect(JSON.parse((await handler(event('student', 'GET', '/me/subscription'))).body)).toMatchObject({ usage: { used: 0, remaining: 2 } });
+  });
+
+  it('deletes a bank parent with its bullets and prunes saved bases', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'project', kind: 'project', content: 'Compiler Lab', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'bullet-a', kind: 'bullet', parent: { kind: 'project', bankItemId: 'project' }, content: 'Built a parser', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'skill', kind: 'skill', content: 'TypeScript', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['project', 'bullet-a', 'skill'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const remove = vi.fn(async () => undefined);
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeSemanticIndex: { index: async () => undefined, remove, scores: async () => new Map() } });
+    const response = await handler(event('student', 'DELETE', '/me/resume-bank/project', { revision: 0 }));
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ removed: expect.arrayContaining(['project', 'bullet-a']) });
+    const bank = JSON.parse((await handler(event('student', 'GET', '/me/resume-bank'))).body) as { items: Array<{ bankItemId: string }> };
+    expect(bank.items.map((item) => item.bankItemId)).toEqual(['skill']);
+    const profile = (JSON.parse((await handler(event('student', 'GET', '/me/resume-profiles'))).body) as { profiles: Array<{ bankItemIds: string[]; revision: number }> }).profiles[0]!;
+    expect(profile.bankItemIds).toEqual(['skill']);
+    expect(profile.revision).toBe(1);
+    expect(remove).toHaveBeenCalledWith('student', expect.arrayContaining(['project', 'bullet-a']));
+  });
+
+  it('rejects a stale bank deletion without removing anything', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'project', kind: 'project', content: 'Compiler Lab', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    expect((await handler(event('student', 'DELETE', '/me/resume-bank/project', { revision: 5 }))).statusCode).toBe(409);
+    const bank = JSON.parse((await handler(event('student', 'GET', '/me/resume-bank'))).body) as { items: unknown[] };
+    expect(bank.items).toHaveLength(1);
+  });
+
   it('supports the specified resolve, recommendation, decision, and finalization routes', async () => {
     const users = new MemoryUserStore();
     await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
