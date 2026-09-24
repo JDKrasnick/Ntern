@@ -4,10 +4,10 @@ import { catalogSearchText, catalogSourceClasses } from '../src/catalog-fields.j
 import { isPastSeason } from '../src/core/early-career.js';
 import { employerCategory } from '../src/core/employers.js';
 import type { ApplicationSession } from '../src/application-automation.js';
-import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
+import { preferredJobIdentityConflicts, providerPostingKey, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
-import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
+import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
 import { validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
 import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
@@ -631,6 +631,13 @@ export class D1InternshipStore implements InternshipStore {
   /** One occurrence by key, for readers that need a single row of a large source. */
   getSourceOccurrence(sourceId: string, externalId: string): Promise<SourceOccurrenceState | undefined> {
     return this.get<SourceOccurrenceState>(`SOURCE#${sourceId}`, `OCCURRENCE#${externalId}`);
+  }
+  async listWithdrawnPostingKeys(): Promise<string[]> {
+    const rows = await this.db.prepare(`SELECT provider, tenant, posting_id FROM posting_withdrawal_reviews ORDER BY id`)
+      .all<{ provider: string; tenant: string; posting_id: string }>();
+    return rows.results.map((row) => providerPostingKey({
+      provider: row.provider as PostingProvider, tenant: row.tenant, postingId: row.posting_id,
+    }));
   }
   putSourceOccurrence(occurrence: SourceOccurrenceState) {
     return this.sourceOccurrenceStatement(occurrence).run().then(() => undefined);

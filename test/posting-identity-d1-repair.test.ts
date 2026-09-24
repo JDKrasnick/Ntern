@@ -49,7 +49,7 @@ function sqliteD1(database: DatabaseSync, metrics?: QueryMetrics): D1Database {
 
 function database() {
   const value = new DatabaseSync(':memory:');
-  for (const name of ['0001_initial.sql', '0002_cost_guards.sql', '0003_billing_shutdown.sql', '0004_auth_rate_limits.sql', '0005_auth_consent.sql', '0006_employer_channel.sql', '0007_catalog_admission.sql', '0013_posting_presentation_reviews.sql', '0034_posting_presentation_review_records.sql']) {
+  for (const name of ['0001_initial.sql', '0002_cost_guards.sql', '0003_billing_shutdown.sql', '0004_auth_rate_limits.sql', '0005_auth_consent.sql', '0006_employer_channel.sql', '0007_catalog_admission.sql', '0013_posting_presentation_reviews.sql', '0034_posting_presentation_review_records.sql', '0035_posting_source_corrections.sql', '0036_posting_withdrawal_reviews.sql']) {
     value.exec(readFileSync(new URL(`../cloudflare/migrations/${name}`, import.meta.url), 'utf8'));
   }
   return value;
@@ -712,13 +712,13 @@ describe('D1 posting identity repair', () => {
 
   it('keeps an employer-identity disagreement blocked when no reviewed presentation exists', async () => {
     const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
-    const url = 'https://jobs.smartrecruiters.com/GDMSI/744000146822449';
-    await store.putInternship(job('gdmsi-community', `${url}-co-op-may-2026-software-engineering-8-months?oga=true`, '2026-08-01T00:00:00.000Z', [
-      occurrence('speedyapply-2027-swe', 'gdmsi-a', `${url}-co-op-may-2026-software-engineering-8-months?oga=true`),
-    ], { company: 'General Dynamics Mission Systems', internshipIdentity: { company: { canonicalId: 'general dynamics mission systems' } } }));
-    await store.putInternship(job('gdmsi-second-list', url, '2026-08-02T00:00:00.000Z', [
-      occurrence('canadian-tech-2027', 'gdmsi-b', url),
-    ], { company: 'General Dynamics UK', internshipIdentity: { company: { canonicalId: 'general dynamics uk' } } }));
+    const url = 'https://jobs.smartrecruiters.com/ExampleCo/999000111';
+    await store.putInternship(job('exampleco-first-list', `${url}-software-engineering-co-op?oga=true`, '2026-08-01T00:00:00.000Z', [
+      occurrence('speedyapply-2027-swe', 'exampleco-a', `${url}-software-engineering-co-op?oga=true`),
+    ], { company: 'Example Co', internshipIdentity: { company: { canonicalId: 'example co' } } }));
+    await store.putInternship(job('exampleco-second-list', url, '2026-08-02T00:00:00.000Z', [
+      occurrence('canadian-tech-2027', 'exampleco-b', url),
+    ], { company: 'Example Company', internshipIdentity: { company: { canonicalId: 'example company' } } }));
 
     expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
       duplicateGroups: 1,
@@ -727,10 +727,100 @@ describe('D1 posting identity repair', () => {
       expectedChanges: 0,
       conflicts: [],
       presentationDisagreements: [expect.objectContaining({
-        providerIdentity: 'smartrecruiters:gdmsi:744000146822449',
+        providerIdentity: 'smartrecruiters:exampleco:999000111',
         fields: ['employerIdentity'],
       })],
     });
+    sqlite.close();
+  });
+
+  it('re-anchors a republished posting to the employer current posting id', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    // The reviewed correction seeded by 0035 answers the production case: the
+    // list kept a SmartRecruiters id the employer has since republished, and the
+    // employer's own page declares the current id as its canonical URL.
+    const staleUrl = 'https://jobs.smartrecruiters.com/GDMSI/744000146822449-co-op-may-2026-software-engineering-8-months?oga=true';
+    const liveUrl = 'https://jobs.smartrecruiters.com/GDMSI/744000147561809-co-op-winter-2027-software-engineering-8-months';
+    await store.putInternship(job('gdmsi-stale-list', staleUrl, '2026-08-01T00:00:00.000Z', [
+      occurrence('simplify-summer-2026', 'gdmsi-stale-row', staleUrl),
+    ], { company: 'General Dynamics UK', internshipIdentity: { company: { canonicalId: 'general dynamics uk' } } }));
+    await store.putInternship(job('gdmsi-current-list', liveUrl, '2026-08-02T00:00:00.000Z', [
+      occurrence('speedyapply-2027-swe', 'gdmsi-live-row', liveUrl),
+    ], { company: 'General Dynamics Mission Systems', internshipIdentity: { company: { canonicalId: 'general dynamics mission systems' } } }));
+
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({
+      duplicateGroups: 1,
+      eligibleDuplicateGroups: 1,
+      unresolvedDuplicateGroups: 0,
+      presentationDisagreements: [],
+      conflicts: [],
+    });
+    await runPostingIdentityRepair(db, {
+      apply: true,
+      repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges,
+      expectedDuplicateJobs: dry.duplicateJobs,
+      scope: 'identity',
+    });
+    expect(await store.getJob('gdmsi-stale-list')).toMatchObject({
+      company: 'General Dynamics Mission Systems',
+      title: 'Co-op Winter 2027 - Software Engineering - 8 Months',
+      location: '1941 Robertson Road, Ottawa, Ontario, Canada',
+      applyUrl: liveUrl,
+      postingIdentity: { provider: 'smartrecruiters', tenant: 'gdmsi', providerPostingId: '744000147561809' },
+    });
+    expect(await store.getJob('gdmsi-current-list')).toMatchObject({ jobId: 'gdmsi-stale-list' });
+    sqlite.close();
+  });
+
+  it('retires a reviewed withdrawn posting instead of blocking on its employer disagreement', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const url = 'https://jobs-cesi.icims.com/jobs/11204/job';
+    await store.putInternship(job('cesi-list-a', `${url}?mobile=true&needsRedirect=false`, '2026-08-01T00:00:00.000Z', [
+      occurrence('simplify-summer-2026', 'cesi-a', `${url}?mobile=true&needsRedirect=false`),
+    ], { company: 'Cole Engineering Services', internshipIdentity: { company: { canonicalId: 'cole engineering services' } } }));
+    await store.putInternship(job('cesi-list-b', url, '2026-08-02T00:00:00.000Z', [
+      occurrence('speedyapply-2027-swe', 'cesi-b', url),
+    ], { company: 'Metova Federal', internshipIdentity: { company: { canonicalId: 'metova federal' } } }));
+
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
+      duplicateGroups: 0,
+      eligibleDuplicateGroups: 0,
+      unresolvedDuplicateGroups: 0,
+      expectedChanges: 0,
+      conflicts: [],
+      presentationDisagreements: [],
+    });
+    sqlite.close();
+  });
+
+  it('fails closed when a reviewed URL correction evidence hash is invalid', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite);
+    sqlite.prepare(`INSERT INTO posting_url_corrections
+      (id, provider, tenant, posting_id, observed_url, canonical_url, evidence_url, evidence_hash, reviewed_at, reviewed_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      'tampered-correction', 'smartrecruiters', 'gdmsi', '744000140000001',
+      'https://jobs.smartrecruiters.com/GDMSI/744000140000001',
+      'https://jobs.smartrecruiters.com/GDMSI/744000140000002',
+      'https://jobs.smartrecruiters.com/GDMSI/744000140000001', '0'.repeat(64),
+      '2026-09-24T00:00:00Z', 'test-reviewer',
+    );
+    expect((await runPostingIdentityRepair(db, { scope: 'identity' })).conflicts)
+      .toEqual(['tampered-correction: reviewed URL correction evidence hash does not match']);
+    sqlite.close();
+  });
+
+  it('fails closed when a reviewed withdrawal evidence hash is invalid', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite);
+    sqlite.prepare(`INSERT INTO posting_withdrawal_reviews
+      (id, provider, tenant, posting_id, evidence_url, evidence_hash, reviewed_at, reviewed_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      'tampered-withdrawal', 'icims', 'jobs-cesi', '11299',
+      'https://jobs-cesi.icims.com/jobs/11299/job', '0'.repeat(64), '2026-09-24T00:00:00Z', 'test-reviewer',
+    );
+    expect((await runPostingIdentityRepair(db, { scope: 'identity' })).conflicts)
+      .toEqual(['tampered-withdrawal: reviewed withdrawal evidence hash does not match']);
     sqlite.close();
   });
 

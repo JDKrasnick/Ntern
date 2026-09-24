@@ -179,12 +179,17 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
   const jobBatch = Math.max(1, Math.min(options.jobBatch ?? IDENTITY_AUDIT_JOB_BATCH, 2_000));
   const sliceRows = await readSmallRows(db, SLICE_KINDS);
   const finalizeRows = sliceRows.concat(await readSmallRows(db, FINALIZE_KINDS.slice(SLICE_KINDS.length)));
-  const [employerMappings, presentationReviews, incidents] = await Promise.all([
+  const [employerMappings, presentationReviews, urlCorrections, withdrawals, incidents] = await Promise.all([
     db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
       WHERE superseded_at IS NULL ORDER BY provider, scope`).all(),
     db.prepare(`SELECT id, provider, tenant, posting_id, company, title, location,
         locations_json, apply_url, evidence_url, evidence_hash, reviewed_at, reviewed_by
       FROM posting_identity_presentation_reviews ORDER BY id`).all(),
+    db.prepare(`SELECT id, provider, tenant, posting_id, observed_url, canonical_url, evidence_url,
+        evidence_hash, reviewed_at, reviewed_by
+      FROM posting_url_corrections ORDER BY id`).all(),
+    db.prepare(`SELECT id, provider, tenant, posting_id, evidence_url, evidence_hash, reviewed_at, reviewed_by
+      FROM posting_withdrawal_reviews ORDER BY id`).all(),
     db.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'posting-identity-incident'").first<{ count: number }>(),
   ]);
 
@@ -223,7 +228,10 @@ async function scanPostingIdentityAudit(db: D1Database, options: {
   };
   const planOf = (catalog: Row[]) => postingIdentityRepairPlan(catalog as never, [], [],
     'all',
-    { employerMappings: employerMappings.results, presentationReviews: presentationReviews.results } as never, 'audit');
+    {
+      employerMappings: employerMappings.results, presentationReviews: presentationReviews.results,
+      urlCorrections: urlCorrections.results, withdrawals: withdrawals.results,
+    } as never, 'audit');
 
   const jobAlias = new Map<string, string>();
   const aliasClaims = new Map<string, string>();

@@ -83,6 +83,9 @@ export interface InternshipStore {
   /** One occurrence by key, for readers that need a single row of a large source. */
   getSourceOccurrence(sourceId: string, externalId: string): Promise<SourceOccurrenceState | undefined>;
   putSourceOccurrence(occurrence: SourceOccurrenceState): Promise<void>;
+  /** Reviewed withdrawn postings, as exact provider keys. A retired posting
+   * stays closed even while a community list still publishes its dead URL. */
+  listWithdrawnPostingKeys?(): Promise<string[]>;
   /** Append-only audit history; current evidence is selected by source/artifact slot. */
   recordRoleMetadataEvidence?(jobId: string, evidence: readonly RoleMetadataEvidence[], conflicts: readonly MetadataConflict[], recordedAt: string,
     replace?: { sourceId: string; sourceClasses: readonly EvidenceSource[] }): Promise<void>;
@@ -124,6 +127,8 @@ export class MemoryInternshipStore implements InternshipStore {
   readonly roleMetadataEvidence = new Map<string, RoleMetadataEvidence>();
   readonly roleMetadataConflicts = new Map<string, MetadataConflict[]>();
   readonly providerShadowVerifications = new Map<string, DestinationVerificationRequest>();
+  /** Reviewed withdrawn postings, as exact provider keys. */
+  readonly withdrawnPostingKeys = new Set<string>();
   catalogProjection?: { generatedAt: string; groups: CatalogGroupDetails[] };
   async getCheckpoint(sourceId: string) { return this.checkpoints.get(sourceId); }
   async getCheckpointsMany(sourceIds: string[]) { return sourceIds.map((id) => this.checkpoints.get(id)).filter((value): value is SourceCheckpoint => Boolean(value)); }
@@ -219,6 +224,7 @@ export class MemoryInternshipStore implements InternshipStore {
     const value = this.occurrences.get(`${sourceId}#${externalId}`);
     return value ? structuredClone(value) : undefined;
   }
+  async listWithdrawnPostingKeys() { return [...this.withdrawnPostingKeys]; }
   async putSourceOccurrence(occurrence: SourceOccurrenceState) { this.occurrences.set(`${occurrence.sourceId}#${occurrence.externalId}`, structuredClone(occurrence)); }
   async recordRoleMetadataEvidence(jobId: string, evidence: readonly RoleMetadataEvidence[], conflicts: readonly MetadataConflict[], _recordedAt: string,
     replace?: { sourceId: string; sourceClasses: readonly EvidenceSource[] }) {

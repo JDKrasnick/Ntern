@@ -40,7 +40,8 @@ const exposeGc = globalThis.gc;
 const sourceId = 'simplify-summer-2026';
 const migrations = ['0001_initial.sql', '0007_catalog_admission.sql', '0008_catalog_admission_occurrence_repair.sql',
   '0010_posting_identity.sql', '0012_destination_verification_schedule.sql', '0015_role_metadata_enrichment.sql',
-  '0016_role_metadata_repair_plans.sql', '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql'];
+  '0016_role_metadata_repair_plans.sql', '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
+  '0036_posting_withdrawal_reviews.sql'];
 
 /**
  * One connection backs every call, so statements are serialized: a synchronous

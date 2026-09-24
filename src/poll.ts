@@ -573,6 +573,7 @@ export class IngestionRunner {
     priorOccurrences: SourceOccurrenceState[];
     resolvedJobs: Map<string, Internship | undefined>;
     now: string;
+    withdrawnPostingKeys: Set<string>;
   }): Promise<void> {
     const unsafeListings = input.listings.filter((listing) => {
       const existing = input.resolvedJobs.get(externalId(listing));
@@ -590,6 +591,7 @@ export class IngestionRunner {
       now: input.now,
       baseline: true,
       publishUnconfirmedIdentities: true,
+      withdrawnPostingKeys: input.withdrawnPostingKeys,
     });
     const jobs = new Map(plan.jobs.map((job) => [job.jobId, job]));
     for (const occurrence of plan.occurrences) {
@@ -1272,6 +1274,9 @@ export class IngestionRunner {
       sourceFailures: [],
     };
     const health: SourceHealth[] = [];
+    // Reviewed retired postings are read once per pass: the reconciler closes
+    // them even while a community list still publishes the dead URL.
+    const withdrawnPostingKeys = new Set(await this.store.listWithdrawnPostingKeys?.() ?? []);
     this.boardActiveIds.clear();
     this.boardCheckpoints = undefined;
     this.currentRunGreenhouseActiveIds.clear();
@@ -1632,6 +1637,7 @@ export class IngestionRunner {
               priorOccurrences,
               resolvedJobs: resolution.resolved,
               now,
+              withdrawnPostingKeys,
             });
             // An alert-only policy still hides the unsafe listings and records the
             // breach, but the source keeps polling instead of quarantining: the
@@ -1717,6 +1723,7 @@ export class IngestionRunner {
           alertEligible: resolution.alertEligible,
           publishUnconfirmedIdentities: this.publishUnconfirmedIdentities,
           trustedCommunityAlertsEnabled: trustedPolicy?.alertMode === 'exact-identity-or-two-complete-snapshots',
+          withdrawnPostingKeys,
         });
         failureCategory = 'persistence';
         const notificationByJobId = new Map(plan.notifications.map((event) => [event.jobId, event]));
