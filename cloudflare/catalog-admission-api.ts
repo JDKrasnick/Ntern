@@ -63,18 +63,21 @@ export async function handleCatalogAdmissionOperations(
       const input = await body(request);
       const id = text(input.id, 'id', 160);
       const existing = (await store.listCanonicalEmployers()).find((item) => item.id === id);
+      const clearIcon = input.iconKey === null;
       const nextIconKey = iconKey(input.iconKey, id);
       if (!existing && !nextIconKey) throw new Error('iconKey is required for a new canonical employer');
       const employer: CanonicalEmployer = {
         id, displayName: text(input.displayName, 'displayName', 160),
-        ...(nextIconKey ? { iconKey: nextIconKey, iconUpdatedAt: timestamp } : existing?.iconKey ? { iconKey: existing.iconKey, iconUpdatedAt: existing.iconUpdatedAt } : {}),
+        ...(nextIconKey ? { iconKey: nextIconKey, iconUpdatedAt: timestamp }
+          : !clearIcon && existing?.iconKey ? { iconKey: existing.iconKey, iconUpdatedAt: existing.iconUpdatedAt } : {}),
         reviewedAt: timestamp, reviewedBy: actor,
         ...(typeof input.parentEmployerId === 'string' && input.parentEmployerId.trim() ? { parentEmployerId: input.parentEmployerId.trim() } : {}),
         ...(typeof input.brandOfEmployerId === 'string' && input.brandOfEmployerId.trim() ? { brandOfEmployerId: input.brandOfEmployerId.trim() } : {}),
       };
       await store.putCanonicalEmployer(employer, timestamp);
       await store.recordReviewerDecision({ id: crypto.randomUUID(), subjectType: 'canonical-employer', subjectId: employer.id,
-        decision: 'approved', reason: reviewReason(input, 'Canonical employer reviewed'), reviewedAt: timestamp, reviewedBy: actor });
+        decision: clearIcon ? 'icon-withdrawn' : 'approved', reason: reviewReason(input, clearIcon ? 'Canonical employer icon withdrawn' : 'Canonical employer reviewed'),
+        reviewedAt: timestamp, reviewedBy: actor });
       return json(200, { employer });
     }
     if (request.method === 'GET' && path === '/internal/admission/mappings') return json(200, { mappings: await store.listEmployerMappings() });

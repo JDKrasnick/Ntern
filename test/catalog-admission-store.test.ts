@@ -2,6 +2,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleCatalogAdmissionOperations } from '../cloudflare/catalog-admission-api.js';
+import { companyIconResponse } from '../cloudflare/company-icon.js';
 import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, DESTINATION_VERIFICATION_LEASE_LIMIT } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { persistDestinationAdmission, reachabilityFromHttpStatus, type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
@@ -11,7 +12,7 @@ import { evaluateCatalogAdmission } from '../src/catalog-admission.js';
 import { classifyDestination, matchingBrowserDestination } from '../src/destination-verification.js';
 import { processPosting } from '../src/ingestion/processor.js';
 import { newJobNotificationEvent } from '../src/ingestion/catalog-reconciler.js';
-import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
+import type { D1Database, D1PreparedStatement, R2Bucket } from '../cloudflare/types.js';
 import type { CatalogAdmission, Internship } from '../src/types.js';
 
 type QueryBudget = { used: number; maximum: number; queries?: string[] };
@@ -75,6 +76,38 @@ function subject(budget?: QueryBudget) {
 
 describe('D1 catalog admission operations', () => {
   afterEach(() => vi.useRealTimers());
+  it('withdraws an icon through the reviewed employer operation and public route', async () => {
+    const { database, admission: store } = subject();
+    const url = 'https://api.test/internal/admission/employers';
+    const update = async (iconKey?: string | null) => handleCatalogAdmissionOperations(new Request(url, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'acme', displayName: 'Acme', ...(iconKey !== undefined ? { iconKey } : {}) }),
+    }), store, async () => undefined);
+    const documents = { async get(key: string) {
+      return key === 'company-icons/acme/logo-v1.webp'
+        ? { body: new Blob(['logo']).stream(), size: 4, httpMetadata: { contentType: 'image/webp' } }
+        : null;
+    } } as R2Bucket;
+    const icon = () => companyIconResponse('acme', store, documents);
+
+    expect((await update(null)).status).toBe(409); // A new employer still requires an icon.
+    expect((await update('company-icons/acme/logo-v1.webp')).status).toBe(200);
+    expect((await icon()).status).toBe(200);
+    expect((await update()).status).toBe(200); // An omitted key leaves the reviewed icon in place.
+    expect((await icon()).status).toBe(200);
+
+    const withdrawn = await update(null);
+    expect(withdrawn.status).toBe(200);
+    expect(await withdrawn.json()).toMatchObject({ employer: { id: 'acme', displayName: 'Acme' } });
+    expect(await store.getCanonicalEmployer('acme')).not.toHaveProperty('iconKey');
+    expect(database.prepare('SELECT icon_key, icon_updated_at FROM canonical_employers WHERE id = ?').get('acme'))
+      .toEqual({ icon_key: null, icon_updated_at: null });
+    const response = await icon();
+    expect(response.status).toBe(404);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(database.prepare("SELECT count(*) AS count FROM admission_reviewer_decisions WHERE subject_id = ? AND decision = 'icon-withdrawn'").get('acme'))
+      .toEqual({ count: 1 });
+  });
   it('forwards verified-page replacement through the internship store adapter', async () => {
     const { database, jobs } = subject();
     const evidence = (sourceClass: 'official-json-ld' | 'official-page', artifactHash: string) => ({

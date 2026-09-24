@@ -24,4 +24,6 @@ unset OPERATIONS_SHARED_SECRET
 
 Backfill existing canonical employers manually with this workflow. Keep the original display name, mapping, and reviewer record. A new canonical employer submitted through the operations API must include an `iconKey`; this prevents silently adding another unbranded company.
 
+To withdraw an existing employer's icon, send the same authenticated `PUT /internal/admission/employers` request with its `id`, current `displayName`, and `"iconKey": null`. The operation clears the reviewed D1 reference; `/company-icons/<id>` then returns 404 with `Cache-Control: no-store`. Omitting `iconKey` preserves the current icon. The R2 object can be removed separately after the D1 reference is cleared.
+
 Do not derive branding from arbitrary websites or third-party favicon services. A website domain may be recorded later as provenance, but it is not needed to store, serve, or validate an icon.
