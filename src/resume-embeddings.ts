@@ -10,22 +10,36 @@ export interface ResumeVectorIndex {
 
 export interface ResumeSemanticIndex {
   index(item: ResumeBankItem): Promise<void>;
+  /** Optional batched upsert so a large imported bank does not embed one item per call. */
+  indexMany?(items: ResumeBankItem[]): Promise<void>;
   remove(userId: string, bankItemIds: string[]): Promise<void>;
   scores(userId: string, jobDescription: string, bankItemIds: string[]): Promise<Map<string, number>>;
 }
 
 const EMBEDDING_MODEL = '@cf/baai/bge-base-en-v1.5';
+const EMBEDDING_BATCH_SIZE = 50;
 const namespaceFor = (userId: string) => `resume-${createHash('sha256').update(userId).digest('hex').slice(0, 48)}`;
 
-function vectorFrom(output: unknown): number[] {
+function embeddingFrom(value: unknown): number[] {
+  if (!Array.isArray(value) || value.length !== 768 || value.some((entry) => typeof entry !== 'number' || !Number.isFinite(entry))) {
+    throw new Error('Workers AI returned an invalid resume embedding');
+  }
+  return value as number[];
+}
+
+function vectorsFrom(output: unknown, expected: number): number[][] {
   const data = typeof output === 'object' && output !== null && 'data' in output ? (output as { data?: unknown }).data : undefined;
-  const vector = Array.isArray(data) && Array.isArray(data[0]) ? data[0] : undefined;
-  if (!vector || vector.length !== 768 || vector.some((value) => typeof value !== 'number' || !Number.isFinite(value))) throw new Error('Workers AI returned an invalid resume embedding');
-  return vector as number[];
+  if (!Array.isArray(data) || data.length !== expected) throw new Error('Workers AI returned an invalid resume embedding batch');
+  return data.map(embeddingFrom);
 }
 
 async function embed(ai: WorkersAi, text: string): Promise<number[]> {
-  return vectorFrom(await ai.run(EMBEDDING_MODEL, { text: [text.slice(0, 8_000)] }));
+  const output = await ai.run(EMBEDDING_MODEL, { text: [text.slice(0, 8_000)] });
+  return embeddingFrom(vectorsFrom(output, 1)[0]);
+}
+
+async function embedBatch(ai: WorkersAi, texts: string[]): Promise<number[][]> {
+  return vectorsFrom(await ai.run(EMBEDDING_MODEL, { text: texts.map((text) => text.slice(0, 8_000)) }), texts.length);
 }
 
 /** Vectorize is a replaceable derived cache. Its namespace is a stable hash of
@@ -35,6 +49,14 @@ export function workersAiResumeSemanticIndex(ai: WorkersAi, index: ResumeVectorI
     async index(item) {
       if (!item.verified) return;
       await index.upsert([{ id: item.bankItemId, values: await embed(ai, item.content), namespace: namespaceFor(item.userId) }]);
+    },
+    async indexMany(items) {
+      const verified = items.filter((item) => item.verified);
+      for (let offset = 0; offset < verified.length; offset += EMBEDDING_BATCH_SIZE) {
+        const batch = verified.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+        const vectors = await embedBatch(ai, batch.map((item) => item.content));
+        await index.upsert(batch.map((item, position) => ({ id: item.bankItemId, values: vectors[position]!, namespace: namespaceFor(item.userId) })));
+      }
     },
     async remove(userId, bankItemIds) {
       for (let offset = 0; offset < bankItemIds.length; offset += 1_000) await index.deleteByIds(bankItemIds.slice(offset, offset + 1_000), { namespace: namespaceFor(userId) });

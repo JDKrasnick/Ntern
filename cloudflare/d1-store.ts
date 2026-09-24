@@ -8,7 +8,7 @@ import { preferredJobIdentityConflicts, providerPostingKey, resolvePostingAliase
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
-import { validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
+import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
 import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
@@ -1306,6 +1306,25 @@ export class D1UserStore implements UserStore {
         AND NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
     `).bind(JSON.stringify(value), value.userId, key, expectedRevision, this.deletionOwner(value.userId)).run();
     return result.meta.changes > 0;
+  }
+  async putResumeBankItems(values: ResumeBankItem[]): Promise<ResumeBankItem[]> {
+    if (!values.length) return [];
+    // One read validates the whole merged graph for every new item; individual
+    // inserts then never re-list the bank. Statements are chunked to the same
+    // bounded batch size the catalog writer uses.
+    validateResumeBankGraph([...await this.listResumeBank(values[0]!.userId), ...values]);
+    const statements = values.map((value) => this.db.prepare(`
+      INSERT INTO user_items (user_id, item_key, kind, value)
+      SELECT ?, ?, 'resume-bank', ?
+      WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+      ON CONFLICT(user_id, item_key) DO NOTHING
+    `).bind(value.userId, `RESUME_BANK#${value.bankItemId}`, JSON.stringify(value), this.deletionOwner(value.userId)));
+    const created: ResumeBankItem[] = [];
+    for (let offset = 0; offset < statements.length; offset += 50) {
+      const results = await this.db.batch(statements.slice(offset, offset + 50));
+      results.forEach((result, index) => { if (result.meta.changes > 0) created.push(values[offset + index]!); });
+    }
+    return created;
   }
   async listResumeProfiles(userId: string) { return this.list<ResumeProfile>(userId, 'RESUME_PROFILE#'); }
   getResumeProfile(userId: string, profileId: string) { return this.get<ResumeProfile>(userId, `RESUME_PROFILE#${profileId}`); }
