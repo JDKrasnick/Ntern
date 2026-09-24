@@ -389,6 +389,22 @@ test('passes real expanded-family roles and blocks malformed roles through repai
   assert.equal(applied.verification.expectedChanges, 0);
   assert.equal(applied.verification.duplicateJobs, 0);
 
+  // A completed identity merge retires job IDs while the durable occurrence row
+  // that named one of them stays behind. Seed exactly that shape, then repair it
+  // through the paged occurrence path the production operation uses.
+  const retiredOccurrence = {
+    sourceId: 'community-list', externalId: 'workable-e2e-new', jobId: 'workable-e2e-new',
+    occurrence: {
+      sourceId: 'community-list', externalId: 'workable-e2e-new', document: 'workable-e2e-new',
+      sourceUrl: 'https://example.test/source', row: 1, company: 'Acme', title: 'Software Engineering Intern',
+      location: 'New York', season: 'summer-2027', applyUrl: newerUrl, compensation: { raw: '' }, state: 'open',
+    },
+    present: true, consecutiveOmissions: 0, changedSnapshotHash: 'e2e', changedAt: '2026-09-18T00:00:00.000Z',
+  };
+  await database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value, source_id, external_id)
+    VALUES ('SOURCE#community-list', 'OCCURRENCE#workable-e2e-new', 'source-occurrence', ?, 'community-list', 'workable-e2e-new')`)
+    .bind(JSON.stringify(retiredOccurrence)).run();
+
   const occurrencePreviewResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
     body: JSON.stringify({ scope: 'occurrences' }),
@@ -396,16 +412,67 @@ test('passes real expanded-family roles and blocks malformed roles through repai
   assert.equal(occurrencePreviewResponse.status, 200);
   const occurrencePreview = await occurrencePreviewResponse.json();
   assert.deepEqual(occurrencePreview.conflicts, []);
-  const occurrenceApplyResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+  assert.equal(occurrencePreview.canonicalJobs, 1);
+  assert.equal(occurrencePreview.danglingOccurrences, 1);
+  assert.ok(occurrencePreview.batches.length > 0);
+  for (const batch of occurrencePreview.batches) {
+    assert.ok(batch.jobIds.length <= 100 && batch.occurrenceKeys.length <= 125 && batch.contextRows.length <= 125);
+    const batchResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+      body: JSON.stringify({
+        apply: true, scope: 'occurrences', finalize: false,
+        applyBatch: { jobIds: batch.jobIds, contextRows: batch.contextRows, occurrenceKeys: batch.occurrenceKeys },
+        repairToken: batch.repairToken, expectedChanges: batch.expectedChanges, expectedDuplicateJobs: batch.expectedDuplicateJobs,
+        acceptCurrentSnapshot: true,
+        expectedEligibleDuplicateGroups: batch.eligibleDuplicateGroups,
+        expectedUnresolvedDuplicateGroups: batch.unresolvedDuplicateGroups,
+      }),
+    });
+    const applied = await batchResponse.json();
+    assert.equal(batchResponse.status, 200, JSON.stringify(applied));
+    assert.equal(applied.applied, true);
+  }
+  const movedRow = await database.prepare("SELECT value FROM catalog_items WHERE pk = 'SOURCE#community-list' AND sk = 'OCCURRENCE#workable-e2e-new'").first();
+  assert.equal(JSON.parse(movedRow.value).jobId, 'workable-e2e-old');
+  assert.deepEqual((await (await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({ scope: 'occurrences' }),
+  })).json()).expectedChanges, 0);
+  // The catalog-wide occurrence apply is gone: repair applies one signed batch.
+  const refusedResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
     body: JSON.stringify({
-      apply: true, scope: 'occurrences', repairToken: occurrencePreview.repairToken,
-      expectedChanges: occurrencePreview.expectedChanges, expectedDuplicateJobs: occurrencePreview.duplicateJobs,
+      apply: true, scope: 'occurrences', repairToken: occurrencePreview.batches[0].repairToken,
+      expectedChanges: occurrencePreview.batches[0].expectedChanges, expectedDuplicateJobs: 0,
     }),
   });
-  const occurrenceApplied = await occurrenceApplyResponse.json();
-  assert.equal(occurrenceApplyResponse.status, 200, JSON.stringify(occurrenceApplied));
-  assert.equal(occurrenceApplied.verification.expectedChanges, 0);
+  assert.equal(refusedResponse.status, 409);
+  assert.equal(await refusedResponse.json().then((body) => body.message), 'Occurrence repair applies one signed batch at a time; send applyBatch');
+
+  // The paged occurrence scope only reaches canonical jobs an identity merge
+  // named. Reference classification for the rest of the catalog stays with the
+  // catalog-wide repair, which the expanded-family matrix below still verifies.
+  const catalogPreviewResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({ scope: 'all', jobBatch: 1 }),
+  });
+  assert.equal(catalogPreviewResponse.status, 200);
+  const catalogPreview = await catalogPreviewResponse.json();
+  assert.deepEqual(catalogPreview.conflicts, []);
+  const catalogApplyResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
+    body: JSON.stringify({
+      apply: true, scope: 'all', jobBatch: 1, repairToken: catalogPreview.repairToken,
+      expectedChanges: catalogPreview.expectedChanges, expectedDuplicateJobs: catalogPreview.duplicateJobs,
+    }),
+  });
+  const catalogApplied = await catalogApplyResponse.json();
+  assert.equal(catalogApplyResponse.status, 200, JSON.stringify(catalogApplied));
+  assert.equal(catalogApplied.verification.expectedChanges, 0);
+  const refreshResponse = await api.fetch('https://api.example.test/internal/refresh-catalog', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret }, body: '{}',
+  });
+  assert.equal(refreshResponse.status, 200);
 
   for (const [family] of familyCases) {
     for (const expectedStatus of ['good', 'bad']) {

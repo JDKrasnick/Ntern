@@ -46,6 +46,14 @@ const GROUP_JOBS_PER_BATCH = 100;
 const KEY_PAIRS_PER_READ = 40;
 const JOB_IDS_PER_READ = 50;
 const CONTEXT_KINDS = ['job-id-alias', 'checkpoint', 'posting-alias', 'notification-tombstone'] as const;
+/** One keyset page of the durable occurrence index. Only the owning job ID is
+ * projected; the multi-kilobyte occurrence bodies are read per repaired group. */
+const OCCURRENCE_INDEX_PAGE = 500;
+/** Queue-tolerant occurrence batch envelope. It mirrors the reviewed low-impact
+ * identity batch limits enforced by the Worker bulk-window gate. */
+const OCCURRENCE_BATCH_JOBS = 100;
+const OCCURRENCE_BATCH_REFERENCES = 125;
+const OCCURRENCE_BATCH_CONTEXT = 125;
 
 function stable(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stable);
@@ -428,7 +436,39 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   return { ...plan, applied: true, projectionRefreshRequired: true };
 }
 
+/**
+ * Plan one bounded repair slice from durable rows. The identity and occurrence
+ * planners must read the same rows for the same batch so the signed repair
+ * token computed here is reproduced when the batch is applied. Occurrence
+ * repair never rewrites user history: the identity batches already remapped it,
+ * and an occurrence batch only reconciles catalog occurrence pointers.
+ */
+async function boundedRepairSlicePlan(db: D1Database, options: {
+  scope: 'identity' | 'occurrences';
+  jobIds: string[];
+  contextRows: PostingIdentityAuditRow[];
+  occurrenceKeys: Array<[string, string]>;
+}): Promise<InternalPostingIdentityRepairPlan> {
+  const occurrenceScope = options.scope === 'occurrences';
+  const [checkpoints, users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
+    readKindRows(db, 'checkpoint'),
+    occurrenceScope ? Promise.resolve([] as UserRow[]) : readUserRowsForJobs(db, options.jobIds),
+    db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>().then((result) => result.results),
+    db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
+      WHERE superseded_at IS NULL ORDER BY provider, scope`).all<EmployerMappingRow>().then((result) => result.results),
+    db.prepare(`SELECT id, provider, tenant, posting_id, company, title, location,
+        locations_json, apply_url, evidence_url, evidence_hash, reviewed_at, reviewed_by
+      FROM posting_identity_presentation_reviews ORDER BY id`).all<PresentationReviewRow>().then((result) => result.results),
+    readJobs(db, [...new Set(options.jobIds)].sort()),
+    readOccurrenceRows(db, options.occurrenceKeys),
+  ]);
+  return postingIdentityRepairPlan([
+    ...fullJobs, ...occurrences, ...checkpoints, ...options.contextRows,
+  ] as never, users as never, proposals, options.scope, { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
+}
+
 export async function runBoundedPostingIdentityRepairBatch(db: D1Database, options: {
+  scope?: 'identity' | 'occurrences';
   jobIds: string[];
   contextRows: PostingIdentityAuditRow[];
   occurrenceKeys: Array<[string, string]>;
@@ -442,20 +482,228 @@ export async function runBoundedPostingIdentityRepairBatch(db: D1Database, optio
   if (!options.jobIds.length || options.jobIds.length > 500) throw new Error('Identity repair batch must contain 1 to 500 jobs');
   if (options.occurrenceKeys.length > 5_000) throw new Error('Identity repair batch contains too many occurrence keys');
   if (options.contextRows.length > 5_000) throw new Error('Identity repair batch contains too many context rows');
-  const [checkpoints, users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
-    readKindRows(db, 'checkpoint'),
-    readUserRowsForJobs(db, options.jobIds),
-    db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>().then((result) => result.results),
-    db.prepare(`SELECT provider, scope, canonical_employer_id FROM employer_mappings
-      WHERE superseded_at IS NULL ORDER BY provider, scope`).all<EmployerMappingRow>().then((result) => result.results),
-    db.prepare(`SELECT id, provider, tenant, posting_id, company, title, location,
-        locations_json, apply_url, evidence_url, evidence_hash, reviewed_at, reviewed_by
-      FROM posting_identity_presentation_reviews ORDER BY id`).all<PresentationReviewRow>().then((result) => result.results),
-    readJobs(db, [...new Set(options.jobIds)].sort()),
-    readOccurrenceRows(db, options.occurrenceKeys),
-  ]);
-  const plan = postingIdentityRepairPlan([
-    ...fullJobs, ...occurrences, ...checkpoints, ...options.contextRows,
-  ] as never, users as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
+  const plan = await boundedRepairSlicePlan(db, {
+    scope: options.scope ?? 'identity',
+    jobIds: options.jobIds,
+    contextRows: options.contextRows,
+    occurrenceKeys: options.occurrenceKeys,
+  });
   return applyPostingIdentityRepairPlan(db, plan, options);
+}
+
+type OccurrenceAlias = { row: PostingIdentityAuditRow; canonicalJobId: string };
+
+/** Durable occurrence rows by owning job ID. The projection keeps every
+ * occurrence body out of memory until a repaired group asks for its own. */
+async function readOccurrenceIndex(db: D1Database): Promise<Map<string, Array<[string, string]>>> {
+  const index = new Map<string, Array<[string, string]>>();
+  let afterPk = '';
+  let afterSk = '';
+  for (;;) {
+    const page = await db.prepare(`SELECT pk, sk, json_extract(value, '$.jobId') AS job_id FROM catalog_items
+      WHERE kind = 'source-occurrence' AND (pk > ? OR (pk = ? AND sk > ?))
+      ORDER BY pk, sk LIMIT ?`)
+      .bind(afterPk, afterPk, afterSk, OCCURRENCE_INDEX_PAGE).all<{ pk: string; sk: string; job_id: string | null }>();
+    for (const row of page.results) if (row.job_id) {
+      index.set(row.job_id, [...(index.get(row.job_id) ?? []), [row.pk, row.sk]]);
+    }
+    if (page.results.length < OCCURRENCE_INDEX_PAGE) return index;
+    const last = page.results.at(-1)!;
+    if (last.pk === afterPk && last.sk === afterSk) throw new Error('Posting identity occurrence index did not advance');
+    afterPk = last.pk;
+    afterSk = last.sk;
+  }
+}
+
+/** Internship PKs that exist for the given job IDs, read by primary key only. */
+async function readExistingJobIds(db: D1Database, jobIds: Iterable<string>): Promise<Set<string>> {
+  const ids = [...new Set(jobIds)].sort();
+  const existing = new Set<string>();
+  for (let offset = 0; offset < ids.length; offset += JOB_IDS_PER_READ) {
+    const pks = ids.slice(offset, offset + JOB_IDS_PER_READ).map((jobId) => `JOB#${jobId}`);
+    const page = await db.prepare(`SELECT pk FROM catalog_items
+      WHERE kind = 'internship' AND pk IN (${pks.map(() => '?').join(', ')})`).bind(...pks).all<{ pk: string }>();
+    for (const row of page.results) existing.add(row.pk.slice('JOB#'.length));
+  }
+  return existing;
+}
+
+export type OccurrenceRepairBatch = {
+  jobIds: string[];
+  contextRows: PostingIdentityAuditRow[];
+  occurrenceKeys: Array<[string, string]>;
+  repairToken: string;
+  expectedChanges: number;
+  expectedDuplicateJobs: number;
+  /** Per-batch bounds that permit a revalidated apply after unrelated catalog
+   * writes, exactly like the identity batch guard. */
+  eligibleDuplicateGroups: number;
+  unresolvedDuplicateGroups: number;
+  occurrenceRemaps: number;
+  jobUpdates: number;
+  projectionMismatches: number;
+};
+
+export type OccurrenceRepairPlan = {
+  schemaVersion: 1;
+  scope: 'occurrences';
+  aliasesScanned: number;
+  danglingOccurrences: number;
+  canonicalJobs: number;
+  expectedChanges: number;
+  occurrenceRemaps: number;
+  jobUpdates: number;
+  projectionMismatches: number;
+  conflicts: string[];
+  batches: OccurrenceRepairBatch[];
+  applied: false;
+  projectionRefreshRequired: false;
+};
+
+/**
+ * Paged occurrence repair. A completed identity merge retires job IDs while
+ * their durable `source-occurrence` rows still point at the old ID, and the
+ * merged job retains identity references the occurrence synchronizer has to
+ * reclassify. Planning that from the whole catalog exceeds D1's CPU limit, so
+ * this planner reads the job-ID alias table and a job-ID-projected occurrence
+ * index, then plans only the canonical jobs an alias actually reaches. Each
+ * returned batch is applied with its own signed token, revalidated against the
+ * batch's current change count exactly like an identity batch.
+ */
+export async function runBoundedPostingIdentityOccurrenceRepair(db: D1Database, options: {
+  jobBatch?: number;
+  log?: (event: string) => void;
+} = {}): Promise<OccurrenceRepairPlan> {
+  const jobLimit = Math.max(1, Math.min(options.jobBatch ?? OCCURRENCE_BATCH_JOBS, OCCURRENCE_BATCH_JOBS));
+  const [aliasRows, occurrenceIndex] = await Promise.all([
+    readKindRows(db, 'job-id-alias'),
+    readOccurrenceIndex(db),
+  ]);
+  const conflicts: string[] = [];
+  const aliasByOldJobId = new Map<string, OccurrenceAlias>();
+  for (const row of aliasRows) {
+    try {
+      const value = JSON.parse(row.value) as { oldJobId?: unknown; canonicalJobId?: unknown };
+      const keyJobId = row.pk.startsWith('JOB_ID_ALIAS#') ? row.pk.slice('JOB_ID_ALIAS#'.length) : undefined;
+      const oldJobId = typeof value.oldJobId === 'string' ? value.oldJobId : undefined;
+      const canonicalJobId = typeof value.canonicalJobId === 'string' ? value.canonicalJobId : undefined;
+      if (row.sk !== 'TARGET' || !keyJobId || !oldJobId || !canonicalJobId || oldJobId !== keyJobId) {
+        conflicts.push(`${row.pk}:${row.sk}: malformed job ID alias`);
+        continue;
+      }
+      if (oldJobId === canonicalJobId) {
+        conflicts.push(`${oldJobId}: job ID alias cannot target itself`);
+        continue;
+      }
+      const existing = aliasByOldJobId.get(oldJobId);
+      if (existing && existing.canonicalJobId !== canonicalJobId) {
+        conflicts.push(`${oldJobId}: job ID alias resolves to multiple canonical jobs`);
+        continue;
+      }
+      aliasByOldJobId.set(oldJobId, { row, canonicalJobId });
+    } catch { conflicts.push(`${row.pk}:${row.sk}: malformed job ID alias JSON`); }
+  }
+  for (const [oldJobId, alias] of aliasByOldJobId) {
+    if (aliasByOldJobId.has(alias.canonicalJobId)) conflicts.push(`${oldJobId}: job ID alias must be one hop`);
+  }
+  // Every alias names a canonical job an identity merge rewrote. The merge
+  // stamps a confirmed projection status that the retained references may not
+  // support, and the durable occurrence row that still names the retired ID has
+  // to move with it. A retired ID whose occurrence row is already gone still
+  // leaves that stale status behind, so both are part of this scope; a durable
+  // row only adds reference keys to the group.
+  const candidates = [...aliasByOldJobId];
+  const existingJobs = await readExistingJobIds(db, candidates.flatMap(([oldJobId, alias]) => [oldJobId, alias.canonicalJobId]));
+  const groups = new Map<string, { canonicalJobId: string; retiredJobIds: string[]; contextRows: PostingIdentityAuditRow[] }>();
+  let danglingOccurrences = 0;
+  for (const [oldJobId, alias] of candidates.sort(([left], [right]) => left.localeCompare(right))) {
+    if (!existingJobs.has(alias.canonicalJobId)) {
+      conflicts.push(`${oldJobId}: job ID alias target ${alias.canonicalJobId} is missing`);
+      continue;
+    }
+    if (existingJobs.has(oldJobId)) {
+      conflicts.push(`${oldJobId}: job ID alias source still has an internship row`);
+      continue;
+    }
+    const group = groups.get(alias.canonicalJobId)
+      ?? { canonicalJobId: alias.canonicalJobId, retiredJobIds: [], contextRows: [] };
+    group.retiredJobIds.push(oldJobId);
+    group.contextRows.push(alias.row);
+    groups.set(alias.canonicalJobId, group);
+    danglingOccurrences += occurrenceIndex.get(oldJobId)?.length ?? 0;
+  }
+
+  const batches: OccurrenceRepairBatch[] = [];
+  const queue: Array<{ jobIds: string[]; contextRows: PostingIdentityAuditRow[]; occurrenceKeys: Array<[string, string]> }> = [];
+  for (const group of [...groups.values()].sort((left, right) => left.canonicalJobId.localeCompare(right.canonicalJobId))) {
+    const jobIds = [group.canonicalJobId, ...group.retiredJobIds];
+    const occurrenceKeys = [...new Map([...occurrenceIndex.get(group.canonicalJobId) ?? [],
+      ...group.retiredJobIds.flatMap((jobId) => occurrenceIndex.get(jobId) ?? [])]
+      .map((key) => [`${key[0]}\0${key[1]}`, key] as const)).values()].sort();
+    const contextRows = [...new Map(group.contextRows.map((row) => [`${row.pk}\0${row.sk}`, row] as const)).values()]
+      .sort((left, right) => left.pk.localeCompare(right.pk) || left.sk.localeCompare(right.sk));
+    // A canonical job's synchronization must see all of its retired IDs in one
+    // slice; splitting a group would make a later batch overwrite the first
+    // batch's source-reference merge with a partial one.
+    if (jobIds.length > jobLimit || occurrenceKeys.length > OCCURRENCE_BATCH_REFERENCES
+      || contextRows.length > OCCURRENCE_BATCH_CONTEXT) {
+      conflicts.push(`${group.canonicalJobId}: occurrence group exceeds the queue-tolerant repair envelope`);
+      continue;
+    }
+    const current = queue.at(-1);
+    if (!current || current.jobIds.length + jobIds.length > jobLimit
+      || current.occurrenceKeys.length + occurrenceKeys.length > OCCURRENCE_BATCH_REFERENCES
+      || current.contextRows.length + contextRows.length > OCCURRENCE_BATCH_CONTEXT) {
+      queue.push({ jobIds, contextRows, occurrenceKeys });
+      continue;
+    }
+    current.jobIds.push(...jobIds);
+    current.contextRows.push(...contextRows);
+    current.occurrenceKeys.push(...occurrenceKeys);
+  }
+
+  let expectedChanges = 0;
+  let occurrenceRemaps = 0;
+  let jobUpdates = 0;
+  let projectionMismatches = 0;
+  for (let index = 0; index < queue.length; index += 1) {
+    const slice = queue[index]!;
+    const plan = await boundedRepairSlicePlan(db, { scope: 'occurrences', ...slice });
+    conflicts.push(...plan.conflicts);
+    expectedChanges += plan.expectedChanges;
+    occurrenceRemaps += plan.occurrenceRemaps;
+    jobUpdates += plan.jobUpdates;
+    projectionMismatches += plan.gate.projectionMismatches;
+    batches.push({
+      jobIds: slice.jobIds,
+      contextRows: slice.contextRows,
+      occurrenceKeys: slice.occurrenceKeys,
+      repairToken: plan.repairToken,
+      expectedChanges: plan.expectedChanges,
+      expectedDuplicateJobs: plan.duplicateJobs,
+      eligibleDuplicateGroups: plan.eligibleDuplicateGroups,
+      unresolvedDuplicateGroups: plan.unresolvedDuplicateGroups,
+      occurrenceRemaps: plan.occurrenceRemaps,
+      jobUpdates: plan.jobUpdates,
+      projectionMismatches: plan.gate.projectionMismatches,
+    });
+    options.log?.(JSON.stringify({ event: 'posting_identity_occurrence_repair_batch', batch: index + 1,
+      batches: queue.length, jobs: slice.jobIds.length, occurrences: slice.occurrenceKeys.length,
+      changes: plan.expectedChanges }));
+  }
+  return {
+    schemaVersion: 1,
+    scope: 'occurrences',
+    aliasesScanned: aliasRows.length,
+    danglingOccurrences,
+    canonicalJobs: groups.size,
+    expectedChanges,
+    occurrenceRemaps,
+    jobUpdates,
+    projectionMismatches,
+    conflicts: [...new Set(conflicts)].sort(),
+    batches,
+    applied: false,
+    projectionRefreshRequired: false,
+  };
 }

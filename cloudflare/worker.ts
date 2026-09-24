@@ -26,7 +26,7 @@ import type { SourceCheckpoint, SourceHealth } from '../src/types.js';
 import { authenticatedInstallation, authenticatedUser, cleanupExpiredAuth, consumeAuthRateLimit, createInstallation, deleteAuthUser, handleAuthRequest, type AuthEnvironment } from './auth.js';
 import { runCatalogQualityBackfill } from '../src/catalog-quality-backfill.js';
 import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
-import { runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
+import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
@@ -424,30 +424,26 @@ type PostingIdentityRepairInput = {
 // an indefinitely empty production queue.
 const MAX_LOW_IMPACT_REPAIR_JOBS = 100;
 const MAX_LOW_IMPACT_REPAIR_REFERENCES = 125;
-// Occurrence synchronization repairs durable pointers left by a completed
-// identity merge. It can read the catalog in pages, but must stay small enough
-// that normal provider work is not displaced and must defer the R2 rebuild.
-const MAX_LOW_IMPACT_OCCURRENCE_CHANGES = 250;
 
-export function isLowImpactPostingIdentityRequest(input: PostingIdentityRepairInput): boolean {
-  if (input.audit === true) return true;
-  if (input.scope === 'occurrences') {
-    if (!input.apply) return true;
-    const expectedChanges = input.expectedChanges;
-    const expectedDuplicateJobs = input.expectedDuplicateJobs;
-    return input.finalize === false
-      && typeof input.repairToken === 'string' && /^[a-f0-9]{64}$/u.test(input.repairToken)
-      && typeof expectedChanges === 'number' && Number.isInteger(expectedChanges) && expectedChanges >= 0
-      && expectedChanges <= MAX_LOW_IMPACT_OCCURRENCE_CHANGES
-      && typeof expectedDuplicateJobs === 'number' && Number.isInteger(expectedDuplicateJobs) && expectedDuplicateJobs >= 0;
-  }
-  if (input.scope !== 'identity') return false;
-  if (input.duplicateGroupsOnly === true && input.apply !== true && !input.applyBatch) return true;
+/** The reviewed queue-tolerant apply envelope shared by identity and occurrence
+ * repairs: one signed batch, bounded jobs and references, projection rebuild
+ * deferred to the separate authorized refresh. */
+function isLowImpactRepairBatch(input: PostingIdentityRepairInput): boolean {
   if (!input.apply || input.finalize === true || !input.applyBatch) return false;
   const { jobIds, contextRows, occurrenceKeys } = input.applyBatch;
   return Array.isArray(jobIds) && jobIds.length > 0 && jobIds.length <= MAX_LOW_IMPACT_REPAIR_JOBS
     && Array.isArray(contextRows) && contextRows.length <= MAX_LOW_IMPACT_REPAIR_REFERENCES
     && Array.isArray(occurrenceKeys) && occurrenceKeys.length <= MAX_LOW_IMPACT_REPAIR_REFERENCES;
+}
+
+export function isLowImpactPostingIdentityRequest(input: PostingIdentityRepairInput): boolean {
+  if (input.audit === true) return true;
+  // The paged occurrence plan reads job-ID aliases and a job-ID-projected
+  // occurrence index; its apply path is a signed batch like the identity one.
+  if (input.scope === 'occurrences') return !input.apply || isLowImpactRepairBatch(input);
+  if (input.scope !== 'identity') return false;
+  if (input.duplicateGroupsOnly === true && input.apply !== true && !input.applyBatch) return true;
+  return isLowImpactRepairBatch(input);
 }
 
 async function bulkOperationWindow(env: Environment, options: { allowQueuedWork?: boolean } = {}): Promise<Response | undefined> {
@@ -987,7 +983,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       };
       let report: PostingIdentityRepairPlan;
       if (input.applyBatch) {
-        if (!input.apply || input.scope !== 'identity'
+        if (!input.apply || (input.scope !== 'identity' && input.scope !== 'occurrences')
           || !Array.isArray(input.applyBatch.jobIds) || input.applyBatch.jobIds.some((item) => typeof item !== 'string')
           || !Array.isArray(input.applyBatch.contextRows)
           || input.applyBatch.contextRows.some((item) => !item || typeof item !== 'object'
@@ -999,6 +995,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
           || (input.acceptCurrentSnapshot === true && (!Number.isInteger(input.expectedEligibleDuplicateGroups)
             || !Number.isInteger(input.expectedUnresolvedDuplicateGroups)))) throw new Error('Identity repair batch is invalid');
         report = await runBoundedPostingIdentityRepairBatch(env.DB, {
+          scope: input.scope,
           jobIds: input.applyBatch.jobIds as string[],
           contextRows: input.applyBatch.contextRows as Array<{ pk: string; sk: string; kind: string; value: string }>,
           occurrenceKeys: input.applyBatch.occurrenceKeys as Array<[string, string]>,
@@ -1011,6 +1008,16 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
         });
         if (input.finalize) await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         return withCors(Response.json(report));
+      }
+      // Occurrence repair never runs as one catalog-wide pass: D1 cannot plan
+      // that shape inside its CPU budget. It plans paged batches and applies
+      // exactly one signed batch at a time.
+      if (input.scope === 'occurrences') {
+        if (input.apply) throw new Error('Occurrence repair applies one signed batch at a time; send applyBatch');
+        return withCors(Response.json(await runBoundedPostingIdentityOccurrenceRepair(env.DB, {
+          ...(input.jobBatch === undefined ? {} : { jobBatch: input.jobBatch }),
+          log: (event) => console.log(event),
+        })));
       }
       report = input.scope === 'identity'
         ? await runBoundedPostingIdentityRepair(env.DB, repairOptions)
