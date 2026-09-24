@@ -26,11 +26,13 @@ export async function companyIconResponse(
 
   const headers = new Headers({
     'Content-Type': contentType,
-    // Reviewed assets have versioned keys; an icon update gets a new key.
-    'Cache-Control': 'public, max-age=31536000, immutable',
+    // The public URL is stable even when the reviewed R2 key changes.
+    'Cache-Control': 'public, max-age=60, must-revalidate',
   });
   if (object.size !== undefined) headers.set('Content-Length', String(object.size));
   return new Response(object.body, { headers });
 }
 
-function notFound() { return Response.json({ message: 'Company icon not found' }, { status: 404 }); }
+function notFound() {
+  return Response.json({ message: 'Company icon not found' }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
+}

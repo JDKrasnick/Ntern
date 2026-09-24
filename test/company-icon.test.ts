@@ -13,7 +13,30 @@ describe('company icon route', () => {
     }, { async get(key) { return key === 'company-icons/acme/logo-v1.webp' ? object('image/webp') : null; } } as R2Bucket);
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('image/webp');
-    expect(response.headers.get('Cache-Control')).toContain('immutable');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, must-revalidate');
+  });
+
+  it('revalidates the stable URL after an icon changes or is removed', async () => {
+    let iconKey: string | undefined = 'company-icons/acme/logo-v1.webp';
+    const employer = { async getCanonicalEmployer() {
+      return { id: 'acme', displayName: 'Acme', iconKey, reviewedAt: '', reviewedBy: '' };
+    } };
+    const documents = { async get(key: string) {
+      return { ...object('image/webp'), body: new Blob([key]).stream(), size: key.length };
+    } } as unknown as R2Bucket;
+
+    const first = await companyIconResponse('acme', employer, documents);
+    expect(await first.text()).toBe('company-icons/acme/logo-v1.webp');
+    expect(first.headers.get('Cache-Control')).toBe('public, max-age=60, must-revalidate');
+
+    iconKey = 'company-icons/acme/logo-v2.webp';
+    const updated = await companyIconResponse('acme', employer, documents);
+    expect(await updated.text()).toBe('company-icons/acme/logo-v2.webp');
+
+    iconKey = undefined;
+    const removed = await companyIconResponse('acme', employer, documents);
+    expect(removed.status).toBe(404);
+    expect(removed.headers.get('Cache-Control')).toBe('no-store');
   });
 
   it('hides missing, malformed, and non-image assets', async () => {
