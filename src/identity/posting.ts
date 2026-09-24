@@ -712,3 +712,17 @@ export function preferredJobIdentityConflicts(identity: PostingIdentity, job: In
   }
   return confirmed.size > 0 && ![...confirmed].some((exactKey) => incoming.has(exactKey));
 }
+
+/**
+ * Lowercased exact provider key shared by every writer that compares immutable
+ * posting identities. Tenant and posting id are case-folded here so the repair
+ * planner, the ingestion reconciler, and the reviewed ledgers agree on one key.
+ * Posting aliases store this same value behind their `provider:` prefix.
+ */
+export function providerPostingKey(reference: {
+  provider: PostingProvider;
+  tenant?: string;
+  postingId: string;
+}): string {
+  return `${reference.provider}:${reference.tenant?.toLowerCase() ?? '-'}:${reference.postingId.toLowerCase()}`;
+}

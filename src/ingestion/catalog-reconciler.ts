@@ -6,6 +6,7 @@ import { normalizeInternship, normalizeListing } from '../catalog-quality.js';
 import { isOfficialOccurrence } from '../sources/provenance.js';
 import { isPastSeason } from '../core/early-career.js';
 import { deriveCanonicalAdmission } from '../catalog-admission.js';
+import { providerPostingKey, providerPostingReference } from '../identity/posting.js';
 import { stableSourceOccurrenceJobId } from '../identity/registry.js';
 import { projectRoleMetadata } from '../role-metadata.js';
 import { mergeSourceOccurrence } from '../identity/source-occurrence.js';
@@ -34,6 +35,22 @@ export interface ReconciliationInput {
   publishUnconfirmedIdentities?: boolean;
   /** Enabled only by the active trusted source's reviewed alert policy. */
   trustedCommunityAlertsEnabled?: boolean;
+  /** Reviewed withdrawn postings as exact provider keys. A retired posting must
+   * not reopen because a community list still publishes its dead URL. */
+  withdrawnPostingKeys?: Set<string>;
+}
+
+/** True when the listing's own application URL names a reviewed withdrawn
+ * posting. The reviewed ledger is the authority, never the row's own claim. */
+function listsWithdrawnPosting(applyUrl: string, withdrawn: Set<string> | undefined): boolean {
+  if (!withdrawn?.size) return false;
+  try {
+    const reference = providerPostingReference(applyUrl);
+    if (reference.provider === 'unknown' || !reference.postingId) return false;
+    return withdrawn.has(providerPostingKey({
+      provider: reference.provider, tenant: reference.tenant, postingId: reference.postingId,
+    }));
+  } catch { return false; }
 }
 
 export interface ReconciliationPlan {
@@ -138,7 +155,8 @@ function seasonAllowsOpen(season: string, identity: Internship['internshipIdenti
   return evidence === 'explicit' && references.some((reference) => reference.state === 'open' && isOfficialOccurrence(reference));
 }
 
-function merge(existing: Internship, listing: ProcessedListing, externalId: string, now: string, applicationUrlValidatedAt?: string, metadataVersion?: number): Internship {
+function merge(existing: Internship, listing: ProcessedListing, externalId: string, now: string,
+  applicationUrlValidatedAt: string | undefined, metadataVersion: number | undefined, withdrawn: boolean): Internship {
   const becomingCatalogVisible = !existing.catalogVisibleAt && existing.admission?.catalogEligible === false && listing.admission?.catalogEligible === true;
   existing = normalizeInternship(existing);
   listing = normalizeListing(listing);
@@ -201,10 +219,10 @@ function merge(existing: Internship, listing: ProcessedListing, externalId: stri
     employerCategory: employerCategory(company),
     sourceReferences,
     ...(admission ? { admission } : {}),
-    ...(authoritativeClosure ? { invalidApplicationUrl: listingNormalizedUrl,
+    ...(authoritativeClosure || withdrawn ? { invalidApplicationUrl: listingNormalizedUrl,
       notification: { ...existing.notification, smsPending: false, digestPending: false } } : {}),
     technical: canRevive ? anyOpenTechnicalOccurrence(sourceReferences) : existing.technical,
-    open: authoritativeClosure || keepQuarantined ? false
+    open: authoritativeClosure || keepQuarantined || withdrawn ? false
       : canRevive && sourceReferences.some((item) => item.state === 'open') && seasonAllowsOpen(season, internshipIdentity, sourceReferences, now),
     ...(becomingCatalogVisible ? {
       catalogVisibleAt: now,
@@ -217,7 +235,8 @@ function merge(existing: Internship, listing: ProcessedListing, externalId: stri
   return projectRoleMetadata(merged).job;
 }
 
-function create(listing: ProcessedListing, externalId: string, now: string, baseline: boolean, applicationUrlValidatedAt?: string, metadataVersion?: number): Internship {
+function create(listing: ProcessedListing, externalId: string, now: string, baseline: boolean,
+  applicationUrlValidatedAt: string | undefined, metadataVersion: number | undefined, withdrawn: boolean): Internship {
   listing = normalizeListing(listing);
   const normalizedUrl = normalizeUrl(listing.applyUrl);
   const key = fingerprint(listing.company, listing.title, listing.location, listing.season);
@@ -249,9 +268,11 @@ function create(listing: ProcessedListing, externalId: string, now: string, base
     sourceReferences: [reference],
     ...(admission ? { admission } : {}),
     ...(authoritativeClosure ? { invalidApplicationUrl: normalizedUrl } : {}),
+    ...(withdrawn ? { invalidApplicationUrl: normalizedUrl } : {}),
     technical: listing.technical ?? isTechnicalJob(listing),
     ...(listing.technicalScope ?? technicalScopeFor(listing) ? { technicalScope: listing.technicalScope ?? technicalScopeFor(listing) } : {}),
-    open: !authoritativeClosure && listing.state === 'open' && seasonAllowsOpen(listing.season, listing.internshipIdentity, [reference], now),
+    open: !authoritativeClosure && !withdrawn && listing.state === 'open'
+      && seasonAllowsOpen(listing.season, listing.internshipIdentity, [reference], now),
     firstSeenAt: now,
     ...(admission?.catalogEligible === false ? {} : {
       catalogVisibleAt: now,
@@ -339,9 +360,10 @@ export class CatalogReconciler {
       const existing = inSnapshot ?? stored;
       const validatedAt = input.validatedAt?.get(externalId);
       const metadataVersion = input.metadataValidated?.get(externalId);
+      const withdrawn = listsWithdrawnPosting(listing.applyUrl, input.withdrawnPostingKeys);
       const job = existing
-        ? merge(existing, listing, externalId, input.now, validatedAt, metadataVersion)
-        : create(listing, externalId, input.now, input.baseline, validatedAt, metadataVersion);
+        ? merge(existing, listing, externalId, input.now, validatedAt, metadataVersion, withdrawn)
+        : create(listing, externalId, input.now, input.baseline, validatedAt, metadataVersion, withdrawn);
       const retryingUncommittedCreate = Boolean(stored && !inSnapshot
         && !priorById.has(externalId)
         && stored.sourceReferences.length === 1

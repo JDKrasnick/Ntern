@@ -202,6 +202,25 @@ describe('snapshot reconciliation', () => {
     ]);
   });
 
+  it('keeps a reviewed withdrawn posting closed while its list still publishes it', async () => {
+    const store = new MemoryInternshipStore();
+    const adapter = new MutableAdapter('github-list', [listing('github-list', { provenance: 'reviewed-community' })]);
+    await new IngestionRunner([adapter], store).run();
+    expect([...store.jobs.values()][0]).toMatchObject({ open: true });
+
+    // The employer page for this exact posting is gone; the list has not caught
+    // up yet. The reviewed ledger, not the row, decides that it stays retired.
+    store.withdrawnPostingKeys.add('ashby:acme:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    await new IngestionRunner([adapter], store).run();
+    expect([...store.jobs.values()][0]).toMatchObject({
+      open: false,
+      notification: { smsPending: false, digestPending: false },
+    });
+
+    await new IngestionRunner([adapter], store).run();
+    expect([...store.jobs.values()][0]).toMatchObject({ open: false });
+  });
+
   it('closes an elapsed role when its last official occurrence closes', async () => {
     const store = new MemoryInternshipStore();
     const community = new MutableAdapter('github-list', [listing('github-list', { season: 'summer-2025', provenance: 'reviewed-community' })]);

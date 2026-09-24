@@ -793,9 +793,28 @@ A reviewed row is authoritative for its exact provider identity: it supplies the
 merged record's company, title, location, and application URL, and it settles a
 member-level employer-name disagreement for that posting, because the immutable
 decision already names the employer the official page shows. Reviews for other
-posting ids, aliases, or tenants never apply. Groups whose page is withdrawn,
-reposted under a different posting id, or otherwise unavailable stay unresolved
-and must not receive a row.
+posting ids, aliases, or tenants never apply.
+
+Two more append-only ledgers answer the cases where the page itself moved:
+
+- `posting_url_corrections` records one reviewed re-anchor: a community list
+  keeps publishing an application URL, and the employer's own page for that
+  exact identity declares a newer immutable posting id as its canonical URL.
+  The correction changes identity resolution for that exact provider identity
+  only — the source row keeps its URL as provenance — so the catalog converges
+  on the employer's current posting instead of holding two twins. Both URLs must
+  name the reviewed provider tenant, and the recorded target must be a newer
+  posting id, or the plan refuses the row.
+- `posting_withdrawal_reviews` retires an identity whose employer page is gone
+  (HTTP 410 with the employer's own "no longer open" message). A withdrawn
+  identity contributes no repair evidence, so it cannot hold up a group on a
+  second reviewed employer attribution, and the ingestion reconciler keeps its
+  record closed while the community lists still publish the dead URL.
+
+Neither ledger authorizes a title, location, employer name, or destination on a
+different identity, and both validate their evidence hash at runtime. Record a
+row only from the employer page for that exact posting; a row for another
+posting id, tenant, or alias is refused.
 
 Run the deterministic integrity audit against the same snapshot before any
 apply and archive its legacy/classified counts. Exit status `2` is expected

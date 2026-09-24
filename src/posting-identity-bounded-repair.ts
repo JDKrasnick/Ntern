@@ -40,6 +40,28 @@ type PresentationReviewRow = {
   reviewed_at: string;
   reviewed_by: string;
 };
+type PostingUrlCorrectionRow = {
+  id: string;
+  provider: string;
+  tenant: string;
+  posting_id: string;
+  observed_url: string;
+  canonical_url: string;
+  evidence_url: string;
+  evidence_hash: string;
+  reviewed_at: string;
+  reviewed_by: string;
+};
+type PostingWithdrawalRow = {
+  id: string;
+  provider: string;
+  tenant: string;
+  posting_id: string;
+  evidence_url: string;
+  evidence_hash: string;
+  reviewed_at: string;
+  reviewed_by: string;
+};
 
 const READ_PAGE = 500;
 const GROUP_JOBS_PER_BATCH = 100;
@@ -270,6 +292,11 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   const presentationReviews = (await db.prepare(`SELECT id, provider, tenant, posting_id, company, title, location,
       locations_json, apply_url, evidence_url, evidence_hash, reviewed_at, reviewed_by
     FROM posting_identity_presentation_reviews ORDER BY id`).all<PresentationReviewRow>()).results;
+  const urlCorrections = (await db.prepare(`SELECT id, provider, tenant, posting_id, observed_url, canonical_url,
+      evidence_url, evidence_hash, reviewed_at, reviewed_by
+    FROM posting_url_corrections ORDER BY id`).all<PostingUrlCorrectionRow>()).results;
+  const withdrawals = (await db.prepare(`SELECT id, provider, tenant, posting_id, evidence_url, evidence_hash,
+      reviewed_at, reviewed_by FROM posting_withdrawal_reviews ORDER BY id`).all<PostingWithdrawalRow>()).results;
 
   const occurrenceKeys = new Map(scan.repairIndex.occurrenceKeysByJob.map((item) => [item.jobId, item.keys]));
   const jobAliases = new Map<string, string>();
@@ -308,7 +335,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
       ...fullJobs,
       ...occurrences,
       ...batchContextRows,
-    ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
+    ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews, urlCorrections, withdrawals }) as InternalPostingIdentityRepairPlan;
 
     batchDigests.push(plan.snapshotDigest, plan.repairToken);
     applyBatches.push({
@@ -422,7 +449,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     const occurrences = await readOccurrenceRows(db, keys);
     const batchPlan = postingIdentityRepairPlan([
       ...fullJobs, ...occurrences, ...contextForJobs(contextRows, occurrenceJobIds),
-    ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
+    ] as never, simulatedUsers as never, proposals, 'identity', { employerMappings, presentationReviews, urlCorrections, withdrawals }) as InternalPostingIdentityRepairPlan;
     await applyPostingIdentityRepairPlan(db, batchPlan, {
       repairToken: batchPlan.repairToken,
       expectedChanges: batchPlan.expectedChanges,
@@ -450,7 +477,7 @@ async function boundedRepairSlicePlan(db: D1Database, options: {
   occurrenceKeys: Array<[string, string]>;
 }): Promise<InternalPostingIdentityRepairPlan> {
   const occurrenceScope = options.scope === 'occurrences';
-  const [checkpoints, users, proposals, employerMappings, presentationReviews, fullJobs, occurrences] = await Promise.all([
+  const [checkpoints, users, proposals, employerMappings, presentationReviews, urlCorrections, withdrawals, fullJobs, occurrences] = await Promise.all([
     readKindRows(db, 'checkpoint'),
     occurrenceScope ? Promise.resolve([] as UserRow[]) : readUserRowsForJobs(db, options.jobIds),
     db.prepare('SELECT id, job_id FROM employer_field_proposals ORDER BY id').all<ProposalRow>().then((result) => result.results),
@@ -459,12 +486,17 @@ async function boundedRepairSlicePlan(db: D1Database, options: {
     db.prepare(`SELECT id, provider, tenant, posting_id, company, title, location,
         locations_json, apply_url, evidence_url, evidence_hash, reviewed_at, reviewed_by
       FROM posting_identity_presentation_reviews ORDER BY id`).all<PresentationReviewRow>().then((result) => result.results),
+    db.prepare(`SELECT id, provider, tenant, posting_id, observed_url, canonical_url, evidence_url,
+        evidence_hash, reviewed_at, reviewed_by
+      FROM posting_url_corrections ORDER BY id`).all<PostingUrlCorrectionRow>().then((result) => result.results),
+    db.prepare(`SELECT id, provider, tenant, posting_id, evidence_url, evidence_hash, reviewed_at, reviewed_by
+      FROM posting_withdrawal_reviews ORDER BY id`).all<PostingWithdrawalRow>().then((result) => result.results),
     readJobs(db, [...new Set(options.jobIds)].sort()),
     readOccurrenceRows(db, options.occurrenceKeys),
   ]);
   return postingIdentityRepairPlan([
     ...fullJobs, ...occurrences, ...checkpoints, ...options.contextRows,
-  ] as never, users as never, proposals, options.scope, { employerMappings, presentationReviews }) as InternalPostingIdentityRepairPlan;
+  ] as never, users as never, proposals, options.scope, { employerMappings, presentationReviews, urlCorrections, withdrawals }) as InternalPostingIdentityRepairPlan;
 }
 
 export async function runBoundedPostingIdentityRepairBatch(db: D1Database, options: {
