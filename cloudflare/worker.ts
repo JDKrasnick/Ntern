@@ -32,7 +32,7 @@ import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection
 import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, shadowExtractionSummary } from './shadow-extraction.js';
-import { handleShadowPublication } from './shadow-publication.js';
+import { handleShadowPublication, publishProspectiveShadowMetadata } from './shadow-publication.js';
 import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
 import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork, recordGmailFailure, type GmailWorkMessage } from './gmail.js';
 import { D1EmployerStore } from './employer-store.js';
@@ -1560,6 +1560,8 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // alert held the feed on a day-old snapshot.
     // See docs/197-ingestion-resource-bounds.md.
     const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store, env.DOCUMENTS));
+    await runScheduledStep('prospective_shadow_metadata', () => publishProspectiveShadowMetadata(env,
+      () => refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS)));
     const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));

@@ -475,6 +475,34 @@ describe('shadow extraction queue and cost ledger', () => {
       ] });
   });
 
+  it('verifies new provider-poll fields and charges both model passes', async () => {
+    const DB = schema(); const artifacts = new MemoryR2(); const messages: unknown[] = [];
+    const queue: Queue = { async send(body) { messages.push(body); }, async sendBatch() {} };
+    const observedAt = '2026-09-24T03:01:00.000Z';
+    const message = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts }, {
+      jobId: 'new-job', sourceId: identity.sourceId, externalId: 'fresh', sourceUrl: identity.sourceUrl,
+      providerIdentity: identity, title: 'Software Engineering Intern', description, observedAt, origin: 'provider-poll',
+    });
+    const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-test', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T03:00:00.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: 25 };
+    let calls = 0;
+    await processShadowExtractionBatch({ queue: 'intern-notifs-shadow-extraction', messages: [{
+      id: 'fresh', body: message, ack() {}, retry() {},
+    }] }, { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '100', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100',
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) }, () => new Date(observedAt), async () => {
+      calls += 1; return { response: output(), inputTokens: 100, outputTokens: 50, actualCostCents: 2 };
+    });
+    expect(calls).toBe(2);
+    const run = await DB.prepare('SELECT state, response_key, actual_cost_cents FROM shadow_extraction_runs WHERE run_key = ?')
+      .bind(message!.runKey).first<{ state: string; response_key: string; actual_cost_cents: number }>();
+    expect(run?.state).toBe('completed');
+    expect(run?.actual_cost_cents).toBe(4);
+    const object = await artifacts.get(run!.response_key);
+    const saved = JSON.parse(await new Response(object!.body).text()) as { verification: { acceptedFields: string[] } };
+    expect(saved.verification.acceptedFields).toEqual(['compensation', 'locations']);
+  });
+
   it('fences a reclaimed lease so stale output cannot replace the newer completion', async () => {
     const DB = schema(); const artifacts = new MemoryR2(); const queue: Queue = { async send() {}, async sendBatch() {} };
     const message = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts }, {

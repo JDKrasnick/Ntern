@@ -160,6 +160,22 @@ describe('Cloudflare deployment plan guard', () => {
     expect(() => validateCloudflarePlan(plan([change(enabled.replace('production-canary-2026-09-09-v1', 'other-canary'), disabled)]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('allows a bounded prospective provider policy and its rollback', () => {
+    const name = 'LLM_METADATA_PUBLICATION_POLICY_JSON';
+    const disabled = JSON.stringify({ enabled: false, version: 'disabled', allowedFields: [], cohort: [] });
+    const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-v1', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T03:00:00.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: 25 };
+    const update = (beforeText: string, afterText: string) => ({ address: 'cloudflare_workers_script.ingestion', actions: ['update'],
+      before: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: beforeText }] },
+      after: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: afterText }] } });
+    expect(validateCloudflarePlan(plan([update(disabled, JSON.stringify(policy))]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([update(JSON.stringify(policy), disabled)]))).toHaveLength(1);
+    for (const invalid of [{ ...policy, allowedFields: ['workMode'] }, { ...policy, maxReceipts: 26 },
+      { ...policy, cohort: [{ sourceId: 'old' }] }, { ...policy, mode: 'all' }]) {
+      expect(() => validateCloudflarePlan(plan([update(disabled, JSON.stringify(invalid))]))).toThrow('Refusing unsafe Cloudflare plan');
+    }
+  });
+
   it('accepts only the reviewed traffic-controller Durable Object binding addition', () => {
     expect(validateCloudflarePlan(plan([{
       ...contentUpdate,
