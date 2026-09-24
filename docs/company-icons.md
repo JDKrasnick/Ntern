@@ -2,6 +2,18 @@
 
 Company icons are stored against `canonical_employers`, not provider mappings or a company website domain. The asset lives in the existing `DOCUMENTS` R2 bucket under `company-icons/<canonical-employer-id>/...`; the D1 `icon_key` is the only public reference.
 
+## Discovery preview
+
+Use the preview command to collect candidates from an employer website that has already been matched to the canonical employer. It never uploads or changes D1:
+
+```sh
+npm run preview:employer-icon -- --company "Figma" --domain figma.com
+```
+
+The result ranks an Organization JSON-LD logo above Open Graph, Apple touch, and favicon candidates. It also makes a bounded `HEAD` request for each candidate and rejects unsupported image types, failed responses, and assets larger than 1.5 MB before review. A candidate remains review-only: confirm the page belongs to the employer and that the rendered asset is their logo before using the upload workflow below. Logo-provider results follow the same rule; they suggest a domain or asset, but do not bypass review.
+
+If the website is challenge-gated or returns non-HTML, the command returns an empty candidate set with `blockedReason`. Record that outcome and continue to the ATS-board or manual-review rung; never substitute an ATS provider's own logo.
+
 ## Operator workflow
 
 For a reviewed square PNG, WebP, or SVG, use a canonical ID such as `acme` and an immutable filename such as `logo-v1.webp`. Upload the asset to the existing documents bucket, then attach that exact key while creating or updating the employer. The API rejects a key outside that employer's `company-icons/<id>/` prefix, and rejects a new employer without a key.
