@@ -392,7 +392,7 @@ describe('Cloudflare bulk operation admission', () => {
     },
   );
 
-  it('permits only capped identity audit and duplicate batches alongside queued work', () => {
+  it('permits only capped identity and occurrence repairs alongside queued work', () => {
     expect(isLowImpactPostingIdentityRequest({ audit: true })).toBe(true);
     expect(isLowImpactPostingIdentityRequest({ scope: 'identity', duplicateGroupsOnly: true })).toBe(true);
     expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
@@ -407,6 +407,16 @@ describe('Cloudflare bulk operation admission', () => {
     expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
       jobIds: Array.from({ length: 101 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
     } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences' })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({
+      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 250, expectedDuplicateJobs: 0,
+    })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({
+      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 251, expectedDuplicateJobs: 0,
+    })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({
+      scope: 'occurrences', apply: true, repairToken: 'a'.repeat(64), expectedChanges: 1, expectedDuplicateJobs: 0,
+    })).toBe(false);
   });
 });
 
