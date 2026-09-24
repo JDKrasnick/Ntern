@@ -343,6 +343,24 @@ function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
   );
 }
 
+function isResumeTunerEnablement(before: unknown, after: unknown): boolean {
+  if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return false;
+  const name = 'RESUME_TUNER_ENABLED';
+  const prior = before.filter((binding) => isRecord(binding) && binding.name === name);
+  const next = after.filter((binding) => isRecord(binding) && binding.name === name);
+  if (prior.length !== 1 || next.length !== 1 || !isRecord(prior[0]) || !isRecord(next[0])) return false;
+  if (prior[0].type !== 'plain_text' || prior[0].text !== 'false') return false;
+  if (!isDeepStrictEqual({ ...prior[0], text: 'true' }, next[0])) return false;
+  const stableBindingIdentity = (binding: unknown): unknown => {
+    if (!isRecord(binding) || binding.type !== 'durable_object_namespace') return binding;
+    return { ...binding, namespace_id: null };
+  };
+  return bindingsMatchByName(
+    before.filter((binding) => !isRecord(binding) || binding.name !== name).map(stableBindingIdentity),
+    after.filter((binding) => !isRecord(binding) || binding.name !== name).map(stableBindingIdentity),
+  );
+}
+
 function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): boolean {
   if (!isRecord(change.before) || !isRecord(change.after)) return false;
   const before = change.before;
@@ -352,6 +370,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     !isDeepStrictEqual(before[field], after[field])
   ));
   const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings)
+    || isResumeTunerEnablement(before.bindings, after.bindings)
     || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, after.bindings));
   // The ingestion Worker exhausted its 10,000-subrequest invocation budget
   // while finishing a bounded GitHub source slice. Permit only this reviewed
@@ -381,7 +400,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     && !permittedResumeMigrationTagTransition
     && !permittedResumeMigrationBootstrap && !permittedAppliedMigrationRetirement) return false;
 
-  const beforeForComparison = {
+  let beforeForComparison = {
     ...before,
     ...(permittedBindingChanged ? { bindings: after.bindings } : {}),
     ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
@@ -402,6 +421,9 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     );
     afterForComparison = { ...after, bindings: normalized.after };
     afterUnknown = { ...afterUnknown, bindings: normalized.unknown };
+    if (permittedBindingChanged) {
+      beforeForComparison = { ...beforeForComparison, bindings: normalized.after };
+    }
   }
   if (permittedControllerMigration && isRecord(afterUnknown) && Array.isArray(afterUnknown.bindings)) {
     const controllerIndex = Array.isArray(after.bindings)

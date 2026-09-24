@@ -185,6 +185,7 @@ resource "cloudflare_workers_script" "application" {
       { name = "AI", type = "ai" },
       { name = "RESUME_EMBEDDINGS", type = "vectorize", index_name = var.resume_embedding_index_name },
       { name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompilerV2" },
+      { name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController", script_name = cloudflare_workers_script.ingestion.script_name },
       { name = "GMAIL_QUEUE", type = "queue", queue_name = cloudflare_queue.work["gmail"].queue_name },
       { name = "RESUME_JOB_IMPORT_QUEUE", type = "queue", queue_name = cloudflare_queue.work["resume-job-import"].queue_name },
       { name = "INGESTION", type = "service", service = cloudflare_workers_script.ingestion.script_name },
