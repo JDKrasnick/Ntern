@@ -29,23 +29,26 @@ Measure each change against a comparable production workload before claiming sav
 
 ## 2. Publish only changed catalog projection cards to D1
 
-**Landed 2026-09-24.** The prototype this section asked for ruled out the machinery
-it proposed: every card is already a self-contained chunk, so nothing is gained by
-re-cutting the same bytes into buckets and describing them in a manifest. D1 stores
+**Landed 2026-09-24.** Each card is already a self-contained chunk, so it is not
+re-cut into buckets. D1 stores
 each card under the group's own identity with a content-addressed suffix
 (`GROUP#<groupId>#<digest>` in one `CATALOG_PROJECTION#GROUPS` partition), and the
 display order became a key the card carries (`updatedAt`, with the group id breaking
 ties) instead of a positional index. Inserting or removing a card therefore never
-renumbers the others, and a refresh writes exactly the cards that changed.
+renumbers the others. A small manifest of active card keys is written before the
+cards, then the schema-version-6 pointer is switched with a compare-and-swap.
+Readers select only keys in that published manifest, so pending and retired rows
+cannot appear in a page or group lookup. Old manifests and cards remain for two
+minutes for in-flight readers; an unchanged tick retries interrupted cleanup.
 
 Measured locally on 2026-09-24 with a 300-card fixture (~8.8 MB of cards, the
 deployed projection carried 2,608 cards / 80.6 MiB):
 
-| refresh | statements written | payload |
-| --- | ---: | ---: |
-| full publish | 12 | 8,805,466 B |
-| one card changed | 2 | 20,669 B |
-| unchanged | 1 | pointer only |
+| refresh | card batch statements | card batch payload | other rows written |
+| --- | ---: | ---: | --- |
+| full publish | 12 | 8,805,466 B | manifest and pointer |
+| one card changed | 1 | 20,526 B | manifest and pointer |
+| unchanged, no cleanup due | 0 | 0 B | pointer only |
 
 The version this replaced wrote every card and deleted every card of the previous
 version on any change — 2,608 writes and 2,608 deletes per changed tick at the
@@ -54,25 +57,28 @@ because a version-4 copy is keyed by its version and cannot be reused.
 
 ### How the acceptance criteria are met
 
-- **Unchanged refresh writes only the pointer** — unchanged (the pointer row carries
-  the new `generatedAt` because readers cap a projection by its age).
-- **A small change writes only the affected cards and bounded cleanup** — one
-  changed card writes that card and deletes the row it replaced; a removed group
-  deletes its row; deletions are batched at 100. Covered for an edited card, an
-  inserted card and a removed card in
+- **Unchanged refresh writes only the pointer when no cleanup is due** — the pointer
+  carries the new `generatedAt` because readers cap a projection by its age.
+- **A small change writes only the affected cards and a key manifest** — one
+  changed card writes one card, plus the manifest and pointer. Superseded cards
+  are deleted after the reader grace period in batches of 100. Covered for an
+  edited card, an inserted card and a removed card in
   `test/d1-catalog-filter.test.ts` ("writes only the cards a refresh changed and
   orders them by the card itself").
-- **All four reads keep their shape, order, cursors and cost** — the unfiltered
-  page, filtered page, role range and group lookup keep their SQL, row counts and
-  cursor semantics; the group lookup is still one row because a removed group has no
-  row left. The same file's existing parity tests (pagination, filters, role ranges,
-  legacy version-4 rows, oversized payloads, byte budgets) run unchanged.
+- **All four reads keep their order and cursor semantics** — unfiltered pages,
+  filtered pages, role ranges and group lookup select keys from the published
+  manifest. The extra manifest existence check and SQL membership have a read
+  cost that must be measured in dev and production. The parity tests also cover
+  legacy version-4 rows, oversized payloads and byte budgets.
 - **No partially published catalog** — D1 is still published before R2, R2 is still
-  invalidated when its publish fails, the pointer is written after the cards, and a
-  refresh only ever deletes rows it replaced or that left the catalog.
-- **Rollback stays a code revert** — readers accept both the schema-version-4 and
-  schema-version-5 pointer, and the legacy rows are removed only by the first
-  version-5 refresh.
+  invalidated when its publish fails, and the pointer is switched after all cards
+  are ready. Tests interrupt a card publish and a card cleanup, overlap two
+  publishers, and remove a published manifest to check the visible outcomes.
+- **Rollback needs a compatible reader** — schema-version-6 readers still accept
+  version-4 pointers. A version-5 pointer is republished by the writer rather
+  than served from its unscoped partition. An older reader does not understand a
+  version-6 pointer; a rollback must republish a compatible projection before
+  routing readers to older code, or roll forward with a repair.
 
 One deliberate behaviour change: cards that share an `updatedAt` are now ordered by
 group id rather than by the order they happened to be built in. Both read models use
@@ -89,14 +95,15 @@ deterministic instead of incidental.
 ## Sequence and rollout
 
 1. Land the metadata optimization and its focused tests first. It has a smaller schema surface and should reduce repeated evidence and trigger writes independently of projection work.
-2. ~~Prototype and benchmark the chunked projection locally. Land compatible readers, then the writer, in separate reversible changes.~~ Landed 2026-09-24 as one change whose readers accept both layouts, so a revert is a code revert; the benchmark is the local measurement above.
+2. ~~Prototype and benchmark the chunked projection locally. Land compatible readers, then the writer, in separate reversible changes.~~ Landed 2026-09-24 with a schema-version-6 key manifest and compatible readers. Use the rollback sequence above after a version-6 publish; the benchmark is the local measurement above.
 3. For each production release, use the repository's guarded Cloudflare plan and deployment process, including `npx wrangler whoami`, build, OpenTofu plan/apply where infrastructure changes are needed, and read-only post-deploy verification. Do not force a protected audit through a busy queue.
 4. Compare seven-day D1 Insights windows with similar ingestion volume after deployment. Watch rows written **and** rows read, billable usage, catalog age, projection errors, metadata coverage, review-token failures, queue depth, and D1 overloads. Roll back if freshness or correctness regresses even if write volume falls.
 
 ## Decision gate
 
-**Met 2026-09-24** for both sections: the projection refresh now writes two rows plus
-its pointer where it wrote 5,216 rows at the deployed size, and the metadata path
+**Met locally 2026-09-24** for both sections: a one-card projection refresh writes
+one card, one manifest and its pointer where it wrote 5,216 card rows at the
+deployed size, and the metadata path
 writes an observation row where it rewrote evidence, conflict and review rows. Both
 measurements are local, so the remaining check is the production one below.
 

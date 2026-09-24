@@ -205,21 +205,27 @@ const catalogRowChanged = (columns: readonly string[]): string =>
  * rewritten and a changed card leaves exactly one row to clean up.
  */
 const CATALOG_PROJECTION_GROUPS_PK = 'CATALOG_PROJECTION#GROUPS';
-const CATALOG_PROJECTION_SCHEMA_VERSION = 5;
+const CATALOG_PROJECTION_MANIFESTS_PK = 'CATALOG_PROJECTION#MANIFESTS';
+const CATALOG_PROJECTION_SCHEMA_VERSION = 6;
+const CATALOG_PROJECTION_RETENTION_MS = 2 * 60_000;
 const CATALOG_PROJECTION_GROUP_PREFIX = 'GROUP#';
+
+type CatalogProjectionPointer = {
+  version: string;
+  generatedAt: string;
+  schemaVersion: number;
+  retainedVersions?: Array<{ version: string; until: string }>;
+  legacyVersion?: string;
+  legacyUntil?: string;
+};
+
+type CatalogProjectionManifest = { createdAt: string; keys: string[] };
 
 const catalogProjectionGroupRowKey = (groupId: string, digest: string): string =>
   `${CATALOG_PROJECTION_GROUP_PREFIX}${groupId}#${digest}`;
 
 function catalogProjectionGroupRowPrefix(groupId: string): string {
-  // The group id is a hex or hyphen identity, but escape the LIKE wildcards so a
-  // future identity scheme cannot turn a lookup into a scan.
   return `${CATALOG_PROJECTION_GROUP_PREFIX}${groupId.replace(/[\\%_]/gu, (character) => `\\${character}`)}#`;
-}
-
-function catalogProjectionGroupRow(sk: string): { groupId: string; digest: string } | undefined {
-  const match = /^GROUP#(.*)#([0-9a-f]{20})$/u.exec(sk);
-  return match ? { groupId: match[1]!, digest: match[2]! } : undefined;
 }
 
 export class D1InternshipStore implements InternshipStore {
@@ -846,8 +852,9 @@ export class D1InternshipStore implements InternshipStore {
    * production size every changed tick used to write 2,608 cards and delete the
    * 2,608 from the previous version. Cards are therefore stored under the group's
    * own identity with a content-addressed suffix, ordered by a key the card
-   * carries, so a refresh writes exactly the cards that changed and deletes
-   * exactly the rows they replaced. An unchanged tick still costs one pointer.
+   * carries. A compact manifest names the published rows; superseded rows are
+   * cleaned after a reader grace period. An unchanged tick normally costs one
+   * pointer write and also retries any cleanup that was interrupted.
    *
    * One `batch()` is also one RPC call carrying every statement's bound value,
    * and Cloudflare refuses a serialized argument over 32 MiB, so the work is
@@ -855,31 +862,56 @@ export class D1InternshipStore implements InternshipStore {
    * rather than as card payloads. See docs/197-ingestion-resource-bounds.md.
    */
   async putCatalogProjection(groups: CatalogGroupDetails[], generatedAt: string): Promise<void> {
-    const previous = await this.get<{ version: string; generatedAt: string; schemaVersion?: number }>('CATALOG_PROJECTION', 'CURRENT');
-    const published = previous?.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION;
+    const previousRow = await this.db.prepare("SELECT value FROM catalog_items WHERE pk = 'CATALOG_PROJECTION' AND sk = 'CURRENT'").first<JsonRow>();
+    const previous = parse<CatalogProjectionPointer>(previousRow);
+    const now = new Date();
+    const retainedVersions = (previous?.retainedVersions ?? []).filter((entry) => Date.parse(entry.until) > now.getTime());
     const version = createHash('sha256');
-    for (const group of groups) version.update(JSON.stringify(group)).update('\0');
+    const entries = groups.map((group) => {
+      const value = JSON.stringify(group);
+      version.update(value).update('\0');
+      const rowDigest = createHash('sha256').update(value).digest('hex').slice(0, 20);
+      return { group, sk: catalogProjectionGroupRowKey(group.group.groupId, rowDigest), sortKey: catalogProjectionSortKey(group) };
+    });
     const digest = version.digest('hex').slice(0, 20);
-    if (published && previous?.version === digest) {
-      await this.putCatalogProjectionPointer(digest, generatedAt);
+    const pointer: CatalogProjectionPointer = {
+      version: digest, generatedAt, schemaVersion: CATALOG_PROJECTION_SCHEMA_VERSION,
+      retainedVersions,
+      ...(previous?.legacyVersion ? { legacyVersion: previous.legacyVersion, legacyUntil: previous.legacyUntil } : {}),
+    };
+    if (previous?.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION && previous.version === digest) {
+      await this.putCatalogProjectionPointer(pointer, previousRow?.value);
+      await this.cleanupCatalogProjectionBestEffort(pointer, now);
       return;
     }
-    // What is stored, without loading a single card: one small row per group
-    // carrying the digest of its payload and its order key.
-    const stored = new Map<string, { digest: string; sortKey: string }>();
-    if (published) {
-      let after = '';
-      for (;;) {
-        const page = await this.db.prepare(`SELECT sk, catalog_sort_key AS sortKey FROM catalog_items
-          WHERE pk = ? AND kind = 'catalog-projection' AND sk > ? ORDER BY sk LIMIT 500`)
-          .bind(CATALOG_PROJECTION_GROUPS_PK, after).all<{ sk: string; sortKey: string | null }>();
-        for (const row of page.results) {
-          const parsed = catalogProjectionGroupRow(row.sk);
-          if (parsed) stored.set(parsed.groupId, { digest: parsed.digest, sortKey: row.sortKey ?? '' });
-        }
-        if (page.results.length < 500) break;
-        after = page.results[page.results.length - 1]!.sk;
-      }
+    if (previous?.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION) {
+      retainedVersions.push({ version: previous.version, until: new Date(now.getTime() + CATALOG_PROJECTION_RETENTION_MS).toISOString() });
+    } else if (previous?.schemaVersion === 4) {
+      pointer.legacyVersion = previous.version;
+      pointer.legacyUntil = new Date(now.getTime() + CATALOG_PROJECTION_RETENTION_MS).toISOString();
+    }
+    // A manifest is small compared with the cards and is written first. A
+    // concurrent cleanup can then see which keys an in-flight publish will use.
+    const current = new Set(entries.map((entry) => entry.sk));
+    await this.put(CATALOG_PROJECTION_MANIFESTS_PK, digest, 'catalog-projection-manifest',
+      { createdAt: now.toISOString(), keys: [...current] } satisfies CatalogProjectionManifest);
+    // Read only keys and order columns; an earlier interrupted publish may have
+    // left more than one digest for a group, and all of them must be considered.
+    const stored = new Map<string, string>();
+    let after = '';
+    for (;;) {
+      const page = await this.db.prepare(`SELECT sk, catalog_sort_key AS sortKey FROM catalog_items
+        WHERE pk = ? AND kind = 'catalog-projection' AND sk > ? ORDER BY sk LIMIT 500`)
+        .bind(CATALOG_PROJECTION_GROUPS_PK, after).all<{ sk: string; sortKey: string | null }>();
+      for (const row of page.results) stored.set(row.sk, row.sortKey ?? '');
+      if (page.results.length < 500) break;
+      after = page.results[page.results.length - 1]!.sk;
+    }
+    if (previous?.schemaVersion === 5) {
+      const legacyManifest = `LEGACY#${previous.version}`;
+      await this.put(CATALOG_PROJECTION_MANIFESTS_PK, legacyManifest, 'catalog-projection-manifest',
+        { createdAt: now.toISOString(), keys: [...stored.keys()] } satisfies CatalogProjectionManifest);
+      retainedVersions.push({ version: legacyManifest, until: new Date(now.getTime() + CATALOG_PROJECTION_RETENTION_MS).toISOString() });
     }
     const pending: D1PreparedStatement[] = [];
     let pendingBytes = 0;
@@ -902,16 +934,10 @@ export class D1InternshipStore implements InternshipStore {
       `).bind(...written.flatMap((row) => [CATALOG_PROJECTION_GROUPS_PK, row.sk, row.value, row.sortKey])));
       pendingBytes += writtenBytes;
     };
-    const current = new Set<string>();
-    for (const group of groups) {
-      const groupId = group.group.groupId;
+    for (const { group, sk, sortKey } of entries) {
       const value = JSON.stringify(group);
-      const rowDigest = createHash('sha256').update(value).digest('hex').slice(0, 20);
-      const sortKey = catalogProjectionSortKey(group);
-      const row = { sk: catalogProjectionGroupRowKey(groupId, rowDigest), value, sortKey };
-      current.add(row.sk);
-      const existing = stored.get(groupId);
-      if (existing && existing.digest === rowDigest && existing.sortKey === sortKey) continue;
+      const row = { sk, value, sortKey };
+      if (stored.get(sk) === sortKey) continue;
       const rowBytes = value.length + row.sk.length + 96;
       // A statement binds four parameters per row, so D1's 100-parameter
       // allowance caps the row count as well as the payload.
@@ -920,38 +946,100 @@ export class D1InternshipStore implements InternshipStore {
     }
     await writeRows();
     await flush();
-    await this.putCatalogProjectionPointer(digest, generatedAt);
-    // Every row this refresh did not just store is superseded: the card changed
-    // or left the catalog. Deletions are bounded so cleanup cannot become the
-    // cost spike the refresh was optimized to avoid.
-    const stale = [...stored.entries()]
-      .map(([groupId, row]) => catalogProjectionGroupRowKey(groupId, row.digest))
-      .filter((sk) => !current.has(sk));
-    for (let offset = 0; offset < stale.length; offset += 100) {
-      const batch = stale.slice(offset, offset + 100)
-        .map((sk) => this.db.prepare("DELETE FROM catalog_items WHERE pk = ? AND sk = ? AND kind = 'catalog-projection'")
-          .bind(CATALOG_PROJECTION_GROUPS_PK, sk));
-      await this.db.batch(batch);
-    }
-    // A version-4 projection stored its copy under the previous version's pk.
-    // The first refresh after this deploy replaces it, and its rows are removed
-    // in one statement because none of them can be reused.
-    if (previous?.version && !published) {
-      await this.db.prepare("DELETE FROM catalog_items WHERE kind = 'catalog-projection' AND pk = ?")
-        .bind(`CATALOG_PROJECTION#${previous.version}`).run();
+    await this.putCatalogProjectionPointer(pointer, previousRow?.value);
+    await this.cleanupCatalogProjectionBestEffort(pointer, now);
+  }
+
+  private async putCatalogProjectionPointer(pointer: CatalogProjectionPointer, expectedValue?: string) {
+    const result = await this.db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', ?)
+      ON CONFLICT(pk, sk) DO UPDATE SET kind = excluded.kind, value = excluded.value
+      WHERE catalog_items.value IS ?`).bind(JSON.stringify(pointer), expectedValue ?? null).run();
+    if (result.meta.changes !== 1) throw new Error('Catalog projection pointer changed during refresh');
+  }
+
+  private async cleanupCatalogProjectionBestEffort(pointer: CatalogProjectionPointer, now: Date) {
+    try {
+      await this.cleanupCatalogProjection(pointer, now);
+    } catch (error) {
+      // The pointer and every card it names are already durable. Let the caller
+      // publish R2, then retry this cleanup on the next catalog refresh.
+      console.error(JSON.stringify({ event: 'catalog_projection_cleanup_failed', error: String(error) }));
     }
   }
 
-  private putCatalogProjectionPointer(version: string, generatedAt: string) {
-    return this.put('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer',
-      { version, generatedAt, schemaVersion: CATALOG_PROJECTION_SCHEMA_VERSION });
+  private async cleanupCatalogProjection(pointer: CatalogProjectionPointer, now: Date) {
+    const cutoff = new Date(now.getTime() - CATALOG_PROJECTION_RETENTION_MS).toISOString();
+    const protectedVersions = new Set([pointer.version, ...(pointer.retainedVersions ?? []).map((entry) => entry.version)]);
+    const protectedKeys = new Set<string>();
+    const expired: Array<{ version: string; keys: string[] }> = [];
+    let after = '';
+    for (;;) {
+      const page = await this.db.prepare(`SELECT sk, value FROM catalog_items
+        WHERE pk = ? AND sk > ? ORDER BY sk LIMIT 20`)
+        .bind(CATALOG_PROJECTION_MANIFESTS_PK, after).all<{ sk: string; value: string }>();
+      for (const row of page.results) {
+        const manifest = JSON.parse(row.value) as CatalogProjectionManifest;
+        if (protectedVersions.has(row.sk) || manifest.createdAt >= cutoff) {
+          for (const key of manifest.keys) protectedKeys.add(key);
+        } else expired.push({ version: row.sk, keys: manifest.keys });
+      }
+      if (page.results.length < 20) break;
+      after = page.results[page.results.length - 1]!.sk;
+    }
+    for (const manifest of expired) {
+      const stale = manifest.keys.filter((key) => !protectedKeys.has(key));
+      // Keep the expired manifest until every card delete succeeds. If a batch
+      // fails, this list is the durable retry record for the next refresh.
+      for (let offset = 0; offset < stale.length; offset += 100) {
+        const batch = stale.slice(offset, offset + 100).map((sk) => this.db.prepare(`DELETE FROM catalog_items
+          WHERE pk = ? AND sk = ? AND kind = 'catalog-projection'
+            AND EXISTS (SELECT 1 FROM catalog_items AS candidate
+              WHERE candidate.pk = ? AND candidate.sk = ?
+                AND json_extract(candidate.value, '$.createdAt') < ?
+                AND NOT EXISTS (SELECT 1 FROM catalog_items AS pointer
+                  WHERE pointer.pk = 'CATALOG_PROJECTION' AND pointer.sk = 'CURRENT'
+                    AND (json_extract(pointer.value, '$.version') = ?
+                      OR EXISTS (SELECT 1 FROM json_each(pointer.value, '$.retainedVersions') AS retained
+                        WHERE json_extract(retained.value, '$.version') = ?))))
+            AND NOT EXISTS (SELECT 1 FROM catalog_items AS other_manifest,
+              json_each(other_manifest.value, '$.keys') AS active
+              WHERE other_manifest.pk = ? AND other_manifest.sk != ? AND active.value = ?)`)
+          .bind(CATALOG_PROJECTION_GROUPS_PK, sk,
+            CATALOG_PROJECTION_MANIFESTS_PK, manifest.version, cutoff, manifest.version, manifest.version,
+            CATALOG_PROJECTION_MANIFESTS_PK, manifest.version, sk));
+        await this.db.batch(batch);
+      }
+      await this.db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND sk = ?
+        AND json_extract(value, '$.createdAt') < ?
+        AND NOT EXISTS (SELECT 1 FROM catalog_items AS pointer
+          WHERE pointer.pk = 'CATALOG_PROJECTION' AND pointer.sk = 'CURRENT'
+          AND (json_extract(pointer.value, '$.version') = ?
+            OR EXISTS (SELECT 1 FROM json_each(pointer.value, '$.retainedVersions') AS retained
+              WHERE json_extract(retained.value, '$.version') = ?)))`)
+        .bind(CATALOG_PROJECTION_MANIFESTS_PK, manifest.version, cutoff, manifest.version, manifest.version).run();
+    }
+    if (pointer.legacyVersion && pointer.legacyUntil && pointer.legacyUntil <= now.toISOString()) {
+      await this.db.prepare(`DELETE FROM catalog_items WHERE kind = 'catalog-projection' AND pk = ?
+        AND EXISTS (SELECT 1 FROM catalog_items AS pointer
+          WHERE pointer.pk = 'CATALOG_PROJECTION' AND pointer.sk = 'CURRENT'
+            AND json_extract(pointer.value, '$.legacyVersion') = ?
+            AND json_extract(pointer.value, '$.legacyUntil') <= ?)`)
+        .bind(`CATALOG_PROJECTION#${pointer.legacyVersion}`, pointer.legacyVersion, now.toISOString()).run();
+    }
   }
 
-  /** The projection rows a request reads, tolerating the version-4 layout until rollback is retired. */
-  private catalogProjectionScope(pointer: { version: string; schemaVersion: number }): { pk: string; order: 'ASC' | 'DESC' } {
+  /** A manifest names exactly the cards published by a schema-v6 pointer. */
+  private catalogProjectionScope(pointer: CatalogProjectionPointer): { pk: string; order: 'ASC' | 'DESC'; manifestVersion?: string } {
     return pointer.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION
-      ? { pk: CATALOG_PROJECTION_GROUPS_PK, order: 'DESC' }
+      ? { pk: CATALOG_PROJECTION_GROUPS_PK, order: 'DESC', manifestVersion: pointer.version }
       : { pk: `CATALOG_PROJECTION#${pointer.version}`, order: 'ASC' };
+  }
+
+  private catalogProjectionMembership(scope: { manifestVersion?: string }, alias: string): string {
+    return scope.manifestVersion ? `AND ${alias}.sk IN (
+      SELECT active.value FROM catalog_items AS manifest, json_each(manifest.value, '$.keys') AS active
+      WHERE manifest.pk = '${CATALOG_PROJECTION_MANIFESTS_PK}' AND manifest.sk = ?)` : '';
   }
 
   async listCatalogProjection(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {
@@ -959,8 +1047,11 @@ export class D1InternshipStore implements InternshipStore {
     if (!pointer) return undefined;
     const scope = this.catalogProjectionScope(pointer);
     const offset = cursorOffset(cursor);
-    const rows = await this.db.prepare(`SELECT value FROM catalog_items WHERE pk = ? AND kind = 'catalog-projection' ORDER BY catalog_sort_key ${scope.order} LIMIT ? OFFSET ?`)
-      .bind(scope.pk, limit + 1, offset).all<JsonRow>();
+    const rows = await this.db.prepare(`SELECT projection.value FROM catalog_items AS projection
+      WHERE projection.pk = ? AND projection.kind = 'catalog-projection'
+        ${this.catalogProjectionMembership(scope, 'projection')}
+      ORDER BY projection.catalog_sort_key ${scope.order} LIMIT ? OFFSET ?`)
+      .bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []), limit + 1, offset).all<JsonRow>();
     const groups = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
     return { groups, ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}) };
   }
@@ -975,13 +1066,14 @@ export class D1InternshipStore implements InternshipStore {
       FROM catalog_items AS projection
       WHERE projection.pk = ?
         AND projection.kind = 'catalog-projection'
+        ${this.catalogProjectionMembership(scope, 'projection')}
         AND EXISTS (
           SELECT 1 FROM json_each(projection.value, '$.roles') AS role
           WHERE ${roleClauses.join('\n            AND ')}
         )
       ORDER BY projection.catalog_sort_key ${scope.order}
       LIMIT ? OFFSET ?
-    `).bind(scope.pk, ...values, limit + 1, offset).all<JsonRow>();
+    `).bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []), ...values, limit + 1, offset).all<JsonRow>();
     const candidates = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
     const groups = filterCatalogGroupDetails(candidates, filter);
     return { groups, ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}) };
@@ -1002,8 +1094,9 @@ export class D1InternshipStore implements InternshipStore {
       FROM catalog_items AS projection, json_each(projection.value, '$.roles') AS role
       WHERE projection.pk = ?
         AND projection.kind = 'catalog-projection'
+        ${this.catalogProjectionMembership(scope, 'projection')}
         AND ${clauses.join('\n        AND ')}
-    `).bind(scope.pk, ...values).all<JsonRow>();
+    `).bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []), ...values).all<JsonRow>();
     return rows.results
       .map((row) => JSON.parse(row.value) as CatalogGroupRole)
       .filter((role) => catalogProjectionRoleMatches(role, filter));
@@ -1015,16 +1108,29 @@ export class D1InternshipStore implements InternshipStore {
     if (scope.pk !== CATALOG_PROJECTION_GROUPS_PK) return this.get<CatalogGroupDetails>(scope.pk, `GROUP#${groupId}`);
     // The group's card carries its own digest, so the lookup is a prefix read of
     // one row; a group the last refresh removed has no row.
-    const row = await this.db.prepare(`SELECT value FROM catalog_items WHERE pk = ? AND kind = 'catalog-projection' AND sk LIKE ? ESCAPE '\\' LIMIT 1`)
-      .bind(scope.pk, `${catalogProjectionGroupRowPrefix(groupId)}%`).first<JsonRow>();
+    const row = await this.db.prepare(`SELECT projection.value FROM catalog_items AS projection
+      WHERE projection.pk = ? AND projection.kind = 'catalog-projection'
+        AND projection.sk LIKE ? ESCAPE '\\'
+        ${this.catalogProjectionMembership(scope, 'projection')} LIMIT 1`)
+      .bind(scope.pk, `${catalogProjectionGroupRowPrefix(groupId)}%`,
+        ...(scope.manifestVersion ? [scope.manifestVersion] : [])).first<JsonRow>();
     return row ? JSON.parse(row.value) as CatalogGroupDetails : undefined;
   }
 
-  private async readCatalogProjectionPointer(): Promise<{ version: string; generatedAt: string; schemaVersion: number } | undefined> {
-    const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
+  private async readCatalogProjectionPointer(): Promise<CatalogProjectionPointer | undefined> {
+    const pointer = await this.get<CatalogProjectionPointer>('CATALOG_PROJECTION', 'CURRENT');
     if (!pointer || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
+    // Version 5 had no published-key manifest. Its shared partition can contain
+    // old and new digests together, so the writer may migrate it but readers
+    // must not serve it as a complete projection.
     const supported = pointer.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION || pointer.schemaVersion === 4;
-    return supported ? pointer : undefined;
+    if (!supported) return undefined;
+    if (pointer.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION) {
+      const manifest = await this.db.prepare('SELECT 1 AS present FROM catalog_items WHERE pk = ? AND sk = ?')
+        .bind(CATALOG_PROJECTION_MANIFESTS_PK, pointer.version).first<{ present: number }>();
+      if (!manifest) throw new Error('Published catalog projection manifest is missing');
+    }
+    return pointer;
   }
   async listLeverAdmissions(): Promise<LeverAdmission[]> {
     const result = await this.db.prepare("SELECT value FROM catalog_items WHERE pk = 'REGISTRY#LEVER' AND sk LIKE 'SOURCE#%'").all<JsonRow>();
