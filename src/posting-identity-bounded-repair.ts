@@ -317,6 +317,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
   const batchConflicts = new Set<string>();
   let simulatedUsers = users;
   let notificationTombstoneRemaps = 0;
+  let notificationEventMerges = 0;
   let receiptRemaps = 0;
   let receiptMerges = 0;
 
@@ -361,6 +362,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     for (const row of plan.proposalUpdates) proposalUpdateFacts.set(row.id, row);
     simulatedUsers = simulateUserRows(simulatedUsers, plan);
     notificationTombstoneRemaps += plan.notificationTombstoneRemaps;
+    notificationEventMerges += plan.notificationEventMerges;
     receiptRemaps += plan.receiptRemaps;
     receiptMerges += plan.receiptMerges;
     options.log?.(JSON.stringify({ event: 'posting_identity_repair_batch', batch: batchIndex + 1,
@@ -408,6 +410,7 @@ export async function runBoundedPostingIdentityRepair(db: D1Database, options: {
     aliasWrites: catalogWriteValues.filter((item) => item.kind === 'posting-alias' || item.kind === 'job-id-alias').length,
     occurrenceRemaps: 0,
     notificationTombstoneRemaps,
+    notificationEventMerges,
     applicationRemaps: userWriteValues.filter((item) => item.kind === 'application').length,
     applicationMerges: userDeleteValues.filter((item) => item.kind === 'application').length,
     sessionRemaps: userWriteValues.filter((item) => item.kind === 'application-session').length,
