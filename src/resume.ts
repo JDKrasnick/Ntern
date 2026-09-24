@@ -209,24 +209,33 @@ export function resumeBankItemRef(item: ResumeBankItem): ResumeBankItemRef {
 
 const sameResumeRef = (left: ResumeBankParentRef, right: ResumeBankParentRef) => left.kind === right.kind && left.bankItemId === right.bankItemId;
 
+/** A caller-safe graph rejection. Storage layers throw this for invalid resume
+ * graph shape so routes can answer 400 without misreporting I/O failures. */
+export class ResumeBankGraphError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ResumeBankGraphError';
+  }
+}
+
 /** Validates the in-memory object graph, independently of its storage shape. */
 export function validateResumeBankGraph(bank: readonly ResumeBankItem[]): void {
   const byId = new Map<string, ResumeBankItem>();
   const userId = bank[0]?.userId;
   for (const item of bank) {
-    if (byId.has(item.bankItemId)) throw new Error('Resume bank item identifiers must be unique.');
-    if (item.userId !== userId) throw new Error('A resume bank graph may only contain one user\'s objects.');
-    if (item.kind !== 'bullet' && 'parent' in item && item.parent !== undefined) throw new Error('Only resume bullets may carry parent pointers.');
+    if (byId.has(item.bankItemId)) throw new ResumeBankGraphError('Resume bank item identifiers must be unique.');
+    if (item.userId !== userId) throw new ResumeBankGraphError('A resume bank graph may only contain one user\'s objects.');
+    if (item.kind !== 'bullet' && 'parent' in item && item.parent !== undefined) throw new ResumeBankGraphError('Only resume bullets may carry parent pointers.');
     byId.set(item.bankItemId, item);
   }
   for (const item of bank) {
     if (item.kind !== 'bullet') continue;
     if (!item.parent || !resumeParentKinds.has(item.parent.kind) || !item.parent.bankItemId) {
-      throw new Error('Each resume bullet must carry a typed parent pointer.');
+      throw new ResumeBankGraphError('Each resume bullet must carry a typed parent pointer.');
     }
     const parent = byId.get(item.parent.bankItemId);
     if (!parent || parent.userId !== item.userId || parent.kind !== item.parent.kind) {
-      throw new Error('Each resume bullet must point to an owned role, project, or education parent of the declared kind.');
+      throw new ResumeBankGraphError('Each resume bullet must point to an owned role, project, or education parent of the declared kind.');
     }
   }
 }
@@ -235,11 +244,34 @@ export function validateResumeBankItemPlacement(item: ResumeBankItem, bank: read
   validateResumeBankGraph([...bank.filter((existing) => existing.bankItemId !== item.bankItemId), item]);
 }
 
+/** Deterministic serializer for typed detail objects used inside de-duplication
+ * keys. Keys are sorted and `undefined` fields dropped so logically identical
+ * details always produce the same string. */
+function stableDetails(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (Array.isArray(value)) return `[${value.map(stableDetails).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableDetails(entry)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? '';
+}
+
 /** Stable content key for de-duplicating bank items across imports. Root items
- * key on kind and normalized content; bullets also key on their resolved parent
- * so the same bullet text under different objects stays distinct. */
-export function resumeBankContentKey(kind: ResumeBankItem['kind'], content: string, parentKey?: string): string {
-  return [kind, parentKey ?? '', content.trim().replace(/\s+/gu, ' ')].join('\u0000');
+ * key on kind, normalized content, and their normalized typed details so two
+ * different objects that share a summary line never collapse into one; bullets
+ * also key on their resolved parent so the same bullet text under different
+ * objects stays distinct.
+ *
+ * Reuse is intentionally conservative: a matched item keeps its stored
+ * `verified` flag, details, and revision, so a re-import neither restores an
+ * unverified item nor overwrites an edit. Because the key is content-addressed,
+ * an edited item no longer matches the freshly extracted line and a re-import
+ * creates a sibling rather than merging into the previously edited copy. */
+export function resumeBankContentKey(kind: ResumeBankItem['kind'], content: string, options: { parentKey?: string; details?: unknown } = {}): string {
+  return [kind, options.parentKey ?? '', content.trim().replace(/\s+/gu, ' '), stableDetails(options.details)].join('\u0000');
 }
 
 function bankItemForRef(ref: ResumeBankItemRef, byId: ReadonlyMap<string, ResumeBankItem>): ResumeBankItem | undefined {

@@ -5909,7 +5909,10 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
         // same item ids. Reuse a saved base with exactly this item set instead of
         // creating a duplicate, and merge items rather than appending twice.
         const importedIds = imported.items.map((item) => item.bankItemId).sort();
-        const matchingProfile = [...profiles, ...newProfiles].find((profile) => profile.name !== "Technical base" && profile.bankItemIds.length === importedIds.length && [...profile.bankItemIds].sort().every((id, index) => id === importedIds[index]));
+        // Require the same item set *and* the template the user picked, so a
+        // re-import honors the current selector instead of silently reusing an
+        // identically-scoped base rendered with a different template.
+        const matchingProfile = [...profiles, ...newProfiles].find((profile) => profile.name !== "Technical base" && profile.template === selectedTemplate && profile.bankItemIds.length === importedIds.length && [...profile.bankItemIds].sort().every((id, index) => id === importedIds[index]));
         const profile = matchingProfile ?? await api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: asset.name.replace(/\.(pdf|docx)$/iu, ""), tags: [], bankItemIds: imported.items.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
         setBankItems((items) => { const byId = new Map(items.map((item) => [item.bankItemId, item])); for (const item of imported.items) byId.set(item.bankItemId, item); return [...byId.values()]; });
         if (matchingProfile) setSelectedProfileId(matchingProfile.profileId);

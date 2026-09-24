@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 import { RESUME_TEMPLATES, resumeTemplateList } from './resume-templates.js';
@@ -440,12 +440,20 @@ function resumeSectionForItem(item: ResumeBankItem): string {
  * instead of creating a parallel copy. Returns the full resolved item set for
  * the new saved base plus only the items that still need to be written. */
 function resolveImportedResumeBank(items: ExtractedResumeItem[], existing: ResumeBankItem[], documentId: string, userId: string, timestamp: string): { items: ResumeBankItem[]; created: ResumeBankItem[] } {
+  // A stored row may predate typed details, so normalize both sides to the same
+  // parsed shape before keying. `undefined` details for a root still normalize
+  // deterministically from its content, which keeps legacy rows matchable.
+  const rootDetails = (value: ResumeBankItem | ExtractedResumeItem) => value.kind === 'bullet'
+    ? undefined
+    : parseResumeBankDetails(value.kind, value.details, value.content);
+  const rootKey = (kind: ResumeBankItem['kind'], content: string, details: unknown) => resumeBankContentKey(kind, content, { details });
+  const bulletKey = (content: string, parentKey: string | undefined) => resumeBankContentKey('bullet', content, { parentKey });
   const rootByKey = new Map<string, ResumeBankItem>();
   const bulletByKey = new Map<string, ResumeBankItem>();
   const signatureById = new Map<string, string>();
   for (const item of existing) {
     if (item.kind === 'bullet') continue;
-    const key = resumeBankContentKey(item.kind, item.content);
+    const key = rootKey(item.kind, item.content, rootDetails(item));
     signatureById.set(item.bankItemId, key);
     if (!rootByKey.has(key)) rootByKey.set(key, item);
   }
@@ -453,7 +461,7 @@ function resolveImportedResumeBank(items: ExtractedResumeItem[], existing: Resum
     if (item.kind !== 'bullet') continue;
     const parentKey = signatureById.get(item.parent.bankItemId);
     if (!parentKey) continue;
-    const key = resumeBankContentKey('bullet', item.content, parentKey);
+    const key = bulletKey(item.content, parentKey);
     signatureById.set(item.bankItemId, key);
     if (!bulletByKey.has(key)) bulletByKey.set(key, item);
   }
@@ -467,7 +475,7 @@ function resolveImportedResumeBank(items: ExtractedResumeItem[], existing: Resum
       : { ...base, kind: extracted.kind, details: parseResumeBankDetails(extracted.kind, extracted.details, extracted.content) } as ResumeBankItem;
   };
   for (const extracted of items.filter((item) => item.kind !== 'bullet')) {
-    const key = resumeBankContentKey(extracted.kind, extracted.content);
+    const key = rootKey(extracted.kind, extracted.content, rootDetails(extracted));
     const match = rootByKey.get(key);
     if (match) { resolved.set(match.bankItemId, match); resolvedLocalIds.set(extracted.localId, match.bankItemId); signatureById.set(match.bankItemId, key); continue; }
     const item = build(extracted);
@@ -476,7 +484,7 @@ function resolveImportedResumeBank(items: ExtractedResumeItem[], existing: Resum
   for (const extracted of items.filter((item) => item.kind === 'bullet')) {
     const parentId = resolvedLocalIds.get(extracted.parent.localId);
     if (!parentId) continue;
-    const key = resumeBankContentKey('bullet', extracted.content, signatureById.get(parentId));
+    const key = bulletKey(extracted.content, signatureById.get(parentId));
     const match = bulletByKey.get(key);
     if (match) { resolved.set(match.bankItemId, match); continue; }
     const item = build(extracted, parentId);
@@ -750,7 +758,10 @@ export function createApiHandler(dependencies: ApiDependencies) {
             // in bounded batches, instead of re-reading the entire bank per item.
             await dependencies.users.putResumeBankItems(created);
           } catch (error) {
-            return reply(400, { message: error instanceof Error ? error.message : 'The imported résumé graph is invalid' });
+            // Only reject invalid graph shape as a client error. Storage failures
+            // are real faults and must not be misreported as a bad import.
+            if (error instanceof ResumeBankGraphError) return reply(400, { message: error.message });
+            throw error;
           }
           try {
             if (created.length && dependencies.resumeSemanticIndex && await semanticRankingEnabled(userId)) {
@@ -777,10 +788,14 @@ export function createApiHandler(dependencies: ApiDependencies) {
           } as ResumeBankItem;
           if (!await dependencies.users.putResumeBankItem(updated, previous.revision)) return reply(409, { message: 'Resume bank item changed; refresh and retry' });
           try {
-            // Unverifying always clears the derived vector, even on a downgrade;
-            // adding or re-verifying only indexes for a paid plan.
+            // Unverifying always clears the derived vector, even on a downgrade.
+            // A paid plan re-indexes the new content; a free plan clears any
+            // previous vector, so the derived cache can never hold an embedding
+            // that contradicts authoritative content and a later upgrade
+            // re-warms it with the current text.
             if (!updated.verified) await dependencies.resumeSemanticIndex?.remove(userId, [updated.bankItemId]);
             else if (await semanticRankingEnabled(userId)) await dependencies.resumeSemanticIndex?.index(updated);
+            else await dependencies.resumeSemanticIndex?.remove(userId, [updated.bankItemId]);
           } catch { /* D1 remains authoritative; a later verification edit retries this cache. */ }
           return reply(200, updated);
         }
@@ -858,8 +873,12 @@ export function createApiHandler(dependencies: ApiDependencies) {
                 if (dependencies.resumeSemanticIndex) {
                   semanticScores = await dependencies.resumeSemanticIndex.scores(userId, imported.description, verified.map((item) => item.bankItemId));
                   if (!semanticScores.size && verified.length) {
-                    // The derived cache can be cold when a user upgrades after
-                    // importing; warm it once, then re-score.
+                    // Vectorize returns the nearest matches with no score floor,
+                    // so an empty map means the namespace holds nothing for this
+                    // user (a cold cache after upgrading) rather than "nothing
+                    // was similar". Warm it once and re-score. Content edits on a
+                    // free plan clear the stale vector (see the PATCH route), so
+                    // a re-warm here can never rebuild the cache from old text.
                     if (dependencies.resumeSemanticIndex.indexMany) await dependencies.resumeSemanticIndex.indexMany(verified);
                     else for (const item of verified) await dependencies.resumeSemanticIndex.index(item);
                     semanticScores = await dependencies.resumeSemanticIndex.scores(userId, imported.description, verified.map((item) => item.bankItemId));

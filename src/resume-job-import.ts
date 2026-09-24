@@ -17,6 +17,13 @@ export function extractResumeJobText(markup: string, maxCharacters = 30_000): { 
   return { ...(title ? { title: title.slice(0, 240) } : {}), description };
 }
 
+/** Routes whose response is JSON the caller can parse unconditionally. The
+ * iCIMS frame route is deliberately excluded: it answers with HTML, and its host
+ * is derived from a URL path segment rather than a reviewed tenant. */
+const RESUME_STRUCTURED_JSON_METHODS = new Set<MetadataAcquisition['method']>([
+  'greenhouse-api', 'lever-api', 'ashby-api', 'workday-api', 'smartrecruiters-api',
+]);
+
 /** A reviewed provider's public JSON route plus a parser for the exact posting.
  * The caller owns the bounded, public-HTTPS fetch so this stays pure and
  * testable; parse returns undefined when the payload is not the requested job. */
@@ -30,7 +37,8 @@ export interface ResumeJobStructuredRoute {
 /** Modern ATS pages (Ashby, Lever, Greenhouse) are client-rendered shells or
  * exceed the HTML budget, so scraping them yields empty or boilerplate text.
  * When the URL names a reviewed provider posting, resolve the structured public
- * API instead — the same immutable IDs the catalog ingestion path trusts. */
+ * API instead — the same immutable IDs the catalog ingestion path trusts. Only
+ * JSON routes are returned, so the caller never has to guess an HTML payload. */
 export function resumeJobStructuredRoute(canonicalUrl: string): ResumeJobStructuredRoute | undefined {
   let reference: ReturnType<typeof providerPostingReference>;
   try { reference = providerPostingReference(canonicalUrl); } catch { return undefined; }
@@ -43,7 +51,7 @@ export function resumeJobStructuredRoute(canonicalUrl: string): ResumeJobStructu
     sourceUrl: canonicalUrl,
   };
   const route = metadataApiRoute(identity, canonicalUrl);
-  if (!route) return undefined;
+  if (!route || !RESUME_STRUCTURED_JSON_METHODS.has(route.method)) return undefined;
   return {
     requestUrl: route.url,
     method: route.method,
