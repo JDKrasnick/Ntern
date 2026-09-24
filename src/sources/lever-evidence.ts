@@ -13,6 +13,7 @@
  */
 import { validateLeverSite, LEVER_APPLICATION_HOST } from './lever-ledger.js';
 import type { ReviewedLeverSource } from './lever-config.js';
+import { registrableDomain } from '../core/registrable-domain.js';
 
 export type LeverOwnershipState =
   | 'ownership-verified'
@@ -63,12 +64,6 @@ const NON_FIRST_PARTY_HOSTS = [
   'glassdoor.co.uk',
 ];
 
-/** Public suffixes with two labels, so `good.co.uk` and `evil.co.uk` stay distinct. */
-const TWO_LABEL_SUFFIXES = [
-  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'co.nz', 'co.za',
-  'co.jp', 'co.kr', 'co.in', 'com.br', 'com.mx', 'com.sg', 'com.cn', 'com.tr', 'com.hk',
-];
-
 const MAX_EXCERPT_LENGTH = 2_000;
 
 export interface LeverOwnershipEvidence {
@@ -99,12 +94,6 @@ function hostOf(url: string): string | undefined {
 
 function isNonFirstPartyHost(host: string): boolean {
   return NON_FIRST_PARTY_HOSTS.some((blocked) => host === blocked || host.endsWith(`.${blocked}`));
-}
-
-export function registrableDomain(host: string): string {
-  const labels = host.split('.');
-  const suffixLabels = TWO_LABEL_SUFFIXES.includes(labels.slice(-2).join('.')) ? 3 : 2;
-  return labels.slice(-suffixLabels).join('.');
 }
 
 function postingUrlViolation(url: string, site: string): string | undefined {

@@ -8,10 +8,10 @@ import {
 } from './sources/lever-ledger.js';
 import {
   evidenceViolations,
-  registrableDomain,
   reviewedSourceFromEvidence,
   type LeverOwnershipEvidence,
 } from './sources/lever-evidence.js';
+import { registrableDomain } from './core/registrable-domain.js';
 import { probeLeverCandidate, type LeverCandidateProbeResult } from './sources/lever-probe.js';
 import type { InternshipStore, LeverAdmission } from './store.js';
 

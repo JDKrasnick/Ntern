@@ -22,6 +22,8 @@ export interface SafeFetchResult {
   status: number;
   headers: Headers;
   body: string;
+  /** Every URL the request was validated through, starting with the requested one. */
+  redirects: readonly string[];
 }
 
 function ipv4Number(value: string): number | undefined {
@@ -149,10 +151,10 @@ async function withFetchTimeout<T>(
   }
 }
 
-async function readBoundedBody(response: Response, maxBodyBytes: number): Promise<string> {
+async function readBoundedBytes(response: Response, maxBodyBytes: number): Promise<Uint8Array> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > maxBodyBytes) throw new Error('Response body exceeds limit');
-  if (!response.body) return '';
+  if (!response.body) return new Uint8Array(0);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -171,19 +173,29 @@ async function readBoundedBody(response: Response, maxBodyBytes: number): Promis
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(bytes);
+  return bytes;
 }
 
-/** Fetch text while validating every redirect target against DNS, time, redirect, and body limits. */
-export async function safeFetchText(value: string, options: SafeFetchOptions): Promise<SafeFetchResult> {
+export interface SafeFetchBytesResult {
+  url: string;
+  status: number;
+  headers: Headers;
+  body: Uint8Array;
+  /** Every URL the request was validated through, starting with the requested one. */
+  redirects: readonly string[];
+}
+
+/** Fetch bytes while validating every redirect target against DNS, time, redirect, and body limits. */
+export async function safeFetchBytes(value: string, options: SafeFetchOptions): Promise<SafeFetchBytesResult> {
   const fetcher = options.fetcher ?? fetch;
   const timeoutMs = options.timeoutMs ?? 5_000;
   const maxRedirects = options.maxRedirects ?? 3;
   const maxBodyBytes = options.maxBodyBytes ?? 64 * 1024;
   if (timeoutMs <= 0 || maxRedirects < 0 || maxBodyBytes <= 0) throw new Error('Fetch limits must be positive');
   let current = await assertPublicHttpsUrl(value, options.resolver);
+  const redirects = [current.href];
 
-  for (let redirects = 0; ; redirects += 1) {
+  for (let hops = 0; ; hops += 1) {
     const { response, body } = await withFetchTimeout(
       fetcher,
       current,
@@ -193,21 +205,26 @@ export async function safeFetchText(value: string, options: SafeFetchOptions): P
         response: received,
         body: received.status >= 300 && received.status < 400
           ? undefined
-          : await readBoundedBody(received, maxBodyBytes),
+          : await readBoundedBytes(received, maxBodyBytes),
       }),
     );
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
       if (!location) throw new Error('Redirect is missing a location');
-      if (redirects >= maxRedirects) throw new Error('Redirect limit exceeded');
+      if (hops >= maxRedirects) throw new Error('Redirect limit exceeded');
       current = await assertPublicHttpsUrl(new URL(location, current), options.resolver);
+      redirects.push(current.href);
       continue;
     }
-    return {
-      url: current.href,
-      status: response.status,
-      headers: response.headers,
-      body: body ?? '',
-    };
+    return { url: current.href, status: response.status, headers: response.headers, body: body ?? new Uint8Array(0), redirects };
   }
+}
+
+/** Fetch text while validating every redirect target against DNS, time, redirect, and body limits. */
+export async function safeFetchText(value: string, options: SafeFetchOptions): Promise<SafeFetchResult> {
+  const result = await safeFetchBytes(value, options);
+  return {
+    url: result.url, status: result.status, headers: result.headers,
+    body: new TextDecoder().decode(result.body), redirects: result.redirects,
+  };
 }

@@ -93,30 +93,45 @@ export interface ShadowInferenceOptions {
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
 }
 
-function billedCents(inputTokens: number, outputTokens: number, pricing: NonNullable<ShadowInferenceOptions['pricing']>): number {
-  return Math.ceil((inputTokens * pricing.inputCentsPerMillionTokens + outputTokens * pricing.outputCentsPerMillionTokens) / 1_000_000);
+/**
+ * One bounded, schema-constrained JSON completion. This is the only place a
+ * worker-issued model request is built, so token caps, the abort deadline, and
+ * the response-size guard cannot drift between features that call a model.
+ *
+ * The returned `response` is exactly what the model emitted; callers must
+ * validate it against their own domain rules before acting on it.
+ */
+export interface OpenAIJsonRequest {
+  prompt: { system: string; user: string };
+  /** Strict `json_schema` name; shown to the model and recorded by the provider. */
+  schemaName: string;
+  schema: Record<string, unknown>;
+  model?: string;
+  maxOutputTokens?: number;
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  pricing?: { inputCentsPerMillionTokens: number; outputCentsPerMillionTokens: number };
+  maxResponseBytes?: number;
+  timeoutMs?: number;
 }
 
-async function boundedJson(response: Response): Promise<OpenAIChatCompletion> {
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > maxResponseBytes) throw new Error('OpenAI response is oversized');
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > maxResponseBytes) throw new Error('OpenAI response is oversized');
-  return JSON.parse(new TextDecoder().decode(bytes)) as OpenAIChatCompletion;
+export interface OpenAIJsonResult {
+  response: unknown;
+  inputTokens: number;
+  outputTokens: number;
+  actualCostCents: number;
 }
 
-export async function inferOpenAIShadowExtraction(
+export async function inferOpenAIJson(
   apiKey: string,
-  input: NormalizedPostingInput,
-  prompt: { system: string; user: string },
+  options: OpenAIJsonRequest,
   request: typeof fetch = fetch,
-  options: ShadowInferenceOptions = {},
-): Promise<ShadowInferenceResult> {
+): Promise<OpenAIJsonResult> {
   if (!apiKey.trim()) throw new Error('OpenAI API key is unavailable');
   const model = options.model ?? shadowDefaultModelId;
   const listed = shadowModelPricingCents[model] ?? shadowModelPricingCents[shadowDefaultModelId]!;
   const pricing = options.pricing ?? { inputCentsPerMillionTokens: listed.input, outputCentsPerMillionTokens: listed.output };
   const outputCap = options.maxOutputTokens ?? 2_500;
+  const responseCap = options.maxResponseBytes ?? maxResponseBytes;
   // GPT-5 Chat Completions rejects the legacy cap name used by the pinned
   // GPT-4o-mini production snapshot. Preserve backwards compatibility while
   // allowing bounded evaluation runs on newer models.
@@ -124,7 +139,7 @@ export async function inferOpenAIShadowExtraction(
   const sampling = model.startsWith('gpt-5-') ? {} : { temperature: 0 };
   const reasoning = model.startsWith('gpt-5-') && options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {};
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? requestTimeoutMs);
   let completion: OpenAIChatCompletion;
   let response: Response;
   try {
@@ -138,11 +153,11 @@ export async function inferOpenAIShadowExtraction(
         ...outputLimit,
         response_format: {
           type: 'json_schema',
-          json_schema: { name: 'shadow_metadata_extraction', strict: true, schema: responseSchema },
+          json_schema: { name: options.schemaName, strict: true, schema: options.schema },
         },
         messages: [
-          { role: 'system', content: prompt.system },
-          { role: 'user', content: prompt.user },
+          { role: 'system', content: options.prompt.system },
+          { role: 'user', content: options.prompt.user },
         ],
       }),
       signal: controller.signal,
@@ -150,7 +165,11 @@ export async function inferOpenAIShadowExtraction(
     // Keep the deadline active while consuming the body as well. Clearing it
     // after headers arrive permits a stalled streaming response to hold an
     // extraction worker indefinitely.
-    completion = await boundedJson(response);
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > responseCap) throw new Error('OpenAI response is oversized');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > responseCap) throw new Error('OpenAI response is oversized');
+    completion = JSON.parse(new TextDecoder().decode(bytes)) as OpenAIChatCompletion;
   } finally {
     clearTimeout(timeout);
   }
@@ -166,8 +185,28 @@ export async function inferOpenAIShadowExtraction(
   }
   let parsed: unknown;
   try { parsed = JSON.parse(content); } catch { throw new Error('OpenAI response is not valid JSON'); }
+  return {
+    response: parsed, inputTokens, outputTokens,
+    actualCostCents: Math.ceil((inputTokens * pricing.inputCentsPerMillionTokens + outputTokens * pricing.outputCentsPerMillionTokens) / 1_000_000),
+  };
+}
+
+export async function inferOpenAIShadowExtraction(
+  apiKey: string,
+  input: NormalizedPostingInput,
+  prompt: { system: string; user: string },
+  request: typeof fetch = fetch,
+  options: ShadowInferenceOptions = {},
+): Promise<ShadowInferenceResult> {
+  const result = await inferOpenAIJson(apiKey, {
+    prompt, schemaName: 'shadow_metadata_extraction', schema: responseSchema,
+    ...(options.model ? { model: options.model } : {}),
+    ...(options.maxOutputTokens === undefined ? {} : { maxOutputTokens: options.maxOutputTokens }),
+    ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+    ...(options.pricing ? { pricing: options.pricing } : {}),
+  }, request);
   // The model only sees this bounded artifact and the versioned extraction
   // prompt. Preserve input in the signature to make that boundary explicit.
   void input;
-  return { response: parsed, inputTokens, outputTokens, actualCostCents: billedCents(inputTokens, outputTokens, pricing) };
+  return result;
 }
