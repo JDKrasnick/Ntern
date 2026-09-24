@@ -184,6 +184,16 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
       permittedBindingChanged = true;
       return true;
     }
+    if (binding.name === 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS') {
+      if (binding.type !== 'plain_text' || nextBinding.type !== 'plain_text') return false;
+      const { text: beforeText, ...beforeRest } = binding;
+      const { text: afterText, ...afterRest } = nextBinding;
+      if (!isDeepStrictEqual(beforeRest, afterRest)) return false;
+      if (beforeText === afterText) return true;
+      if (!((beforeText === '500' && afterText === '2000') || (beforeText === '2000' && afterText === '500'))) return false;
+      permittedBindingChanged = true;
+      return true;
+    }
     if (!permittedPlainTextBindings.has(String(binding.name))) return isDeepStrictEqual(binding, nextBinding);
     if (binding.type !== 'plain_text' || nextBinding.type !== 'plain_text') return false;
     const { text: beforeText, ...beforeRest } = binding;

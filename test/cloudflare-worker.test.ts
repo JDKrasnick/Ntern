@@ -392,6 +392,32 @@ describe('resume artifact rollout boundary', () => {
   });
 });
 
+describe('Cloudflare company icon route', () => {
+  it('resolves a public icon through the reviewed canonical employer record', async () => {
+    const db = {
+      prepare(query: string) {
+        return { bind() { return this; }, async first() {
+          if (query.includes('canonical_employers')) return {
+            id: 'acme', display_name: 'Acme', icon_key: 'company-icons/acme/logo-v1.webp',
+            reviewed_at: '2026-09-24T00:00:00.000Z', reviewed_by: 'reviewer',
+          };
+          return null;
+        } };
+      },
+    };
+    const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/company-icons/acme'), {
+      DB: db,
+      DOCUMENTS: { async get(key: string) {
+        return key === 'company-icons/acme/logo-v1.webp'
+          ? { body: new ReadableStream({ start(controller) { controller.close(); } }), size: 7, httpMetadata: { contentType: 'image/webp' } }
+          : null;
+      } },
+    } as unknown as Environment);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('image/webp');
+  });
+});
+
 describe('Cloudflare bulk operation admission', () => {
   it('exposes a protected read-only preflight', async () => {
     const empty = queue(async () => ({ backlogCount: 0, backlogBytes: 0 }));
@@ -429,7 +455,7 @@ describe('Cloudflare bulk operation admission', () => {
     },
   );
 
-  it('permits only capped identity audit and duplicate batches alongside queued work', () => {
+  it('permits only capped identity and occurrence repairs alongside queued work', () => {
     expect(isLowImpactPostingIdentityRequest({ audit: true })).toBe(true);
     expect(isLowImpactPostingIdentityRequest({ scope: 'identity', duplicateGroupsOnly: true })).toBe(true);
     expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
@@ -444,6 +470,16 @@ describe('Cloudflare bulk operation admission', () => {
     expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
       jobIds: Array.from({ length: 101 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
     } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences' })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({
+      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 250, expectedDuplicateJobs: 0,
+    })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({
+      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 251, expectedDuplicateJobs: 0,
+    })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({
+      scope: 'occurrences', apply: true, repairToken: 'a'.repeat(64), expectedChanges: 1, expectedDuplicateJobs: 0,
+    })).toBe(false);
   });
 });
 

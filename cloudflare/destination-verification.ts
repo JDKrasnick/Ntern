@@ -431,6 +431,33 @@ export async function sendAdmissionOperationalAlert(
   return true;
 }
 
+/** Alert once per month when another prospective shadow run cannot reserve
+ * its full upper-bound cost. Resend and the delivery ledger share a stable key. */
+export async function sendShadowBudgetAlert(
+  store: D1CatalogAdmissionStore,
+  env: Pick<DestinationVerificationEnvironment, 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL'>,
+  input: { period: string; spentCents: number; allowanceCents: number; observedAt: string },
+): Promise<boolean> {
+  if (!env.RESEND_API_KEY || !env.ADMISSION_SUPPORT_RECIPIENT || !env.AUTH_FROM_EMAIL) {
+    throw new Error('Shadow budget alert email is not configured');
+  }
+  const dedupeKey = createHash('sha256').update(`shadow-budget-exhausted\0${input.period}`).digest('hex');
+  if (await store.emailDeliveryExists(dedupeKey)) return true;
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': dedupeKey },
+    body: JSON.stringify({
+      from: env.AUTH_FROM_EMAIL,
+      to: [env.ADMISSION_SUPPORT_RECIPIENT],
+      subject: `[Ntern] shadow metadata budget reached (${input.period})`,
+      text: `The ${input.period} shadow metadata ledger is at ${input.spentCents}¢ of its ${input.allowanceCents}¢ allowance. A new provider run cannot reserve its 20¢ maximum, so new AI metadata processing will pause until there is headroom or the monthly budget resets.`,
+    }),
+  });
+  if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);
+  await store.recordEmailDelivery(dedupeKey, `shadow-budget:${input.period}`, 'shadow-budget-exhausted', input.observedAt);
+  return true;
+}
+
 export async function processDestinationVerificationBatch(
   batch: MessageBatch<unknown>,
   env: DestinationVerificationEnvironment,

@@ -32,13 +32,14 @@ import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore 
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
 import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
-import { processShadowExtractionBatch, shadowExtractionSummary } from './shadow-extraction.js';
+import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary } from './shadow-extraction.js';
 import { handleShadowPublication, publishProspectiveShadowMetadata } from './shadow-publication.js';
 import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
 import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork, recordGmailFailure, type GmailWorkMessage } from './gmail.js';
 import { D1EmployerStore } from './employer-store.js';
 import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
+import { companyIconResponse } from './company-icon.js';
 import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
 import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
@@ -51,7 +52,7 @@ import { StructuredCareerSourceConnector } from '../src/sources/structured/index
 import { failedSourceHealth, safeDiagnostic, successfulSourceHealth } from '../src/source-health.js';
 import puppeteer, { type BrowserWorker } from '@cloudflare/puppeteer';
 import { destinationVerificationMessage, enqueueDueDestinationVerifications, processDestinationVerificationBatch,
-  sendAdmissionOperationalAlert } from './destination-verification.js';
+  sendAdmissionOperationalAlert, sendShadowBudgetAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
 import { classifyD1Failure } from './d1-errors.js';
 import { recentD1OverloadCount } from './d1-overload-alert.js';
@@ -423,9 +424,23 @@ type PostingIdentityRepairInput = {
 // an indefinitely empty production queue.
 const MAX_LOW_IMPACT_REPAIR_JOBS = 100;
 const MAX_LOW_IMPACT_REPAIR_REFERENCES = 125;
+// Occurrence synchronization repairs durable pointers left by a completed
+// identity merge. It can read the catalog in pages, but must stay small enough
+// that normal provider work is not displaced and must defer the R2 rebuild.
+const MAX_LOW_IMPACT_OCCURRENCE_CHANGES = 250;
 
 export function isLowImpactPostingIdentityRequest(input: PostingIdentityRepairInput): boolean {
   if (input.audit === true) return true;
+  if (input.scope === 'occurrences') {
+    if (!input.apply) return true;
+    const expectedChanges = input.expectedChanges;
+    const expectedDuplicateJobs = input.expectedDuplicateJobs;
+    return input.finalize === false
+      && typeof input.repairToken === 'string' && /^[a-f0-9]{64}$/u.test(input.repairToken)
+      && typeof expectedChanges === 'number' && Number.isInteger(expectedChanges) && expectedChanges >= 0
+      && expectedChanges <= MAX_LOW_IMPACT_OCCURRENCE_CHANGES
+      && typeof expectedDuplicateJobs === 'number' && Number.isInteger(expectedDuplicateJobs) && expectedDuplicateJobs >= 0;
+  }
   if (input.scope !== 'identity') return false;
   if (input.duplicateGroupsOnly === true && input.apply !== true && !input.applyBatch) return true;
   if (!input.apply || input.finalize === true || !input.applyBatch) return false;
@@ -769,6 +784,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   const url = new URL(request.url);
   if (url.pathname === '/internal/billing-shutdown') return billingShutdown(request, env);
   if (await isShutdown(env)) return withCors(Response.json({ message: 'Service paused by billing guard' }, { status: 503 }));
+  const companyIcon = /^\/company-icons\/([^/]+)$/u.exec(url.pathname);
+  if (request.method === 'GET' && companyIcon) {
+    return withCors(await companyIconResponse(companyIcon[1]!, new D1CatalogAdmissionStore(env.DB), env.DOCUMENTS));
+  }
   if (request.method === 'GET' && url.pathname === '/oauth/gmail/callback') return withCors(await gmailCallback(request, env));
   if (request.method === 'POST' && url.pathname === '/internal/refresh-catalog') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
@@ -976,7 +995,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
           || !Array.isArray(input.applyBatch.occurrenceKeys)
           || input.applyBatch.occurrenceKeys.some((item) => !Array.isArray(item) || item.length !== 2 || item.some((part) => typeof part !== 'string'))
           || typeof input.repairToken !== 'string' || typeof input.expectedChanges !== 'number'
-          || typeof input.expectedDuplicateJobs !== 'number') throw new Error('Identity repair batch is invalid');
+          || typeof input.expectedDuplicateJobs !== 'number'
+          || (input.acceptCurrentSnapshot === true && (!Number.isInteger(input.expectedEligibleDuplicateGroups)
+            || !Number.isInteger(input.expectedUnresolvedDuplicateGroups)))) throw new Error('Identity repair batch is invalid');
         report = await runBoundedPostingIdentityRepairBatch(env.DB, {
           jobIds: input.applyBatch.jobIds as string[],
           contextRows: input.applyBatch.contextRows as Array<{ pk: string; sk: string; kind: string; value: string }>,
@@ -984,6 +1005,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
           repairToken: input.repairToken,
           expectedChanges: input.expectedChanges,
           expectedDuplicateJobs: input.expectedDuplicateJobs,
+          acceptCurrentSnapshot: input.acceptCurrentSnapshot,
+          expectedEligibleDuplicateGroups: input.expectedEligibleDuplicateGroups,
+          expectedUnresolvedDuplicateGroups: input.expectedUnresolvedDuplicateGroups,
         });
         if (input.finalize) await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         return withCors(Response.json(report));
@@ -991,7 +1015,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       report = input.scope === 'identity'
         ? await runBoundedPostingIdentityRepair(env.DB, repairOptions)
         : await runPostingIdentityRepair(env.DB, repairOptions);
-      if (input.apply && report.projectionRefreshRequired) {
+      // A bounded occurrence repair returns its receipt before rebuilding R2.
+      // The authorized projection endpoint can then run independently without
+      // extending a queue-tolerant D1 operation into an unbounded write.
+      if (input.apply && report.projectionRefreshRequired && input.finalize !== false) {
         await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         const verificationOptions = {
           scope: input.scope,
@@ -1731,6 +1758,12 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     }));
     if (dlqGrowth?.changed && (!Object.keys(dlqGrowth.increases).length || alertSent)) {
       await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts));
+    }
+    const shadowBudget = await runScheduledStep('shadow_budget_status', () => providerShadowBudgetStatus(env.DB, observedAt, env));
+    if (shadowBudget?.exhausted) {
+      await runScheduledStep('shadow_budget_alert', () => sendShadowBudgetAlert(new D1CatalogAdmissionStore(env.DB), env, {
+        ...shadowBudget, observedAt: observedAt.toISOString(),
+      }));
     }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));

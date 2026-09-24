@@ -36,6 +36,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
 import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
+import { compactCompensationLabel } from "../shared/compensation-display";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
@@ -528,8 +529,14 @@ function useRoleSheetTransition(visible: boolean, onDismiss: () => void) {
         useNativeDriver: true,
       }),
     ]);
-    animation.start();
-    return () => animation.stop();
+    // Mount the transparent Modal with its off-screen position first. Starting
+    // on the same commit can make web (and occasionally native) paint the end
+    // position before Animated sees the initial offset.
+    const frame = requestAnimationFrame(() => animation.start());
+    return () => {
+      cancelAnimationFrame(frame);
+      animation.stop();
+    };
   }, [dimOpacity, entranceDistance, motionAllowed, sheetOffset, visible]);
 
   return {
@@ -824,6 +831,7 @@ function JobCard({
   const wideEditorialRow = Platform.OS === "web" && width >= 900;
   const desktopVariant = roleTable && wideEditorialRow ? desktopRolesVariant() : null;
   const showMobileRoleIdentity = compactMobile && roleFeed;
+  const rolePaySummary = roleFeed ? compactCompensationLabel(job.compensation) : display.compensation;
   const source = sourcePresentation(job.sourceReferences);
   const canAddToQueue = Boolean(onAddToQueue) && !isAddingToQueue && (!applicationStatus || (applicationStatus === "saved" && !(isQueued ?? true)));
   const inQueue = isQueued ?? applicationStatus === "saved";
@@ -999,7 +1007,7 @@ function JobCard({
               <Text style={[styles.title, compactMobile && styles.mobileRoleTitle]} numberOfLines={2}>{display.title}</Text>
               <Text style={[styles.muted, compactMobile && styles.mobileRoleMeta]} numberOfLines={3}>
                 {display.location} · {display.season}
-                {display.compensation ? <Text style={styles.payInline}> · {display.compensation}</Text> : null}
+                {rolePaySummary ? <Text style={styles.payInline}> · {rolePaySummary}</Text> : null}
               </Text>
             </View>
             <View style={[wideEditorialRow && styles.editorialRoleEvidence, roleTable && styles.appleResultEvidence, compactMobile && styles.mobileRoleSource]}>
@@ -3660,9 +3668,11 @@ function CatalogScreen({
           onEndReached={onLoadMore}
           onEndReachedThreshold={0.6}
           ListHeaderComponent={
-            lane.groups.length && !searching ? (
-              <NewnessLane groups={lane.groups} since={lane.latest ? undefined : newSinceLabel ?? "your last visit"} attentive={attentive} {...cardProps} />
-            ) : null
+            loading && rows.length ? (
+              <CatalogTileSkeleton count={columns * 2} columns={columns} />
+            ) : lane.groups.length && !searching ? (
+                <NewnessLane groups={lane.groups} since={lane.latest ? undefined : newSinceLabel ?? "your last visit"} attentive={attentive} {...cardProps} />
+              ) : null
           }
           renderItem={({ item: row }) => (
             <View style={styles.catalogGridRow}>

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
-import { enqueueDueDestinationVerifications, processDestinationVerificationBatch, sendAdmissionOperationalAlert,
+import { enqueueDueDestinationVerifications, processDestinationVerificationBatch, sendAdmissionOperationalAlert, sendShadowBudgetAlert,
   type DestinationVerificationEnvironment,
   type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
 import type { D1Database, D1PreparedStatement, MessageBatch, QueueMessage, R2Bucket } from '../cloudflare/types.js';
@@ -466,5 +466,21 @@ describe('destination verification queue consumer', () => {
     expect(JSON.parse(init.body as string).text).toContain('Action required: inspect the destination-verification DLQ');
     expect(JSON.parse(init.body as string).text).toContain('Do not purge messages.');
     vi.unstubAllGlobals();
+  });
+
+  it('sends one budget exhaustion email per month', async () => {
+    const { operations } = subject();
+    const send = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', send);
+    const env = { RESEND_API_KEY: 'resend-key', ADMISSION_SUPPORT_RECIPIENT: 'support@example.test',
+      AUTH_FROM_EMAIL: 'Ntern <notifications@send.ntern.app>' };
+    const input = { period: '2026-09', spentCents: 1990, allowanceCents: 2000, observedAt: '2026-09-24T12:00:00.000Z' };
+    expect(await sendShadowBudgetAlert(operations, env, input)).toBe(true);
+    expect(await sendShadowBudgetAlert(operations, env, { ...input, spentCents: 2000 })).toBe(true);
+    expect(send).toHaveBeenCalledOnce();
+    const request = send.mock.calls[0]![1] as RequestInit;
+    expect(JSON.parse(request.body as string)).toMatchObject({ to: ['support@example.test'],
+      subject: '[Ntern] shadow metadata budget reached (2026-09)' });
+    expect(JSON.parse(request.body as string).text).toContain('1990¢ of its 2000¢ allowance');
   });
 });

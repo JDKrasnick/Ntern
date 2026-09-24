@@ -2,6 +2,7 @@ import { POSTING_PROVIDERS, type CanonicalEmployer, type DestinationReviewRule, 
 import type { DestinationVerificationRequest } from '../src/destination-verification.js';
 import { ATOMIC_REPAIR_RECORD_LIMIT, BACKFILL_REPAIR_RECORD_LIMIT } from './catalog-admission-store.js';
 import type { D1CatalogAdmissionStore, RepairChange } from './catalog-admission-store.js';
+import { validCompanyIconEmployerId } from './company-icon.js';
 
 const json = (status: number, body: unknown) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
@@ -18,6 +19,15 @@ function text(value: unknown, name: string, maximum = 300): string {
 
 function reviewReason(input: Record<string, unknown>, fallback: string): string {
   return typeof input.reason === 'string' && input.reason.trim() ? input.reason.trim().slice(0, 500) : fallback;
+}
+
+function iconKey(value: unknown, employerId: string): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const key = text(value, 'iconKey', 300);
+  if (!new RegExp(`^company-icons/${employerId}/[a-zA-Z0-9][a-zA-Z0-9._-]*$`, 'u').test(key)) {
+    throw new Error('iconKey must be a first-party company icon for this employer');
+  }
+  return key;
 }
 
 export async function handleCatalogAdmissionOperations(
@@ -52,15 +62,24 @@ export async function handleCatalogAdmissionOperations(
     if (request.method === 'GET' && path === '/internal/admission/employers') return json(200, { employers: await store.listCanonicalEmployers() });
     if (request.method === 'PUT' && path === '/internal/admission/employers') {
       const input = await body(request);
+      const id = text(input.id, 'id', 160);
+      if (!validCompanyIconEmployerId(id)) throw new Error('id must use lowercase letters, digits, and hyphens');
+      const existing = (await store.listCanonicalEmployers()).find((item) => item.id === id);
+      const clearIcon = input.iconKey === null;
+      const nextIconKey = iconKey(input.iconKey, id);
+      if (!existing && !nextIconKey) throw new Error('iconKey is required for a new canonical employer');
       const employer: CanonicalEmployer = {
-        id: text(input.id, 'id', 160), displayName: text(input.displayName, 'displayName', 160),
+        id, displayName: text(input.displayName, 'displayName', 160),
+        ...(nextIconKey ? { iconKey: nextIconKey, iconUpdatedAt: timestamp }
+          : !clearIcon && existing?.iconKey ? { iconKey: existing.iconKey, iconUpdatedAt: existing.iconUpdatedAt } : {}),
         reviewedAt: timestamp, reviewedBy: actor,
         ...(typeof input.parentEmployerId === 'string' && input.parentEmployerId.trim() ? { parentEmployerId: input.parentEmployerId.trim() } : {}),
         ...(typeof input.brandOfEmployerId === 'string' && input.brandOfEmployerId.trim() ? { brandOfEmployerId: input.brandOfEmployerId.trim() } : {}),
       };
       await store.putCanonicalEmployer(employer, timestamp);
       await store.recordReviewerDecision({ id: crypto.randomUUID(), subjectType: 'canonical-employer', subjectId: employer.id,
-        decision: 'approved', reason: reviewReason(input, 'Canonical employer reviewed'), reviewedAt: timestamp, reviewedBy: actor });
+        decision: clearIcon ? 'icon-withdrawn' : 'approved', reason: reviewReason(input, clearIcon ? 'Canonical employer icon withdrawn' : 'Canonical employer reviewed'),
+        reviewedAt: timestamp, reviewedBy: actor });
       return json(200, { employer });
     }
     if (request.method === 'GET' && path === '/internal/admission/mappings') return json(200, { mappings: await store.listEmployerMappings() });

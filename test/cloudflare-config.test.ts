@@ -236,7 +236,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(ingestion.vars.SHADOW_EXTRACTION_ENABLED).toBe('true');
     expect(ingestion.vars.RESUME_TUNER_ENABLED).toBe('false');
     expect(ingestion.vars.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS).toBe('1500');
-    expect(ingestion.vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS).toBe('500');
+    expect(ingestion.vars.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS).toBe('2000');
     expect(ingestion.vars.SHADOW_EXTRACTION_QUEUE_NAME).toBe('intern-notifs-shadow-extraction');
     expect(terraform).toContain('cloudflare_r2_bucket" "shadow_extraction');
     expect(terraform).toContain('SHADOW_EXTRACTION_ARTIFACTS');

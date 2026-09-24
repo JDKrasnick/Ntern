@@ -120,6 +120,18 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits only the reviewed monthly shadow headroom change and rollback', () => {
+    const name = 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS';
+    const change = (beforeText: string, afterText: string) => ({
+      address: 'cloudflare_workers_script.ingestion', actions: ['update'],
+      before: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: beforeText }] },
+      after: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: afterText }] },
+    });
+    expect(validateCloudflarePlan(plan([change('500', '2000')]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([change('2000', '500')]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([change('500', '3000')]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits only the production API catalog R2 read toggle', () => {
     const enabled = { name: 'CATALOG_R2_READ_ENABLED', type: 'plain_text', text: 'true' };
     const added = { ...contentUpdate, after: { ...contentUpdate.after, bindings: [enabled, ...worker.bindings] } };
