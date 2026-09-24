@@ -722,16 +722,23 @@ describe('Catalog queue setup failures', () => {
 
   it('defers source-scoped setup failures on the final delivery instead of dead-lettering', async () => {
     const failureRows: unknown[][] = [];
-    const prepare = vi.fn((query: string) => ({
-      async first() { return null; },
-      bind: (...values: unknown[]) => ({
-        async all() {
-          if (query.includes('reviewed_source_registry')) throw new Error('D1 DB is overloaded. Requests queued for too long.');
-          return { results: [] };
-        },
-        async run() { failureRows.push(values); return { meta: { changes: 1 } }; },
-      }),
-    }));
+    const statements: string[] = [];
+    const prepare = vi.fn((query: string) => {
+      statements.push(query);
+      return {
+        async first() { return null; },
+        bind: (...values: unknown[]) => ({
+          async all() {
+            if (query.includes('reviewed_source_registry')) throw new Error('D1 DB is overloaded. Requests queued for too long.');
+            return { results: [] };
+          },
+          async run() {
+            if (query.includes('INSERT INTO queue_failure_events')) failureRows.push(values);
+            return { meta: { changes: 1 } };
+          },
+        }),
+      };
+    });
     const first = { id: 'first', body: { sourceId: 'greenhouse-acme' }, attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
       ack: vi.fn(), retry: vi.fn() };
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -743,18 +750,28 @@ describe('Catalog queue setup failures', () => {
     expect(first.ack).toHaveBeenCalledOnce();
     expect(first.retry).not.toHaveBeenCalled();
     expect(failureRows).toHaveLength(1);
+    // The deferred message is never redelivered, so the ledger row is resolved
+    // here instead of inflating the unresolved count for 30 days.
+    expect(statements.some((query) => query.includes('UPDATE queue_failure_events') && query.includes('resolved_at'))).toBe(true);
     vi.restoreAllMocks();
   });
 
   it('defers the GitHub lane when the structured registry read fails on the final delivery', async () => {
     const failureRows: unknown[][] = [];
-    const prepare = vi.fn(() => ({
-      async first() { return null; },
-      bind: (...values: unknown[]) => ({
-        async all() { return { results: [] }; },
-        async run() { failureRows.push(values); return { meta: { changes: 1 } }; },
-      }),
-    }));
+    const statements: string[] = [];
+    const prepare = vi.fn((query: string) => {
+      statements.push(query);
+      return {
+        async first() { return null; },
+        bind: (...values: unknown[]) => ({
+          async all() { return { results: [] }; },
+          async run() {
+            if (query.includes('INSERT INTO queue_failure_events')) failureRows.push(values);
+            return { meta: { changes: 1 } };
+          },
+        }),
+      };
+    });
     // The structured registry read gates every GitHub delivery, so a source-scoped
     // message that survives all attempts here is still work the dispatcher owns.
     vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources')
@@ -770,6 +787,7 @@ describe('Catalog queue setup failures', () => {
     expect(first.ack).toHaveBeenCalledOnce();
     expect(first.retry).not.toHaveBeenCalled();
     expect(failureRows).toHaveLength(1);
+    expect(statements.some((query) => query.includes('UPDATE queue_failure_events') && query.includes('resolved_at'))).toBe(true);
     vi.restoreAllMocks();
   });
 

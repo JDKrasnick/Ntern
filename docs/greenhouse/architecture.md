@@ -72,10 +72,11 @@ retired SSM cohort or a provider-specific deployment stack.
 - Per-message deadline: five minutes; timed-out work is recorded as a retryable
   transport failure instead of holding a consumer slot until the platform limit.
 - Queue retries: two. A source-scoped failure that survives the final delivery
-  records its health and failure-ledger rows and is then acknowledged, because
-  the dispatcher re-issues the source from its health row and checkpoint. Only a
-  message the dispatcher cannot re-own (an unknown source or a malformed body)
-  dead-letters.
+  records its health where a poll ran plus its failure-ledger rows, then is
+  acknowledged, because the dispatcher re-issues the source from its health row
+  and checkpoint. Acknowledged failures resolve their failure-ledger rows, so the
+  unresolved count tracks pending and dead-lettered work only. Only a message the
+  dispatcher cannot re-own (an unknown source or a malformed body) dead-letters.
 - Greenhouse API timeout: eight seconds per identity or admission request, and
   fifteen seconds per board fetch, which covers headers and the whole body.
 - Queue retention: one day.
@@ -83,4 +84,5 @@ retired SSM cohort or a provider-specific deployment stack.
 - Dead-letter threshold: three total attempts; catalog dead letters are poison only.
 
 Worker observability and the operations API surface invocation failures, stale
-sources, queue age, and any message arriving in the Greenhouse DLQ.
+sources, queue age, and any message arriving in the Greenhouse DLQ, which now
+holds poison only.

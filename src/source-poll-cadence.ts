@@ -63,26 +63,36 @@ export function catalogFailureIsPoison(error: unknown): boolean {
     || /no such (?:table|column)/i.test(error.message);
 }
 
+/** Caller-supplied facts about whether the scheduled dispatcher re-owns the
+ * message's source. The default describes the Greenhouse/Lever/Ashby lanes,
+ * whose next sweep or daily recovery probe re-issues a quarantined source. */
+export interface CatalogDeferralContext {
+  /** False when this message is one the dispatcher can never re-issue, so
+   * deferring it would drop work with no automatic retry. The GitHub lane
+   * passes false for a forced recovery: its scheduled dispatch skips
+   * quarantined sources and it has no recovery probe, so that recovery is the
+   * only thing that would ever re-issue them and must dead-letter for a human. */
+  dispatcherCanReissue?: boolean;
+}
+
 /**
  * Whether a failed catalog delivery should be deferred to the scheduled
  * dispatcher instead of dead-lettered. True only for a source-scoped message
- * that has exhausted every delivery and is not poison. Deferral is safe only
- * while the dispatcher re-owns the source: Greenhouse/Lever/Ashby sources are
- * re-issued from their next sweep or their daily recovery probe, so their health
- * row and checkpoint are the durable retry state. Callers must exclude any
- * message the dispatcher can never re-issue; the GitHub lane does this for a
- * forced recovery, because its scheduled dispatch skips quarantined sources and
- * has no recovery probe, so that message is the only thing that would ever
- * re-issue them and must dead-letter for a human. Keeping the rule in one place
- * stops the GitHub lane and the shared Greenhouse/Lever/Ashby path from
- * drifting.
+ * that has exhausted every delivery, is not poison, and whose source the
+ * dispatcher re-owns. Deferral is safe only while the dispatcher re-owns the
+ * source: Greenhouse/Lever/Ashby sources are re-issued from their next sweep or
+ * their daily recovery probe, so their health row and checkpoint are the
+ * durable retry state. Keeping the rule in one place stops the GitHub lane and
+ * the shared Greenhouse/Lever/Ashby path from drifting.
  */
 export function catalogDeliveryIsDeferred(
   error: unknown,
   sourceId: string | undefined,
   attempts: number | undefined,
+  context: CatalogDeferralContext = {},
 ): boolean {
-  return Boolean(sourceId) && (attempts ?? 0) >= CATALOG_DELIVERY_MAX_ATTEMPTS
+  return context.dispatcherCanReissue !== false
+    && Boolean(sourceId) && (attempts ?? 0) >= CATALOG_DELIVERY_MAX_ATTEMPTS
     && !catalogFailureIsPoison(error);
 }
 

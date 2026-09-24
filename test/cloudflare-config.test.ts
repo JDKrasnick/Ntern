@@ -126,6 +126,9 @@ describe('Cloudflare deployment configuration', () => {
     // CATALOG_DELIVERY_MAX_ATTEMPTS acks a source-scoped failure on its final
     // delivery. If a catalog queue's max_retries changes without the constant,
     // the threshold either fires early or never fires and DLQ growth returns.
+    // This suite reads Wrangler; OpenTofu is the deployed authority and its
+    // catalog retry value is pinned by the max_retries assertion in the
+    // destination-verification configuration test above.
     const catalogQueues = ['intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby', 'intern-notifs-github'];
     for (const consumer of ingestion.queues?.consumers ?? []) {
       if (!catalogQueues.includes(consumer.queue)) continue;

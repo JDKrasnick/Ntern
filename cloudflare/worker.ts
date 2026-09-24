@@ -1902,6 +1902,16 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   const completeTraffic = async (messageId: string, outcome: 'success' | 'failure' | 'cancelled', error?: unknown) => {
     await trafficObservations.get(messageId)?.complete(outcome, error);
   };
+  // A deferred delivery is acknowledged and never redelivered, so its failure
+  // ledger row would otherwise stay unresolved until the 30-day cleanup and
+  // inflate the operator "unresolved" signal. Resolve it here: the source health
+  // row and the dispatcher's own cadence are the durable retry state.
+  const resolveDeferredFailure = async (messageId: string) => {
+    try { await resolveQueueFailures(env.DB, batch.queue, messageId); }
+    catch (error) {
+      console.error(JSON.stringify({ command: 'catalog-deferred-ledger-resolution', messageId, error: safeDiagnostic(error) }));
+    }
+  };
   if (batch.queue.includes('destination-verification')) {
     await observeQueueBatch(batch, trafficObservations, (observed) => processDestinationVerificationBatch(observed, env));
     return;
@@ -2013,9 +2023,11 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         // re-issues from its next sweep. Only poison, and a forced recovery the
         // dispatcher can never re-issue, stay on the retry path. No poll ran, so
         // no source health is written; the dispatch lease is what re-issues it.
-        if (parsed?.force !== true && catalogDeliveryIsDeferred(error, parsed?.sourceId, queued.attempts)) {
+        if (catalogDeliveryIsDeferred(error, parsed?.sourceId, queued.attempts,
+          { dispatcherCanReissue: parsed?.force !== true })) {
           console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
             sourceId: parsed?.sourceId, messageId: queued.id, attempts: queued.attempts, error: safeDiagnostic(error) }));
+          await resolveDeferredFailure(queued.id);
           queued.ack();
         } else {
           queued.retry({ delaySeconds: d1QueueRetryDelay(error, queued.attempts) });
@@ -2152,11 +2164,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         // retry, so it stays on the retry path and dead-letters for a human.
         // Ordinary polls carry no `force` flag and are still re-issued from the
         // dispatcher's next sweep.
-        if (parsedMessage?.force !== true
-          && catalogDeliveryIsDeferred(error, parsedMessage?.sourceId, queued.attempts)) {
+        if (catalogDeliveryIsDeferred(error, parsedMessage?.sourceId, queued.attempts,
+          { dispatcherCanReissue: parsedMessage?.force !== true })) {
           console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
             sourceId: parsedMessage?.sourceId, messageId: record.messageId, attempts: queued.attempts,
             error: safeDiagnostic(error) }));
+          await resolveDeferredFailure(record.messageId);
         } else {
           failed.add(record.messageId);
         }
@@ -2191,6 +2204,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     // the record, outside that catch. Recording it here keeps `lastAttemptAt`
     // advancing for a stalled board instead of letting the cadence-slip alarm
     // fire on a source the dispatcher is in fact re-issuing.
+    //
+    // `processFifoBatch` reports a blocked record with the error of the record
+    // ahead of it in the same FIFO group. Cloudflare delivers one message per
+    // group here (`queueHandler` builds records with no MessageGroupId), so
+    // every reported record ran; revisit this if SQS-style grouping returns, so
+    // a blocked record is not recorded as a stalled board.
     if (error instanceof QueueMessageDeadlineError && parsed?.sourceId) {
       try {
         const completedAt = new Date().toISOString();
@@ -2225,6 +2244,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       deferred.add(record.messageId);
       console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: catalogProvider,
         sourceId: parsed?.sourceId, messageId: record.messageId, attempts: queued?.attempts, error: safeDiagnostic(error) }));
+      await resolveDeferredFailure(record.messageId);
     }
   };
   let registry: Awaited<ReturnType<typeof reviewedProviderRegistry>>;
