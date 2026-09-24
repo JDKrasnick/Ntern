@@ -15,6 +15,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalCompanyKey } from './core/normalize.js';
 import { registrableDomain } from './core/registrable-domain.js';
+import type { OccurrenceProvenance } from './types.js';
 
 /**
  * Signals a candidate domain can carry. Each group contributes at most once, so
@@ -33,6 +34,8 @@ export type IconEvidenceSignal =
   | 'page-title'
   /** `og:site_name` or `og:title` clearly names the canonical employer. */
   | 'opengraph'
+  /** The employer's own site, established by the role's reviewed application destination. */
+  | 'official-application-host'
   /** The posting's own reviewed ATS board slug names the canonical employer. */
   | 'ats-tenant'
   /** Logo.dev name search selected this domain. */
@@ -75,6 +78,19 @@ const GROUP_WEIGHTS = {
   jsonld: 0.35,
   provider: 0.30,
   metadata: 0.15,
+  /**
+   * Added to the 0.45 URL weight when the candidate is the application host that
+   * an officially-admitted role was recorded on, taking it to exactly the 0.85
+   * automatic threshold.
+   *
+   * A role admitted from an official ATS, structured, or employer-submitted source
+   * has already had its destination reviewed as the employer's own application
+   * form. If that form is served from a host that is not a transport platform, then
+   * that host *is* the employer's application host, and no page or provider needs to
+   * confirm what the catalog already established. Community listings are excluded,
+   * because their links are not the employer's own destination.
+   */
+  officialHost: 0.40,
 } as const;
 const PROVIDER_AGREEMENT_BONUS = 0.25;
 const MAX_SCORE = 1.0;
@@ -155,6 +171,18 @@ export interface EmployerIconSeed {
   provider: string;
   tenant?: string;
   sourceId: string;
+  /**
+   * Reviewed occurrence provenance. Only an official occurrence makes the role's
+   * application host the employer's own site; a community listing may point
+   * anywhere, so its link is never treated as the employer's destination.
+   */
+  provenance?: OccurrenceProvenance;
+}
+
+/** The provenances whose application URL is the employer's own reviewed destination. */
+export function officialIconProvenance(provenance: OccurrenceProvenance | undefined): boolean {
+  return provenance === 'official-ats' || provenance === 'official-structured'
+    || provenance === 'employer-submitted';
 }
 
 /**
@@ -271,6 +299,7 @@ export function scoreIconCandidate(
   }
   let score = 0;
   if (signals.includes('final-url') || signals.includes('redirect-host')) score += GROUP_WEIGHTS.url;
+  if (signals.includes('official-application-host')) score += GROUP_WEIGHTS.officialHost;
   if (signals.includes('jsonld-url') || signals.includes('jsonld-name')) score += GROUP_WEIGHTS.jsonld;
   if (signals.includes('logo-dev')) score += GROUP_WEIGHTS.provider;
   if (signals.includes('brandfetch')) score += GROUP_WEIGHTS.provider;
@@ -280,7 +309,10 @@ export function scoreIconCandidate(
   if (signals.includes('page-title') || signals.includes('opengraph') || signals.includes('ats-tenant')) {
     score += GROUP_WEIGHTS.metadata;
   }
-  return { domain, score: Math.min(score, MAX_SCORE), signals, evidenceIds, rejected: false };
+  // Decimal weights accumulate binary float error, and a resolved/unresolved
+  // decision compares against a threshold exactly, so the sum is settled here
+  // rather than left to whatever `0.45 + 0.40` happens to produce.
+  return { domain, score: Math.min(Number(score.toFixed(6)), MAX_SCORE), signals, evidenceIds, rejected: false };
 }
 
 /**

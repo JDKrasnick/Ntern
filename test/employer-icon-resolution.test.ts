@@ -4,6 +4,7 @@ import {
   acceptIconTieBreak, decideIconDomain, employerDistinctiveTerms, employerNamesDomain,
   iconEvidenceFingerprint, iconTextMatchesEmployer, isIconTransportHost, parseIconTieBreakDecision,
   providerNameMatchesEmployer, scoreIconCandidate, scoreIconCandidates, tenantCorroboratesEmployer,
+  officialIconProvenance,
 } from '../src/employer-icon-resolution.js';
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from '../shared/company-icon.js';
 import type { IconCandidateScore, IconDomainCandidate, IconTieBreakDecision } from '../src/employer-icon-resolution.js';
@@ -216,6 +217,35 @@ describe('candidate scoring', () => {
       expect(isIconTransportHost(domain)).toBe(true);
       expect(scoreIconCandidate(candidate(domain, ['jsonld-url', 'jsonld-name'])).rejected).toBe(true);
     }
+  });
+
+  it('publishes an official occurrence’s own application host on its own', () => {
+    // A client-rendered careers page proves nothing, but the catalog already
+    // reviewed this link as the employer's own application destination.
+    const official = [{ domain: 'coinbase.com', signals: ['final-url', 'official-application-host'] } as const];
+    expect(scoreIconCandidate(official[0])).toMatchObject({ score: 0.85, rejected: false });
+    expect(decideIconDomain([{ domain: 'coinbase.com', signals: ['final-url', 'official-application-host'] }]))
+      .toMatchObject({ outcome: 'resolved', selectedDomain: 'coinbase.com' });
+
+    // The same link without official provenance is only the 0.45 URL weight.
+    const community = decideIconDomain([{ domain: 'coinbase.com', signals: ['final-url'] }]);
+    expect(community.outcome).toBe('unresolved');
+    expect(community.selectedScore).toBeCloseTo(0.45, 10);
+
+    // And a page or provider that disagrees cannot outrank the reviewed destination.
+    const contested = decideIconDomain([
+      { domain: 'coinbase.com', signals: ['final-url', 'official-application-host'] },
+      { domain: 'coinbase.example', signals: ['logo-dev', 'page-title', 'opengraph'] },
+    ]);
+    expect(contested).toMatchObject({ outcome: 'resolved', selectedDomain: 'coinbase.com' });
+  });
+
+  it('treats only an official occurrence as the employer’s own destination', () => {
+    expect(officialIconProvenance('official-ats')).toBe(true);
+    expect(officialIconProvenance('official-structured')).toBe(true);
+    expect(officialIconProvenance('employer-submitted')).toBe(true);
+    expect(officialIconProvenance('reviewed-community')).toBe(false);
+    expect(officialIconProvenance(undefined)).toBe(false);
   });
 
   it('orders candidates best-first', () => {

@@ -728,6 +728,70 @@ describe('employer icon idempotency', () => {
   });
 });
 
+describe('employer icon official application host', () => {
+  it('publishes an official role’s own application host with no provider and no page evidence', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('coinbase', 'Coinbase'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://www.coinbase.com/careers/positions/1'),
+      canonicalEmployerId: 'coinbase', displayName: 'Coinbase', provider: 'structured', tenant: 'board-1',
+      provenance: 'official-structured',
+    }, NOW);
+    // A client-rendered page: it fetches cleanly and names nothing at all.
+    const fetchImpl = scriptedFetch({
+      'https://www.coinbase.com/careers/positions/1': () => html('<!doctype html><html><head><title>Careers</title></head></html>'),
+    });
+
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    expect(result.resolved).toBe(1);
+    const context = await icons.context('coinbase');
+    expect(context?.websiteDomain).toBe('coinbase.com');
+    expect(context?.resolutionStatus).toBe('resolved');
+  });
+
+  it('does not promote a community listing’s link to the employer’s own site', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://some-list.example/roles/1'),
+      provenance: 'reviewed-community',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      'https://some-list.example/roles/1': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
+    });
+
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    // A community link may point anywhere, so it stays a monogram rather than
+    // publishing a domain the employer may not own.
+    expect(result.resolved).toBe(0);
+    expect((await icons.context('acme'))?.websiteDomain).toBeUndefined();
+  });
+
+  it('retries a provider search on the employer brand when the catalog name finds nothing', async () => {
+    const diagnostic = await diagnoseEmployerIcon({
+      seed: {
+        ...employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'),
+        canonicalEmployerId: 'flagship', displayName: 'Flagship Pioneering Co-Op Program', tenant: 'board-1',
+      },
+      credentials: { logoDevToken: LOGO_TOKEN },
+      deps: DEPENDENCIES(scriptedFetch({
+        'https://job-boards.greenhouse.io/board-1/jobs/1': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
+        [logoDevSearchUrl('Flagship Pioneering Co-Op Program')]: () => ok([]),
+        [logoDevSearchUrl('flagship pioneering')]: () => ok([{ name: 'Flagship Pioneering', domain: 'flagshippioneering.com' }]),
+      })),
+    });
+
+    // The second query still uses the exact-name rule, so it can only recover a
+    // nomination the shorter brand name legitimately matches.
+    expect(diagnostic.logoDevDomains).toEqual(['flagshippioneering.com']);
+    expect(diagnostic.decision.scores.find((entry) => entry.domain === 'flagshippioneering.com')?.rejected).toBe(false);
+  });
+});
+
 describe('employer icon confirm route', () => {
   const confirmRequest = (body: unknown) => new Request('https://api.test/internal/admission/employer-icons/confirm', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),

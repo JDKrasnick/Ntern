@@ -18,7 +18,7 @@ import { registrableDomain } from '../src/core/registrable-domain.js';
 import {
   MAX_PROVIDER_CANDIDATES, decideIconDomain, acceptIconTieBreak, iconEvidenceFingerprint,
   iconTextMatchesEmployer, iconTieBreakSchema, isIconTransportHost, parseIconTieBreakDecision,
-  tenantCorroboratesEmployer, employerNamesDomain,
+  tenantCorroboratesEmployer, employerNamesDomain, employerDistinctiveTerms, officialIconProvenance,
   type IconCandidateScore, type IconDomainCandidate, type IconDomainDecision, type IconEvidenceSignal,
   type IconTieBreakDecision, type EmployerIconSeed,
 } from '../src/employer-icon-resolution.js';
@@ -138,10 +138,11 @@ export async function runEmployerIconResolutionPass(
   result.backfilled = await backfillSeedlessEmployers(store, settings, now);
   const tasks = await store.claimDue(now.toISOString(), settings.maxPerSweep, ICON_LEASE_MS);
   result.claimed = tasks.length;
+  const providerOutcomes: Record<string, number> = {};
 
   for (const task of tasks) {
     try {
-      const outcome = await resolveEmployerIconTask({ store, task, settings, env, now, deps });
+      const outcome = await resolveEmployerIconTask({ store, task, settings, env, now, deps, providerOutcomes });
       result[outcome.outcome] += 1;
       result.reasonCodes.push(outcome.reasonCode);
     } catch (error) {
@@ -169,6 +170,7 @@ export async function runEmployerIconResolutionPass(
     company_icon_resolution_monogram_total: result.unresolved + result.retryable,
     company_icon_resolution_retryable_total: result.retryable,
     company_icon_resolution_backfilled_total: result.backfilled,
+    company_icon_resolution_provider_outcomes: providerOutcomes,
     company_icon_resolution_reason_codes: reasonCodes,
   }));
   return result;
@@ -205,6 +207,12 @@ interface ResolveTaskInput {
   env: EmployerIconResolverEnvironment;
   now: Date;
   deps: EmployerIconResolverDependencies;
+  /**
+   * Accumulator for the whole pass. The provider call happens per task, but the
+   * operator needs a pass-level hit rate to judge whether the provider is actually
+   * finding employers, so the caller owns the tally.
+   */
+  providerOutcomes?: Record<string, number>;
 }
 
 interface ResolveOutcome {
@@ -240,6 +248,11 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
     ...(env.LOGO_DEV_TOKEN ? { logoDevToken: env.LOGO_DEV_TOKEN } : {}),
     ...(env.BRANDFETCH_CLIENT_ID ? { brandfetchClientId: env.BRANDFETCH_CLIENT_ID } : {}),
   }, deps);
+  if (input.providerOutcomes) {
+    for (const [provider, outcome] of Object.entries(providers.outcomes)) {
+      input.providerOutcomes[`${provider}:${outcome}`] = (input.providerOutcomes[`${provider}:${outcome}`] ?? 0) + 1;
+    }
+  }
   const candidates = iconCandidates(seed, context, gathered, providers);
   const decision = decideIconDomain(candidates);
   const attempt = task.attempts + 1;
@@ -523,6 +536,18 @@ interface ProviderLookup {
   transientFailure: boolean;
   retryAfterMs?: number;
   failures: Record<string, string>;
+  /**
+   * What each provider actually did: `nominated`, `miss`, `failed`, or
+   * `unconfigured`. This is the only honest way to see a provider's real hit rate,
+   * because a miss and an unconfigured provider both yield no candidates.
+   */
+  outcomes: Record<string, string>;
+}
+
+function providerOutcome(response: ProviderResponse): string {
+  if (response.failure === 'unconfigured') return 'unconfigured';
+  if (response.failure !== undefined) return 'failed';
+  return response.domains.length ? 'nominated' : 'miss';
 }
 
 /** Server-side provider credentials. A token never reaches a response or a key. */
@@ -538,16 +563,10 @@ async function lookupProviderDomains(
 ): Promise<ProviderLookup> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const failures: Record<string, string> = {};
-  const unconfigured: ProviderResponse = { domains: [], failure: 'unconfigured' };
   const [logoDev, brandfetch] = await Promise.all([
-    credentials.logoDevToken
-      ? requestProviderDomains(logoDevSearchUrl(seed.displayName), { authorization: `Bearer ${credentials.logoDevToken}` },
-        seed.displayName, logoDevCandidateDomains, fetchImpl)
-      : Promise.resolve(unconfigured),
-    credentials.brandfetchClientId
-      ? requestProviderDomains(brandfetchSearchUrl(seed.displayName, credentials.brandfetchClientId), {},
-        seed.displayName, brandfetchCandidateDomains, fetchImpl)
-      : Promise.resolve(unconfigured),
+    searchProvider('logo-dev', credentials.logoDevToken, seed, fetchImpl, logoDevSearchUrl, logoDevCandidateDomains),
+    searchProvider('brandfetch', credentials.brandfetchClientId, seed, fetchImpl,
+      (name) => brandfetchSearchUrl(name, credentials.brandfetchClientId!), brandfetchCandidateDomains),
   ]);
   if (logoDev.failure) failures['logo-dev'] = logoDev.failure;
   if (brandfetch.failure) failures.brandfetch = brandfetch.failure;
@@ -557,6 +576,7 @@ async function lookupProviderDomains(
     transientFailure: retryable.length > 0,
     ...(retryable.length ? { retryAfterMs: Math.max(0, ...retryable.map((entry) => entry.retryAfterMs ?? 0)) } : {}),
     failures,
+    outcomes: { 'logo-dev': providerOutcome(logoDev), brandfetch: providerOutcome(brandfetch) },
   };
 }
 
@@ -565,6 +585,35 @@ interface ProviderResponse {
   failure?: string;
   transient?: boolean;
   retryAfterMs?: number;
+}
+
+/**
+ * One provider search, with a second attempt on the employer's distinctive brand
+ * token when the full catalog name finds nothing.
+ *
+ * Real catalogs carry names a search index does not hold verbatim —
+ * "Flagship Pioneering Co-Op Program", "Palantir Technologies" — while the brand
+ * itself does match. Both attempts use the same exact-name rule, so the retry can
+ * only find a domain the first attempt could have accepted on a shorter query.
+ */
+async function searchProvider(
+  provider: 'logo-dev' | 'brandfetch',
+  credential: string | undefined,
+  seed: EmployerIconSeed,
+  fetchImpl: typeof fetch,
+  url: (name: string) => string,
+  parse: (value: unknown, displayName: string) => string[],
+): Promise<ProviderResponse> {
+  if (!credential) return { domains: [], failure: 'unconfigured' };
+  const headers: Record<string, string> = provider === 'logo-dev' ? { authorization: `Bearer ${credential}` } : {};
+  const first = await requestProviderDomains(url(seed.displayName), headers, seed.displayName, parse, fetchImpl);
+  if (first.domains.length || first.failure !== undefined) return first;
+
+  // Only retry when dropping qualifiers actually changes the query.
+  const brand = employerDistinctiveTerms(seed.displayName).join(' ');
+  const full = seed.displayName.trim().toLowerCase().replace(/[^a-z0-9]+/gu, ' ').trim();
+  if (!brand || brand === full) return first;
+  return requestProviderDomains(url(brand), headers, seed.displayName, parse, fetchImpl);
 }
 
 /**
@@ -637,6 +686,11 @@ function iconCandidates(
   let siteMatches = false;
   let organizationNameMatches = false;
   let pageNamedDomain: string | undefined;
+  // The host admission reviewed and recorded for this role. Where the link later
+  // redirects stays evidence (final-url, redirect-host) but is not the recorded
+  // destination, and the recorded one is both the reviewed fact and usually the
+  // employer's primary domain rather than a role-specific site.
+  const applicationHost = registrableDomain(hostOf(seed.applicationUrl) ?? '');
   if (gathered) {
     add(hostOf(gathered.finalUrl) ?? '', 'final-url');
     for (const host of gathered.redirectHosts.slice(0, -1)) add(host, 'redirect-host');
@@ -681,6 +735,13 @@ function iconCandidates(
   }
   for (const domain of providers.logoDev) add(domain, 'logo-dev');
   for (const domain of providers.brandfetch) add(domain, 'brandfetch');
+  // An officially-admitted role's application host is the employer's own site. A
+  // transport host is not: it is the platform, and the exemption above decides
+  // whether it is the employer's own platform domain.
+  if (officialIconProvenance(seed.provenance) && applicationHost
+    && (!isIconTransportHost(applicationHost) || employerNamesDomain(context.displayName, applicationHost))) {
+    add(applicationHost, 'official-application-host');
+  }
   return Object.entries(signals).map(([domain, domainSignals]) => ({
     domain, signals: domainSignals,
     ...(exempt[domain] ? { employerNamesDomain: true } : {}),
@@ -768,6 +829,9 @@ function parseIconSeed(evidenceJson: string, context: EmployerIconContext): Empl
     provider: text(record.provider, 'unknown', 80),
     ...(typeof record.tenant === 'string' && record.tenant ? { tenant: record.tenant.slice(0, 300) } : {}),
     sourceId: text(record.sourceId, 'unknown', 300),
+    ...(record.provenance === 'official-ats' || record.provenance === 'official-structured'
+      || record.provenance === 'employer-submitted' || record.provenance === 'reviewed-community'
+      ? { provenance: record.provenance } : {}),
   };
 }
 

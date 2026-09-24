@@ -1008,6 +1008,7 @@ export class IngestionRunner {
                 applicationUrl: normalizedUrl,
                 provider: listing.providerIdentity.provider,
                 ...(listing.providerIdentity.tenant ? { tenant: listing.providerIdentity.tenant } : {}),
+                ...(listing.provenance ? { provenance: listing.provenance } : {}),
                 sourceId: listing.sourceId,
               });
             }
