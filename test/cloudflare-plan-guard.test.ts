@@ -91,6 +91,34 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits only the temporary resume migration tag bootstrap and cleanup', () => {
+    const migration = {
+      deleted_classes: null,
+      new_classes: null,
+      new_sqlite_classes: ['ResumePdfCompilerV2'],
+      new_tag: 'v4-resume-pdf-compiler-v2',
+      old_tag: null,
+      renamed_classes: null,
+      steps: null,
+      transferred_classes: null,
+    };
+    const bootstrap = {
+      ...contentUpdate,
+      before: { ...worker, migrations: migration },
+      after: { ...contentUpdate.after, migrations: { ...migration, old_tag: '' } },
+    };
+    expect(validateCloudflarePlan(plan([bootstrap]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([{
+      ...bootstrap,
+      before: bootstrap.after,
+      after: bootstrap.before,
+    }]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{
+      ...bootstrap,
+      after: { ...contentUpdate.after, migrations: { ...migration, old_tag: 'wrong-tag' } },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it.each([
     ['creates', 'cloudflare_workers_script.ingestion', ['create']],
     ['replacements', 'cloudflare_workers_script.application', ['delete', 'create']],
