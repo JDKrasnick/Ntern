@@ -17,7 +17,8 @@ Formatting rules:
 - Preserve distinct alternative bullets under their correct parent; do not merge facts from different roles or projects.
 - Preserve dates, metrics, technologies, names, and scope exactly when supplied. Never invent a claim, metric, employer, project, skill, or credential.
 - Remove duplicate wording only when the underlying fact and parent are identical.
-- Keep source facts comprehensive. This is a master content bank, not a one-page résumé.`;
+- Keep source facts comprehensive. This is a master content bank, not a one-page résumé.
+- Before exporting, ask me to resolve any fact whose parent is unclear. If I cannot resolve it, omit it from the typed sections and append it after a final REVIEW NEEDED heading as a plain, non-bulleted source line. Ntern ignores REVIEW NEEDED during import.`;
 
 export const buildResumeBankPrompt = `Help me build a comprehensive master résumé content bank from scratch.
 
@@ -29,7 +30,7 @@ ${outputContract}`;
 
 export const convertResumeBankPrompt = `Convert the résumé, CV, or career content bank I provide into a comprehensive structured master résumé bank.
 
-Treat my source as authoritative. Keep every useful factual bullet and alternate version, but attach it only to the role, research entry, project, or education record it actually belongs to. If a bullet’s parent is ambiguous, place it under an "UNRESOLVED" section at the end with a short explanation instead of guessing. Do not improve, embellish, or invent claims during conversion.
+Treat my source as authoritative. Keep every useful factual bullet and alternate version, but attach it only to the role, research entry, project, or education record it actually belongs to. When a bullet’s parent is ambiguous, ask me which parent owns it before exporting. If I cannot resolve it, omit it from the typed sections and place its original wording under REVIEW NEEDED as a plain, non-bulleted line with a short explanation. Never guess. Do not improve, embellish, or invent claims during conversion.
 
 Use this output contract:
 

@@ -16,6 +16,8 @@ describe('resume bank prompts', () => {
 
   it('keeps creation and conversion behavior distinct', () => {
     expect(resumeBankPrompt('build')).toContain('interview me one parent at a time');
-    expect(resumeBankPrompt('convert')).toContain('UNRESOLVED');
+    expect(resumeBankPrompt('convert')).toContain('ask me which parent owns it');
+    expect(resumeBankPrompt('convert')).toContain('REVIEW NEEDED');
+    expect(resumeBankPrompt('convert')).toContain('plain, non-bulleted line');
   });
 });

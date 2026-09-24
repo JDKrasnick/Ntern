@@ -6014,7 +6014,7 @@ function ResumeWorkspace({ token }: { token: string }) {
         ) : null}
       </View>
 
-      <View style={styles.resumeSavedSection}>
+      {!bankManagerOpen ? <View style={styles.resumeSavedSection}>
         <View style={styles.resumeSavedHeader}>
           <View style={styles.resumeSavedHeaderCopy}>
             <Text style={styles.sectionTitle}>Saved résumés</Text>
@@ -6047,17 +6047,6 @@ function ResumeWorkspace({ token }: { token: string }) {
             <Text style={styles.resumeSavedEmpty}>No saved résumé variants yet. Open the master bank and add a PDF or DOCX.</Text>
           </View>
         )}
-      </View>
-
-      {subscription && planExpanded ? <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
-        {subscription.plans.map((plan) => (
-          <View key={plan.tier} style={[styles.resumePlanCard, subscription.tier === plan.tier && styles.resumePlanCardCurrent]}>
-            <Text style={styles.resumePlanName}>{plan.name}</Text>
-            <Text style={styles.resumePlanPrice}>{plan.priceUsdMonthly ? `$${plan.priceUsdMonthly.toFixed(2)}/month` : "$0"}</Text>
-            <Text style={styles.resumePlanDetail}>{plan.tailoredDraftsPerMonth} tailored reviews/month</Text>
-            <Text style={styles.resumePlanState}>{subscription.tier === plan.tier ? "Current plan" : plan.tier === "free" ? "Included" : "App Store purchase coming next"}</Text>
-          </View>
-        ))}
       </View> : null}
 
       {bankManagerOpen ? (
@@ -6068,26 +6057,29 @@ function ResumeWorkspace({ token }: { token: string }) {
               <Text style={styles.resumeSectionDescription}>Start with the résumés you already use. Ntern saves each one as a reusable option and merges its structured experience into your private master bank.</Text>
             </View>
           </View>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import one or more PDF or DOCX resumes" onPress={() => void importResume()} disabled={bankSaving} style={[styles.resumeImportStage, bankSaving && styles.resumeSourceChoiceDisabled]}>
-            <View style={styles.resumeImportStageIcon}><Ionicons name="documents-outline" size={28} color={colors.signal} /></View>
-            <View style={styles.resumeImportStageCopy}>
-              <Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>
-              <Text style={styles.resumeImportStageDescription}>Choose one or several PDF or DOCX files. Each file stays available as a saved résumé while its roles, projects, education, skills, and correctly attached bullets join the master bank.</Text>
-              <Text style={styles.resumeImportStageMeta}>{importedResumeCount ? `${importedResumeCount} source résumé${importedResumeCount === 1 ? "" : "s"} imported` : "PDF or DOCX · select multiple files"}</Text>
-            </View>
-            <View style={styles.resumeImportStageAction}>
-              <Ionicons name="add" size={18} color={colors.onDark} />
-              <Text style={styles.resumeImportStageActionText}>Choose files</Text>
-            </View>
-          </TouchableOpacity>
+          <View style={[styles.resumeSourceWorkspace, desktop && styles.resumeSourceWorkspaceWide]}>
+            <View style={styles.resumeSourceImportColumn}>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import one or more PDF or DOCX resumes" onPress={() => void importResume()} disabled={bankSaving} style={[styles.resumeImportStage, bankSaving && styles.resumeSourceChoiceDisabled]}>
+                <View style={styles.resumeImportStageIcon}><Ionicons name="documents-outline" size={28} color={colors.signal} /></View>
+                <View style={styles.resumeImportStageCopy}>
+                  <Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>
+                  <Text style={styles.resumeImportStageDescription}>Choose one or several PDF or DOCX files. Each file stays available as a saved résumé while its roles, projects, education, skills, and correctly attached bullets join the master bank.</Text>
+                  <Text style={styles.resumeImportStageMeta}>{importedResumeCount ? `${importedResumeCount} source résumé${importedResumeCount === 1 ? "" : "s"} imported` : "PDF or DOCX · select multiple files"}</Text>
+                </View>
+                <View style={styles.resumeImportStageAction}>
+                  <Ionicons name="add" size={18} color={colors.onDark} />
+                  <Text style={styles.resumeImportStageActionText}>Choose files</Text>
+                </View>
+              </TouchableOpacity>
 
-          <TouchableOpacity accessibilityRole="button" aria-expanded={promptGuideOpen} onPress={() => setPromptGuideOpen((value) => !value)} style={styles.resumePromptAccess}>
-            <Ionicons name="sparkles-outline" size={17} color={colors.signal} />
-            <Text style={styles.resumePromptAccessText}>{promptGuideOpen ? "Hide LLM prompts" : "No clean source file? Use an LLM prompt"}</Text>
-            <Ionicons name={promptGuideOpen ? "chevron-up" : "chevron-down"} size={16} color={colors.signal} />
-          </TouchableOpacity>
+              <TouchableOpacity accessibilityRole="button" aria-expanded={promptGuideOpen} onPress={() => setPromptGuideOpen((value) => !value)} style={styles.resumePromptAccess}>
+                <Ionicons name="sparkles-outline" size={17} color={colors.signal} />
+                <Text style={styles.resumePromptFreeBadge}>Free</Text>
+                <Text style={styles.resumePromptAccessText}>{promptGuideOpen ? "Hide LLM prompts" : "No clean source file? Use an LLM prompt"}</Text>
+                <Ionicons name={promptGuideOpen ? "chevron-up" : "chevron-down"} size={16} color={colors.signal} />
+              </TouchableOpacity>
 
-          {promptGuideOpen ? <View style={styles.resumePromptPanel}>
+              {promptGuideOpen ? <View style={styles.resumePromptPanel}>
             <View style={styles.resumePromptHeader}>
               <View style={styles.resumeSourceHeadingCopy}>
                 <Text style={styles.resumeMasterBankTitle}>Prepare a parseable master bank</Text>
@@ -6112,9 +6104,11 @@ function ResumeWorkspace({ token }: { token: string }) {
                 <Text style={styles.resumePromptCopyText}>{copiedPrompt === promptKind ? "Copied" : "Copy prompt"}</Text>
               </TouchableOpacity>
             </View>
-          </View> : null}
+              </View> : null}
+            </View>
 
-          <View style={styles.resumeMasterBankSummary}>
+            <View style={styles.resumeSourceBankColumn}>
+              <View style={styles.resumeMasterBankSummary}>
             <View style={styles.resumeMasterBankCopy}>
               <View style={styles.resumeSourceHeading}>
                 <View style={styles.resumeSourceHeadingCopy}>
@@ -6137,11 +6131,11 @@ function ResumeWorkspace({ token }: { token: string }) {
                 <Text style={styles.resumeMasterBankSecondaryText}>{bankExpanded ? "Hide bank" : `Review ${bankRoots.length} items`}</Text>
               </TouchableOpacity> : null}
             </View>
-          </View>
+              </View>
 
-          {bankExpanded ? (
-            <ScrollView nestedScrollEnabled style={styles.resumeBankScroller} contentContainerStyle={styles.resumeBankItems}>
-              {bankRoots.map((item) => (
+              {bankExpanded ? (
+                <ScrollView nestedScrollEnabled style={styles.resumeBankScroller} contentContainerStyle={styles.resumeBankItems}>
+                  {bankRoots.map((item) => (
                     <View key={item.bankItemId} style={styles.resumeBankItem}>
                       <Ionicons name={item.kind === "role" ? "briefcase-outline" : item.kind === "project" ? "code-slash-outline" : item.kind === "skill" ? "construct-outline" : item.kind === "education" ? "school-outline" : "document-text-outline"} size={17} color={colors.signal} />
                       <View style={styles.resumeBankItemCopy}>
@@ -6149,9 +6143,11 @@ function ResumeWorkspace({ token }: { token: string }) {
                         <Text style={styles.resumeBankItemStatus}>{item.kind} · {bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length} bullet{bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length === 1 ? "" : "s"}</Text>
                       </View>
                     </View>
-              ))}
-            </ScrollView>
-          ) : null}
+                  ))}
+                </ScrollView>
+              ) : null}
+            </View>
+          </View>
 
           {manualEntryOpen ? <View style={styles.resumeManualEntry}>
             <View style={styles.resumeManualEntryHeader}>
@@ -6210,6 +6206,17 @@ function ResumeWorkspace({ token }: { token: string }) {
           </View> : null}
         </View>
       ) : null}
+
+      {subscription && planExpanded ? <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
+        {subscription.plans.map((plan) => (
+          <View key={plan.tier} style={[styles.resumePlanCard, subscription.tier === plan.tier && styles.resumePlanCardCurrent]}>
+            <Text style={styles.resumePlanName}>{plan.name}</Text>
+            <Text style={styles.resumePlanPrice}>{plan.priceUsdMonthly ? `$${plan.priceUsdMonthly.toFixed(2)}/month` : "$0"}</Text>
+            <Text style={styles.resumePlanDetail}>{plan.tailoredDraftsPerMonth} tailored reviews/month</Text>
+            <Text style={styles.resumePlanState}>{subscription.tier === plan.tier ? "Current plan" : plan.tier === "free" ? "Included" : "App Store purchase coming next"}</Text>
+          </View>
+        ))}
+      </View> : null}
 
       {jobImport?.status === "ready" ? <View style={styles.resumeSection}>
         <View style={styles.resumeSectionHeading}>
@@ -8873,6 +8880,10 @@ const styles = StyleSheet.create({
   resumeSourceChoiceTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", lineHeight: 23, marginTop: 14 },
   resumeSourceChoiceCopy: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 5 },
   resumeBankWorkspace: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 16, marginTop: 28, paddingTop: 24 },
+  resumeSourceWorkspace: { gap: 16 },
+  resumeSourceWorkspaceWide: { alignItems: "flex-start", flexDirection: "row" },
+  resumeSourceImportColumn: { flex: 2, gap: 10, minWidth: 0 },
+  resumeSourceBankColumn: { flex: 1, gap: 10, minWidth: 300 },
   resumeImportStage: { alignItems: "center", backgroundColor: colors.surface, borderColor: colors.signal, borderRadius: 16, borderStyle: "dashed", borderWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 16, minHeight: 214, padding: 24 },
   resumeImportStageIcon: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 14, height: 56, justifyContent: "center", width: 56 },
   resumeImportStageCopy: { flex: 1, minWidth: 240 },
@@ -8882,6 +8893,7 @@ const styles = StyleSheet.create({
   resumeImportStageAction: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 10, flexDirection: "row", gap: 7, justifyContent: "center", minHeight: 48, paddingHorizontal: 16 },
   resumeImportStageActionText: { color: colors.onDark, fontSize: 14, fontWeight: "800" },
   resumePromptAccess: { alignItems: "center", alignSelf: "flex-start", flexDirection: "row", gap: 7, minHeight: 44, paddingHorizontal: 2 },
+  resumePromptFreeBadge: { backgroundColor: colors.signalSoft, borderRadius: 999, color: colors.signal, fontSize: 10, fontWeight: "900", letterSpacing: 0.5, overflow: "hidden", paddingHorizontal: 7, paddingVertical: 3, textTransform: "uppercase" },
   resumePromptAccessText: { color: colors.signal, fontSize: 13, fontWeight: "800" },
   resumePromptPanel: { borderColor: colors.separator, borderRadius: 14, borderWidth: 1, padding: 16 },
   resumePromptHeader: { alignItems: "flex-start", flexDirection: "row" },

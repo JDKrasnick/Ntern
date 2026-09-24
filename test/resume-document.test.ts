@@ -41,6 +41,13 @@ describe('resume document extraction', () => {
     ]);
   });
 
+  it('stops typed extraction before unresolved review notes', () => {
+    expect(extractResumeBankItems('Projects\nCompiler Lab\n- Built a parser\nREVIEW NEEDED\nMaybe belonged to a different project\n- Do not attach this')).toEqual([
+      { localId: 'line-2', kind: 'project', content: 'Compiler Lab', details: { name: 'Compiler Lab', tagline: undefined, technologies: [] }, sourceLocation: 'line 2' },
+      { localId: 'line-3', kind: 'bullet', parent: { kind: 'project', localId: 'line-2' }, content: 'Built a parser', sourceLocation: 'line 3' },
+    ]);
+  });
+
   it('extracts readable document.xml from a DOCX upload', async () => {
     const docx = zipSync({ 'word/document.xml': new TextEncoder().encode('<w:document><w:body><w:p><w:t>Projects</w:t></w:p><w:p><w:t>Built a TypeScript dashboard</w:t></w:p></w:body></w:document>') });
     await expect(extractResumeDocument(docx.buffer as ArrayBuffer, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')).resolves.toEqual([

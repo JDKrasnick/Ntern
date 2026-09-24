@@ -48,6 +48,8 @@
   - [x] Provide a responsive GitHub-style diff review path that asks for approval only on job-specific changes, rejects private/non-HTTPS import targets, keeps pasted job descriptions per-user, and creates deterministic evidence-linked suggestions.
   - [x] Add the asynchronous catalog/cache/browser import worker, document extraction, managed model generation, user-namespaced semantic ranking, and isolated PDF/LaTeX artifact compiler with derived page previews before enabling the production flag.
   - [x] Replace flat line rendering with typed education, experience, research, project, skill, and parent-bound bullet objects; ship four fixed template recipes and preserve the complete selected base when applying reviewed diffs.
+  - [x] Offer free copyable prompts that build or convert a typed master bank in any user-selected LLM without consuming a résumé-review allowance.
+  - [ ] Add a subscription-gated hosted master-bank builder that can ingest user-authorized LinkedIn, GitHub, and personal-site sources, preserve provenance, and require user review before any extracted claim enters the typed bank.
 - [x] Implement the Cloudflare replacement substrate with Workers, D1, R2, Queues, Cron Triggers, provider v5 Terraform, Cloudflare-native mobile authentication, and local end-to-end smoke coverage.
 - [x] Provision the Cloudflare account, apply remote D1 migrations and Worker secrets, verify the source backfill, cut every mobile environment over, and retire AWS deployment paths.
 - [x] Bound sparse grouped-catalog filter scans, reconcile legacy notification markers through durable Expo receipts, isolate iOS plain-text accessibility state from secure authentication fields, and make account switching/sign-out race-safe with server-side session revocation.

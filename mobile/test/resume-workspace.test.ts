@@ -45,12 +45,15 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('const [bankManagerOpen, setBankManagerOpen] = useState(false);');
     expect(app).toContain('bankManagerOpen ? "Done editing" : "Edit master bank"');
     expect(app).toContain('{bankManagerOpen ? (');
+    expect(app).toContain('{!bankManagerOpen ? <View style={styles.resumeSavedSection}>');
     expect(app.indexOf('Paste the job URL')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
     expect(app).toContain('<Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>');
     expect(app).toContain('No clean source file? Use an LLM prompt');
+    expect(app).toContain('<Text style={styles.resumePromptFreeBadge}>Free</Text>');
     expect(app).toContain('"Build from scratch" : "Convert existing material"');
     expect(app).toContain('Clipboard.setStringAsync(resumeBankPrompt(promptKind))');
     expect(app).toContain('<Text style={styles.resumeMasterBankTitle}>Master bank</Text>');
+    expect(app).toContain('styles.resumeSourceWorkspaceWide');
     expect(app).toContain('const [manualEntryOpen, setManualEntryOpen] = useState(false);');
     expect(app).toContain('manualEntryOpen ? <View style={styles.resumeManualEntry}>');
     expect(app).toContain('setBankEntryKind("bullet");');
@@ -68,7 +71,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('savedResumeProfiles.map((profile) =>');
     expect(app).toContain('aria-pressed={selected}');
     expect(app).toContain('setSelectedProfileId(profile.profileId); setResumeSourceMode("existing");');
-    expect(app.indexOf('<Text style={styles.sectionTitle}>Saved résumés</Text>')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
+    expect(app).toContain('{!bankManagerOpen ? <View style={styles.resumeSavedSection}>');
   });
 
   it('offers the best saved resume and an ideal master-bank build', () => {

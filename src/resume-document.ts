@@ -129,6 +129,7 @@ export function extractResumeBankItems(text: string, limit = 500): ExtractedResu
     const line = raw.replace(/\s+/gu, ' ').trim();
     if (!line) continue;
     const heading = line.toLowerCase().replace(/[^a-z]/gu, '');
+    if (/^(?:reviewneeded|unresolved)$/u.test(heading)) { section = undefined; parent = undefined; awaitingSecondary = false; continue; }
     if (/^(?:professional)?(?:experience|employment|workhistory)(?:bank)?$/u.test(heading)) { section = 'role'; parent = undefined; awaitingSecondary = false; continue; }
     if (/^(?:projects?)(?:bank.*)?$/u.test(heading)) { section = 'project'; parent = undefined; awaitingSecondary = false; continue; }
     if (/^(?:research)(?:bank.*)?$/u.test(heading)) { section = 'research'; parent = undefined; awaitingSecondary = false; continue; }
