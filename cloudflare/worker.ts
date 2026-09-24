@@ -38,6 +38,7 @@ import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork,
 import { D1EmployerStore } from './employer-store.js';
 import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
+import { companyIconResponse } from './company-icon.js';
 import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
 import { assertPublicHttpsUrl, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
@@ -677,6 +678,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   const url = new URL(request.url);
   if (url.pathname === '/internal/billing-shutdown') return billingShutdown(request, env);
   if (await isShutdown(env)) return withCors(Response.json({ message: 'Service paused by billing guard' }, { status: 503 }));
+  const companyIcon = /^\/company-icons\/([^/]+)$/u.exec(url.pathname);
+  if (request.method === 'GET' && companyIcon) {
+    return withCors(await companyIconResponse(companyIcon[1]!, new D1CatalogAdmissionStore(env.DB), env.DOCUMENTS));
+  }
   if (request.method === 'GET' && url.pathname === '/oauth/gmail/callback') return withCors(await gmailCallback(request, env));
   if (request.method === 'POST' && url.pathname === '/internal/refresh-catalog') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));

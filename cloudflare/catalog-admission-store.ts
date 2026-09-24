@@ -1164,14 +1164,23 @@ export class D1CatalogAdmissionStore {
 
   async listCanonicalEmployers(): Promise<CanonicalEmployer[]> {
     const rows = await this.db.prepare('SELECT * FROM canonical_employers ORDER BY display_name').all<Record<string, unknown>>();
-    return rows.results.map((row) => ({
+    return rows.results.map((row) => this.canonicalEmployer(row));
+  }
+
+  async getCanonicalEmployer(id: string): Promise<CanonicalEmployer | undefined> {
+    const row = await this.db.prepare('SELECT * FROM canonical_employers WHERE id = ?').bind(id).first<Record<string, unknown>>();
+    return row ? this.canonicalEmployer(row) : undefined;
+  }
+
+  private canonicalEmployer(row: Record<string, unknown>): CanonicalEmployer {
+    return {
       id: row.id as string, displayName: row.display_name as string, reviewedAt: row.reviewed_at as string,
       reviewedBy: row.reviewed_by as string,
       ...(row.icon_key ? { iconKey: row.icon_key as string } : {}),
       ...(row.icon_updated_at ? { iconUpdatedAt: row.icon_updated_at as string } : {}),
       ...(row.parent_employer_id ? { parentEmployerId: row.parent_employer_id as string } : {}),
       ...(row.brand_of_employer_id ? { brandOfEmployerId: row.brand_of_employer_id as string } : {}),
-    }));
+    };
   }
 
   async putCanonicalEmployer(value: CanonicalEmployer, now: string): Promise<void> {
