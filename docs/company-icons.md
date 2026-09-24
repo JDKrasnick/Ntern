@@ -104,15 +104,30 @@ Read across: a role on the employer's own domain needs no provider, and a platfo
 
 **The residual risk of a proposal is a name collision.** Verification asks whether the domain presents itself as this employer, and two companies can share a name — a domain titled `ACME Industrial Supply` does confirm an employer named `Acme`. That risk is inherent to any name-to-domain lookup, including a provider's own search, and it is bounded by the same guardrails: observe mode before anything is rendered, the exception queue, and `report-wrong` withdrawing a decision within a minute. Proposal decisions are marked `selected_source = 'proposed'` so they can be reviewed as their own class.
 
-### An option that was investigated and not taken
+### The employer's own uploaded logo
 
-Greenhouse and Lever serve the employer's uploaded logo as the posting's `og:image`, on their own CDN (`s101-recruiting.cdn.greenhouse.io/...`, `lever-client-logos.s3-us-west-2.amazonaws.com/...`), and Greenhouse's filename often carries the employer name. That is a real image for the right employer, and it would raise rendered coverage further. It is not used because:
+The best icon is the one the employer put on its own board, and every supported platform publishes it. The posting page is already fetched, so this is read from the page in hand — no provider, no credential, and no identity inference, because the page *is* the employer's own posting and the asset is on the platform's board-logo host.
 
-- it is a third-party asset, so rendering it is a hotlink and storing it needs the same kind of agreement Logo.dev self-hosting needs — the terms question Brandfetch already forced;
-- its quality varies: Axon's board serves a marketing banner rather than a mark;
-- the reviewed direction treats an image URL found on a page as evidence of nothing, so adopting it is a product decision about what an icon may be, not an implementation detail.
+| Platform | Field | Host |
+|---|---|---|
+| Ashby | `logoSquareImageUrl`, else `logoWordmarkImageUrl`, else its social card | `app.ashbyhq.com/api/images/org-theme-*` |
+| Greenhouse | `og:image` | `s<N>-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/…` |
+| Lever | `og:image` | `lever-client-logos.s3[-us-west-2\|.us-west-2].amazonaws.com/…` |
 
-Deciding to adopt it would be a small change — the same verified-image path, keyed on the ATS asset — and it is recorded here so the decision is explicit rather than accidental.
+Each platform is matched on the hosts and paths it actually uses for board logos, so an unrelated `og:image` — a role banner, a client's CDN, a share card — is never picked up. Candidates are ranked by format before source, because Ashby serves some boards an SVG that cannot be stored while the usable raster sits beside it, and a caller that finds one unusable falls through to the next.
+
+Measured across **124 platform-hosted employers** in the live catalog:
+
+| Platform | Employers | Uploaded logo usable |
+|---|---:|---:|
+| Ashby | 31 | **29** (94%) |
+| Lever | 2 | **2** (100%) |
+| Greenhouse | 91 | **57** (63%) |
+| **All** | **124** | **88 (71%)** |
+
+Two details that measurement forced. Lever's bucket serves its logos as `binary/octet-stream`, so a declared content type cannot be the only evidence — the asset type is settled from the bytes when the header is useless or missing, and an asset is stored only if it resolves to a raster. And Ashby serves some boards an **SVG** square logo; SVG is refused, because it would run script on the API origin, so the raster beside it is used instead. Greenhouse's remaining gap is real: a third of its boards publish no logo at all, and those employers fall to the domain path.
+
+The bytes are copied into our own bucket under `company-icons/<id>/platform-<hash>.<ext>`, so rendering never depends on the platform's CDN and no third-party request happens at render time. The key is recorded with `icon_source = 'platform'`, which is what an operator sees in the exception queue, and `report-wrong` withdraws it like any other automatic decision. A reviewer's icon is never overwritten, and the icon is stored even when the employer's *domain* stays undecided — the icon and the domain are separate facts, so `icon_resolution_status` is left alone.
 
 **No incorrect domain was published in any configuration.** Every evidence signal and every decision path was exercised by the run:
 
@@ -139,10 +154,12 @@ Decision paths taken: automatic resolution, tie-break acceptance, and monogram f
 
 `GET /company-icons/:id` resolves in this order:
 
-1. a reviewed `icon_key` in `DOCUMENTS` (unchanged from the workflow above);
+1. an `icon_key` in `DOCUMENTS` — the employer's uploaded board logo, or a cached provider icon, or a reviewer's upload;
 2. an automatically resolved domain, fetched server-side from the provider CDN and returned with the same security headers.
 
-The second path exists so a provider credential never reaches a client, a catalog payload, or a stored key, and image bytes are **not** written to R2 while Logo.dev self-hosting rights are unconfirmed. The image probe requests `fallback=404`, so Logo.dev's generated monogram tile can never be served as if it were a real logo. Responses keep `max-age=60, must-revalidate`, so a wrong-icon report takes effect within a minute.
+A key a **machine** wrote (`icon_source = 'logo-dev'` or `'platform'`) renders only once the operator has left observe mode. A reviewer's upload always renders. Without that gate a stored key would route around the observe switch, which matters precisely because the uploaded logo is stored during observe mode so the later switch is instant.
+
+The second path exists so a provider credential never reaches a client, a catalog payload, or a stored key, and provider image bytes are **not** written to R2 while Logo.dev self-hosting rights are unconfirmed — the employer's own uploaded logo is a different asset and is stored, because the employer published it on its own board. The image probe requests `fallback=404`, so Logo.dev's generated monogram tile can never be served as if it were a real logo. Responses keep `max-age=60, must-revalidate`, so a wrong-icon report takes effect within a minute.
 
 Once the Logo.dev plan confirms self-hosting and retention, record the confirmation and the resolver will cache the icon instead:
 
