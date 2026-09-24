@@ -67,6 +67,8 @@ export interface CatalogProjectionPage {
 export interface CatalogGroupRole {
   jobId: string;
   company: string;
+  /** Stable reviewed employer identity; clients use this to resolve a first-party icon. */
+  canonicalEmployerId?: string;
   title: string;
   location: string;
   locations: string[];
@@ -454,6 +456,7 @@ function catalogGroupRole(job: Internship): CatalogGroupRole {
   const releaseDay = employerDropDay(job);
   return {
     jobId: job.jobId, company: job.company, title: titleFor(job), location: job.location, season: seasonFor(job),
+    ...(job.admission?.canonicalEmployer?.id ? { canonicalEmployerId: job.admission.canonicalEmployer.id } : {}),
     locations: locationsFor(job), visibleAt: catalogVisibleAt(job),
     ...(releaseDay ? { releaseDay } : {}),
     // A day read from an instant can be re-read in the reader's own zone; a

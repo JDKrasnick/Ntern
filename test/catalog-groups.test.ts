@@ -49,6 +49,13 @@ describe('grouped catalog domain', () => {
     expect(details.group.featuredRole.housing).toEqual(housing);
     expect(details.group.compensations).toEqual(['USD 8,500/month']);
   });
+  it('exposes a reviewed employer ID on both featured and detailed roles', () => {
+    const details = catalogGroupDetails(groupCatalogJobs([job('icon', 0, {
+      admission: { canonicalEmployer: { id: 'acme', displayName: 'Acme' } },
+    })])[0]!);
+    expect(details.roles[0]?.canonicalEmployerId).toBe('acme');
+    expect(details.group.featuredRole.canonicalEmployerId).toBe('acme');
+  });
   it('splits a day bigger than the card cap into consecutive cards', () => {
     const at = (seconds: number) => ({ firstSeenAt: `2026-08-23T12:${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.000Z`, catalogVisibleAt: `2026-08-23T12:${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.000Z`, lastSeenAt: `2026-08-23T12:00:00.000Z` });
     const day = (count: number) => Array.from({ length: count }, (_, index) => job(`role-${index}`, 0, at(index)));
