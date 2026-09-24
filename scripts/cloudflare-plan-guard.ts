@@ -236,6 +236,23 @@ function isControllerMigrationTagTransition(before: unknown, after: unknown): bo
     && after.old_tag === null;
 }
 
+function isAppliedMigrationRetirement(address: string, before: Record<string, unknown>, after: Record<string, unknown>): boolean {
+  if (after.migrations !== null || !isRecord(before.migrations)) return false;
+  const expected = address === 'cloudflare_workers_script.ingestion'
+    ? { tag: 'v1-d1-traffic-controller', classes: ['D1TrafficController'] }
+    : address === 'cloudflare_workers_script.application'
+      ? { tag: 'v4-resume-pdf-compiler-v2', classes: ['ResumePdfCompilerV2'] }
+      : undefined;
+  if (!expected || before.migration_tag !== expected.tag) return false;
+  const migration = before.migrations;
+  return migration.new_tag === expected.tag
+    && isDeepStrictEqual(migration.new_sqlite_classes, expected.classes)
+    && (migration.old_tag === null || migration.old_tag === undefined)
+    && Object.entries(migration).every(([key, value]) => (
+      ['new_tag', 'new_sqlite_classes', 'old_tag'].includes(key) || value === null
+    ));
+}
+
 function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after)) return false;
   const controllers = after.filter((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER');
@@ -348,10 +365,11 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   const permittedResumeMigrationBootstrap = address === 'cloudflare_workers_script.application'
     && (before.migrations === null || before.migrations === undefined)
     && isExpectedResumeMigration(after.migrations, '');
+  const permittedAppliedMigrationRetirement = isAppliedMigrationRetirement(address, before, after);
   if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease
     && !permittedControllerMigration && !permittedControllerMigrationTagTransition
     && !permittedResumeMigrationTagTransition
-    && !permittedResumeMigrationBootstrap) return false;
+    && !permittedResumeMigrationBootstrap && !permittedAppliedMigrationRetirement) return false;
 
   const beforeForComparison = {
     ...before,
@@ -361,6 +379,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     ...(permittedControllerMigrationTagTransition ? { migrations: after.migrations } : {}),
     ...(permittedResumeMigrationTagTransition ? { migrations: after.migrations } : {}),
     ...(permittedResumeMigrationBootstrap ? { migrations: after.migrations } : {}),
+    ...(permittedAppliedMigrationRetirement ? { migrations: after.migrations } : {}),
   };
 
   let afterUnknown = change.after_unknown;
