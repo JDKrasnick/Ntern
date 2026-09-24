@@ -44,3 +44,24 @@ export function compensationLabels(value: DisplayCompensation | undefined): stri
   }
   return rawFallback ? [rawFallback] : [];
 }
+
+/** A single compact disclosure for role rows; the detail sheet retains every range and qualifier. */
+export function compactCompensationLabel(value: DisplayCompensation | undefined): string {
+  const ranges = (value?.ranges ?? []).filter((range) => Number.isFinite(range.minAmount)
+    && Number.isFinite(range.maxAmount) && range.minAmount > 0 && range.maxAmount >= range.minAmount);
+  if (ranges.length > 1) return "Pay varies";
+  const range = ranges[0];
+  if (range) {
+    const shortNumber = (amount: number) => amount >= 1_000
+      ? `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(amount / 1_000)}K`
+      : new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(amount);
+    const currency = range.currency === "USD" ? "$" : /^[A-Z]{3}$/u.test(range.currency) && range.currency !== "XXX" ? `${range.currency} ` : "";
+    const amount = `${currency}${shortNumber(range.minAmount)}${range.maxAmount !== range.minAmount ? `–${currency}${shortNumber(range.maxAmount)}` : ""}`;
+    const period = ({ hourly: "/hr", daily: "/day", weekly: "/wk", monthly: "/mo", annual: "/yr" } as Record<string, string>)[range.period] ?? "";
+    return `${amount}${period}`;
+  }
+  const raw = typeof value?.raw === "string" ? value.raw.normalize("NFC").replace(/\s+/gu, " ").trim() : "";
+  if (!raw) return "";
+  const concise = raw.split(/[·;]|\.(?:\s|$)/u, 1)[0]?.trim() ?? "";
+  return concise.length <= 44 ? concise : "Pay disclosed";
+}

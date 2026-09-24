@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "../src/catalog-quality.js";
+import { compactCompensationLabel } from "../../shared/compensation-display.js";
 
 describe("catalog presentation hardening", () => {
   it("uses explicit currency, period and applicability on every role surface", () => {
@@ -47,5 +48,11 @@ describe("catalog presentation hardening", () => {
   it("formats structured compensation with explicit and source currencies", () => {
     expect(presentCatalogRole({ compensation: { ranges: [{ minAmount: 40, maxAmount: 50, currency: "USD", period: "hourly", sourceText: "$40-$50/hour" }] } }).compensation).toBe("USD 40–50/hour");
     expect(presentCatalogRole({ compensation: { ranges: [{ minAmount: 20, maxAmount: 20, currency: "XXX", period: "hourly", sourceText: "£20/hour" }] } }).compensation).toBe("£20/hour");
+  });
+
+  it("keeps role-row pay disclosures short while details retain every range", () => {
+    expect(compactCompensationLabel({ ranges: [{ minAmount: 95_000, maxAmount: 110_000, currency: "USD", period: "unknown", applicableEducationLevels: ["undergraduate, masters, doctoral"] }] })).toBe("$95K–$110K");
+    expect(compactCompensationLabel({ ranges: [{ minAmount: 45, maxAmount: 55, currency: "USD", period: "hourly" }] })).toBe("$45–$55/hr");
+    expect(compactCompensationLabel({ ranges: [{ minAmount: 20, maxAmount: 20, currency: "EUR", period: "monthly" }, { minAmount: 25, maxAmount: 25, currency: "EUR", period: "monthly" }] })).toBe("Pay varies");
   });
 });
