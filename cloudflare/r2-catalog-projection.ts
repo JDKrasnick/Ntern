@@ -6,6 +6,7 @@ import type { D1Database, R2Bucket } from './types.js';
 
 const prefix = 'public-catalog/v1';
 const pageSize = 100;
+const roleReadPageConcurrency = 4;
 const maxAgeMs = 7 * 24 * 60 * 60_000;
 const encoded = (value: unknown): ArrayBuffer => new TextEncoder().encode(JSON.stringify(value)).buffer as ArrayBuffer;
 
@@ -94,11 +95,17 @@ export class R2CatalogProjection {
     const roles: CatalogGroupRole[] = [];
     const from = range.from ? new Date(Date.parse(range.from) - 86_400_000).toISOString().slice(0, 10) : undefined;
     const to = range.to ? new Date(Date.parse(range.to) + 86_400_000).toISOString().slice(0, 10) : undefined;
-    for (let index = 0; index * pageSize < pointer.count; index += 1) {
-      for (const group of await this.page(pointer, index)) {
-        roles.push(...group.roles.filter((role) => role.releaseDay && catalogProjectionRoleMatches(role, filter)
-          && (!from || role.releaseDay >= from)
-          && (!to || role.releaseDay <= to)));
+    for (let first = 0; first * pageSize < pointer.count; first += roleReadPageConcurrency) {
+      const pages = await Promise.all(Array.from(
+        { length: Math.min(roleReadPageConcurrency, Math.ceil(pointer.count / pageSize) - first) },
+        (_, offset) => this.page(pointer, first + offset),
+      ));
+      for (const page of pages) {
+        for (const group of page) {
+          roles.push(...group.roles.filter((role) => role.releaseDay && catalogProjectionRoleMatches(role, filter)
+            && (!from || role.releaseDay >= from)
+            && (!to || role.releaseDay <= to)));
+        }
       }
     }
     return roles;

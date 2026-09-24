@@ -157,6 +157,8 @@ describe('D1 filtered catalog projection', () => {
   });
 
   it('writes a projection larger than the D1 RPC ceiling in byte-bounded batches', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-17T00:00:00.000Z'));
     const database = new DatabaseSync(':memory:');
     database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
     // A live catalog whose serialized projection passed D1's 32 MiB per-RPC

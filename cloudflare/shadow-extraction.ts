@@ -18,6 +18,8 @@ import {
   type ShadowValidationResult,
 } from '../src/shadow-extraction.js';
 import { postprocessRoleScopedExtraction } from '../src/shadow-extraction-postprocess.js';
+import { parseShadowPublicationPolicy } from '../src/shadow-publication.js';
+import { shadowVerificationPrompt, verifiedProspectiveFields } from '../src/shadow-verification.js';
 import type { ProviderIdentity } from '../src/types.js';
 import type { D1Database, D1PreparedStatement, MessageBatch, Queue, R2Bucket } from './types.js';
 import { inferOpenAIShadowExtraction } from './openai-shadow-inference.js';
@@ -55,6 +57,7 @@ export interface ShadowExtractionEnvironment {
   SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS?: string;
   SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS?: string;
   OPENAI_KEY?: string;
+  LLM_METADATA_PUBLICATION_POLICY_JSON?: string;
 }
 
 const shadowFieldNames = ['compensation', 'locations', 'workMode', 'housing', 'timing', 'education', 'eligibility'] as const;
@@ -179,8 +182,11 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
   const prior = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger
     WHERE period = ? AND lease_token = ?`).bind(period, leaseToken).first<{ state: string; reserved_cents: number }>();
   if (prior?.state === 'reserved' && prior.reserved_cents >= reserveCents) return true;
-  // Owner-approved $3 increase applies only to September 2026; October returns to the usual envelope.
-  const septemberIncreaseCents = period === '2026-09' ? 300 : 0;
+  // Keep the final $1 of September's owner-approved $4 increase for natural provider-poll work.
+  // Other origins retain the previous $3 increase; October returns to the usual envelope.
+  const run = await db.prepare('SELECT origin FROM shadow_extraction_runs WHERE run_key = ?')
+    .bind(runKey).first<{ origin: ShadowExtractionOrigin }>();
+  const septemberIncreaseCents = period === '2026-09' ? (run?.origin === 'provider-poll' ? 400 : 300) : 0;
   const allowance = Math.min(headroom + septemberIncreaseCents, Math.max(0, 2_000 + septemberIncreaseCents - forecast));
   if (reserveCents > allowance) return false;
   const result = await db.prepare(`INSERT INTO shadow_extraction_cost_ledger (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
@@ -360,7 +366,10 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       if (!await currentRevision(env.DB, message)) {
         await finishRun(env.DB, message, leaseToken, 'obsolete', now(), { error: 'a newer posting revision is current' }); queued.ack(); continue;
       }
-      const parsed = JSON.parse(await r2Text(env.SHADOW_EXTRACTION_ARTIFACTS, message.inputKey)) as { normalized?: NormalizedPostingInput; baseline?: ShadowBaseline };
+      const parsed = JSON.parse(await r2Text(env.SHADOW_EXTRACTION_ARTIFACTS, message.inputKey)) as {
+        normalized?: NormalizedPostingInput; baseline?: ShadowBaseline;
+        identity?: { observedAt?: string; origin?: string; sourceId?: string; externalId?: string; jobId?: string };
+      };
       const normalized = parsed.normalized;
       if (normalized?.completeness === 'complete' || normalized?.completeness === 'incomplete') {
         await env.DB.prepare(`UPDATE shadow_extraction_runs SET input_completeness = ?
@@ -370,6 +379,12 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       if (!normalized || normalized.contentHash !== message.contentHash || shadowExtractionCacheKey(normalized) !== message.cacheKey) {
         await finishRun(env.DB, message, leaseToken, 'invalid-output', now(), { error: 'input identity or version mismatch' }); queued.ack(); continue;
       }
+      const policy = parseShadowPublicationPolicy(env.LLM_METADATA_PUBLICATION_POLICY_JSON);
+      const prospective = policy.enabled && policy.mode === 'prospective-provider-poll' && normalized.completeness === 'complete'
+        && message.origin === 'provider-poll' && parsed.identity?.origin === 'provider-poll'
+        && parsed.identity.observedAt === message.queuedAt && message.queuedAt >= policy.startsAt!
+        && parsed.identity.jobId === message.jobId && parsed.identity.sourceId === message.sourceId
+        && parsed.identity.externalId === message.externalId;
       if (env.SHADOW_EXTRACTION_ENABLED !== 'true' || !inference) {
         const error = env.SHADOW_EXTRACTION_ENABLED !== 'true'
           ? 'live model execution disabled by runtime flag'
@@ -378,7 +393,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       }
       const cached = await env.DB.prepare('SELECT response_key, validation, expires_at FROM shadow_extraction_cache WHERE cache_key = ?')
         .bind(message.cacheKey).first<{ response_key: string; validation: string; expires_at: string }>();
-      if (cached) {
+      if (cached && !prospective) {
         const checkedAt = now();
         if (!await currentRevision(env.DB, message)) {
           await finishRun(env.DB, message, leaseToken, 'obsolete', checkedAt, { error: 'a newer posting revision arrived before cache reuse' });
@@ -397,7 +412,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       }
       // Reserve the upper bound for one extraction plus one field-repair retry.
       // Actual combined usage is reconciled below.
-      if (!await reserveShadowCost(env.DB, startedAt, message.runKey, leaseToken, 10, env)) {
+      if (!await reserveShadowCost(env.DB, startedAt, message.runKey, leaseToken, prospective ? 20 : 10, env)) {
         await finishRun(env.DB, message, leaseToken, 'disabled', now(), { error: 'cost headroom unavailable' }); queued.ack(); continue;
       }
       const usageValid = (response: ShadowInferenceResult) => Number.isSafeInteger(response.inputTokens) && response.inputTokens >= 0
@@ -441,12 +456,12 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
           repairedResponse = undefined;
         }
       }
-      const usage = repairedResponse
+      let usage = repairedResponse
         ? { inputTokens: response.inputTokens + repairedResponse.inputTokens, outputTokens: response.outputTokens + repairedResponse.outputTokens,
           actualCostCents: response.actualCostCents + repairedResponse.actualCostCents }
         : response;
-      await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now());
       if (!await currentRevision(env.DB, message)) {
+        await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now());
         await finishRun(env.DB, message, leaseToken, 'obsolete', now(), { error: 'a newer posting revision arrived during inference', inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens, actualCostCents: usage.actualCostCents }); queued.ack(); continue;
       }
@@ -454,9 +469,30 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
         const postprocessed = postprocessRoleScopedExtraction(validation.accepted, normalized.completeness);
         if (postprocessed.changes.length > 0) validation = validateShadowExtraction(postprocessed.extraction, normalized);
       }
+      let verification: { policyVersion: string; startsAt: string; acceptedFields: string[]; response: unknown;
+        inputTokens: number; outputTokens: number; actualCostCents: number } | undefined;
+      let verificationError: string | undefined;
+      if (prospective && validation.accepted) {
+        try {
+          const checked = await inference(normalized, shadowVerificationPrompt(normalized, validation.accepted));
+          if (!usageValid(checked)) throw new Error('verifier usage is invalid');
+          usage = { inputTokens: usage.inputTokens + checked.inputTokens, outputTokens: usage.outputTokens + checked.outputTokens,
+            actualCostCents: usage.actualCostCents + checked.actualCostCents };
+          const verified = validateShadowExtraction(checked.response, normalized);
+          verification = { policyVersion: policy.version, startsAt: policy.startsAt!,
+            acceptedFields: verified.accepted && verified.failures.length === 0
+              ? verifiedProspectiveFields(validation.accepted, verified.accepted).filter(field => policy.allowedFields.includes(field)) : [],
+            response: checked.response, inputTokens: checked.inputTokens, outputTokens: checked.outputTokens,
+            actualCostCents: checked.actualCostCents };
+        } catch (error) {
+          verificationError = error instanceof Error ? error.message.slice(0, 500) : 'verifier failed';
+        }
+      }
+      await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now());
       const responseKey = `shadow-response/${message.runKey}/${leaseToken}.json`;
       await env.SHADOW_EXTRACTION_ARTIFACTS.put(responseKey, new TextEncoder().encode(JSON.stringify({ response: response.response, validation, rawValidation,
         projection: initialProjection ? { removedFields: initialProjection.removedFields, failures: initialProjection.failures } : undefined,
+        verification, verificationError,
         repair: repairedResponse ? { response: repairedResponse.response, repairedFields, inputTokens: repairedResponse.inputTokens,
           outputTokens: repairedResponse.outputTokens, actualCostCents: repairedResponse.actualCostCents }
           : repairError ? { error: repairError } : undefined })).buffer, { httpMetadata: { contentType: 'application/json' } });

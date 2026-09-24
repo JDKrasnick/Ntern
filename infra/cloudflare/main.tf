@@ -180,7 +180,7 @@ resource "cloudflare_workers_script" "application" {
       { name = "DOCUMENTS", type = "r2_bucket", bucket_name = cloudflare_r2_bucket.documents.name },
       { name = "AI", type = "ai" },
       { name = "RESUME_EMBEDDINGS", type = "vectorize", index_name = var.resume_embedding_index_name },
-      { name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompiler" },
+      { name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompilerV2" },
       { name = "GMAIL_QUEUE", type = "queue", queue_name = cloudflare_queue.work["gmail"].queue_name },
       { name = "RESUME_JOB_IMPORT_QUEUE", type = "queue", queue_name = cloudflare_queue.work["resume-job-import"].queue_name },
       { name = "INGESTION", type = "service", service = cloudflare_workers_script.ingestion.script_name },
@@ -190,8 +190,8 @@ resource "cloudflare_workers_script" "application" {
   )
 
   migrations = {
-    new_tag            = "v2-resume-pdf-compiler"
-    new_sqlite_classes = ["ResumePdfCompiler"]
+    new_tag            = "v4-resume-pdf-compiler-v2"
+    new_sqlite_classes = ["ResumePdfCompilerV2"]
   }
 
   limits = { cpu_ms = 30000, subrequests = 10000 }

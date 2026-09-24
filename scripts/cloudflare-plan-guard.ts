@@ -30,7 +30,7 @@ const resumeWorkerBindings: Record<string, Array<Record<string, unknown>>> = {
   'cloudflare_workers_script.application': [
     { name: 'AI', type: 'ai' },
     { name: 'RESUME_EMBEDDINGS', type: 'vectorize', index_name: 'intern-notifs-resume-bank-v1' },
-    { name: 'RESUME_PDF_COMPILER', type: 'durable_object_namespace', class_name: 'ResumePdfCompiler' },
+    { name: 'RESUME_PDF_COMPILER', type: 'durable_object_namespace', class_name: 'ResumePdfCompilerV2' },
     { name: 'RESUME_JOB_IMPORT_QUEUE', type: 'queue', queue_name: 'intern-notifs-resume-job-import' },
     { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' },
   ],
@@ -68,6 +68,35 @@ function disablesReviewedMetadataCanary(before: string, after: string): boolean 
   } catch {
     return false;
   }
+}
+
+function isProspectiveMetadataPolicy(value: unknown, allowUnlimited = false): boolean {
+  if (!isRecord(value)) return false;
+  const fields = value.allowedFields;
+  const startsAt = value.startsAt;
+  const version = value.version;
+  return Object.keys(value).sort().join(',') === 'allowedFields,cohort,enabled,maxReceipts,mode,startsAt,version'
+    && value.enabled === true && value.mode === 'prospective-provider-poll'
+    && typeof version === 'string' && /^prospective-provider-poll-2026-09-[a-z0-9-]+$/u.test(version)
+    && Array.isArray(value.cohort) && value.cohort.length === 0
+    && Array.isArray(fields) && fields.length > 0 && fields.length <= 2
+    && new Set(fields).size === fields.length && fields.every(field => field === 'compensation' || field === 'locations')
+    && ((allowUnlimited && value.maxReceipts === null)
+      || (Number.isSafeInteger(value.maxReceipts) && Number(value.maxReceipts) >= 1 && Number(value.maxReceipts) <= 25))
+    && typeof startsAt === 'string' && Number.isFinite(Date.parse(startsAt))
+    && new Date(startsAt).toISOString() === startsAt;
+}
+
+function permitsProspectiveMetadataPolicy(before: string, after: string): boolean {
+  try {
+    const prior = JSON.parse(before) as unknown;
+    const next = JSON.parse(after) as unknown;
+    return (isDeepStrictEqual(prior, disabledMetadataPolicy) && isProspectiveMetadataPolicy(next))
+      || (isProspectiveMetadataPolicy(prior, true) && isDeepStrictEqual(next, disabledMetadataPolicy))
+      || (isProspectiveMetadataPolicy(prior) && isProspectiveMetadataPolicy(next, true)
+        && isRecord(prior) && isRecord(next) && prior.maxReceipts === 25 && next.maxReceipts === null
+        && isDeepStrictEqual({ ...prior, maxReceipts: null }, next));
+  } catch { return false; }
 }
 // These provider-computed values may legitimately change after uploading new
 // code. Keep this list explicit so a new provider field fails closed.
@@ -151,7 +180,7 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
       const { text: afterText, ...afterRest } = nextBinding;
       if (!isDeepStrictEqual(beforeRest, afterRest) || typeof beforeText !== 'string' || typeof afterText !== 'string') return false;
       if (beforeText === afterText) return true;
-      if (!disablesReviewedMetadataCanary(beforeText, afterText)) return false;
+       if (!disablesReviewedMetadataCanary(beforeText, afterText) && !permitsProspectiveMetadataPolicy(beforeText, afterText)) return false;
       permittedBindingChanged = true;
       return true;
     }
@@ -177,7 +206,8 @@ function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
   if (oldBindings.length === 0) {
     // First enablement is the only permitted binding addition. Terraform may
     // insert it into the ordered list, so compare everything after removal.
-    return isDeepStrictEqual(enabled, { name, type: 'plain_text', text: 'true' })
+    return enabled.text === 'true'
+      && Object.entries(enabled).every(([key, value]) => ['name', 'type', 'text'].includes(key) || value === null)
       && after.length === before.length + 1
       && isDeepStrictEqual(before, after.filter((binding) => !isRecord(binding) || binding.name !== name));
   }
@@ -241,8 +271,8 @@ function isResumeWorkerUpdate(address: string, change: ResourceChange['change'])
 
   const migrationChanged = address === 'cloudflare_workers_script.application';
   if (migrationChanged && (!isRecord(change.after.migrations)
-    || change.after.migrations.new_tag !== 'v2-resume-pdf-compiler'
-    || !isDeepStrictEqual(change.after.migrations.new_sqlite_classes, ['ResumePdfCompiler'])
+    || change.after.migrations.new_tag !== 'v4-resume-pdf-compiler-v2'
+    || !isDeepStrictEqual(change.after.migrations.new_sqlite_classes, ['ResumePdfCompilerV2'])
     || Object.entries(change.after.migrations).some(([key, value]) => (
       !['new_tag', 'new_sqlite_classes'].includes(key) && value !== null
     )))) return false;

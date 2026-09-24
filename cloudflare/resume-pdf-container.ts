@@ -4,7 +4,7 @@ import { Container } from '@cloudflare/containers';
  * Dedicated, no-network TeX process. The Worker passes only escaped output
  * from fixed templates; this class never accepts user-selected commands.
  */
-export class ResumePdfCompiler extends Container {
+export class ResumePdfCompilerV2 extends Container {
   defaultPort = 8080;
   requiredPorts = [8080];
   sleepAfter = '2m';

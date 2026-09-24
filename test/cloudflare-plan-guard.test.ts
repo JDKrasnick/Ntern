@@ -124,6 +124,9 @@ describe('Cloudflare deployment plan guard', () => {
     const enabled = { name: 'CATALOG_R2_READ_ENABLED', type: 'plain_text', text: 'true' };
     const added = { ...contentUpdate, after: { ...contentUpdate.after, bindings: [enabled, ...worker.bindings] } };
     expect(validateCloudflarePlan(plan([added]))).toHaveLength(1);
+    const providerShaped = { ...enabled, service: null, bucket_name: null };
+    expect(validateCloudflarePlan(plan([{ ...added, after: { ...added.after,
+      bindings: [providerShaped, ...worker.bindings] } }]))).toHaveLength(1);
     expect(() => validateCloudflarePlan(plan([{ ...added, address: 'cloudflare_workers_script.ingestion' }]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([{ ...added, after: { ...added.after,
       bindings: [{ ...enabled, text: 'false' }, ...worker.bindings] } }]))).toThrow('Refusing unsafe Cloudflare plan');
@@ -157,6 +160,30 @@ describe('Cloudflare deployment plan guard', () => {
     expect(() => validateCloudflarePlan(plan([change(enabled.replace('production-canary-2026-09-09-v1', 'other-canary'), disabled)]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('allows a bounded prospective provider policy and its rollback', () => {
+    const name = 'LLM_METADATA_PUBLICATION_POLICY_JSON';
+    const disabled = JSON.stringify({ enabled: false, version: 'disabled', allowedFields: [], cohort: [] });
+    const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-v1', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T03:00:00.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: 25 };
+    const update = (beforeText: string, afterText: string) => ({ address: 'cloudflare_workers_script.ingestion', actions: ['update'],
+      before: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: beforeText }] },
+      after: { ...worker, bindings: [...worker.bindings, { name, type: 'plain_text', text: afterText }] } });
+    expect(validateCloudflarePlan(plan([update(disabled, JSON.stringify(policy))]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([update(JSON.stringify(policy), disabled)]))).toHaveLength(1);
+    const unlimited = { ...policy, maxReceipts: null };
+    expect(validateCloudflarePlan(plan([update(JSON.stringify(policy), JSON.stringify(unlimited))]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([update(JSON.stringify(unlimited), disabled)]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([update(disabled, JSON.stringify(unlimited))]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([update(JSON.stringify(policy), JSON.stringify({ ...unlimited,
+      startsAt: '2026-09-23T00:00:00.000Z' }))]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([update(JSON.stringify(policy), JSON.stringify({ ...unlimited,
+      allowedFields: ['locations'] }))]))).toThrow('Refusing unsafe Cloudflare plan');
+    for (const invalid of [{ ...policy, allowedFields: ['workMode'] }, { ...policy, maxReceipts: 26 },
+      { ...policy, cohort: [{ sourceId: 'old' }] }, { ...policy, mode: 'all' }]) {
+      expect(() => validateCloudflarePlan(plan([update(disabled, JSON.stringify(invalid))]))).toThrow('Refusing unsafe Cloudflare plan');
+    }
+  });
+
   it('accepts only the reviewed traffic-controller Durable Object binding addition', () => {
     expect(validateCloudflarePlan(plan([{
       ...contentUpdate,
@@ -182,7 +209,7 @@ describe('Cloudflare deployment plan guard', () => {
     const apiBindings = [
       { name: 'AI', type: 'ai' },
       { name: 'RESUME_EMBEDDINGS', type: 'vectorize', index_name: 'intern-notifs-resume-bank-v1' },
-      { name: 'RESUME_PDF_COMPILER', type: 'durable_object_namespace', class_name: 'ResumePdfCompiler' },
+      { name: 'RESUME_PDF_COMPILER', type: 'durable_object_namespace', class_name: 'ResumePdfCompilerV2' },
       { name: 'RESUME_JOB_IMPORT_QUEUE', type: 'queue', queue_name: 'intern-notifs-resume-job-import' },
       { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' },
     ];
@@ -198,7 +225,7 @@ describe('Cloudflare deployment plan guard', () => {
         after: {
           ...contentUpdate.after,
           bindings: [...worker.bindings, ...apiBindings],
-          migrations: { new_tag: 'v2-resume-pdf-compiler', new_sqlite_classes: ['ResumePdfCompiler'] },
+          migrations: { new_tag: 'v4-resume-pdf-compiler-v2', new_sqlite_classes: ['ResumePdfCompilerV2'] },
         },
         after_unknown: {
           bindings: [...worker.bindings.map(() => ({})), {}, {}, { namespace_id: true }, {}, {}],

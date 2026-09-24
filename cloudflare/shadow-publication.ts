@@ -36,6 +36,106 @@ interface RunRow {
   response_key: string;
 }
 
+interface ProspectiveRunRow extends RunRow {
+  origin: string;
+  created_at: string;
+  input_completeness: string | null;
+  observed_at: string;
+  projected_at: string | null;
+}
+
+/** One maintenance item per pass. Only a fresh provider observation
+ * whose own verified artifact matches the active policy can create a receipt. */
+export async function publishProspectiveShadowMetadata(env: {
+  DB: D1Database;
+  DOCUMENTS: R2Bucket;
+  SHADOW_EXTRACTION_ARTIFACTS: R2Bucket;
+  LLM_METADATA_PUBLICATION_POLICY_JSON?: string;
+}, refreshProjection: () => Promise<unknown>): Promise<{ result: string; runKey?: string }> {
+  const policy = parseShadowPublicationPolicy(env.LLM_METADATA_PUBLICATION_POLICY_JSON);
+  if (!policy.enabled || policy.mode !== 'prospective-provider-poll') return { result: 'disabled' };
+  const run = await env.DB.prepare(`SELECT r.run_key, r.job_id, r.source_id, r.external_id, r.source_url,
+      r.content_hash, r.response_key, r.origin, r.created_at, r.input_completeness,
+      revision.observed_at, receipt.projected_at
+    FROM shadow_extraction_runs r
+    JOIN shadow_extraction_posting_revisions revision ON revision.job_id = r.job_id
+      AND revision.source_id = r.source_id AND revision.external_id = r.external_id
+      AND revision.content_hash = r.content_hash
+    LEFT JOIN shadow_publication_receipts receipt ON receipt.run_key = r.run_key
+      AND receipt.policy_version = ? AND receipt.revoked_at IS NULL
+    LEFT JOIN shadow_publication_decisions decision ON decision.run_key = r.run_key AND decision.policy_version = ?
+    WHERE r.state = 'completed' AND r.origin = 'provider-poll' AND r.input_completeness = 'complete'
+      AND r.created_at >= ? AND revision.observed_at >= ?
+      AND (decision.run_key IS NULL OR (decision.result = 'receipted' AND receipt.projected_at IS NULL))
+    ORDER BY r.created_at, r.run_key LIMIT 1`)
+    .bind(policy.version, policy.version, policy.startsAt, policy.startsAt).first<ProspectiveRunRow>();
+  if (!run) return { result: 'none' };
+  const object = await env.SHADOW_EXTRACTION_ARTIFACTS.get(run.response_key);
+  if (!object || object.size === undefined || object.size > maxArtifactBytes) throw new Error('Prospective artifact is unavailable or oversized');
+  const saved = JSON.parse(await new Response(object.body).text()) as {
+    validation?: ShadowValidationResult;
+    verification?: { policyVersion?: string; startsAt?: string; acceptedFields?: unknown };
+  };
+  const verified = saved.verification;
+  const fields = verified?.policyVersion === policy.version && verified.startsAt === policy.startsAt
+    && Array.isArray(verified.acceptedFields)
+    ? verified.acceptedFields.filter((field): field is ShadowPublicationField =>
+      typeof field === 'string' && policy.allowedFields.includes(field as ShadowPublicationField)) : [];
+  const extraction = saved.validation?.accepted;
+  const acceptedFields = extraction && saved.validation?.failures.length === 0
+    ? shadowPublishableFields(extraction, fields) : [];
+  const jobs = new D1InternshipStore(env.DB);
+  const job = acceptedFields.length ? await jobs.getJob(run.job_id) : undefined;
+  const attached = job?.open && job.sourceReferences.some(reference => reference.sourceId === run.source_id
+    && reference.externalId === run.external_id);
+  if (!attached || !extraction || !acceptedFields.length) {
+    await env.DB.prepare(`INSERT INTO shadow_publication_decisions (run_key, policy_version, result, recorded_at)
+      VALUES (?, ?, 'skipped', ?) ON CONFLICT(run_key, policy_version) DO NOTHING`)
+      .bind(run.run_key, policy.version, new Date().toISOString()).run();
+    return { result: 'skipped', runKey: run.run_key };
+  }
+  await currentRevision(env.DB, run);
+  const evidenceFingerprint = shadowPublicationFingerprint({ jobId: run.job_id, sourceId: run.source_id,
+    externalId: run.external_id, contentHash: run.content_hash, runKey: run.run_key,
+    policyVersion: policy.version, allowedFields: acceptedFields });
+  const receiptId = createHash('sha256').update(`receipt\0${evidenceFingerprint}`).digest('hex');
+  const inserted = await env.DB.prepare(`INSERT INTO shadow_publication_receipts
+      (receipt_id, job_id, source_id, external_id, content_hash, run_key, policy_version, accepted_fields, evidence_fingerprint, created_at)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE (? IS NULL OR (SELECT COUNT(*) FROM shadow_publication_receipts WHERE policy_version = ? AND revoked_at IS NULL) < ?)
+    ON CONFLICT(receipt_id) DO NOTHING`)
+    .bind(receiptId, run.job_id, run.source_id, run.external_id, run.content_hash, run.run_key,
+      policy.version, JSON.stringify(acceptedFields), evidenceFingerprint, new Date().toISOString(),
+      policy.maxReceipts, policy.version, policy.maxReceipts).run();
+  const receipt = await env.DB.prepare(`SELECT projected_at FROM shadow_publication_receipts
+    WHERE receipt_id = ? AND revoked_at IS NULL`).bind(receiptId).first<{ projected_at: string | null }>();
+  if (!receipt) return { result: inserted.meta.changes ? 'receipt-missing' : 'cap-reached', runKey: run.run_key };
+  await env.DB.prepare(`INSERT INTO shadow_publication_decisions (run_key, policy_version, result, recorded_at)
+    VALUES (?, ?, 'receipted', ?) ON CONFLICT(run_key, policy_version) DO NOTHING`)
+    .bind(run.run_key, policy.version, new Date().toISOString()).run();
+  if (receipt.projected_at) return { result: 'already-projected', runKey: run.run_key };
+  const evidence = shadowExtractionEvidence({ extraction, sourceId: run.source_id, sourceUrl: run.source_url,
+    contentHash: run.content_hash, observedAt: run.observed_at, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
+    allowedFields: acceptedFields });
+  if (!evidence) throw new Error('Verified fields yielded no publishable evidence');
+  const latest = await jobs.getJob(run.job_id);
+  if (!latest?.open || !latest.sourceReferences.some(reference => reference.sourceId === run.source_id
+    && reference.externalId === run.external_id)) throw new Error('Catalog role is no longer open with exact source');
+  await currentRevision(env.DB, run);
+  const sourceReferences = latest.sourceReferences.map(reference => reference.sourceId === run.source_id && reference.externalId === run.external_id
+    ? { ...reference, metadataEvidence: mergeRoleMetadataEvidence(reference.metadataEvidence, [evidence]) } : reference);
+  const projected = projectRoleMetadata({ ...latest, sourceReferences });
+  const operations = new D1CatalogAdmissionStore(env.DB);
+  await operations.recordRoleMetadataEvidence(run.job_id, [evidence], projected.conflicts, run.observed_at,
+    { sourceId: run.source_id, sourceClasses: ['reviewed-shadow'] });
+  await jobs.putInternship(projected.job);
+  await refreshProjection();
+  await env.DB.prepare(`UPDATE shadow_publication_receipts SET projected_at = ?
+    WHERE receipt_id = ? AND revoked_at IS NULL AND projected_at IS NULL`)
+    .bind(new Date().toISOString(), receiptId).run();
+  return { result: 'projected', runKey: run.run_key };
+}
+
 async function artifact(bucket: R2Bucket, key: string): Promise<{ extraction: ShadowExtraction; validation: ShadowValidationResult }> {
   const object = await bucket.get(key);
   if (!object || object.size === undefined || object.size > maxArtifactBytes) throw new Error('Validated extraction artifact is unavailable or oversized');
@@ -147,7 +247,11 @@ export async function handleShadowPublication(request: Request, env: {
   if (request.method === 'GET') {
     const receipts = await env.DB.prepare(`SELECT policy_version, count(*) AS count FROM shadow_publication_receipts
       WHERE revoked_at IS NULL GROUP BY policy_version`).all<{ policy_version: string; count: number }>();
-    return Response.json({ enabled: policy.enabled, version: policy.version, allowedFields: policy.allowedFields,
+    const decisions = await env.DB.prepare(`SELECT policy_version, result, COUNT(*) AS count FROM shadow_publication_decisions
+      GROUP BY policy_version, result`).all<{ policy_version: string; result: string; count: number }>();
+    return Response.json({ enabled: policy.enabled, version: policy.version, mode: policy.mode ?? 'exact-cohort',
+      startsAt: policy.startsAt ?? null, maxReceipts: policy.maxReceipts ?? null, allowedFields: policy.allowedFields,
+      prospectiveDecisions: decisions.results,
       cohortSize: policy.cohort.length, activeReceipts: receipts.results, evaluations: await evaluationSummary(env.DB),
       rolloutQualityGate: await rolloutQualityGate(env.DB),
       extractionScope: { classification: ['technical', 'earlyCareer', 'disciplines'],

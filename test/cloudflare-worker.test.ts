@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -428,6 +428,23 @@ describe('Cloudflare bulk operation admission', () => {
       } finally { warning.mockRestore(); }
     },
   );
+
+  it('permits only capped identity audit and duplicate batches alongside queued work', () => {
+    expect(isLowImpactPostingIdentityRequest({ audit: true })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'identity', duplicateGroupsOnly: true })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: [],
+    } })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, finalize: true, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: [],
+    } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
+      jobIds: Array.from({ length: 100 }, (_, index) => String(index)), contextRows: Array.from({ length: 125 }, () => ({})), occurrenceKeys: Array.from({ length: 125 }, () => []),
+    } })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'identity', apply: true, applyBatch: {
+      jobIds: Array.from({ length: 101 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
+    } })).toBe(false);
+  });
 });
 
 describe('Cloudflare queue continuation bounds', () => {

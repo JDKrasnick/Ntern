@@ -33,7 +33,7 @@ import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection
 import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, shadowExtractionSummary } from './shadow-extraction.js';
-import { handleShadowPublication } from './shadow-publication.js';
+import { handleShadowPublication, publishProspectiveShadowMetadata } from './shadow-publication.js';
 import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
 import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork, recordGmailFailure, type GmailWorkMessage } from './gmail.js';
 import { D1EmployerStore } from './employer-store.js';
@@ -410,14 +410,39 @@ function operationsAuthorized(request: Request, env: Environment): boolean {
     && request.headers.get('X-Operations-Key') === env.OPERATIONS_SHARED_SECRET;
 }
 
-async function bulkOperationWindow(env: Environment): Promise<Response | undefined> {
+type PostingIdentityRepairInput = {
+  apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
+  acceptCurrentSnapshot?: boolean; expectedEligibleDuplicateGroups?: number; expectedUnresolvedDuplicateGroups?: number;
+  scope?: 'all' | 'identity' | 'occurrences'; audit?: boolean; jobBatch?: number; duplicateGroupsOnly?: boolean;
+  applyBatch?: { jobIds?: unknown; contextRows?: unknown; occurrenceKeys?: unknown }; finalize?: boolean;
+};
+
+// A single reviewed duplicate family can be larger than the original
+// per-batch planning default. Keep this queue-tolerant path below the normal
+// 500-job repair limit, while admitting that bounded family without requiring
+// an indefinitely empty production queue.
+const MAX_LOW_IMPACT_REPAIR_JOBS = 100;
+const MAX_LOW_IMPACT_REPAIR_REFERENCES = 125;
+
+export function isLowImpactPostingIdentityRequest(input: PostingIdentityRepairInput): boolean {
+  if (input.audit === true) return true;
+  if (input.scope !== 'identity') return false;
+  if (input.duplicateGroupsOnly === true && input.apply !== true && !input.applyBatch) return true;
+  if (!input.apply || input.finalize === true || !input.applyBatch) return false;
+  const { jobIds, contextRows, occurrenceKeys } = input.applyBatch;
+  return Array.isArray(jobIds) && jobIds.length > 0 && jobIds.length <= MAX_LOW_IMPACT_REPAIR_JOBS
+    && Array.isArray(contextRows) && contextRows.length <= MAX_LOW_IMPACT_REPAIR_REFERENCES
+    && Array.isArray(occurrenceKeys) && occurrenceKeys.length <= MAX_LOW_IMPACT_REPAIR_REFERENCES;
+}
+
+async function bulkOperationWindow(env: Environment, options: { allowQueuedWork?: boolean } = {}): Promise<Response | undefined> {
   try {
     const window = await assessBulkSafeWindow(env.DB, {
       greenhouse: env.GREENHOUSE_QUEUE, lever: env.LEVER_QUEUE, ashby: env.ASHBY_QUEUE,
       github: env.GITHUB_QUEUE, gmail: env.GMAIL_QUEUE,
       'destination-verification': env.DESTINATION_VERIFICATION_QUEUE,
       'shadow-extraction': env.SHADOW_EXTRACTION_QUEUE,
-    }, new Date());
+    }, new Date(), options);
     if (window.ready) return undefined;
     console.warn(JSON.stringify({ event: 'bulk_operation_deferred', reason: window.reason, queues: window.queues ?? [] }));
     return Response.json({ message: 'Bulk operation requires a quiet queue and D1 window', ...window },
@@ -924,14 +949,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   }
   if (request.method === 'POST' && url.pathname === '/internal/posting-identity-repair') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
-    const window = await bulkOperationWindow(env);
+    const input = await request.json().catch(() => ({})) as PostingIdentityRepairInput;
+    const window = await bulkOperationWindow(env, { allowQueuedWork: isLowImpactPostingIdentityRequest(input) });
     if (window) return withCors(window);
-    const input = await request.json().catch(() => ({})) as {
-      apply?: boolean; repairToken?: string; expectedChanges?: number; expectedDuplicateJobs?: number;
-      acceptCurrentSnapshot?: boolean; expectedEligibleDuplicateGroups?: number; expectedUnresolvedDuplicateGroups?: number;
-      scope?: 'all' | 'identity' | 'occurrences'; audit?: boolean; jobBatch?: number; duplicateGroupsOnly?: boolean;
-      applyBatch?: { jobIds?: unknown; contextRows?: unknown; occurrenceKeys?: unknown }; finalize?: boolean;
-    };
     try {
       // The audit is the read-only integrity gate. It pages the catalog so a
       // production-sized identity check never depends on one unbounded read.
@@ -1676,6 +1696,8 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // alert held the feed on a day-old snapshot.
     // See docs/197-ingestion-resource-bounds.md.
     const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store, env.DOCUMENTS));
+    await runScheduledStep('prospective_shadow_metadata', () => publishProspectiveShadowMetadata(env,
+      () => refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS)));
     const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));

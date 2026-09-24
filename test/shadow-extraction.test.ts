@@ -417,13 +417,14 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await reserveShadowCost(DB, now, 'd'.repeat(64), 'lease-d', 1, env)).toBe(false);
   });
 
-  it('admits September v34 work after 691 cents, caps it at 800, and restores 500 in October', async () => {
+  it('reserves the final September dollar for provider-poll work and restores 500 in October', async () => {
     const DB = schema();
     const september = new Date('2026-09-23T00:00:00.000Z');
     const october = new Date('2026-10-01T00:00:00.000Z');
-    const priorKey = 'e'.repeat(64); const septemberKey = 'f'.repeat(64); const octoberKey = '1'.repeat(64); const overLimitKey = '2'.repeat(64);
-    for (const key of [priorKey, septemberKey, octoberKey, overLimitKey]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, input_key, created_at, updated_at)
-      VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, ?, 'p', 's', 'n', 'queued', 0, '', 'shadow-input/x.json', ?, ?)`).bind(key, key, SHADOW_EXTRACTION_MODEL_ID, september.toISOString(), september.toISOString()).run();
+    const priorKey = 'e'.repeat(64); const septemberKey = 'f'.repeat(64); const octoberKey = '1'.repeat(64); const overLimitKey = '2'.repeat(64); const providerKey = '3'.repeat(64);
+    for (const key of [priorKey, septemberKey, octoberKey, overLimitKey, providerKey]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, input_key, origin, created_at, updated_at)
+      VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, ?, 'p', 's', 'n', 'queued', 0, '', 'shadow-input/x.json', ?, ?, ?)`)
+      .bind(key, key, SHADOW_EXTRACTION_MODEL_ID, key === providerKey ? 'provider-poll' : 'backfill', september.toISOString(), september.toISOString()).run();
     for (const period of ['2026-09', '2026-10']) await DB.prepare(`INSERT INTO shadow_extraction_cost_ledger
       (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
       VALUES (?, ?, ?, 10, 691, 'reconciled', ?, ?)`).bind(period, `prior-${period}`, priorKey, september.toISOString(), september.toISOString()).run();
@@ -431,7 +432,8 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await reserveShadowCost(DB, september, septemberKey, 'september-v34', 10, env)).toBe(true);
     expect(await reserveShadowCost(DB, october, octoberKey, 'october-v34', 10, env)).toBe(false);
     await DB.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = 790 WHERE period = '2026-09' AND run_key = ?`).bind(priorKey).run();
-    expect(await reserveShadowCost(DB, september, overLimitKey, 'september-over-limit', 1, env)).toBe(false);
+    expect(await reserveShadowCost(DB, september, overLimitKey, 'september-over-limit', 10, env)).toBe(false);
+    expect(await reserveShadowCost(DB, september, providerKey, 'september-provider', 10, env)).toBe(true);
   });
 
   it('reuses a reservation for one transient retry and records deterministic baseline differences', async () => {
@@ -471,6 +473,34 @@ describe('shadow extraction queue and cost ledger', () => {
         { field: 'locations', baseline_state: 'present', shadow_state: 'present', differs: 0 },
         { field: 'workMode', baseline_state: 'not-stated', shadow_state: 'not-stated', differs: 0 },
       ] });
+  });
+
+  it('verifies new provider-poll fields and charges both model passes', async () => {
+    const DB = schema(); const artifacts = new MemoryR2(); const messages: unknown[] = [];
+    const queue: Queue = { async send(body) { messages.push(body); }, async sendBatch() {} };
+    const observedAt = '2026-09-24T03:01:00.000Z';
+    const message = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts }, {
+      jobId: 'new-job', sourceId: identity.sourceId, externalId: 'fresh', sourceUrl: identity.sourceUrl,
+      providerIdentity: identity, title: 'Software Engineering Intern', description, observedAt, origin: 'provider-poll',
+    });
+    const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-test', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T03:00:00.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: 25 };
+    let calls = 0;
+    await processShadowExtractionBatch({ queue: 'intern-notifs-shadow-extraction', messages: [{
+      id: 'fresh', body: message, ack() {}, retry() {},
+    }] }, { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '100', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100',
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) }, () => new Date(observedAt), async () => {
+      calls += 1; return { response: output(), inputTokens: 100, outputTokens: 50, actualCostCents: 2 };
+    });
+    expect(calls).toBe(2);
+    const run = await DB.prepare('SELECT state, response_key, actual_cost_cents FROM shadow_extraction_runs WHERE run_key = ?')
+      .bind(message!.runKey).first<{ state: string; response_key: string; actual_cost_cents: number }>();
+    expect(run?.state).toBe('completed');
+    expect(run?.actual_cost_cents).toBe(4);
+    const object = await artifacts.get(run!.response_key);
+    const saved = JSON.parse(await new Response(object!.body).text()) as { verification: { acceptedFields: string[] } };
+    expect(saved.verification.acceptedFields).toEqual(['compensation', 'locations']);
   });
 
   it('fences a reclaimed lease so stale output cannot replace the newer completion', async () => {

@@ -5,13 +5,18 @@ export type BulkWindow =
   | { ready: true }
   | { ready: false; reason: 'recent-d1-overload' | 'queue-busy' | 'queue-metrics-unavailable'; queues?: string[] };
 
-/** Check immediately before a manual whole-catalog operation. */
+/** Check immediately before a manual operation that could contend with D1. */
 export async function assessBulkSafeWindow(
   db: D1Database,
   workQueues: Record<string, Queue | undefined>,
   now: Date,
+  options: { allowQueuedWork?: boolean } = {},
 ): Promise<BulkWindow> {
   if (await recentD1OverloadCount(db, now) > 0) return { ready: false, reason: 'recent-d1-overload' };
+  // Read-only audits and capped repair batches do not add a catalog-sized D1
+  // write workload. They may run alongside normal queue processing, but never
+  // after a recent D1 overload.
+  if (options.allowQueuedWork) return { ready: true };
   const entries = Object.entries(workQueues);
   const measured = await Promise.allSettled(entries.map(async ([name, queue]) => {
     if (!queue?.metrics) return { name, count: undefined };

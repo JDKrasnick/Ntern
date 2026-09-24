@@ -107,10 +107,10 @@ describe('mobile job routes', () => {
 
 describe('mobile job trust and freshness', () => {
   it('distinguishes official, community, and corroborated sources', () => {
-    expect(sourcePresentation([{ sourceId: 'greenhouse-acme', provenance: 'official-ats' }])).toEqual({ primary: 'Official ATS', corroboration: undefined, labels: ['Official ATS'] });
-    expect(sourcePresentation([{ sourceId: 'employer-acme', provenance: 'employer-submitted' }, { sourceId: 'lever-acme', provenance: 'official-ats' }, { sourceId: 'community-list', provenance: 'reviewed-community' }])).toEqual({ primary: 'Employer submitted', corroboration: 'Also: Official ATS · Reviewed community source', labels: ['Employer submitted', 'Official ATS', 'Reviewed community source'] });
+    expect(sourcePresentation([{ sourceId: 'greenhouse-acme', provenance: 'official-ats' }])).toEqual({ primary: 'Verified employer listing', corroboration: undefined, labels: ['Official ATS'] });
+    expect(sourcePresentation([{ sourceId: 'employer-acme', provenance: 'employer-submitted' }, { sourceId: 'lever-acme', provenance: 'official-ats' }, { sourceId: 'community-list', provenance: 'reviewed-community' }])).toEqual({ primary: 'Employer submitted', corroboration: 'Also: Verified employer listing · Reviewed community source', labels: ['Employer submitted', 'Official ATS', 'Reviewed community source'] });
     expect(sourcePresentation([{ sourceId: 'community-list', provenance: 'reviewed-community' }])).toEqual({ primary: 'Reviewed community source', corroboration: undefined, labels: ['Reviewed community source'] });
-    expect(sourcePresentation([{ sourceId: 'submitted', provenance: 'employer-submitted', state: 'closed' }, { sourceId: 'official', provenance: 'official-structured' }]).primary).toBe('Official structured source');
+    expect(sourcePresentation([{ sourceId: 'submitted', provenance: 'employer-submitted', state: 'closed' }, { sourceId: 'official', provenance: 'official-structured' }]).primary).toBe('Verified employer listing');
     expect(sourcePresentation([])).toEqual({ primary: 'Source unavailable', corroboration: undefined, labels: [] });
   });
 
