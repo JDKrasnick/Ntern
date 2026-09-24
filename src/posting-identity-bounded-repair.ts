@@ -67,7 +67,7 @@ const READ_PAGE = 500;
 const GROUP_JOBS_PER_BATCH = 100;
 const KEY_PAIRS_PER_READ = 40;
 const JOB_IDS_PER_READ = 50;
-const CONTEXT_KINDS = ['job-id-alias', 'checkpoint', 'posting-alias', 'notification-tombstone'] as const;
+const CONTEXT_KINDS = ['job-id-alias', 'checkpoint', 'posting-alias', 'notification-tombstone', 'notification-event'] as const;
 /** One keyset page of the durable occurrence index. Only the owning job ID is
  * projected; the multi-kilobyte occurrence bodies are read per repaired group. */
 const OCCURRENCE_INDEX_PAGE = 500;
@@ -212,7 +212,7 @@ async function readContextRowsForJobs(db: D1Database, jobIds: Iterable<string>):
     const chunk = ids.slice(offset, offset + 25);
     const placeholders = chunk.map(() => '?').join(', ');
     const page = await db.prepare(`SELECT pk, sk, kind, value FROM catalog_items
-      WHERE kind IN ('job-id-alias', 'posting-alias', 'notification-tombstone')
+      WHERE kind IN ('job-id-alias', 'posting-alias', 'notification-tombstone', 'notification-event')
         AND (json_extract(value, '$.jobId') IN (${placeholders})
           OR json_extract(value, '$.oldJobId') IN (${placeholders})
           OR json_extract(value, '$.canonicalJobId') IN (${placeholders}))
