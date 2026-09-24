@@ -1240,7 +1240,10 @@ export function postingIdentityRepairPlan(
     try {
       const event = parse<{ jobId?: string }>(row.value);
       if (!event.jobId) continue;
-      const canonical = identityCanonicalByJobId.get(event.jobId) ?? event.jobId;
+      // Bucket through every known alias, the same mapping the alert count uses:
+      // an alert row left under a retired job ID must consolidate with, and count
+      // under, the canonical posting rather than on its own.
+      const canonical = canonicalByJobId.get(event.jobId) ?? event.jobId;
       eventsByCanonical.set(canonical, [...(eventsByCanonical.get(canonical) ?? []), row]);
     } catch { conflicts.push(`${row.pk}:${row.sk}: malformed notification event JSON`); }
   }

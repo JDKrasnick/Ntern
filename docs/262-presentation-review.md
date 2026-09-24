@@ -25,7 +25,7 @@ runtime-validated `evidence_hash` over its recorded fields; those values are in
 | `smartrecruiters:boschgroup:744000148575999` | reviewed presentation | [page](https://jobs.smartrecruiters.com/BoschGroup/744000148575999) | Bosch Group | Product Management AI-Tool Intern (8 months/40hrs per week) | 38000 Hills Tech Dr, Farmington Hills, MI 48331, USA | `4682308cd770217aa9db0c5aa02ed2b124829929c4c79fd1ae4bb4a928805ebc` |
 | `smartrecruiters:boschgroup:744000148595878` | reviewed presentation | [page](https://jobs.smartrecruiters.com/BoschGroup/744000148595878) | Bosch Group | Data Analytics Intern - Engineering & SAP Operations | 500 Barclay Blvd, Lincolnshire, IL 60069, USA | `b2a81337190ffa4e1ed9e9d65478f1302c18d876e6fe1ecada64de8bcf97abbd` |
 | `smartrecruiters:boschgroup:744000150217869` | reviewed presentation | [page](https://jobs.smartrecruiters.com/BoschGroup/744000150217869) | Bosch Group | AI Engineering Intern (October 2026 - August 2027) | 15000 N Haggerty Rd, Plymouth, MI 48170, USA | `008ce4eebf8464894920807cbab9e229d5e20057214cb1068925d080a8a88f51` |
-| `icims:gsk-us-earlytalent:11013` | reviewed presentation | [page](https://gsk-us-earlytalent.icims.com/jobs/11013/job?mobile=true&needsRedirect=false&utm_source=Simplify&ref=Simplify) | GSK | Winter Co-op/Web App Developer | US-Cambridge MA/Hybrid | `7a643fae1b24798f2f87f6c1895fe52ea661d827335c366eb74f4101e6452552` |
+| `icims:gsk-us-earlytalent:11013` | reviewed presentation | [page](https://gsk-us-earlytalent.icims.com/jobs/11013/winter-co-op-web-app-developer/job?mobile=true&needsRedirect=false) | GSK | Winter Co-op/Web App Developer | US-Cambridge MA/Hybrid | `7a643fae1b24798f2f87f6c1895fe52ea661d827335c366eb74f4101e6452552` |
 | `smartrecruiters:gdmsi:744000147561809` | reviewed presentation | [page](https://jobs.smartrecruiters.com/GDMSI/744000147561809) | General Dynamics Mission Systems | Co-op Winter 2027 - Software Engineering - 8 Months | 1941 Robertson Road, Ottawa, Ontario, Canada | `5d8fe63c10c3cd56141295cf97b6c06f52bb2ef4bd3ee442ed61bc2f86ff72c3` |
 | `smartrecruiters:gdmsi:744000147556214` | reviewed presentation | [page](https://jobs.smartrecruiters.com/GDMSI/744000147556214) | General Dynamics Mission Systems | Co-op Winter 2027 - Software Engineering Developer - 16-Months | 1120 68 St SE #110, Calgary, AB T2A 7B2, Canada | `1ad4b16b9a33774909826f60cbd41916b472a9706859c29dcf9e6731adad961b` |
 | `smartrecruiters:gdmsi:744000147554134` | reviewed presentation | [page](https://jobs.smartrecruiters.com/GDMSI/744000147554134) | General Dynamics Mission Systems | Co-op Winter 2027 - Software Developer - 8 Months | 1941 Robertson Road, Ottawa, Ontario, Canada | `02bfb3dc40a84d4b7e66c157e2cad4ecd21aad5de20052d6c8597605485ec993` |
@@ -75,10 +75,14 @@ and Amazon rows. Two conclusions from it were corrected here and are worth
 recording:
 
 - `icims:gsk-us-earlytalent:11013` was first reported as insufficient evidence
-  because the slug-form URL (`/jobs/11013/winter-co-op-web-app-developer/job`)
-  serves only the programme shell. The URL the community lists carry
-  (`/jobs/11013/job?mobile=true&needsRedirect=false`) serves the full posting,
-  so the identity is reviewable and is now recorded.
+  because the slug-form URL without query parameters
+  (`/jobs/11013/winter-co-op-web-app-developer/job`) serves only the programme
+  shell. Both URLs that carry `?mobile=true&needsRedirect=false` — the one the
+  community lists use and the one recorded in the ledger — serve the full
+  posting, byte-identical (54 607 bytes, "Winter Co-op/Web App Developer",
+  hiring organization "GSK Internships & Co-ops powered by Atrium"), so the
+  identity is reviewable and is now recorded. The ledger records the page's own
+  canonical (`og:url`) form.
 - The five General Dynamics identities were recorded as "republished under a
   different posting id, no decision". They are now re-anchored and reviewed.
 
