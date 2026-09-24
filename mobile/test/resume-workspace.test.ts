@@ -19,8 +19,8 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('Add a role, research entry, project, or education parent before adding its bullets.');
     expect(app).toContain('"role", "research", "project", "education", "skill", "bullet"');
     expect(app).toContain('api<{ templates: ResumeTemplateCard[] }>("/resume-templates", token)');
-    expect(app).toContain('selectedProfile.template !== selectedTemplate');
-    expect(app).toContain('revision: selectedProfile.revision, template: selectedTemplate');
+    expect(app).toContain('sourceProfile.template !== selectedTemplate');
+    expect(app).toContain('revision: sourceProfile.revision, template: selectedTemplate');
   });
 
   it('offers an adaptive review workspace with evidence and explicit decisions', () => {
@@ -54,10 +54,22 @@ describe('resume workspace navigation contract', () => {
   it('offers saved resume variants as a quick horizontal picker', () => {
     expect(app).toContain('const savedResumeProfiles = profiles.filter((profile) => profile.name !== "Technical base");');
     expect(app).toContain('<Text style={styles.sectionTitle}>Saved résumés</Text>');
+    expect(app).toContain('bankLoading ? <ResumeSavedProfilesGhost />');
+    expect(app).toContain('const motionAllowed = useContext(MotionAllowedContext);');
+    expect(app).toContain('useNativeDriver: true');
     expect(app).toContain('savedResumeProfiles.map((profile) =>');
     expect(app).toContain('aria-pressed={selected}');
-    expect(app).toContain('onPress={() => setSelectedProfileId(profile.profileId)}');
+    expect(app).toContain('setSelectedProfileId(profile.profileId); setResumeSourceMode("existing");');
     expect(app.indexOf('<Text style={styles.sectionTitle}>Saved résumés</Text>')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
+  });
+
+  it('offers the best saved resume and an ideal master-bank build', () => {
+    expect(app).toContain('type ResumeSourceMode = "existing" | "ideal";');
+    expect(app).toContain('bestSavedResumeRecommendation(result.recommendations, savedProfiles)');
+    expect(app).toContain('<Text style={styles.resumeSourceChoiceBadge}>Best existing</Text>');
+    expect(app).toContain('<Text style={styles.resumeSourceChoiceBadge}>Ideal from your bank</Text>');
+    expect(app).toContain('resumeSourceMode === "ideal" ? await syncTechnicalBase()');
+    expect(app).toContain('profileId: sourceProfile.profileId');
   });
 
   it('keeps server-owned plans collapsed and disables new tailoring at the monthly limit', () => {

@@ -5622,6 +5622,7 @@ function AccountGate({
 
 type ResumeBankParentKind = "role" | "research" | "project" | "education";
 type ResumeTemplateId = "jake-technical" | "clean-standard" | "research-academic" | "project-compact";
+type ResumeSourceMode = "existing" | "ideal";
 type ResumeBankDetails =
   | { organization: string; title?: string; advisor?: string; location?: string; dateRange?: string }
   | { name: string; tagline?: string; technologies: string[]; url?: string }
@@ -5631,6 +5632,7 @@ type ResumeBankCard = { bankItemId: string; kind: "role" | "research" | "project
 type ResumeBankRef = { kind: "role" | "research" | "project" | "skill" | "education"; bankItemId: string } | { kind: "bullet"; bankItemId: string; parent: { kind: ResumeBankParentKind; bankItemId: string } };
 type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; template: ResumeTemplateId; revision: number };
 type ResumeTemplateCard = { template: ResumeTemplateId; displayName: string; description: string; bestFor: string };
+type ResumeProfileRecommendationCard = { profileId: string; score: number; explanation: string };
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
 type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; target: ResumeBankRef; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
 type ResumeArtifactCard = { artifactId: string; pageCount?: number };
@@ -5640,6 +5642,40 @@ type ResumeSubscriptionCard = {
   usage: { period: string; used: number; limit: number; remaining: number };
   plans: Array<{ tier: "free" | "plus" | "pro"; name: string; priceUsdMonthly: number; tailoredDraftsPerMonth: number }>;
 };
+
+function bestSavedResumeRecommendation(recommendations: ResumeProfileRecommendationCard[], profiles: ResumeProfileCard[]) {
+  const savedIds = new Set(profiles.filter((profile) => profile.name !== "Technical base").map((profile) => profile.profileId));
+  return recommendations.find((recommendation) => savedIds.has(recommendation.profileId));
+}
+
+function ResumeSavedProfilesGhost() {
+  const motionAllowed = useContext(MotionAllowedContext);
+  const opacity = useRef(new Animated.Value(0.48)).current;
+  useEffect(() => {
+    if (!motionAllowed) {
+      opacity.setValue(0.68);
+      return;
+    }
+    const animation = Animated.loop(Animated.sequence([
+      Animated.timing(opacity, { toValue: 0.82, duration: 650, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 0.48, duration: 650, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    animation.start();
+    return () => animation.stop();
+  }, [motionAllowed, opacity]);
+  return (
+    <View accessibilityLabel="Loading saved résumés" style={styles.resumeGhostRow}>
+      {[0, 1, 2].map((index) => (
+        <Animated.View key={index} style={[styles.resumeGhostCard, { opacity }]}>
+          <View style={styles.resumeGhostIcon} />
+          <View style={styles.resumeGhostTitle} />
+          <View style={styles.resumeGhostTag} />
+          <View style={styles.resumeGhostMeta} />
+        </Animated.View>
+      ))}
+    </View>
+  );
+}
 
 function ResumeWorkspace({ token }: { token: string }) {
   const { width } = useWindowDimensions();
@@ -5663,6 +5699,8 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [resumeTemplates, setResumeTemplates] = useState<ResumeTemplateCard[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<ResumeTemplateId>("jake-technical");
   const [selectedProfileId, setSelectedProfileId] = useState<string>();
+  const [bestExistingRecommendation, setBestExistingRecommendation] = useState<ResumeProfileRecommendationCard>();
+  const [resumeSourceMode, setResumeSourceMode] = useState<ResumeSourceMode>("existing");
   const [jobImport, setJobImport] = useState<ResumeImportCard>();
   const [manualDescription, setManualDescription] = useState("");
   const [draft, setDraft] = useState<ResumeDraftCard>();
@@ -5707,6 +5745,7 @@ function ResumeWorkspace({ token }: { token: string }) {
   const technicalBase = profiles.find((profile) => profile.name === "Technical base");
   const savedResumeProfiles = profiles.filter((profile) => profile.name !== "Technical base");
   const selectedProfile = profiles.find((profile) => profile.profileId === selectedProfileId);
+  const recommendedProfile = profiles.find((profile) => profile.profileId === bestExistingRecommendation?.profileId);
   const bankRoots = bankItems.filter((item) => item.kind !== "bullet");
   const visibleBankItems = bankExpanded ? bankRoots : bankRoots.slice(0, 4);
   const bankParents = bankItems.filter((item): item is ResumeBankCard & { kind: ResumeBankParentKind } => item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education");
@@ -5725,7 +5764,17 @@ function ResumeWorkspace({ token }: { token: string }) {
         ]);
         setProfiles(savedProfiles);
         setSelectedProfileId((selected) => selected ?? savedProfiles.find((profile) => profile.name !== "Technical base")?.profileId ?? savedProfiles[0]?.profileId);
-        setJobImport(imports.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]);
+        const latestImport = imports.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+        setJobImport(latestImport);
+        if (latestImport?.status === "ready") {
+          const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${latestImport.importId}/recommendation`, token, { method: "POST" });
+          const best = bestSavedResumeRecommendation(result.recommendations, savedProfiles);
+          if (best) {
+            setBestExistingRecommendation(best);
+            setSelectedProfileId(best.profileId);
+            setResumeSourceMode("existing");
+          }
+        }
         setSubscription(currentSubscription);
         setResumeTemplates(templates);
         setSelectedTemplate(savedProfiles[0]?.template ?? "jake-technical");
@@ -5746,13 +5795,18 @@ function ResumeWorkspace({ token }: { token: string }) {
         if (cancelled) return;
         setJobImport(value);
         if (value.status === "ready") {
-          const result = await api<{ recommendations: Array<{ profileId: string }> }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
-          if (!cancelled && result.recommendations[0]) setSelectedProfileId(result.recommendations[0].profileId);
+          const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
+          const best = bestSavedResumeRecommendation(result.recommendations, profiles);
+          if (!cancelled && best) {
+            setBestExistingRecommendation(best);
+            setSelectedProfileId(best.profileId);
+            setResumeSourceMode("existing");
+          }
         }
       })
       .catch((error) => { if (!cancelled) setBankError(error instanceof Error ? error.message : "We couldn't refresh that job import."); });
     return () => { cancelled = true; };
-  }, [jobImport?.importId, jobImport?.status, token]);
+  }, [jobImport?.importId, jobImport?.status, profiles, token]);
   useEffect(() => () => releaseResumeArtifactPreview(artifactPreview), [artifactPreview]);
   const addBankItem = () => {
     const content = bankDraft.trim();
@@ -5799,23 +5853,24 @@ function ResumeWorkspace({ token }: { token: string }) {
       setBankError(error instanceof Error ? error.message : "We couldn't import that résumé.");
     } finally { setBankSaving(false); }
   };
+  const syncTechnicalBase = async () => {
+    // Earlier preview builds required a separate approval for every imported
+    // line. Syncing the repository upgrades those private source records to
+    // the current model, where only job-specific diffs need review.
+    const trustedItems = await Promise.all(bankItems.map((item) => item.verified ? item : api<ResumeBankCard>(`/me/resume-bank/${item.bankItemId}`, token, {
+      method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true }),
+    })));
+    setBankItems(trustedItems);
+    const profile = technicalBase
+      ? await api<ResumeProfileCard>(`/me/resume-profiles/${technicalBase.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: technicalBase.revision, bankItemIds: trustedItems.map((item) => item.bankItemId), template: selectedTemplate }) })
+      : await api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: trustedItems.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
+    setProfiles((all) => technicalBase ? all.map((item) => item.profileId === profile.profileId ? profile : item) : [...all, profile]);
+    return profile;
+  };
   const saveBase = () => {
     if (resumeBusy || !bankItems.length) return;
     setResumeBusy(true);
-    const request = async () => {
-      // Earlier preview builds required a separate approval for every imported
-      // line. Syncing the repository upgrades those private source records to
-      // the current model, where only job-specific diffs need review.
-      const trustedItems = await Promise.all(bankItems.map((item) => item.verified ? item : api<ResumeBankCard>(`/me/resume-bank/${item.bankItemId}`, token, {
-        method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true }),
-      })));
-      setBankItems(trustedItems);
-      return technicalBase
-        ? api<ResumeProfileCard>(`/me/resume-profiles/${technicalBase.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: technicalBase.revision, bankItemIds: trustedItems.map((item) => item.bankItemId), template: selectedTemplate }) })
-        : api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: trustedItems.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
-    };
-    void request()
-      .then((profile) => { setProfiles((all) => technicalBase ? all.map((item) => item.profileId === profile.profileId ? profile : item) : [...all, profile]); setSelectedProfileId(profile.profileId); })
+    void syncTechnicalBase()
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that base."))
       .finally(() => setResumeBusy(false));
   };
@@ -5823,7 +5878,14 @@ function ResumeWorkspace({ token }: { token: string }) {
     if (!jobUrl.trim() || resumeBusy) return;
     setResumeBusy(true); setBankError(undefined);
     void api<ResumeImportCard>("/me/resume-jobs/resolve", token, { method: "POST", body: JSON.stringify({ url: jobUrl }) })
-      .then((value) => { setJobImport(value); setDraft(undefined); setActiveChange(0); })
+      .then(async (value) => {
+        setJobImport(value); setDraft(undefined); setActiveChange(0); setBestExistingRecommendation(undefined);
+        if (value.status === "ready") {
+          const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
+          const best = bestSavedResumeRecommendation(result.recommendations, profiles);
+          if (best) { setBestExistingRecommendation(best); setSelectedProfileId(best.profileId); setResumeSourceMode("existing"); }
+        }
+      })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't import that job."))
       .finally(() => setResumeBusy(false));
   };
@@ -5833,23 +5895,25 @@ function ResumeWorkspace({ token }: { token: string }) {
     void api<ResumeImportCard>(`/me/resume-jobs/${jobImport.importId}/manual-description`, token, { method: "POST", body: JSON.stringify({ revision: jobImport.revision, description: manualDescription }) })
       .then(async (value) => {
         setJobImport(value);
-        const result = await api<{ recommendations: Array<{ profileId: string }> }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
-        if (result.recommendations[0]) setSelectedProfileId(result.recommendations[0].profileId);
+        const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
+        const best = bestSavedResumeRecommendation(result.recommendations, profiles);
+        if (best) { setBestExistingRecommendation(best); setSelectedProfileId(best.profileId); setResumeSourceMode("existing"); }
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that description."))
       .finally(() => setResumeBusy(false));
   };
   const createDraft = () => {
-    if (!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy) return;
+    if (!jobImport || jobImport.status !== "ready" || resumeBusy || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length)) return;
     setResumeBusy(true);
     const request = async () => {
-      const selectedProfile = profiles.find((profile) => profile.profileId === selectedProfileId);
-      if (!selectedProfile) throw new Error("Select a saved resume base before creating a review.");
-      if (selectedProfile.template !== selectedTemplate) {
-        const updated = await api<ResumeProfileCard>(`/me/resume-profiles/${selectedProfile.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: selectedProfile.revision, template: selectedTemplate }) });
+      const sourceProfile = resumeSourceMode === "ideal" ? await syncTechnicalBase() : profiles.find((profile) => profile.profileId === selectedProfileId);
+      if (!sourceProfile) throw new Error("Select a saved resume base before creating a review.");
+      if (sourceProfile.template !== selectedTemplate) {
+        const updated = await api<ResumeProfileCard>(`/me/resume-profiles/${sourceProfile.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: sourceProfile.revision, template: selectedTemplate }) });
         setProfiles((all) => all.map((profile) => profile.profileId === updated.profileId ? updated : profile));
+        return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: updated.profileId }) });
       }
-      return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: selectedProfileId }) });
+      return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: sourceProfile.profileId }) });
     };
     void request()
       .then((value) => {
@@ -5943,12 +6007,12 @@ function ResumeWorkspace({ token }: { token: string }) {
           </View>
           {selectedProfile && selectedProfile.name !== "Technical base" ? <Text style={styles.resumeSavedSelection}>Using {selectedProfile.name}</Text> : null}
         </View>
-        {bankLoading ? <Text style={styles.resumeSavedEmpty}>Loading your saved résumés…</Text> : savedResumeProfiles.length ? (
+        {bankLoading ? <ResumeSavedProfilesGhost /> : savedResumeProfiles.length ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeSavedScroller}>
             {savedResumeProfiles.map((profile) => {
               const selected = selectedProfileId === profile.profileId;
               return (
-                <TouchableOpacity key={profile.profileId} accessibilityRole="button" accessibilityLabel={`Use ${profile.name} resume`} aria-pressed={selected} onPress={() => setSelectedProfileId(profile.profileId)} style={[styles.resumeSavedCard, selected && styles.resumeSavedCardSelected]}>
+                <TouchableOpacity key={profile.profileId} accessibilityRole="button" accessibilityLabel={`Use ${profile.name} resume`} aria-pressed={selected} onPress={() => { setSelectedProfileId(profile.profileId); setResumeSourceMode("existing"); }} style={[styles.resumeSavedCard, selected && styles.resumeSavedCardSelected]}>
                   <View style={styles.resumeSavedCardTop}>
                     <View style={[styles.resumeSavedIcon, selected && styles.resumeSavedIconSelected]}>
                       <Ionicons name="document-text-outline" size={18} color={selected ? colors.onDark : colors.signal} />
@@ -6055,9 +6119,27 @@ function ResumeWorkspace({ token }: { token: string }) {
       {jobImport?.status === "ready" ? <View style={styles.resumeSection}>
         <View style={styles.resumeSectionHeading}>
           <View>
-            <Text style={styles.sectionTitle}>Choose a template</Text>
-            <Text style={styles.resumeSectionDescription}>{selectedProfile ? `Starting from ${selectedProfile.name}. Pick the layout you want to review.` : "Select a saved résumé above, then pick the layout you want to review."}</Text>
+            <Text style={styles.sectionTitle}>Choose how Ntern starts</Text>
+            <Text style={styles.resumeSectionDescription}>Reuse the closest saved résumé, or build the ideal version from your complete technical base.</Text>
           </View>
+        </View>
+        <View style={[styles.resumeSourceChoiceGrid, desktop && styles.resumeSourceChoiceGridWide]}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Use the best existing resume" aria-pressed={resumeSourceMode === "existing"} disabled={!recommendedProfile} onPress={() => { if (recommendedProfile) setSelectedProfileId(recommendedProfile.profileId); setResumeSourceMode("existing"); }} style={[styles.resumeSourceChoice, resumeSourceMode === "existing" && styles.resumeSourceChoiceSelected, !recommendedProfile && styles.resumeSourceChoiceDisabled]}>
+            <View style={styles.resumeSourceChoiceHeader}>
+              <View style={styles.resumeSourceChoiceIcon}><Ionicons name="copy-outline" size={19} color={colors.signal} /></View>
+              <Text style={styles.resumeSourceChoiceBadge}>Best existing</Text>
+            </View>
+            <Text style={styles.resumeSourceChoiceTitle}>{recommendedProfile?.name ?? "No saved match available"}</Text>
+            <Text style={styles.resumeSourceChoiceCopy}>{bestExistingRecommendation?.explanation ?? "Save a résumé variant to make this option available."}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Build the ideal resume from the technical base" aria-pressed={resumeSourceMode === "ideal"} disabled={!bankItems.length} onPress={() => setResumeSourceMode("ideal")} style={[styles.resumeSourceChoice, resumeSourceMode === "ideal" && styles.resumeSourceChoiceSelected, !bankItems.length && styles.resumeSourceChoiceDisabled]}>
+            <View style={styles.resumeSourceChoiceHeader}>
+              <View style={styles.resumeSourceChoiceIcon}><Ionicons name="sparkles-outline" size={19} color={colors.signal} /></View>
+              <Text style={styles.resumeSourceChoiceBadge}>Ideal from your bank</Text>
+            </View>
+            <Text style={styles.resumeSourceChoiceTitle}>Build the strongest one-page résumé</Text>
+            <Text style={styles.resumeSourceChoiceCopy}>Start from all {bankItems.length} source item{bankItems.length === 1 ? "" : "s"}; Ntern proposes the job-relevant cuts and rewrites for your approval.</Text>
+          </TouchableOpacity>
         </View>
         <Text style={[styles.inputLabel, styles.resumeTemplateLabel]}>Output template</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeTemplatePicker}>
@@ -6068,7 +6150,7 @@ function ResumeWorkspace({ token }: { token: string }) {
             </TouchableOpacity>
           ))}
         </ScrollView>
-        <View style={styles.resumeBankComposerAction}><ActionButton label={subscription?.usage.remaining === 0 ? "Monthly limit reached" : "Create grounded review"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || !selectedProfileId || resumeBusy || subscription?.usage.remaining === 0} /></View>
+        <View style={styles.resumeBankComposerAction}><ActionButton label={subscription?.usage.remaining === 0 ? "Monthly limit reached" : resumeSourceMode === "ideal" ? "Build ideal review" : "Review best match"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length) || resumeBusy || subscription?.usage.remaining === 0} /></View>
       </View> : null}
 
       {draft ? <View style={styles.resumeSection}>
@@ -8669,6 +8751,12 @@ const styles = StyleSheet.create({
   resumeSavedHeaderCopy: { flexGrow: 1, flexShrink: 1, minWidth: 240 },
   resumeSavedSelection: { color: colors.signal, fontSize: 13, fontWeight: "800", lineHeight: 18 },
   resumeSavedScroller: { gap: 10, paddingBottom: 4, paddingTop: 14 },
+  resumeGhostRow: { flexDirection: "row", gap: 10, marginTop: 14, overflow: "hidden" },
+  resumeGhostCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, minHeight: 144, padding: 14, width: 224 },
+  resumeGhostIcon: { backgroundColor: colors.separator, borderRadius: 10, height: 36, width: 36 },
+  resumeGhostTitle: { backgroundColor: colors.separator, borderRadius: 4, height: 17, marginTop: 13, width: "62%" },
+  resumeGhostTag: { backgroundColor: colors.separator, borderRadius: 4, height: 12, marginTop: 8, width: "42%" },
+  resumeGhostMeta: { backgroundColor: colors.separator, borderRadius: 4, height: 11, marginTop: 15, width: "52%" },
   resumeSavedCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, minHeight: 144, padding: 14, width: 224 },
   resumeSavedCardSelected: { borderColor: colors.signal, borderWidth: 2, padding: 13 },
   resumeSavedCardTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
@@ -8679,6 +8767,16 @@ const styles = StyleSheet.create({
   resumeSavedMeta: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 10 },
   resumeSavedEmptyState: { alignItems: "center", flexDirection: "row", gap: 9, minHeight: 64, paddingVertical: 12 },
   resumeSavedEmpty: { color: colors.muted, fontSize: 13, lineHeight: 19 },
+  resumeSourceChoiceGrid: { gap: 10, marginTop: 16 },
+  resumeSourceChoiceGridWide: { flexDirection: "row" },
+  resumeSourceChoice: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, flex: 1, minHeight: 180, padding: 16 },
+  resumeSourceChoiceSelected: { borderColor: colors.signal, borderWidth: 2, padding: 15 },
+  resumeSourceChoiceDisabled: { opacity: 0.52 },
+  resumeSourceChoiceHeader: { alignItems: "center", flexDirection: "row", gap: 9 },
+  resumeSourceChoiceIcon: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 10, height: 36, justifyContent: "center", width: 36 },
+  resumeSourceChoiceBadge: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.4, textTransform: "uppercase" },
+  resumeSourceChoiceTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", lineHeight: 23, marginTop: 14 },
+  resumeSourceChoiceCopy: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 5 },
   resumeBankWorkspace: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 28, paddingTop: 24 },
   resumeOverview: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 16, flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginBottom: 12, overflow: "hidden", paddingHorizontal: 18, paddingVertical: 14 },
   resumeOverviewCopy: { flexGrow: 1, flexShrink: 1, maxWidth: 570, minWidth: 220 },
