@@ -41,6 +41,25 @@ export default tseslint.config(
     },
   },
   {
+    files: ['scripts/**/*.mjs', 'test/e2e/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        AbortSignal: 'readonly',
+        Buffer: 'readonly',
+        Response: 'readonly',
+        TextDecoder: 'readonly',
+        TextEncoder: 'readonly',
+        URL: 'readonly',
+        WebAssembly: 'readonly',
+        console: 'readonly',
+        crypto: 'readonly',
+        fetch: 'readonly',
+        process: 'readonly',
+        setTimeout: 'readonly',
+      },
+    },
+  },
+  {
     files: ['cloudflare/**/*.ts'],
     languageOptions: {
       globals: {

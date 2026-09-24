@@ -4,6 +4,7 @@
   "main": "cloudflare/ingestion-worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }],
   "durable_objects": { "bindings": [{ "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController" }] },
   "migrations": [{ "tag": "v1-d1-traffic-controller", "new_sqlite_classes": ["D1TrafficController"] }],
   "workers_dev": false,

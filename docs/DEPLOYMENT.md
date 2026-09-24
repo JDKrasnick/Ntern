@@ -295,6 +295,8 @@ npm run cloudflare:migrate:remote
 npm run build:cloudflare
 ```
 
+The ingestion bundle now ships the SVG rasterizer as a second module part, `resvg.wasm` (`application/wasm`), and the API Worker's bundle ships none. `npm run build:cloudflare` runs `scripts/prepare-worker-modules.mjs` after each `wrangler deploy --dry-run`, which renames Wrangler's content-hashed wasm file to `resvg.wasm` and rewrites the import specifier, so the part key matches what the bundle imports and no content hash reaches `infra/cloudflare/main.tf`. OpenTofu uploads it through the `files` map on the ingestion Worker only, and `scripts/cloudflare-plan-guard.ts` permits exactly that shape: `application/wasm` parts whose paths end in `.wasm`, with a wasm-only change counted as a code change. A plan that adds any other part, or that changes a protected binding, still fails the guard. The API Worker needs no part because only the ingestion entry carries the renderer.
+
 Provision the provider credentials interactively; never put their values in Git, Terraform variables, shell arguments, Wrangler `vars`, mobile configuration, or `EXPO_PUBLIC_*` values. The ingestion Worker is the only one that resolves icons:
 
 ```bash

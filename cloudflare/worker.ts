@@ -44,6 +44,7 @@ import { handleEmployerIconOperations } from './employer-icon-api.js';
 import { enqueueEmployerIconResolution, runEmployerIconResolutionPass, verifyIconDomain } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
 import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
+import type { IconSvgRasterizer } from '../src/svg-icon.js';
 import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
 import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
@@ -217,6 +218,21 @@ export async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise
   if (!response.ok) throw new Error('DNS verification is temporarily unavailable');
   const value = await response.json() as { Answer?: Array<{ data?: string }> };
   return value.Answer ?? [];
+}
+
+/**
+ * The SVG rasterizer, provided by the entry point that can carry it.
+ *
+ * Only the ingestion Worker runs the icon sweep, and only its bundle references the
+ * 2.5 MB resvg module, so the ingestion entry registers the renderer here at startup
+ * instead of every bundle importing it. An unregistered renderer is not a failure: a
+ * board that publishes only SVG is then reported as `svg-not-servable` and the sweep
+ * carries on, which is what the API Worker and the unit tests do.
+ */
+let iconSvgRasterizer: IconSvgRasterizer | undefined;
+
+export function provideIconSvgRasterizer(rasterizer: IconSvgRasterizer): void {
+  iconSvgRasterizer = rasterizer;
 }
 
 export const publicHostResolver = {
@@ -1800,7 +1816,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // Icon resolution is pure background work that never gates publication, so it
     // yields to the projection on the same terms as metadata collection.
     const companyIconResolution = recentOverloads === 0
-      ? await runScheduledStep('company_icon_resolution', () => runEmployerIconResolutionPass(env, observedAt, { resolver: publicHostResolver }))
+      ? await runScheduledStep('company_icon_resolution', () => runEmployerIconResolutionPass(env, observedAt, {
+        resolver: publicHostResolver,
+        ...(iconSvgRasterizer ? { rasterizeSvg: iconSvgRasterizer } : {}),
+      }))
       : undefined;
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'company_icon_resolution_deferred', recentOverloads: recentOverloads ?? null }));
     const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);

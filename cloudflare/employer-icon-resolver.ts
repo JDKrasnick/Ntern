@@ -32,6 +32,7 @@ import {
   type IconPageEvidence,
 } from '../src/employer-icon-discovery.js';
 
+import { safeIconSvg, type IconSvgRasterizer } from '../src/svg-icon.js';
 import { safeFetchBytes, safeFetchText, type HostResolver } from '../src/employer/safe-network.js';
 import { inferOpenAIJson, shadowDefaultModelId, type OpenAIJsonRequest, type OpenAIJsonResult } from './openai-shadow-inference.js';
 import {
@@ -89,6 +90,12 @@ export interface EmployerIconResolverDependencies {
   fetchImpl?: typeof fetch;
   /** Overridden in tests so no network call is made. */
   infer?: (request: OpenAIJsonRequest) => Promise<OpenAIJsonResult>;
+  /**
+   * Rasterizes a board logo published only as SVG. The ingestion Worker passes the
+   * resvg renderer; a caller without one simply refuses those boards, which is why
+   * the diagnostic and the API Worker can share this code unchanged.
+   */
+  rasterizeSvg?: IconSvgRasterizer;
 }
 
 interface PersistedCandidate {
@@ -1051,7 +1058,7 @@ async function storePlatformLogo(input: {
         timeoutMs: ICON_PROVIDER_TIMEOUT_MS, maxRedirects: 1, maxBodyBytes: MAX_ICON_ASSET_BYTES,
       });
       const asset = result.status >= 200 && result.status < 300
-        ? platformAsset(result.headers.get('content-type'), result.body, banner)
+        ? await platformAsset(result.headers.get('content-type'), result.body, banner, deps)
         : { usable: false as const, reason: 'status' };
       if (!asset.usable) {
         console.log(JSON.stringify({
@@ -1065,7 +1072,7 @@ async function storePlatformLogo(input: {
       await store.markPlatformIcon({ canonicalEmployerId: context.id, iconKey: key, now: now.toISOString() });
       console.log(JSON.stringify({
         event: 'company_icon_platform_logo_stored', canonicalEmployerId: context.id, key,
-        kind: banner ? 'banner' : 'logo', format: asset.contentType,
+        kind: banner ? 'banner' : 'logo', format: asset.contentType, rasterized: asset.rasterized,
       }));
       return key;
     } catch (error) {
@@ -1079,20 +1086,36 @@ async function storePlatformLogo(input: {
 }
 
 type PlatformAsset =
-  | { usable: true; bytes: Uint8Array; contentType: string }
+  | { usable: true; bytes: Uint8Array; contentType: string; rasterized: boolean }
   | { usable: false; reason: string };
 
 /**
  * The storable image an asset carries, if any. A raster is taken as it stands,
  * unless it is a banner whose shape is not square enough to be an icon. An SVG is
- * refused: it cannot be served from the API origin, and nothing here renders it, so
- * the candidate is reported as its own class rather than mistaken for absent art.
+ * rasterized, so what reaches the bucket is never the publisher's document — and a
+ * banner is shape-checked after rasterization too, because the banner rule is about
+ * the picture, not about the container it arrived in.
  */
-function platformAsset(contentType: string | null | undefined, bytes: Uint8Array, banner: boolean): PlatformAsset {
+async function platformAsset(
+  contentType: string | null | undefined,
+  bytes: Uint8Array,
+  banner: boolean,
+  deps: EmployerIconResolverDependencies,
+): Promise<PlatformAsset> {
   const raster = iconAssetType(contentType, bytes);
-  if (!raster) return { usable: false, reason: iconSvgAsset(contentType, bytes) ? 'svg-not-servable' : 'not-a-raster' };
-  if (banner && !bannerAssetShapeUsable(bytes)) return { usable: false, reason: 'banner-not-square' };
-  return { usable: true, bytes, contentType: raster };
+  if (raster) {
+    if (banner && !bannerAssetShapeUsable(bytes)) return { usable: false, reason: 'banner-not-square' };
+    return { usable: true, bytes, contentType: raster, rasterized: false };
+  }
+  const svg = iconSvgAsset(contentType, bytes);
+  if (!svg) return { usable: false, reason: 'not-a-raster' };
+  if (!deps.rasterizeSvg) return { usable: false, reason: 'svg-not-servable' };
+  const safe = safeIconSvg(svg);
+  if (!safe) return { usable: false, reason: 'svg-unsafe' };
+  const png = await deps.rasterizeSvg(safe);
+  if (!png || png.byteLength === 0 || png.byteLength > MAX_ICON_ASSET_BYTES) return { usable: false, reason: 'svg-raster-failed' };
+  if (banner && !bannerAssetShapeUsable(png)) return { usable: false, reason: 'banner-not-square' };
+  return { usable: true, bytes: png, contentType: 'image/png', rasterized: true };
 }
 
 /** Stores the provider's WebP output under an immutable, content-addressed key. */

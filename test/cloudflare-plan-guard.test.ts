@@ -53,6 +53,33 @@ describe('Cloudflare deployment plan guard', () => {
     ]))).toHaveLength(2);
   });
 
+  it('accepts a wasm module part and refuses anything else in it', () => {
+    const part = { content_type: 'application/wasm', content_file: 'cloudflare/dist/ingestion/resvg.wasm', content_sha256: 'old' };
+    const updated = {
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, files: { 'resvg.wasm': part } },
+      after: { ...worker, files: { 'resvg.wasm': { ...part, content_sha256: 'new' } } },
+    };
+    expect(validateCloudflarePlan(plan([updated]))).toHaveLength(1);
+    // A wasm-only change carries no new JavaScript, so the part is the release.
+    expect(validateCloudflarePlan(plan([{
+      ...updated,
+      before: { ...updated.before },
+      after: { ...worker, files: { 'resvg.wasm': { ...part, content_sha256: 'new' } } },
+    }]))).toHaveLength(1);
+    // Any other part, or a part that is not an application/wasm file, is refused.
+    for (const files of [
+      { 'payload.js': { content_type: 'text/javascript', content_file: 'cloudflare/dist/ingestion/payload.js' } },
+      { 'resvg.wasm': { content_type: 'text/plain', content_file: 'cloudflare/dist/ingestion/resvg.wasm' } },
+      { 'resvg.wasm': { content_type: 'application/wasm', content_file: 'cloudflare/dist/ingestion/resvg.js' } },
+      { 'resvg.wasm': 'cloudflare/dist/ingestion/resvg.wasm' },
+    ]) {
+      expect(() => validateCloudflarePlan(plan([{ ...updated, after: { ...updated.after, files } }])))
+        .toThrow('Refusing unsafe Cloudflare plan');
+    }
+  });
+
   it('accepts a computed namespace ID for an unchanged Durable Object binding', () => {
     const namespace = {
       name: 'RESUME_PDF_COMPILER',

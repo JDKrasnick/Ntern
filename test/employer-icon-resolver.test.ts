@@ -8,7 +8,8 @@ import { D1EmployerIconStore } from '../cloudflare/employer-icon-store.js';
 import {
   diagnoseEmployerIcon, enqueueEmployerIconResolution, runEmployerIconResolutionPass,
 } from '../cloudflare/employer-icon-resolver.js';
-import { brandfetchSearchUrl, logoDevImageUrl, logoDevSearchUrl } from '../src/employer-icon-discovery.js';
+import { brandfetchSearchUrl, logoDevImageUrl, logoDevSearchUrl, rasterDimensions } from '../src/employer-icon-discovery.js';
+import { createIconSvgRasterizer } from '../cloudflare/svg-raster.js';
 import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
 import type { HostResolver } from '../src/employer/safe-network.js';
 import type { OpenAIJsonRequest, OpenAIJsonResult } from '../cloudflare/openai-shadow-inference.js';
@@ -103,12 +104,13 @@ const employerRow = (id: string, displayName: string, iconKey?: string): Canonic
 });
 
 function r2Stub() {
-  const puts: Array<{ key: string; contentType?: string; byteLength: number }> = [];
+  const puts: Array<{ key: string; contentType?: string; byteLength: number; bytes?: Uint8Array }> = [];
   const objects = new Map<string, { body: ReadableStream; size: number; httpMetadata: { contentType: string } }>();
   const bucket = {
     async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string } }) {
       const byteLength = value instanceof ArrayBuffer ? value.byteLength : value instanceof Uint8Array ? value.byteLength : 0;
-      puts.push({ key, byteLength, ...(options?.httpMetadata?.contentType ? { contentType: options.httpMetadata.contentType } : {}) });
+      const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : value instanceof Uint8Array ? value : undefined;
+      puts.push({ key, byteLength, ...(bytes ? { bytes } : {}), ...(options?.httpMetadata?.contentType ? { contentType: options.httpMetadata.contentType } : {}) });
       objects.set(key, { body: new Blob([new Uint8Array(byteLength)]).stream(), size: byteLength, httpMetadata: { contentType: options?.httpMetadata?.contentType ?? '' } });
     },
     async get(key: string) { return objects.get(key) ?? null; },
@@ -124,6 +126,14 @@ const environment = (
 ) => ({ DB: db, DOCUMENTS: documents, ...secrets });
 
 const DEPENDENCIES = (fetchImpl: typeof fetch, resolver: HostResolver = PUBLIC_RESOLVER) => ({ resolver, fetchImpl });
+
+/**
+ * The real resvg renderer the ingestion Worker ships, so the SVG path is exercised
+ * through the module that runs in production rather than a stand-in for it.
+ */
+const RASTERIZE = createIconSvgRasterizer(
+  readFileSync(new URL('../node_modules/@resvg/resvg-wasm/index_bg.wasm', import.meta.url)),
+);
 
 beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -1182,7 +1192,89 @@ describe('employer icon uploaded board logo', () => {
     expect(square.r2.puts[0]?.key).toMatch(/^company-icons\/acme\/platform-[0-9a-f]{16}\.png$/u);
   });
 
-  it('records an SVG-only board as its own class instead of storing it', async () => {
+  it('rasterizes a board logo published only as SVG and stores the PNG', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const square = 'https://app.ashbyhq.com/api/images/org-theme-logo/9fde/square.png';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://jobs.ashbyhq.com/acme/abc'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://jobs.ashbyhq.com/acme/abc': () => html(
+        `<!doctype html><html><head><title>Open role</title><script>{"logoSquareImageUrl":"${square}"}</script></head></html>`,
+      ),
+      // Ashby serves an SVG from a `.png` path, and this board publishes nothing else.
+      [square]: () => new Response(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#123456"/></svg>',
+        { headers: { 'content-type': 'image/svg+xml' } },
+      ),
+    });
+
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, { ...DEPENDENCIES(fetchImpl), rasterizeSvg: RASTERIZE });
+
+    // What is stored is the rendered PNG, never the publisher's document.
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0]?.contentType).toBe('image/png');
+    expect(r2.puts[0]?.key).toMatch(/^company-icons\/acme\/platform-[0-9a-f]{16}\.png$/u);
+    expect(rasterDimensions(r2.puts[0]!.bytes!)).toEqual({ width: 256, height: 256 });
+    expect((await admission.getCanonicalEmployer('acme'))?.iconSource).toBe('platform');
+    const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+    expect(events.find((event) => event.event === 'company_icon_platform_logo_stored'))
+      .toMatchObject({ format: 'image/png', rasterized: true });
+  });
+
+  it('refuses an SVG that could fetch or execute, even with a rasterizer', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const square = 'https://app.ashbyhq.com/api/images/org-theme-logo/9fde/square.png';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://jobs.ashbyhq.com/acme/abc'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://jobs.ashbyhq.com/acme/abc': () => html(
+        `<!doctype html><html><head><title>Open role</title><script>{"logoSquareImageUrl":"${square}"}</script></head></html>`,
+      ),
+      [square]: () => new Response(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><script>fetch("https://evil.test")</script><rect width="64" height="64"/></svg>',
+        { headers: { 'content-type': 'image/svg+xml' } },
+      ),
+    });
+
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, { ...DEPENDENCIES(fetchImpl), rasterizeSvg: RASTERIZE });
+
+    expect(r2.puts).toHaveLength(0);
+    const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+    expect(events.find((event) => event.event === 'company_icon_platform_logo_rejected'))
+      .toMatchObject({ reason: 'svg-unsafe' });
+  });
+
+  it('shape-checks a banner after rasterizing it, not by its container', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const banner = 'https://s9-recruiting.cdn.greenhouse.io/job_board_renderer/job_board_configurations/banners/400/032/800/original/CareerPageBanner.svg';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/acme/jobs/1': () => html(
+        `<!doctype html><html><head><title>Open role</title><script>{"banner_url":"${banner}"}</script></head></html>`,
+      ),
+      // The employer's own art, uploaded as SVG, and shaped like a careers strip.
+      [banner]: () => new Response(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 300"><rect width="1400" height="300" fill="#eee"/></svg>',
+        { headers: { 'content-type': 'image/svg+xml' } },
+      ),
+    });
+
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, { ...DEPENDENCIES(fetchImpl), rasterizeSvg: RASTERIZE });
+
+    expect(r2.puts).toHaveLength(0);
+    const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+    expect(events.find((event) => event.event === 'company_icon_platform_logo_rejected'))
+      .toMatchObject({ kind: 'banner', reason: 'banner-not-square' });
+  });
+
+  it('records an SVG board as its own class when no rasterizer is available', async () => {
     const { db, admission, icons } = subject();
     const r2 = r2Stub();
     const square = 'https://app.ashbyhq.com/api/images/org-theme-logo/9fde/square.png';

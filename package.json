@@ -56,8 +56,8 @@
     "eval:shadow:live": "tsx scripts/shadow-extraction-eval.ts --live --report eval/shadow-extraction-results",
     "build:browser-companion": "esbuild browser-companion/content.ts --bundle --format=iife --platform=browser --outfile=browser-companion/dist/content.js",
     "build:cloudflare": "npm run build:cloudflare:api && npm run build:cloudflare:ingestion",
-    "build:cloudflare:api": "wrangler deploy --config wrangler.api.jsonc --dry-run --outdir cloudflare/dist/api",
-    "build:cloudflare:ingestion": "wrangler deploy --config wrangler.ingestion.jsonc --dry-run --outdir cloudflare/dist/ingestion",
+    "build:cloudflare:api": "wrangler deploy --config wrangler.api.jsonc --dry-run --outdir cloudflare/dist/api && node scripts/prepare-worker-modules.mjs cloudflare/dist/api",
+    "build:cloudflare:ingestion": "wrangler deploy --config wrangler.ingestion.jsonc --dry-run --outdir cloudflare/dist/ingestion && node scripts/prepare-worker-modules.mjs cloudflare/dist/ingestion",
     "build:web": "npm --prefix mobile run web:export",
     "build:icons": "node mobile/scripts/generate-icons.mjs",
     "serve:web": "wrangler pages dev mobile/dist --port 4173",
@@ -71,6 +71,7 @@
   },
   "dependencies": {
     "@cloudflare/containers": "^0.0.16",
+    "@resvg/resvg-wasm": "^2.6.2",
     "fflate": "^0.8.3",
     "pdfjs-dist": "^5.7.284"
   },
