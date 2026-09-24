@@ -35,7 +35,7 @@ Most canonical employers are created before anyone has an icon for them, and a r
 ### How a decision is made
 
 1. **Admission records the task.** When posting admission resolves a canonical employer, `src/poll.ts` hands the employer ID, the application URL, and the provider/tenant to `enqueueEmployerIconResolution`. That is one deduplicated `INSERT` keyed by `(canonical_employer_id, evidence_fingerprint)`; no provider or model is called on the ingestion path, and the insert is skipped when the employer already has a reviewed icon or a live decision.
-2. **A sweep resolves it.** The ten-minute maintenance cron calls `runEmployerIconResolutionPass`, which claims at most `maxPerSweep` due rows with a lease. The sweep reads the real application link through the existing SSRF controls (`safeFetchText`, five redirects, 10s, 512 KiB), parses only bounded public metadata (`<title>`, OpenGraph, JSON-LD `Organization` name and URL), and asks Logo.dev and Brandfetch for domains by employer name. A posting page larger than the ceiling is **truncated, not rejected**: the employer's name is in the first few kilobytes of `<head>`, and a two-megabyte Lever page must not cost that employer its icon.
+2. **A sweep resolves it.** The ten-minute maintenance cron calls `runEmployerIconResolutionPass`, which claims at most `maxPerSweep` due rows with a lease. The sweep reads the real application link through the existing SSRF controls (`safeFetchText`, five redirects, 10s, 512 KiB), presenting an identifying user agent and `Accept: text/html` (`NternCompanyIcons/1.0 (+…; read-only)`), parses only bounded public metadata (`<title>`, OpenGraph, JSON-LD `Organization` name and URL), and asks Logo.dev and Brandfetch for domains by employer name. A posting page larger than the ceiling is **truncated, not rejected**: the employer's name is in the first few kilobytes of `<head>`, and a two-megabyte Lever page must not cost that employer its icon. A page that answers **non-2xx** is a retrieval failure, not a page that happens to say nothing: it yields no evidence, records `pageFailure`/`pageStatus` for the reviewer, and a rate limit or bot wall (403, 406, 408, 425, 429, 5xx) takes the one-hour transient backoff while a withdrawn or malformed posting takes the long one.
 3. **Scoring decides.** Candidates are scored from the reviewed table — non-ATS final/careers URL 0.45, the reviewed application host of an officially-admitted role 0.40 on top of that, JSON-LD Organization 0.35, each provider's exact-name candidate 0.30, both providers agreeing on one domain 0.25, employer-identity evidence naming the employer 0.15, capped at 1.0. ATS and job-board hosts are transport and are rejected outright. A domain is accepted automatically only at 0.85 or above with a 0.15 margin over the runner-up.
 
    The 0.40 exists because a role admitted from an official ATS, structured, or employer-submitted source has already had its destination reviewed as the employer's own application form. If that form is served from a host that is not a transport platform, that host *is* the employer's application host, and nothing further needs to confirm what the catalog already established. Community listings are deliberately excluded: their links are not the employer's own destination. Scores are settled to six decimals before the threshold comparison, so `0.45 + 0.40` cannot miss 0.85 to a binary rounding error.
@@ -111,21 +111,29 @@ The best icon is the one the employer put on its own board, and every supported 
 | Platform | Field | Host |
 |---|---|---|
 | Ashby | `logoSquareImageUrl`, else `logoWordmarkImageUrl`, else its social card | `app.ashbyhq.com/api/images/org-theme-*` |
-| Greenhouse | `og:image` | `s<N>-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/…` |
+| Greenhouse | board `logo.url`, else `og:image` | `s<N>-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/…` |
+| Greenhouse | `banner_url`, else the rendered `<img class="banner">` — last resort, shape-gated | `…cdn.greenhouse.io/job_board_renderer/job_board_configurations/banners/…` |
 | Lever | `og:image` | `lever-client-logos.s3[-us-west-2\|.us-west-2].amazonaws.com/…` |
 
 Each platform is matched on the hosts and paths it actually uses for board logos, so an unrelated `og:image` — a role banner, a client's CDN, a share card — is never picked up. Candidates are ranked by format before source, because Ashby serves some boards an SVG that cannot be stored while the usable raster sits beside it, and a caller that finds one unusable falls through to the next.
 
-Measured across **124 platform-hosted employers** in the live catalog:
+Greenhouse forced two reads beyond `og:image`. Its current board renderer emits `<meta property="og:image"/>` **with no value** for a board whose logo was never uploaded, and serializes the board payload escaped inside a script (`\"logo\":{\"href\":…,\"url\":…}`), so both the board logo and the banner are read from there, tolerating the escaping. The banner is the employer's own uploaded art, but it is a promotional strip as often as it is a mark — a photo, a tagline, a collage — so it is the last candidate and is stored **only when its own pixels are roughly square** (0.75–1.34). A 1400×300 careers banner cropped into a square tile shows a slice of a photograph, which is worse than the monogram it replaced, so it is refused and the refusal is logged as `banner-not-square`.
+
+Measured with `npm run coverage:icons` (read-only, real page fetches and real asset rules) across the employers the sweep acts on — every canonical employer with a reviewed ATS mapping, reached through a live posting on that platform's own host:
 
 | Platform | Employers | Uploaded logo usable |
 |---|---:|---:|
-| Ashby | 31 | **29** (94%) |
-| Lever | 2 | **2** (100%) |
-| Greenhouse | 91 | **57** (63%) |
-| **All** | **124** | **88 (71%)** |
+| Ashby | 59 | **42** (71%) |
+| Lever | 1 | **1** (100%) |
+| Greenhouse | 96 | see below |
 
-Two details that measurement forced. Lever's bucket serves its logos as `binary/octet-stream`, so a declared content type cannot be the only evidence — the asset type is settled from the bytes when the header is useless or missing, and an asset is stored only if it resolves to a raster. And Ashby serves some boards an **SVG** square logo; SVG is refused, because it would run script on the API origin, so the raster beside it is used instead. Greenhouse's remaining gap is real: a third of its boards publish no logo at all, and those employers fall to the domain path.
+The greenhouse column cannot be re-measured as this is written: after roughly 1,500 page reads the platform's edge (CloudFront in front of nginx) began answering **406 Not Acceptable** to this host for every job page and board root, with every user agent tried, while `boards-api.greenhouse.io` kept answering. That is a client-level block, not a parsing failure, and it is why the sweep now presents an identifying user agent and treats a 4xx/5xx page as a retrieval failure rather than as a page that happens to say nothing.
+
+The last clean measurement of the greenhouse cohort was taken before that block, over the 111 employers of the time: **76 published a board logo and all 76 assets fetched** (63 PNG, 13 JPEG), and of the 35 that published none, five offered only a banner and one of those was square enough to use — so the board path reaches **77 of 111 (69%)** with the new rules, against 68% before them.
+
+Three details the measurement forced. Lever's bucket serves its logos as `binary/octet-stream`, so a declared content type cannot be the only evidence — the asset type is settled from the bytes when the header is useless or missing, and an asset is stored only if it resolves to a raster. Ashby serves some boards an **SVG** square logo — from a `.png` path, so the URL says nothing — and SVG is refused, because it would run script on the API origin; the raster beside it is used instead, and a board that publishes *only* SVG is logged as `svg-not-servable` rather than silently treated as having no art. Greenhouse's remaining gap is then real: roughly a third of its boards publish no logo at all, and those employers fall to the domain path.
+
+Three board-art-only-SVG employers have reviewed mappings today — `snowflake`, `droyd`, and `tribalscale` — and recovering them needs a rasterizer. Both available mechanisms were measured and neither is wired: a WebAssembly rasterizer (resvg is 2.5 MB, ~950 KB compressed, and would have to be uploaded as a second Worker module, which the OpenTofu single-`content_file` upload and the plan guard both reject) and the Cloudflare Images binding (a new product dependency and infra change). At ~2% of the platform cohort it does not pay for itself yet; the domain path covers those employers once a provider is configured, and a reviewer upload covers them without one.
 
 The bytes are copied into our own bucket under `company-icons/<id>/platform-<hash>.<ext>`, so rendering never depends on the platform's CDN and no third-party request happens at render time. The key is recorded with `icon_source = 'platform'`, which is what an operator sees in the exception queue, and `report-wrong` withdraws it like any other automatic decision. A reviewer's icon is never overwritten, and the icon is stored even when the employer's *domain* stays undecided — the icon and the domain are separate facts, so `icon_resolution_status` is left alone.
 
@@ -209,4 +217,9 @@ tsx scripts/discover-employer-icon.ts --employer acme,globex
 
 # One hand-supplied shape, no database read.
 tsx scripts/discover-employer-icon.ts --name "Acme" --url https://job-boards.greenhouse.io/acme/jobs/1 --json
+
+# How much of the live catalog the employer's own uploaded board logo covers, per
+# platform, and why each miss is a miss. Real fetches, real asset rules, nothing written.
+npm run coverage:icons
+npm run coverage:icons -- --platform greenhouse --json
 ```

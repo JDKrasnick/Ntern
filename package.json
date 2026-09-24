@@ -25,6 +25,7 @@
     "probes:trusted-catalog": "tsx scripts/trusted-catalog-probes.ts",
     "probes:random-official": "tsx scripts/random-official-probes.ts",
     "coverage:companies": "tsx scripts/company-coverage.ts",
+    "coverage:icons": "tsx scripts/company-icon-coverage.ts",
     "discover:employer-icon": "tsx scripts/discover-employer-icon.ts",
     "greenhouse:manifest": "tsx scripts/greenhouse-manifest.ts",
     "discover:lever": "tsx scripts/discover-lever.ts",
