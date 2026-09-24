@@ -5623,12 +5623,14 @@ function AccountGate({
 type ResumeBankParentKind = "role" | "research" | "project" | "education";
 type ResumeTemplateId = "jake-technical" | "clean-standard" | "research-academic" | "project-compact";
 type ResumeSourceMode = "existing" | "ideal";
-type ResumeBankDetails =
-  | { organization: string; title?: string; advisor?: string; location?: string; dateRange?: string }
-  | { name: string; tagline?: string; technologies: string[]; url?: string }
-  | { institution: string; credential?: string; location?: string; dateRange?: string; details?: string }
-  | { category: string; skills: string[] };
-type ResumeBankCard = { bankItemId: string; kind: "role" | "research" | "project" | "skill" | "education" | "bullet"; parent?: { kind: ResumeBankParentKind; bankItemId: string }; content: string; details?: ResumeBankDetails; verified: boolean; revision: number };
+type ResumeBankCardBase = { bankItemId: string; content: string; sourceDocumentId?: string; verified: boolean; revision: number };
+type ResumeBankCard =
+  | (ResumeBankCardBase & { kind: "role"; parent?: never; details?: { organization: string; title?: string; location?: string; dateRange?: string } })
+  | (ResumeBankCardBase & { kind: "research"; parent?: never; details?: { organization: string; title?: string; advisor?: string; location?: string; dateRange?: string } })
+  | (ResumeBankCardBase & { kind: "project"; parent?: never; details?: { name: string; tagline?: string; technologies: string[]; url?: string } })
+  | (ResumeBankCardBase & { kind: "education"; parent?: never; details?: { institution: string; credential?: string; location?: string; dateRange?: string; details?: string } })
+  | (ResumeBankCardBase & { kind: "skill"; parent?: never; details?: { category: string; skills: string[] } })
+  | (ResumeBankCardBase & { kind: "bullet"; parent: { kind: ResumeBankParentKind; bankItemId: string }; details?: never });
 type ResumeBankRef = { kind: "role" | "research" | "project" | "skill" | "education"; bankItemId: string } | { kind: "bullet"; bankItemId: string; parent: { kind: ResumeBankParentKind; bankItemId: string } };
 type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; template: ResumeTemplateId; revision: number };
 type ResumeTemplateCard = { template: ResumeTemplateId; displayName: string; description: string; bestFor: string };
@@ -5680,7 +5682,6 @@ function ResumeSavedProfilesGhost() {
 function ResumeWorkspace({ token }: { token: string }) {
   const { width } = useWindowDimensions();
   const desktop = width >= 700;
-  const wideWorkbench = width >= 1040;
   const [jobUrl, setJobUrl] = useState("");
   const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
   const [bankDraft, setBankDraft] = useState("");
@@ -5694,6 +5695,7 @@ function ResumeWorkspace({ token }: { token: string }) {
   const [bankError, setBankError] = useState<string>();
   const [bankExpanded, setBankExpanded] = useState(false);
   const [bankManagerOpen, setBankManagerOpen] = useState(false);
+  const [manualEntryOpen, setManualEntryOpen] = useState(false);
   const [planExpanded, setPlanExpanded] = useState(false);
   const [profiles, setProfiles] = useState<ResumeProfileCard[]>([]);
   const [resumeTemplates, setResumeTemplates] = useState<ResumeTemplateCard[]>([]);
@@ -5747,8 +5749,9 @@ function ResumeWorkspace({ token }: { token: string }) {
   const selectedProfile = profiles.find((profile) => profile.profileId === selectedProfileId);
   const recommendedProfile = profiles.find((profile) => profile.profileId === bestExistingRecommendation?.profileId);
   const bankRoots = bankItems.filter((item) => item.kind !== "bullet");
-  const visibleBankItems = bankExpanded ? bankRoots : bankRoots.slice(0, 4);
-  const bankParents = bankItems.filter((item): item is ResumeBankCard & { kind: ResumeBankParentKind } => item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education");
+  const bankBullets = bankItems.filter((item) => item.kind === "bullet");
+  const importedResumeCount = new Set(bankItems.map((item) => item.sourceDocumentId).filter(Boolean)).size;
+  const bankParents = bankItems.filter((item): item is Extract<ResumeBankCard, { kind: ResumeBankParentKind }> => item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education");
   const selectedBankParent = bankParents.find((item) => item.bankItemId === bankParentId) ?? bankParents[0];
   const loadBank = () => {
     setBankLoading(true);
@@ -5827,6 +5830,10 @@ function ResumeWorkspace({ token }: { token: string }) {
         setBankItems((items) => [...items, item]);
         setBankDraft("");
         setBankSecondary(""); setBankLocation(""); setBankDateRange("");
+        if (item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education") {
+          setBankEntryKind("bullet");
+          setBankParentId(item.bankItemId);
+        }
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that bank item."))
       .finally(() => setBankSaving(false));
@@ -5838,17 +5845,22 @@ function ResumeWorkspace({ token }: { token: string }) {
       const result = await DocumentPicker.getDocumentAsync({
         type: ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
         copyToCacheDirectory: true,
+        multiple: true,
       });
       if (result.canceled) return;
-      const asset = result.assets[0];
-      if (!asset) return;
-      const contentType = asset.mimeType ?? (asset.name.toLowerCase().endsWith(".docx") ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/pdf");
       setBankSaving(true);
-      const response = await api<{ document: { documentId: string }; uploadUrl: string }>("/me/documents", token, { method: "POST", body: JSON.stringify({ fileName: asset.name, contentType }) });
-      const file = await fetch(asset.uri);
-      await uploadDocumentContent({ uploadUrl: response.uploadUrl, token, contentType, body: await file.blob() }, { deleteMetadata: () => api(`/me/documents/${encodeURIComponent(response.document.documentId)}`, token, { method: "DELETE" }) });
-      const imported = await api<{ items: ResumeBankCard[] }>("/me/resume-bank/import", token, { method: "POST", body: JSON.stringify({ documentId: response.document.documentId }) });
-      setBankItems((items) => [...items, ...imported.items]);
+      for (const asset of result.assets) {
+        const contentType = asset.mimeType ?? (asset.name.toLowerCase().endsWith(".docx") ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/pdf");
+        const response = await api<{ document: { documentId: string }; uploadUrl: string }>("/me/documents", token, { method: "POST", body: JSON.stringify({ fileName: asset.name, contentType }) });
+        const file = await fetch(asset.uri);
+        await uploadDocumentContent({ uploadUrl: response.uploadUrl, token, contentType, body: await file.blob() }, { deleteMetadata: () => api(`/me/documents/${encodeURIComponent(response.document.documentId)}`, token, { method: "DELETE" }) });
+        const imported = await api<{ items: ResumeBankCard[] }>("/me/resume-bank/import", token, { method: "POST", body: JSON.stringify({ documentId: response.document.documentId }) });
+        if (!imported.items.length) throw new Error(`We couldn't find structured résumé content in ${asset.name}.`);
+        const profile = await api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: asset.name.replace(/\.(pdf|docx)$/iu, ""), tags: [], bankItemIds: imported.items.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
+        setBankItems((items) => [...items, ...imported.items]);
+        setProfiles((items) => [...items, profile]);
+        setSelectedProfileId(profile.profileId);
+      }
     } catch (error) {
       setBankError(error instanceof Error ? error.message : "We couldn't import that résumé.");
     } finally { setBankSaving(false); }
@@ -5866,13 +5878,6 @@ function ResumeWorkspace({ token }: { token: string }) {
       : await api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: trustedItems.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
     setProfiles((all) => technicalBase ? all.map((item) => item.profileId === profile.profileId ? profile : item) : [...all, profile]);
     return profile;
-  };
-  const saveBase = () => {
-    if (resumeBusy || !bankItems.length) return;
-    setResumeBusy(true);
-    void syncTechnicalBase()
-      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that base."))
-      .finally(() => setResumeBusy(false));
   };
   const importJob = () => {
     if (!jobUrl.trim() || resumeBusy) return;
@@ -5985,8 +5990,8 @@ function ResumeWorkspace({ token }: { token: string }) {
         ) : null}
         <View style={styles.resumeBaseAccessRow}>
           <Text style={styles.resumeBaseAccessStatus}>{bankLoading ? "Checking your saved experience…" : bankItems.length ? `${bankItems.length} saved source item${bankItems.length === 1 ? "" : "s"}` : "No saved experience yet"}</Text>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel={bankManagerOpen ? "Close technical base editor" : "Edit technical base"} aria-expanded={bankManagerOpen} onPress={() => setBankManagerOpen((value) => !value)} style={styles.resumeCompactAction}>
-            <Text style={styles.resumeCompactActionText}>{bankManagerOpen ? "Done editing" : "Edit technical base"}</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={bankManagerOpen ? "Close master bank editor" : "Edit master bank"} aria-expanded={bankManagerOpen} onPress={() => setBankManagerOpen((value) => !value)} style={styles.resumeCompactAction}>
+            <Text style={styles.resumeCompactActionText}>{bankManagerOpen ? "Done editing" : "Edit master bank"}</Text>
           </TouchableOpacity>
         </View>
         {subscription ? (
@@ -6029,7 +6034,7 @@ function ResumeWorkspace({ token }: { token: string }) {
         ) : (
           <View style={styles.resumeSavedEmptyState}>
             <Ionicons name="documents-outline" size={20} color={colors.muted} />
-            <Text style={styles.resumeSavedEmpty}>No saved résumé variants yet. Open your technical base to create your first one.</Text>
+            <Text style={styles.resumeSavedEmpty}>No saved résumé variants yet. Open the master bank and add a PDF or DOCX.</Text>
           </View>
         )}
       </View>
@@ -6049,53 +6054,51 @@ function ResumeWorkspace({ token }: { token: string }) {
         <View style={styles.resumeBankWorkspace}>
           <View style={styles.resumeSourceHeading}>
             <View style={styles.resumeSourceHeadingCopy}>
-              <Text style={styles.sectionTitle}>Technical base</Text>
-              <Text style={styles.resumeSectionDescription}>Keep your complete, verified experience here. This source stays private and is only used when you tailor a résumé.</Text>
+              <Text style={styles.sectionTitle}>Resume sources</Text>
+              <Text style={styles.resumeSectionDescription}>Start with the résumés you already use. Ntern saves each one as a reusable option and merges its structured experience into your private master bank.</Text>
             </View>
           </View>
-          <View style={[styles.resumeSetupWorkspace, wideWorkbench && styles.resumeSetupWorkspaceWide]}>
-            <View style={[styles.resumeBankComposer, wideWorkbench && styles.resumeLibraryRail]}>
-              <Text style={styles.inputLabel}>{bankEntryKind === "bullet" ? "Add a bullet" : "Add a structured entry"}</Text>
-              <TextInput value={bankDraft} onChangeText={setBankDraft} accessibilityLabel="Add a technical base item" placeholder={bankEntryKind === "bullet" ? "A verified bullet for the selected parent" : bankEntryKind === "skill" ? "Skill category, e.g. Backend & Cloud" : bankEntryKind === "education" ? "Institution" : bankEntryKind === "project" ? "Project name" : "Organization"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} multiline style={styles.resumeBankInput} />
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeBankKindPicker}>
-                {(["role", "research", "project", "education", "skill", "bullet"] as const).map((kind) => (
-                  <TouchableOpacity key={kind} accessibilityRole="button" aria-pressed={bankEntryKind === kind} onPress={() => setBankEntryKind(kind)} style={[styles.resumeBankKindOption, bankEntryKind === kind && styles.resumeBankKindOptionActive]}>
-                    <Text style={[styles.resumeSegmentText, bankEntryKind === kind && styles.resumeSegmentTextActive]}>{kind === "bullet" ? "Child bullet" : kind[0]!.toUpperCase() + kind.slice(1)}</Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-              {bankEntryKind !== "bullet" ? (
-                <View style={styles.resumeStructuredFields}>
-                  <TextInput value={bankSecondary} onChangeText={setBankSecondary} accessibilityLabel="Entry subtitle" placeholder={bankEntryKind === "skill" ? "Comma-separated skills" : bankEntryKind === "education" ? "Degree, field, GPA" : bankEntryKind === "project" ? "One-line project label" : "Title"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} />
-                  {bankEntryKind !== "skill" ? <TextInput value={bankLocation} onChangeText={setBankLocation} accessibilityLabel="Entry location or technologies" placeholder={bankEntryKind === "project" ? "Technologies, comma separated" : "Location"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} /> : null}
-                  {bankEntryKind !== "skill" ? <TextInput value={bankDateRange} onChangeText={setBankDateRange} accessibilityLabel="Entry dates or URL" placeholder={bankEntryKind === "project" ? "Project URL (optional)" : "Dates"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInput} /> : null}
-                </View>
-              ) : null}
-              {bankEntryKind === "bullet" ? (
-                bankParents.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeParentPicker}>
-                  {bankParents.map((parent) => (
-                    <TouchableOpacity key={parent.bankItemId} accessibilityRole="button" aria-pressed={selectedBankParent?.bankItemId === parent.bankItemId} onPress={() => setBankParentId(parent.bankItemId)} style={[styles.resumeParentOption, selectedBankParent?.bankItemId === parent.bankItemId && styles.resumeParentOptionActive]}>
-                      <Text numberOfLines={1} style={styles.resumeParentOptionText}>{parent.content}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView> : <Text style={styles.resumeBankError}>Add a role, research entry, project, or education parent before adding its bullets.</Text>
-              ) : null}
-              <View style={styles.resumeBankComposerAction}><ActionButton label={bankSaving ? "Saving…" : "Add to technical base"} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving || bankEntryKind === "bullet" && !selectedBankParent} /></View>
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import PDF or DOCX resume" onPress={() => void importResume()} disabled={bankSaving}>
-                <Text style={styles.resumeKeepAll}>{bankSaving ? "Importing source…" : "Import a résumé or master-bank DOCX"}</Text>
-              </TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import one or more PDF or DOCX resumes" onPress={() => void importResume()} disabled={bankSaving} style={[styles.resumeImportStage, bankSaving && styles.resumeSourceChoiceDisabled]}>
+            <View style={styles.resumeImportStageIcon}><Ionicons name="documents-outline" size={28} color={colors.signal} /></View>
+            <View style={styles.resumeImportStageCopy}>
+              <Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>
+              <Text style={styles.resumeImportStageDescription}>Choose one or several PDF or DOCX files. Each file stays available as a saved résumé while its roles, projects, education, skills, and correctly attached bullets join the master bank.</Text>
+              <Text style={styles.resumeImportStageMeta}>{importedResumeCount ? `${importedResumeCount} source résumé${importedResumeCount === 1 ? "" : "s"} imported` : "PDF or DOCX · select multiple files"}</Text>
             </View>
-            <View style={styles.resumeSetupMain}>
+            <View style={styles.resumeImportStageAction}>
+              <Ionicons name="add" size={18} color={colors.onDark} />
+              <Text style={styles.resumeImportStageActionText}>Choose files</Text>
+            </View>
+          </TouchableOpacity>
+
+          <View style={styles.resumeMasterBankSummary}>
+            <View style={styles.resumeMasterBankCopy}>
               <View style={styles.resumeSourceHeading}>
                 <View style={styles.resumeSourceHeadingCopy}>
-                  <Text style={styles.sectionTitle}>Saved experience</Text>
-                  <Text style={styles.resumeSectionDescription}>{bankLoading ? "Loading…" : `${bankItems.length} verified item${bankItems.length === 1 ? "" : "s"}`}</Text>
+                  <Text style={styles.resumeMasterBankTitle}>Master bank</Text>
+                  <Text style={styles.resumeSectionDescription}>The complete typed source Ntern can draw from when it builds an ideal résumé.</Text>
                 </View>
-                <TouchableOpacity accessibilityRole="button" onPress={saveBase} disabled={!bankItems.length || resumeBusy}><Text style={styles.resumeRecommendation}>{technicalBase ? "Sync technical base" : "Create technical base"}</Text></TouchableOpacity>
               </View>
-              {!bankLoading && bankItems.length ? (
-                <ScrollView nestedScrollEnabled scrollEnabled={bankExpanded} style={bankExpanded ? styles.resumeBankScroller : undefined} contentContainerStyle={styles.resumeBankItems}>
-                  {visibleBankItems.map((item) => (
+              <Text style={styles.resumeMasterBankStats}>{bankLoading ? "Loading…" : `${bankRoots.length} parent item${bankRoots.length === 1 ? "" : "s"} · ${bankBullets.length} attached bullet${bankBullets.length === 1 ? "" : "s"}`}</Text>
+              <View style={styles.resumeTypeGuardNote}>
+                <Ionicons name="git-branch-outline" size={16} color={colors.signal} />
+                <Text style={styles.resumeTypeGuardText}>Every bullet carries a typed pointer to one role, project, research entry, or education record. It cannot drift to another parent.</Text>
+              </View>
+            </View>
+            <View style={styles.resumeMasterBankActions}>
+              <TouchableOpacity accessibilityRole="button" aria-expanded={manualEntryOpen} onPress={() => setManualEntryOpen((value) => !value)} style={styles.resumeMasterBankPrimaryAction}>
+                <Ionicons name={manualEntryOpen ? "close" : "add"} size={17} color={colors.onDark} />
+                <Text style={styles.resumeMasterBankPrimaryText}>{manualEntryOpen ? "Close entry form" : "Add manually"}</Text>
+              </TouchableOpacity>
+              {bankRoots.length ? <TouchableOpacity accessibilityRole="button" aria-expanded={bankExpanded} onPress={() => setBankExpanded((value) => !value)} style={styles.resumeMasterBankSecondaryAction}>
+                <Text style={styles.resumeMasterBankSecondaryText}>{bankExpanded ? "Hide bank" : `Review ${bankRoots.length} items`}</Text>
+              </TouchableOpacity> : null}
+            </View>
+          </View>
+
+          {bankExpanded ? (
+            <ScrollView nestedScrollEnabled style={styles.resumeBankScroller} contentContainerStyle={styles.resumeBankItems}>
+              {bankRoots.map((item) => (
                     <View key={item.bankItemId} style={styles.resumeBankItem}>
                       <Ionicons name={item.kind === "role" ? "briefcase-outline" : item.kind === "project" ? "code-slash-outline" : item.kind === "skill" ? "construct-outline" : item.kind === "education" ? "school-outline" : "document-text-outline"} size={17} color={colors.signal} />
                       <View style={styles.resumeBankItemCopy}>
@@ -6103,16 +6106,65 @@ function ResumeWorkspace({ token }: { token: string }) {
                         <Text style={styles.resumeBankItemStatus}>{item.kind} · {bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length} bullet{bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length === 1 ? "" : "s"}</Text>
                       </View>
                     </View>
-                  ))}
-                </ScrollView>
-              ) : <Text style={styles.resumeSectionDescription}>Add an entry or import an existing résumé to get started.</Text>}
-              {bankRoots.length > 4 ? (
-                <TouchableOpacity accessibilityRole="button" onPress={() => setBankExpanded((value) => !value)} style={styles.resumeCompactAction}>
-                  <Text style={styles.resumeKeepAll}>{bankExpanded ? "Show less" : `Browse all ${bankRoots.length} entries`}</Text>
-                </TouchableOpacity>
-              ) : null}
+              ))}
+            </ScrollView>
+          ) : null}
+
+          {manualEntryOpen ? <View style={styles.resumeManualEntry}>
+            <View style={styles.resumeManualEntryHeader}>
+              <View style={styles.resumeSourceHeadingCopy}>
+                <Text style={styles.sectionTitle}>Add a structured item</Text>
+                <Text style={styles.resumeSectionDescription}>Choose what it is first. Ntern changes the fields and allowed relationships to match that type.</Text>
+              </View>
             </View>
-          </View>
+            <View style={styles.resumeBankKindPicker}>
+              {(["role", "research", "project", "education", "skill", "bullet"] as const).map((kind) => (
+                <TouchableOpacity key={kind} accessibilityRole="button" aria-pressed={bankEntryKind === kind} onPress={() => {
+                  if (bankEntryKind !== kind) { setBankDraft(""); setBankSecondary(""); setBankLocation(""); setBankDateRange(""); }
+                  setBankEntryKind(kind);
+                }} style={[styles.resumeBankKindOption, bankEntryKind === kind && styles.resumeBankKindOptionActive]}>
+                  <Text style={[styles.resumeSegmentText, bankEntryKind === kind && styles.resumeSegmentTextActive]}>{kind === "bullet" ? "Bullet" : kind[0]!.toUpperCase() + kind.slice(1)}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {bankEntryKind === "bullet" ? <View style={styles.resumeManualField}>
+              <Text style={styles.inputLabel}>Which item owns this bullet?</Text>
+              {bankParents.length ? <View style={styles.resumeParentPicker}>
+                {bankParents.map((parent) => (
+                  <TouchableOpacity key={parent.bankItemId} accessibilityRole="button" aria-pressed={selectedBankParent?.bankItemId === parent.bankItemId} onPress={() => setBankParentId(parent.bankItemId)} style={[styles.resumeParentOption, selectedBankParent?.bankItemId === parent.bankItemId && styles.resumeParentOptionActive]}>
+                    <Text numberOfLines={1} style={styles.resumeParentOptionKind}>{parent.kind}</Text>
+                    <Text numberOfLines={2} style={styles.resumeParentOptionText}>{parent.content}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View> : <Text style={styles.resumeBankError}>Create a role, research entry, project, or education item first. Bullets cannot exist without one.</Text>}
+            </View> : null}
+
+            <View style={styles.resumeManualField}>
+              <Text style={styles.inputLabel}>{bankEntryKind === "bullet" ? "Bullet" : bankEntryKind === "skill" ? "Skill category" : bankEntryKind === "education" ? "Institution" : bankEntryKind === "project" ? "Project name" : "Organization"}</Text>
+              <TextInput value={bankDraft} onChangeText={setBankDraft} accessibilityLabel="Structured resume item name" placeholder={bankEntryKind === "bullet" ? "Built a queue-backed ingestion pipeline that…" : bankEntryKind === "skill" ? "Backend & Cloud" : bankEntryKind === "education" ? "Cornell University" : bankEntryKind === "project" ? "InternNotifs" : "Organization name"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} multiline={bankEntryKind === "bullet"} style={[styles.resumeStructuredInputLarge, bankEntryKind === "bullet" && styles.resumeStructuredInputMultiline]} />
+            </View>
+
+            {bankEntryKind !== "bullet" ? <View style={[styles.resumeStructuredFields, desktop && styles.resumeStructuredFieldsWide]}>
+              <View style={styles.resumeStructuredField}>
+                <Text style={styles.inputLabel}>{bankEntryKind === "skill" ? "Skills" : bankEntryKind === "education" ? "Degree and field" : bankEntryKind === "project" ? "One-line description" : "Title"}</Text>
+                <TextInput value={bankSecondary} onChangeText={setBankSecondary} accessibilityLabel="Structured resume item subtitle" placeholder={bankEntryKind === "skill" ? "TypeScript, Cloudflare Workers, D1" : bankEntryKind === "education" ? "B.S. Operations Research" : bankEntryKind === "project" ? "Early-career role discovery and alerts" : "Software Engineering Intern"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInputLarge} />
+              </View>
+              {bankEntryKind !== "skill" ? <View style={styles.resumeStructuredField}>
+                <Text style={styles.inputLabel}>{bankEntryKind === "project" ? "Technologies" : "Location"}</Text>
+                <TextInput value={bankLocation} onChangeText={setBankLocation} accessibilityLabel="Structured resume item location or technologies" placeholder={bankEntryKind === "project" ? "React, TypeScript, Cloudflare" : "New York, NY"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInputLarge} />
+              </View> : null}
+              {bankEntryKind !== "skill" ? <View style={styles.resumeStructuredField}>
+                <Text style={styles.inputLabel}>{bankEntryKind === "project" ? "Project URL" : "Dates"}</Text>
+                <TextInput value={bankDateRange} onChangeText={setBankDateRange} accessibilityLabel="Structured resume item dates or URL" placeholder={bankEntryKind === "project" ? "https://… (optional)" : "May 2026 – Aug 2026"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInputLarge} />
+              </View> : null}
+            </View> : null}
+
+            <View style={styles.resumeManualEntryFooter}>
+              <Text style={styles.resumeManualEntryHint}>{bankEntryKind === "bullet" ? `This bullet will stay attached to ${selectedBankParent?.content ?? "the selected parent"}.` : bankEntryKind === "skill" ? "Skills are stored as a typed category and list." : `After creating this ${bankEntryKind}, the form moves directly to its bullets.`}</Text>
+              <View style={styles.resumeBankComposerAction}><ActionButton label={bankSaving ? "Saving…" : bankEntryKind === "bullet" ? "Add attached bullet" : bankEntryKind === "skill" ? "Add skill group" : `Create ${bankEntryKind} and add bullets`} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving || (bankEntryKind === "bullet" && !selectedBankParent)} /></View>
+            </View>
+          </View> : null}
         </View>
       ) : null}
 
@@ -8777,7 +8829,31 @@ const styles = StyleSheet.create({
   resumeSourceChoiceBadge: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.4, textTransform: "uppercase" },
   resumeSourceChoiceTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", lineHeight: 23, marginTop: 14 },
   resumeSourceChoiceCopy: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 5 },
-  resumeBankWorkspace: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 28, paddingTop: 24 },
+  resumeBankWorkspace: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 16, marginTop: 28, paddingTop: 24 },
+  resumeImportStage: { alignItems: "center", backgroundColor: colors.surface, borderColor: colors.signal, borderRadius: 16, borderStyle: "dashed", borderWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 16, minHeight: 214, padding: 24 },
+  resumeImportStageIcon: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 14, height: 56, justifyContent: "center", width: 56 },
+  resumeImportStageCopy: { flex: 1, minWidth: 240 },
+  resumeImportStageTitle: { color: colors.ink, fontSize: 22, fontWeight: "800", letterSpacing: -0.4, lineHeight: 28 },
+  resumeImportStageDescription: { color: colors.body, fontSize: 14, lineHeight: 21, marginTop: 7, maxWidth: 680 },
+  resumeImportStageMeta: { color: colors.muted, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 12 },
+  resumeImportStageAction: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 10, flexDirection: "row", gap: 7, justifyContent: "center", minHeight: 48, paddingHorizontal: 16 },
+  resumeImportStageActionText: { color: colors.onDark, fontSize: 14, fontWeight: "800" },
+  resumeMasterBankSummary: { alignItems: "flex-start", backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 18, justifyContent: "space-between", padding: 16 },
+  resumeMasterBankCopy: { flex: 1, minWidth: 240 },
+  resumeMasterBankTitle: { color: colors.ink, fontSize: 18, fontWeight: "800", lineHeight: 24 },
+  resumeMasterBankStats: { color: colors.body, fontSize: 13, fontWeight: "700", lineHeight: 18, marginTop: 10 },
+  resumeTypeGuardNote: { alignItems: "flex-start", flexDirection: "row", gap: 8, marginTop: 10, maxWidth: 680 },
+  resumeTypeGuardText: { color: colors.muted, flex: 1, fontSize: 12, lineHeight: 18 },
+  resumeMasterBankActions: { alignItems: "stretch", gap: 8, minWidth: 156 },
+  resumeMasterBankPrimaryAction: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 10, flexDirection: "row", gap: 6, justifyContent: "center", minHeight: 44, paddingHorizontal: 13 },
+  resumeMasterBankPrimaryText: { color: colors.onDark, fontSize: 13, fontWeight: "800" },
+  resumeMasterBankSecondaryAction: { alignItems: "center", borderColor: colors.border, borderRadius: 10, borderWidth: 1, justifyContent: "center", minHeight: 44, paddingHorizontal: 13 },
+  resumeMasterBankSecondaryText: { color: colors.signal, fontSize: 13, fontWeight: "800" },
+  resumeManualEntry: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 6, paddingTop: 22 },
+  resumeManualEntryHeader: { alignItems: "flex-start", flexDirection: "row", justifyContent: "space-between" },
+  resumeManualField: { marginTop: 18 },
+  resumeManualEntryFooter: { alignItems: "flex-start", borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 20, paddingTop: 16 },
+  resumeManualEntryHint: { color: colors.muted, fontSize: 12, lineHeight: 18, maxWidth: 680 },
   resumeOverview: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 16, flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginBottom: 12, overflow: "hidden", paddingHorizontal: 18, paddingVertical: 14 },
   resumeOverviewCopy: { flexGrow: 1, flexShrink: 1, maxWidth: 570, minWidth: 220 },
   resumeCardLabel: { color: colors.signalGlow, fontSize: 12, fontWeight: "800", letterSpacing: 1.1, textTransform: "uppercase" },
@@ -8800,23 +8876,22 @@ const styles = StyleSheet.create({
   resumePlanPrice: { color: colors.ink, fontSize: 14, fontWeight: "700", marginTop: 5 },
   resumePlanDetail: { color: colors.muted, fontSize: 13, lineHeight: 18, marginTop: 4 },
   resumePlanState: { color: colors.signal, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 10 },
-  resumeSetupWorkspace: { gap: 20 },
-  resumeSetupWorkspaceWide: { alignItems: "flex-start", flexDirection: "row" },
-  resumeLibraryRail: { flexBasis: 320, flexGrow: 0, flexShrink: 0, marginBottom: 0 },
-  resumeSetupMain: { flex: 1, minWidth: 0 },
-  resumeBankComposer: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, marginBottom: 8, padding: 16 },
   resumeSourceHeading: { alignItems: "flex-start", flexDirection: "row", gap: 10, justifyContent: "space-between", marginBottom: 14 },
   resumeSourceHeadingCopy: { flex: 1, minWidth: 0 },
   resumeBankInput: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, color: colors.ink, fontSize: 15, lineHeight: 21, minHeight: 82, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: "top" },
-  resumeStructuredFields: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginTop: 8 },
-  resumeStructuredInput: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 8, borderWidth: 1, color: colors.ink, flexGrow: 1, fontSize: 13, minHeight: 42, minWidth: 130, paddingHorizontal: 10 },
-  resumeBankKindPicker: { gap: 6, paddingTop: 10 },
-  resumeBankKindOption: { alignItems: "center", backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 8, borderWidth: 1, justifyContent: "center", minHeight: 36, paddingHorizontal: 10 },
+  resumeStructuredFields: { gap: 14, marginTop: 18 },
+  resumeStructuredFieldsWide: { flexDirection: "row", flexWrap: "wrap" },
+  resumeStructuredField: { flexGrow: 1, flexShrink: 1, minWidth: 220 },
+  resumeStructuredInputLarge: { backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 10, borderWidth: 1, color: colors.ink, fontSize: 15, minHeight: 52, paddingHorizontal: 14 },
+  resumeStructuredInputMultiline: { minHeight: 112, paddingTop: 13, textAlignVertical: "top" },
+  resumeBankKindPicker: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 10 },
+  resumeBankKindOption: { alignItems: "center", backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, justifyContent: "center", minHeight: 44, minWidth: 104, paddingHorizontal: 13 },
   resumeBankKindOptionActive: { backgroundColor: colors.surface, borderColor: colors.signal },
-  resumeParentPicker: { gap: 7, paddingTop: 9 },
-  resumeParentOption: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 8, borderWidth: 1, maxWidth: 210, paddingHorizontal: 10, paddingVertical: 8 },
+  resumeParentPicker: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 4 },
+  resumeParentOption: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, flexGrow: 1, maxWidth: 320, minHeight: 64, minWidth: 210, paddingHorizontal: 12, paddingVertical: 10 },
   resumeParentOptionActive: { borderColor: colors.signal },
-  resumeParentOptionText: { color: colors.body, fontSize: 12, fontWeight: "600" },
+  resumeParentOptionKind: { color: colors.signal, fontSize: 10, fontWeight: "800", letterSpacing: 0.5, textTransform: "uppercase" },
+  resumeParentOptionText: { color: colors.body, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 3 },
   resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },
   resumeBankError: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 8 },
   resumeBankScroller: { maxHeight: 340 },

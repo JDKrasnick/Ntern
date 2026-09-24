@@ -9,14 +9,18 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('resumeEnabled ? [{ key: "resume" as const, label: "Resume"');
     expect(app).toContain('resumeEnabled={publicConfig.resumeTunerEnabled}');
     expect(app).toContain('feature="tailor and save résumés"');
-    expect(app).toContain('accessibilityLabel="Import PDF or DOCX resume"');
+    expect(app).toContain('accessibilityLabel="Import one or more PDF or DOCX resumes"');
     expect(app).toContain('"/me/resume-bank/import"');
-    expect(app).toContain('technicalBase ? "Sync technical base" : "Create technical base"');
+    expect(app).toContain('multiple: true');
+    expect(app).toContain('bankItemIds: imported.items.map((item) => item.bankItemId)');
+    expect(app).toContain('setProfiles((items) => [...items, profile])');
     expect(app).toContain('method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true })');
+    expect(app).toContain('type ResumeBankCard =');
+    expect(app).toContain('kind: "bullet"; parent: { kind: ResumeBankParentKind; bankItemId: string }; details?: never');
     expect(app).toContain('type ResumeBankRef =');
     expect(app).toContain('kind: "bullet"; bankItemId: string; parent:');
     expect(app).toContain('bankEntryKind === "bullet" && selectedBankParent');
-    expect(app).toContain('Add a role, research entry, project, or education parent before adding its bullets.');
+    expect(app).toContain('Create a role, research entry, project, or education item first. Bullets cannot exist without one.');
     expect(app).toContain('"role", "research", "project", "education", "skill", "bullet"');
     expect(app).toContain('api<{ templates: ResumeTemplateCard[] }>("/resume-templates", token)');
     expect(app).toContain('sourceProfile.template !== selectedTemplate');
@@ -37,18 +41,19 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('pollResumeImport(() => api<ResumeImportCard>');
   });
 
-  it('keeps the technical base behind progressive disclosure', () => {
+  it('keeps the master bank compact and makes resume import the primary editor task', () => {
     expect(app).toContain('const [bankManagerOpen, setBankManagerOpen] = useState(false);');
-    expect(app).toContain('bankManagerOpen ? "Done editing" : "Edit technical base"');
+    expect(app).toContain('bankManagerOpen ? "Done editing" : "Edit master bank"');
     expect(app).toContain('{bankManagerOpen ? (');
     expect(app.indexOf('Paste the job URL')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
-    expect(app).toContain('const wideWorkbench = width >= 1040;');
-    expect(app).toContain('bankRoots.slice(0, 4)');
-    expect(app).toContain('styles.resumeSetupWorkspaceWide');
-    expect(app).toContain('styles.resumeLibraryRail');
-    expect(app).toContain('style={bankExpanded ? styles.resumeBankScroller : undefined}');
+    expect(app).toContain('<Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>');
+    expect(app).toContain('<Text style={styles.resumeMasterBankTitle}>Master bank</Text>');
+    expect(app).toContain('const [manualEntryOpen, setManualEntryOpen] = useState(false);');
+    expect(app).toContain('manualEntryOpen ? <View style={styles.resumeManualEntry}>');
+    expect(app).toContain('setBankEntryKind("bullet");');
+    expect(app).toContain('setBankParentId(item.bankItemId);');
     expect(app).toContain('<Text numberOfLines={2} style={styles.resumeBankItemText}>');
-    expect(app).toContain('`Browse all ${bankRoots.length} entries`');
+    expect(app).toContain('bankExpanded ? "Hide bank" : `Review ${bankRoots.length} items`');
   });
 
   it('offers saved resume variants as a quick horizontal picker', () => {
