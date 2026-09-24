@@ -412,8 +412,20 @@ test('passes real expanded-family roles and blocks malformed roles through repai
   assert.equal(occurrencePreviewResponse.status, 200);
   const occurrencePreview = await occurrencePreviewResponse.json();
   assert.deepEqual(occurrencePreview.conflicts, []);
-  assert.equal(occurrencePreview.canonicalJobs, 1);
   assert.equal(occurrencePreview.danglingOccurrences, 1);
+  // The merge named workable-e2e-old through its alias, and the identity repair
+  // also stamped a confirmed projection on single-member groups. Those jobs
+  // never got an alias, so the internship projection predicate is the only
+  // thing that puts them in the plan.
+  const targetedJobIds = occurrencePreview.batches.flatMap((batch) => batch.jobIds);
+  assert.ok(targetedJobIds.includes('workable-e2e-old'));
+  assert.ok(targetedJobIds.includes('matrix-eu-greenhouse-good'));
+  assert.ok(occurrencePreview.canonicalJobs > 1);
+  assert.ok(occurrencePreview.projectionMismatches >= 1);
+  const staleAlias = await database.prepare(
+    "SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'job-id-alias' AND pk = 'JOB_ID_ALIAS#matrix-eu-greenhouse-good'",
+  ).first();
+  assert.equal(staleAlias.count, 0);
   assert.ok(occurrencePreview.batches.length > 0);
   for (const batch of occurrencePreview.batches) {
     assert.ok(batch.jobIds.length <= 100 && batch.occurrenceKeys.length <= 125 && batch.contextRows.length <= 125);
@@ -449,9 +461,10 @@ test('passes real expanded-family roles and blocks malformed roles through repai
   assert.equal(refusedResponse.status, 409);
   assert.equal(await refusedResponse.json().then((body) => body.message), 'Occurrence repair applies one signed batch at a time; send applyBatch');
 
-  // The paged occurrence scope only reaches canonical jobs an identity merge
-  // named. Reference classification for the rest of the catalog stays with the
-  // catalog-wide repair, which the expanded-family matrix below still verifies.
+  // The paged occurrence scope reaches the jobs an identity merge rewrote,
+  // whether or not it named them with an alias. Reference classification for
+  // rows the merge never touched stays with the catalog-wide repair, which the
+  // expanded-family matrix below still verifies.
   const catalogPreviewResponse = await api.fetch('https://api.example.test/internal/posting-identity-repair', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': operationsSecret },
     body: JSON.stringify({ scope: 'all', jobBatch: 1 }),
