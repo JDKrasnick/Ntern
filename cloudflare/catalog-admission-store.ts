@@ -1283,6 +1283,7 @@ export class D1CatalogAdmissionStore {
       id: row.id as string, displayName: row.display_name as string, reviewedAt: row.reviewed_at as string,
       reviewedBy: row.reviewed_by as string,
       ...(row.icon_key ? { iconKey: row.icon_key as string } : {}),
+      ...(row.icon_source ? { iconSource: row.icon_source as string } : {}),
       ...(row.icon_updated_at ? { iconUpdatedAt: row.icon_updated_at as string } : {}),
       ...(row.parent_employer_id ? { parentEmployerId: row.parent_employer_id as string } : {}),
       ...(row.brand_of_employer_id ? { brandOfEmployerId: row.brand_of_employer_id as string } : {}),

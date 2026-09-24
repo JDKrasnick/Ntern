@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   brandfetchSearchUrl, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence,
-  proposedDomainMatchesEmployer, validIconAsset,
+  iconAssetType, platformLogoUrls, proposedDomainMatchesEmployer, validIconAsset,
 } from '../src/employer-icon-discovery.js';
 import { parseIconProposal, plausibleEmployerName } from '../src/employer-icon-resolution.js';
 
@@ -135,6 +135,86 @@ describe('domain proposal payload', () => {
     expect(plausibleEmployerName('Astranis')).toBe(true);
     expect(plausibleEmployerName('RV Tech')).toBe(true);
     expect(plausibleEmployerName('Rivian and Volkswagen Group Technologies')).toBe(true);
+  });
+});
+
+describe('uploaded board logo', () => {
+  it('picks the logo each platform serves for the employer’s own board', () => {
+    // Ashby, square preferred because an icon tile is square.
+    expect(platformLogoUrls('<script>{"logoSquareImageUrl":"https://app.ashbyhq.com/api/images/org-theme-logo/1cea/9d.png","logoWordmarkImageUrl":"https://app.ashbyhq.com/api/images/org-theme-wordmark/1cea/9d.png"}</script>')[0])
+      .toBe('https://app.ashbyhq.com/api/images/org-theme-logo/1cea/9d.png');
+    // Ashby with no square logo falls back to the wordmark.
+    expect(platformLogoUrls('<script>{"logoSquareImageUrl":null,"logoWordmarkImageUrl":"https://app.ashbyhq.com/api/images/org-theme-wordmark/694/8c.png"}</script>')[0])
+      .toBe('https://app.ashbyhq.com/api/images/org-theme-wordmark/694/8c.png');
+
+    // Greenhouse and Lever serve it as og:image, across their shards.
+    expect(platformLogoUrls('<meta property="og:image" content="https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/204/510/original/Logo-IMC-Blue.png?1773245307">')[0])
+      .toBe('https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/204/510/original/Logo-IMC-Blue.png?1773245307');
+    expect(platformLogoUrls('<meta property="og:image" content="https://lever-client-logos.s3-us-west-2.amazonaws.com/b8300af6-1586196845320.png">')[0])
+      .toBe('https://lever-client-logos.s3-us-west-2.amazonaws.com/b8300af6-1586196845320.png');
+    expect(platformLogoUrls('<meta property="og:image" content="https://lever-client-logos.s3.us-west-2.amazonaws.com/c0bce04e-1654061968773.png">')[0])
+      .toBe('https://lever-client-logos.s3.us-west-2.amazonaws.com/c0bce04e-1654061968773.png');
+  });
+
+  it('keeps an SVG board logo but ranks a usable raster ahead of it', () => {
+    // Ashby serves some boards an SVG square logo. It cannot be stored, and the
+    // raster beside it must therefore come first.
+    const urls = platformLogoUrls(
+      '<meta property="og:image" content="https://app.ashbyhq.com/api/images/org-theme-social/1cea/social.png">'
+      + '<script>{"logoSquareImageUrl":"https://app.ashbyhq.com/api/images/org-theme-logo/1cea/square.svg","logoWordmarkImageUrl":"https://app.ashbyhq.com/api/images/org-theme-wordmark/1cea/word.svg"}</script>',
+    );
+    expect(urls[0]).toBe('https://app.ashbyhq.com/api/images/org-theme-social/1cea/social.png');
+    // With only SVG art available the square logo still leads, and the caller
+    // falls through when it turns out to be unusable.
+    expect(platformLogoUrls('<script>{"logoSquareImageUrl":"https://app.ashbyhq.com/api/images/org-theme-logo/1cea/square.svg"}</script>'))
+      .toEqual(['https://app.ashbyhq.com/api/images/org-theme-logo/1cea/square.svg']);
+    // Two rasters keep their source order: the square logo before the wordmark.
+    expect(platformLogoUrls(
+      '<meta property="og:image" content="https://app.ashbyhq.com/api/images/org-theme-social/1cea/social.png">'
+      + '<script>{"logoSquareImageUrl":"https://app.ashbyhq.com/api/images/org-theme-logo/1cea/square.png","logoWordmarkImageUrl":"https://app.ashbyhq.com/api/images/org-theme-wordmark/1cea/word.png"}</script>',
+    )).toEqual([
+      'https://app.ashbyhq.com/api/images/org-theme-logo/1cea/square.png',
+      'https://app.ashbyhq.com/api/images/org-theme-wordmark/1cea/word.png',
+      'https://app.ashbyhq.com/api/images/org-theme-social/1cea/social.png',
+    ]);
+  });
+
+  it('refuses an og:image that is not a board logo', () => {
+    // A role banner, a client CDN, or a platform image is not the employer's mark.
+    for (const content of [
+      'https://cdn.example.com/role-banner.png',
+      'https://media.licdn.com/dms/image/abc.png',
+      'https://job-boards.greenhouse.io/images/share.png',
+      'https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/other/x.png',
+      'http://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/a.png',
+      'https://app.ashbyhq.com/api/images/org-theme-banner/abc/def.png',
+      'https://lever-client-logos.s3.us-west-2.amazonaws.com.evil.test/x.png',
+    ]) {
+      expect(platformLogoUrls(`<meta property="og:image" content="${content}">`)).toEqual([]);
+    }
+    expect(platformLogoUrls('<html><head><title>Open roles</title></head></html>')).toEqual([]);
+  });
+
+  it('resolves an asset type from its bytes when the server declares nothing useful', () => {
+    const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]);
+    const webp = Uint8Array.from([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+    const avif = Uint8Array.from([0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66]);
+    const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+
+    // Lever's bucket serves PNGs as binary/octet-stream, so the header cannot be trusted alone.
+    for (const declared of [null, undefined, 'application/octet-stream', 'binary/octet-stream']) {
+      expect(iconAssetType(declared, png)).toBe('image/png');
+      expect(iconAssetType(declared, jpeg)).toBe('image/jpeg');
+      expect(iconAssetType(declared, webp)).toBe('image/webp');
+      expect(iconAssetType(declared, avif)).toBe('image/avif');
+      expect(iconAssetType(declared, svg)).toBeUndefined();
+    }
+    // A declared type still decides, and an SVG is refused however it is declared.
+    expect(iconAssetType('image/png; charset=binary', svg)).toBe('image/png');
+    expect(iconAssetType('image/svg+xml', png)).toBeUndefined();
+    expect(iconAssetType('text/html', png)).toBeUndefined();
+    expect(iconAssetType(null, new Uint8Array(0))).toBeUndefined();
   });
 });
 

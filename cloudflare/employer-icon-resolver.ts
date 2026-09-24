@@ -26,8 +26,9 @@ import {
 } from '../src/employer-icon-resolution.js';
 import {
   ICON_PROVIDER_TIMEOUT_MS, MAX_ICON_ASSET_BYTES, brandfetchCandidateDomains, brandfetchSearchUrl,
+  iconAssetType, platformLogoUrls,
   proposedDomainMatchesEmployer,
-  logoDevCandidateDomains, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence, validIconAsset,
+  logoDevCandidateDomains, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence,
   type IconPageEvidence,
 } from '../src/employer-icon-discovery.js';
 import { safeFetchBytes, safeFetchText, type HostResolver } from '../src/employer/safe-network.js';
@@ -264,6 +265,13 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
   const candidates = iconCandidates(seed, context, gathered, providers, declaredName);
   const decision = decideIconDomain(candidates);
   const attempt = task.attempts + 1;
+
+  // The employer's own uploaded logo is independent of the domain decision: it is
+  // the employer's mark, published by the employer on its own board, so it renders
+  // even while the domain stays unknown. Never fatal — an absent or unusable asset
+  // simply leaves the domain path to decide. Its provenance is recorded on the
+  // employer row as `icon_source = 'platform'`.
+  await storePlatformLogo({ store, env, context, gathered, now, deps });
 
   if (decision.outcome === 'resolved' && decision.selectedDomain) {
     return acceptSelectedDomain({ ...input, context, seed, decision, gathered, providers, attempt, at });
@@ -637,6 +645,11 @@ interface GatheredIconEvidence {
   /** Hostnames the request was validated through, in order. */
   redirectHosts: string[];
   page: IconPageEvidence;
+  /**
+   * The employer's uploaded board logos, most suitable first. Only URLs are kept;
+   * page HTML is never retained.
+   */
+  platformLogoUrls?: string[];
   /** Set when the link could not be read at all; providers still get a chance. */
   failure?: string;
 }
@@ -649,10 +662,12 @@ async function gatherIconEvidence(seed: EmployerIconSeed, deps: EmployerIconReso
       timeoutMs: ICON_LINK_TIMEOUT_MS, maxRedirects: ICON_LINK_MAX_REDIRECTS, maxBodyBytes: ICON_LINK_MAX_BYTES,
       onOversize: 'truncate',
     });
+    const logoUrls = platformLogoUrls(result.body);
     return {
       finalUrl: result.url,
       redirectHosts: hostnames(result.redirects),
       page: parseIconPageEvidence(result.body),
+      ...(logoUrls.length ? { platformLogoUrls: logoUrls } : {}),
     };
   } catch (error) {
     // A blocked, challenged, or timed-out link is normal. The employer still has
@@ -957,12 +972,63 @@ async function probeLogoDevImage(
         ...(retryAfter === undefined ? {} : { retryAfterMs: retryAfter }),
       };
     }
-    const contentType = result.headers.get('content-type');
-    if (!validIconAsset(contentType, result.body.byteLength)) return { available: false, transient: false };
-    return { available: true, transient: false, bytes: result.body, contentType: contentType!.split(';')[0]!.trim().toLowerCase() };
+    const contentType = iconAssetType(result.headers.get('content-type'), result.body);
+    if (!contentType) return { available: false, transient: false };
+    return { available: true, transient: false, bytes: result.body, contentType };
   } catch {
     return { available: false, transient: true };
   }
+}
+
+/**
+ * Stores the logo the employer uploaded to its own ATS board.
+ *
+ * No identity inference is involved: the page is the employer's own posting, and
+ * the asset is on the platform's board-logo host, so the mark belongs to the
+ * employer by construction. The bytes are copied into our own bucket so rendering
+ * never depends on the platform's CDN, and the key records its own provenance.
+ */
+async function storePlatformLogo(input: {
+  store: D1EmployerIconStore;
+  env: EmployerIconResolverEnvironment;
+  context: EmployerIconContext;
+  gathered?: GatheredIconEvidence;
+  now: Date;
+  deps: EmployerIconResolverDependencies;
+}): Promise<string | undefined> {
+  const { store, env, context, gathered, now, deps } = input;
+  const urls = gathered?.platformLogoUrls ?? [];
+  // A reviewer's icon and an already-stored one are both left alone.
+  if (!urls.length || context.iconKey) return undefined;
+  // Candidates are tried in order: a board can offer a square logo as an SVG and a
+  // usable raster behind it, so one unusable asset must not end the attempt.
+  for (const url of urls) {
+    try {
+      const result = await safeFetchBytes(url, {
+        resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch,
+        timeoutMs: ICON_PROVIDER_TIMEOUT_MS, maxRedirects: 1, maxBodyBytes: MAX_ICON_ASSET_BYTES,
+      });
+      const contentType = result.status >= 200 && result.status < 300
+        ? iconAssetType(result.headers.get('content-type'), result.body) : undefined;
+      if (!contentType) {
+        console.log(JSON.stringify({
+          event: 'company_icon_platform_logo_rejected', canonicalEmployerId: context.id,
+          status: result.status, byteLength: result.body.byteLength,
+        }));
+        continue;
+      }
+      const key = await storeIconAsset(env, context.id, result.body, contentType, 'platform');
+      await store.markPlatformIcon({ canonicalEmployerId: context.id, iconKey: key, now: now.toISOString() });
+      console.log(JSON.stringify({ event: 'company_icon_platform_logo_stored', canonicalEmployerId: context.id, key }));
+      return key;
+    } catch (error) {
+      console.log(JSON.stringify({
+        event: 'company_icon_platform_logo_failed', canonicalEmployerId: context.id,
+        error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+      }));
+    }
+  }
+  return undefined;
 }
 
 /** Stores the provider's WebP output under an immutable, content-addressed key. */
@@ -971,10 +1037,11 @@ async function storeIconAsset(
   canonicalEmployerId: string,
   bytes: Uint8Array,
   contentType: string,
+  kind: 'logo' | 'platform' = 'logo',
 ): Promise<string> {
   const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
   const extension = contentType === 'image/webp' ? 'webp' : contentType.split('/')[1]!.replace('jpeg', 'jpg');
-  const key = `company-icons/${canonicalEmployerId}/logo-${digest}.${extension}`;
+  const key = `company-icons/${canonicalEmployerId}/${kind}-${digest}.${extension}`;
   await env.DOCUMENTS.put(key, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType } });
   return key;
 }

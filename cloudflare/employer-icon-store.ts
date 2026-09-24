@@ -260,12 +260,29 @@ export class D1EmployerIconStore {
         updated_at = ? WHERE canonical_employer_id = ? AND status <> 'invalidated'`)
         .bind(now, employerIconWrongMatchPriority, reason.slice(0, 200), now, canonicalEmployerId),
       this.db.prepare(`UPDATE canonical_employers SET
-        icon_key = CASE WHEN icon_source = 'logo-dev' THEN NULL ELSE icon_key END,
-        icon_source = CASE WHEN icon_source = 'logo-dev' THEN NULL ELSE icon_source END,
+        icon_key = CASE WHEN icon_source IN ('logo-dev', 'platform') THEN NULL ELSE icon_key END,
+        icon_source = CASE WHEN icon_source IN ('logo-dev', 'platform') THEN NULL ELSE icon_source END,
         website_domain = NULL, icon_resolution_status = 'invalidated', icon_resolved_at = NULL,
         icon_tie_break_at = NULL, updated_at = ? WHERE id = ?`)
         .bind(now, canonicalEmployerId),
     ]);
+  }
+
+  /**
+   * Records the employer's own uploaded logo.
+   *
+   * The icon and the domain decision are separate facts, and this writes only the
+   * icon: `icon_resolution_status` is left alone, so an employer can show its real
+   * logo while its domain remains undecided. `icon_source` marks it as a machine
+   * write, which is what keeps observe mode withholding it.
+   */
+  async markPlatformIcon(input: { canonicalEmployerId: string; iconKey: string; now: string }): Promise<void> {
+    await this.db.prepare(`UPDATE canonical_employers SET
+      icon_key = CASE WHEN icon_key IS NULL THEN ? ELSE icon_key END,
+      icon_source = CASE WHEN icon_key IS NULL THEN 'platform' ELSE icon_source END,
+      icon_updated_at = CASE WHEN icon_key IS NULL THEN ? ELSE icon_updated_at END,
+      updated_at = ? WHERE id = ?`)
+      .bind(input.iconKey, input.now, input.now, input.canonicalEmployerId).run();
   }
 
   /**

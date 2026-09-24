@@ -2,6 +2,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
+import { companyIconResponse } from '../cloudflare/company-icon.js';
 import { handleEmployerIconOperations } from '../cloudflare/employer-icon-api.js';
 import { D1EmployerIconStore } from '../cloudflare/employer-icon-store.js';
 import {
@@ -934,6 +935,177 @@ describe('employer icon platform declarations and proposals', () => {
     // The catalog calls it `RV Tech`; the board knows the company's real name, and
     // that is the query which finds the domain.
     expect(diagnostic.logoDevDomains).toEqual(['rivianvw.tech']);
+  });
+});
+
+describe('employer icon uploaded board logo', () => {
+  const boardLogo = 'https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/204/510/original/Logo-IMC-Blue.png';
+
+  it('stores an employer’s uploaded logo even when no domain resolves', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    const fetchImpl = scriptedFetch({
+      // A posting that names nobody and a board slug that corroborates nobody, so
+      // the domain stays undecided — the uploaded logo is the only thing to use.
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+        `<!doctype html><html><head><title>Open role</title><meta property="og:image" content="${boardLogo}"></head></html>`,
+      ),
+      [boardLogo]: () => new Response(new Uint8Array(64).fill(9), { headers: { 'content-type': 'image/png' } }),
+    });
+
+    const result = await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    // The icon is stored, and the domain decision is honestly left undecided.
+    expect(result.unresolved).toBe(1);
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0]?.contentType).toBe('image/png');
+    expect(r2.puts[0]?.key).toMatch(/^company-icons\/acme\/platform-[0-9a-f]{16}\.png$/u);
+    const employer = await admission.getCanonicalEmployer('acme');
+    expect(employer?.iconKey).toBe(r2.puts[0]?.key);
+    expect(employer?.iconSource).toBe('platform');
+    expect(employer?.iconKey).toBeDefined();
+  });
+
+  it('stores a Lever logo the bucket serves as an opaque byte stream', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const leverLogo = 'https://lever-client-logos.s3-us-west-2.amazonaws.com/b8300af6-1586196845320.png';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://jobs.lever.co/board-1/abc'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://jobs.lever.co/board-1/abc': () => html(
+        `<!doctype html><html><head><title>Open role</title><meta property="og:image" content="${leverLogo}"></head></html>`,
+      ),
+      // No usable content type, but the bytes are a PNG.
+      [leverLogo]: () => new Response(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]), {
+        headers: { 'content-type': 'binary/octet-stream' },
+      }),
+    });
+
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0]?.contentType).toBe('image/png');
+    expect(r2.puts[0]?.key).toMatch(/^company-icons\/acme\/platform-[0-9a-f]{16}\.png$/u);
+  });
+
+  it('falls through an Ashby SVG square logo to the raster beside it', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const square = 'https://app.ashbyhq.com/api/images/org-theme-logo/1cea/square.svg';
+    const social = 'https://app.ashbyhq.com/api/images/org-theme-social/1cea/social.png';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://jobs.ashbyhq.com/board-1/abc'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://jobs.ashbyhq.com/board-1/abc': () => html(
+        `<!doctype html><html><head><title>Open role</title><meta property="og:image" content="${social}"></head><body>`
+        + `<script>{"logoSquareImageUrl":"${square}"}</script></body></html>`,
+      ),
+      [square]: () => new Response('<svg xmlns="http://www.w3.org/2000/svg"/>', { headers: { 'content-type': 'image/svg+xml' } }),
+      [social]: () => new Response(new Uint8Array(48).fill(3), { headers: { 'content-type': 'image/png' } }),
+    });
+
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    // The SVG is refused and the raster behind it is used, rather than ending the
+    // attempt at the first unusable asset.
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0]?.contentType).toBe('image/png');
+  });
+
+  it('withholds a machine-stored icon until the operator leaves observe mode, then serves it', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'observe', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+        `<!doctype html><html><head><title>Open role</title><meta property="og:image" content="${boardLogo}"></head></html>`,
+      ),
+      [boardLogo]: () => new Response(new Uint8Array(64).fill(9), { headers: { 'content-type': 'image/png' } }),
+    });
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    const employers = {
+      async getCanonicalEmployer(id: string) { return admission.getCanonicalEmployer(id); },
+    };
+
+    // Observe mode withholds the machine icon rather than letting a stored key route
+    // around the switch.
+    const observed = await companyIconResponse('acme', employers, r2.bucket, {
+      automaticDisplay: async () => (await icons.settings()).mode === 'resolve',
+    });
+    expect(observed.status).toBe(404);
+
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    const resolved = await companyIconResponse('acme', employers, r2.bucket, {
+      automaticDisplay: async () => (await icons.settings()).mode === 'resolve',
+    });
+    expect(resolved.status).toBe(200);
+    expect(resolved.headers.get('content-type')).toBe('image/png');
+  });
+
+  it('never overwrites a reviewer’s icon and drops an unusable upload', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme', 'company-icons/acme/reviewed.png'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+        `<!doctype html><html><head><title>Open role</title><meta property="og:image" content="${boardLogo}"></head></html>`,
+      ),
+    });
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    // A reviewed icon is authoritative, so the upload is not even fetched.
+    expect(r2.puts).toHaveLength(0);
+    expect((await admission.getCanonicalEmployer('acme'))?.iconKey).toBe('company-icons/acme/reviewed.png');
+
+    // And an upload that is not a usable raster is rejected rather than stored.
+    const second = subject();
+    await second.admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await second.icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(second.icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    const badR2 = r2Stub();
+    const badFetch = scriptedFetch({
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+        `<!doctype html><html><head><title>Open role</title><meta property="og:image" content="${boardLogo}"></head></html>`,
+      ),
+      [boardLogo]: () => new Response('<svg/>', { headers: { 'content-type': 'image/svg+xml' } }),
+    });
+    await runEmployerIconResolutionPass(environment(second.db, badR2.bucket, {}), NOW, DEPENDENCIES(badFetch));
+    expect(badR2.puts).toHaveLength(0);
+    expect((await second.admission.getCanonicalEmployer('acme'))?.iconKey).toBeUndefined();
+  });
+
+  it('withdraws a platform icon when a wrong-icon report arrives', async () => {
+    const { database, db, admission, icons } = subject();
+    const r2 = r2Stub();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+        `<!doctype html><html><head><title>Open role</title><meta property="og:image" content="${boardLogo}"></head></html>`,
+      ),
+      [boardLogo]: () => new Response(new Uint8Array(64).fill(9), { headers: { 'content-type': 'image/png' } }),
+    });
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+    expect((await admission.getCanonicalEmployer('acme'))?.iconKey).toBeDefined();
+
+    await icons.invalidate('acme', NOW.toISOString(), 'wrong logo');
+    const employer = await admission.getCanonicalEmployer('acme');
+    expect(employer?.iconKey).toBeUndefined();
+    expect(employer?.iconSource).toBeUndefined();
+    expect(database.prepare('SELECT icon_resolution_status FROM canonical_employers WHERE id = ?').get('acme'))
+      .toMatchObject({ icon_resolution_status: 'invalidated' });
   });
 });
 

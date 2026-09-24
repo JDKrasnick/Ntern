@@ -29,6 +29,9 @@ export interface CompanyIconDependencies {
   resolver?: HostResolver;
 }
 
+/** Icon sources a machine path wrote; they render only once the operator leaves observe mode. */
+const MACHINE_ICON_SOURCES: Record<string, true> = { 'logo-dev': true, platform: true };
+
 /** Serves only a reviewed icon linked to the requested canonical employer. */
 export async function companyIconResponse(
   encodedEmployerId: string,
@@ -42,7 +45,18 @@ export async function companyIconResponse(
 
   const employer = await employers.getCanonicalEmployer(employerId);
   if (!employer) return notFound();
-  if (employer.iconKey) return storedIconResponse(employer.iconKey, documents);
+  if (employer.iconKey) {
+    // A reviewer's icon always renders. An icon a machine stored — a cached
+    // provider image, or the logo the employer uploaded to its ATS board — is
+    // automatic, so observe mode must withhold it like any other automatic answer
+    // rather than let a stored key route around the switch.
+    if (MACHINE_ICON_SOURCES[employer.iconSource ?? ''] !== true) {
+      return storedIconResponse(employer.iconKey, documents);
+    }
+    if (dependencies.automaticDisplay && await dependencies.automaticDisplay()) {
+      return storedIconResponse(employer.iconKey, documents);
+    }
+  }
   return automaticIconResponse(employerId, dependencies);
 }
 

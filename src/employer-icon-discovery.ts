@@ -95,6 +95,98 @@ function providerDomains(value: unknown, displayName: string): string[] {
   return domains;
 }
 
+/**
+ * The logos the employer uploaded to its own ATS board, most suitable first.
+ *
+ * This is the employer's own mark, published by the employer on the board that
+ * hosts its postings, so it is the ideal icon: no logo provider is involved and no
+ * identity inference is needed. Each platform is matched on the hosts and paths it
+ * actually uses for board logos, so an unrelated `og:image` — a role banner, a
+ * client's CDN — is never picked up:
+ *
+ *   Ashby      app.ashbyhq.com/api/images/org-theme-logo|wordmark/<org>/<image>
+ *   Greenhouse s<N>-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/…
+ *   Lever      lever-client-logos.s3[-us-west-2|.us-west-2].amazonaws.com/<image>
+ *
+ * A square logo beats a wide wordmark for a square tile, and a raster beats an SVG,
+ * because Ashby serves some boards an SVG that cannot be stored safely. Every
+ * candidate is returned so a caller can fall through when one turns out to be
+ * unusable.
+ */
+export function platformLogoUrls(html: string): string[] {
+  const ranked = [
+    // Source rank: a square logo beats a wide wordmark, and both beat the social
+    // card crop, which is still the employer's own uploaded art.
+    { url: jsonStringField(html, 'logoSquareImageUrl'), rank: 0 },
+    { url: jsonStringField(html, 'logoWordmarkImageUrl'), rank: 1 },
+    { url: metaContent(html, 'og:image'), rank: 2 },
+  ].filter((candidate): candidate is { url: string; rank: number } =>
+    Boolean(candidate.url) && isPlatformLogoHost(candidate.url!));
+  const unique = [...new Map(ranked.map((candidate) => [candidate.url, candidate])).values()];
+  const isSvg = (url: string) => /\.svg($|\?)/iu.test(url);
+  // A raster is usable, an SVG cannot be stored, so format outranks source: Ashby
+  // serves some boards an SVG square with a usable social image beside it.
+  return unique
+    .slice()
+    .sort((left, right) => (isSvg(left.url) ? 1 : 0) - (isSvg(right.url) ? 1 : 0) || left.rank - right.rank)
+    .map((candidate) => candidate.url);
+}
+
+/**
+ * The accepted raster type for an asset, from its declared type or, when the
+ * server declares nothing useful, from its own bytes. Lever's logo bucket serves
+ * PNGs as `binary/octet-stream`, so a header cannot be the only evidence.
+ */
+export function iconAssetType(typeHeader: string | null | undefined, bytes: Uint8Array): string | undefined {
+  const declared = typeHeader?.split(';')[0]?.trim().toLowerCase();
+  if (declared && declared !== 'application/octet-stream' && declared !== 'binary/octet-stream') {
+    return declared !== '' && ICON_ASSET_CONTENT_TYPES[declared] ? declared : undefined;
+  }
+  const sniffed = sniffRasterType(bytes);
+  return sniffed && ICON_ASSET_CONTENT_TYPES[sniffed] ? sniffed : undefined;
+}
+
+function sniffRasterType(bytes: Uint8Array): string | undefined {
+  const at = (offset: number, expected: readonly number[]) =>
+    expected.every((value, index) => bytes[offset + index] === value);
+  if (at(0, [0x89, 0x50, 0x4e, 0x47])) return 'image/png';
+  if (at(0, [0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (bytes.length >= 12 && at(0, [0x52, 0x49, 0x46, 0x46]) && at(8, [0x57, 0x45, 0x42, 0x50])) return 'image/webp';
+  // ISO base media files carry `ftyp` at offset 4 with a brand that names the codec.
+  if (bytes.length >= 12 && at(4, [0x66, 0x74, 0x79, 0x70])) {
+    const brand = String.fromCharCode(...bytes.slice(8, 12));
+    if (brand === 'avif' || brand === 'avis') return 'image/avif';
+  }
+  return undefined;
+}
+
+function jsonStringField(html: string, name: string): string | undefined {
+  const match = new RegExp(`"${name}"\\s*:\\s*("(?:[^"\\\\]|\\\\.)*")`, 'u').exec(html);
+  if (!match) return undefined;
+  try {
+    const value = JSON.parse(match[1]!);
+    return typeof value === 'string' && value.startsWith('https://') ? value : undefined;
+  } catch { return undefined; }
+}
+
+function isPlatformLogoHost(value: string): boolean {
+  let url: URL;
+  try { url = new URL(value); } catch { return false; }
+  if (url.protocol !== 'https:') return false;
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.toLowerCase();
+  if (host.endsWith('cdn.greenhouse.io')) return path.startsWith('/external_greenhouse_job_boards/logos/');
+  if (host.startsWith('lever-client-logos.s3') && host.endsWith('amazonaws.com')) return true;
+  if (host === 'app.ashbyhq.com') {
+    // Every `org-theme-*` path is the employer's own uploaded art for its board:
+    // the square logo, the wordmark, and the social-card crop of the same image.
+    return path.startsWith('/api/images/org-theme-logo/')
+      || path.startsWith('/api/images/org-theme-wordmark/')
+      || path.startsWith('/api/images/org-theme-social/');
+  }
+  return false;
+}
+
 /** Bounded public page metadata that can independently name the employer. */
 export interface IconOrganizationEvidence {
   name?: string;
