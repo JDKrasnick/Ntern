@@ -398,6 +398,16 @@ steps and isolates each one's failure, so a failing alert or verification email 
 no longer hold publication back.
 
 Still growing with the catalog: the projection carried 80.6 MiB on 2026-09-17 and
-is written in 11 batches. If that keeps climbing, the next step is a projection
-that ships only the groups a refresh changed rather than a full copy.
+is written in 11 batches. The refresh now ships only the cards that changed
+instead of a full copy. Cards are stored under the group's own identity with a
+content-addressed suffix and ordered by a key the card carries, so a changed tick
+writes the changed cards and deletes exactly the rows they replaced, and an
+unchanged tick still costs one pointer row.
+
+Measured on 2026-09-24 against a 300-card local simulation (~8.8 MB of cards):
+a full publish wrote 12 statements, and a one-card refresh wrote 2 statements and
+20.7 KB — the card plus the row it replaced. At the deployed size the version this
+replaced wrote 2,608 cards and deleted the 2,608 from the previous version on
+every changed tick. The first refresh after the deploy still rewrites every card
+once: a version-4 copy is stored under its version's key and cannot be reused.
 

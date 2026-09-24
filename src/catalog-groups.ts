@@ -402,6 +402,23 @@ function releaseGroups(jobs: Internship[]): { releases: Array<{ roles: Internshi
   return { releases, remaining: [...remaining] };
 }
 
+/**
+ * The order the public catalog serves cards in. `updatedAt` is carried by the
+ * card itself, so inserting or removing a card never renumbers the others — which
+ * is what lets D1 store each card under a stable key and rewrite only the card
+ * that changed. The group id breaks ties, so the order is deterministic rather
+ * than dependent on the order the cards happened to be built in.
+ */
+export function compareCatalogProjectionGroups(left: CatalogGroupDetails, right: CatalogGroupDetails): number {
+  return right.group.updatedAt.localeCompare(left.group.updatedAt)
+    || right.group.groupId.localeCompare(left.group.groupId);
+}
+
+/** The row's order key: read descending, so it matches `compareCatalogProjectionGroups`. */
+export function catalogProjectionSortKey(group: CatalogGroupDetails): string {
+  return `${group.group.updatedAt}#${group.group.groupId}`;
+}
+
 /** Deterministically builds safe catalog rows without treating title/location similarity as posting identity. */
 export function groupCatalogJobs(jobs: Internship[], options: { includeClosed?: boolean } = {}): BuiltGroup[] {
   const visible = jobs.filter((job) => (options.includeClosed || job.open) && job.technical !== false);

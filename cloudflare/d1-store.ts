@@ -6,7 +6,7 @@ import { employerCategory } from '../src/core/employers.js';
 import type { ApplicationSession } from '../src/application-automation.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
-import { catalogProjectionRoleMatches, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
+import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
@@ -180,6 +180,48 @@ function catalogProjectionRoleQuery(filter: CatalogGroupFilter) {
   return { clauses, values };
 }
 
+/**
+ * Whether an upsert would store anything different. D1 bills a row an `UPDATE`
+ * matched, not a row whose bytes changed, so an identical rewrite costs exactly
+ * what a real one costs; every writer that can be replayed compares the stored
+ * row with the value it is about to store. `IS NOT` keeps a NULL column (for
+ * example `catalog_state` on a withheld role) comparable.
+ *
+ * The derived index columns are part of the comparison on purpose: if a deploy
+ * changes how a column is derived, an otherwise unchanged row is still repaired
+ * instead of keeping the old value forever.
+ *
+ * Two writers deliberately keep their own precondition guard instead: the
+ * posting-observation commit and `putAdmissionState` return their statement's
+ * `changes` count as a commit signal, so they must keep matching the row they
+ * were prepared against even when the new value equals the stored one.
+ */
+const catalogRowChanged = (columns: readonly string[]): string =>
+  ['kind', 'value', ...columns].map((name) => `catalog_items.${name} IS NOT excluded.${name}`).join(' OR ');
+
+/**
+ * Projection rows live under one stable partition; the group id and the digest
+ * of the card's payload identify the row, so an unchanged card is never
+ * rewritten and a changed card leaves exactly one row to clean up.
+ */
+const CATALOG_PROJECTION_GROUPS_PK = 'CATALOG_PROJECTION#GROUPS';
+const CATALOG_PROJECTION_SCHEMA_VERSION = 5;
+const CATALOG_PROJECTION_GROUP_PREFIX = 'GROUP#';
+
+const catalogProjectionGroupRowKey = (groupId: string, digest: string): string =>
+  `${CATALOG_PROJECTION_GROUP_PREFIX}${groupId}#${digest}`;
+
+function catalogProjectionGroupRowPrefix(groupId: string): string {
+  // The group id is a hex or hyphen identity, but escape the LIKE wildcards so a
+  // future identity scheme cannot turn a lookup into a scan.
+  return `${CATALOG_PROJECTION_GROUP_PREFIX}${groupId.replace(/[\\%_]/gu, (character) => `\\${character}`)}#`;
+}
+
+function catalogProjectionGroupRow(sk: string): { groupId: string; digest: string } | undefined {
+  const match = /^GROUP#(.*)#([0-9a-f]{20})$/u.exec(sk);
+  return match ? { groupId: match[1]!, digest: match[2]! } : undefined;
+}
+
 export class D1InternshipStore implements InternshipStore {
   constructor(private readonly db: D1Database) {}
 
@@ -210,7 +252,7 @@ export class D1InternshipStore implements InternshipStore {
     const names = Object.keys(columns);
     const placeholders = Array.from({ length: 4 + names.length }, () => '?').join(', ');
     const updates = ['kind = excluded.kind', 'value = excluded.value', ...names.map((name) => `${name} = excluded.${name}`)].join(', ');
-    await this.db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value${names.length ? `, ${names.join(', ')}` : ''}) VALUES (${placeholders}) ON CONFLICT(pk, sk) DO UPDATE SET ${updates}`)
+    await this.db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value${names.length ? `, ${names.join(', ')}` : ''}) VALUES (${placeholders}) ON CONFLICT(pk, sk) DO UPDATE SET ${updates} WHERE ${catalogRowChanged(names)}`)
       .bind(pk, sk, kind, JSON.stringify(value), ...names.map((name) => columns[name])).run();
   }
 
@@ -226,6 +268,8 @@ export class D1InternshipStore implements InternshipStore {
         sms_pending = excluded.sms_pending, digest_pending = excluded.digest_pending,
         catalog_state = excluded.catalog_state, catalog_sort_key = excluded.catalog_sort_key,
         search_text = excluded.search_text, source_classes = excluded.source_classes
+      WHERE ${catalogRowChanged(['url_key', 'fingerprint_key', 'sms_pending', 'digest_pending',
+        'catalog_state', 'catalog_sort_key', 'search_text', 'source_classes'])}
     `).bind(
       `JOB#${canonical.jobId}`,
       JSON.stringify(canonical),
@@ -244,7 +288,8 @@ export class D1InternshipStore implements InternshipStore {
     return this.db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value, source_id, external_id)
       VALUES (?, ?, 'source-occurrence', ?, ?, ?)
       ON CONFLICT(pk, sk) DO UPDATE SET kind = excluded.kind, value = excluded.value,
-        source_id = excluded.source_id, external_id = excluded.external_id`)
+        source_id = excluded.source_id, external_id = excluded.external_id
+      WHERE ${catalogRowChanged(['source_id', 'external_id'])}`)
       .bind(`SOURCE#${occurrence.sourceId}`, `OCCURRENCE#${occurrence.externalId}`, JSON.stringify(occurrence), occurrence.sourceId, occurrence.externalId);
   }
 
@@ -289,7 +334,8 @@ export class D1InternshipStore implements InternshipStore {
     if (!dispatches.length) return;
     const statements = dispatches.map((dispatch) => this.db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
       VALUES (?, 'DISPATCH', 'source-dispatch', ?)
-      ON CONFLICT(pk, sk) DO UPDATE SET kind = excluded.kind, value = excluded.value`)
+      ON CONFLICT(pk, sk) DO UPDATE SET kind = excluded.kind, value = excluded.value
+      WHERE ${catalogRowChanged([])}`)
       .bind(`SOURCE#${dispatch.sourceId}`, JSON.stringify(dispatch)));
     for (let offset = 0; offset < statements.length; offset += 50) await this.db.batch(statements.slice(offset, offset + 50));
   }
@@ -513,7 +559,10 @@ export class D1InternshipStore implements InternshipStore {
             SELECT COUNT(*) FROM posting_identity_review_candidate_occurrences WHERE candidate_id = ?
           )
           WHERE id = ? AND ${conflictGuard} AND ${projectionGuard}
-        `).bind(candidateId, candidateId, ...candidateGuardValues));
+            AND occurrence_count IS NOT (
+              SELECT COUNT(*) FROM posting_identity_review_candidate_occurrences WHERE candidate_id = ?
+            )
+        `).bind(candidateId, candidateId, ...candidateGuardValues, candidateId));
       }
       const notificationIndex = finalized.notificationEvent ? statements.length : -1;
       if (finalized.notificationEvent) statements.push(this.db.prepare(`
@@ -788,28 +837,50 @@ export class D1InternshipStore implements InternshipStore {
     return jobs
       .sort(compareCatalogRecency).map(withEmployerCategory);
   }
+  /**
+   * Publishes the grouped catalog the readers serve.
+   *
+   * The refresh runs on a ten-minute cadence and D1's throughput is the
+   * constraint the ingestion queues queue behind, so the cost of a tick that
+   * changes one card must not be a copy of the whole catalog: at the measured
+   * production size every changed tick used to write 2,608 cards and delete the
+   * 2,608 from the previous version. Cards are therefore stored under the group's
+   * own identity with a content-addressed suffix, ordered by a key the card
+   * carries, so a refresh writes exactly the cards that changed and deletes
+   * exactly the rows they replaced. An unchanged tick still costs one pointer.
+   *
+   * One `batch()` is also one RPC call carrying every statement's bound value,
+   * and Cloudflare refuses a serialized argument over 32 MiB, so the work is
+   * budgeted in payload bytes and the stored state is read as small key rows
+   * rather than as card payloads. See docs/197-ingestion-resource-bounds.md.
+   */
   async putCatalogProjection(groups: CatalogGroupDetails[], generatedAt: string): Promise<void> {
-    const previous = await this.get<{ version: string; generatedAt: string }>('CATALOG_PROJECTION', 'CURRENT');
-    // Content-addressed, so an unchanged catalog costs one pointer write instead
-    // of rewriting every card: the refresh runs on a ten-minute cadence and D1's
-    // throughput is the constraint the ingestion queues queue behind, so ticks
-    // that change nothing must not spend it. The hash covers each card's payload,
-    // not just its id, because a role can change inside a card whose id is stable.
+    const previous = await this.get<{ version: string; generatedAt: string; schemaVersion?: number }>('CATALOG_PROJECTION', 'CURRENT');
+    const published = previous?.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION;
     const version = createHash('sha256');
     for (const group of groups) version.update(JSON.stringify(group)).update('\0');
     const digest = version.digest('hex').slice(0, 20);
-    if (previous?.version === digest) {
-      await this.put('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', { version: digest, generatedAt, schemaVersion: 4 });
+    if (published && previous?.version === digest) {
+      await this.putCatalogProjectionPointer(digest, generatedAt);
       return;
     }
-    // One `batch()` is a single RPC call carrying every statement's bound value,
-    // and Cloudflare refuses a serialized argument over 32 MiB. The projection is
-    // a copy of the whole catalog, so neither a row count nor a statement count
-    // bounds the write: it crossed the ceiling in production and every refresh
-    // failed here, freezing the feed on the last good version. Rows are grouped
-    // into statements and statements into one `batch()` by payload bytes instead,
-    // budgeted well below the ceiling because the RPC envelope can inflate the
-    // JSON it carries. See docs/197-ingestion-resource-bounds.md.
+    // What is stored, without loading a single card: one small row per group
+    // carrying the digest of its payload and its order key.
+    const stored = new Map<string, { digest: string; sortKey: string }>();
+    if (published) {
+      let after = '';
+      for (;;) {
+        const page = await this.db.prepare(`SELECT sk, catalog_sort_key AS sortKey FROM catalog_items
+          WHERE pk = ? AND kind = 'catalog-projection' AND sk > ? ORDER BY sk LIMIT 500`)
+          .bind(CATALOG_PROJECTION_GROUPS_PK, after).all<{ sk: string; sortKey: string | null }>();
+        for (const row of page.results) {
+          const parsed = catalogProjectionGroupRow(row.sk);
+          if (parsed) stored.set(parsed.groupId, { digest: parsed.digest, sortKey: row.sortKey ?? '' });
+        }
+        if (page.results.length < 500) break;
+        after = page.results[page.results.length - 1]!.sk;
+      }
+    }
     const pending: D1PreparedStatement[] = [];
     let pendingBytes = 0;
     let rows: Array<{ sk: string; value: string; sortKey: string }> = [];
@@ -828,12 +899,19 @@ export class D1InternshipStore implements InternshipStore {
       pending.push(this.db.prepare(`
         INSERT INTO catalog_items (pk, sk, kind, value, catalog_sort_key) VALUES ${placeholders}
         ON CONFLICT(pk, sk) DO UPDATE SET value = excluded.value, catalog_sort_key = excluded.catalog_sort_key
-      `).bind(...written.flatMap((row) => [`CATALOG_PROJECTION#${digest}`, row.sk, row.value, row.sortKey])));
+      `).bind(...written.flatMap((row) => [CATALOG_PROJECTION_GROUPS_PK, row.sk, row.value, row.sortKey])));
       pendingBytes += writtenBytes;
     };
-    for (let index = 0; index < groups.length; index += 1) {
-      const value = JSON.stringify(groups[index]);
-      const row = { sk: `GROUP#${groups[index]!.group.groupId}`, value, sortKey: String(index).padStart(8, '0') };
+    const current = new Set<string>();
+    for (const group of groups) {
+      const groupId = group.group.groupId;
+      const value = JSON.stringify(group);
+      const rowDigest = createHash('sha256').update(value).digest('hex').slice(0, 20);
+      const sortKey = catalogProjectionSortKey(group);
+      const row = { sk: catalogProjectionGroupRowKey(groupId, rowDigest), value, sortKey };
+      current.add(row.sk);
+      const existing = stored.get(groupId);
+      if (existing && existing.digest === rowDigest && existing.sortKey === sortKey) continue;
       const rowBytes = value.length + row.sk.length + 96;
       // A statement binds four parameters per row, so D1's 100-parameter
       // allowance caps the row count as well as the payload.
@@ -842,27 +920,54 @@ export class D1InternshipStore implements InternshipStore {
     }
     await writeRows();
     await flush();
-    await this.put('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', { version: digest, generatedAt, schemaVersion: 4 });
-    // Projection versions are rebuildable caches. Deleting only the version
-    // observed before this refresh keeps overlapping refreshes from deleting
-    // whichever version wins the pointer race.
-    if (previous?.version && previous.version !== digest) {
+    await this.putCatalogProjectionPointer(digest, generatedAt);
+    // Every row this refresh did not just store is superseded: the card changed
+    // or left the catalog. Deletions are bounded so cleanup cannot become the
+    // cost spike the refresh was optimized to avoid.
+    const stale = [...stored.entries()]
+      .map(([groupId, row]) => catalogProjectionGroupRowKey(groupId, row.digest))
+      .filter((sk) => !current.has(sk));
+    for (let offset = 0; offset < stale.length; offset += 100) {
+      const batch = stale.slice(offset, offset + 100)
+        .map((sk) => this.db.prepare("DELETE FROM catalog_items WHERE pk = ? AND sk = ? AND kind = 'catalog-projection'")
+          .bind(CATALOG_PROJECTION_GROUPS_PK, sk));
+      await this.db.batch(batch);
+    }
+    // A version-4 projection stored its copy under the previous version's pk.
+    // The first refresh after this deploy replaces it, and its rows are removed
+    // in one statement because none of them can be reused.
+    if (previous?.version && !published) {
       await this.db.prepare("DELETE FROM catalog_items WHERE kind = 'catalog-projection' AND pk = ?")
         .bind(`CATALOG_PROJECTION#${previous.version}`).run();
     }
   }
+
+  private putCatalogProjectionPointer(version: string, generatedAt: string) {
+    return this.put('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer',
+      { version, generatedAt, schemaVersion: CATALOG_PROJECTION_SCHEMA_VERSION });
+  }
+
+  /** The projection rows a request reads, tolerating the version-4 layout until rollback is retired. */
+  private catalogProjectionScope(pointer: { version: string; schemaVersion: number }): { pk: string; order: 'ASC' | 'DESC' } {
+    return pointer.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION
+      ? { pk: CATALOG_PROJECTION_GROUPS_PK, order: 'DESC' }
+      : { pk: `CATALOG_PROJECTION#${pointer.version}`, order: 'ASC' };
+  }
+
   async listCatalogProjection(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {
-    const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
-    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
+    const pointer = await this.readCatalogProjectionPointer();
+    if (!pointer) return undefined;
+    const scope = this.catalogProjectionScope(pointer);
     const offset = cursorOffset(cursor);
-    const rows = await this.db.prepare("SELECT value FROM catalog_items WHERE pk = ? AND kind = 'catalog-projection' ORDER BY catalog_sort_key ASC LIMIT ? OFFSET ?")
-      .bind(`CATALOG_PROJECTION#${pointer.version}`, limit + 1, offset).all<JsonRow>();
+    const rows = await this.db.prepare(`SELECT value FROM catalog_items WHERE pk = ? AND kind = 'catalog-projection' ORDER BY catalog_sort_key ${scope.order} LIMIT ? OFFSET ?`)
+      .bind(scope.pk, limit + 1, offset).all<JsonRow>();
     const groups = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
     return { groups, ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}) };
   }
   async listCatalogProjectionFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
-    const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
-    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
+    const pointer = await this.readCatalogProjectionPointer();
+    if (!pointer) return undefined;
+    const scope = this.catalogProjectionScope(pointer);
     const offset = cursorOffset(cursor);
     const { clauses: roleClauses, values } = catalogProjectionRoleQuery(filter);
     const rows = await this.db.prepare(`
@@ -874,16 +979,17 @@ export class D1InternshipStore implements InternshipStore {
           SELECT 1 FROM json_each(projection.value, '$.roles') AS role
           WHERE ${roleClauses.join('\n            AND ')}
         )
-      ORDER BY projection.catalog_sort_key ASC
+      ORDER BY projection.catalog_sort_key ${scope.order}
       LIMIT ? OFFSET ?
-    `).bind(`CATALOG_PROJECTION#${pointer.version}`, ...values, limit + 1, offset).all<JsonRow>();
+    `).bind(scope.pk, ...values, limit + 1, offset).all<JsonRow>();
     const candidates = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
     const groups = filterCatalogGroupDetails(candidates, filter);
     return { groups, ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}) };
   }
   async listCatalogProjectionRoles(filter: CatalogGroupFilter, range: { from?: string; to?: string }): Promise<CatalogGroupRole[] | undefined> {
-    const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
-    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
+    const pointer = await this.readCatalogProjectionPointer();
+    if (!pointer) return undefined;
+    const scope = this.catalogProjectionScope(pointer);
     const { clauses, values } = catalogProjectionRoleQuery(filter);
     clauses.push("json_extract(role.value, '$.releaseDay') IS NOT NULL");
     // Observed instants can cross one calendar boundary in the reader's zone.
@@ -897,15 +1003,28 @@ export class D1InternshipStore implements InternshipStore {
       WHERE projection.pk = ?
         AND projection.kind = 'catalog-projection'
         AND ${clauses.join('\n        AND ')}
-    `).bind(`CATALOG_PROJECTION#${pointer.version}`, ...values).all<JsonRow>();
+    `).bind(scope.pk, ...values).all<JsonRow>();
     return rows.results
       .map((row) => JSON.parse(row.value) as CatalogGroupRole)
       .filter((role) => catalogProjectionRoleMatches(role, filter));
   }
   async getCatalogProjectionGroup(groupId: string): Promise<CatalogGroupDetails | undefined> {
+    const pointer = await this.readCatalogProjectionPointer();
+    if (!pointer) return undefined;
+    const scope = this.catalogProjectionScope(pointer);
+    if (scope.pk !== CATALOG_PROJECTION_GROUPS_PK) return this.get<CatalogGroupDetails>(scope.pk, `GROUP#${groupId}`);
+    // The group's card carries its own digest, so the lookup is a prefix read of
+    // one row; a group the last refresh removed has no row.
+    const row = await this.db.prepare(`SELECT value FROM catalog_items WHERE pk = ? AND kind = 'catalog-projection' AND sk LIKE ? ESCAPE '\\' LIMIT 1`)
+      .bind(scope.pk, `${catalogProjectionGroupRowPrefix(groupId)}%`).first<JsonRow>();
+    return row ? JSON.parse(row.value) as CatalogGroupDetails : undefined;
+  }
+
+  private async readCatalogProjectionPointer(): Promise<{ version: string; generatedAt: string; schemaVersion: number } | undefined> {
     const pointer = await this.get<{ version: string; generatedAt: string; schemaVersion: number }>('CATALOG_PROJECTION', 'CURRENT');
-    if (!pointer || pointer.schemaVersion !== 4 || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
-    return this.get<CatalogGroupDetails>(`CATALOG_PROJECTION#${pointer.version}`, `GROUP#${groupId}`);
+    if (!pointer || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;
+    const supported = pointer.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION || pointer.schemaVersion === 4;
+    return supported ? pointer : undefined;
   }
   async listLeverAdmissions(): Promise<LeverAdmission[]> {
     const result = await this.db.prepare("SELECT value FROM catalog_items WHERE pk = 'REGISTRY#LEVER' AND sk LIKE 'SOURCE#%'").all<JsonRow>();

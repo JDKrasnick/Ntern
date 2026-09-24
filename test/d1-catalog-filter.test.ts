@@ -33,7 +33,7 @@ type SqliteValue = string | number | bigint | null | Uint8Array;
 function sqliteD1(
   database: DatabaseSync,
   inspectRows?: (query: string, rows: unknown[]) => void,
-  rpc?: { maxBatchBytes: number; batchBytes: number[] },
+  rpc?: { maxBatchBytes: number; batchBytes: number[]; batchSizes?: number[] },
 ): D1Database {
   const prepared = (query: string, values: unknown[] = []): D1PreparedStatement => {
     const statement: StatementSync = database.prepare(query);
@@ -58,6 +58,7 @@ function sqliteD1(
       // over 32 MiB, so the fake enforces the same ceiling on the bound payload.
       const bytes = statements.reduce((total, statement) => total + (statement as D1PreparedStatement & { __payload: number }).__payload, 0);
       rpc?.batchBytes.push(bytes);
+      rpc?.batchSizes?.push(statements.length);
       if (rpc && bytes > rpc.maxBatchBytes) {
         throw new Error(`D1_ERROR: Serialized RPC arguments or return values are limited to ${rpc.maxBatchBytes} bytes, but the size of this value was: ${bytes} bytes.`);
       }
@@ -180,7 +181,8 @@ describe('D1 filtered catalog projection', () => {
     } finally {
       database.close();
     }
-  });
+    // A production-sized projection write is a heavy local simulation.
+  }, 30_000);
 
   it('writes only the pointer when the projection content has not changed', async () => {
     const database = new DatabaseSync(':memory:');
@@ -286,7 +288,7 @@ describe('D1 filtered catalog projection', () => {
     expect(batchBytes.reduce((total, bytes) => total + bytes, 0)).toBeGreaterThan(3 * 1024 * 1024);
   });
 
-  it('writes multi-row projection batches with stable global ordering', async () => {
+  it('writes only the cards a refresh changed and orders them by the card itself', async () => {
     const database = new DatabaseSync(':memory:');
     database.exec(`
       CREATE TABLE catalog_items (
@@ -301,18 +303,101 @@ describe('D1 filtered catalog projection', () => {
     const template = catalogGroupDetails(groupCatalogJobs([job('template', 'Software Engineering Intern')])[0]!);
     const groups = Array.from({ length: 26 }, (_, index) => ({
       ...template,
-      group: { ...template.group, groupId: `group-${index}` },
+      group: { ...template.group, groupId: `group-${String(index).padStart(2, '0')}` },
       roles: template.roles.map((role) => ({ ...role, jobId: `job-${index}` })),
     }));
+    const rows = () => database.prepare("SELECT sk, value, catalog_sort_key FROM catalog_items WHERE kind = 'catalog-projection' ORDER BY sk").all() as Array<{ sk: string; value: string; catalog_sort_key: string }>;
     try {
-      await new D1InternshipStore(sqliteD1(database)).putCatalogProjection(groups, '2026-08-27T00:00:00.000Z');
+      const store = new D1InternshipStore(sqliteD1(database));
+      // The reader rejects a projection older than the recovery window, so the
+      // pointer is stamped now and only its content digest decides a rewrite.
+      const generatedAt = new Date().toISOString();
+      await store.putCatalogProjection(groups, generatedAt);
       expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 26 });
+      // The order key is the card's own recency, so a card's position never
+      // depends on how many cards happened to be built before it.
       expect(database.prepare("SELECT MIN(catalog_sort_key) AS first, MAX(catalog_sort_key) AS last FROM catalog_items WHERE kind = 'catalog-projection'").get())
-        .toEqual({ first: '00000000', last: '00000025' });
+        .toEqual({ first: `${template.group.updatedAt}#group-00`, last: `${template.group.updatedAt}#group-25` });
+      const page = await store.listCatalogProjection(undefined, 25);
+      expect(page?.groups.map((group) => group.group.groupId))
+        .toEqual(Array.from({ length: 25 }, (_, index) => `group-${String(25 - index).padStart(2, '0')}`));
+      expect(page?.cursor).toBe('25');
+
+      // One renamed card rewrites one card and deletes the row it replaced; every
+      // other card keeps its exact bytes, which is the whole point of the layout.
+      const before = rows();
+      const changed = structuredClone(groups);
+      changed[3]!.group.titles = ['Renamed Intern'];
+      await store.putCatalogProjection(changed, generatedAt);
+      const after = rows();
+      expect(after).toHaveLength(before.length);
+      const beforeKeys = new Set(before.map((row) => row.sk));
+      const afterKeys = new Set(after.map((row) => row.sk));
+      expect([...afterKeys].filter((key) => !beforeKeys.has(key))).toHaveLength(1);
+      expect([...beforeKeys].filter((key) => !afterKeys.has(key))).toHaveLength(1);
+      expect(after.filter((row) => beforeKeys.has(row.sk))).toEqual(before.filter((row) => afterKeys.has(row.sk)));
+
+      // A group that leaves the catalog takes its row with it, and a group that
+      // arrives adds exactly one row.
+      const withoutFirst = changed.slice(1);
+      const arrived = { ...template, group: { ...template.group, groupId: 'group-99' },
+        roles: template.roles.map((role) => ({ ...role, jobId: 'job-new' })) };
+      await store.putCatalogProjection([...withoutFirst, arrived], generatedAt);
+      const current = rows();
+      expect(current).toHaveLength(after.length);
+      expect(current.some((row) => row.sk.startsWith('GROUP#group-00#'))).toBe(false);
+      expect(current.some((row) => row.sk.startsWith('GROUP#group-99#'))).toBe(true);
+      const stored = await store.getCatalogProjectionGroup('group-99');
+      expect(stored?.group.groupId).toBe('group-99');
+      await expect(store.getCatalogProjectionGroup('group-00')).resolves.toBeUndefined();
     } finally {
       database.close();
     }
   });
+
+  it('reports a changed refresh against a full publish at production card size', async () => {
+    const template = catalogGroupDetails(groupCatalogJobs([job('template', `Software Engineering Intern ${'x'.repeat(9_000)}`)])[0]!);
+    const groups = Array.from({ length: 300 }, (_, index) => ({
+      ...template,
+      group: { ...template.group, groupId: `group-${String(index).padStart(4, '0')}` },
+      roles: template.roles.map((role) => ({ ...role, jobId: `job-${index}` })),
+    }));
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (
+        pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL,
+        catalog_sort_key TEXT, PRIMARY KEY (pk, sk)
+      )
+    `);
+    const batchBytes: number[] = []; const batchSizes: number[] = [];
+    try {
+      const store = new D1InternshipStore(sqliteD1(database, undefined, { maxBatchBytes: 32 * 1024 * 1024, batchBytes, batchSizes }));
+      const generatedAt = new Date().toISOString();
+      await store.putCatalogProjection(groups, generatedAt);
+      const publishBatches = batchSizes.length;
+      const publishStatements = batchSizes.reduce((total, size) => total + size, 0);
+      const publishBytes = batchBytes.reduce((total, bytes) => total + bytes, 0);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 300 });
+
+      // One card changes in a projection of a production card size. The deployed
+      // projection carried 2,608 cards and 80.6 MiB on 2026-09-17, and the version
+      // this replaced rewrote and deleted all of them on every changed tick.
+      const changed = structuredClone(groups);
+      changed[7]!.group.titles = ['Renamed Intern'];
+      await store.putCatalogProjection(changed, generatedAt);
+      const refreshStatements = batchSizes.slice(publishBatches).reduce((total, size) => total + size, 0);
+      const refreshBytes = batchBytes.reduce((total, bytes) => total + bytes, 0) - publishBytes;
+      console.log(`catalog projection writes: full publish=${publishStatements} statements/${publishBytes} bytes, `
+        + `one changed card=${refreshStatements} statements/${refreshBytes} bytes`);
+      // Exactly the replaced card and the row it replaced; the pointer is a third
+      // single-row write that the refresh needs for freshness.
+      expect(refreshStatements).toBe(2);
+      expect(refreshBytes * 50).toBeLessThan(publishBytes);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'catalog-projection'").get()).toEqual({ count: 300 });
+    } finally {
+      database.close();
+    }
+  }, 30_000);
 
   it('matches normalized role locations when the raw label is generic', async () => {
     const database = new DatabaseSync(':memory:');
