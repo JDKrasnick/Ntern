@@ -150,7 +150,6 @@ resource "cloudflare_workers_script" "ingestion" {
   )
 
   migrations = {
-    old_tag            = ""
     new_tag            = "v1-d1-traffic-controller"
     new_sqlite_classes = ["D1TrafficController"]
   }
@@ -197,7 +196,6 @@ resource "cloudflare_workers_script" "application" {
   )
 
   migrations = {
-    old_tag            = ""
     new_tag            = "v4-resume-pdf-compiler-v2"
     new_sqlite_classes = ["ResumePdfCompilerV2"]
   }

@@ -169,7 +169,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(ingestion.durable_objects?.bindings).toContainEqual({ name: 'D1_TRAFFIC_CONTROLLER', class_name: 'D1TrafficController' });
     expect(ingestion.migrations).toContainEqual({ tag: 'v1-d1-traffic-controller', new_sqlite_classes: ['D1TrafficController'] });
     expect(terraform).toContain('{ name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController" }');
-    expect(terraform).toMatch(/old_tag\s+= ""\s+new_tag\s+= "v1-d1-traffic-controller"/);
+    expect(terraform).not.toMatch(/old_tag\s+= ""\s+new_tag\s+= "v1-d1-traffic-controller"/);
     expect(terraform).toContain('new_tag            = "v1-d1-traffic-controller"');
     expect(terraform).toContain('new_sqlite_classes = ["D1TrafficController"]');
   });

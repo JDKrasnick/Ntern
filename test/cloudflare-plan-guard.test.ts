@@ -363,6 +363,26 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('accepts removing only the verified ingestion bootstrap tag', () => {
+    const migration = {
+      new_tag: 'v1-d1-traffic-controller',
+      new_sqlite_classes: ['D1TrafficController'],
+      old_tag: '',
+    };
+    expect(validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, migrations: migration },
+      after: { ...contentUpdate.after, migrations: { ...migration, old_tag: null } },
+    }]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, migrations: { ...migration, old_tag: 'unverified' } },
+      after: { ...contentUpdate.after, migrations: { ...migration, old_tag: null } },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits only the reviewed resume infrastructure rollout', () => {
     const apiBindings = [
       { name: 'AI', type: 'ai' },
