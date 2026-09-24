@@ -124,6 +124,28 @@ describe('Cloudflare deployment plan guard', () => {
   });
 
   it.each([
+    ['cloudflare_workers_script.ingestion', 'v1-d1-traffic-controller', 'D1TrafficController'],
+    ['cloudflare_workers_script.application', 'v4-resume-pdf-compiler-v2', 'ResumePdfCompilerV2'],
+  ])('permits retiring only the applied migration for %s', (address, tag, className) => {
+    const migration = {
+      deleted_classes: null, new_classes: null, new_sqlite_classes: [className],
+      new_tag: tag, old_tag: null, renamed_classes: null, steps: null, transferred_classes: null,
+    };
+    const change = {
+      ...contentUpdate, address,
+      before: { ...worker, migration_tag: tag, migrations: migration },
+      after: { ...contentUpdate.after, migration_tag: tag, migrations: null },
+    };
+    expect(validateCloudflarePlan(plan([change]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...change, before: { ...change.before, migration_tag: 'wrong-tag' } },
+      { ...change, before: { ...change.before, migrations: { ...migration, new_sqlite_classes: ['OtherClass'] } } },
+      { ...change, before: { ...change.before, migrations: { ...migration, old_tag: '' } } },
+      { ...change, after: { ...change.after, bindings: [{ name: 'DB', type: 'd1', id: 'other-db' }] } },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
+  it.each([
     ['creates', 'cloudflare_workers_script.ingestion', ['create']],
     ['replacements', 'cloudflare_workers_script.application', ['delete', 'create']],
     ['non-script updates', 'cloudflare_workers_cron_trigger.ingestion', ['update']],
