@@ -104,9 +104,19 @@ function providerDomains(value: unknown, displayName: string): string[] {
  * actually uses for board logos, so an unrelated `og:image` — a role banner, a
  * client's CDN — is never picked up:
  *
- *   Ashby      app.ashbyhq.com/api/images/org-theme-logo|wordmark/<org>/<image>
- *   Greenhouse s<N>-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/…
+ *   Ashby      app.ashbyhq.com/api/images/org-theme-logo|wordmark|social/<org>/<image>
+ *   Greenhouse board `logo.url`, and its `og:image`
+ *              s<N>-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/…
+ *   Greenhouse banner art
+ *              …/job_board_renderer/job_board_configurations/banners/…
  *   Lever      lever-client-logos.s3[-us-west-2|.us-west-2].amazonaws.com/<image>
+ *
+ * Greenhouse's current board renderer publishes an `og:image` that *has no value*
+ * for a board whose logo was never uploaded, and puts the employer's own art in the
+ * board configuration instead, so the board logo and the banner are read from there
+ * as well. A banner is a promotional strip as often as it is the employer's mark —
+ * a photo, a tagline, a collage — so it is ranked last and `isPlatformBannerUrl`
+ * marks it for the shape check the caller applies before storing it.
  *
  * A square logo beats a wide wordmark for a square tile, and a raster beats an SVG,
  * because Ashby serves some boards an SVG that cannot be stored safely. Every
@@ -120,16 +130,62 @@ export function platformLogoUrls(html: string): string[] {
     { url: jsonStringField(html, 'logoSquareImageUrl'), rank: 0 },
     { url: jsonStringField(html, 'logoWordmarkImageUrl'), rank: 1 },
     { url: metaContent(html, 'og:image'), rank: 2 },
+    { url: greenhouseBoardLogoUrl(html), rank: 2 },
+    { url: greenhouseBannerUrl(html), rank: 3 },
   ].filter((candidate): candidate is { url: string; rank: number } =>
     Boolean(candidate.url) && isPlatformLogoHost(candidate.url!));
   const unique = [...new Map(ranked.map((candidate) => [candidate.url, candidate])).values()];
   const isSvg = (url: string) => /\.svg($|\?)/iu.test(url);
   // A raster is usable, an SVG cannot be stored, so format outranks source: Ashby
-  // serves some boards an SVG square with a usable social image beside it.
+  // serves some boards an SVG square with a usable social image beside it. A
+  // platform that answers an SVG from a `.png` path is caught by the caller's
+  // fall-through, which reads the bytes rather than the URL.
   return unique
     .slice()
     .sort((left, right) => (isSvg(left.url) ? 1 : 0) - (isSvg(right.url) ? 1 : 0) || left.rank - right.rank)
     .map((candidate) => candidate.url);
+}
+
+/**
+ * A string field of a JSON payload a page embeds, tolerating the escaping a
+ * framework applies when it serializes that payload inside a script element
+ * (`\"logo\":\"https://…\"` as well as `"logo":"https://…"`). Only an `https` URL
+ * comes back, so a null or relative value is simply absent.
+ */
+function payloadHttpsField(html: string, name: string): string | undefined {
+  const pattern = new RegExp(String.raw`\\?"${name}\\?"\s*:\s*\\?"((?:[^"\\]|\\.)*)\\?"`, 'u');
+  const value = pattern.exec(html)?.[1];
+  if (!value) return undefined;
+  const unescaped = value.replace(/\\\//gu, '/').replace(/\\"/gu, '"').replace(/\\\\/gu, '\\');
+  return unescaped.startsWith('https://') ? unescaped : undefined;
+}
+
+/** Greenhouse's board configuration publishes the uploaded board logo as `logo.url`. */
+function greenhouseBoardLogoUrl(html: string): string | undefined {
+  const marker = /\\?"logo\\?"\s*:\s*\{/u.exec(html);
+  if (!marker) return undefined;
+  const close = html.indexOf('}', marker.index);
+  return close < 0 ? undefined : payloadHttpsField(html.slice(marker.index, close), 'url');
+}
+
+/**
+ * The board's banner art: the payload field, or the rendered `<img class="banner">`
+ * the board page carries. It is the employer's own uploaded art, but it is a banner
+ * first, so a caller must check its shape before using it as an icon.
+ */
+function greenhouseBannerUrl(html: string): string | undefined {
+  return payloadHttpsField(html, 'banner_url') ?? imgSrcForClass(html, 'banner');
+}
+
+function imgSrcForClass(html: string, className: string): string | undefined {
+  const wanted = new RegExp(String.raw`(?:^|\s)${className}(?:\s|$)`, 'u');
+  for (const [tag] of html.matchAll(/<img\b[^>]*>/giu)) {
+    const classes = /class=["']([^"']*)["']/iu.exec(tag)?.[1];
+    if (!classes || !wanted.test(classes.trim())) continue;
+    const src = /src=["']([^"']+)["']/iu.exec(tag)?.[1];
+    if (src?.startsWith('https://')) return src;
+  }
+  return undefined;
 }
 
 /**
@@ -160,6 +216,99 @@ function sniffRasterType(bytes: Uint8Array): string | undefined {
   return undefined;
 }
 
+/**
+ * The SVG document an asset is, when it is one. Ashby serves its theme images as
+ * `image/svg+xml` even from a `.png` path, and a bucket that declares nothing
+ * useful (`binary/octet-stream`) can still hold one, so the declared type is not the
+ * only evidence. Nothing here renders the document: an SVG cannot be stored because
+ * opening one directly runs its script on the API origin, so a caller only records
+ * that this candidate was one.
+ */
+export function iconSvgAsset(typeHeader: string | null | undefined, bytes: Uint8Array): Uint8Array | undefined {
+  const declared = typeHeader?.split(';')[0]?.trim().toLowerCase();
+  if (declared === 'image/svg+xml') return bytes;
+  if (declared && declared !== 'application/octet-stream' && declared !== 'binary/octet-stream') return undefined;
+  const head = new TextDecoder('utf-8').decode(bytes.subarray(0, 4_096));
+  return /^(?:\uFEFF|\s|<\?xml[\s\S]*?\?>|<!--[\s\S]*?-->)*<svg[\s>]/iu.test(head) ? bytes : undefined;
+}
+
+/**
+ * Pixel dimensions of a raster, from its own bytes. Only the containers the ATS
+ * logo hosts actually serve are read; anything else has no dimensions and is
+ * treated as unshaped rather than guessed at.
+ */
+export function rasterDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+  const png = readPngDimensions(bytes);
+  if (png) return png;
+  const jpeg = readJpegDimensions(bytes);
+  if (jpeg) return jpeg;
+  return readWebpDimensions(bytes);
+}
+
+function readPngDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+  // The IHDR chunk is fixed at offset 8, so its width and height are at 16 and 20.
+  if (bytes.byteLength < 24) return undefined;
+  for (const [offset, expected] of [[0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]], [12, [0x49, 0x48, 0x44, 0x52]]] as const) {
+    if (!expected.every((value, index) => bytes[offset + index] === value)) return undefined;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { width: view.getUint32(16), height: view.getUint32(20) };
+}
+
+function readJpegDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+  if (bytes.byteLength < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return undefined;
+  for (let at = 2; at + 9 < bytes.byteLength;) {
+    if (bytes[at] !== 0xff) { at += 1; continue; }
+    const marker = bytes[at + 1]!;
+    const length = (bytes[at + 2]! << 8) | bytes[at + 3]!;
+    // SOF0–SOF15 carry the frame size; four of those markers are not frame headers.
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      return { height: (bytes[at + 5]! << 8) | bytes[at + 6]!, width: (bytes[at + 7]! << 8) | bytes[at + 8]! };
+    }
+    if (length < 2) return undefined;
+    at += 2 + length;
+  }
+  return undefined;
+}
+
+function readWebpDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+  if (bytes.byteLength < 30) return undefined;
+  const at = (offset: number, expected: readonly number[]) =>
+    expected.every((value, index) => bytes[offset + index] === value);
+  if (!at(0, [0x52, 0x49, 0x46, 0x46]) || !at(8, [0x57, 0x45, 0x42, 0x50])) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (at(12, [0x56, 0x50, 0x38, 0x58])) {
+    // The extended header stores canvas size minus one, little-endian, 24 bits each.
+    return { width: (view.getUint8(24) | (view.getUint8(25) << 8) | (view.getUint8(26) << 16)) + 1,
+      height: (view.getUint8(27) | (view.getUint8(28) << 8) | (view.getUint8(29) << 16)) + 1 };
+  }
+  if (at(12, [0x56, 0x50, 0x38, 0x4c])) {
+    // Lossless: 14-bit width and height follow the 0x2f signature byte.
+    const bits = view.getUint32(21, true);
+    return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+  }
+  if (at(12, [0x56, 0x50, 0x38, 0x20])) {
+    return { width: (view.getUint16(26, true) & 0x3fff), height: (view.getUint16(28, true) & 0x3fff) };
+  }
+  return undefined;
+}
+
+/**
+ * A board banner is only usable as an icon when its own shape says it is the
+ * employer's mark rather than a promotional strip. A 1400×300 careers banner
+ * cropped into a square tile shows a slice of a photograph, which is worse than the
+ * monogram it replaced, so only a roughly square asset is accepted.
+ */
+export const ICON_BANNER_MIN_ASPECT = 0.75;
+export const ICON_BANNER_MAX_ASPECT = 1.34;
+
+export function bannerAssetShapeUsable(bytes: Uint8Array): boolean {
+  const size = rasterDimensions(bytes);
+  if (!size || size.width <= 0 || size.height <= 0) return false;
+  const aspect = size.width / size.height;
+  return aspect >= ICON_BANNER_MIN_ASPECT && aspect <= ICON_BANNER_MAX_ASPECT;
+}
+
 function jsonStringField(html: string, name: string): string | undefined {
   const match = new RegExp(`"${name}"\\s*:\\s*("(?:[^"\\\\]|\\\\.)*")`, 'u').exec(html);
   if (!match) return undefined;
@@ -175,7 +324,10 @@ function isPlatformLogoHost(value: string): boolean {
   if (url.protocol !== 'https:') return false;
   const host = url.hostname.toLowerCase();
   const path = url.pathname.toLowerCase();
-  if (host.endsWith('cdn.greenhouse.io')) return path.startsWith('/external_greenhouse_job_boards/logos/');
+  if (host.endsWith('cdn.greenhouse.io')) {
+    return path.startsWith('/external_greenhouse_job_boards/logos/')
+      || path.startsWith('/job_board_renderer/job_board_configurations/banners/');
+  }
   if (host.startsWith('lever-client-logos.s3') && host.endsWith('amazonaws.com')) return true;
   if (host === 'app.ashbyhq.com') {
     // Every `org-theme-*` path is the employer's own uploaded art for its board:
@@ -185,6 +337,18 @@ function isPlatformLogoHost(value: string): boolean {
       || path.startsWith('/api/images/org-theme-social/');
   }
   return false;
+}
+
+/**
+ * True for Greenhouse's board banner, which is a promotional image as often as it
+ * is the employer's mark. The caller checks its shape before storing it, because a
+ * wide banner cropped into a square tile shows a slice of a photo.
+ */
+export function isPlatformBannerUrl(value: string): boolean {
+  let url: URL;
+  try { url = new URL(value); } catch { return false; }
+  return url.protocol === 'https:' && url.hostname.toLowerCase().endsWith('cdn.greenhouse.io')
+    && url.pathname.toLowerCase().startsWith('/job_board_renderer/job_board_configurations/banners/');
 }
 
 /** Bounded public page metadata that can independently name the employer. */

@@ -80,6 +80,15 @@ const html = (body: string) => new Response(body, { headers: { 'content-type': '
 const status = (code: number, headers: Record<string, string> = {}) => new Response(null, { status: code, headers });
 const webp = (bytes = 4) => new Response(new Uint8Array(bytes).fill(7), { headers: { 'content-type': 'image/webp' } });
 
+/** A PNG with a real IHDR, which is all the banner shape check reads. */
+function pngBytes(width: number, height: number): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(new ArrayBuffer(24));
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 0);
+  new DataView(bytes.buffer).setUint32(16, width);
+  new DataView(bytes.buffer).setUint32(20, height);
+  return bytes;
+}
+
 const linkPage = (organization: { name: string; url: string }, head = '') =>
   `<!doctype html><html><head><title>Open roles</title>${head}<script type="application/ld+json">${JSON.stringify({ '@type': 'Organization', ...organization })}</script></head></html>`;
 
@@ -180,6 +189,71 @@ describe('employer icon diagnosis', () => {
     expect(diagnostic.decision.scores.some((candidate) => candidate.domain === 'acme.com')).toBe(false);
   });
 
+  it('treats a challenge page from the board as a retry rather than an answer', async () => {
+    const { database, db, admission, icons } = subject();
+    const r2 = r2Stub();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'), NOW);
+    // Greenhouse's edge answers a client it has rate-limited with 406 and an nginx
+    // body. That page names no employer and carries no board art, so it must not be
+    // read as the employer's posting.
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/acme/jobs/1': () => new Response(
+        '<html><head><title>406 Not Acceptable</title></head></html>',
+        { status: 406, headers: { 'content-type': 'text/html' } },
+      ),
+    });
+
+    const result = await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    expect(result.retryable).toBe(1);
+    expect(result.unresolved).toBe(0);
+    const row = database.prepare('SELECT evidence_json FROM employer_icon_resolutions WHERE canonical_employer_id = ?')
+      .get('acme') as { evidence_json: string };
+    const evidence = JSON.parse(row.evidence_json) as Record<string, unknown>;
+    expect(evidence).toMatchObject({ pageFailure: 'transport', pageStatus: 406, reasonCode: 'transient-provider-failure' });
+    // The platform host itself is recorded, rejected: the error page named nothing.
+    expect((evidence.candidates as Array<{ rejected?: boolean }>).every((candidate) => candidate.rejected === true)).toBe(true);
+  });
+
+  it('records a withdrawn posting with the long backoff', async () => {
+    const diagnostic = await diagnoseEmployerIcon({
+      seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'),
+      credentials: {},
+      deps: {
+        resolver: PUBLIC_RESOLVER,
+        fetchImpl: scriptedFetch({ 'https://job-boards.greenhouse.io/acme/jobs/1': () => new Response(null, { status: 404 }) }),
+      },
+    });
+
+    expect(diagnostic.pageStatus).toBe(404);
+    expect(diagnostic.pageFailure).toBe('blocked');
+    expect(diagnostic.decision.outcome).toBe('unresolved');
+  });
+
+  it('presents an identifying client when it reads a posting', async () => {
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({
+        url: typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+      });
+      return html('<html><head><title>Open roles</title></head></html>');
+    }) as typeof fetch;
+
+    await diagnoseEmployerIcon({
+      seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'),
+      credentials: {}, deps: { resolver: PUBLIC_RESOLVER, fetchImpl },
+    });
+
+    const headers = seen[0]?.headers ?? {};
+    // The page request names the client and asks for HTML, because a request that
+    // presents nothing at all is answered with 406.
+    expect(headers['user-agent']).toContain('NternCompanyIcons');
+    expect(headers.accept).toContain('text/html');
+  });
+
   it('resolves from provider consensus alone when the page is blocked', async () => {
     const fetchImpl = scriptedFetch({
       [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
@@ -271,8 +345,10 @@ describe('employer icon diagnosis', () => {
       }) },
     });
 
-    // A 403 challenge page is fetched successfully but yields no usable metadata.
-    expect(diagnostic.pageFailure).toBeUndefined();
+    // A 403 challenge is the platform refusing the client, not a page that happens
+    // to say nothing, and it is recorded as such so the employer is re-read soon.
+    expect(diagnostic.pageFailure).toBe('transport');
+    expect(diagnostic.pageStatus).toBe(403);
     expect(diagnostic.pageOrganizations).toEqual([]);
     const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
     expect(winner?.signals).toEqual(['ats-tenant', 'logo-dev']);
@@ -1049,6 +1125,85 @@ describe('employer icon uploaded board logo', () => {
     });
     expect(resolved.status).toBe(200);
     expect(resolved.headers.get('content-type')).toBe('image/png');
+  });
+
+  it('stores a Greenhouse board logo the renderer publishes only in its board payload', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const logo = 'https://s4-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/377/100/original/Figma-icon-sm.png';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'), NOW);
+    const fetchImpl = scriptedFetch({
+      // The current renderer emits an og:image with no value and serializes the
+      // board payload escaped inside a script.
+      'https://job-boards.greenhouse.io/acme/jobs/1': () => html(
+        '<!doctype html><html><head><title>Open role</title><meta property="og:image"/></head><body>'
+        + `<script>window.x={"boardConfiguration":{\\"logo\\":{\\"href\\":null,\\"url\\":\\"${logo}\\"}}}</script></body></html>`,
+      ),
+      [logo]: () => new Response(pngBytes(400, 400), { headers: { 'content-type': 'image/png' } }),
+    });
+
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0]?.key).toMatch(/^company-icons\/acme\/platform-[0-9a-f]{16}\.png$/u);
+  });
+
+  it('stores a Greenhouse banner only when its own shape is square, and says why', async () => {
+    const banner = 'https://s9-recruiting.cdn.greenhouse.io/job_board_renderer/job_board_configurations/banners/400/032/800/original/CareerPageBanner.png';
+    const run = async (bytes: Uint8Array<ArrayBuffer>) => {
+      const { db, admission, icons } = subject();
+      const r2 = r2Stub();
+      await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+      await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+      await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'), NOW);
+      const fetchImpl = scriptedFetch({
+        'https://job-boards.greenhouse.io/acme/jobs/1': () => html(
+          `<!doctype html><html><head><title>Open role</title><script>{"banner_url":"${banner}"}</script></head></html>`,
+        ),
+        [banner]: () => new Response(bytes, { headers: { 'content-type': 'image/png' } }),
+      });
+      await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+      return { r2 };
+    };
+
+    // A 1400×300 careers banner cropped into a square tile is worse than the
+    // monogram, so it is refused and the reason is recorded.
+    const strip = await run(pngBytes(1400, 300));
+    expect(strip.r2.puts).toHaveLength(0);
+    const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+    expect(events.find((event) => event.event === 'company_icon_platform_logo_rejected'))
+      .toMatchObject({ kind: 'banner', reason: 'banner-not-square' });
+
+    // A banner that is the employer's own mark is stored.
+    const square = await run(pngBytes(1200, 900));
+    expect(square.r2.puts).toHaveLength(1);
+    expect(square.r2.puts[0]?.key).toMatch(/^company-icons\/acme\/platform-[0-9a-f]{16}\.png$/u);
+  });
+
+  it('records an SVG-only board as its own class instead of storing it', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const square = 'https://app.ashbyhq.com/api/images/org-theme-logo/9fde/square.png';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://jobs.ashbyhq.com/acme/abc'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://jobs.ashbyhq.com/acme/abc': () => html(
+        `<!doctype html><html><head><title>Open role</title><script>{"logoSquareImageUrl":"${square}"}</script></head></html>`,
+      ),
+      // Ashby answers an SVG from a `.png` path.
+      [square]: () => new Response('<svg xmlns="http://www.w3.org/2000/svg"/>', { headers: { 'content-type': 'image/svg+xml' } }),
+    });
+
+    await runEmployerIconResolutionPass(environment(db, r2.bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    expect(r2.puts).toHaveLength(0);
+    const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+    expect(events.find((event) => event.event === 'company_icon_platform_logo_rejected'))
+      .toMatchObject({ reason: 'svg-not-servable' });
+    expect((await admission.getCanonicalEmployer('acme'))?.iconKey).toBeUndefined();
   });
 
   it('never overwrites a reviewer’s icon and drops an unusable upload', async () => {

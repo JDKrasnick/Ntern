@@ -1,12 +1,67 @@
 import { describe, expect, it } from 'vitest';
 import {
-  brandfetchSearchUrl, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence,
+  bannerAssetShapeUsable, brandfetchSearchUrl, iconSvgAsset, isPlatformBannerUrl, logoDevImageUrl,
+  logoDevSearchUrl, parseIconPageEvidence, rasterDimensions,
   iconAssetType, platformLogoUrls, proposedDomainMatchesEmployer, validIconAsset,
 } from '../src/employer-icon-discovery.js';
 import { parseIconProposal, plausibleEmployerName } from '../src/employer-icon-resolution.js';
 
 const org = (value: Record<string, unknown>) =>
   `<!doctype html><html><head><title>Careers</title><script type="application/ld+json">${JSON.stringify(value)}</script></head></html>`;
+
+/** A PNG with a real IHDR, which is all the dimension reader needs. */
+function pngBytes(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(24);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13], 0);
+  bytes.set([0x49, 0x48, 0x44, 0x52], 12);
+  new DataView(bytes.buffer).setUint32(16, width);
+  new DataView(bytes.buffer).setUint32(20, height);
+  return bytes;
+}
+
+/** A JPEG whose first marker is a baseline frame header. */
+function jpegBytes(width: number, height: number): Uint8Array {
+  // SOI, then an APP0 segment (marker, length 4) the scan skips, then SOF0 at
+  // index 8: length, precision, height, width.
+  const bytes = new Uint8Array(32);
+  bytes.set([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8], 0);
+  bytes[13] = height >> 8; bytes[14] = height & 0xff;
+  bytes[15] = width >> 8; bytes[16] = width & 0xff;
+  return bytes;
+}
+
+/** An extended-format WebP, whose canvas size is 24 bits of width then height. */
+function webpExtendedBytes(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(32);
+  bytes.set([0x52, 0x49, 0x46, 0x46], 0);
+  bytes.set([0x57, 0x45, 0x42, 0x50], 8);
+  bytes.set([0x56, 0x50, 0x38, 0x58], 12);
+  bytes.set([width - 1 & 0xff, (width - 1) >> 8 & 0xff, (width - 1) >> 16 & 0xff], 24);
+  bytes.set([height - 1 & 0xff, (height - 1) >> 8 & 0xff, (height - 1) >> 16 & 0xff], 27);
+  return bytes;
+}
+
+/** A lossless WebP, whose 14-bit width and height share one little-endian word. */
+function webpLosslessBytes(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(32);
+  bytes.set([0x52, 0x49, 0x46, 0x46], 0);
+  bytes.set([0x57, 0x45, 0x42, 0x50], 8);
+  bytes.set([0x56, 0x50, 0x38, 0x4c], 12);
+  bytes[20] = 0x2f;
+  new DataView(bytes.buffer).setUint32(21, ((width - 1) & 0x3fff) | (((height - 1) & 0x3fff) << 14), true);
+  return bytes;
+}
+
+/** A lossy WebP, whose 14-bit dimensions precede the bitstream. */
+function webpLossyBytes(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(32);
+  bytes.set([0x52, 0x49, 0x46, 0x46], 0);
+  bytes.set([0x57, 0x45, 0x42, 0x50], 8);
+  bytes.set([0x56, 0x50, 0x38, 0x20], 12);
+  new DataView(bytes.buffer).setUint16(26, width, true);
+  new DataView(bytes.buffer).setUint16(28, height, true);
+  return bytes;
+}
 
 describe('page evidence parsing', () => {
   it('reads an organization domain from sameAs as well as url', () => {
@@ -193,6 +248,69 @@ describe('uploaded board logo', () => {
       expect(platformLogoUrls(`<meta property="og:image" content="${content}">`)).toEqual([]);
     }
     expect(platformLogoUrls('<html><head><title>Open roles</title></head></html>')).toEqual([]);
+  });
+
+  it('reads the Greenhouse board logo and banner a board publishes instead of og:image', () => {
+    // The current board renderer serializes its payload inside a script, so every
+    // key and value arrives escaped, and `og:image` is emitted with no value at all.
+    const logo = 'https://s4-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/377/100/original/Figma-icon-sm.png?1726';
+    const banner = 'https://s3-recruiting.cdn.greenhouse.io/job_board_renderer/job_board_configurations/banners/400/334/900/original/banner.png?1';
+    const escaped = `<meta property="og:image"/><script>window.x={"boardConfiguration":{\\"logo\\":{\\"href\\":\\"https://www.figma.com\\",\\"url\\":\\"${logo}\\"},\\"banner_url\\":\\"${banner}\\"}}</script>`;
+    // The board logo is the employer's mark, so it outranks the banner.
+    expect(platformLogoUrls(escaped)).toEqual([logo, banner]);
+    // The plain (unescaped) serialization is read the same way.
+    expect(platformLogoUrls(`<script>{"logo":{"href":null,"url":"${logo}"},"banner_url":"${banner}"}</script>`))
+      .toEqual([logo, banner]);
+    // A board with no uploaded logo publishes only the banner, and no og:image.
+    expect(platformLogoUrls(`<script>{"logo":{"href":"https://acme.test","url":null},"banner_url":"${banner}"}</script>`))
+      .toEqual([banner]);
+    // The rendered image is read when the payload is not present at all.
+    expect(platformLogoUrls(`<div class="banner-container"><img src="${banner}" alt="Banner" class="banner"/></div>`))
+      .toEqual([banner]);
+  });
+
+  it('marks only Greenhouse banner art as a banner', () => {
+    const banner = 'https://s9-recruiting.cdn.greenhouse.io/job_board_renderer/job_board_configurations/banners/400/032/800/original/CareerPageBanner_1400x300.png';
+    expect(isPlatformBannerUrl(banner)).toBe(true);
+    expect(isPlatformBannerUrl('https://s4-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/377/100/original/Figma-icon-sm.png')).toBe(false);
+    expect(isPlatformBannerUrl('https://app.ashbyhq.com/api/images/org-theme-logo/1cea/9d.png')).toBe(false);
+    // A host that merely looks like the banner CDN is not it.
+    expect(isPlatformBannerUrl('https://cdn.greenhouse.io.evil.test/job_board_renderer/job_board_configurations/banners/a.png')).toBe(false);
+    expect(platformLogoUrls('<meta property="og:image" content="https://cdn.greenhouse.io.evil.test/job_board_renderer/job_board_configurations/banners/a.png">')).toEqual([]);
+  });
+
+  it('recognizes an SVG however the server labels it', () => {
+    const svg = new TextEncoder().encode('<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"/>');
+    expect(iconSvgAsset('image/svg+xml', svg)).toBe(svg);
+    expect(iconSvgAsset('image/svg+xml; charset=utf-8', svg)).toBe(svg);
+    // Ashby answers an SVG from a `.png` path, and a logo bucket may declare nothing.
+    expect(iconSvgAsset('binary/octet-stream', svg)).toBe(svg);
+    expect(iconSvgAsset(null, svg)).toBe(svg);
+    const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    expect(iconSvgAsset('binary/octet-stream', png)).toBeUndefined();
+    expect(iconSvgAsset('image/png', svg)).toBeUndefined();
+    expect(iconSvgAsset('text/html', new TextEncoder().encode('<svg/>'))).toBeUndefined();
+  });
+
+  it('measures a banner from its own bytes and refuses a promotional strip', () => {
+    // 1400×300 is the careers banner; 200×200 is the employer's square mark.
+    expect(rasterDimensions(pngBytes(1400, 300))).toEqual({ width: 1400, height: 300 });
+    expect(bannerAssetShapeUsable(pngBytes(1400, 300))).toBe(false);
+    expect(bannerAssetShapeUsable(pngBytes(1200, 900))).toBe(true);
+    expect(bannerAssetShapeUsable(pngBytes(400, 400))).toBe(true);
+    // A 4:1 strip and a tall crop are both refused.
+    expect(bannerAssetShapeUsable(pngBytes(2000, 500))).toBe(false);
+    expect(bannerAssetShapeUsable(pngBytes(300, 900))).toBe(false);
+    // Unshapeable bytes are refused rather than guessed at.
+    expect(rasterDimensions(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]))).toBeUndefined();
+    expect(bannerAssetShapeUsable(new TextEncoder().encode('<svg/>'))).toBe(false);
+  });
+
+  it('measures the other containers the logo hosts serve', () => {
+    expect(rasterDimensions(jpegBytes(1410, 301))).toEqual({ width: 1410, height: 301 });
+    expect(rasterDimensions(webpExtendedBytes(996, 196))).toEqual({ width: 996, height: 196 });
+    expect(rasterDimensions(webpLosslessBytes(512, 512))).toEqual({ width: 512, height: 512 });
+    expect(rasterDimensions(webpLossyBytes(800, 800))).toEqual({ width: 800, height: 800 });
   });
 
   it('resolves an asset type from its bytes when the server declares nothing useful', () => {

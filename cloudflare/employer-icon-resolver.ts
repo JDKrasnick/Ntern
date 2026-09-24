@@ -25,12 +25,13 @@ import {
   type IconTieBreakDecision, type EmployerIconSeed,
 } from '../src/employer-icon-resolution.js';
 import {
-  ICON_PROVIDER_TIMEOUT_MS, MAX_ICON_ASSET_BYTES, brandfetchCandidateDomains, brandfetchSearchUrl,
-  iconAssetType, platformLogoUrls,
+  ICON_PROVIDER_TIMEOUT_MS, MAX_ICON_ASSET_BYTES, bannerAssetShapeUsable, brandfetchCandidateDomains, brandfetchSearchUrl,
+  iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls,
   proposedDomainMatchesEmployer,
   logoDevCandidateDomains, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence,
   type IconPageEvidence,
 } from '../src/employer-icon-discovery.js';
+
 import { safeFetchBytes, safeFetchText, type HostResolver } from '../src/employer/safe-network.js';
 import { inferOpenAIJson, shadowDefaultModelId, type OpenAIJsonRequest, type OpenAIJsonResult } from './openai-shadow-inference.js';
 import {
@@ -60,6 +61,17 @@ const ICON_PROVIDER_MAX_BYTES = 128 * 1024;
 const MAX_ICON_EVIDENCE_BYTES = 16 * 1024;
 /** How many employers a single pass may seed when they have no task row at all. */
 const ICON_BACKFILL_PER_PASS = 5;
+/**
+ * The client identity the resolver presents when it reads an employer's public
+ * posting. Greenhouse's edge answers a request that presents no client at all with
+ * `406 Not Acceptable`, so a stable, honest user agent is part of being able to read
+ * the page; the sweep's rate is unchanged either way, five employers every ten
+ * minutes. Exported so the read-only coverage script presents the same client.
+ */
+export const ICON_PAGE_REQUEST_HEADERS: Record<string, string> = {
+  'user-agent': 'NternCompanyIcons/1.0 (+https://intern-notifs.jdkrasnick.workers.dev; read-only)',
+  accept: 'text/html,application/xhtml+xml',
+};
 const tieBreakSchemaName = 'company_icon_domain_resolution';
 
 export interface EmployerIconResolverEnvironment {
@@ -652,6 +664,19 @@ interface GatheredIconEvidence {
   platformLogoUrls?: string[];
   /** Set when the link could not be read at all; providers still get a chance. */
   failure?: string;
+  /** The HTTP status the posting answered with, recorded for the reviewer. */
+  status?: number;
+}
+
+/**
+ * How a posting's non-2xx response is treated. A rate limit, a bot wall, or a
+ * server fault is the platform asking for room rather than evidence that the
+ * employer has no logo, so it retries from an hour. A withdrawn or malformed
+ * posting is not going to change its mind, so it takes the long backoff.
+ */
+function pageFailureOutcome(status: number): string {
+  return status === 403 || status === 406 || status === 408 || status === 425 || status === 429 || status >= 500
+    ? 'transport' : 'blocked';
 }
 
 async function gatherIconEvidence(seed: EmployerIconSeed, deps: EmployerIconResolverDependencies): Promise<GatheredIconEvidence | undefined> {
@@ -659,9 +684,19 @@ async function gatherIconEvidence(seed: EmployerIconSeed, deps: EmployerIconReso
   try {
     const result = await safeFetchText(seed.applicationUrl, {
       resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch,
+      headers: ICON_PAGE_REQUEST_HEADERS,
       timeoutMs: ICON_LINK_TIMEOUT_MS, maxRedirects: ICON_LINK_MAX_REDIRECTS, maxBodyBytes: ICON_LINK_MAX_BYTES,
       onOversize: 'truncate',
     });
+    // An error or challenge page is not the employer's posting: it names no
+    // employer, carries no board art, and must not be recorded as if it had been
+    // read. Providers still get their chance, so the employer is not lost.
+    if (result.status < 200 || result.status >= 300) {
+      return {
+        finalUrl: result.url, redirectHosts: hostnames(result.redirects),
+        page: { organizations: [] }, failure: pageFailureOutcome(result.status), status: result.status,
+      };
+    }
     const logoUrls = platformLogoUrls(result.body);
     return {
       finalUrl: result.url,
@@ -987,6 +1022,12 @@ async function probeLogoDevImage(
  * the asset is on the platform's board-logo host, so the mark belongs to the
  * employer by construction. The bytes are copied into our own bucket so rendering
  * never depends on the platform's CDN, and the key records its own provenance.
+ *
+ * Two asset shapes need a judgement beyond "is it an image". A board that publishes
+ * its mark only as SVG is rasterized, because the API serves raster formats only. A
+ * Greenhouse banner is the employer's own art but is a promotional strip as often as
+ * it is the employer's mark, so it is stored only when its own shape says it is
+ * square enough to be an icon.
  */
 async function storePlatformLogo(input: {
   store: D1EmployerIconStore;
@@ -1003,23 +1044,29 @@ async function storePlatformLogo(input: {
   // Candidates are tried in order: a board can offer a square logo as an SVG and a
   // usable raster behind it, so one unusable asset must not end the attempt.
   for (const url of urls) {
+    const banner = isPlatformBannerUrl(url);
     try {
       const result = await safeFetchBytes(url, {
         resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch,
         timeoutMs: ICON_PROVIDER_TIMEOUT_MS, maxRedirects: 1, maxBodyBytes: MAX_ICON_ASSET_BYTES,
       });
-      const contentType = result.status >= 200 && result.status < 300
-        ? iconAssetType(result.headers.get('content-type'), result.body) : undefined;
-      if (!contentType) {
+      const asset = result.status >= 200 && result.status < 300
+        ? platformAsset(result.headers.get('content-type'), result.body, banner)
+        : { usable: false as const, reason: 'status' };
+      if (!asset.usable) {
         console.log(JSON.stringify({
           event: 'company_icon_platform_logo_rejected', canonicalEmployerId: context.id,
           status: result.status, byteLength: result.body.byteLength,
+          contentType: result.headers.get('content-type'), kind: banner ? 'banner' : 'logo', reason: asset.reason,
         }));
         continue;
       }
-      const key = await storeIconAsset(env, context.id, result.body, contentType, 'platform');
+      const key = await storeIconAsset(env, context.id, asset.bytes, asset.contentType, 'platform');
       await store.markPlatformIcon({ canonicalEmployerId: context.id, iconKey: key, now: now.toISOString() });
-      console.log(JSON.stringify({ event: 'company_icon_platform_logo_stored', canonicalEmployerId: context.id, key }));
+      console.log(JSON.stringify({
+        event: 'company_icon_platform_logo_stored', canonicalEmployerId: context.id, key,
+        kind: banner ? 'banner' : 'logo', format: asset.contentType,
+      }));
       return key;
     } catch (error) {
       console.log(JSON.stringify({
@@ -1029,6 +1076,23 @@ async function storePlatformLogo(input: {
     }
   }
   return undefined;
+}
+
+type PlatformAsset =
+  | { usable: true; bytes: Uint8Array; contentType: string }
+  | { usable: false; reason: string };
+
+/**
+ * The storable image an asset carries, if any. A raster is taken as it stands,
+ * unless it is a banner whose shape is not square enough to be an icon. An SVG is
+ * refused: it cannot be served from the API origin, and nothing here renders it, so
+ * the candidate is reported as its own class rather than mistaken for absent art.
+ */
+function platformAsset(contentType: string | null | undefined, bytes: Uint8Array, banner: boolean): PlatformAsset {
+  const raster = iconAssetType(contentType, bytes);
+  if (!raster) return { usable: false, reason: iconSvgAsset(contentType, bytes) ? 'svg-not-servable' : 'not-a-raster' };
+  if (banner && !bannerAssetShapeUsable(bytes)) return { usable: false, reason: 'banner-not-square' };
+  return { usable: true, bytes, contentType: raster };
 }
 
 /** Stores the provider's WebP output under an immutable, content-addressed key. */
@@ -1129,6 +1193,7 @@ function evidenceRecord(
     ...(gathered ? { finalUrl: gathered.finalUrl.slice(0, 2_048) } : {}),
     ...(gathered ? { redirectHosts: gathered.redirectHosts.slice(0, 6) } : {}),
     ...(gathered?.failure ? { pageFailure: gathered.failure } : {}),
+    ...(gathered?.status ? { pageStatus: gathered.status } : {}),
     ...(Object.keys(providers.failures).length ? { providerFailures: providers.failures } : {}),
     ...(brandfetchAgreed ? { brandfetchAgreed: true } : {}),
     ...(outcome.attempt === undefined ? {} : { attempt: outcome.attempt }),
@@ -1188,6 +1253,8 @@ export interface EmployerIconDiagnostic {
   finalUrl?: string;
   redirectHosts: string[];
   pageFailure?: string;
+  /** The HTTP status the posting answered with, when it was not a success. */
+  pageStatus?: number;
   pageOrganizations: string[];
   providerFailures: Record<string, string>;
   /** Provider nominations, display-only. Brandfetch data is never persisted. */
@@ -1226,6 +1293,7 @@ export async function diagnoseEmployerIcon(input: {
     ...(gathered ? { finalUrl: gathered.finalUrl } : {}),
     redirectHosts: gathered?.redirectHosts ?? [],
     ...(gathered?.failure ? { pageFailure: gathered.failure } : {}),
+    ...(gathered?.status ? { pageStatus: gathered.status } : {}),
     pageOrganizations: (gathered?.page.organizations ?? []).flatMap((organization) => organization.domains ?? []),
     providerFailures: providers.failures,
     logoDevDomains: providers.logoDev,
