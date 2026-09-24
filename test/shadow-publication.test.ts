@@ -10,6 +10,7 @@ import { SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PREPROCESSING_VERSION, SH
 import type { Internship, RoleMetadataEvidence } from '../src/types.js';
 import type { R2Bucket } from '../cloudflare/types.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
+import { publishProspectiveShadowMetadata } from '../cloudflare/shadow-publication.js';
 
 const hash = 'a'.repeat(64);
 
@@ -57,7 +58,7 @@ async function publicationDatabase(): Promise<{ database: DatabaseSync; artifact
   const database = new DatabaseSync(':memory:');
   for (const migration of ['0001_initial.sql', '0003_billing_shutdown.sql', '0015_role_metadata_enrichment.sql', '0020_shadow_extraction.sql', '0021_shadow_extraction_fencing.sql',
     '0022_shadow_extraction_cache_expiry.sql', '0023_shadow_extraction_attempt_costs.sql', '0024_shadow_publication_receipts.sql', '0025_shadow_extraction_evaluations.sql',
-    '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql']) {
+    '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql', '0033_shadow_publication_projection.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   database.prepare(`INSERT INTO shadow_extraction_runs
@@ -282,5 +283,26 @@ describe('shadow publication policy', () => {
     expect(published.locations).toEqual(['Austin, TX']);
     expect(published.workMode).toBe('onsite');
     expect(published.notification).toEqual({ smsPending: false, digestPending: false });
+  });
+
+  it('publishes only verified post-activation provider observations and resumes once', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-test', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T00:00:00.000Z', allowedFields: ['locations'], cohort: [], maxReceipts: 1 };
+    const env = { DB: d1(database), DOCUMENTS: new MemoryR2(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+    let refreshes = 0;
+    const refresh = async () => { refreshes += 1; };
+    database.prepare(`UPDATE shadow_extraction_runs SET origin = 'backfill', input_completeness = 'complete',
+      created_at = '2026-09-24T00:01:00.000Z' WHERE run_key = ?`).run(hash);
+    database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-24T00:01:00.000Z'`).run();
+    await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
+      verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
+    expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'none' });
+    database.prepare("UPDATE shadow_extraction_runs SET origin = 'provider-poll' WHERE run_key = ?").run(hash);
+    expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'projected', runKey: hash });
+    expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'none' });
+    expect(refreshes).toBe(1);
+    expect((database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get() as { count: number }).count).toBe(1);
   });
 });
