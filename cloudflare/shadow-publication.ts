@@ -44,7 +44,7 @@ interface ProspectiveRunRow extends RunRow {
   projected_at: string | null;
 }
 
-/** One bounded maintenance item per pass. Only a fresh provider observation
+/** One maintenance item per pass. Only a fresh provider observation
  * whose own verified artifact matches the active policy can create a receipt. */
 export async function publishProspectiveShadowMetadata(env: {
   DB: D1Database;
@@ -102,11 +102,11 @@ export async function publishProspectiveShadowMetadata(env: {
   const inserted = await env.DB.prepare(`INSERT INTO shadow_publication_receipts
       (receipt_id, job_id, source_id, external_id, content_hash, run_key, policy_version, accepted_fields, evidence_fingerprint, created_at)
     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    WHERE (SELECT COUNT(*) FROM shadow_publication_receipts WHERE policy_version = ? AND revoked_at IS NULL) < ?
+    WHERE (? IS NULL OR (SELECT COUNT(*) FROM shadow_publication_receipts WHERE policy_version = ? AND revoked_at IS NULL) < ?)
     ON CONFLICT(receipt_id) DO NOTHING`)
     .bind(receiptId, run.job_id, run.source_id, run.external_id, run.content_hash, run.run_key,
       policy.version, JSON.stringify(acceptedFields), evidenceFingerprint, new Date().toISOString(),
-      policy.version, policy.maxReceipts).run();
+      policy.maxReceipts, policy.version, policy.maxReceipts).run();
   const receipt = await env.DB.prepare(`SELECT projected_at FROM shadow_publication_receipts
     WHERE receipt_id = ? AND revoked_at IS NULL`).bind(receiptId).first<{ projected_at: string | null }>();
   if (!receipt) return { result: inserted.meta.changes ? 'receipt-missing' : 'cap-reached', runKey: run.run_key };

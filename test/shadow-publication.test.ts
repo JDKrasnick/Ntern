@@ -147,6 +147,14 @@ describe('shadow publication policy', () => {
     expect(policyAllows(policy, { sourceId: 'greenhouse-acme', externalId: '124', contentHash: hash })).toBe(false);
   });
 
+  it('accepts an explicit unlimited prospective cap but keeps its field and time gates', () => {
+    const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-v1', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T03:20:27.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: null };
+    expect(parseShadowPublicationPolicy(JSON.stringify(policy)).maxReceipts).toBeNull();
+    expect(parseShadowPublicationPolicy(JSON.stringify({ ...policy, maxReceipts: undefined })).enabled).toBe(false);
+    expect(parseShadowPublicationPolicy(JSON.stringify({ ...policy, allowedFields: ['workMode'] })).enabled).toBe(false);
+  });
+
   it('converts only supported, receipt-allowed fields with quoted provenance', () => {
     const extraction: ShadowExtraction = {
       classification: { technical: 'yes', earlyCareer: 'yes', disciplines: ['software'] },
@@ -304,5 +312,27 @@ describe('shadow publication policy', () => {
     expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'none' });
     expect(refreshes).toBe(1);
     expect((database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get() as { count: number }).count).toBe(1);
+  });
+
+  it('publishes a verified provider run after the old receipt cap is reached', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-test', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T00:00:00.000Z', allowedFields: ['locations'], cohort: [], maxReceipts: null };
+    database.prepare(`UPDATE shadow_extraction_runs SET origin = 'provider-poll', input_completeness = 'complete',
+      created_at = '2026-09-24T00:01:00.000Z' WHERE run_key = ?`).run(hash);
+    database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-24T00:01:00.000Z'`).run();
+    for (let index = 0; index < 25; index += 1) {
+      database.prepare(`INSERT INTO shadow_publication_receipts
+        (receipt_id, job_id, source_id, external_id, content_hash, run_key, policy_version, accepted_fields, evidence_fingerprint, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(`prior-${index}`, 'job-1', 'greenhouse-acme', `prior-${index}`, hash, hash,
+          policy.version, '["locations"]', `prior-${index}`, '2026-09-24T00:00:00.000Z');
+    }
+    await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
+      verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
+    const env = { DB: d1(database), DOCUMENTS: new MemoryR2(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+    expect(await publishProspectiveShadowMetadata(env, async () => {})).toEqual({ result: 'projected', runKey: hash });
+    expect((database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get() as { count: number }).count).toBe(26);
   });
 });
