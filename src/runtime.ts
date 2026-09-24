@@ -5,6 +5,7 @@ import { type InternshipStore, type UserStore } from './store.js';
 import { defaultSources } from './sources/index.js';
 import type { SourceAdapter } from './types.js';
 import type { CatalogAdmissionResolver, DestinationVerificationRequest } from './destination-verification.js';
+import type { EmployerIconSeed } from './employer-icon-resolution.js';
 
 export interface RuntimeConfig {
   /** Optional personal fallback topic. Public app alerts use Expo Push Service. */
@@ -41,6 +42,8 @@ export interface RuntimeDependencies {
   maxListingsPerSourceRun?: number;
   enqueueDestinationVerification?: (request: DestinationVerificationRequest) => Promise<void>;
   catalogAdmissionResolver?: CatalogAdmissionResolver;
+  /** Records a background company-icon task for an admitted employer. */
+  enqueueEmployerIconResolution?: (seed: EmployerIconSeed) => Promise<void>;
   /** Defaults off in deployed runtimes until the compatible client is live. */
   identityUnconfirmedPublicationEnabled?: boolean;
   /** Catalog exposure gate; alert activation stays in reviewed source policy. */
@@ -60,6 +63,7 @@ export async function runRuntimeCommand(command: 'poll' | 'digest', dependencies
       dependencies.catalogAdmissionResolver,
       dependencies.identityUnconfirmedPublicationEnabled ?? false,
       dependencies.trustedCommunityCatalogEnabled ?? false,
+      dependencies.enqueueEmployerIconResolution,
     ).poll({
       allowCompleteEmptySnapshot: dependencies.allowCompleteEmptySnapshot,
       maxAdmissionMigrationListingsPerSourceRun: dependencies.maxAdmissionMigrationListingsPerSourceRun,
