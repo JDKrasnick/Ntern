@@ -4,7 +4,9 @@ Company icons are stored against `canonical_employers`, not provider mappings or
 
 ## Discovery preview
 
-Use the preview command to collect candidates from an employer website that has already been matched to the canonical employer. With `LOGO_DEV_PUBLISHABLE_KEY`, it queries Logo.dev first, then continues to the official-site fallback regardless of the Logo.dev result. It never uploads or changes D1:
+Use the preview command only after an operator has resolved and confirmed the employer's official domain. It is deliberately not a name-to-domain matcher: a wrong domain produces a convincing but wrong logo.
+
+With `LOGO_DEV_PUBLISHABLE_KEY`, Logo.dev is the first candidate. With `BRANDFETCH_CLIENT_ID`, Brandfetch is the second candidate. The command then shows official-site candidates for manual comparison. It never uploads or changes D1:
 
 ```sh
 npm run preview:employer-icon -- --company "Figma" --domain figma.com
@@ -15,11 +17,16 @@ Set the publishable key only in the local shell or CI secret; the command redact
 ```sh
 read -s LOGO_DEV_PUBLISHABLE_KEY
 export LOGO_DEV_PUBLISHABLE_KEY
+read -s BRANDFETCH_CLIENT_ID
+export BRANDFETCH_CLIENT_ID
 npm run preview:employer-icon -- --company "Figma" --domain figma.com
 unset LOGO_DEV_PUBLISHABLE_KEY
+unset BRANDFETCH_CLIENT_ID
 ```
 
-The result places the Logo.dev candidate first, then ranks Organization JSON-LD above Open Graph, Apple touch, and favicon candidates. It also makes a bounded `HEAD` request for each candidate and rejects unsupported image types, failed responses, and assets larger than 1.5 MB before review. PNG, WebP, SVG, AVIF, and JPEG are valid review candidates; approved JPEG/AVIF candidates must be converted to WebP before upload. A candidate remains review-only: confirm the page belongs to the employer and that the rendered asset is their logo before using the upload workflow below. Logo-provider results follow the same rule; they suggest a domain or asset, but do not bypass review.
+The result places Logo.dev first, Brandfetch second, then ranks Organization JSON-LD above Open Graph, Apple touch, and favicon candidates. It also makes a bounded `HEAD` request for each candidate and rejects unsupported image types, failed responses, and assets larger than 1.5 MB before review. PNG, WebP, SVG, AVIF, and JPEG are valid review candidates; approved JPEG/AVIF candidates must be converted to WebP before upload.
+
+Every result remains review-only: compare the provider candidates against the official site and verify that the mark identifies the employer. Brandfetch's standard Logo API terms require hotlinking, so its candidate is evidence for review and must not be copied into R2 unless a separate self-hosting agreement permits it. Confirm Logo.dev's plan permits the intended R2 retention before copying a Logo.dev result.
 
 If the website is challenge-gated or returns non-HTML, the command returns an empty candidate set with `blockedReason`. Record that outcome and continue to the ATS-board or manual-review rung; never substitute an ATS provider's own logo.
 

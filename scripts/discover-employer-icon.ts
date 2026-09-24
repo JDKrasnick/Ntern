@@ -1,4 +1,4 @@
-import { discoverEmployerIcon, logoDevIconRequest, verifyEmployerIconAsset } from '../src/employer-icon-discovery.js';
+import { brandfetchIconRequest, discoverEmployerIcon, logoDevIconRequest, verifyEmployerIconAsset } from '../src/employer-icon-discovery.js';
 
 const argument = (name: string) => {
   const index = process.argv.indexOf(name);
@@ -22,12 +22,15 @@ const discovery = contentType.includes('text/html')
   ? discoverEmployerIcon(company, final.href, await response.text())
   : { pageUrl: final.href, verifiedName: false, candidates: [], blockedReason: `website returned ${contentType || 'no content type'}, not HTML` };
 const logoDev = logoDevIconRequest(domain, process.env.LOGO_DEV_PUBLISHABLE_KEY ?? '');
-const candidates = await Promise.all([...(logoDev ? [logoDev.candidate] : []), ...discovery.candidates].map(async (candidate) => {
+const brandfetch = brandfetchIconRequest(domain, process.env.BRANDFETCH_CLIENT_ID ?? '');
+const providerRequest = (candidate: { source: string }) => candidate.source === 'logo-dev' ? logoDev?.requestUrl : candidate.source === 'brandfetch' ? brandfetch?.requestUrl : undefined;
+const candidates = await Promise.all([...(logoDev ? [logoDev.candidate] : []), ...(brandfetch ? [brandfetch.candidate] : []), ...discovery.candidates].map(async (candidate) => {
   try {
-    let asset = await fetch(candidate.source === 'logo-dev' ? logoDev!.requestUrl : candidate.assetUrl, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(10_000) });
+    const requestUrl = providerRequest(candidate) ?? candidate.assetUrl;
+    let asset = await fetch(requestUrl, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(10_000) });
     if (asset.status === 405) {
       await asset.body?.cancel();
-      asset = await fetch(candidate.source === 'logo-dev' ? logoDev!.requestUrl : candidate.assetUrl, { redirect: 'follow', signal: AbortSignal.timeout(10_000) });
+      asset = await fetch(requestUrl, { redirect: 'follow', signal: AbortSignal.timeout(10_000) });
     }
     await asset.body?.cancel();
     return { ...candidate, asset: verifyEmployerIconAsset(asset) };

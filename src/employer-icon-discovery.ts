@@ -1,4 +1,4 @@
-export type EmployerIconCandidateSource = 'logo-dev' | 'json-ld-logo' | 'open-graph-image' | 'apple-touch-icon' | 'favicon';
+export type EmployerIconCandidateSource = 'logo-dev' | 'brandfetch' | 'json-ld-logo' | 'open-graph-image' | 'apple-touch-icon' | 'favicon';
 
 export interface EmployerIconCandidate {
   source: EmployerIconCandidateSource;
@@ -27,6 +27,11 @@ export interface LogoDevIconRequest {
   requestUrl: string;
 }
 
+export interface BrandfetchIconRequest {
+  candidate: EmployerIconCandidate;
+  requestUrl: string;
+}
+
 const compact = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, '');
 const decodeHtml = (value: string) => value.replace(/&amp;/giu, '&').replace(/&#x2f;/giu, '/');
 const absoluteUrl = (raw: string, page: URL): string | undefined => {
@@ -49,6 +54,19 @@ export function logoDevIconRequest(domain: string, token: string): LogoDevIconRe
       evidence: ['Logo.dev candidate for supplied domain', 'needs official-site and reviewer confirmation'],
     },
     requestUrl: `https://img.logo.dev/${domain}?${parameters}`,
+  };
+}
+
+/** Keeps the Brandfetch client ID in the request URL, never the review output. */
+export function brandfetchIconRequest(domain: string, clientId: string): BrandfetchIconRequest | undefined {
+  if (!/^[a-z0-9.-]+$/iu.test(domain) || domain.includes('..') || !clientId.trim()) return undefined;
+  const parameters = new URLSearchParams({ c: clientId.trim() });
+  return {
+    candidate: {
+      source: 'brandfetch', assetUrl: `https://cdn.brandfetch.io/${domain}/w/256/h/256`, pageUrl: `https://${domain}/`, confidence: 'medium',
+      evidence: ['Brandfetch candidate for supplied domain', 'needs reviewer confirmation and must not be copied into R2 under the standard Logo API terms'],
+    },
+    requestUrl: `https://cdn.brandfetch.io/${domain}/w/256/h/256?${parameters}`,
   };
 }
 

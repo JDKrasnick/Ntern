@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { discoverEmployerIcon, logoDevIconRequest, verifyEmployerIconAsset } from '../src/employer-icon-discovery.js';
+import { brandfetchIconRequest, discoverEmployerIcon, logoDevIconRequest, verifyEmployerIconAsset } from '../src/employer-icon-discovery.js';
 
 describe('employer icon discovery', () => {
   it('prioritizes a verified organization JSON-LD logo over presentation assets', () => {
@@ -39,5 +39,14 @@ describe('employer icon discovery', () => {
     expect(candidate.candidate).toMatchObject({ source: 'logo-dev', assetUrl: 'https://img.logo.dev/figma.com?format=webp&size=256' });
     expect(JSON.stringify(candidate.candidate)).not.toContain('public-token');
     expect(logoDevIconRequest('not/a-domain', 'public-token')).toBeUndefined();
+  });
+
+  it('keeps the Brandfetch client ID out of review output and marks its asset as hotlink-only', () => {
+    const candidate = brandfetchIconRequest('figma.com', 'brandfetch-client-id')!;
+    expect(candidate.requestUrl).toContain('c=brandfetch-client-id');
+    expect(candidate.candidate).toMatchObject({ source: 'brandfetch', assetUrl: 'https://cdn.brandfetch.io/figma.com/w/256/h/256' });
+    expect(candidate.candidate.evidence.join(' ')).toContain('must not be copied into R2');
+    expect(JSON.stringify(candidate.candidate)).not.toContain('brandfetch-client-id');
+    expect(brandfetchIconRequest('not/a-domain', 'brandfetch-client-id')).toBeUndefined();
   });
 });
