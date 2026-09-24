@@ -60,7 +60,6 @@ import { pollResumeImport } from "./src/resume-import-poll";
 import { resumeBankPrompt, type ResumeBankPromptKind } from "./src/resume-bank-prompts";
 import { clearSession, confirmEmail, restoreSession, signIn, signOut, signUp } from "./src/auth";
 import { policyUrls } from "./src/policies";
-import { publicConfig } from "./src/public-config";
 import {
   clearApplicationFollowUp,
   notifyApplicationProgress,
