@@ -493,6 +493,42 @@ describe('D1 posting identity repair', () => {
     single.sqlite.close(); paged.sqlite.close();
   });
 
+  it('re-synchronizes projection mismatches the identity repair left without an alias', async () => {
+    const { sqlite, db } = await historicalDatabase();
+    // The full identity scope stamps a confirmed projection on single-member
+    // groups too. Those jobs never get a job-ID alias, so an alias-driven
+    // occurrence plan cannot see them and the audit's projectionMismatches stays
+    // behind after the repair reports convergence.
+    const identity = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    for (const batch of identity.applyBatches ?? []) await runBoundedPostingIdentityRepairBatch(db, batch);
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'job-id-alias'").get())
+      .toMatchObject({ count: 2 });
+
+    const catalogWide = await runPostingIdentityRepair(db, { scope: 'occurrences' });
+    expect(catalogWide.gate).toMatchObject({ danglingOccurrenceReferences: 1, projectionMismatches: 4 });
+
+    const plan = await runBoundedPostingIdentityOccurrenceRepair(db);
+    expect(plan).toMatchObject({ conflicts: [], danglingOccurrences: 1, projectionMismatches: 4, occurrenceRemaps: 1 });
+    expect(plan.batches.flatMap((batch) => batch.jobIds))
+      .toEqual(expect.arrayContaining(['plus-old', 'drw-old', 'spacex-a', 'spacex-b']));
+    // spacex-a and spacex-b carry no alias at all: only the projection
+    // predicate reaches them.
+    expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'job-id-alias'
+      AND pk IN ('JOB_ID_ALIAS#spacex-a', 'JOB_ID_ALIAS#spacex-b')`).get()).toMatchObject({ count: 0 });
+
+    for (const batch of plan.batches) {
+      await expect(runBoundedPostingIdentityRepairBatch(db, { scope: 'occurrences', ...batch }))
+        .resolves.toMatchObject({ applied: true });
+    }
+    expect((await runPostingIdentityRepair(db, { scope: 'occurrences' })).gate).toMatchObject({
+      projectionMismatches: 0, danglingOccurrenceReferences: 0,
+    });
+    const converged = await runBoundedPostingIdentityOccurrenceRepair(db);
+    expect(converged).toMatchObject({ expectedChanges: 0, projectionMismatches: 0, occurrenceRemaps: 0 });
+    expect(converged.batches.every((batch) => batch.expectedChanges === 0)).toBe(true);
+    sqlite.close();
+  });
+
   it('revalidates a signed occurrence batch after unrelated ingestion writes and refuses its replay', async () => {
     const { sqlite, db } = await historicalDatabase({ presentationAgrees: true });
     const identity = await runBoundedPostingIdentityRepair(db, { jobBatch: 1, duplicateGroupsOnly: true });

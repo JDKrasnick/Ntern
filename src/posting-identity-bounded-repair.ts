@@ -528,6 +528,41 @@ async function readExistingJobIds(db: D1Database, jobIds: Iterable<string>): Pro
   return existing;
 }
 
+/**
+ * Jobs whose stored identity projection disagrees with the decision derived
+ * from their retained references. This is the paged audit's
+ * `projectionMismatches` predicate evaluated in one projected page walk, so the
+ * repair targets the exact jobs the integrity gate counts without reading an
+ * occurrence body or running the audit's per-slice plan.
+ */
+async function readProjectionMismatchJobIds(db: D1Database): Promise<Set<string>> {
+  const mismatched = new Set<string>();
+  let afterPk = '';
+  let afterSk = '';
+  for (;;) {
+    const page = await db.prepare(`SELECT pk, sk, json_extract(value, '$.jobId') AS job_id,
+        json_extract(value, '$.postingIdentityStatus') AS stored,
+        (SELECT CASE
+           WHEN MAX(json_extract(reference.value, '$.postingIdentityDecision.status') = 'confirmed') = 1 THEN 'confirmed'
+           WHEN MAX(json_extract(reference.value, '$.postingIdentityDecision.status') = 'unconfirmed') = 1 THEN 'unconfirmed'
+           END
+         FROM json_each(json_extract(catalog_items.value, '$.sourceReferences')) AS reference) AS derived
+      FROM catalog_items
+      WHERE kind = 'internship' AND (pk > ? OR (pk = ? AND sk > ?))
+      ORDER BY pk, sk LIMIT ?`)
+      .bind(afterPk, afterPk, afterSk, OCCURRENCE_INDEX_PAGE)
+      .all<{ pk: string; sk: string; job_id: string | null; stored: string | null; derived: string | null }>();
+    for (const row of page.results) {
+      if (row.job_id && (row.derived ?? null) !== (row.stored ?? null)) mismatched.add(row.job_id);
+    }
+    if (page.results.length < OCCURRENCE_INDEX_PAGE) return mismatched;
+    const last = page.results.at(-1)!;
+    if (last.pk === afterPk && last.sk === afterSk) throw new Error('Posting identity projection scan did not advance');
+    afterPk = last.pk;
+    afterSk = last.sk;
+  }
+}
+
 export type OccurrenceRepairBatch = {
   jobIds: string[];
   contextRows: PostingIdentityAuditRow[];
@@ -562,22 +597,23 @@ export type OccurrenceRepairPlan = {
 
 /**
  * Paged occurrence repair. A completed identity merge retires job IDs while
- * their durable `source-occurrence` rows still point at the old ID, and the
- * merged job retains identity references the occurrence synchronizer has to
- * reclassify. Planning that from the whole catalog exceeds D1's CPU limit, so
- * this planner reads the job-ID alias table and a job-ID-projected occurrence
- * index, then plans only the canonical jobs an alias actually reaches. Each
- * returned batch is applied with its own signed token, revalidated against the
- * batch's current change count exactly like an identity batch.
+ * their durable `source-occurrence` rows still point at the old ID, and it
+ * rewrites jobs with an identity projection their retained references may not
+ * support. Planning that from the whole catalog exceeds D1's CPU limit, so this
+ * planner reads the job-ID alias table, a job-ID-projected occurrence index,
+ * and the internship projection predicate, then plans only the jobs those three
+ * reach. Each returned batch is applied with its own signed token, revalidated
+ * against the batch's current change count exactly like an identity batch.
  */
 export async function runBoundedPostingIdentityOccurrenceRepair(db: D1Database, options: {
   jobBatch?: number;
   log?: (event: string) => void;
 } = {}): Promise<OccurrenceRepairPlan> {
   const jobLimit = Math.max(1, Math.min(options.jobBatch ?? OCCURRENCE_BATCH_JOBS, OCCURRENCE_BATCH_JOBS));
-  const [aliasRows, occurrenceIndex] = await Promise.all([
+  const [aliasRows, occurrenceIndex, mismatchJobIds] = await Promise.all([
     readKindRows(db, 'job-id-alias'),
     readOccurrenceIndex(db),
+    readProjectionMismatchJobIds(db),
   ]);
   const conflicts: string[] = [];
   const aliasByOldJobId = new Map<string, OccurrenceAlias>();
@@ -631,6 +667,14 @@ export async function runBoundedPostingIdentityOccurrenceRepair(db: D1Database, 
     group.contextRows.push(alias.row);
     groups.set(alias.canonicalJobId, group);
     danglingOccurrences += occurrenceIndex.get(oldJobId)?.length ?? 0;
+  }
+  // Every alias covers a canonical job the merge rewrote, but not every job the
+  // merge rewrote got an alias: a single-member identity group only stamps the
+  // confirmed projection onto its own row. Those jobs are stale by the exact
+  // predicate the audit counts, so the projection scan adds them as one-job
+  // groups and the synchronizer re-derives them from their retained references.
+  for (const jobId of [...mismatchJobIds].sort()) {
+    if (!groups.has(jobId)) groups.set(jobId, { canonicalJobId: jobId, retiredJobIds: [], contextRows: [] });
   }
 
   const batches: OccurrenceRepairBatch[] = [];
