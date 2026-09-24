@@ -41,7 +41,7 @@ import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalo
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { companyIconResponse } from './company-icon.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
-import { enqueueEmployerIconResolution, runEmployerIconResolutionPass } from './employer-icon-resolver.js';
+import { enqueueEmployerIconResolution, runEmployerIconResolutionPass, verifyIconDomain } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
 import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
 import { handleEmployerApi } from './employer-api.js';
@@ -994,7 +994,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       logoDev: Boolean(env.LOGO_DEV_TOKEN),
       brandfetch: Boolean(env.BRANDFETCH_CLIENT_ID),
       tieBreaker: Boolean(env.OPENAI_KEY),
-    })));
+    }), () => new Date(), env.LOGO_DEV_TOKEN
+      ? (domain) => verifyIconDomain(domain, { logoDevToken: env.LOGO_DEV_TOKEN! }, { resolver: publicHostResolver })
+      : undefined));
   }
   if (url.pathname.startsWith('/internal/admission/')) {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));

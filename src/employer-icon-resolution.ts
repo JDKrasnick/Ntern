@@ -33,6 +33,8 @@ export type IconEvidenceSignal =
   | 'page-title'
   /** `og:site_name` or `og:title` clearly names the canonical employer. */
   | 'opengraph'
+  /** The posting's own reviewed ATS board slug names the canonical employer. */
+  | 'ats-tenant'
   /** Logo.dev name search selected this domain. */
   | 'logo-dev'
   /** Brandfetch name search selected this domain, as corroboration only. */
@@ -132,13 +134,89 @@ export interface EmployerIconSeed {
   sourceId: string;
 }
 
-/** A metadata string clearly names the employer only when every distinctive term appears. */
+/**
+ * Organizational qualifiers a real posting page may legitimately omit, and whose
+ * removal does not change which employer is being named. Catalog employer names
+ * carry these ("Palantir Technologies", "Flagship Pioneering Co-Op Program")
+ * while the page usually shows the brand alone.
+ */
+const EMPLOYER_QUALIFIERS: Record<string, true> = {
+  program: true, programme: true, coop: true, op: true, internship: true, intern: true,
+  summer: true, spring: true, fall: true, winter: true, university: true, campus: true,
+  careers: true, technologies: true, technology: true, group: true, holdings: true,
+  international: true, global: true, solutions: true, systems: true, labs: true,
+  laboratory: true, partners: true, digital: true, consulting: true, services: true,
+  investment: true, management: true, capital: true, asset: true, advisors: true,
+  trading: true, securities: true, financial: true,
+};
+
+/**
+ * The tokens that actually identify the employer, after corporate suffixes and
+ * organizational qualifiers are removed. Never empty for a name with at least one
+ * distinctive token; a name made only of qualifiers yields none, and matching then
+ * fails closed rather than guessing.
+ */
+export function employerDistinctiveTerms(displayName: string): string[] {
+  return canonicalCompanyKey(displayName).split(' ')
+    .filter((term) => term.length > 2 && EMPLOYER_QUALIFIERS[term] !== true);
+}
+
+/**
+ * A metadata string clearly names the employer when every distinctive term
+ * appears as its own word. Qualifiers are dropped first, so a page showing the
+ * brand alone still counts for a name that carries an entity or program suffix.
+ */
 export function iconTextMatchesEmployer(text: string | undefined, displayName: string): boolean {
   if (!text) return false;
   const haystack = ` ${text.toLowerCase().replace(/[^a-z0-9]+/gu, ' ').trim()} `;
-  const terms = canonicalCompanyKey(displayName).split(' ').filter((term) => term.length > 2);
+  const terms = employerDistinctiveTerms(displayName);
   if (!terms.length) return false;
   return terms.every((term) => haystack.includes(` ${term} `));
+}
+
+/**
+ * Whether a provider's own reported brand name denotes the canonical employer.
+ *
+ * Symmetric with the page rule: the provider name must contain every distinctive
+ * employer term and must not add a distinctive term of its own. So a provider
+ * reporting "Flagship Pioneering" for the catalog's "Flagship Pioneering Co-Op
+ * Program" matches, while "Scale Computing" never matches an employer "Scale AI"
+ * — the extra distinctive token is exactly the evidence of a different company.
+ */
+export function providerNameMatchesEmployer(providerName: string, displayName: string): boolean {
+  const reported = canonicalCompanyKey(providerName);
+  if (!reported) return false;
+  if (reported === canonicalCompanyKey(displayName)) return true;
+  const terms = employerDistinctiveTerms(displayName);
+  if (!terms.length) return false;
+  const reportedTerms = reported.split(' ');
+  if (!terms.every((term) => reportedTerms.includes(term))) return false;
+  return reportedTerms.every((term) => terms.includes(term)
+    || term.length <= 3 || EMPLOYER_QUALIFIERS[term] === true);
+}
+
+/**
+ * Whether the posting's own ATS board slug corroborates the canonical employer.
+ *
+ * The tenant is part of the provider identity the catalog already reviewed — it
+ * is the board that hosts this employer's postings — so it is evidence about the
+ * employer, independent of whatever domain a provider nominates. Compared against
+ * the canonical employer ID, which is a reviewed stable slug, rather than against
+ * fuzzy name tokens, so a weak generic word can never satisfy it.
+ */
+export function tenantCorroboratesEmployer(tenant: string | undefined, canonicalEmployerId: string): boolean {
+  const simplify = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, '');
+  const employer = simplify(canonicalEmployerId);
+  const board = simplify(tenant ?? '');
+  if (employer.length < 2 || !board) return false;
+  if (board === employer) return true;
+  // A board may carry the provider's own segment, so a whole-segment or affix
+  // match counts too ("job-boards/artefactlinkedin" hosts "artefact").
+  const segments = (tenant ?? '').toLowerCase().split(/[^a-z0-9]+/u).map(simplify).filter(Boolean);
+  if (segments.includes(employer)) return true;
+  // Affix matching needs a distinctive employer slug: "tech" occurs inside
+  // "fintechcorp" without either naming the other.
+  return employer.length >= 5 && (board.startsWith(employer) || board.endsWith(employer));
 }
 
 /** Stable evidence identifier a decision may cite, e.g. `logo-dev:example.com`. */
@@ -173,7 +251,9 @@ export function scoreIconCandidate(
   if (signals.includes('logo-dev') && signals.includes('brandfetch') && options.providersAgree) {
     score += PROVIDER_AGREEMENT_BONUS;
   }
-  if (signals.includes('page-title') || signals.includes('opengraph')) score += GROUP_WEIGHTS.metadata;
+  if (signals.includes('page-title') || signals.includes('opengraph') || signals.includes('ats-tenant')) {
+    score += GROUP_WEIGHTS.metadata;
+  }
   return { domain, score: Math.min(score, MAX_SCORE), signals, evidenceIds, rejected: false };
 }
 

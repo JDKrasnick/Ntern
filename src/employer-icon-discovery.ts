@@ -12,9 +12,8 @@
  * selected by scoring.
  */
 
-import { canonicalCompanyKey } from './core/normalize.js';
 import { registrableDomain } from './core/registrable-domain.js';
-import { MAX_PROVIDER_CANDIDATES } from './employer-icon-resolution.js';
+import { MAX_PROVIDER_CANDIDATES, providerNameMatchesEmployer } from './employer-icon-resolution.js';
 
 export const logoDevSearchEndpoint = 'https://api.logo.dev/search';
 export const logoDevImageEndpoint = 'https://img.logo.dev';
@@ -59,15 +58,13 @@ export function validIconAsset(contentType: string | null | undefined, byteLengt
 }
 
 /**
- * A provider nominates a domain only when its own reported brand name matches
- * the canonical employer name exactly. A fuzzy provider hit is not evidence of
- * employer identity, and accepting one is how a wrong logo reaches the catalog.
+ * A provider nominates a domain only when its own reported brand name denotes the
+ * canonical employer. A fuzzy provider hit is not evidence of employer identity,
+ * and accepting one is how a wrong logo reaches the catalog.
  */
 function exactProviderName(providerName: unknown, displayName: string): boolean {
-  if (typeof providerName !== 'string' || !providerName.trim()) return false;
-  const reported = canonicalCompanyKey(providerName);
-  const expected = canonicalCompanyKey(displayName);
-  return reported !== '' && reported === expected;
+  return typeof providerName === 'string' && providerName.trim() !== ''
+    && providerNameMatchesEmployer(providerName, displayName);
 }
 
 /** Domains Logo.dev reported for the employer name, deduplicated and capped. */

@@ -268,6 +268,28 @@ export class D1EmployerIconStore {
     ]);
   }
 
+  /**
+   * Records a domain a person confirmed, after an automatic decision could not
+   * reach one. It sets the same read-path fields as an automatic resolution but
+   * marks the source as reviewed, so the exception queue can distinguish a human
+   * decision from a machine one.
+   */
+  async markConfirmed(input: {
+    canonicalEmployerId: string; domain: string; evidenceJson: string; revalidateAt: string; now: string;
+  }): Promise<void> {
+    await this.db.batch([
+      this.db.prepare(`UPDATE employer_icon_resolutions SET status = 'resolved', selected_domain = ?,
+        selected_source = 'reviewed', confidence = 1, evidence_json = ?, next_retry_at = ?,
+        review_priority = 0, invalidated_at = NULL, lease_token = NULL, lease_until = NULL, updated_at = ?
+        WHERE canonical_employer_id = ? AND status <> 'resolved'`)
+        .bind(input.domain, input.evidenceJson, input.revalidateAt, input.now, input.canonicalEmployerId),
+      this.db.prepare(`UPDATE canonical_employers SET
+        icon_source = CASE WHEN icon_key IS NULL THEN 'logo-dev' ELSE icon_source END,
+        website_domain = ?, icon_resolution_status = 'resolved', icon_resolved_at = ?, updated_at = ?
+        WHERE id = ?`).bind(input.domain, input.now, input.now, input.canonicalEmployerId),
+    ]);
+  }
+
   /** The exception queue: wrong-icon reports first, then unresolved employers. */
   async reviewQueue(limit: number): Promise<EmployerIconReviewItem[]> {
     const rows = await this.db.prepare(`SELECT canonical_employer_id, status, selected_domain, selected_source,

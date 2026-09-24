@@ -2,6 +2,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
+import { handleEmployerIconOperations } from '../cloudflare/employer-icon-api.js';
 import { D1EmployerIconStore } from '../cloudflare/employer-icon-store.js';
 import {
   diagnoseEmployerIcon, enqueueEmployerIconResolution, runEmployerIconResolutionPass,
@@ -158,10 +159,11 @@ describe('employer icon diagnosis', () => {
     expect(diagnostic.finalUrl).toBe('https://acme.com/careers/role');
     expect(diagnostic.pageOrganizations).toEqual([]);
     const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
-    expect(winner?.score).toBeCloseTo(0.45, 10);
-    expect(winner?.signals).toContain('final-url');
+    // A non-ATS final URL plus the reviewed board slug naming the employer.
+    expect(winner?.score).toBeCloseTo(0.6, 10);
+    expect(winner?.signals).toEqual(expect.arrayContaining(['final-url', 'ats-tenant']));
     expect(diagnostic.decision.selectedDomain).toBe('acme.com');
-    expect(diagnostic.decision.outcome).toBe('unresolved');
+    expect(diagnostic.decision.outcome).toBe('llm-review');
   });
 
   it('records a blocked page, uses no page signals, and falls back to a monogram', async () => {
@@ -192,8 +194,9 @@ describe('employer icon diagnosis', () => {
     expect(diagnostic.pageFailure).toBe('blocked');
     expect(diagnostic.decision.outcome).toBe('resolved');
     expect(diagnostic.decision.selectedDomain).toBe('acme.com');
-    // 0.30 + 0.30 + 0.25 agreement is exactly the automatic threshold.
-    expect(diagnostic.decision.selectedScore).toBeCloseTo(0.85, 10);
+    // 0.30 + 0.30 + 0.25 agreement + 0.15 for the board slug naming the employer,
+    // capped at 1.0.
+    expect(diagnostic.decision.selectedScore).toBeCloseTo(1, 10);
   });
 
   it('ignores a JSON-LD organization that names a different company', async () => {
@@ -208,8 +211,8 @@ describe('employer icon diagnosis', () => {
     expect(diagnostic.pageOrganizations).toEqual(['globex.com']);
     expect(diagnostic.decision.scores.some((candidate) => candidate.domain === 'globex.com')).toBe(false);
     const own = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
-    expect(own?.score).toBeCloseTo(0.45, 10);
-    expect(own?.signals).toEqual(['final-url']);
+    expect(own?.score).toBeCloseTo(0.6, 10);
+    expect(own?.signals).toEqual(['final-url', 'ats-tenant']);
   });
 
   it('corroborates a provider nomination with an ATS page that names the employer', async () => {
@@ -229,14 +232,14 @@ describe('employer icon diagnosis', () => {
     });
 
     const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
-    expect(winner?.signals).toEqual(expect.arrayContaining(['logo-dev', 'page-title']));
-    expect(winner?.evidenceIds).toHaveLength(2);
+    expect(winner?.signals).toEqual(expect.arrayContaining(['logo-dev', 'page-title', 'ats-tenant']));
+    expect(winner?.evidenceIds).toHaveLength(3);
     expect(diagnostic.decision.outcome).toBe('llm-review');
     // The transport host itself is still never selectable.
     expect(diagnostic.decision.scores.find((candidate) => candidate.domain === 'greenhouse.io')?.rejected).toBe(true);
   });
 
-  it('does not corroborate a provider nomination with a page that names another employer', async () => {
+  it('adds no page evidence when the page names a different employer, and stays a monogram without a corroborating board', async () => {
     const fetchImpl = scriptedFetch({
       'https://job-boards.greenhouse.io/acme/jobs/4001': () => html(
         '<!doctype html><html><head><title>Job Application for Data Scientist Intern at Globex</title></head></html>',
@@ -244,7 +247,8 @@ describe('employer icon diagnosis', () => {
       [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
     });
     const diagnostic = await diagnoseEmployerIcon({
-      seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'),
+      // A board slug that does not name this employer, so no identity signal fires.
+      seed: { ...employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'), tenant: 'board-1' },
       credentials: { logoDevToken: LOGO_TOKEN }, deps: DEPENDENCIES(fetchImpl),
     });
 
@@ -252,6 +256,26 @@ describe('employer icon diagnosis', () => {
     expect(winner?.signals).toEqual(['logo-dev']);
     expect(winner?.evidenceIds).toHaveLength(1);
     expect(diagnostic.decision.outcome).toBe('unresolved');
+  });
+
+  it('corroborates a provider nomination from the reviewed board slug alone', async () => {
+    // A challenge-gated page yields no metadata at all, so the only identity
+    // evidence is our own reviewed binding of this employer to its board.
+    const diagnostic = await diagnoseEmployerIcon({
+      seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'),
+      credentials: { logoDevToken: LOGO_TOKEN },
+      deps: { resolver: PUBLIC_RESOLVER, fetchImpl: scriptedFetch({
+        'https://job-boards.greenhouse.io/acme/jobs/4001': () => status(403),
+        [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      }) },
+    });
+
+    // A 403 challenge page is fetched successfully but yields no usable metadata.
+    expect(diagnostic.pageFailure).toBeUndefined();
+    expect(diagnostic.pageOrganizations).toEqual([]);
+    const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
+    expect(winner?.signals).toEqual(['ats-tenant', 'logo-dev']);
+    expect(diagnostic.decision.outcome).toBe('llm-review');
   });
 });
 
@@ -398,7 +422,8 @@ describe('employer icon image gating', () => {
     const row = database.prepare('SELECT evidence_json FROM employer_icon_resolutions WHERE canonical_employer_id = ?')
       .get('acme') as { evidence_json: string };
     const evidence = JSON.parse(row.evidence_json) as { tieBreak?: { citedEvidenceIds?: string[]; inputTokens?: number } };
-    expect([...(evidence.tieBreak?.citedEvidenceIds ?? [])].sort()).toEqual(['logo-dev:acme.com', 'page-title:acme.com']);
+    expect([...(evidence.tieBreak?.citedEvidenceIds ?? [])].sort())
+      .toEqual(['ats-tenant:acme.com', 'logo-dev:acme.com', 'page-title:acme.com']);
     expect(evidence.tieBreak?.inputTokens).toBe(200);
   });
 
@@ -639,6 +664,45 @@ describe('employer icon idempotency', () => {
   });
 });
 
+describe('employer icon confirm route', () => {
+  const confirmRequest = (body: unknown) => new Request('https://api.test/internal/admission/employer-icons/confirm', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const message = async (response: Response) => (await response.json() as { message?: string }).message;
+
+  it('records a verified domain and refuses a transport host or an unverified one', async () => {
+    const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    const verify = vi.fn(async (domain: string) => domain === 'acme.com');
+    const confirm = (body: unknown) => handleEmployerIconOperations(
+      confirmRequest(body), icons, () => ({ logoDev: true, brandfetch: true, tieBreaker: true }), () => NOW, verify,
+    );
+
+    const transport = await confirm({ canonicalEmployerId: 'acme', domain: 'job-boards.greenhouse.io' });
+    expect(transport.status).toBe(409);
+    expect(await message(transport)).toContain('ATS');
+
+    const url = await confirm({ canonicalEmployerId: 'acme', domain: 'https://acme.com/careers' });
+    expect(url.status).toBe(409);
+    expect(await message(url)).toContain('bare hostname');
+
+    // A person may name a domain but never vouch for an icon that does not exist.
+    const missing = await confirm({ canonicalEmployerId: 'acme', domain: 'no-logo.test' });
+    expect(missing.status).toBe(409);
+    expect(await message(missing)).toContain('No real logo');
+    expect((await icons.context('acme'))?.websiteDomain).toBeUndefined();
+
+    // A subdomain is confirmed and served as its registrable domain, so the verify
+    // call and the later read path agree on exactly one domain.
+    const confirmed = await confirm({ canonicalEmployerId: 'acme', domain: 'careers.acme.com' });
+    expect(confirmed.status).toBe(200);
+    expect(verify).toHaveBeenLastCalledWith('acme.com');
+    const context = await icons.context('acme');
+    expect(context?.resolutionStatus).toBe('resolved');
+    expect(context?.websiteDomain).toBe('acme.com');
+  });
+});
+
 describe('employer icon tie-breaker budget', () => {
   it('calls the model once per evidence fingerprint and records token usage', async () => {
     const { db, admission, icons } = subject();
@@ -655,7 +719,11 @@ describe('employer icon tie-breaker budget', () => {
       };
     };
     const fetchImpl = scriptedFetch({
-      'https://acme.com/careers/role': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      // The employer's own careers page naming the employer, with no JSON-LD
+      // organization: 0.45 + 0.15 stays inside the tie-breaker's band.
+      'https://acme.com/careers/role': () => html(
+        '<!doctype html><html><head><title>Careers at Acme</title></head></html>',
+      ),
     });
     const env = environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' });
 

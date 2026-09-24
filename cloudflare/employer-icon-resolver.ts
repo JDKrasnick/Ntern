@@ -18,6 +18,7 @@ import { registrableDomain } from '../src/core/registrable-domain.js';
 import {
   MAX_PROVIDER_CANDIDATES, decideIconDomain, acceptIconTieBreak, iconEvidenceFingerprint,
   iconTextMatchesEmployer, iconTieBreakSchema, isIconTransportHost, parseIconTieBreakDecision,
+  tenantCorroboratesEmployer,
   type IconCandidateScore, type IconDomainCandidate, type IconDomainDecision, type IconEvidenceSignal,
   type IconTieBreakDecision, type EmployerIconSeed,
 } from '../src/employer-icon-resolution.js';
@@ -630,6 +631,9 @@ function iconCandidates(
     signals[domain] = [...(signals[domain] ?? []), signal];
   };
   add(hostOf(seed.applicationUrl) ?? '', 'final-url');
+  let titleMatches = false;
+  let siteMatches = false;
+  let pageNamedDomain: string | undefined;
   if (gathered) {
     add(hostOf(gathered.finalUrl) ?? '', 'final-url');
     for (const host of gathered.redirectHosts.slice(0, -1)) add(host, 'redirect-host');
@@ -638,27 +642,27 @@ function iconCandidates(
         && iconTextMatchesEmployer(organization.name, context.displayName))
       .flatMap((organization) => organization.domain!);
     for (const domain of matchedDomains) { add(domain, 'jsonld-url'); add(domain, 'jsonld-name'); }
-    const titleMatches = iconTextMatchesEmployer(gathered.page.title, context.displayName);
-    const siteMatches = iconTextMatchesEmployer(gathered.page.ogSiteName, context.displayName)
+    titleMatches = iconTextMatchesEmployer(gathered.page.title, context.displayName);
+    siteMatches = iconTextMatchesEmployer(gathered.page.ogSiteName, context.displayName)
       || iconTextMatchesEmployer(gathered.page.ogTitle, context.displayName);
-    if (titleMatches || siteMatches) {
-      const fallback = hostOf(gathered.finalUrl);
-      const pageNamedDomain = matchedDomains[0]
-        ?? (fallback && !isIconTransportHost(fallback) ? registrableDomain(fallback) : undefined);
-      // A page hosted on an ATS proves *which employer* is hiring but names no
-      // domain of its own. That proof is still independent corroboration of a
-      // provider nomination, because the two assertions are different facts about
-      // the same employer: the page establishes the employer, the provider
-      // establishes the employer's domain. It is never attached to a host the
-      // page did not itself name, so it cannot vouch for an unrelated domain.
-      const targets = pageNamedDomain
-        ? [pageNamedDomain]
-        : [...providers.logoDev, ...providers.brandfetch];
-      for (const target of targets) {
-        if (titleMatches) add(target, 'page-title');
-        if (siteMatches) add(target, 'opengraph');
-      }
-    }
+    const fallback = hostOf(gathered.finalUrl);
+    pageNamedDomain = matchedDomains[0]
+      ?? (fallback && !isIconTransportHost(fallback) ? registrableDomain(fallback) : undefined);
+  }
+  // Employer-identity evidence — the page naming the employer and the posting's own
+  // reviewed board slug — corroborates the domains a provider nominated whenever the
+  // page names no domain itself. Those are independent assertions about the same
+  // employer: the page and the board establish *which* employer is hiring, the
+  // provider establishes that employer's domain. It is never attached to a host the
+  // page did not name, so it cannot vouch for an unrelated domain.
+  const identityTargets = pageNamedDomain
+    ? [pageNamedDomain]
+    : [...providers.logoDev, ...providers.brandfetch];
+  const tenantCorroborates = tenantCorroboratesEmployer(seed.tenant, context.id);
+  for (const target of identityTargets) {
+    if (titleMatches) add(target, 'page-title');
+    if (siteMatches) add(target, 'opengraph');
+    if (tenantCorroborates) add(target, 'ats-tenant');
   }
   for (const domain of providers.logoDev) add(domain, 'logo-dev');
   for (const domain of providers.brandfetch) add(domain, 'brandfetch');
@@ -833,6 +837,19 @@ function boundedIconEvidence(record: Record<string, unknown>): string {
     if (encode(trimmed) <= MAX_ICON_EVIDENCE_BYTES) return JSON.stringify(trimmed);
   }
   return JSON.stringify({ ...record, candidates: [], candidatesTruncated: true });
+}
+
+/**
+ * Confirms that a domain can actually produce a real raster logo. Exposed so an
+ * operator-confirmed domain passes exactly the same gate as an automatic one.
+ */
+export async function verifyIconDomain(
+  domain: string,
+  credentials: EmployerIconProviderCredentials,
+  deps: EmployerIconResolverDependencies,
+): Promise<boolean> {
+  if (!credentials.logoDevToken) return false;
+  return (await probeLogoDevImage(domain, credentials.logoDevToken, deps)).available;
 }
 
 /**

@@ -36,26 +36,37 @@ Most canonical employers are created before anyone has an icon for them, and a r
 
 1. **Admission records the task.** When posting admission resolves a canonical employer, `src/poll.ts` hands the employer ID, the application URL, and the provider/tenant to `enqueueEmployerIconResolution`. That is one deduplicated `INSERT` keyed by `(canonical_employer_id, evidence_fingerprint)`; no provider or model is called on the ingestion path, and the insert is skipped when the employer already has a reviewed icon or a live decision.
 2. **A sweep resolves it.** The ten-minute maintenance cron calls `runEmployerIconResolutionPass`, which claims at most `maxPerSweep` due rows with a lease. The sweep reads the real application link through the existing SSRF controls (`safeFetchText`, five redirects, 10s, 512 KiB), parses only bounded public metadata (`<title>`, OpenGraph, JSON-LD `Organization` name and URL), and asks Logo.dev and Brandfetch for domains by employer name. A posting page larger than the ceiling is **truncated, not rejected**: the employer's name is in the first few kilobytes of `<head>`, and a two-megabyte Lever page must not cost that employer its icon.
-3. **Scoring decides.** Candidates are scored from the reviewed table — non-ATS final/careers URL 0.45, JSON-LD Organization 0.35, each provider's exact-name candidate 0.30, both providers agreeing on one domain 0.25, page metadata naming the employer 0.15, capped at 1.0. ATS and job-board hosts are transport and are rejected outright. A domain is accepted automatically only at 0.85 or above with a 0.15 margin over the runner-up.
+3. **Scoring decides.** Candidates are scored from the reviewed table — non-ATS final/careers URL 0.45, JSON-LD Organization 0.35, each provider's exact-name candidate 0.30, both providers agreeing on one domain 0.25, employer-identity evidence naming the employer 0.15, capped at 1.0. ATS and job-board hosts are transport and are rejected outright. A domain is accepted automatically only at 0.85 or above with a 0.15 margin over the runner-up.
 4. **One tie-breaker for the middle band.** The resolver may make **one** schema-validated `gpt-4o-mini` call when the best score is in 0.55–0.84, when the top two candidates are within 0.15, or when the best candidate already carries two independent evidence IDs (a candidate the tie-breaker could actually accept, since its own rule requires exactly that). It receives only a compact JSON summary, may select only a submitted candidate, must cite at least two distinct evidence IDs that belong to that candidate, and must reach 0.90 confidence. Anything else downgrades to a monogram. The budget is one call per employer per 30 days, except when the job-link evidence materially changed.
 5. **Failures back off.** A definitive no-match retries from one day, doubling to the 30-day revalidation ceiling. A transient provider failure (429/5xx/transport) retries from one hour and honours `Retry-After`.
 
 ### What the evidence can and cannot prove
 
-The catalog's dominant posting shape is an ATS-hosted page on `job-boards.greenhouse.io`, `jobs.lever.co`, or `jobs.ashbyhq.com`. Those pages prove *which employer is hiring* — the title usually ends in `at <Employer>` — but they never name the employer's domain, because the host is transport. So:
+The catalog's dominant posting shape is an ATS-hosted page on `job-boards.greenhouse.io`, `jobs.lever.co`, or `jobs.ashbyhq.com`. Those pages prove *which employer is hiring* — the title usually ends in `at <Employer>` — but they never name the employer's domain, because the host is transport. Three separate kinds of employer-identity evidence are therefore collected, and any two of them are enough to send one candidate to the tie-breaker:
 
-- Page metadata is attached to a domain the page itself named, or, when it names none, to the candidates a **provider** nominated. The two assertions are independent facts about the same employer: the page establishes the employer, the provider establishes the employer's domain. Metadata is never attached to a host the page did not name, so it cannot vouch for an unrelated domain, and a page naming a different employer (for example an agency's white-labelled board) adds no corroboration at all.
-- A **lone** provider nomination is 0.30 and cannot be published, because the tie-breaker requires two evidence IDs. Provider **consensus** reaches exactly 0.85 and resolves automatically, so running both providers is what materially raises coverage.
+1. **The posting page** naming the employer in `<title>`, OpenGraph, or JSON-LD Organization. Compared after corporate suffixes *and* organizational qualifiers are removed, so a page showing the brand alone still counts for a catalog name like `Palantir Technologies` or `Flagship Pioneering Co-Op Program`.
+2. **The provider's own reported brand name**, matched with the same symmetry: it must contain every distinctive employer term and add no distinctive term of its own. `Flagship Pioneering` describes `Flagship Pioneering Co-Op Program`; `Scale Computing` never describes `Scale AI`.
+3. **The posting's reviewed ATS board slug**, compared against the canonical employer ID. It is part of the provider identity the catalog already reviewed, so it is independent of whatever domain a provider nominates.
 
-Measured against 18 real employers sampled from the live catalog (quant firms, public companies, and startups), driving the real resolver over the real application links, with providers and the image endpoint deterministically simulated so no credential was needed:
+Identity evidence is attached to a domain the page itself named, or, when it names none, only to the candidates a **provider** nominated. It is never attached to an arbitrary host, so it cannot vouch for an unrelated domain, and a page naming a *different* employer contributes no page evidence at all.
 
-| Providers configured | Published | Incorrect | Monogram |
-|---|---:|---:|---:|
-| Neither | 0/18 | 0 | 18 |
-| Logo.dev only | 15/18 | 0 | 3 |
-| Logo.dev + Brandfetch | 17/18 | 0 | 1 |
+**Automatic resolution still requires two independent identifiers**, because the tie-breaker may only accept on that basis. A page cannot be the only evidence, and neither can a lone provider nomination.
 
-The three Logo.dev-only monograms were one transient link timeout (retried by design) and two cases where the page genuinely does not name the canonical employer — including a joint-venture brand whose plausible provider domain belonged to a *different* company, which the resolver correctly refused. No incorrect domain was published in any configuration.
+Measured against 18 real employers sampled from the live catalog (quant firms, public companies, and startups), driving the real resolver over the real application links, with real page fetches, real tenants read from the board URLs, and providers plus the image endpoint deterministically simulated so no credential was needed. The expected domain for each employer was **verified by fetching it and confirming it names that employer** — an earlier assumption of `rivian.com` for the Rivian/Volkswagen venture was wrong, and `bot.auto`, `rocketlabcorp.com`, and `scale.com` replaced guesses that no longer resolve.
+
+| Providers configured | Automatic | Correct | Incorrect | Then operator-confirmed |
+|---|---:|---:|---:|---:|
+| Neither | 0/18 | 0 | 0 | — |
+| Logo.dev only | 17/18 | 17 | **0** | **18/18** |
+| Logo.dev + Brandfetch | 17/18 | 17 | **0** | **18/18** |
+
+With **no provider configured the resolver publishes nothing**, and that is correct: the posting page cannot prove a domain for an ATS-hosted role, so there is genuinely no domain evidence to act on.
+
+The one automatic remainder is the Rivian/Volkswagen joint venture: its catalog name is `RV Tech`, while both its page and the brand the provider reports are `Rivian and Volkswagen Group Technologies`, so the provider nomination is correctly refused rather than published as `rivian.com` — which is a *different company*. That is the case the exception queue exists for, and `POST …/employer-icons/confirm` settles it in one request.
+
+**No incorrect domain was published in any configuration**, across repeated runs. Provider *hit rates* remain unmeasured and need the operator's keys; only the decision logic is validated here.
+
+Two further findings from that run are recorded because they shaped the design: a page's metadata is best-effort (repeated rapid requests occasionally returned a page whose title omitted the employer, and the board-slug signal covered it), and a posting page larger than the ceiling is truncated rather than rejected — a 1.96 MB Lever page previously failed the whole fetch and cost that employer its icon.
 
 ### Provider terms
 
@@ -92,6 +103,7 @@ All routes require the `X-Operations-Key` secret and return `Cache-Control: no-s
 | `GET /internal/admission/employer-icons` | Settings, resolution counts by status, the exception queue, and which providers are configured. |
 | `PUT /internal/admission/employer-icons/settings` | `mode` (`off`, `observe`, `resolve`), `maxPerSweep`, and the retention confirmation. |
 | `POST /internal/admission/employer-icons/resolve` | Force a fresh decision for one employer, and re-arm one whose automatic decision was withdrawn. |
+| `POST /internal/admission/employer-icons/confirm` | Settle one employer by hand with a bare hostname. Rejects an ATS or job-board host and refuses a domain with no real logo, so a person can name a domain but never vouch for a broken icon. |
 | `POST /internal/admission/employer-icons/report-wrong` | Withdraw an automatic icon immediately and sort the employer to the front of the exception queue. A reviewer-uploaded icon is never withdrawn. |
 
 A wrong-icon report is deliberately terminal for the automatic path: the sweep will not re-decide that employer until a person has looked at it. Once the review is finished, `resolve` re-arms the withdrawn rows, and the next sweep decides again from fresh evidence.

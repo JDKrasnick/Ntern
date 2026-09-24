@@ -10,6 +10,9 @@
 
 import { validCompanyIconEmployerId } from './company-icon.js';
 import { enqueueEmployerIconResolution } from './employer-icon-resolver.js';
+import { isIconTransportHost } from '../src/employer-icon-resolution.js';
+import { normalizeCompanyDomain } from '../src/employer/domain.js';
+import { registrableDomain } from '../src/core/registrable-domain.js';
 import type { D1EmployerIconStore, EmployerIconMode } from './employer-icon-store.js';
 
 const MAX_REVIEW_QUEUE = 50;
@@ -45,6 +48,8 @@ export async function handleEmployerIconOperations(
   store: D1EmployerIconStore,
   providerStatus: () => EmployerIconProviderStatus,
   now = () => new Date(),
+  /** Confirms a real logo exists for an operator-supplied domain; absent means the route is unavailable. */
+  verifyDomain?: (domain: string) => Promise<boolean>,
 ): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -100,6 +105,32 @@ export async function handleEmployerIconOperations(
         sourceId: optionalText(input.sourceId, 300) ?? 'reviewed-registry',
       }, now());
       return json(202, { employerId: id, enqueued, reopened });
+    }
+    if (request.method === 'POST' && path === '/internal/admission/employer-icons/confirm') {
+      const input = await body(request);
+      const id = employerId(input.canonicalEmployerId);
+      const context = await store.context(id);
+      if (!context) throw new Error('Canonical employer was not found');
+      const hostname = normalizeCompanyDomain(optionalText(input.domain, 253) ?? '');
+      if (!hostname) throw new Error('domain must be a bare hostname such as example.com');
+      // Verified and served through the same registrable domain, so what an
+      // operator confirms is exactly what the read path later requests.
+      const domain = registrableDomain(hostname);
+      if (isIconTransportHost(domain)) throw new Error('domain cannot be an ATS or job-board host');
+      if (!verifyDomain) throw new Error('Domain verification is not configured');
+      // A person may confirm a domain, but never an unverified icon: the same
+      // real-image gate that an automatic decision passes applies here too.
+      if (!await verifyDomain(domain)) throw new Error('No real logo exists for that domain');
+      await store.markConfirmed({
+        canonicalEmployerId: id, domain,
+        evidenceJson: JSON.stringify({
+          version: 1, kind: 'confirmed', canonicalEmployerId: id, displayName: context.displayName.slice(0, 200),
+          outcome: 'resolved', reasonCode: 'operator-confirmed', candidates: [{ domain, score: 1, signals: ['confirmed'] }],
+        }),
+        revalidateAt: new Date(Date.parse(timestamp) + 365 * 24 * 60 * 60 * 1_000).toISOString(),
+        now: timestamp,
+      });
+      return json(200, { employerId: id, domain, confirmed: true });
     }
     if (request.method === 'POST' && path === '/internal/admission/employer-icons/report-wrong') {
       const input = await body(request);

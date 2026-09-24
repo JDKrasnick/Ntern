@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { registrableDomain, sameRegistrableDomain } from '../src/core/registrable-domain.js';
 import {
-  acceptIconTieBreak, decideIconDomain, iconEvidenceFingerprint, iconTextMatchesEmployer,
-  isIconTransportHost, parseIconTieBreakDecision, scoreIconCandidate, scoreIconCandidates,
+  acceptIconTieBreak, decideIconDomain, employerDistinctiveTerms, iconEvidenceFingerprint,
+  iconTextMatchesEmployer, isIconTransportHost, parseIconTieBreakDecision, providerNameMatchesEmployer,
+  scoreIconCandidate, scoreIconCandidates, tenantCorroboratesEmployer,
 } from '../src/employer-icon-resolution.js';
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from '../shared/company-icon.js';
 import type { IconCandidateScore, IconDomainCandidate, IconTieBreakDecision } from '../src/employer-icon-resolution.js';
@@ -86,6 +87,58 @@ describe('employer text matching', () => {
 
     expect(iconTextMatchesEmployer('ACME is hiring', 'ABC')).toBe(false);
     expect(iconTextMatchesEmployer('AB Corp is hiring', 'AB Corp')).toBe(false);
+  });
+
+  it('matches a page that shows the brand alone when the employer name carries qualifiers', () => {
+    // Real catalog names carry entity and program suffixes the posting page omits.
+    expect(iconTextMatchesEmployer('Home | Palantir', 'Palantir Technologies')).toBe(true);
+    expect(iconTextMatchesEmployer('Home | Flagship Pioneering', 'Flagship Pioneering Co-Op Program')).toBe(true);
+    expect(iconTextMatchesEmployer('Home US | IMC Trading', 'IMC')).toBe(true);
+
+    // Dropping qualifiers must not turn a distinctive term into a match.
+    expect(iconTextMatchesEmployer('Rivian and Volkswagen Group Technologies', 'RV Tech')).toBe(false);
+    expect(iconTextMatchesEmployer('Palantir', 'Palantir Systems')).toBe(true);
+    expect(iconTextMatchesEmployer('Globex', 'Palantir Technologies')).toBe(false);
+
+    expect(employerDistinctiveTerms('Flagship Pioneering Co-Op Program')).toEqual(['flagship', 'pioneering']);
+    expect(employerDistinctiveTerms('Palantir Technologies')).toEqual(['palantir']);
+    expect(employerDistinctiveTerms('RV Tech')).toEqual(['tech']);
+    // A name made only of qualifiers yields nothing, so matching fails closed.
+    expect(employerDistinctiveTerms('AB Corp')).toEqual([]);
+  });
+
+  it('accepts a provider brand name that omits qualifiers but never one that adds a distinctive term', () => {
+    // The provider must contain every distinctive employer term...
+    expect(providerNameMatchesEmployer('Palantir', 'Palantir Technologies')).toBe(true);
+    expect(providerNameMatchesEmployer('Flagship Pioneering', 'Flagship Pioneering Co-Op Program')).toBe(true);
+    expect(providerNameMatchesEmployer('Scale AI', 'Scale AI')).toBe(true);
+    expect(providerNameMatchesEmployer('scale ai, inc.', 'Scale AI')).toBe(true);
+    // ...and may append only organizational-form or business-descriptor words, which
+    // real providers do routinely ("IMC Trading", "Saronic Technologies").
+    expect(providerNameMatchesEmployer('IMC Trading', 'IMC')).toBe(true);
+    expect(providerNameMatchesEmployer('Saronic Technologies', 'Saronic')).toBe(true);
+    expect(providerNameMatchesEmployer('Palantir Systems', 'Palantir Technologies')).toBe(true);
+
+    // A distinctive extra term is the evidence of a different company, so it never matches.
+    expect(providerNameMatchesEmployer('Scale Computing', 'Scale AI')).toBe(false);
+    expect(providerNameMatchesEmployer('Palantir Federal', 'Palantir Technologies')).toBe(false);
+    expect(providerNameMatchesEmployer('Rivian and Volkswagen Group Technologies', 'RV Tech')).toBe(false);
+    expect(providerNameMatchesEmployer('', 'Palantir Technologies')).toBe(false);
+  });
+
+  it('corroborates an employer only from a board slug that actually names it', () => {
+    // The tenant is the reviewed binding of this employer to its ATS board.
+    expect(tenantCorroboratesEmployer('palantir', 'palantir')).toBe(true);
+    expect(tenantCorroboratesEmployer('artefactlinkedin', 'artefact')).toBe(true);
+    expect(tenantCorroboratesEmployer('rivianvw.tech', 'rivianvw-tech')).toBe(true);
+    expect(tenantCorroboratesEmployer('fspco-op012325', 'fspco-op012325')).toBe(true);
+
+    // A board that does not name the employer corroborates nothing, and a slug too
+    // short to be distinctive is never enough on its own.
+    expect(tenantCorroboratesEmployer('board-1', 'acme')).toBe(false);
+    expect(tenantCorroboratesEmployer(undefined, 'acme')).toBe(false);
+    expect(tenantCorroboratesEmployer('acme', 'ab')).toBe(false);
+    expect(tenantCorroboratesEmployer('fintechcorp', 'tech')).toBe(false);
   });
 });
 
