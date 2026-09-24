@@ -138,6 +138,12 @@ describe('job filters', () => {
       expect(isTechnicalJob(listing(title, 'https://example.com/role')), title).toBe(true);
     }
   });
+  it('recognizes explicitly technical project delivery without broadening generic management', () => {
+    expect(isTechnicalJob(listing('Technical Project Management Intern (Summer 2027)', 'https://example.com/tpm'))).toBe(true);
+    expect(isTechnicalJob(listing('Technical Program Manager Intern', 'https://example.com/tpgm'))).toBe(true);
+    expect(isTechnicalJob(listing('Project Management Intern', 'https://example.com/pm'))).toBe(false);
+    expect(isTechnicalJob(listing('Marketing Project Manager Intern', 'https://example.com/marketing'))).toBe(false);
+  });
   it('lets a business function outrank a technical word it merely shares', () => {
     for (const title of ['AI Marketing Intern', 'Talent Acquisition Technology Intern', 'Platform Campaign Project Intern',
       'Technical Recruiting Intern - AI & Automation', 'Supply Chain Intern', 'Administrative Business Partner - Security']) {
