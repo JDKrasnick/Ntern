@@ -415,9 +415,23 @@ type PostingIdentityRepairInput = {
 // an indefinitely empty production queue.
 const MAX_LOW_IMPACT_REPAIR_JOBS = 100;
 const MAX_LOW_IMPACT_REPAIR_REFERENCES = 125;
+// Occurrence synchronization repairs durable pointers left by a completed
+// identity merge. It can read the catalog in pages, but must stay small enough
+// that normal provider work is not displaced and must defer the R2 rebuild.
+const MAX_LOW_IMPACT_OCCURRENCE_CHANGES = 250;
 
 export function isLowImpactPostingIdentityRequest(input: PostingIdentityRepairInput): boolean {
   if (input.audit === true) return true;
+  if (input.scope === 'occurrences') {
+    if (!input.apply) return true;
+    const expectedChanges = input.expectedChanges;
+    const expectedDuplicateJobs = input.expectedDuplicateJobs;
+    return input.finalize === false
+      && typeof input.repairToken === 'string' && /^[a-f0-9]{64}$/u.test(input.repairToken)
+      && typeof expectedChanges === 'number' && Number.isInteger(expectedChanges) && expectedChanges >= 0
+      && expectedChanges <= MAX_LOW_IMPACT_OCCURRENCE_CHANGES
+      && typeof expectedDuplicateJobs === 'number' && Number.isInteger(expectedDuplicateJobs) && expectedDuplicateJobs >= 0;
+  }
   if (input.scope !== 'identity') return false;
   if (input.duplicateGroupsOnly === true && input.apply !== true && !input.applyBatch) return true;
   if (!input.apply || input.finalize === true || !input.applyBatch) return false;
@@ -909,7 +923,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       report = input.scope === 'identity'
         ? await runBoundedPostingIdentityRepair(env.DB, repairOptions)
         : await runPostingIdentityRepair(env.DB, repairOptions);
-      if (input.apply && report.projectionRefreshRequired) {
+      // A bounded occurrence repair returns its receipt before rebuilding R2.
+      // The authorized projection endpoint can then run independently without
+      // extending a queue-tolerant D1 operation into an unbounded write.
+      if (input.apply && report.projectionRefreshRequired && input.finalize !== false) {
         await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
         const verificationOptions = {
           scope: input.scope,
