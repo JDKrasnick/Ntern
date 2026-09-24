@@ -86,6 +86,8 @@ export interface PostingIdentityRepairPlan {
   aliasWrites: number;
   occurrenceRemaps: number;
   notificationTombstoneRemaps: number;
+  /** Superseded duplicate alert rows removed so one posting owns one alert. */
+  notificationEventMerges: number;
   applicationRemaps: number;
   applicationMerges: number;
   sessionRemaps: number;
@@ -1227,6 +1229,34 @@ export function postingIdentityRepairPlan(
       : write);
   }
   catalogWrites.splice(0, catalogWrites.length, ...uniqueCatalogWrites.values());
+  // One canonical posting owns one alert. A merged duplicate's own pending
+  // alert row is superseded by the canonical job's: the pipeline resolves
+  // alerts per canonical job, so the extra row is redundant and would otherwise
+  // leave the alert gate permanently red after a legitimate merge. Keep the
+  // canonical job's own row; if it has none, keep the oldest member row so the
+  // posting still has an alert to deliver.
+  const eventsByCanonical = new Map<string, CatalogRow[]>();
+  for (const row of catalogRows.filter((item) => item.kind === 'notification-event')) {
+    try {
+      const event = parse<{ jobId?: string }>(row.value);
+      if (!event.jobId) continue;
+      // Bucket through every known alias, the same mapping the alert count uses:
+      // an alert row left under a retired job ID must consolidate with, and count
+      // under, the canonical posting rather than on its own.
+      const canonical = canonicalByJobId.get(event.jobId) ?? event.jobId;
+      eventsByCanonical.set(canonical, [...(eventsByCanonical.get(canonical) ?? []), row]);
+    } catch { conflicts.push(`${row.pk}:${row.sk}: malformed notification event JSON`); }
+  }
+  const supersededEventKeys = new Set<string>();
+  for (const [canonical, rows] of [...eventsByCanonical.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    if (rows.length <= 1) continue;
+    const retained = rows.find((row) => parse<{ jobId?: string }>(row.value).jobId === canonical) ?? rows[0]!;
+    for (const row of rows) {
+      if (row.pk === retained.pk && row.sk === retained.sk) continue;
+      supersededEventKeys.add(`${row.pk}\0${row.sk}`);
+      if (!audit) catalogDeletes.push(row);
+    }
+  }
   const expectedChanges = catalogWrites.length + catalogDeletes.length + userWrites.length + userDeletes.length + proposalUpdates.length;
   const repairToken = structuredDigest([
     ['catalogWrites', catalogWrites.map((item) => [item.pk, item.sk, item.before?.value ?? null, item.value])
@@ -1245,6 +1275,7 @@ export function postingIdentityRepairPlan(
   ]);
   const notificationGroups = new Map<string, number>();
   for (const row of catalogRows.filter((item) => item.kind === 'notification-event')) {
+    if (supersededEventKeys.has(`${row.pk}\0${row.sk}`)) continue;
     try {
       const event = parse<{ jobId: string }>(row.value);
       const canonicalId = canonicalByJobId.get(event.jobId) ?? event.jobId;
@@ -1293,7 +1324,8 @@ export function postingIdentityRepairPlan(
     unresolvedDuplicateGroups: presentationDisagreements.length,
     jobUpdates: catalogWrites.filter((item) => item.kind === 'internship').length, jobDeletes: catalogDeletes.length,
     aliasWrites: catalogWrites.filter((item) => item.kind === 'posting-alias' || item.kind === 'job-id-alias').length,
-    occurrenceRemaps, notificationTombstoneRemaps, applicationRemaps, applicationMerges, sessionRemaps, receiptRemaps, receiptMerges,
+    occurrenceRemaps, notificationTombstoneRemaps, notificationEventMerges: supersededEventKeys.size,
+    applicationRemaps, applicationMerges, sessionRemaps, receiptRemaps, receiptMerges,
     releaseRemaps, proposalRemaps: proposalUpdates.length,
     outboxRows: catalogRows.filter((row) => row.kind === 'notification-event').length,
     conflicts: sortedConflicts, presentationDisagreements, samples: samples.slice(0, 20), expectedChanges,
@@ -1414,7 +1446,8 @@ function repairReport(plan: InternalPlan): PostingIdentityRepairPlan {
     eligibleDuplicateJobs: plan.eligibleDuplicateJobs, unresolvedDuplicateGroups: plan.unresolvedDuplicateGroups,
     jobUpdates: plan.jobUpdates, jobDeletes: plan.jobDeletes,
     aliasWrites: plan.aliasWrites, occurrenceRemaps: plan.occurrenceRemaps,
-    notificationTombstoneRemaps: plan.notificationTombstoneRemaps, applicationRemaps: plan.applicationRemaps,
+    notificationTombstoneRemaps: plan.notificationTombstoneRemaps,
+    notificationEventMerges: plan.notificationEventMerges, applicationRemaps: plan.applicationRemaps,
     applicationMerges: plan.applicationMerges, sessionRemaps: plan.sessionRemaps, receiptRemaps: plan.receiptRemaps,
     receiptMerges: plan.receiptMerges, releaseRemaps: plan.releaseRemaps, proposalRemaps: plan.proposalRemaps,
     outboxRows: plan.outboxRows, conflicts: plan.conflicts, presentationDisagreements: plan.presentationDisagreements,

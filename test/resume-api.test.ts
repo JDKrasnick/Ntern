@@ -117,6 +117,47 @@ describe('resume API ownership and revisions', () => {
     expect(generate).toHaveBeenCalledTimes(2);
   });
 
+  it('refunds the monthly allowance when a draft cannot be persisted', async () => {
+    class ConflictStore extends MemoryUserStore {
+      async putResumeDraft(): Promise<boolean> { return false; }
+    }
+    const users = new ConflictStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript service', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'TypeScript role', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, now: () => '2026-09-23T00:00:00.000Z' });
+    expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(409);
+    expect(JSON.parse((await handler(event('student', 'GET', '/me/subscription'))).body)).toMatchObject({ usage: { used: 0, remaining: 2 } });
+  });
+
+  it('deletes a bank parent with its bullets and prunes saved bases', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'project', kind: 'project', content: 'Compiler Lab', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'bullet-a', kind: 'bullet', parent: { kind: 'project', bankItemId: 'project' }, content: 'Built a parser', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'skill', kind: 'skill', content: 'TypeScript', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['project', 'bullet-a', 'skill'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const remove = vi.fn(async () => undefined);
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeSemanticIndex: { index: async () => undefined, remove, scores: async () => new Map() } });
+    const response = await handler(event('student', 'DELETE', '/me/resume-bank/project', { revision: 0 }));
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ removed: expect.arrayContaining(['project', 'bullet-a']) });
+    const bank = JSON.parse((await handler(event('student', 'GET', '/me/resume-bank'))).body) as { items: Array<{ bankItemId: string }> };
+    expect(bank.items.map((item) => item.bankItemId)).toEqual(['skill']);
+    const profile = (JSON.parse((await handler(event('student', 'GET', '/me/resume-profiles'))).body) as { profiles: Array<{ bankItemIds: string[]; revision: number }> }).profiles[0]!;
+    expect(profile.bankItemIds).toEqual(['skill']);
+    expect(profile.revision).toBe(1);
+    expect(remove).toHaveBeenCalledWith('student', expect.arrayContaining(['project', 'bullet-a']));
+  });
+
+  it('rejects a stale bank deletion without removing anything', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'project', kind: 'project', content: 'Compiler Lab', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    expect((await handler(event('student', 'DELETE', '/me/resume-bank/project', { revision: 5 }))).statusCode).toBe(409);
+    const bank = JSON.parse((await handler(event('student', 'GET', '/me/resume-bank'))).body) as { items: unknown[] };
+    expect(bank.items).toHaveLength(1);
+  });
+
   it('supports the specified resolve, recommendation, decision, and finalization routes', async () => {
     const users = new MemoryUserStore();
     await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
@@ -138,26 +179,61 @@ describe('resume API ownership and revisions', () => {
     expect(JSON.parse(finalized.body)).toMatchObject({ draft: { status: 'finalized' }, artifact: { objectKey: expect.stringMatching(/\.pdf$/u) } });
   });
 
-  it('resolves catalog records before cache or asynchronous public-page acquisition', async () => {
+  it('uses trusted catalog title and company but still acquires the full description', async () => {
     const jobs = new MemoryInternshipStore();
     await jobs.putInternship({
       jobId: 'catalog-job', company: 'Acme', title: 'Platform Intern', location: 'Remote', season: 'summer-2027',
       applyUrl: 'https://careers.example.test/jobs/1', normalizedUrl: 'https://careers.example.test/jobs/1', fingerprint: 'acme-platform',
       compensation: { raw: '' }, sourceReferences: [], open: true, firstSeenAt: '2026-09-22T00:00:00.000Z', lastSeenAt: '2026-09-22T00:00:00.000Z', notification: { smsPending: false, digestPending: false },
     });
-    const queued = vi.fn();
+    const queued = vi.fn(async () => undefined);
     const handler = createApiHandler({
       jobs, users: new MemoryUserStore(), resumeTunerEnabled: true,
       resumeImportQueue: { send: queued },
-      resumeImportCache: { get: async () => ({ canonicalUrl: 'https://careers.example.test/jobs/2', description: 'cached role text', contentHash: 'cached' }) },
+      resumeImportCache: { get: async () => undefined },
     });
     const response = await handler(event('student', 'POST', '/me/resume-jobs/resolve', { url: 'https://careers.example.test/jobs/1' }));
-    expect(JSON.parse(response.body)).toMatchObject({ status: 'ready', source: 'catalog', title: 'Platform Intern', company: 'Acme' });
+    expect(JSON.parse(response.body)).toMatchObject({
+      status: 'pending', source: 'catalog', title: 'Platform Intern', company: 'Acme',
+      // A provisional, non-empty summary keeps the import readable while the
+      // full public description is acquired.
+      description: expect.stringContaining('Platform Intern at Acme.'),
+    });
+    expect(queued).toHaveBeenCalledTimes(1);
+  });
+
+  it('prefers a ready shared public-job cache over the compact catalog summary', async () => {
+    const jobs = new MemoryInternshipStore();
+    await jobs.putInternship({
+      jobId: 'catalog-job', company: 'Acme', title: 'Platform Intern', location: 'Remote', season: 'summer-2027',
+      applyUrl: 'https://careers.example.test/jobs/1', normalizedUrl: 'https://careers.example.test/jobs/1', fingerprint: 'acme-platform',
+      compensation: { raw: '' }, sourceReferences: [], open: true, firstSeenAt: '2026-09-22T00:00:00.000Z', lastSeenAt: '2026-09-22T00:00:00.000Z', notification: { smsPending: false, digestPending: false },
+    });
+    const queued = vi.fn(async () => undefined);
+    const handler = createApiHandler({
+      jobs, users: new MemoryUserStore(), resumeTunerEnabled: true,
+      resumeImportQueue: { send: queued },
+      resumeImportCache: { get: async () => ({ canonicalUrl: 'https://careers.example.test/jobs/1', title: 'Platform Intern', description: 'Full public cached job description', contentHash: 'cached' }) },
+    });
+    const response = await handler(event('student', 'POST', '/me/resume-jobs/resolve', { url: 'https://careers.example.test/jobs/1' }));
+    expect(JSON.parse(response.body)).toMatchObject({ status: 'ready', source: 'cache', title: 'Platform Intern', description: 'Full public cached job description' });
     expect(queued).not.toHaveBeenCalled();
   });
 
-  it('uses a ready shared public-job cache before queuing a fetch', async () => {
-    const queued = vi.fn();
+  it('queues an unknown employer URL without a cached description', async () => {
+    const queued = vi.fn(async () => undefined);
+    const handler = createApiHandler({
+      jobs: new MemoryInternshipStore(), users: new MemoryUserStore(), resumeTunerEnabled: true,
+      resumeImportQueue: { send: queued },
+      resumeImportCache: { get: async () => undefined },
+    });
+    const response = await handler(event('student', 'POST', '/me/resume-jobs/resolve', { url: 'https://careers.example.test/jobs/2' }));
+    expect(JSON.parse(response.body)).toMatchObject({ status: 'pending', description: '' });
+    expect(queued).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a ready shared public-job cache for an unknown employer URL before queuing', async () => {
+    const queued = vi.fn(async () => undefined);
     const handler = createApiHandler({
       jobs: new MemoryInternshipStore(), users: new MemoryUserStore(), resumeTunerEnabled: true,
       resumeImportQueue: { send: queued },
@@ -168,8 +244,9 @@ describe('resume API ownership and revisions', () => {
     expect(queued).not.toHaveBeenCalled();
   });
 
-  it('adds isolated semantic similarity to the deterministic saved-base recommendation', async () => {
+  it('adds isolated semantic similarity to the deterministic saved-base recommendation for paid plans', async () => {
     const users = new MemoryUserStore();
+    await users.putResumeSubscription({ userId: 'student', tier: 'plus', status: 'active', provider: 'apple', updatedAt: 'now' });
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
       resumeSemanticIndex: { index: async () => undefined, remove: async () => undefined, scores: async () => new Map([['semantic-evidence', 0.9]]) } });
     const bank = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank', { kind: 'project', content: 'Built a compiler' }))).body) as { bankItemId: string; revision: number };
@@ -179,6 +256,26 @@ describe('resume API ownership and revisions', () => {
     await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'Software internship', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
     const response = JSON.parse((await handler(event('student', 'POST', '/me/resume-jobs/job/recommendation'))).body) as { recommendations: Array<{ profileId: string; score: number; explanation: string }> };
     expect(response.recommendations).toEqual([expect.objectContaining({ profileId: profile.profileId, score: 23, explanation: expect.stringContaining('Semantic similarity: 90%') })]);
+  });
+
+  it('keeps semantic ranking paid-only and warms the derived cache once on upgrade', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Implemented mobile user interfaces', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Mobile', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'Software internship', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const scores = vi.fn(async () => new Map<string, number>());
+    const indexMany = vi.fn(async () => undefined);
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeSemanticIndex: { index: async () => undefined, remove: async () => undefined, scores, indexMany } });
+    // Free account: the derived index is never queried.
+    const free = JSON.parse((await handler(event('student', 'POST', '/me/resume-jobs/job/recommendation'))).body) as { recommendations: Array<{ explanation: string }> };
+    expect(scores).not.toHaveBeenCalled();
+    expect(free.recommendations[0]?.explanation).not.toContain('Semantic');
+    // Paid account with a cold cache: warm it once, then score.
+    await users.putResumeSubscription({ userId: 'student', tier: 'pro', status: 'active', provider: 'apple', updatedAt: 'now' });
+    scores.mockResolvedValueOnce(new Map()).mockResolvedValueOnce(new Map([['evidence', 0.5]]));
+    const paid = JSON.parse((await handler(event('student', 'POST', '/me/resume-jobs/job/recommendation'))).body) as { recommendations: Array<{ explanation: string }> };
+    expect(indexMany).toHaveBeenCalledOnce();
+    expect(paid.recommendations[0]?.explanation).toContain('Semantic similarity: 50%');
   });
 
   it('rejects malformed generated changes and falls back to verified deterministic evidence', async () => {
@@ -223,6 +320,139 @@ describe('resume API ownership and revisions', () => {
     expect(JSON.parse(response.body)).toMatchObject({ items: [expect.objectContaining({ content: 'Built a dashboard', sourceDocumentId: 'resume', sourceLocation: 'line 3', verified: true })] });
   });
 
+  it('imports a whole document with one bank read and a single batched write', async () => {
+    class CountingStore extends MemoryUserStore {
+      listCalls = 0;
+      batchCalls = 0;
+      async listResumeBank(userId: string) { this.listCalls += 1; return super.listResumeBank(userId); }
+      async putResumeBankItems(values: Parameters<MemoryUserStore['putResumeBankItems']>[0]) { this.batchCalls += 1; return super.putResumeBankItems(values); }
+    }
+    const users = new CountingStore();
+    await users.putDocument({ userId: 'student', documentId: 'resume', fileName: 'resume.docx', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', objectKey: 'private/student/resume', createdAt: 'now' });
+    const handler = createApiHandler({
+      jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
+      documentStorage: { createUploadUrl: async () => '', createDownloadUrl: async () => '', deleteObject: async () => undefined, readContent: async () => new ArrayBuffer(0) },
+      resumeDocumentExtractor: async () => [
+        { localId: 'parent', kind: 'project', content: 'Compiler Lab', sourceLocation: 'line 2' },
+        { localId: 'bullet-a', kind: 'bullet', parent: { kind: 'project', localId: 'parent' }, content: 'Built a parser', sourceLocation: 'line 3' },
+        { localId: 'bullet-b', kind: 'bullet', parent: { kind: 'project', localId: 'parent' }, content: 'Added type checking', sourceLocation: 'line 4' },
+      ],
+    });
+    const response = await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }));
+    expect(response.statusCode).toBe(201);
+    expect(JSON.parse(response.body)).toMatchObject({ items: expect.arrayContaining([
+      expect.objectContaining({ kind: 'project', content: 'Compiler Lab' }),
+      expect.objectContaining({ kind: 'bullet', content: 'Built a parser' }),
+      expect.objectContaining({ kind: 'bullet', content: 'Added type checking' }),
+    ]) });
+    // Two bounded bank reads total (dedup resolution plus one merged validation),
+    // never one per item; the write is a single batch.
+    expect(users.listCalls).toBe(2);
+    expect(users.batchCalls).toBe(1);
+    const persisted = JSON.parse((await handler(event('student', 'GET', '/me/resume-bank'))).body) as { items: unknown[] };
+    expect(persisted.items).toHaveLength(3);
+  });
+
+  it('de-duplicates a re-imported résumé against the existing bank and reuses its items', async () => {
+    const users = new MemoryUserStore();
+    await users.putDocument({ userId: 'student', documentId: 'resume', fileName: 'resume.docx', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', objectKey: 'private/student/resume', createdAt: 'now' });
+    const handler = createApiHandler({
+      jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
+      documentStorage: { createUploadUrl: async () => '', createDownloadUrl: async () => '', deleteObject: async () => undefined, readContent: async () => new ArrayBuffer(0) },
+      resumeDocumentExtractor: async () => [
+        { localId: 'parent', kind: 'project', content: 'Compiler Lab', sourceLocation: 'line 2' },
+        { localId: 'bullet-a', kind: 'bullet', parent: { kind: 'project', localId: 'parent' }, content: 'Built a parser', sourceLocation: 'line 3' },
+      ],
+    });
+    const first = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }))).body) as { items: Array<{ bankItemId: string }> };
+    const second = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }))).body) as { items: Array<{ bankItemId: string }> };
+    // Re-import resolves to the same stored items: no new rows, same identifiers.
+    expect(second.items.map((item) => item.bankItemId).sort()).toEqual(first.items.map((item) => item.bankItemId).sort());
+    const persisted = JSON.parse((await handler(event('student', 'GET', '/me/resume-bank'))).body) as { items: unknown[] };
+    expect(persisted.items).toHaveLength(2);
+  });
+
+  it('keeps a genuinely new bullet on a reused parent during a partial re-import', async () => {
+    const users = new MemoryUserStore();
+    await users.putDocument({ userId: 'student', documentId: 'resume', fileName: 'resume.docx', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', objectKey: 'private/student/resume', createdAt: 'now' });
+    let includeExtra = false;
+    const handler = createApiHandler({
+      jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
+      documentStorage: { createUploadUrl: async () => '', createDownloadUrl: async () => '', deleteObject: async () => undefined, readContent: async () => new ArrayBuffer(0) },
+      resumeDocumentExtractor: async () => [
+        { localId: 'parent', kind: 'project', content: 'Compiler Lab', sourceLocation: 'line 2' },
+        { localId: 'bullet-a', kind: 'bullet', parent: { kind: 'project', localId: 'parent' }, content: 'Built a parser', sourceLocation: 'line 3' },
+        ...(includeExtra ? [{ localId: 'bullet-b', kind: 'bullet' as const, parent: { kind: 'project' as const, localId: 'parent' }, content: 'Added type checking', sourceLocation: 'line 4' }] : []),
+      ],
+    });
+    const first = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }))).body) as { items: Array<{ kind: string; content: string; bankItemId: string }> };
+    const parentId = first.items.find((item) => item.kind === 'project')!.bankItemId;
+    includeExtra = true;
+    const second = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }))).body) as { items: Array<{ kind: string; content: string; bankItemId: string; parent?: { bankItemId: string } }> };
+    // The reused parent keeps its identifier; only the new bullet is added.
+    expect(second.items.find((item) => item.kind === 'project')?.bankItemId).toBe(parentId);
+    expect(second.items.find((item) => item.content === 'Added type checking')).toMatchObject({ kind: 'bullet', parent: { bankItemId: parentId } });
+    const persisted = JSON.parse((await handler(event('student', 'GET', '/me/resume-bank'))).body) as { items: unknown[] };
+    expect(persisted.items).toHaveLength(3);
+  });
+
+  it('indexes newly imported items in one batch and only for paid plans', async () => {
+    const users = new MemoryUserStore();
+    await users.putDocument({ userId: 'student', documentId: 'resume', fileName: 'resume.docx', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', objectKey: 'private/student/resume', createdAt: 'now' });
+    const indexMany = vi.fn((...args: unknown[]) => { void args; return Promise.resolve(); });
+    let withExtra = false;
+    const handler = createApiHandler({
+      jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
+      documentStorage: { createUploadUrl: async () => '', createDownloadUrl: async () => '', deleteObject: async () => undefined, readContent: async () => new ArrayBuffer(0) },
+      resumeSemanticIndex: { index: async () => undefined, indexMany, remove: async () => undefined, scores: async () => new Map() },
+      resumeDocumentExtractor: async () => [
+        { localId: 'parent', kind: 'project', content: 'Compiler Lab', sourceLocation: 'line 2' },
+        ...(withExtra ? [{ localId: 'bullet', kind: 'bullet' as const, parent: { kind: 'project' as const, localId: 'parent' }, content: 'Built a parser', sourceLocation: 'line 3' }] : []),
+      ],
+    });
+    await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }));
+    expect(indexMany).not.toHaveBeenCalled();
+    await users.putResumeSubscription({ userId: 'student', tier: 'plus', status: 'active', provider: 'apple', updatedAt: 'now' });
+    withExtra = true;
+    await handler(event('student', 'POST', '/me/resume-bank/import', { documentId: 'resume' }));
+    expect(indexMany).toHaveBeenCalledOnce();
+    // Only the genuinely new bullet is embedded; the reused project is skipped.
+    expect(indexMany.mock.calls[0]![0]).toHaveLength(1);
+  });
+
+  it('clears a stale derived vector when a free plan edits a verified item', async () => {
+    const users = new MemoryUserStore();
+    const remove = vi.fn(async () => undefined);
+    const index = vi.fn(async () => undefined);
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true,
+      resumeSemanticIndex: { index, remove, scores: async () => new Map() } });
+    const item = JSON.parse((await handler(event('student', 'POST', '/me/resume-bank', { kind: 'project', content: 'Built a compiler' }))).body) as { bankItemId: string; revision: number };
+    // A free plan must not index the edit, but must clear any previous vector so
+    // the derived cache can never contradict the authoritative content.
+    const patched = await handler(event('student', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision: item.revision, verified: true, content: 'Built a query compiler' }));
+    expect(patched.statusCode).toBe(200);
+    expect(index).not.toHaveBeenCalled();
+    expect(remove).toHaveBeenCalledWith('student', [item.bankItemId]);
+    // A paid plan re-indexes the same edit instead of clearing it.
+    await users.putResumeSubscription({ userId: 'student', tier: 'plus', status: 'active', provider: 'apple', updatedAt: 'now' });
+    const revision = JSON.parse(patched.body).revision as number;
+    await handler(event('student', 'PATCH', `/me/resume-bank/${item.bankItemId}`, { revision, verified: true, content: 'Built a query planner' }));
+    expect(index).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the résumé document cap instead of failing silently', async () => {
+    class CappedStore extends MemoryUserStore {
+      async putDocument(): Promise<void> { throw new Error('Document storage quota reached'); }
+    }
+    const handler = createApiHandler({
+      jobs: new MemoryInternshipStore(), users: new CappedStore(), resumeTunerEnabled: true,
+      documentStorage: { createUploadUrl: async () => 'https://upload.test', createDownloadUrl: async () => '', deleteObject: async () => undefined },
+    });
+    const response = await handler(event('student', 'POST', '/me/documents', { fileName: 'resume.pdf', contentType: 'application/pdf' }));
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body).message).toContain('5 résumé documents');
+  });
+
   it('finalizes reviewed drafts into private fixed-template PDF artifacts with applicant contact details', async () => {
     const users = new MemoryUserStore();
     await users.putProfile({ userId: 'student', contact: { name: 'Student Name', email: 'student@example.test' }, location: 'Ithaca, NY', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
@@ -241,6 +471,25 @@ describe('resume API ownership and revisions', () => {
     expect(putPdf).toHaveBeenCalledOnce();
     expect(putPreview).toHaveBeenCalledOnce();
     expect(JSON.parse(finalized.body)).toMatchObject({ artifact: { objectKey: expect.stringMatching(/\.pdf$/u), texObjectKey: expect.stringMatching(/\.tex$/u), pageCount: 1, previewObjectKeys: [expect.stringMatching(/preview-1\.png$/u)] } });
+  });
+
+  it('reuses one compiled artifact for content-identical drafts instead of recompiling', async () => {
+    const users = new MemoryUserStore();
+    await users.putProfile({ userId: 'student', contact: { name: 'Student Name', email: 'student@example.test' }, location: 'Ithaca, NY', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'bank', kind: 'project', content: 'Built a dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Technical base', tags: [], bankItemIds: ['bank'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const changes = [{ changeId: 'change', type: 'add' as const, target: { kind: 'project' as const, bankItemId: 'bank' }, section: 'Projects', suggestion: 'Built a dashboard', evidenceIds: ['bank'], reason: 'fit', decision: 'accepted' as const }];
+    for (const draftId of ['draft-a', 'draft-b']) await users.putResumeDraft({ userId: 'student', draftId, profileId: 'profile', importId: 'job', changes, revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now' });
+    const compile = vi.fn(async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer] }));
+    const putPdf = vi.fn();
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex: async () => undefined, putPdf, putPreview: async () => undefined, compile } });
+    const first = JSON.parse((await handler(event('student', 'POST', '/me/resume-drafts/draft-a/finalize', { revision: 0 }))).body) as { artifact: { artifactId: string; resumeSpecHash: string } };
+    const second = JSON.parse((await handler(event('student', 'POST', '/me/resume-drafts/draft-b/finalize', { revision: 0 }))).body) as { artifact: { artifactId: string; resumeSpecHash: string } };
+    expect(second.artifact.artifactId).toBe(first.artifact.artifactId);
+    expect(second.artifact.resumeSpecHash).toBe(first.artifact.resumeSpecHash);
+    expect(compile).toHaveBeenCalledOnce();
+    expect(putPdf).toHaveBeenCalledOnce();
+    expect(await users.listResumeArtifacts('student')).toHaveLength(1);
   });
 
   it('does not finalize a draft when applicant contact details or PDF compilation are unavailable', async () => {

@@ -8,7 +8,7 @@ import { preferredJobIdentityConflicts, providerPostingKey, resolvePostingAliase
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
-import { validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
+import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
 import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
@@ -1307,6 +1307,31 @@ export class D1UserStore implements UserStore {
     `).bind(JSON.stringify(value), value.userId, key, expectedRevision, this.deletionOwner(value.userId)).run();
     return result.meta.changes > 0;
   }
+  async putResumeBankItems(values: ResumeBankItem[]): Promise<ResumeBankItem[]> {
+    if (!values.length) return [];
+    // One read validates the whole merged graph for every new item; individual
+    // inserts then never re-list the bank. Statements are chunked to the same
+    // bounded batch size the catalog writer uses.
+    validateResumeBankGraph([...await this.listResumeBank(values[0]!.userId), ...values]);
+    const statements = values.map((value) => this.db.prepare(`
+      INSERT INTO user_items (user_id, item_key, kind, value)
+      SELECT ?, ?, 'resume-bank', ?
+      WHERE NOT EXISTS (SELECT 1 FROM user_items WHERE user_id = ? AND item_key = 'TOMBSTONE')
+      ON CONFLICT(user_id, item_key) DO NOTHING
+    `).bind(value.userId, `RESUME_BANK#${value.bankItemId}`, JSON.stringify(value), this.deletionOwner(value.userId)));
+    const created: ResumeBankItem[] = [];
+    for (let offset = 0; offset < statements.length; offset += 50) {
+      const results = await this.db.batch(statements.slice(offset, offset + 50));
+      results.forEach((result, index) => { if (result.meta.changes > 0) created.push(values[offset + index]!); });
+    }
+    return created;
+  }
+  async deleteResumeBankItems(userId: string, bankItemIds: string[]): Promise<void> {
+    if (!bankItemIds.length) return;
+    const statements = bankItemIds.map((bankItemId) => this.db.prepare('DELETE FROM user_items WHERE user_id = ? AND item_key = ?')
+      .bind(userId, `RESUME_BANK#${bankItemId}`));
+    for (let offset = 0; offset < statements.length; offset += 50) await this.db.batch(statements.slice(offset, offset + 50));
+  }
   async listResumeProfiles(userId: string) { return this.list<ResumeProfile>(userId, 'RESUME_PROFILE#'); }
   getResumeProfile(userId: string, profileId: string) { return this.get<ResumeProfile>(userId, `RESUME_PROFILE#${profileId}`); }
   async putResumeProfile(value: ResumeProfile, expectedRevision?: number): Promise<boolean> {
@@ -1386,6 +1411,12 @@ export class D1UserStore implements UserStore {
         AND CAST(json_extract(user_items.value, '$.used') AS INTEGER) < ?
     `).bind(userId, key, JSON.stringify({ period, used: 1, updatedAt: timestamp }), this.deletionOwner(userId), timestamp, limit).run();
     return result.meta.changes > 0;
+  }
+  async releaseResumeDraftAllowance(userId: string, period: string): Promise<void> {
+    await this.db.prepare(`UPDATE user_items
+      SET value = json_set(value, '$.used', MAX(0, CAST(json_extract(value, '$.used') AS INTEGER) - 1))
+      WHERE user_id = ? AND item_key = ? AND kind = 'resume-subscription-usage'`)
+      .bind(userId, `RESUME_USAGE#${period}`).run();
   }
   getReceipt(userId: string, dedupeKey: string, token: string) { return this.get<DeliveryReceipt>(userId, `RECEIPT#${dedupeKey}#${token}`); }
   async claimReceipt(value: DeliveryReceipt): Promise<boolean> {

@@ -405,6 +405,57 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it('consolidates superseded alerts on the bounded identity path production uses', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const url = 'https://jobs.smartrecruiters.com/ExampleCo/999000222';
+    for (const [jobId, seen] of [['listing-canonical', '2026-08-01T00:00:00.000Z'], ['listing-duplicate', '2026-08-02T00:00:00.000Z']]) {
+      await store.putInternship(job(jobId, url, seen, [occurrence('community-list', jobId, url)]));
+      sqlite.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'EVENT', 'notification-event', ?)`)
+        .run(`OUTBOX#${jobId}`, JSON.stringify({
+          eventId: jobId, jobId, kind: 'new-job', createdAt: seen, sourceId: 'community-list', externalId: jobId,
+        }));
+    }
+    const batch = (await runBoundedPostingIdentityRepair(db, { duplicateGroupsOnly: true })).applyBatches?.[0];
+    expect(batch).toBeDefined();
+    await runBoundedPostingIdentityRepairBatch(db, {
+      ...batch!, acceptCurrentSnapshot: true,
+      expectedEligibleDuplicateGroups: batch!.eligibleDuplicateGroups,
+      expectedUnresolvedDuplicateGroups: batch!.unresolvedDuplicateGroups,
+    });
+    expect(sqlite.prepare(`SELECT pk FROM catalog_items WHERE kind = 'notification-event' ORDER BY pk`).all())
+      .toEqual([{ pk: 'OUTBOX#listing-canonical' }]);
+    expect(await runBoundedPostingIdentityRepair(db, { duplicateGroupsOnly: true }))
+      .toMatchObject({ duplicateAlertGroups: 0, eligibleDuplicateGroups: 0, expectedChanges: 0, conflicts: [] });
+    sqlite.close();
+  });
+
+  it('consolidates an alert row left under a retired job ID', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const url = 'https://jobs.smartrecruiters.com/ExampleCo/999000444';
+    await store.putInternship(job('only-canonical', url, '2026-08-01T00:00:00.000Z', [occurrence('community-list', 'only-canonical', url)]));
+    sqlite.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES ('JOB_ID_ALIAS#retired-listing', 'TARGET', 'job-id-alias', ?)`)
+      .run(JSON.stringify({ oldJobId: 'retired-listing', canonicalJobId: 'only-canonical', createdBy: 'posting-identity-repair' }));
+    for (const jobId of ['only-canonical', 'retired-listing']) {
+      sqlite.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'EVENT', 'notification-event', ?)`)
+        .run(`OUTBOX#${jobId}`, JSON.stringify({
+          eventId: jobId, jobId, kind: 'new-job', createdAt: '2026-08-01T00:00:00.000Z',
+          sourceId: 'community-list', externalId: jobId,
+        }));
+    }
+
+    const plan = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(plan).toMatchObject({ duplicateAlertGroups: 0, notificationEventMerges: 1, conflicts: [] });
+    await runPostingIdentityRepair(db, {
+      apply: true, scope: 'identity', repairToken: plan.repairToken,
+      expectedChanges: plan.expectedChanges, expectedDuplicateJobs: plan.duplicateJobs,
+    });
+    expect(sqlite.prepare(`SELECT pk FROM catalog_items WHERE kind = 'notification-event' ORDER BY pk`).all())
+      .toEqual([{ pk: 'OUTBOX#only-canonical' }]);
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' }))
+      .toMatchObject({ duplicateAlertGroups: 0, notificationEventMerges: 0, expectedChanges: 0, conflicts: [] });
+    sqlite.close();
+  });
+
   it('allows an explicitly revalidated batch when its counts still match', async () => {
     const { sqlite, db } = await historicalDatabase({ presentationAgrees: true });
     const dry = await runBoundedPostingIdentityRepair(db, { jobBatch: 1, duplicateGroupsOnly: true });
@@ -792,6 +843,61 @@ describe('D1 posting identity repair', () => {
       conflicts: [],
       presentationDisagreements: [],
     });
+    sqlite.close();
+  });
+
+  it('keeps one alert per merged posting and removes the superseded duplicate row', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const url = 'https://jobs.smartrecruiters.com/ExampleCo/999000222';
+    const alert = (eventId: string, jobId: string) => JSON.stringify({
+      eventId, jobId, kind: 'new-job', createdAt: '2026-08-01T00:00:00.000Z',
+      sourceId: 'community-list', externalId: jobId,
+    });
+    for (const [jobId, seen] of [['listing-canonical', '2026-08-01T00:00:00.000Z'], ['listing-duplicate', '2026-08-02T00:00:00.000Z']]) {
+      await store.putInternship(job(jobId, url, seen, [occurrence('community-list', jobId, url)]));
+      sqlite.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'EVENT', 'notification-event', ?)`)
+        .run(`OUTBOX#${jobId}`, alert(jobId, jobId));
+    }
+
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({
+      eligibleDuplicateGroups: 1, duplicateAlertGroups: 0, notificationEventMerges: 1, conflicts: [],
+    });
+    await runPostingIdentityRepair(db, {
+      apply: true, repairToken: dry.repairToken, expectedChanges: dry.expectedChanges,
+      expectedDuplicateJobs: dry.duplicateJobs, scope: 'identity',
+    });
+    expect(sqlite.prepare(`SELECT pk FROM catalog_items WHERE kind = 'notification-event'`).all())
+      .toEqual([{ pk: 'OUTBOX#listing-canonical' }]);
+
+    const verification = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(verification).toMatchObject({ duplicateAlertGroups: 0, expectedChanges: 0, conflicts: [] });
+    sqlite.close();
+  });
+
+  it('keeps the only alert row when a merged duplicate owns it', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const url = 'https://jobs.smartrecruiters.com/ExampleCo/999000333';
+    for (const [jobId, seen] of [['only-canonical', '2026-08-01T00:00:00.000Z'], ['only-duplicate', '2026-08-02T00:00:00.000Z']]) {
+      await store.putInternship(job(jobId, url, seen, [occurrence('community-list', jobId, url)]));
+    }
+    sqlite.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'EVENT', 'notification-event', ?)`)
+      .run('OUTBOX#only-duplicate', JSON.stringify({
+        eventId: 'only-duplicate', jobId: 'only-duplicate', kind: 'new-job',
+        createdAt: '2026-08-02T00:00:00.000Z', sourceId: 'community-list', externalId: 'only-duplicate',
+      }));
+
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({ eligibleDuplicateGroups: 1, duplicateAlertGroups: 0, notificationEventMerges: 0, conflicts: [] });
+    await runPostingIdentityRepair(db, {
+      apply: true, repairToken: dry.repairToken, expectedChanges: dry.expectedChanges,
+      expectedDuplicateJobs: dry.duplicateJobs, scope: 'identity',
+    });
+    // The row still resolves to the surviving job through the job-ID alias.
+    expect(sqlite.prepare(`SELECT pk FROM catalog_items WHERE kind = 'notification-event'`).all())
+      .toEqual([{ pk: 'OUTBOX#only-duplicate' }]);
+    expect(sqlite.prepare(`SELECT value FROM catalog_items WHERE pk = 'JOB_ID_ALIAS#only-duplicate'`).get())
+      .toEqual({ value: JSON.stringify({ oldJobId: 'only-duplicate', canonicalJobId: 'only-canonical', createdBy: 'posting-identity-repair' }) });
     sqlite.close();
   });
 

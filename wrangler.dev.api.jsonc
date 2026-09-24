@@ -9,7 +9,6 @@
     { "name": "RESUME_PDF_COMPILER", "class_name": "ResumePdfCompilerV2" }
   ] },
   "migrations": [
-    { "tag": "v3-retire-resume-pdf-compiler", "deleted_classes": ["ResumePdfCompiler"] },
     { "tag": "v4-resume-pdf-compiler-v2", "new_sqlite_classes": ["ResumePdfCompilerV2"] }
   ],
   "containers": [{ "class_name": "ResumePdfCompilerV2", "image": "./cloudflare/resume-compiler/Dockerfile", "instance_type": "basic", "max_instances": 2 }],
