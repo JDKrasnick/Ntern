@@ -5548,10 +5548,7 @@ function GuestExperience({
               </View>
             ) : tab === "resume" ? (
               <View style={styles.pageColumn}>
-                <AccountGate
-                  feature="tailor and save résumés"
-                  onSignIn={openAccount}
-                />
+                <ResumeWorkspace onSignIn={openAccount} />
               </View>
             ) : tab === "profile" ? (
               <View style={styles.pageColumn}>
@@ -5681,9 +5678,10 @@ function ResumeSavedProfilesGhost() {
   );
 }
 
-function ResumeWorkspace({ token }: { token: string }) {
+function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: () => void }) {
   const { width } = useWindowDimensions();
   const desktop = width >= 700;
+  const signedIn = Boolean(token);
   const [jobUrl, setJobUrl] = useState("");
   const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
   const [bankDraft, setBankDraft] = useState("");
@@ -5764,6 +5762,11 @@ function ResumeWorkspace({ token }: { token: string }) {
       .catch(() => setBankError("We couldn't copy that prompt. Select the text and copy it manually."));
   };
   const loadBank = () => {
+    if (!signedIn) {
+      setBankLoading(false);
+      setBankError(undefined);
+      return;
+    }
     setBankLoading(true);
     setBankError(undefined);
     void api<{ items: ResumeBankCard[] }>("/me/resume-bank", token)
@@ -5795,7 +5798,7 @@ function ResumeWorkspace({ token }: { token: string }) {
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't load your Master Bank."))
       .finally(() => setBankLoading(false));
   };
-  useEffect(loadBank, [token]);
+  useEffect(loadBank, [signedIn, token]);
   useEffect(() => {
     const selected = profiles.find((profile) => profile.profileId === selectedProfileId);
     if (selected) setSelectedTemplate(selected.template);
@@ -5833,6 +5836,27 @@ function ResumeWorkspace({ token }: { token: string }) {
       : bankEntryKind === "skill" ? { category: content, skills: bankSecondary.split(",").map((value) => value.trim()).filter(Boolean) }
       : undefined;
     const summary = [content, bankSecondary.trim(), bankLocation.trim(), bankDateRange.trim()].filter(Boolean).join(" | ");
+    if (!signedIn) {
+      const localId = `guest-${Date.now()}-${bankItems.length + 1}`;
+      const item = {
+        bankItemId: localId,
+        kind: bankEntryKind,
+        content: bankEntryKind === "bullet" ? content : summary,
+        verified: true,
+        revision: 1,
+        ...(details ? { details } : {}),
+        ...(bankEntryKind === "bullet" && selectedBankParent ? { parent: { kind: selectedBankParent.kind, bankItemId: selectedBankParent.bankItemId } } : {}),
+      } as ResumeBankCard;
+      setBankItems((items) => [...items, item]);
+      setBankDraft("");
+      setBankSecondary(""); setBankLocation(""); setBankDateRange("");
+      if (item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education") {
+        setBankEntryKind("bullet");
+        setBankParentId(item.bankItemId);
+      }
+      setBankSaving(false);
+      return;
+    }
     void api<ResumeBankCard>("/me/resume-bank", token, {
       method: "POST", body: JSON.stringify({ kind: bankEntryKind, content: bankEntryKind === "bullet" ? content : summary, ...(details ? { details } : {}), ...(bankEntryKind === "bullet" && selectedBankParent ? { parent: { kind: selectedBankParent.kind, bankItemId: selectedBankParent.bankItemId } } : {}) }),
     })
@@ -5850,6 +5874,10 @@ function ResumeWorkspace({ token }: { token: string }) {
   };
   const importResume = async () => {
     if (bankSaving) return;
+    if (!signedIn) {
+      onSignIn?.();
+      return;
+    }
     setBankError(undefined);
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -5891,6 +5919,12 @@ function ResumeWorkspace({ token }: { token: string }) {
   };
   const importJob = () => {
     if (!jobUrl.trim() || resumeBusy) return;
+    if (!signedIn) {
+      setBankError(undefined);
+      setJobImport({ importId: "guest-job", canonicalUrl: jobUrl.trim(), description: "", status: "manual-description-required", revision: 1, updatedAt: new Date().toISOString() });
+      setDraft(undefined); setActiveChange(0); setBestExistingRecommendation(undefined); setResumeSourceMode("ideal");
+      return;
+    }
     setResumeBusy(true); setBankError(undefined);
     void api<ResumeImportCard>("/me/resume-jobs/resolve", token, { method: "POST", body: JSON.stringify({ url: jobUrl }) })
       .then(async (value) => {
@@ -5906,6 +5940,10 @@ function ResumeWorkspace({ token }: { token: string }) {
   };
   const saveManualDescription = () => {
     if (!jobImport || !manualDescription.trim() || resumeBusy) return;
+    if (!signedIn) {
+      setJobImport({ ...jobImport, description: manualDescription.trim(), status: "ready", revision: jobImport.revision + 1, updatedAt: new Date().toISOString() });
+      return;
+    }
     setResumeBusy(true);
     void api<ResumeImportCard>(`/me/resume-jobs/${jobImport.importId}/manual-description`, token, { method: "POST", body: JSON.stringify({ revision: jobImport.revision, description: manualDescription }) })
       .then(async (value) => {
@@ -5919,6 +5957,10 @@ function ResumeWorkspace({ token }: { token: string }) {
   };
   const createDraft = () => {
     if (!jobImport || jobImport.status !== "ready" || resumeBusy || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length)) return;
+    if (!signedIn) {
+      onSignIn?.();
+      return;
+    }
     setResumeBusy(true);
     const request = async () => {
       const sourceProfile = resumeSourceMode === "ideal" ? await syncTechnicalBase() : profiles.find((profile) => profile.profileId === selectedProfileId);
@@ -5962,11 +6004,23 @@ function ResumeWorkspace({ token }: { token: string }) {
 
   return (
     <ScrollView style={styles.list} contentContainerStyle={styles.resumeContent}>
-      <PageHeading
-        eyebrow="Resume"
-        title="Tailor your résumé."
-        description="Paste a job link. Ntern compares it with your saved experience and shows only the changes for you to review."
-      />
+      <View style={[styles.resumeHeadingRow, desktop && styles.resumeHeadingRowWide]}>
+        <View style={styles.resumeHeadingCopy}>
+          <PageHeading
+            eyebrow="Resume"
+            title="Tailor your résumé."
+            description="Paste a job link. Ntern compares it with your experience and shows only the changes for you to review."
+          />
+        </View>
+        {!signedIn ? <View accessibilityLabel="Guest session, work is not saved" style={styles.resumeGuestStatus}>
+          <Ionicons name="cloud-offline-outline" size={17} color={colors.signal} />
+          <View style={styles.resumeGuestStatusCopy}>
+            <Text style={styles.resumeGuestStatusTitle}>Guest session</Text>
+            <Text style={styles.resumeGuestStatusDetail}>Not saved</Text>
+          </View>
+          {onSignIn ? <TouchableOpacity accessibilityRole="button" onPress={onSignIn} style={styles.resumeGuestSignIn}><Text style={styles.resumeCompactActionText}>Sign in</Text></TouchableOpacity> : null}
+        </View> : null}
+      </View>
 
       <View style={styles.resumePrimaryTask}>
         <Text style={styles.sectionTitle}>Paste the job URL</Text>
@@ -5999,7 +6053,7 @@ function ResumeWorkspace({ token }: { token: string }) {
           </View>
         ) : null}
         <View style={styles.resumeBaseAccessRow}>
-          <Text style={styles.resumeBaseAccessStatus}>{bankLoading ? "Checking your saved experience…" : bankItems.length ? `${bankItems.length} saved source item${bankItems.length === 1 ? "" : "s"}` : "No saved experience yet"}</Text>
+          <Text style={styles.resumeBaseAccessStatus}>{bankLoading ? "Checking your saved experience…" : bankItems.length ? `${bankItems.length} ${signedIn ? "saved" : "session"} source item${bankItems.length === 1 ? "" : "s"}` : signedIn ? "No saved experience yet" : "No session experience yet"}</Text>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel={bankManagerOpen ? "Close master bank editor" : "Edit master bank"} aria-expanded={bankManagerOpen} onPress={() => setBankManagerOpen((value) => !value)} style={styles.resumeCompactAction}>
             <Text style={styles.resumeCompactActionText}>{bankManagerOpen ? "Done editing" : "Edit master bank"}</Text>
           </TouchableOpacity>
@@ -6014,7 +6068,7 @@ function ResumeWorkspace({ token }: { token: string }) {
         ) : null}
       </View>
 
-      {!bankManagerOpen ? <View style={styles.resumeSavedSection}>
+      {!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>
         <View style={styles.resumeSavedHeader}>
           <View style={styles.resumeSavedHeaderCopy}>
             <Text style={styles.sectionTitle}>Saved résumés</Text>
@@ -6063,8 +6117,8 @@ function ResumeWorkspace({ token }: { token: string }) {
                 <View style={styles.resumeImportStageIcon}><Ionicons name="documents-outline" size={28} color={colors.signal} /></View>
                 <View style={styles.resumeImportStageCopy}>
                   <Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>
-                  <Text style={styles.resumeImportStageDescription}>Choose one or several PDF or DOCX files. Each file stays available as a saved résumé while its roles, projects, education, skills, and correctly attached bullets join the master bank.</Text>
-                  <Text style={styles.resumeImportStageMeta}>{importedResumeCount ? `${importedResumeCount} source résumé${importedResumeCount === 1 ? "" : "s"} imported` : "PDF or DOCX · select multiple files"}</Text>
+                  <Text style={styles.resumeImportStageDescription}>{signedIn ? "Choose one or several PDF or DOCX files. Each file stays available as a saved résumé while its roles, projects, education, skills, and correctly attached bullets join the master bank." : "File import uses your private saved workspace. You can still add typed items manually or prepare them with the free prompt below."}</Text>
+                  <Text style={styles.resumeImportStageMeta}>{signedIn ? (importedResumeCount ? `${importedResumeCount} source résumé${importedResumeCount === 1 ? "" : "s"} imported` : "PDF or DOCX · select multiple files") : "Sign in to import PDF or DOCX"}</Text>
                 </View>
                 <View style={styles.resumeImportStageAction}>
                   <Ionicons name="add" size={18} color={colors.onDark} />
@@ -6231,8 +6285,8 @@ function ResumeWorkspace({ token }: { token: string }) {
               <View style={styles.resumeSourceChoiceIcon}><Ionicons name="copy-outline" size={19} color={colors.signal} /></View>
               <Text style={styles.resumeSourceChoiceBadge}>Best existing</Text>
             </View>
-            <Text style={styles.resumeSourceChoiceTitle}>{recommendedProfile?.name ?? "No saved match available"}</Text>
-            <Text style={styles.resumeSourceChoiceCopy}>{bestExistingRecommendation?.explanation ?? "Save a résumé variant to make this option available."}</Text>
+              <Text style={styles.resumeSourceChoiceTitle}>{recommendedProfile?.name ?? (signedIn ? "No saved match available" : "Available after sign-in")}</Text>
+              <Text style={styles.resumeSourceChoiceCopy}>{bestExistingRecommendation?.explanation ?? (signedIn ? "Save a résumé variant to make this option available." : "Saved résumé variants belong to your account; guest work remains session-only.")}</Text>
           </TouchableOpacity>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Build the ideal resume from the technical base" aria-pressed={resumeSourceMode === "ideal"} disabled={!bankItems.length} onPress={() => setResumeSourceMode("ideal")} style={[styles.resumeSourceChoice, resumeSourceMode === "ideal" && styles.resumeSourceChoiceSelected, !bankItems.length && styles.resumeSourceChoiceDisabled]}>
             <View style={styles.resumeSourceChoiceHeader}>
@@ -6252,7 +6306,7 @@ function ResumeWorkspace({ token }: { token: string }) {
             </TouchableOpacity>
           ))}
         </ScrollView>
-        <View style={styles.resumeBankComposerAction}><ActionButton label={subscription?.usage.remaining === 0 ? "Monthly limit reached" : resumeSourceMode === "ideal" ? "Build ideal review" : "Review best match"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length) || resumeBusy || subscription?.usage.remaining === 0} /></View>
+        <View style={styles.resumeBankComposerAction}><ActionButton label={!signedIn ? "Sign in to run review" : subscription?.usage.remaining === 0 ? "Monthly limit reached" : resumeSourceMode === "ideal" ? "Build ideal review" : "Review best match"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length) || resumeBusy || subscription?.usage.remaining === 0} /></View>
       </View> : null}
 
       {draft ? <View style={styles.resumeSection}>
@@ -8843,6 +8897,14 @@ const styles = StyleSheet.create({
   catalogPaginationRetryText: { color: colors.signal, fontSize: 14, fontWeight: "700" },
   resumeContent: { maxWidth: 1360, paddingBottom: 44, paddingTop: 24, width: "100%" },
   resumePrimaryTask: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 900, padding: 20 },
+  resumeHeadingRow: { gap: 12, marginBottom: 18 },
+  resumeHeadingRowWide: { alignItems: "flex-start", flexDirection: "row", justifyContent: "space-between" },
+  resumeHeadingCopy: { flex: 1, minWidth: 0 },
+  resumeGuestStatus: { alignItems: "center", alignSelf: "flex-start", borderColor: colors.border, borderRadius: 12, borderWidth: 1, flexDirection: "row", gap: 8, minHeight: 44, paddingHorizontal: 11, paddingVertical: 6 },
+  resumeGuestStatusCopy: { minWidth: 72 },
+  resumeGuestStatusTitle: { color: colors.ink, fontSize: 12, fontWeight: "800", lineHeight: 16 },
+  resumeGuestStatusDetail: { color: colors.muted, fontSize: 11, lineHeight: 15 },
+  resumeGuestSignIn: { alignItems: "center", justifyContent: "center", minHeight: 32, paddingHorizontal: 6 },
   resumeManualFallback: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 18, paddingTop: 18 },
   resumeBaseAccessRow: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between", marginTop: 18, paddingTop: 10 },
   resumeBaseAccessStatus: { color: colors.body, fontSize: 13, lineHeight: 18 },

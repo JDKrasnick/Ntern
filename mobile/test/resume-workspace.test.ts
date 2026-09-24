@@ -8,7 +8,8 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('type AppTab = "roles" | "queue" | "catalog" | "resume" | "profile";');
     expect(app).toContain('resumeEnabled ? [{ key: "resume" as const, label: "Resume"');
     expect(app).toContain('resumeEnabled={publicConfig.resumeTunerEnabled}');
-    expect(app).toContain('feature="tailor and save résumés"');
+    expect(app).toContain('<ResumeWorkspace onSignIn={openAccount} />');
+    expect(app).not.toContain('feature="tailor and save résumés"');
     expect(app).toContain('accessibilityLabel="Import one or more PDF or DOCX resumes"');
     expect(app).toContain('"/me/resume-bank/import"');
     expect(app).toContain('multiple: true');
@@ -25,6 +26,16 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('api<{ templates: ResumeTemplateCard[] }>("/resume-templates", token)');
     expect(app).toContain('sourceProfile.template !== selectedTemplate');
     expect(app).toContain('revision: sourceProfile.revision, template: selectedTemplate');
+  });
+
+  it('offers guests a temporary resume workspace without persistent writes', () => {
+    expect(app).toContain('function ResumeWorkspace({ token = "", onSignIn }');
+    expect(app).toContain('Guest session');
+    expect(app).toContain('name="cloud-offline-outline"');
+    expect(app).toContain('<Text style={styles.resumeGuestStatusDetail}>Not saved</Text>');
+    expect(app).toContain('const localId = `guest-${Date.now()}-${bankItems.length + 1}`;');
+    expect(app).toContain('Sign in to run review');
+    expect(app).toContain('Sign in to import PDF or DOCX');
   });
 
   it('offers an adaptive review workspace with evidence and explicit decisions', () => {
@@ -45,7 +56,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('const [bankManagerOpen, setBankManagerOpen] = useState(false);');
     expect(app).toContain('bankManagerOpen ? "Done editing" : "Edit master bank"');
     expect(app).toContain('{bankManagerOpen ? (');
-    expect(app).toContain('{!bankManagerOpen ? <View style={styles.resumeSavedSection}>');
+    expect(app).toContain('{!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>');
     expect(app.indexOf('Paste the job URL')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
     expect(app).toContain('<Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>');
     expect(app).toContain('No clean source file? Use an LLM prompt');
@@ -71,7 +82,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('savedResumeProfiles.map((profile) =>');
     expect(app).toContain('aria-pressed={selected}');
     expect(app).toContain('setSelectedProfileId(profile.profileId); setResumeSourceMode("existing");');
-    expect(app).toContain('{!bankManagerOpen ? <View style={styles.resumeSavedSection}>');
+    expect(app).toContain('{!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>');
   });
 
   it('offers the best saved resume and an ideal master-bank build', () => {
