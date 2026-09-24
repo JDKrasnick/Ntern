@@ -19,6 +19,7 @@
           <tr><td>Unverified signup</td><td>7 days after the last signup attempt</td><td>Automatic deletion if email verification is not completed</td></tr>
           <tr><td>Verified account, consent record, profile, saved applications, and notes</td><td>Until account deletion</td><td>In-app deletion or a verified support request</td></tr>
           <tr><td>Uploaded résumé and documents</td><td>Until individual document or account deletion</td><td>Removed from active Cloudflare R2 storage as part of the deletion request</td></tr>
+          <tr><td>Resume Tuner Master Bank, saved bases, pasted job descriptions, review drafts, embeddings, and generated PDF, TeX, and preview artifacts</td><td>Until account deletion</td><td>Removed with account data; derived R2 and Vectorize caches are deleted with canonical records and account export includes active private records</td></tr>
           <tr><td>Authentication session</td><td>Up to 30 days</td><td>Sign-out, account deletion, or automatic expiry</td></tr>
           <tr><td>Application-assistance access credential</td><td>1 hour or less</td><td>Use, cancellation, completion, or expiry</td></tr>
           <tr><td>Application-assistance metadata and masked field plan</td><td>30 days</td><td>Automatic expiry or earlier account deletion</td></tr>

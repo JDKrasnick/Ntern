@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ApplicationUrlValidationError, assessApplicationPageForListing, canonicalApplicationUrl, inspectApplicationPage, validateApplicationUrl } from '../src/core/application-url.js';
+import { ApplicationUrlValidationError, assessApplicationPageForListing, canonicalApplicationUrl, inspectApplicationPage, validateApplicationUrl, validateApplicationUrlWithEvidence } from '../src/core/application-url.js';
 
 describe('application URL validation', () => {
   it('canonicalizes TikTok bare position URLs before validation', () => {
@@ -275,6 +275,15 @@ describe('application URL validation', () => {
     await expect(inspectApplicationPage('https://careers.example.com/jobs/123456', async () =>
       new Response('Access denied', { status: 403 }),
     )).resolves.toMatchObject({ confidence: { level: 'low', recommendation: 'review', signals: expect.arrayContaining(['access restricted to scraper']) } });
+  });
+  it('keeps HTTP 406 unverified at both URL and page probes', async () => {
+    const url = 'https://careers.example.com/jobs/123456';
+    await expect(validateApplicationUrlWithEvidence(url, async () =>
+      new Response('Not acceptable', { status: 406 }),
+    )).resolves.toMatchObject({ evidence: { confidence: { recommendation: 'review', signals: expect.arrayContaining(['access restricted to scraper']) } } });
+    await expect(inspectApplicationPage(url, async () =>
+      new Response('Not acceptable', { status: 406 }),
+    )).resolves.toMatchObject({ confidence: { recommendation: 'review', signals: expect.arrayContaining(['access restricted to scraper']) } });
   });
   it('treats a server failure as transient rather than a dead link', async () => {
     await expect(inspectApplicationPage('https://careers.example.com/jobs/123456', async () =>

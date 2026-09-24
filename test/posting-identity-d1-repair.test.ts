@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
-import { runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
+import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { postingIdentityRepairQueryCount, runPostingIdentityRepair } from '../src/posting-identity-repair.js';
 import type { Internship, ProviderPostingEvidence, SourceOccurrence } from '../src/types.js';
 
@@ -436,6 +436,155 @@ describe('D1 posting identity repair', () => {
     });
     expect(duplicates.applyBatches?.length).toBeLessThan(all.applyBatches?.length ?? 0);
     expect(duplicates.applyBatches?.every((batch) => batch.jobIds.length > 1)).toBe(true);
+    sqlite.close();
+  });
+
+  it('repairs dangling occurrence pointers in paged signed batches that match the catalog-wide planner', async () => {
+    const single = await historicalDatabase({ presentationAgrees: true });
+    const paged = await historicalDatabase({ presentationAgrees: true });
+    for (const { db } of [single, paged]) {
+      const identity = await runBoundedPostingIdentityRepair(db, { jobBatch: 1, duplicateGroupsOnly: true });
+      for (const batch of identity.applyBatches ?? []) await runBoundedPostingIdentityRepairBatch(db, batch);
+    }
+    // The applied identity merge retired job IDs whose durable occurrence rows
+    // still name them, and left the merged job's projection status stale.
+    const catalogWide = await runPostingIdentityRepair(single.db, { scope: 'occurrences' });
+    expect(catalogWide.gate.danglingOccurrenceReferences).toBeGreaterThan(0);
+    expect(catalogWide.gate.projectionMismatches).toBeGreaterThan(0);
+    expect(await runPostingIdentityRepair(single.db, {
+      apply: true, scope: 'occurrences', repairToken: catalogWide.repairToken,
+      expectedChanges: catalogWide.expectedChanges, expectedDuplicateJobs: catalogWide.duplicateJobs,
+    })).toMatchObject({ applied: true });
+
+    const plan = await runBoundedPostingIdentityOccurrenceRepair(paged.db);
+    expect(plan).toMatchObject({ scope: 'occurrences', applied: false, conflicts: [] });
+    expect(plan.danglingOccurrences).toBe(catalogWide.gate.danglingOccurrenceReferences);
+    expect(plan.occurrenceRemaps).toBe(catalogWide.occurrenceRemaps);
+    expect(plan.batches.length).toBeGreaterThan(0);
+    for (const batch of plan.batches) {
+      await expect(runBoundedPostingIdentityRepairBatch(paged.db, { scope: 'occurrences', ...batch }))
+        .resolves.toMatchObject({ applied: true });
+    }
+
+    // Every row the paged repair rewrote is byte-identical to the catalog-wide
+    // planner's result: the signed batch never makes a different decision.
+    const coveredJobs = [...new Set(plan.batches.flatMap((batch) => batch.jobIds))].map((jobId) => `JOB#${jobId}`);
+    const coveredOccurrences = plan.batches.flatMap((batch) => batch.occurrenceKeys);
+    const coveredRows = (database: DatabaseSync) => [
+      ...Array.from({ length: Math.ceil(coveredJobs.length / 500) }, (_, index) => coveredJobs.slice(index * 500, index * 500 + 500))
+        .flatMap((chunk) => database.prepare(`SELECT * FROM catalog_items WHERE pk IN (${chunk.map(() => '?').join(', ')}) ORDER BY pk, sk`).all(...chunk)),
+      ...coveredOccurrences.map(([pk, sk]) => database.prepare('SELECT * FROM catalog_items WHERE pk = ? AND sk = ?').get(pk, sk)),
+    ];
+    expect(coveredRows(paged.sqlite)).toEqual(coveredRows(single.sqlite));
+
+    // The paged repair clears every gate finding the identity merge created. The
+    // fixture's unrelated legacy classification is the one term this scope does
+    // not own: production already reports zero legacy occurrences, and the
+    // catalog-wide planner clears it only because it synchronizes every job.
+    expect((await runPostingIdentityRepair(paged.db, { scope: 'occurrences' })).gate).toMatchObject({
+      aliasConflicts: 0, untrackedQuarantines: 0, duplicateOccurrenceReferences: 0,
+      projectionMismatches: 0, danglingOccurrenceReferences: 0,
+    });
+    expect((await runPostingIdentityRepair(single.db, { scope: 'occurrences' })).gate).toMatchObject({
+      aliasConflicts: 0, untrackedQuarantines: 0, duplicateOccurrenceReferences: 0,
+      projectionMismatches: 0, danglingOccurrenceReferences: 0, legacyOccurrences: 0,
+    });
+    expect(await runBoundedPostingIdentityOccurrenceRepair(paged.db)).toMatchObject({ expectedChanges: 0, occurrenceRemaps: 0 });
+    single.sqlite.close(); paged.sqlite.close();
+  });
+
+  it('re-synchronizes projection mismatches the identity repair left without an alias', async () => {
+    const { sqlite, db } = await historicalDatabase();
+    // The full identity scope stamps a confirmed projection on single-member
+    // groups too. Those jobs never get a job-ID alias, so an alias-driven
+    // occurrence plan cannot see them and the audit's projectionMismatches stays
+    // behind after the repair reports convergence.
+    const identity = await runBoundedPostingIdentityRepair(db, { jobBatch: 1 });
+    for (const batch of identity.applyBatches ?? []) await runBoundedPostingIdentityRepairBatch(db, batch);
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'job-id-alias'").get())
+      .toMatchObject({ count: 2 });
+
+    const catalogWide = await runPostingIdentityRepair(db, { scope: 'occurrences' });
+    expect(catalogWide.gate).toMatchObject({ danglingOccurrenceReferences: 1, projectionMismatches: 4 });
+
+    const plan = await runBoundedPostingIdentityOccurrenceRepair(db);
+    expect(plan).toMatchObject({ conflicts: [], danglingOccurrences: 1, projectionMismatches: 4, occurrenceRemaps: 1 });
+    expect(plan.batches.flatMap((batch) => batch.jobIds))
+      .toEqual(expect.arrayContaining(['plus-old', 'drw-old', 'spacex-a', 'spacex-b']));
+    // spacex-a and spacex-b carry no alias at all: only the projection
+    // predicate reaches them.
+    expect(sqlite.prepare(`SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'job-id-alias'
+      AND pk IN ('JOB_ID_ALIAS#spacex-a', 'JOB_ID_ALIAS#spacex-b')`).get()).toMatchObject({ count: 0 });
+
+    for (const batch of plan.batches) {
+      await expect(runBoundedPostingIdentityRepairBatch(db, { scope: 'occurrences', ...batch }))
+        .resolves.toMatchObject({ applied: true });
+    }
+    expect((await runPostingIdentityRepair(db, { scope: 'occurrences' })).gate).toMatchObject({
+      projectionMismatches: 0, danglingOccurrenceReferences: 0,
+    });
+    const converged = await runBoundedPostingIdentityOccurrenceRepair(db);
+    expect(converged).toMatchObject({ expectedChanges: 0, projectionMismatches: 0, occurrenceRemaps: 0 });
+    expect(converged.batches.every((batch) => batch.expectedChanges === 0)).toBe(true);
+    sqlite.close();
+  });
+
+  it('revalidates a signed occurrence batch after unrelated ingestion writes and refuses its replay', async () => {
+    const { sqlite, db } = await historicalDatabase({ presentationAgrees: true });
+    const identity = await runBoundedPostingIdentityRepair(db, { jobBatch: 1, duplicateGroupsOnly: true });
+    for (const batch of identity.applyBatches ?? []) await runBoundedPostingIdentityRepairBatch(db, batch);
+    const batch = (await runBoundedPostingIdentityOccurrenceRepair(db)).batches[0]!;
+    const revalidation = {
+      acceptCurrentSnapshot: true,
+      expectedEligibleDuplicateGroups: batch.eligibleDuplicateGroups,
+      expectedUnresolvedDuplicateGroups: batch.unresolvedDuplicateGroups,
+    };
+
+    sqlite.prepare("UPDATE catalog_items SET value = json_set(value, '$.lastSeenAt', '2026-08-03T00:00:00.000Z') WHERE pk = ? AND sk = 'META'")
+      .run(`JOB#${batch.jobIds[0]}`);
+    await expect(runBoundedPostingIdentityRepairBatch(db, { scope: 'occurrences', ...batch }))
+      .rejects.toThrow('Catalog changed after dry run');
+    await expect(runBoundedPostingIdentityRepairBatch(db, { scope: 'occurrences', ...batch, ...revalidation }))
+      .resolves.toMatchObject({ applied: true });
+    await expect(runBoundedPostingIdentityRepairBatch(db, { scope: 'occurrences', ...batch, ...revalidation }))
+      .rejects.toThrow('Catalog changed after dry run');
+    expect(await runBoundedPostingIdentityOccurrenceRepair(db)).toMatchObject({ expectedChanges: 0, danglingOccurrences: 0 });
+    sqlite.close();
+  });
+
+  it('splits paged occurrence repair into batches inside the queue-tolerant envelope', async () => {
+    const sqlite = database();
+    const db = sqliteD1(sqlite);
+    const insertAlias = sqlite.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'TARGET', 'job-id-alias', ?)");
+    const insertOccurrence = sqlite.prepare(`INSERT INTO catalog_items (pk, sk, kind, value, source_id, external_id)
+      VALUES (?, ?, 'source-occurrence', ?, ?, ?)`);
+    for (let index = 0; index < 130; index += 1) {
+      const canonicalJobId = `canonical-${index}`;
+      const retiredJobId = `retired-${index}`;
+      const reference = occurrence('community-list', `role-${index}`, `https://careers.example.test/jobs/${index}`);
+      sqlite.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'META', 'internship', ?)")
+        .run(`JOB#${canonicalJobId}`, JSON.stringify(job(canonicalJobId, reference.applyUrl, '2026-08-04T00:00:00.000Z', [reference])));
+      insertAlias.run(`JOB_ID_ALIAS#${retiredJobId}`, JSON.stringify({ oldJobId: retiredJobId, canonicalJobId, createdBy: 'posting-identity-repair' }));
+      for (let extra = 0; extra < 2; extra += 1) {
+        const sourceId = `legacy-${index}`;
+        const externalId = `role-${index}-${extra}`;
+        insertOccurrence.run(`SOURCE#${sourceId}`, `OCCURRENCE#${externalId}`, JSON.stringify({
+          sourceId, externalId, jobId: retiredJobId, occurrence: occurrence(sourceId, externalId, reference.applyUrl),
+        }), sourceId, externalId);
+      }
+    }
+
+    const plan = await runBoundedPostingIdentityOccurrenceRepair(db);
+    expect(plan).toMatchObject({ conflicts: [], danglingOccurrences: 260, canonicalJobs: 130 });
+    expect(plan.batches.length).toBeGreaterThan(1);
+    for (const batch of plan.batches) {
+      expect(batch.jobIds.length).toBeLessThanOrEqual(100);
+      expect(batch.contextRows.length).toBeLessThanOrEqual(125);
+      expect(batch.occurrenceKeys.length).toBeLessThanOrEqual(125);
+      expect(batch.expectedChanges).toBeGreaterThan(0);
+    }
+    // Every group is repaired exactly once: one canonical and one retired job each.
+    expect(plan.batches.flatMap((batch) => batch.jobIds)).toHaveLength(260);
     sqlite.close();
   });
 

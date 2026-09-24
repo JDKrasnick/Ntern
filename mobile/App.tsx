@@ -31,6 +31,7 @@ import {
 import * as WebBrowser from "expo-web-browser";
 import * as Notifications from "expo-notifications";
 import * as DocumentPicker from "expo-document-picker";
+import * as Clipboard from "expo-clipboard";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
@@ -47,11 +48,15 @@ import { type EducationLevel } from "../shared/education-display";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
+import { publicConfig } from "./src/public-config";
 import { installationApi } from "./src/installation";
 import { migrateLegacyAccountAlerts } from "./src/legacy-alert-migration";
 import { buildCompleteDataExport, DataExportFetchError, SharingUnavailableError, type AccountExportResponse } from "./src/account-data-export";
 import { accountDataActionState } from "./src/account-data-controls";
 import { shareDataExport } from "./src/account-data-share";
+import { loadResumeArtifactPreview, loadResumeArtifactSource, releaseResumeArtifactPreview, shareResumeArtifact } from "./src/resume-artifact-share";
+import { pollResumeImport } from "./src/resume-import-poll";
+import { resumeBankPrompt, type ResumeBankPromptKind } from "./src/resume-bank-prompts";
 import { clearSession, confirmEmail, restoreSession, signIn, signOut, signUp } from "./src/auth";
 import { policyUrls } from "./src/policies";
 import {
@@ -181,6 +186,7 @@ type CatalogGroupRole = {
   postingIdentityStatus?: "confirmed" | "unconfirmed";
 };
 type CatalogGroupDetails = { group: CatalogGroupRow; roles: CatalogGroupRole[] };
+type AppTab = "roles" | "queue" | "catalog" | "resume" | "profile";
 
 /** Let a reader finish a word before asking D1, while local results react at once. */
 function useDebouncedValue<T>(value: T, delayMs: number) {
@@ -2876,16 +2882,19 @@ function TabNavigation({
   onChange,
   rail = false,
   badgeCount = 0,
+  resumeEnabled = false,
 }: {
-  active: "roles" | "queue" | "catalog" | "profile";
-  onChange: (tab: "roles" | "queue" | "catalog" | "profile") => void;
+  active: AppTab;
+  onChange: (tab: AppTab) => void;
   rail?: boolean;
   badgeCount?: number;
+  resumeEnabled?: boolean;
 }) {
   const tabs = [
     { key: "roles", label: "Roles", icon: "briefcase-outline", activeIcon: "briefcase" },
     { key: "queue", label: "Queue", accessibilityLabel: "Apply queue", icon: "albums-outline", activeIcon: "albums" },
     { key: "catalog", label: "Catalog", accessibilityLabel: "Catalog search", icon: "search-outline", activeIcon: "search" },
+    ...(resumeEnabled ? [{ key: "resume" as const, label: "Resume", icon: "document-text-outline" as const, activeIcon: "document-text" as const }] : []),
     { key: "profile", label: "Profile", icon: "person-outline", activeIcon: "person" },
   ] as const;
   return (
@@ -3866,7 +3875,7 @@ function AppContent() {
   const [sessionRecoveryMessage, setSessionRecoveryMessage] = useState<string>();
   const sessionRequestId = useRef(0);
   const privateRequestId = useRef(0);
-  const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "profile">("roles");
+  const [tab, setTab] = useState<AppTab>("roles");
   // Release days default to UTC; a reader can ask for their own zone instead.
   const { zone: dayZone } = useDayZone();
   const [queueSheetVisible, setQueueSheetVisible] = useState(false);
@@ -3948,7 +3957,7 @@ function AppContent() {
   const catalogRequestGeneration = useRef(0);
   const catalogRequestInFlight = useRef(false);
   const groupRequestGuard = useRef(createLatestRequestGuard());
-  const changeTab = (nextTab: "roles" | "queue" | "catalog" | "profile") => {
+  const changeTab = (nextTab: AppTab) => {
     setTab(nextTab);
   };
   const clearPrivateState = () => {
@@ -4854,7 +4863,7 @@ function AppContent() {
   return (
     <SafeAreaView style={styles.screen}>
       <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
-        {usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} rail badgeCount={applyQueue.length} /> : null}
+        {usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} rail badgeCount={applyQueue.length} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
         <View style={styles.appMain}>
           {tab === "roles" ? (
             <View style={styles.pageColumn}>
@@ -4952,6 +4961,10 @@ function AppContent() {
               hiddenFeedbackJob={hiddenFeedbackJob}
               onUndoHide={undoHideLocally}
             />
+          ) : tab === "resume" ? (
+            <View style={styles.pageColumn}>
+              <ResumeWorkspace token={token} />
+            </View>
           ) : (
             <View style={styles.pageColumn}>
             <Profile
@@ -4969,7 +4982,7 @@ function AppContent() {
             </View>
           )}
         </View>
-        {!usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} badgeCount={applyQueue.length} /> : null}
+        {!usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} badgeCount={applyQueue.length} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
       </View>
       <JobDetailSheet
         job={selectedJob}
@@ -5422,7 +5435,7 @@ function GuestExperience({
 }) {
   const { width } = useWindowDimensions();
   const usesNavigationRail = width >= 700;
-  const [tab, setTab] = useState<"roles" | "queue" | "catalog" | "profile">(() =>
+  const [tab, setTab] = useState<AppTab>(() =>
     Platform.OS === "web" && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("rolesVariant")
       ? "roles"
       : "catalog",
@@ -5468,7 +5481,7 @@ function GuestExperience({
         importantForAccessibility={showAccount ? "no-hide-descendants" : "auto"}
       >
         <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
-          {usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} rail /> : null}
+          {usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} rail resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
           <View style={styles.appMain}>
             <View
               style={[styles.appMain, tab !== "catalog" && styles.hiddenScreen]}
@@ -5543,6 +5556,10 @@ function GuestExperience({
                   onSignIn={openAccount}
                 />
               </View>
+            ) : tab === "resume" ? (
+              <View style={styles.pageColumn}>
+                <ResumeWorkspace onSignIn={openAccount} />
+              </View>
             ) : tab === "profile" ? (
               <View style={styles.pageColumn}>
                 <Profile
@@ -5556,7 +5573,7 @@ function GuestExperience({
               </View>
             ) : null}
           </View>
-          {!usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} /> : null}
+          {!usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
         </View>
         <JobDetailSheet
           job={routedJob}
@@ -5609,6 +5626,788 @@ function AccountGate({
         <ActionButton label="Sign in or create account" onPress={onSignIn} />
       </View>
     </View>
+  );
+}
+
+type ResumeBankParentKind = "role" | "research" | "project" | "education";
+type ResumeTemplateId = "jake-technical" | "clean-standard" | "research-academic" | "project-compact";
+type ResumeSourceMode = "existing" | "ideal";
+type ResumeBankCardBase = { bankItemId: string; content: string; sourceDocumentId?: string; verified: boolean; revision: number };
+type ResumeBankCard =
+  | (ResumeBankCardBase & { kind: "role"; parent?: never; details?: { organization: string; title?: string; location?: string; dateRange?: string } })
+  | (ResumeBankCardBase & { kind: "research"; parent?: never; details?: { organization: string; title?: string; advisor?: string; location?: string; dateRange?: string } })
+  | (ResumeBankCardBase & { kind: "project"; parent?: never; details?: { name: string; tagline?: string; technologies: string[]; url?: string } })
+  | (ResumeBankCardBase & { kind: "education"; parent?: never; details?: { institution: string; credential?: string; location?: string; dateRange?: string; details?: string } })
+  | (ResumeBankCardBase & { kind: "skill"; parent?: never; details?: { category: string; skills: string[] } })
+  | (ResumeBankCardBase & { kind: "bullet"; parent: { kind: ResumeBankParentKind; bankItemId: string }; details?: never });
+type ResumeBankRef = { kind: "role" | "research" | "project" | "skill" | "education"; bankItemId: string } | { kind: "bullet"; bankItemId: string; parent: { kind: ResumeBankParentKind; bankItemId: string } };
+type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bankItemIds: string[]; template: ResumeTemplateId; revision: number };
+type ResumeTemplateCard = { template: ResumeTemplateId; displayName: string; description: string; bestFor: string };
+type ResumeProfileRecommendationCard = { profileId: string; score: number; explanation: string };
+type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
+type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; target: ResumeBankRef; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
+type ResumeArtifactCard = { artifactId: string; pageCount?: number };
+type ResumeSubscriptionCard = {
+  tier: "free" | "plus" | "pro";
+  plan: { name: string; priceUsdMonthly: number; tailoredDraftsPerMonth: number };
+  usage: { period: string; used: number; limit: number; remaining: number };
+  plans: Array<{ tier: "free" | "plus" | "pro"; name: string; priceUsdMonthly: number; tailoredDraftsPerMonth: number }>;
+};
+
+function bestSavedResumeRecommendation(recommendations: ResumeProfileRecommendationCard[], profiles: ResumeProfileCard[]) {
+  const savedIds = new Set(profiles.filter((profile) => profile.name !== "Technical base").map((profile) => profile.profileId));
+  return recommendations.find((recommendation) => savedIds.has(recommendation.profileId));
+}
+
+function ResumeSavedProfilesGhost() {
+  const motionAllowed = useContext(MotionAllowedContext);
+  const opacity = useRef(new Animated.Value(0.48)).current;
+  useEffect(() => {
+    if (!motionAllowed) {
+      opacity.setValue(0.68);
+      return;
+    }
+    const animation = Animated.loop(Animated.sequence([
+      Animated.timing(opacity, { toValue: 0.82, duration: 650, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 0.48, duration: 650, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    animation.start();
+    return () => animation.stop();
+  }, [motionAllowed, opacity]);
+  return (
+    <View accessibilityLabel="Loading saved résumés" style={styles.resumeGhostRow}>
+      {[0, 1, 2].map((index) => (
+        <Animated.View key={index} style={[styles.resumeGhostCard, { opacity }]}>
+          <View style={styles.resumeGhostIcon} />
+          <View style={styles.resumeGhostTitle} />
+          <View style={styles.resumeGhostTag} />
+          <View style={styles.resumeGhostMeta} />
+        </Animated.View>
+      ))}
+    </View>
+  );
+}
+
+function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: () => void }) {
+  const { width } = useWindowDimensions();
+  const desktop = width >= 700;
+  const signedIn = Boolean(token);
+  const [jobUrl, setJobUrl] = useState("");
+  const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
+  const [bankDraft, setBankDraft] = useState("");
+  const [bankSecondary, setBankSecondary] = useState("");
+  const [bankLocation, setBankLocation] = useState("");
+  const [bankDateRange, setBankDateRange] = useState("");
+  const [bankEntryKind, setBankEntryKind] = useState<ResumeBankCard["kind"]>("project");
+  const [bankParentId, setBankParentId] = useState<string>();
+  const [bankLoading, setBankLoading] = useState(true);
+  const [bankSaving, setBankSaving] = useState(false);
+  const [bankError, setBankError] = useState<string>();
+  const [bankExpanded, setBankExpanded] = useState(false);
+  const [bankManagerOpen, setBankManagerOpen] = useState(false);
+  const [manualEntryOpen, setManualEntryOpen] = useState(false);
+  const [promptGuideOpen, setPromptGuideOpen] = useState(false);
+  const [promptKind, setPromptKind] = useState<ResumeBankPromptKind>("build");
+  const [copiedPrompt, setCopiedPrompt] = useState<ResumeBankPromptKind>();
+  const [planExpanded, setPlanExpanded] = useState(false);
+  const [profiles, setProfiles] = useState<ResumeProfileCard[]>([]);
+  const [resumeTemplates, setResumeTemplates] = useState<ResumeTemplateCard[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<ResumeTemplateId>("jake-technical");
+  const [selectedProfileId, setSelectedProfileId] = useState<string>();
+  const [bestExistingRecommendation, setBestExistingRecommendation] = useState<ResumeProfileRecommendationCard>();
+  const [resumeSourceMode, setResumeSourceMode] = useState<ResumeSourceMode>("existing");
+  const [jobImport, setJobImport] = useState<ResumeImportCard>();
+  const [manualDescription, setManualDescription] = useState("");
+  const [draft, setDraft] = useState<ResumeDraftCard>();
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [activeChange, setActiveChange] = useState(0);
+  const [reviewMode, setReviewMode] = useState<"changes" | "preview">("changes");
+  const [artifact, setArtifact] = useState<ResumeArtifactCard>();
+  const [artifactMode, setArtifactMode] = useState<"rendered" | "latex">("rendered");
+  const [artifactPreview, setArtifactPreview] = useState<string>();
+  const [artifactSource, setArtifactSource] = useState("");
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [subscription, setSubscription] = useState<ResumeSubscriptionCard>();
+  const current = draft?.changes[activeChange];
+  const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
+  const decide = (decision: "accepted" | "rejected") => {
+    if (!draft || !current || resumeBusy) return;
+    setResumeBusy(true);
+    const changes = draft.changes.map((change) => change.changeId === current.changeId ? { ...change, decision } : change);
+    void api<ResumeDraftCard>(`/me/resume-drafts/${draft.draftId}/changes/${current.changeId}`, token, { method: "PATCH", body: JSON.stringify({ revision: draft.revision, decision }) })
+      .then((updated) => { setDraft(updated); if (activeChange < updated.changes.length - 1) setActiveChange((index) => index + 1); })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that decision."))
+      .finally(() => setResumeBusy(false));
+  };
+  const keepRemainingOriginals = () => {
+    if (!draft || resumeBusy) return;
+    const remaining = draft.changes.filter((change) => !change.decision);
+    if (!remaining.length) return;
+    setResumeBusy(true);
+    void (async () => {
+      let updated = draft;
+      for (const change of remaining) {
+        updated = await api<ResumeDraftCard>(`/me/resume-drafts/${updated.draftId}/changes/${change.changeId}`, token, {
+          method: "PATCH", body: JSON.stringify({ revision: updated.revision, decision: "rejected" }),
+        });
+      }
+      setDraft(updated);
+      setActiveChange(Math.max(0, updated.changes.length - 1));
+    })().catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't keep the remaining originals."))
+      .finally(() => setResumeBusy(false));
+  };
+  const accepted = draft?.changes.filter((change) => change.decision === "accepted").length ?? 0;
+  const technicalBase = profiles.find((profile) => profile.name === "Technical base");
+  const savedResumeProfiles = profiles.filter((profile) => profile.name !== "Technical base");
+  const selectedProfile = profiles.find((profile) => profile.profileId === selectedProfileId);
+  const recommendedProfile = profiles.find((profile) => profile.profileId === bestExistingRecommendation?.profileId);
+  const bankRoots = bankItems.filter((item) => item.kind !== "bullet");
+  const bankBullets = bankItems.filter((item) => item.kind === "bullet");
+  const importedResumeCount = new Set(bankItems.map((item) => item.sourceDocumentId).filter(Boolean)).size;
+  const bankParents = bankItems.filter((item): item is Extract<ResumeBankCard, { kind: ResumeBankParentKind }> => item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education");
+  const selectedBankParent = bankParents.find((item) => item.bankItemId === bankParentId) ?? bankParents[0];
+  const copyBankPrompt = () => {
+    void Clipboard.setStringAsync(resumeBankPrompt(promptKind))
+      .then(() => setCopiedPrompt(promptKind))
+      .catch(() => setBankError("We couldn't copy that prompt. Select the text and copy it manually."));
+  };
+  const loadBank = () => {
+    if (!signedIn) {
+      setBankLoading(false);
+      setBankError(undefined);
+      return;
+    }
+    setBankLoading(true);
+    setBankError(undefined);
+    void api<{ items: ResumeBankCard[] }>("/me/resume-bank", token)
+      .then(async ({ items }) => {
+        setBankItems(items);
+        const [{ profiles: savedProfiles }, { imports }, currentSubscription, { templates }] = await Promise.all([
+          api<{ profiles: ResumeProfileCard[] }>("/me/resume-profiles", token),
+          api<{ imports: ResumeImportCard[] }>("/me/resume-imports", token),
+          api<ResumeSubscriptionCard>("/me/subscription", token),
+          api<{ templates: ResumeTemplateCard[] }>("/resume-templates", token),
+        ]);
+        setProfiles(savedProfiles);
+        setSelectedProfileId((selected) => selected ?? savedProfiles.find((profile) => profile.name !== "Technical base")?.profileId ?? savedProfiles[0]?.profileId);
+        const latestImport = imports.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+        setJobImport(latestImport);
+        if (latestImport?.status === "ready") {
+          const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${latestImport.importId}/recommendation`, token, { method: "POST" });
+          const best = bestSavedResumeRecommendation(result.recommendations, savedProfiles);
+          if (best) {
+            setBestExistingRecommendation(best);
+            setSelectedProfileId(best.profileId);
+            setResumeSourceMode("existing");
+          }
+        }
+        setSubscription(currentSubscription);
+        setResumeTemplates(templates);
+        setSelectedTemplate(savedProfiles[0]?.template ?? "jake-technical");
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't load your Master Bank."))
+      .finally(() => setBankLoading(false));
+  };
+  useEffect(loadBank, [signedIn, token]);
+  useEffect(() => {
+    const selected = profiles.find((profile) => profile.profileId === selectedProfileId);
+    if (selected) setSelectedTemplate(selected.template);
+  }, [profiles, selectedProfileId]);
+  useEffect(() => {
+    if (jobImport?.status !== "pending") return;
+    let cancelled = false;
+    void pollResumeImport(() => api<ResumeImportCard>(`/me/resume-imports/${encodeURIComponent(jobImport.importId)}`, token))
+      .then(async (value) => {
+        if (cancelled) return;
+        setJobImport(value);
+        if (value.status === "ready") {
+          const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
+          const best = bestSavedResumeRecommendation(result.recommendations, profiles);
+          if (!cancelled && best) {
+            setBestExistingRecommendation(best);
+            setSelectedProfileId(best.profileId);
+            setResumeSourceMode("existing");
+          }
+        }
+      })
+      .catch((error) => { if (!cancelled) setBankError(error instanceof Error ? error.message : "We couldn't refresh that job import."); });
+    return () => { cancelled = true; };
+  }, [jobImport?.importId, jobImport?.status, profiles, token]);
+  useEffect(() => () => releaseResumeArtifactPreview(artifactPreview), [artifactPreview]);
+  const addBankItem = () => {
+    const content = bankDraft.trim();
+    if (!content || bankSaving) return;
+    setBankSaving(true);
+    setBankError(undefined);
+    const details = bankEntryKind === "role" ? { organization: content, title: bankSecondary.trim() || undefined, location: bankLocation.trim() || undefined, dateRange: bankDateRange.trim() || undefined }
+      : bankEntryKind === "research" ? { organization: content, title: bankSecondary.trim() || undefined, location: bankLocation.trim() || undefined, dateRange: bankDateRange.trim() || undefined }
+      : bankEntryKind === "project" ? { name: content, tagline: bankSecondary.trim() || undefined, technologies: bankLocation.split(",").map((value) => value.trim()).filter(Boolean), url: bankDateRange.trim() || undefined }
+      : bankEntryKind === "education" ? { institution: content, credential: bankSecondary.trim() || undefined, location: bankLocation.trim() || undefined, dateRange: bankDateRange.trim() || undefined }
+      : bankEntryKind === "skill" ? { category: content, skills: bankSecondary.split(",").map((value) => value.trim()).filter(Boolean) }
+      : undefined;
+    const summary = [content, bankSecondary.trim(), bankLocation.trim(), bankDateRange.trim()].filter(Boolean).join(" | ");
+    if (!signedIn) {
+      const localId = `guest-${Date.now()}-${bankItems.length + 1}`;
+      const item = {
+        bankItemId: localId,
+        kind: bankEntryKind,
+        content: bankEntryKind === "bullet" ? content : summary,
+        verified: true,
+        revision: 1,
+        ...(details ? { details } : {}),
+        ...(bankEntryKind === "bullet" && selectedBankParent ? { parent: { kind: selectedBankParent.kind, bankItemId: selectedBankParent.bankItemId } } : {}),
+      } as ResumeBankCard;
+      setBankItems((items) => [...items, item]);
+      setBankDraft("");
+      setBankSecondary(""); setBankLocation(""); setBankDateRange("");
+      if (item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education") {
+        setBankEntryKind("bullet");
+        setBankParentId(item.bankItemId);
+      }
+      setBankSaving(false);
+      return;
+    }
+    void api<ResumeBankCard>("/me/resume-bank", token, {
+      method: "POST", body: JSON.stringify({ kind: bankEntryKind, content: bankEntryKind === "bullet" ? content : summary, ...(details ? { details } : {}), ...(bankEntryKind === "bullet" && selectedBankParent ? { parent: { kind: selectedBankParent.kind, bankItemId: selectedBankParent.bankItemId } } : {}) }),
+    })
+      .then((item) => {
+        setBankItems((items) => [...items, item]);
+        setBankDraft("");
+        setBankSecondary(""); setBankLocation(""); setBankDateRange("");
+        if (item.kind === "role" || item.kind === "research" || item.kind === "project" || item.kind === "education") {
+          setBankEntryKind("bullet");
+          setBankParentId(item.bankItemId);
+        }
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that bank item."))
+      .finally(() => setBankSaving(false));
+  };
+  const importResume = async () => {
+    if (bankSaving) return;
+    if (!signedIn) {
+      onSignIn?.();
+      return;
+    }
+    setBankError(undefined);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+        copyToCacheDirectory: true,
+        multiple: true,
+      });
+      if (result.canceled) return;
+      setBankSaving(true);
+      for (const asset of result.assets) {
+        const contentType = asset.mimeType ?? (asset.name.toLowerCase().endsWith(".docx") ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/pdf");
+        const response = await api<{ document: { documentId: string }; uploadUrl: string }>("/me/documents", token, { method: "POST", body: JSON.stringify({ fileName: asset.name, contentType }) });
+        const file = await fetch(asset.uri);
+        await uploadDocumentContent({ uploadUrl: response.uploadUrl, token, contentType, body: await file.blob() }, { deleteMetadata: () => api(`/me/documents/${encodeURIComponent(response.document.documentId)}`, token, { method: "DELETE" }) });
+        const imported = await api<{ items: ResumeBankCard[] }>("/me/resume-bank/import", token, { method: "POST", body: JSON.stringify({ documentId: response.document.documentId }) });
+        if (!imported.items.length) throw new Error(`We couldn't find structured résumé content in ${asset.name}.`);
+        const profile = await api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: asset.name.replace(/\.(pdf|docx)$/iu, ""), tags: [], bankItemIds: imported.items.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
+        setBankItems((items) => [...items, ...imported.items]);
+        setProfiles((items) => [...items, profile]);
+        setSelectedProfileId(profile.profileId);
+      }
+    } catch (error) {
+      setBankError(error instanceof Error ? error.message : "We couldn't import that résumé.");
+    } finally { setBankSaving(false); }
+  };
+  const syncTechnicalBase = async () => {
+    // Earlier preview builds required a separate approval for every imported
+    // line. Syncing the repository upgrades those private source records to
+    // the current model, where only job-specific diffs need review.
+    const trustedItems = await Promise.all(bankItems.map((item) => item.verified ? item : api<ResumeBankCard>(`/me/resume-bank/${item.bankItemId}`, token, {
+      method: "PATCH", body: JSON.stringify({ revision: item.revision, verified: true }),
+    })));
+    setBankItems(trustedItems);
+    const profile = technicalBase
+      ? await api<ResumeProfileCard>(`/me/resume-profiles/${technicalBase.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: technicalBase.revision, bankItemIds: trustedItems.map((item) => item.bankItemId), template: selectedTemplate }) })
+      : await api<ResumeProfileCard>("/me/resume-profiles", token, { method: "POST", body: JSON.stringify({ name: "Technical base", tags: ["technical"], bankItemIds: trustedItems.map((item) => item.bankItemId), sectionOrder: ["education", "experience", "research", "projects", "skills"], template: selectedTemplate }) });
+    setProfiles((all) => technicalBase ? all.map((item) => item.profileId === profile.profileId ? profile : item) : [...all, profile]);
+    return profile;
+  };
+  const importJob = () => {
+    if (!jobUrl.trim() || resumeBusy) return;
+    if (!signedIn) {
+      setBankError(undefined);
+      setJobImport({ importId: "guest-job", canonicalUrl: jobUrl.trim(), description: "", status: "manual-description-required", revision: 1, updatedAt: new Date().toISOString() });
+      setDraft(undefined); setActiveChange(0); setBestExistingRecommendation(undefined); setResumeSourceMode("ideal");
+      return;
+    }
+    setResumeBusy(true); setBankError(undefined);
+    void api<ResumeImportCard>("/me/resume-jobs/resolve", token, { method: "POST", body: JSON.stringify({ url: jobUrl }) })
+      .then(async (value) => {
+        setJobImport(value); setDraft(undefined); setActiveChange(0); setBestExistingRecommendation(undefined);
+        if (value.status === "ready") {
+          const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
+          const best = bestSavedResumeRecommendation(result.recommendations, profiles);
+          if (best) { setBestExistingRecommendation(best); setSelectedProfileId(best.profileId); setResumeSourceMode("existing"); }
+        }
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't import that job."))
+      .finally(() => setResumeBusy(false));
+  };
+  const saveManualDescription = () => {
+    if (!jobImport || !manualDescription.trim() || resumeBusy) return;
+    if (!signedIn) {
+      setJobImport({ ...jobImport, description: manualDescription.trim(), status: "ready", revision: jobImport.revision + 1, updatedAt: new Date().toISOString() });
+      return;
+    }
+    setResumeBusy(true);
+    void api<ResumeImportCard>(`/me/resume-jobs/${jobImport.importId}/manual-description`, token, { method: "POST", body: JSON.stringify({ revision: jobImport.revision, description: manualDescription }) })
+      .then(async (value) => {
+        setJobImport(value);
+        const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
+        const best = bestSavedResumeRecommendation(result.recommendations, profiles);
+        if (best) { setBestExistingRecommendation(best); setSelectedProfileId(best.profileId); setResumeSourceMode("existing"); }
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that description."))
+      .finally(() => setResumeBusy(false));
+  };
+  const createDraft = () => {
+    if (!jobImport || jobImport.status !== "ready" || resumeBusy || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length)) return;
+    if (!signedIn) {
+      onSignIn?.();
+      return;
+    }
+    setResumeBusy(true);
+    const request = async () => {
+      const sourceProfile = resumeSourceMode === "ideal" ? await syncTechnicalBase() : profiles.find((profile) => profile.profileId === selectedProfileId);
+      if (!sourceProfile) throw new Error("Select a saved resume base before creating a review.");
+      if (sourceProfile.template !== selectedTemplate) {
+        const updated = await api<ResumeProfileCard>(`/me/resume-profiles/${sourceProfile.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: sourceProfile.revision, template: selectedTemplate }) });
+        setProfiles((all) => all.map((profile) => profile.profileId === updated.profileId ? updated : profile));
+        return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: updated.profileId }) });
+      }
+      return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: sourceProfile.profileId }) });
+    };
+    void request()
+      .then((value) => {
+        setDraft(value); setActiveChange(0); setArtifact(undefined); setArtifactSource(""); setArtifactPreview(undefined); setReviewMode("changes");
+        setSubscription((currentPlan) => currentPlan ? { ...currentPlan, usage: { ...currentPlan.usage, used: currentPlan.usage.used + 1, remaining: Math.max(0, currentPlan.usage.remaining - 1) } } : currentPlan);
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create a grounded draft."))
+      .finally(() => setResumeBusy(false));
+  };
+  const finalizeDraft = () => {
+    if (!draft || draft.status === "finalized" || resumeBusy) return;
+    setResumeBusy(true);
+    void api<{ draft: ResumeDraftCard; artifact?: ResumeArtifactCard }>(`/me/resume-drafts/${draft.draftId}/finalize`, token, { method: "POST", body: JSON.stringify({ revision: draft.revision }) })
+      .then(async (result) => {
+        setDraft(result.draft);
+        if (!result.artifact) return;
+        setArtifact(result.artifact);
+        setReviewMode("preview");
+        setArtifactMode("rendered");
+        setArtifactLoading(true);
+        const [preview, source] = await Promise.all([
+          loadResumeArtifactPreview(result.artifact.artifactId, 1, token),
+          loadResumeArtifactSource(result.artifact.artifactId, token),
+        ]);
+        setArtifactPreview(preview);
+        setArtifactSource(source);
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create that résumé."))
+      .finally(() => { setResumeBusy(false); setArtifactLoading(false); });
+  };
+
+  return (
+    <ScrollView style={styles.list} contentContainerStyle={styles.resumeContent}>
+      <View style={[styles.resumeHeadingRow, desktop && styles.resumeHeadingRowWide]}>
+        <View style={styles.resumeHeadingCopy}>
+          <PageHeading
+            eyebrow="Resume"
+            title="Tailor your résumé."
+            description="Paste a job link. Ntern compares it with your experience and shows only the changes for you to review."
+          />
+        </View>
+        {!signedIn ? <View accessibilityLabel="Guest session, work is not saved" style={styles.resumeGuestStatus}>
+          <Ionicons name="cloud-offline-outline" size={17} color={colors.signal} />
+          <View style={styles.resumeGuestStatusCopy}>
+            <Text style={styles.resumeGuestStatusTitle}>Guest session</Text>
+            <Text style={styles.resumeGuestStatusDetail}>Not saved</Text>
+          </View>
+          {onSignIn ? <TouchableOpacity accessibilityRole="button" onPress={onSignIn} style={styles.resumeGuestSignIn}><Text style={styles.resumeCompactActionText}>Sign in</Text></TouchableOpacity> : null}
+        </View> : null}
+      </View>
+
+      <View style={styles.resumePrimaryTask}>
+        <Text style={styles.sectionTitle}>Paste the job URL</Text>
+        <Text style={styles.resumeSectionDescription}>Use the employer’s official posting.</Text>
+        <View style={[styles.resumeUrlRow, !desktop && styles.resumeUrlRowStacked]}>
+          <View style={styles.resumeUrlField}>
+            <Ionicons name="link-outline" size={18} color={colors.muted} />
+            <TextInput
+              value={jobUrl}
+              onChangeText={setJobUrl}
+              accessibilityLabel="Job URL"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              placeholder="https://careers.example.com/jobs/..."
+              placeholderTextColor={colors.placeholder}
+              selectionColor={colors.signal}
+              style={styles.resumeUrlInput}
+            />
+          </View>
+          <ActionButton label={resumeBusy ? "Checking…" : "Continue"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
+        </View>
+        {bankError && (bankManagerOpen || jobImport || jobUrl.trim()) ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
+        {jobImport && jobImport.status !== "ready" ? (
+          <View style={styles.resumeManualFallback}>
+            <Text style={styles.inputLabel}>Paste the job description to continue</Text>
+            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : "We couldn't read the public page. Paste the description to continue."} Pasted text stays in your private resume workspace.</Text>
+            <TextInput value={manualDescription} onChangeText={setManualDescription} accessibilityLabel="Job description" multiline placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} />
+            <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
+          </View>
+        ) : null}
+        <View style={styles.resumeBaseAccessRow}>
+          <Text style={styles.resumeBaseAccessStatus}>{bankLoading ? "Checking your saved experience…" : bankItems.length ? `${bankItems.length} ${signedIn ? "saved" : "session"} source item${bankItems.length === 1 ? "" : "s"}` : signedIn ? "No saved experience yet" : "No session experience yet"}</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={bankManagerOpen ? "Close master bank editor" : "Edit master bank"} aria-expanded={bankManagerOpen} onPress={() => setBankManagerOpen((value) => !value)} style={styles.resumeCompactAction}>
+            <Text style={styles.resumeCompactActionText}>{bankManagerOpen ? "Done editing" : "Edit master bank"}</Text>
+          </TouchableOpacity>
+        </View>
+        {subscription ? (
+          <View style={styles.resumePlanAccessRow}>
+            <Text style={styles.resumePlanSummary}>{subscription.plan.name} plan · {subscription.usage.remaining} review{subscription.usage.remaining === 1 ? "" : "s"} left this month</Text>
+            <TouchableOpacity accessibilityRole="button" aria-expanded={planExpanded} onPress={() => setPlanExpanded((value) => !value)} style={styles.resumeCompactAction}>
+              <Text style={styles.resumeCompactActionText}>{planExpanded ? "Hide plan details" : "Plan details"}</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+      </View>
+
+      {!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>
+        <View style={styles.resumeSavedHeader}>
+          <View style={styles.resumeSavedHeaderCopy}>
+            <Text style={styles.sectionTitle}>Saved résumés</Text>
+            <Text style={styles.resumeSectionDescription}>Choose a starting point now, or let Ntern recommend one after reading the job.</Text>
+          </View>
+          {selectedProfile && selectedProfile.name !== "Technical base" ? <Text style={styles.resumeSavedSelection}>Using {selectedProfile.name}</Text> : null}
+        </View>
+        {bankLoading ? <ResumeSavedProfilesGhost /> : savedResumeProfiles.length ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeSavedScroller}>
+            {savedResumeProfiles.map((profile) => {
+              const selected = selectedProfileId === profile.profileId;
+              return (
+                <TouchableOpacity key={profile.profileId} accessibilityRole="button" accessibilityLabel={`Use ${profile.name} resume`} aria-pressed={selected} onPress={() => { setSelectedProfileId(profile.profileId); setResumeSourceMode("existing"); }} style={[styles.resumeSavedCard, selected && styles.resumeSavedCardSelected]}>
+                  <View style={styles.resumeSavedCardTop}>
+                    <View style={[styles.resumeSavedIcon, selected && styles.resumeSavedIconSelected]}>
+                      <Ionicons name="document-text-outline" size={18} color={selected ? colors.onDark : colors.signal} />
+                    </View>
+                    {selected ? <Ionicons name="checkmark-circle" size={19} color={colors.signal} /> : null}
+                  </View>
+                  <Text numberOfLines={1} style={styles.resumeSavedName}>{profile.name}</Text>
+                  <Text numberOfLines={1} style={styles.resumeSavedTags}>{profile.tags.join(" · ") || "General"}</Text>
+                  <Text style={styles.resumeSavedMeta}>{profile.bankItemIds.length} source item{profile.bankItemIds.length === 1 ? "" : "s"}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        ) : (
+          <View style={styles.resumeSavedEmptyState}>
+            <Ionicons name="documents-outline" size={20} color={colors.muted} />
+            <Text style={styles.resumeSavedEmpty}>No saved résumé variants yet. Open the master bank and add a PDF or DOCX.</Text>
+          </View>
+        )}
+      </View> : null}
+
+      {bankManagerOpen ? (
+        <View style={styles.resumeBankWorkspace}>
+          <View style={styles.resumeSourceHeading}>
+            <View style={styles.resumeSourceHeadingCopy}>
+              <Text style={styles.sectionTitle}>Resume sources</Text>
+              <Text style={styles.resumeSectionDescription}>Start with the résumés you already use. Ntern saves each one as a reusable option and merges its structured experience into your private master bank.</Text>
+            </View>
+          </View>
+          <View style={[styles.resumeSourceWorkspace, desktop && styles.resumeSourceWorkspaceWide]}>
+            <View style={styles.resumeSourceImportColumn}>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Import one or more PDF or DOCX resumes" onPress={() => void importResume()} disabled={bankSaving} style={[styles.resumeImportStage, bankSaving && styles.resumeSourceChoiceDisabled]}>
+                <View style={styles.resumeImportStageIcon}><Ionicons name="documents-outline" size={28} color={colors.signal} /></View>
+                <View style={styles.resumeImportStageCopy}>
+                  <Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>
+                  <Text style={styles.resumeImportStageDescription}>{signedIn ? "Choose one or several PDF or DOCX files. Each file stays available as a saved résumé while its roles, projects, education, skills, and correctly attached bullets join the master bank." : "File import uses your private saved workspace. You can still add typed items manually or prepare them with the free prompt below."}</Text>
+                  <Text style={styles.resumeImportStageMeta}>{signedIn ? (importedResumeCount ? `${importedResumeCount} source résumé${importedResumeCount === 1 ? "" : "s"} imported` : "PDF or DOCX · select multiple files") : "Sign in to import PDF or DOCX"}</Text>
+                </View>
+                <View style={styles.resumeImportStageAction}>
+                  <Ionicons name="add" size={18} color={colors.onDark} />
+                  <Text style={styles.resumeImportStageActionText}>Choose files</Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity accessibilityRole="button" aria-expanded={promptGuideOpen} onPress={() => setPromptGuideOpen((value) => !value)} style={styles.resumePromptAccess}>
+                <Ionicons name="sparkles-outline" size={17} color={colors.signal} />
+                <Text style={styles.resumePromptFreeBadge}>Free</Text>
+                <Text style={styles.resumePromptAccessText}>{promptGuideOpen ? "Hide LLM prompts" : "No clean source file? Use an LLM prompt"}</Text>
+                <Ionicons name={promptGuideOpen ? "chevron-up" : "chevron-down"} size={16} color={colors.signal} />
+              </TouchableOpacity>
+
+              {promptGuideOpen ? <View style={styles.resumePromptPanel}>
+            <View style={styles.resumePromptHeader}>
+              <View style={styles.resumeSourceHeadingCopy}>
+                <Text style={styles.resumeMasterBankTitle}>Prepare a parseable master bank</Text>
+                <Text style={styles.resumeSectionDescription}>Use either prompt with the LLM you prefer. It produces the strict parent-and-bullet text format Ntern can validate after you save it as a PDF or DOCX.</Text>
+              </View>
+            </View>
+            <View accessibilityRole="tablist" style={styles.resumePromptTabs}>
+              {(["build", "convert"] as const).map((kind) => (
+                <TouchableOpacity key={kind} accessibilityRole="tab" aria-selected={promptKind === kind} onPress={() => { setPromptKind(kind); setCopiedPrompt(undefined); }} style={[styles.resumePromptTab, promptKind === kind && styles.resumePromptTabActive]}>
+                  <Text style={[styles.resumePromptTabText, promptKind === kind && styles.resumePromptTabTextActive]}>{kind === "build" ? "Build from scratch" : "Convert existing material"}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.resumePromptPurpose}>{promptKind === "build" ? "The LLM interviews the user one parent at a time, then exports only confirmed facts." : "The LLM restructures an existing résumé or giant content bank without reassigning or inventing facts."}</Text>
+            <ScrollView nestedScrollEnabled style={styles.resumePromptScroller} contentContainerStyle={styles.resumePromptContent}>
+              <Text selectable style={styles.resumePromptText}>{resumeBankPrompt(promptKind)}</Text>
+            </ScrollView>
+            <View style={styles.resumePromptFooter}>
+              <Text style={styles.resumePromptFootnote}>After the LLM exports the bank, save it as PDF or DOCX and add it above. Ntern still rejects broken parent pointers.</Text>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Copy ${promptKind === "build" ? "build from scratch" : "convert existing material"} prompt`} onPress={copyBankPrompt} style={styles.resumePromptCopy}>
+                <Ionicons name={copiedPrompt === promptKind ? "checkmark" : "copy-outline"} size={17} color={colors.onDark} />
+                <Text style={styles.resumePromptCopyText}>{copiedPrompt === promptKind ? "Copied" : "Copy prompt"}</Text>
+              </TouchableOpacity>
+            </View>
+              </View> : null}
+            </View>
+
+            <View style={styles.resumeSourceBankColumn}>
+              <View style={styles.resumeMasterBankSummary}>
+            <View style={styles.resumeMasterBankCopy}>
+              <View style={styles.resumeSourceHeading}>
+                <View style={styles.resumeSourceHeadingCopy}>
+                  <Text style={styles.resumeMasterBankTitle}>Master bank</Text>
+                  <Text style={styles.resumeSectionDescription}>The complete typed source Ntern can draw from when it builds an ideal résumé.</Text>
+                </View>
+              </View>
+              <Text style={styles.resumeMasterBankStats}>{bankLoading ? "Loading…" : `${bankRoots.length} parent item${bankRoots.length === 1 ? "" : "s"} · ${bankBullets.length} attached bullet${bankBullets.length === 1 ? "" : "s"}`}</Text>
+              <View style={styles.resumeTypeGuardNote}>
+                <Ionicons name="git-branch-outline" size={16} color={colors.signal} />
+                <Text style={styles.resumeTypeGuardText}>Every bullet carries a typed pointer to one role, project, research entry, or education record. It cannot drift to another parent.</Text>
+              </View>
+            </View>
+            <View style={styles.resumeMasterBankActions}>
+              <TouchableOpacity accessibilityRole="button" aria-expanded={manualEntryOpen} onPress={() => setManualEntryOpen((value) => !value)} style={styles.resumeMasterBankPrimaryAction}>
+                <Ionicons name={manualEntryOpen ? "close" : "add"} size={17} color={colors.onDark} />
+                <Text style={styles.resumeMasterBankPrimaryText}>{manualEntryOpen ? "Close entry form" : "Add manually"}</Text>
+              </TouchableOpacity>
+              {bankRoots.length ? <TouchableOpacity accessibilityRole="button" aria-expanded={bankExpanded} onPress={() => setBankExpanded((value) => !value)} style={styles.resumeMasterBankSecondaryAction}>
+                <Text style={styles.resumeMasterBankSecondaryText}>{bankExpanded ? "Hide bank" : `Review ${bankRoots.length} items`}</Text>
+              </TouchableOpacity> : null}
+            </View>
+              </View>
+
+              {bankExpanded ? (
+                <ScrollView nestedScrollEnabled style={styles.resumeBankScroller} contentContainerStyle={styles.resumeBankItems}>
+                  {bankRoots.map((item) => (
+                    <View key={item.bankItemId} style={styles.resumeBankItem}>
+                      <Ionicons name={item.kind === "role" ? "briefcase-outline" : item.kind === "project" ? "code-slash-outline" : item.kind === "skill" ? "construct-outline" : item.kind === "education" ? "school-outline" : "document-text-outline"} size={17} color={colors.signal} />
+                      <View style={styles.resumeBankItemCopy}>
+                        <Text numberOfLines={2} style={styles.resumeBankItemText}>{item.content}</Text>
+                        <Text style={styles.resumeBankItemStatus}>{item.kind} · {bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length} bullet{bankItems.filter((candidate) => candidate.kind === "bullet" && candidate.parent?.bankItemId === item.bankItemId).length === 1 ? "" : "s"}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </ScrollView>
+              ) : null}
+            </View>
+          </View>
+
+          {manualEntryOpen ? <View style={styles.resumeManualEntry}>
+            <View style={styles.resumeManualEntryHeader}>
+              <View style={styles.resumeSourceHeadingCopy}>
+                <Text style={styles.sectionTitle}>Add a structured item</Text>
+                <Text style={styles.resumeSectionDescription}>Choose what it is first. Ntern changes the fields and allowed relationships to match that type.</Text>
+              </View>
+            </View>
+            <View style={styles.resumeBankKindPicker}>
+              {(["role", "research", "project", "education", "skill", "bullet"] as const).map((kind) => (
+                <TouchableOpacity key={kind} accessibilityRole="button" aria-pressed={bankEntryKind === kind} onPress={() => {
+                  if (bankEntryKind !== kind) { setBankDraft(""); setBankSecondary(""); setBankLocation(""); setBankDateRange(""); }
+                  setBankEntryKind(kind);
+                }} style={[styles.resumeBankKindOption, bankEntryKind === kind && styles.resumeBankKindOptionActive]}>
+                  <Text style={[styles.resumeSegmentText, bankEntryKind === kind && styles.resumeSegmentTextActive]}>{kind === "bullet" ? "Bullet" : kind[0]!.toUpperCase() + kind.slice(1)}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {bankEntryKind === "bullet" ? <View style={styles.resumeManualField}>
+              <Text style={styles.inputLabel}>Which item owns this bullet?</Text>
+              {bankParents.length ? <View style={styles.resumeParentPicker}>
+                {bankParents.map((parent) => (
+                  <TouchableOpacity key={parent.bankItemId} accessibilityRole="button" aria-pressed={selectedBankParent?.bankItemId === parent.bankItemId} onPress={() => setBankParentId(parent.bankItemId)} style={[styles.resumeParentOption, selectedBankParent?.bankItemId === parent.bankItemId && styles.resumeParentOptionActive]}>
+                    <Text numberOfLines={1} style={styles.resumeParentOptionKind}>{parent.kind}</Text>
+                    <Text numberOfLines={2} style={styles.resumeParentOptionText}>{parent.content}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View> : <Text style={styles.resumeBankError}>Create a role, research entry, project, or education item first. Bullets cannot exist without one.</Text>}
+            </View> : null}
+
+            <View style={styles.resumeManualField}>
+              <Text style={styles.inputLabel}>{bankEntryKind === "bullet" ? "Bullet" : bankEntryKind === "skill" ? "Skill category" : bankEntryKind === "education" ? "Institution" : bankEntryKind === "project" ? "Project name" : "Organization"}</Text>
+              <TextInput value={bankDraft} onChangeText={setBankDraft} accessibilityLabel="Structured resume item name" placeholder={bankEntryKind === "bullet" ? "Built a queue-backed ingestion pipeline that…" : bankEntryKind === "skill" ? "Backend & Cloud" : bankEntryKind === "education" ? "Cornell University" : bankEntryKind === "project" ? "InternNotifs" : "Organization name"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} multiline={bankEntryKind === "bullet"} style={[styles.resumeStructuredInputLarge, bankEntryKind === "bullet" && styles.resumeStructuredInputMultiline]} />
+            </View>
+
+            {bankEntryKind !== "bullet" ? <View style={[styles.resumeStructuredFields, desktop && styles.resumeStructuredFieldsWide]}>
+              <View style={styles.resumeStructuredField}>
+                <Text style={styles.inputLabel}>{bankEntryKind === "skill" ? "Skills" : bankEntryKind === "education" ? "Degree and field" : bankEntryKind === "project" ? "One-line description" : "Title"}</Text>
+                <TextInput value={bankSecondary} onChangeText={setBankSecondary} accessibilityLabel="Structured resume item subtitle" placeholder={bankEntryKind === "skill" ? "TypeScript, Cloudflare Workers, D1" : bankEntryKind === "education" ? "B.S. Operations Research" : bankEntryKind === "project" ? "Early-career role discovery and alerts" : "Software Engineering Intern"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInputLarge} />
+              </View>
+              {bankEntryKind !== "skill" ? <View style={styles.resumeStructuredField}>
+                <Text style={styles.inputLabel}>{bankEntryKind === "project" ? "Technologies" : "Location"}</Text>
+                <TextInput value={bankLocation} onChangeText={setBankLocation} accessibilityLabel="Structured resume item location or technologies" placeholder={bankEntryKind === "project" ? "React, TypeScript, Cloudflare" : "New York, NY"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInputLarge} />
+              </View> : null}
+              {bankEntryKind !== "skill" ? <View style={styles.resumeStructuredField}>
+                <Text style={styles.inputLabel}>{bankEntryKind === "project" ? "Project URL" : "Dates"}</Text>
+                <TextInput value={bankDateRange} onChangeText={setBankDateRange} accessibilityLabel="Structured resume item dates or URL" placeholder={bankEntryKind === "project" ? "https://… (optional)" : "May 2026 – Aug 2026"} placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeStructuredInputLarge} />
+              </View> : null}
+            </View> : null}
+
+            <View style={styles.resumeManualEntryFooter}>
+              <Text style={styles.resumeManualEntryHint}>{bankEntryKind === "bullet" ? `This bullet will stay attached to ${selectedBankParent?.content ?? "the selected parent"}.` : bankEntryKind === "skill" ? "Skills are stored as a typed category and list." : `After creating this ${bankEntryKind}, the form moves directly to its bullets.`}</Text>
+              <View style={styles.resumeBankComposerAction}><ActionButton label={bankSaving ? "Saving…" : bankEntryKind === "bullet" ? "Add attached bullet" : bankEntryKind === "skill" ? "Add skill group" : `Create ${bankEntryKind} and add bullets`} onPress={addBankItem} disabled={!bankDraft.trim() || bankSaving || (bankEntryKind === "bullet" && !selectedBankParent)} /></View>
+            </View>
+          </View> : null}
+        </View>
+      ) : null}
+
+      {subscription && planExpanded ? <View style={[styles.resumePlanGrid, desktop && styles.resumePlanGridWide]}>
+        {subscription.plans.map((plan) => (
+          <View key={plan.tier} style={[styles.resumePlanCard, subscription.tier === plan.tier && styles.resumePlanCardCurrent]}>
+            <Text style={styles.resumePlanName}>{plan.name}</Text>
+            <Text style={styles.resumePlanPrice}>{plan.priceUsdMonthly ? `$${plan.priceUsdMonthly.toFixed(2)}/month` : "$0"}</Text>
+            <Text style={styles.resumePlanDetail}>{plan.tailoredDraftsPerMonth} tailored reviews/month</Text>
+            <Text style={styles.resumePlanState}>{subscription.tier === plan.tier ? "Current plan" : plan.tier === "free" ? "Included" : "App Store purchase coming next"}</Text>
+          </View>
+        ))}
+      </View> : null}
+
+      {jobImport?.status === "ready" ? <View style={styles.resumeSection}>
+        <View style={styles.resumeSectionHeading}>
+          <View>
+            <Text style={styles.sectionTitle}>Choose how Ntern starts</Text>
+            <Text style={styles.resumeSectionDescription}>Reuse the closest saved résumé, or build the ideal version from your complete technical base.</Text>
+          </View>
+        </View>
+        <View style={[styles.resumeSourceChoiceGrid, desktop && styles.resumeSourceChoiceGridWide]}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Use the best existing resume" aria-pressed={resumeSourceMode === "existing"} disabled={!recommendedProfile} onPress={() => { if (recommendedProfile) setSelectedProfileId(recommendedProfile.profileId); setResumeSourceMode("existing"); }} style={[styles.resumeSourceChoice, resumeSourceMode === "existing" && styles.resumeSourceChoiceSelected, !recommendedProfile && styles.resumeSourceChoiceDisabled]}>
+            <View style={styles.resumeSourceChoiceHeader}>
+              <View style={styles.resumeSourceChoiceIcon}><Ionicons name="copy-outline" size={19} color={colors.signal} /></View>
+              <Text style={styles.resumeSourceChoiceBadge}>Best existing</Text>
+            </View>
+              <Text style={styles.resumeSourceChoiceTitle}>{recommendedProfile?.name ?? (signedIn ? "No saved match available" : "Available after sign-in")}</Text>
+              <Text style={styles.resumeSourceChoiceCopy}>{bestExistingRecommendation?.explanation ?? (signedIn ? "Save a résumé variant to make this option available." : "Saved résumé variants belong to your account; guest work remains session-only.")}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Build the ideal resume from the technical base" aria-pressed={resumeSourceMode === "ideal"} disabled={!bankItems.length} onPress={() => setResumeSourceMode("ideal")} style={[styles.resumeSourceChoice, resumeSourceMode === "ideal" && styles.resumeSourceChoiceSelected, !bankItems.length && styles.resumeSourceChoiceDisabled]}>
+            <View style={styles.resumeSourceChoiceHeader}>
+              <View style={styles.resumeSourceChoiceIcon}><Ionicons name="sparkles-outline" size={19} color={colors.signal} /></View>
+              <Text style={styles.resumeSourceChoiceBadge}>Ideal from your bank</Text>
+            </View>
+            <Text style={styles.resumeSourceChoiceTitle}>Build the strongest one-page résumé</Text>
+            <Text style={styles.resumeSourceChoiceCopy}>Start from all {bankItems.length} source item{bankItems.length === 1 ? "" : "s"}; Ntern proposes the job-relevant cuts and rewrites for your approval.</Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={[styles.inputLabel, styles.resumeTemplateLabel]}>Output template</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.resumeTemplatePicker}>
+          {resumeTemplates.map((template) => (
+            <TouchableOpacity key={template.template} accessibilityRole="button" aria-pressed={selectedTemplate === template.template} onPress={() => setSelectedTemplate(template.template)} style={[styles.resumeTemplateOption, selectedTemplate === template.template && styles.resumeTemplateOptionActive]}>
+              <Text style={styles.resumeTemplateName}>{template.displayName}</Text>
+              <Text numberOfLines={2} style={styles.resumeTemplateDescription}>{template.description}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+        <View style={styles.resumeBankComposerAction}><ActionButton label={!signedIn ? "Sign in to run review" : subscription?.usage.remaining === 0 ? "Monthly limit reached" : resumeSourceMode === "ideal" ? "Build ideal review" : "Review best match"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length) || resumeBusy || subscription?.usage.remaining === 0} /></View>
+      </View> : null}
+
+      {draft ? <View style={styles.resumeSection}>
+        <View style={styles.resumeReviewHeader}>
+          <View>
+            <Text style={styles.sectionTitle}>Review changes</Text>
+            <Text style={styles.resumeSectionDescription}>{draft ? `${reviewed} of ${draft.changes.length} diffs reviewed · unchanged source material needs no approval.` : "Import a job and choose a saved base to start a grounded review."}</Text>
+          </View>
+          {!desktop ? (
+            <View style={styles.resumeSegmentedControl} accessibilityRole="tablist">
+              {(["changes", "preview"] as const).map((mode) => (
+                <TouchableOpacity key={mode} accessibilityRole="tab" aria-selected={reviewMode === mode} onPress={() => setReviewMode(mode)} style={[styles.resumeSegment, reviewMode === mode && styles.resumeSegmentActive]}>
+                  <Text style={[styles.resumeSegmentText, reviewMode === mode && styles.resumeSegmentTextActive]}>{mode === "changes" ? "Changes" : "Preview"}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          ) : null}
+        </View>
+        {draft?.changes.length ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
+          {(desktop || reviewMode === "changes") ? (
+            <View style={styles.resumeChangePanel}>
+              <View style={styles.resumeDiffHeader}>
+                <Text style={styles.resumeChangeCounter}>Diff {activeChange + 1} of {draft.changes.length}</Text>
+                <Text style={styles.resumeDiffType}>{current?.type}</Text>
+              </View>
+              <Text style={styles.resumeChangeSection}>{current?.section}</Text>
+              <View style={styles.resumeDiffCode}>
+                {current?.original ? (
+                  <View style={[styles.resumeDiffLine, styles.resumeDiffRemoved]}>
+                    <Text style={[styles.resumeDiffMarker, styles.resumeDiffRemovedText]}>−</Text>
+                    <Text style={[styles.resumeDiffText, styles.resumeDiffRemovedText]}>{current.original}</Text>
+                  </View>
+                ) : null}
+                {current?.suggestion || current?.type === "move" ? (
+                  <View style={[styles.resumeDiffLine, styles.resumeDiffAdded]}>
+                    <Text style={[styles.resumeDiffMarker, styles.resumeDiffAddedText]}>+</Text>
+                    <Text style={[styles.resumeDiffText, styles.resumeDiffAddedText]}>{current.suggestion ?? current.original}</Text>
+                  </View>
+                ) : null}
+              </View>
+              <View style={styles.resumeEvidence}>
+                <Ionicons name="link-outline" size={16} color={colors.signal} />
+                <Text style={styles.resumeEvidenceText}>Technical-base evidence · {current?.evidenceIds.length} source item{current?.evidenceIds.length === 1 ? "" : "s"}</Text>
+              </View>
+              <Text style={styles.resumeReason}>{current?.reason}</Text>
+              <View style={styles.resumeDecisionRow}>
+                {activeChange > 0 ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous change" onPress={() => setActiveChange((index) => index - 1)} disabled={resumeBusy}><Text style={styles.resumeKeepAll}>Previous</Text></TouchableOpacity> : null}
+                <ActionButton label="Keep original" variant="secondary" onPress={() => decide("rejected")} />
+                <ActionButton label="Apply change" onPress={() => decide("accepted")} />
+              </View>
+            </View>
+          ) : null}
+          {(desktop || reviewMode === "preview") ? (
+            <View style={styles.resumePreviewPanel}>
+              {artifact ? (
+                <>
+                  <View style={styles.resumeArtifactTabs} accessibilityRole="tablist">
+                    {(["rendered", "latex"] as const).map((mode) => (
+                      <TouchableOpacity key={mode} accessibilityRole="tab" aria-selected={artifactMode === mode} onPress={() => setArtifactMode(mode)} style={[styles.resumeArtifactTab, artifactMode === mode && styles.resumeArtifactTabActive]}>
+                        <Text style={[styles.resumeArtifactTabText, artifactMode === mode && styles.resumeArtifactTabTextActive]}>{mode === "rendered" ? "Rendered PDF" : "LaTeX source"}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {artifactLoading ? <Text style={styles.resumePreviewCaption}>Loading compiled résumé…</Text> : artifactMode === "rendered" ? (
+                    artifactPreview ? <Image accessibilityLabel="Rendered resume page 1" source={{ uri: artifactPreview }} resizeMode="contain" style={styles.resumeRenderedPage} /> : <Text style={styles.resumePreviewCaption}>The rendered preview is unavailable.</Text>
+                  ) : (
+                    <ScrollView horizontal style={styles.resumeLatexScroller}><Text selectable style={styles.resumeLatexSource}>{artifactSource}</Text></ScrollView>
+                  )}
+                  <View style={styles.resumeArtifactActions}>
+                    <Text style={styles.resumePreviewCaption}>{artifact.pageCount ?? 1} compiled PDF page{artifact.pageCount === 1 ? "" : "s"} · private and ready to inspect</Text>
+                    <ActionButton label="Download PDF" variant="secondary" onPress={() => void shareResumeArtifact(artifact.artifactId, token).catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't download that résumé."))} />
+                  </View>
+                </>
+              ) : (
+                <View style={styles.resumePreviewEmpty}>
+                  <Ionicons name="document-text-outline" size={28} color={colors.muted} />
+                  <Text style={styles.resumePreviewEmptyTitle}>Rendered preview after review</Text>
+                  <Text style={styles.resumePreviewCaption}>Review each diff, then compile the résumé to inspect the real PDF and its LaTeX source before downloading.</Text>
+                </View>
+              )}
+            </View>
+          ) : null}
+        </View> : null}
+        <View style={styles.resumeFinalizeRow}>
+          <TouchableOpacity accessibilityRole="button" disabled={!draft || reviewed === draft.changes.length || resumeBusy} onPress={keepRemainingOriginals}>
+            <Text style={styles.resumeKeepAll}>Keep all remaining originals</Text>
+          </TouchableOpacity>
+          <ActionButton label={resumeBusy ? "Compiling…" : `Compile résumé${accepted ? ` with ${accepted} applied change${accepted === 1 ? "" : "s"}` : ""}`} onPress={finalizeDraft} disabled={!draft || draft.status === "finalized" || reviewed !== draft.changes.length || resumeBusy} />
+        </View>
+      </View> : null}
+    </ScrollView>
   );
 }
 
@@ -8106,6 +8905,217 @@ const styles = StyleSheet.create({
   catalogPaginationText: { color: colors.muted, fontSize: 14, lineHeight: 20, textAlign: "center" },
   catalogPaginationRetry: { alignItems: "center", justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },
   catalogPaginationRetryText: { color: colors.signal, fontSize: 14, fontWeight: "700" },
+  resumeContent: { maxWidth: 1360, paddingBottom: 44, paddingTop: 24, width: "100%" },
+  resumePrimaryTask: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 900, padding: 20 },
+  resumeHeadingRow: { gap: 12, marginBottom: 18 },
+  resumeHeadingRowWide: { alignItems: "flex-start", flexDirection: "row", justifyContent: "space-between" },
+  resumeHeadingCopy: { flex: 1, minWidth: 0 },
+  resumeGuestStatus: { alignItems: "center", alignSelf: "flex-start", borderColor: colors.border, borderRadius: 12, borderWidth: 1, flexDirection: "row", gap: 8, minHeight: 44, paddingHorizontal: 11, paddingVertical: 6 },
+  resumeGuestStatusCopy: { minWidth: 72 },
+  resumeGuestStatusTitle: { color: colors.ink, fontSize: 12, fontWeight: "800", lineHeight: 16 },
+  resumeGuestStatusDetail: { color: colors.muted, fontSize: 11, lineHeight: 15 },
+  resumeGuestSignIn: { alignItems: "center", justifyContent: "center", minHeight: 32, paddingHorizontal: 6 },
+  resumeManualFallback: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 18, paddingTop: 18 },
+  resumeBaseAccessRow: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between", marginTop: 18, paddingTop: 10 },
+  resumeBaseAccessStatus: { color: colors.body, fontSize: 13, lineHeight: 18 },
+  resumePlanSummary: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 2 },
+  resumePlanAccessRow: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between" },
+  resumeSavedSection: { marginTop: 28 },
+  resumeSavedHeader: { alignItems: "flex-end", flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between" },
+  resumeSavedHeaderCopy: { flexGrow: 1, flexShrink: 1, minWidth: 240 },
+  resumeSavedSelection: { color: colors.signal, fontSize: 13, fontWeight: "800", lineHeight: 18 },
+  resumeSavedScroller: { gap: 10, paddingBottom: 4, paddingTop: 14 },
+  resumeGhostRow: { flexDirection: "row", gap: 10, marginTop: 14, overflow: "hidden" },
+  resumeGhostCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, minHeight: 144, padding: 14, width: 224 },
+  resumeGhostIcon: { backgroundColor: colors.separator, borderRadius: 10, height: 36, width: 36 },
+  resumeGhostTitle: { backgroundColor: colors.separator, borderRadius: 4, height: 17, marginTop: 13, width: "62%" },
+  resumeGhostTag: { backgroundColor: colors.separator, borderRadius: 4, height: 12, marginTop: 8, width: "42%" },
+  resumeGhostMeta: { backgroundColor: colors.separator, borderRadius: 4, height: 11, marginTop: 15, width: "52%" },
+  resumeSavedCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, minHeight: 144, padding: 14, width: 224 },
+  resumeSavedCardSelected: { borderColor: colors.signal, borderWidth: 2, padding: 13 },
+  resumeSavedCardTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
+  resumeSavedIcon: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 10, height: 36, justifyContent: "center", width: 36 },
+  resumeSavedIconSelected: { backgroundColor: colors.signal },
+  resumeSavedName: { color: colors.ink, fontSize: 16, fontWeight: "800", lineHeight: 22, marginTop: 12 },
+  resumeSavedTags: { color: colors.body, fontSize: 13, lineHeight: 18, marginTop: 2, textTransform: "capitalize" },
+  resumeSavedMeta: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 10 },
+  resumeSavedEmptyState: { alignItems: "center", flexDirection: "row", gap: 9, minHeight: 64, paddingVertical: 12 },
+  resumeSavedEmpty: { color: colors.muted, fontSize: 13, lineHeight: 19 },
+  resumeSourceChoiceGrid: { gap: 10, marginTop: 16 },
+  resumeSourceChoiceGridWide: { flexDirection: "row" },
+  resumeSourceChoice: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, flex: 1, minHeight: 180, padding: 16 },
+  resumeSourceChoiceSelected: { borderColor: colors.signal, borderWidth: 2, padding: 15 },
+  resumeSourceChoiceDisabled: { opacity: 0.52 },
+  resumeSourceChoiceHeader: { alignItems: "center", flexDirection: "row", gap: 9 },
+  resumeSourceChoiceIcon: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 10, height: 36, justifyContent: "center", width: 36 },
+  resumeSourceChoiceBadge: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.4, textTransform: "uppercase" },
+  resumeSourceChoiceTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", lineHeight: 23, marginTop: 14 },
+  resumeSourceChoiceCopy: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 5 },
+  resumeBankWorkspace: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 16, marginTop: 28, paddingTop: 24 },
+  resumeSourceWorkspace: { gap: 16 },
+  resumeSourceWorkspaceWide: { alignItems: "flex-start", flexDirection: "row" },
+  resumeSourceImportColumn: { flex: 2, gap: 10, minWidth: 0 },
+  resumeSourceBankColumn: { flex: 1, gap: 10, minWidth: 300 },
+  resumeImportStage: { alignItems: "center", backgroundColor: colors.surface, borderColor: colors.signal, borderRadius: 16, borderStyle: "dashed", borderWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 16, minHeight: 214, padding: 24 },
+  resumeImportStageIcon: { alignItems: "center", backgroundColor: colors.signalSoft, borderRadius: 14, height: 56, justifyContent: "center", width: 56 },
+  resumeImportStageCopy: { flex: 1, minWidth: 240 },
+  resumeImportStageTitle: { color: colors.ink, fontSize: 22, fontWeight: "800", letterSpacing: -0.4, lineHeight: 28 },
+  resumeImportStageDescription: { color: colors.body, fontSize: 14, lineHeight: 21, marginTop: 7, maxWidth: 680 },
+  resumeImportStageMeta: { color: colors.muted, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 12 },
+  resumeImportStageAction: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 10, flexDirection: "row", gap: 7, justifyContent: "center", minHeight: 48, paddingHorizontal: 16 },
+  resumeImportStageActionText: { color: colors.onDark, fontSize: 14, fontWeight: "800" },
+  resumePromptAccess: { alignItems: "center", alignSelf: "flex-start", flexDirection: "row", gap: 7, minHeight: 44, paddingHorizontal: 2 },
+  resumePromptFreeBadge: { backgroundColor: colors.signalSoft, borderRadius: 999, color: colors.signal, fontSize: 10, fontWeight: "900", letterSpacing: 0.5, overflow: "hidden", paddingHorizontal: 7, paddingVertical: 3, textTransform: "uppercase" },
+  resumePromptAccessText: { color: colors.signal, fontSize: 13, fontWeight: "800" },
+  resumePromptPanel: { borderColor: colors.separator, borderRadius: 14, borderWidth: 1, padding: 16 },
+  resumePromptHeader: { alignItems: "flex-start", flexDirection: "row" },
+  resumePromptTabs: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 14 },
+  resumePromptTab: { alignItems: "center", borderColor: colors.border, borderRadius: 10, borderWidth: 1, justifyContent: "center", minHeight: 44, paddingHorizontal: 13 },
+  resumePromptTabActive: { backgroundColor: colors.signalSoft, borderColor: colors.signal },
+  resumePromptTabText: { color: colors.body, fontSize: 13, fontWeight: "700" },
+  resumePromptTabTextActive: { color: colors.signal },
+  resumePromptPurpose: { color: colors.body, fontSize: 13, lineHeight: 19, marginTop: 12, maxWidth: 760 },
+  resumePromptScroller: { backgroundColor: colors.canvas, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, marginTop: 12, maxHeight: 260 },
+  resumePromptContent: { padding: 14 },
+  resumePromptText: { color: colors.body, fontSize: 13, lineHeight: 20 },
+  resumePromptFooter: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between", marginTop: 12 },
+  resumePromptFootnote: { color: colors.muted, flex: 1, fontSize: 12, lineHeight: 18, minWidth: 240 },
+  resumePromptCopy: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 10, flexDirection: "row", gap: 7, justifyContent: "center", minHeight: 44, paddingHorizontal: 14 },
+  resumePromptCopyText: { color: colors.onDark, fontSize: 13, fontWeight: "800" },
+  resumeMasterBankSummary: { alignItems: "flex-start", backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, flexDirection: "row", flexWrap: "wrap", gap: 18, justifyContent: "space-between", padding: 16 },
+  resumeMasterBankCopy: { flex: 1, minWidth: 240 },
+  resumeMasterBankTitle: { color: colors.ink, fontSize: 18, fontWeight: "800", lineHeight: 24 },
+  resumeMasterBankStats: { color: colors.body, fontSize: 13, fontWeight: "700", lineHeight: 18, marginTop: 10 },
+  resumeTypeGuardNote: { alignItems: "flex-start", flexDirection: "row", gap: 8, marginTop: 10, maxWidth: 680 },
+  resumeTypeGuardText: { color: colors.muted, flex: 1, fontSize: 12, lineHeight: 18 },
+  resumeMasterBankActions: { alignItems: "stretch", gap: 8, minWidth: 156 },
+  resumeMasterBankPrimaryAction: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 10, flexDirection: "row", gap: 6, justifyContent: "center", minHeight: 44, paddingHorizontal: 13 },
+  resumeMasterBankPrimaryText: { color: colors.onDark, fontSize: 13, fontWeight: "800" },
+  resumeMasterBankSecondaryAction: { alignItems: "center", borderColor: colors.border, borderRadius: 10, borderWidth: 1, justifyContent: "center", minHeight: 44, paddingHorizontal: 13 },
+  resumeMasterBankSecondaryText: { color: colors.signal, fontSize: 13, fontWeight: "800" },
+  resumeManualEntry: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 6, paddingTop: 22 },
+  resumeManualEntryHeader: { alignItems: "flex-start", flexDirection: "row", justifyContent: "space-between" },
+  resumeManualField: { marginTop: 18 },
+  resumeManualEntryFooter: { alignItems: "flex-start", borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 20, paddingTop: 16 },
+  resumeManualEntryHint: { color: colors.muted, fontSize: 12, lineHeight: 18, maxWidth: 680 },
+  resumeOverview: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 16, flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginBottom: 12, overflow: "hidden", paddingHorizontal: 18, paddingVertical: 14 },
+  resumeOverviewCopy: { flexGrow: 1, flexShrink: 1, maxWidth: 570, minWidth: 220 },
+  resumeCardLabel: { color: colors.signalGlow, fontSize: 12, fontWeight: "800", letterSpacing: 1.1, textTransform: "uppercase" },
+  resumeCardTitle: { color: colors.onDark, fontSize: 21, fontWeight: "800", letterSpacing: -0.4, lineHeight: 27, marginTop: 3 },
+  resumeCardCopy: { color: "#D1D5DB", fontSize: 14, lineHeight: 20, marginTop: 4 },
+  resumeBankStatus: { color: colors.signalGlow, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 8 },
+  resumeInlineAction: { alignItems: "center", alignSelf: "flex-start", flexDirection: "row", gap: 6, marginTop: 16, minHeight: 36 },
+  resumeInlineActionText: { color: colors.signalGlow, fontSize: 14, fontWeight: "800" },
+  resumeTrustCard: { backgroundColor: "rgba(255,255,255,0.1)", borderColor: "rgba(255,255,255,0.16)", borderRadius: 12, borderWidth: 1, flexBasis: 260, flexGrow: 0, paddingHorizontal: 13, paddingVertical: 10 },
+  resumeTrustTitle: { color: colors.onDark, fontSize: 14, fontWeight: "800", marginTop: 5 },
+  resumeTrustCopy: { color: "#D1D5DB", fontSize: 13, lineHeight: 18, marginTop: 3 },
+  resumePlanSection: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, marginBottom: 12, paddingHorizontal: 16, paddingVertical: 12 },
+  resumePlanActions: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  resumePlanRemaining: { backgroundColor: colors.signalSoft, borderRadius: 999, color: colors.signal, fontSize: 13, fontWeight: "800", overflow: "hidden", paddingHorizontal: 11, paddingVertical: 7 },
+  resumePlanGrid: { gap: 10, marginTop: 15 },
+  resumePlanGridWide: { flexDirection: "row" },
+  resumePlanCard: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 12, borderWidth: 1, flex: 1, minWidth: 170, padding: 14 },
+  resumePlanCardCurrent: { borderColor: colors.signal, borderWidth: 2 },
+  resumePlanName: { color: colors.ink, fontSize: 16, fontWeight: "800" },
+  resumePlanPrice: { color: colors.ink, fontSize: 14, fontWeight: "700", marginTop: 5 },
+  resumePlanDetail: { color: colors.muted, fontSize: 13, lineHeight: 18, marginTop: 4 },
+  resumePlanState: { color: colors.signal, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 10 },
+  resumeSourceHeading: { alignItems: "flex-start", flexDirection: "row", gap: 10, justifyContent: "space-between", marginBottom: 14 },
+  resumeSourceHeadingCopy: { flex: 1, minWidth: 0 },
+  resumeBankInput: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, color: colors.ink, fontSize: 15, lineHeight: 21, minHeight: 82, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: "top" },
+  resumeStructuredFields: { gap: 14, marginTop: 18 },
+  resumeStructuredFieldsWide: { flexDirection: "row", flexWrap: "wrap" },
+  resumeStructuredField: { flexGrow: 1, flexShrink: 1, minWidth: 220 },
+  resumeStructuredInputLarge: { backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 10, borderWidth: 1, color: colors.ink, fontSize: 15, minHeight: 52, paddingHorizontal: 14 },
+  resumeStructuredInputMultiline: { minHeight: 112, paddingTop: 13, textAlignVertical: "top" },
+  resumeBankKindPicker: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 10 },
+  resumeBankKindOption: { alignItems: "center", backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, justifyContent: "center", minHeight: 44, minWidth: 104, paddingHorizontal: 13 },
+  resumeBankKindOptionActive: { backgroundColor: colors.surface, borderColor: colors.signal },
+  resumeParentPicker: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 4 },
+  resumeParentOption: { backgroundColor: colors.canvas, borderColor: colors.border, borderRadius: 10, borderWidth: 1, flexGrow: 1, maxWidth: 320, minHeight: 64, minWidth: 210, paddingHorizontal: 12, paddingVertical: 10 },
+  resumeParentOptionActive: { borderColor: colors.signal },
+  resumeParentOptionKind: { color: colors.signal, fontSize: 10, fontWeight: "800", letterSpacing: 0.5, textTransform: "uppercase" },
+  resumeParentOptionText: { color: colors.body, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 3 },
+  resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },
+  resumeBankError: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 8 },
+  resumeBankScroller: { maxHeight: 340 },
+  resumeBankItems: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 8, marginTop: 16, paddingBottom: 2, paddingTop: 12 },
+  resumeBankItem: { alignItems: "flex-start", borderBottomColor: colors.separator, borderBottomWidth: 1, flexDirection: "row", gap: 9, paddingBottom: 9, paddingTop: 2 },
+  resumeBankItemCopy: { flex: 1 },
+  resumeBankItemText: { color: colors.ink, fontSize: 14, lineHeight: 20 },
+  resumeBankItemStatus: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 1 },
+  resumeSection: { borderTopColor: colors.separator, borderTopWidth: 1, marginTop: 8, paddingTop: 24, paddingBottom: 4 },
+  resumeSectionDescription: { color: colors.muted, fontSize: 14, lineHeight: 20, marginTop: 5, maxWidth: 660 },
+  resumeUrlRow: { alignItems: "center", flexDirection: "row", gap: 10, marginTop: 14 },
+  resumeUrlRowStacked: { alignItems: "stretch", flexDirection: "column" },
+  resumeUrlField: { alignItems: "center", backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 12, borderWidth: 1, flex: 1, flexDirection: "row", gap: 8, minHeight: 52, paddingHorizontal: 14 },
+  resumeUrlInput: { color: colors.ink, flex: 1, fontSize: 15, minHeight: 50, outlineStyle: "none" as unknown as "solid" },
+  resumeSectionHeading: { alignItems: "flex-start", flexDirection: "row", flexWrap: "wrap", gap: 10, justifyContent: "space-between" },
+  resumeCompactAction: { alignItems: "center", justifyContent: "center", minHeight: 44, paddingHorizontal: 4 },
+  resumeCompactActionText: { color: colors.signal, fontSize: 13, fontWeight: "800" },
+  resumeRecommendation: { backgroundColor: colors.signalSoft, borderRadius: 999, color: colors.signal, fontSize: 12, fontWeight: "800", overflow: "hidden", paddingHorizontal: 10, paddingVertical: 6 },
+  resumeProfileGrid: { gap: 10, marginTop: 14 },
+  resumeProfileGridWide: { flexDirection: "row", flexWrap: "wrap" },
+  resumeProfileCard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, flexGrow: 1, flexShrink: 1, minHeight: 112, minWidth: 220, padding: 15 },
+  resumeProfileRecommended: { borderColor: colors.signal, borderWidth: 2 },
+  resumeProfileName: { color: colors.ink, fontSize: 17, fontWeight: "800" },
+  resumeProfileTags: { color: colors.body, fontSize: 13, lineHeight: 19, marginTop: 5 },
+  resumeProfileNote: { color: colors.signal, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 12 },
+  resumeTemplateLabel: { marginTop: 18 },
+  resumeTemplatePicker: { gap: 8, paddingBottom: 3, paddingTop: 8 },
+  resumeTemplateOption: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, minHeight: 92, padding: 12, width: 220 },
+  resumeTemplateOptionActive: { borderColor: colors.signal, borderWidth: 2 },
+  resumeTemplateName: { color: colors.ink, fontSize: 14, fontWeight: "800" },
+  resumeTemplateDescription: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 5 },
+  resumeReviewHeader: { alignItems: "flex-start", flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between" },
+  resumeSegmentedControl: { backgroundColor: colors.separator, borderRadius: 9, flexDirection: "row", padding: 3 },
+  resumeSegment: { alignItems: "center", borderRadius: 7, justifyContent: "center", minHeight: 44, paddingHorizontal: 11 },
+  resumeSegmentActive: { backgroundColor: colors.surface },
+  resumeSegmentText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
+  resumeSegmentTextActive: { color: colors.ink },
+  resumeReviewWorkspace: { marginTop: 15 },
+  resumeReviewWorkspaceWide: { alignItems: "stretch", flexDirection: "row", gap: 14 },
+  resumeChangePanel: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1.1, minWidth: 0, padding: 18 },
+  resumeDiffHeader: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
+  resumeChangeCounter: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.8, textTransform: "uppercase" },
+  resumeDiffType: { backgroundColor: colors.separator, borderRadius: 999, color: colors.body, fontSize: 11, fontWeight: "800", overflow: "hidden", paddingHorizontal: 9, paddingVertical: 4, textTransform: "uppercase" },
+  resumeChangeSection: { color: colors.ink, fontSize: 18, fontWeight: "800", marginTop: 9 },
+  resumeChangeOriginal: { color: colors.body, fontSize: 15, lineHeight: 22, marginTop: 8 },
+  resumeSuggestion: { backgroundColor: colors.signalSoft, borderRadius: 10, marginTop: 12, padding: 12 },
+  resumeSuggestionLabel: { color: colors.signal, fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
+  resumeSuggestionText: { color: colors.ink, fontSize: 15, lineHeight: 22, marginTop: 3 },
+  resumeDiffCode: { borderColor: colors.separator, borderRadius: 10, borderWidth: 1, marginTop: 12, overflow: "hidden" },
+  resumeDiffLine: { alignItems: "flex-start", flexDirection: "row", gap: 9, minHeight: 44, paddingHorizontal: 11, paddingVertical: 10 },
+  resumeDiffRemoved: { backgroundColor: colors.dangerSoft, borderBottomColor: colors.dangerBorder, borderBottomWidth: 1 },
+  resumeDiffAdded: { backgroundColor: colors.successSoft },
+  resumeDiffMarker: { fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 15, fontWeight: "800", lineHeight: 21, width: 14 },
+  resumeDiffText: { flex: 1, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 13, lineHeight: 20 },
+  resumeDiffRemovedText: { color: colors.danger },
+  resumeDiffAddedText: { color: colors.success },
+  resumeEvidence: { alignItems: "center", flexDirection: "row", gap: 6, marginTop: 14 },
+  resumeEvidenceText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
+  resumeReason: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },
+  resumeDecisionRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 18 },
+  resumePreviewPanel: { backgroundColor: "#E9ECF1", borderRadius: 16, flex: 0.9, justifyContent: "center", minHeight: 390, minWidth: 0, overflow: "hidden", padding: 16 },
+  resumePreviewPaper: { alignSelf: "center", backgroundColor: colors.surface, borderColor: "#D7DBE2", borderRadius: 2, borderWidth: 1, maxWidth: 430, minHeight: 330, padding: 24, shadowColor: "#1C1C1E", shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.12, shadowRadius: 8, width: "100%" },
+  resumePreviewName: { color: colors.ink, fontSize: 21, fontWeight: "800", letterSpacing: -0.3 },
+  resumePreviewContact: { color: colors.muted, fontSize: 11, marginTop: 4 },
+  resumePreviewHeading: { borderBottomColor: colors.separator, borderBottomWidth: 1, color: colors.ink, fontSize: 12, fontWeight: "800", letterSpacing: 0.6, marginTop: 18, paddingBottom: 4, textTransform: "uppercase" },
+  resumePreviewLine: { color: colors.body, fontSize: 12, lineHeight: 18, marginTop: 7 },
+  resumePreviewCaption: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 12, textAlign: "center" },
+  resumePreviewEmpty: { alignItems: "center", alignSelf: "center", maxWidth: 330, padding: 24 },
+  resumePreviewEmptyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800", marginTop: 10 },
+  resumeArtifactTabs: { alignSelf: "center", backgroundColor: "#DDE1E7", borderRadius: 9, flexDirection: "row", padding: 3 },
+  resumeArtifactTab: { alignItems: "center", borderRadius: 7, justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },
+  resumeArtifactTabActive: { backgroundColor: colors.surface },
+  resumeArtifactTabText: { color: colors.muted, fontSize: 12, fontWeight: "700" },
+  resumeArtifactTabTextActive: { color: colors.ink },
+  resumeRenderedPage: { alignSelf: "center", aspectRatio: 8.5 / 11, backgroundColor: colors.surface, marginTop: 14, maxHeight: 620, width: "100%" },
+  resumeLatexScroller: { backgroundColor: "#111827", borderRadius: 8, marginTop: 14, maxHeight: 620, padding: 14 },
+  resumeLatexSource: { color: "#E5E7EB", fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 12, lineHeight: 18, minWidth: 640 },
+  resumeArtifactActions: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 12, justifyContent: "space-between", marginTop: 12 },
+  resumeFinalizeRow: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "space-between", marginTop: 16 },
+  resumeKeepAll: { color: colors.signal, fontSize: 14, fontWeight: "800", minHeight: 44, paddingTop: 12 },
   profileContent: {
     maxWidth: 760,
     paddingBottom: 44,

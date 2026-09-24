@@ -41,7 +41,7 @@ data sent by libraries and SDKs. Sources:
 | --- | --- | --- | --- | --- |
 | Email, password-derived hash/salt, consent versions | Account creation, verification, security | Account-linked | Optional to use app; required for account | Until deletion; abandoned unverified signup 7 days |
 | Name, profile email, phone, location, education, work authorization, links, reusable answers | Optional application profile and form assistance | Account-linked | Optional | Until deletion |
-| Résumé/documents, application status, notes, masked assistance field plan | Optional application tracking and assistance | Account-linked | Optional | Documents/records until deletion; assistance metadata 30 days |
+| Résumé/documents, Resume Tuner bank entries, saved bases, pasted job descriptions, review drafts, generated PDF/TeX/previews, derived embeddings, application status, notes, masked assistance field plan | Optional application tracking and assistance | Account-linked | Optional | Documents and Resume Tuner canonical records and private derived caches until deletion; assistance metadata 30 days |
 | Connected Gmail address, encrypted OAuth credential, sender, subject, date, labels, keyed message identifier, transient bounded message text, and derived match evidence | Optional Gmail application detection | Account-linked | Optional | Credential/sync state while connected; message text is not retained; pending evidence 30 days; keyed deduplication value 180 days; all deleted on disconnect/account deletion |
 | Random account/user ID | Authentication and private-data isolation | Account-linked | Optional | Until deletion |
 | Random installation ID, Expo push token, platform | Account-free settings and requested alert delivery | Deliberately not connected to account identity | Installation ID required; push token optional | 12 months inactive; invalid tokens disabled earlier |
@@ -118,6 +118,7 @@ it with this table before publishing the App Privacy answers.
 | App activity → Other user-generated content | Optional | App functionality; application statuses, notes, and answers |
 | Messages → Emails | Optional | App functionality; Gmail sender/subject/date/labels and bounded message text for confirmation detection; message text is not retained |
 | Files and docs → Files and docs | Optional | App functionality; résumé/document storage |
+| Purchases → Purchase history | Optional | App functionality; the app stores subscription tier/status and a provider transaction reference, while Apple handles payment details |
 | Device or other IDs → Device or other IDs | Installation ID required; push token optional | App functionality; security; requested notifications |
 | App info and performance → Other app performance data | Required | App functionality; diagnostics; security |
 

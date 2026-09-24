@@ -27,6 +27,7 @@
       { "binding": "GMAIL_QUEUE", "queue": "intern-notifs-gmail" },
       { "binding": "DESTINATION_VERIFICATION_QUEUE", "queue": "intern-notifs-destination-verification" },
       { "binding": "SHADOW_EXTRACTION_QUEUE", "queue": "intern-notifs-shadow-extraction" },
+      { "binding": "RESUME_JOB_IMPORT_QUEUE", "queue": "intern-notifs-resume-job-import" },
       { "binding": "GREENHOUSE_DLQ", "queue": "intern-notifs-greenhouse-dlq" },
       { "binding": "LEVER_DLQ", "queue": "intern-notifs-lever-dlq" },
       { "binding": "ASHBY_DLQ", "queue": "intern-notifs-ashby-dlq" },
@@ -42,7 +43,8 @@
       { "queue": "intern-notifs-github", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-github-dlq" },
       { "queue": "intern-notifs-gmail", "max_batch_size": 1, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "intern-notifs-gmail-dlq" },
       { "queue": "intern-notifs-destination-verification", "max_batch_size": 5, "max_batch_timeout": 60, "max_concurrency": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-destination-verification-dlq" },
-      { "queue": "intern-notifs-shadow-extraction", "max_batch_size": 1, "max_batch_timeout": 60, "max_concurrency": 1, "max_retries": 2, "retry_delay": 300, "dead_letter_queue": "intern-notifs-shadow-extraction-dlq" }
+      { "queue": "intern-notifs-shadow-extraction", "max_batch_size": 1, "max_batch_timeout": 60, "max_concurrency": 1, "max_retries": 2, "retry_delay": 300, "dead_letter_queue": "intern-notifs-shadow-extraction-dlq" },
+      { "queue": "intern-notifs-resume-job-import", "max_batch_size": 1, "max_concurrency": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-resume-job-import-dlq" }
     ]
   },
   "triggers": {
@@ -58,6 +60,7 @@
     "TRUSTED_COMMUNITY_CATALOG_ENABLED": "false",
     "IDENTITY_CONFIRMED_COVERAGE_FLOOR": "0",
     "GMAIL_ENABLED": "true",
+    "RESUME_TUNER_ENABLED": "false",
     "SHADOW_EXTRACTION_ENABLED": "true",
     "SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS": "1500",
     "SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS": "2000",

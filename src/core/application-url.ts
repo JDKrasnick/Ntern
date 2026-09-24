@@ -422,11 +422,11 @@ export async function inspectApplicationPage(
   const destination = new URL(response.url || url.toString());
   if (!response.ok) {
     await discardResponseBody(response);
-    if ([401, 403, 429].includes(response.status) || response.status >= 500) {
+    if ([401, 403, 406, 429].includes(response.status) || response.status >= 500) {
       return {
         url: destination.toString(),
         ...(expectedPostingId ? { expectedPostingId } : {}),
-        confidence: confidenceFor({ html: false, ...([401, 403, 429].includes(response.status) ? { accessRestricted: true } : { temporarilyUnavailable: true }), ...(expectedPostingId ? { expectedPostingId } : {}) }),
+        confidence: confidenceFor({ html: false, ...([401, 403, 406, 429].includes(response.status) ? { accessRestricted: true } : { temporarilyUnavailable: true }), ...(expectedPostingId ? { expectedPostingId } : {}) }),
       };
     }
     throw new ApplicationUrlValidationError(`Application page returned HTTP ${response.status}`);
@@ -559,12 +559,12 @@ export async function validateApplicationUrlWithEvidence(
 
   if (!response.ok) {
     await discardResponseBody(response);
-    if ([401, 403, 429].includes(response.status) || response.status >= 500) {
+    if ([401, 403, 406, 429].includes(response.status) || response.status >= 500) {
       const restricted = httpsUrl(response.url || sourceUrl.toString(), 'Resolved application link');
       if (policy?.allowedFinalHosts && !hostAllowed(restricted.hostname, policy.allowedFinalHosts)) {
         throw new ApplicationUrlValidationError(`Resolved application link host ${restricted.hostname} is not an approved destination host`);
       }
-      return { url: restricted.toString(), evidence: { url: restricted.toString(), confidence: confidenceFor({ html: false, ...([401, 403, 429].includes(response.status) ? { accessRestricted: true } : { temporarilyUnavailable: true }) }) } };
+      return { url: restricted.toString(), evidence: { url: restricted.toString(), confidence: confidenceFor({ html: false, ...([401, 403, 406, 429].includes(response.status) ? { accessRestricted: true } : { temporarilyUnavailable: true }) }) } };
     }
     throw new ApplicationUrlValidationError(`Application link returned HTTP ${response.status}`);
   }

@@ -6,6 +6,7 @@ import {
   verifyApplication,
 } from '../src/core/application-verification.js';
 import { IngestionRunner } from '../src/poll.js';
+import { validateApplicationUrlWithEvidence } from '../src/core/application-url.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import type { ProcessedListing, SourceAdapter, SourceCheckpoint, SourceFetchResult } from '../src/types.js';
@@ -47,6 +48,7 @@ describe('reachability', () => {
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 410'))).toBe('gone');
     expect(reachabilityFromFailure(new Error('Application page returned HTTP 404'))).toBe('gone');
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 403'))).toBe('blocked');
+    expect(reachabilityFromFailure(new Error('Application page returned HTTP 406'))).toBe('blocked');
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 503'))).toBe('unreachable');
     expect(reachabilityFromFailure(new Error('fetch timed out'))).toBe('unreachable');
     expect(reachabilityFromSignals(['destination reached', 'access restricted to scraper'])).toBe('blocked');
@@ -83,6 +85,18 @@ describe('verification in the poll', () => {
   const seeded = async (store: MemoryInternshipStore) => {
     await store.putCheckpoint({ sourceId: 'markdown-list', successfulFetches: 1, lastRowCount: 1 });
   };
+  it('completes a source delivery when an application page returns HTTP 406', async () => {
+    const store = new MemoryInternshipStore();
+    await seeded(store);
+    const report = await new IngestionRunner(
+      [adapter([listing({})])], store, () => new Date('2026-07-29T12:00:00.000Z'), undefined,
+      (url) => validateApplicationUrlWithEvidence(url, async () => new Response('Not acceptable', { status: 406 })),
+    ).run();
+
+    expect(report.failures).toEqual([]);
+    expect((await store.getCheckpoint('markdown-list'))?.successfulFetches).toBe(2);
+    expect((await store.getSourceHealth('markdown-list'))?.state).toBe('healthy');
+  });
 
   it('never fetches a role attributed by a board this catalog polls', async () => {
     const store = new MemoryInternshipStore();

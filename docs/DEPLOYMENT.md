@@ -39,6 +39,7 @@ Use the committed, config-specific commands—never a bare Wrangler deploy:
 
 ```sh
 npm run build:cloudflare
+npm run cloudflare:dev:provision
 npx wrangler d1 migrations apply intern-notifs-dev-db --remote --config wrangler.dev.api.jsonc
 npx wrangler deploy --config wrangler.dev.ingestion.jsonc
 npx wrangler deploy --config wrangler.dev.api.jsonc
@@ -57,6 +58,43 @@ bare `wrangler deploy`. The cutover sequence, binding inventory, smoke checks,
 and rollback procedure are in [`api-ingestion-split.md`](api-ingestion-split.md).
 The coordinator alone performs that cutover.
 
+### Resume Tuner staged rollout
+
+`RESUME_TUNER_ENABLED` is `false` in both Worker configs and must remain false
+until a separate security review approves an exact OpenTofu plan. The feature
+uses authenticated `/me/resume-*` routes, private user-store records, and the
+`intern-notifs-resume-job-import` queue. Its shared import cache contains only
+public job-page text; uploaded résumé source material, extracted bank cards,
+drafts, and generated artifacts remain user-scoped and are deleted with the
+account.
+
+The résumé API also stores a provider-neutral subscription entitlement and a
+UTC monthly usage counter in the same account-scoped D1 table. Paid upgrades
+must remain unavailable until App Store products, server-side transaction
+verification, App Store Server Notifications, restore-purchase behavior, and
+sandbox acceptance are complete. Never write an entitlement from an
+unverified mobile request. Accounts without an active or grace-period verified
+entitlement receive the Free allowance of two new tailored reviews per month.
+
+The production workflow idempotently provisions the
+`intern-notifs-resume-bank-v1` Vectorize index with the
+`@cf/baai/bge-base-en-v1.5` preset before OpenTofu binds it. The API uses
+Vectorize's built-in namespace partition instead of metadata filters, so no
+metadata index is required. It stores no raw account ID or résumé text in
+Vectorize metadata: the namespace is a stable account hash and vectors remain a
+delete-on-account-removal cache. Confirm the index name and its 768-dimension
+cosine configuration match `resume_embedding_index_name` before approving the
+exact OpenTofu plan.
+
+Validate the API and ingestion Worker bindings, exercise a catalog hit, a
+cached import, a safe public-page import, Browser Rendering, and the
+manual-description fallback. Confirm that private-network, credential-bearing,
+and non-HTTPS URLs are rejected; check the import queue and its DLQ without
+consuming messages. Compile a fixture through the internet-disabled Container
+and inspect the bounded PDF, TeX, page-count metadata, and private PNG previews.
+Account deletion must remove every one of those R2 objects and the associated
+Vectorize IDs before the flag can be enabled.
+
 ## OpenTofu state adoption
 
 The production Cloudflare stack uses the private
@@ -74,10 +112,16 @@ exact green SHA at the tip of `main`. The `cloudflare-workers-production`
 environment supplies the Cloudflare token, bucket-scoped state credentials,
 and live non-secret Terraform variables. The job rejects obsolete revisions
 and any plan containing creates, deletes, replacements, or updates outside the
-two Worker scripts. It applies the exact saved plan, requires a no-drift second
-plan, then monitors public and authentication-boundary smoke checks for two
-minutes. Keep environment approval rules enabled when a human deployment gate
-is required.
+reviewed résumé resources and two Worker scripts. After that guard passes, it
+applies pending D1 migrations before the exact saved plan, requires a no-drift
+second plan, then performs the one supported container-specific deployment step: a
+full API Wrangler deploy builds, publishes, and rolls out the résumé PDF
+compiler image. That step uses a generated config without `vars` plus
+`--keep-vars`, so OpenTofu-managed production values remain authoritative. It
+then monitors public and authentication-boundary smoke checks for two minutes.
+Keep environment approval rules enabled when a human deployment gate is
+required. Do not run the container deploy separately or with the committed
+config's staged flag values.
 
 Configure these environment secrets: `CLOUDFLARE_API_TOKEN`,
 `R2_STATE_ACCESS_KEY_ID`, and `R2_STATE_SECRET_ACCESS_KEY`. The optional
@@ -846,8 +890,9 @@ deserialising the whole catalog.
   `200 {"ready":true}` only when every work queue reports zero backlog and the
   last 30 minutes contain no recorded D1 overload. A missing queue metric or D1
   check returns retryable `503`; the endpoints repeat this check immediately
-  before scanning. A read-only identity audit, duplicate-only identity plan, or
-  identity apply batch capped at 100 jobs and 125 references may proceed with normal queue work only when the
+  before scanning. A read-only identity audit, duplicate-only identity plan,
+  paged occurrence plan, or identity/occurrence apply batch capped at 100 jobs
+  and 125 references may proceed with normal queue work only when the
   D1-overload check is clean. Full repairs and projection refreshes still
   require the strict window.
 
@@ -857,9 +902,15 @@ outbox facts in 20 pages at the default batch, used 14 s of CPU, and completed
 under a 104 MB V8 heap cap (96 MB at a 250-job batch). The single-pass plan
 needs 787 MB resident and over 256 MB of heap before it fails. That envelope
 still has to be confirmed in the deployed Worker before the daily gate is
-trusted. The guarded repair plan and apply are unchanged and still read the
-whole catalog: plan or apply a repair from a bounded scope, or outside the
-Worker, until a batch-scoped repair read is reviewed.
+trusted. The catalog-wide identity plan and apply still read the whole catalog:
+plan or apply them from a bounded scope, or outside the Worker. Occurrence
+synchronization is paged instead. `scope: "occurrences"` reads the job-ID alias
+table plus a job-ID-projected occurrence index, plans only the canonical jobs
+those aliases reach, and returns signed batches that
+`npm run migrate:posting-identity -- --batch-file PLAN.json --batch-index N --apply`
+applies one at a time with `finalize:false` (add `--accept-current-snapshot`
+when ingestion rewrote a job after the plan); the R2 projection is rebuilt by
+the separate authorized refresh.
 
 #### Issue #50 staged production execution
 

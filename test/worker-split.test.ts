@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
+vi.mock('cloudflare:workers', () => ({ DurableObject: class {} }));
 import apiWorker, { type ApiEnvironment } from '../cloudflare/api-worker.js';
 import ingestionWorker, { type IngestionEnvironment } from '../cloudflare/ingestion-worker.js';
 import { isIngestionOperationPath, secretMatches } from '../cloudflare/split.js';

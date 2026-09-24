@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -30,6 +30,22 @@ const queue = (metrics: Queue['metrics']): Queue => ({
   async send() {},
   async sendBatch() {},
   metrics,
+});
+
+describe('Resume compiler transport', () => {
+  it('sends an explicit UTF-8 byte length to the bounded compiler server', async () => {
+    const request = resumeCompilerRequest('Résumé – PDF');
+    expect(request.headers.get('content-type')).toBe('application/x-tex');
+    expect(request.headers.get('content-length')).toBe(String(new TextEncoder().encode('Résumé – PDF').byteLength));
+    expect(new Uint8Array(await request.arrayBuffer())).toEqual(new TextEncoder().encode('Résumé – PDF'));
+  });
+
+  it('maps arbitrary resume digests onto the bounded compiler instance pool', () => {
+    expect(resumeCompilerPoolName('00000000abcdef12')).toBe('resume-pdf-compiler-0');
+    expect(resumeCompilerPoolName('00000001abcdef12')).toBe('resume-pdf-compiler-1');
+    expect(resumeCompilerPoolName('ffffffffabcdef12')).toBe('resume-pdf-compiler-1');
+    expect(() => resumeCompilerPoolName('not-a-digest')).toThrow(/digest/u);
+  });
 });
 
 const publishedGreenhouseRecords: ReviewedSourceRecord[] = reviewedGreenhouseSources
@@ -329,6 +345,53 @@ describe('Cloudflare DLQ route authentication', () => {
   });
 });
 
+describe('resume artifact rollout boundary', () => {
+  it('hides artifact content, source, and previews while resume tailoring is disabled', async () => {
+    for (const suffix of ['content', 'source', 'preview/1']) {
+      const response = await cloudflareWorker.fetch(
+        new Request(`https://intern-notifs.test/me/resume-artifacts/artifact/${suffix}`),
+        { RESUME_TUNER_ENABLED: 'false', PUBLIC_API_URL: 'https://intern-notifs.test', DB: { prepare: () => ({ async first() { return null; } }) } } as unknown as Environment,
+      );
+      expect(response.status).toBe(404);
+    }
+  });
+
+  it('serves the authenticated owner PDF, LaTeX source, and rendered preview privately', async () => {
+    const artifact = {
+      userId: 'student', artifactId: 'artifact', draftId: 'draft', objectKey: 'private/student/resume.pdf',
+      texObjectKey: 'private/student/resume.tex', previewObjectKeys: ['private/student/preview-1.png'],
+      templateVersion: 'v1', compilerVersion: 'compiler', resumeSpecHash: 'hash', pageCount: 1, createdAt: 'now',
+    };
+    const getArtifact = vi.spyOn(D1UserStore.prototype, 'getResumeArtifact').mockResolvedValue(artifact);
+    const getObject = vi.fn(async (key: string) => ({ body: new TextEncoder().encode(key) }));
+    const statement = { bind() { return this; }, async first() { return { user_id: 'student' }; } };
+    const env = {
+      RESUME_TUNER_ENABLED: 'true', PUBLIC_API_URL: 'https://intern-notifs.test',
+      AUTH_SESSION_SECRET: 'a-production-length-session-secret-value',
+      DB: { prepare: () => statement }, DOCUMENTS: { get: getObject },
+    } as unknown as Environment;
+    try {
+      for (const [suffix, contentType, objectKey] of [
+        ['content', 'application/pdf', artifact.objectKey],
+        ['source', 'text/plain; charset=utf-8', artifact.texObjectKey],
+        ['preview/1', 'image/png', artifact.previewObjectKeys[0]],
+      ] as const) {
+        const response = await cloudflareWorker.fetch(new Request(`https://intern-notifs.test/me/resume-artifacts/artifact/${suffix}`, {
+          headers: { Authorization: 'Bearer session-token' },
+        }), env);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe(contentType);
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+        expect(await response.text()).toBe(objectKey);
+      }
+      expect(getArtifact).toHaveBeenCalledTimes(3);
+      expect(getObject).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
 describe('Cloudflare company icon route', () => {
   it('resolves a public icon through the reviewed canonical employer record', async () => {
     const db = {
@@ -408,14 +471,29 @@ describe('Cloudflare bulk operation admission', () => {
       jobIds: Array.from({ length: 101 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
     } })).toBe(false);
     expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences' })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, finalize: false, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: [['simplify-summer-2026', 'README.md:1']],
+    } })).toBe(true);
+    // An omitted finalize defers the R2 rebuild exactly like an explicit false.
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: [],
+    } })).toBe(true);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, finalize: true, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: [],
+    } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, applyBatch: {
+      jobIds: Array.from({ length: 101 }, (_, index) => String(index)), contextRows: [], occurrenceKeys: [],
+    } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, applyBatch: {
+      jobIds: ['one'], contextRows: [], occurrenceKeys: Array.from({ length: 126 }, (_, index) => [`source-${index}`, 'role']),
+    } })).toBe(false);
+    expect(isLowImpactPostingIdentityRequest({ scope: 'occurrences', apply: true, applyBatch: {
+      jobIds: ['one'], contextRows: Array.from({ length: 126 }, () => ({})), occurrenceKeys: [],
+    } })).toBe(false);
+    // The catalog-wide occurrence apply no longer exists: the repair applies one
+    // signed batch at a time, so a bare apply must not admit queued work.
     expect(isLowImpactPostingIdentityRequest({
-      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 250, expectedDuplicateJobs: 0,
-    })).toBe(true);
-    expect(isLowImpactPostingIdentityRequest({
-      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 251, expectedDuplicateJobs: 0,
-    })).toBe(false);
-    expect(isLowImpactPostingIdentityRequest({
-      scope: 'occurrences', apply: true, repairToken: 'a'.repeat(64), expectedChanges: 1, expectedDuplicateJobs: 0,
+      scope: 'occurrences', apply: true, finalize: false, repairToken: 'a'.repeat(64), expectedChanges: 1, expectedDuplicateJobs: 0,
     })).toBe(false);
   });
 });
