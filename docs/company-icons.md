@@ -27,3 +27,79 @@ Backfill existing canonical employers manually with this workflow. Keep the orig
 To withdraw an existing employer's icon, send the same authenticated `PUT /internal/admission/employers` request with its `id`, current `displayName`, and `"iconKey": null`. The operation clears the reviewed D1 reference; `/company-icons/<id>` then returns 404 with `Cache-Control: no-store`. Omitting `iconKey` preserves the current icon. The R2 object can be removed separately after the D1 reference is cleared.
 
 Do not derive branding from arbitrary websites or third-party favicon services. A website domain may be recorded later as provenance, but it is not needed to store, serve, or validate an icon.
+
+## Live resolution
+
+Most canonical employers are created before anyone has an icon for them, and a role must never wait on one. An employer without a reviewed icon therefore gets a background decision, and every unresolved case renders the deterministic monogram the client already draws. A role published without an icon is never hidden and never delays a notification.
+
+### How a decision is made
+
+1. **Admission records the task.** When posting admission resolves a canonical employer, `src/poll.ts` hands the employer ID, the application URL, and the provider/tenant to `enqueueEmployerIconResolution`. That is one deduplicated `INSERT` keyed by `(canonical_employer_id, evidence_fingerprint)`; no provider or model is called on the ingestion path, and the insert is skipped when the employer already has a reviewed icon or a live decision.
+2. **A sweep resolves it.** The ten-minute maintenance cron calls `runEmployerIconResolutionPass`, which claims at most `maxPerSweep` due rows with a lease. The sweep reads the real application link through the existing SSRF controls (`safeFetchText`, five redirects, 10s, 64 KiB), parses only bounded public metadata (`<title>`, OpenGraph, JSON-LD `Organization` name and URL), and asks Logo.dev and Brandfetch for domains by employer name.
+3. **Scoring decides.** Candidates are scored from the reviewed table — non-ATS final/careers URL 0.45, JSON-LD Organization 0.35, each provider's exact-name candidate 0.30, both providers agreeing on one domain 0.25, page metadata naming the employer 0.15, capped at 1.0. ATS and job-board hosts are transport and are rejected outright. A domain is accepted automatically only at 0.85 or above with a 0.15 margin over the runner-up.
+4. **One tie-breaker for the middle band.** Below 0.85, or when the top two candidates are within 0.15, the resolver may make **one** schema-validated `gpt-4o-mini` call. It receives only a compact JSON summary, may select only a submitted candidate, must cite at least two distinct evidence IDs that belong to that candidate, and must reach 0.90 confidence. Anything else downgrades to a monogram. The budget is one call per employer per 30 days, except when the job-link evidence materially changed.
+5. **Failures back off.** A definitive no-match retries from one day, doubling to the 30-day revalidation ceiling. A transient provider failure (429/5xx/transport) retries from one hour and honours `Retry-After`.
+
+### Provider terms
+
+- **Logo.dev** supplies both the name search and the icon. The credential is a Worker secret (`LOGO_DEV_TOKEN`), never an `EXPO_PUBLIC_*` value, and never appears in a response, an R2 key, or a log.
+- **Brandfetch** is corroboration only. Its standard Brand Search terms forbid persisting its data, so its results are used in memory, are never written to `employer_icon_resolutions`, and its logo is never fetched or stored. Only a bare agreement flag is recorded, and a candidate that only Brandfetch nominated is omitted from the stored evidence.
+- **Simple Icons and favicon services are not used.** The mobile client previously carried a hardcoded map of `cdn.simpleicons.org` and `icons.duckduckgo.com` URLs; it has been removed in favour of the first-party route and the monogram.
+
+### Serving an automatic icon
+
+`GET /company-icons/:id` resolves in this order:
+
+1. a reviewed `icon_key` in `DOCUMENTS` (unchanged from the workflow above);
+2. an automatically resolved domain, fetched server-side from the provider CDN and returned with the same security headers.
+
+The second path exists so a provider credential never reaches a client, a catalog payload, or a stored key, and image bytes are **not** written to R2 while Logo.dev self-hosting rights are unconfirmed. The image probe requests `fallback=404`, so Logo.dev's generated monogram tile can never be served as if it were a real logo. Responses keep `max-age=60, must-revalidate`, so a wrong-icon report takes effect within a minute.
+
+Once the Logo.dev plan confirms self-hosting and retention, record the confirmation and the resolver will cache the icon instead:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -X PUT https://intern-notifs.jdkrasnick.workers.dev/internal/admission/employer-icons/settings \
+  -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" -H 'Content-Type: application/json' \
+  -d '{"mode":"resolve","maxPerSweep":5,"logoDevRetentionLicensedAt":"2026-10-01T00:00:00.000Z"}'
+```
+
+That writes an immutable `company-icons/<id>/logo-<hash>.webp` key and sets `icon_source = 'logo-dev'`.
+
+### Operator surface
+
+All routes require the `X-Operations-Key` secret and return `Cache-Control: no-store`.
+
+| Route | Purpose |
+|---|---|
+| `GET /internal/admission/employer-icons` | Settings, resolution counts by status, the exception queue, and which providers are configured. |
+| `PUT /internal/admission/employer-icons/settings` | `mode` (`off`, `observe`, `resolve`), `maxPerSweep`, and the retention confirmation. |
+| `POST /internal/admission/employer-icons/resolve` | Force a fresh decision for one employer, and re-arm one whose automatic decision was withdrawn. |
+| `POST /internal/admission/employer-icons/report-wrong` | Withdraw an automatic icon immediately and sort the employer to the front of the exception queue. A reviewer-uploaded icon is never withdrawn. |
+
+A wrong-icon report is deliberately terminal for the automatic path: the sweep will not re-decide that employer until a person has looked at it. Once the review is finished, `resolve` re-arms the withdrawn rows, and the next sweep decides again from fresh evidence.
+
+`mode` is stored in `system_state`, not in Wrangler, so enabling the resolver never changes a Worker binding and the deploy plan guard stays clean.
+
+### Staged rollout
+
+1. `npm run cloudflare:migrate:remote` — apply `0034_employer_icon_resolution.sql` **before** deploying the Worker. The resolver and the employer upsert both read the new columns.
+2. Provision the secrets: `npx wrangler secret put LOGO_DEV_TOKEN --config wrangler.ingestion.jsonc` and, optionally, `BRANDFETCH_CLIENT_ID`. Set `OPENAI_KEY` if it is not already present; without it the resolver simply skips the tie-breaker. Terraform keeps `secret_text` bindings, so these survive deploys and never appear in a plan.
+3. `tsx scripts/discover-employer-icon.ts --employer a,b,c` over about twenty employers spanning large companies, niche startups, quant firms, public companies, community listings, and challenge-gated sites. It is read-only and writes nothing. Record domain accuracy, the Logo.dev hit rate, the Brandfetch corroboration rate, the monogram rate, and the tie-break count.
+4. Set `mode: "observe"` and leave it there for a week. Decisions, provenance, and counters are recorded, but readers still see only reviewed icons and monograms.
+5. Switch to `mode: "resolve"` once the automatic false-match rate is acceptable. Reviewed icons are unaffected, and `report-wrong` is the immediate withdrawal path.
+6. Enable R2 caching only after Logo.dev confirms self-hosting and retention rights for the selected plan.
+
+### Observability
+
+The sweep emits one structured line per pass, `company_icon_resolution_complete`, carrying `company_icon_resolution_attempted_total`, `..._resolved_total`, `..._monogram_total`, `..._retryable_total`, `..._backfilled_total`, and a reason-code tally. Each accepted or declined tie-breaker also emits `company_icon_resolution_tie_break` with `accepted` and the validation reason code. Token counts are stored per employer in `icon_tie_break_input_tokens`/`icon_tie_break_output_tokens`. Provider tokens, full pages, and raw provider payloads are never logged.
+
+### Reviewing the work without a live host
+
+```bash
+# Candidate order, scores, decision, and tie-breaker for real employers.
+tsx scripts/discover-employer-icon.ts --employer acme,globex
+
+# One hand-supplied shape, no database read.
+tsx scripts/discover-employer-icon.ts --name "Acme" --url https://job-boards.greenhouse.io/acme/jobs/1 --json
+```

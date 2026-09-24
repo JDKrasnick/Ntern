@@ -67,7 +67,7 @@ function subject(budget?: QueryBudget) {
     '0010_posting_identity.sql',
     '0012_destination_verification_schedule.sql',
     '0015_role_metadata_enrichment.sql', '0016_role_metadata_repair_plans.sql', '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
-    '0013_canonical_employer_icons.sql']) {
+    '0013_canonical_employer_icons.sql', '0034_employer_icon_resolution.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   const db = sqliteD1(database, budget);
