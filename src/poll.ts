@@ -201,13 +201,13 @@ interface PrefetchedBoardFetch {
 }
 
 const SOURCE_WORK_CONCURRENCY = 24;
+const GITHUB_RESOLUTION_WORK_CONCURRENCY = 8;
 const SOURCE_PERSISTENCE_CONCURRENCY = 8;
 const SOURCE_MIGRATION_PERSISTENCE_CONCURRENCY = 4;
 /**
- * Share of a delivery's rows whose application page may fail to verify before the
- * source itself is treated as broken. Individual dead or unreachable pages are a
- * per-row data problem (the row is withheld), while a mostly-broken list still
- * fails the delivery and is surfaced by the source-level gates.
+ * Share of a delivery's rows with broken application pages before the source
+ * itself is treated as broken. Inconclusive transport probes stay pending for
+ * a later poll and do not count as evidence that the source is broken.
  */
 const MAX_PROBE_FAILURE_SHARE = 0.2;
 const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
@@ -219,12 +219,14 @@ const MAX_IN_PROCESS_RETRY_DELAY_MS = 60_000;
  * its own catalog writes. 750 rows measured a 300 s (five-minute) message-deadline
  * abort on `simplify-summer-2026`, and the later 3,302-row production snapshot
  * still exhausted the delivery at 100 rows once page probes and persistence were
- * included. A slice of 50 leaves room for the fixed fetch/parse cost as the
- * community list grows. The pass is resumable from the checkpoint
+ * included. A 50-row slice later produced 11-13 transient probe failures on
+ * live Simplify employer URLs. A 25-row slice with eight concurrent probes
+ * leaves more room for the fixed fetch/parse cost and destination latency.
+ * The pass is resumable from the checkpoint
  * (`pendingResolutionRows`), so lowering this only trades deliveries for
  * per-delivery cost; it never closes rows outside the completed slice.
  */
-export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 50;
+export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 25;
 /**
  * Listings one delivery may re-grade after an admission policy change. The
  * bounded-migration gate suppresses newly admitted rows of a trusted list until
@@ -737,6 +739,7 @@ export class IngestionRunner {
     completeFetchSequence?: number,
     stampSourceMetadata = false,
     providerShadowEligible = false,
+    workConcurrency = SOURCE_WORK_CONCURRENCY,
   ) {
     const resolved = new Map<string, Internship | undefined>();
     const validatedAt = new Map<string, string>();
@@ -749,17 +752,21 @@ export class IngestionRunner {
     // reported failures do not depend on which worker finished first.
     const accepted = new Array<ProcessedListing | undefined>(listings.length);
     const failures = new Array<string | undefined>(listings.length);
-    // Rows whose application page could not be reached or no longer resolves are
-    // withdrawn from this delivery instead of failing it: the row never reaches
-    // `accepted`, the source-level gates (zero-row, floor, coverage) still catch
-    // a source that is genuinely down, and the share gate below still fails a
-    // list whose links are mostly broken. Failing the whole delivery here is what
-    // kept healthy reviewed lists quarantined and filled the GitHub DLQ.
+    // Failed probes stay out of this delivery. Transport failures remain owed by
+    // the checkpoint; completed negative results still count toward the source
+    // link-integrity gate. Queue or persistence errors fail the delivery.
     const withdrawnProbeFailures: string[] = [];
-    const isProbeFailure = (error: unknown) => {
+    const brokenProbeFailures: string[] = [];
+    const retryableProbeExternalIds = new Set<string>();
+    const isProbeFailure = (error: unknown, fromValidator = false) => {
       const category = sourceFailureCategory(error);
-      return category === 'transport' || category === 'link';
+      return (category === 'transport' || category === 'link')
+        && (fromValidator || /^Application (?:link|page) /i.test(error instanceof Error ? error.message : String(error)));
     };
+    const isRetryableProbeFailure = (error: unknown, fromValidator = false) =>
+      (fromValidator && sourceFailureCategory(error) === 'transport')
+      || /^Application (?:link (?:timed out|could not be reached)|page (?:could not be reached|body timed out))$/i
+        .test(error instanceof Error ? error.message : String(error));
     const priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
     await forEachBounded(listings, async (sourceListing, slot) => {
       // Transitional RawListing adapters predate provider-neutral evidence.
@@ -1056,8 +1063,15 @@ export class IngestionRunner {
             // bounded metadata refresh, inconclusive probes must remain pending
             // instead of entering the processed-row checkpoint ledger.
             if (!(stampSourceMetadata && reachability === 'gone' && admissionManaged)) {
-              if (isProbeFailure(error) && !stampSourceMetadata) withdrawnProbeFailures.push(failure);
-              else failures[slot] = failure;
+              if (isProbeFailure(error, true) && !stampSourceMetadata) {
+                withdrawnProbeFailures.push(failure);
+                if (isRetryableProbeFailure(error, true)) {
+                  retryableProbeExternalIds.add(id);
+                  failedExternalIds.add(id);
+                  return;
+                }
+                brokenProbeFailures.push(failure);
+              } else failures[slot] = failure;
             }
             if (stampSourceMetadata && reachability !== 'gone') failedExternalIds.add(id);
             if (!admissionManaged) {
@@ -1218,21 +1232,22 @@ export class IngestionRunner {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const failure = `${listing.sourceId}: row ${listing.row}: ${message}`;
-        if (isProbeFailure(error)) withdrawnProbeFailures.push(failure);
-        else failures[slot] = failure;
+        if (isProbeFailure(error)) {
+          withdrawnProbeFailures.push(failure);
+          if (isRetryableProbeFailure(error)) retryableProbeExternalIds.add(id);
+          else brokenProbeFailures.push(failure);
+        } else failures[slot] = failure;
         failedExternalIds.add(id);
         await completeFailedAdmissionMigration();
       }
-    });
-    // A list whose application pages are mostly broken is a real failure; a
-    // handful of dead links is data quality, and those rows are already withheld
-    // from this delivery.
-    const probeFailureShare = listings.length === 0 ? 0 : withdrawnProbeFailures.length / listings.length;
+    }, workConcurrency);
+    // Only completed negative probes can establish a broken-list failure.
+    const probeFailureShare = listings.length === 0 ? 0 : brokenProbeFailures.length / listings.length;
     if (probeFailureShare > MAX_PROBE_FAILURE_SHARE) {
       report.failures.push(
-        `${listings[0]?.sourceId ?? 'source'}: ${withdrawnProbeFailures.length} of ${listings.length} rows could not be verified `
+        `${listings[0]?.sourceId ?? 'source'}: ${brokenProbeFailures.length} of ${listings.length} rows could not be verified `
         + `(${(probeFailureShare * 100).toFixed(0)}% above ${MAX_PROBE_FAILURE_SHARE * 100}%)`,
-        ...withdrawnProbeFailures.slice(0, 5),
+        ...brokenProbeFailures.slice(0, 5),
       );
     }
     report.failures.push(...failures.filter((failure): failure is string => failure !== undefined));
@@ -1246,6 +1261,7 @@ export class IngestionRunner {
       failedExternalIds,
       providerShadowVerifications,
       withdrawnProbeFailures,
+      retryableProbeExternalIds,
       probeFailureShare,
     };
   }
@@ -1523,7 +1539,7 @@ export class IngestionRunner {
           : selectedSlice;
         // Rows that left the board between deliveries stop holding the pass
         // open; they have no listing to resolve and are reconciled as omissions.
-        const nextPendingRows = resolutionFullBody
+        const remainingRows = resolutionFullBody
           ? resolutionScope.slice(sliceCapacity ?? resolutionScope.length).map(externalId)
           : [];
         const resolution = await this.resolveListings(
@@ -1537,7 +1553,18 @@ export class IngestionRunner {
           result.unchangedReason === 'not_modified' ? undefined : result.checkpoint.successfulFetches,
           boundedMetadataRefresh,
           !baseline && options.naturalProviderPoll === true,
+          options.maxListingsPerSourceRun !== undefined
+            && options.maxListingsPerSourceRun <= GITHUB_RESOLUTION_ROWS_PER_DELIVERY
+            && migrationLimit === undefined
+            ? GITHUB_RESOLUTION_WORK_CONCURRENCY : SOURCE_WORK_CONCURRENCY,
         );
+        // Keep inconclusive rows in the checkpoint without making the whole
+        // slice retry. Finish unvisited rows first; once only probes remain,
+        // the next scheduled poll retries them without a hot queue loop.
+        const nextPendingRows = [...new Set([
+          ...remainingRows,
+          ...resolvedListings.filter((listing) => resolution.retryableProbeExternalIds.has(externalId(listing))).map(externalId),
+        ])];
         // Existing catalog decisions are the durable migration obligation.
         // Rows with no prior occurrence are evaluated with spare slice capacity
         // but fail closed and cannot hold the source checkpoint open forever.
@@ -1546,7 +1573,8 @@ export class IngestionRunner {
             event: 'row_probe_withdrawn',
             sourceId: connector.id,
             count: resolution.withdrawnProbeFailures.length,
-            share: Number(resolution.probeFailureShare.toFixed(4)),
+            brokenShare: Number(resolution.probeFailureShare.toFixed(4)),
+            retryableCount: resolution.retryableProbeExternalIds.size,
             samples: resolution.withdrawnProbeFailures.slice(0, 5),
           }));
         }
@@ -1582,7 +1610,7 @@ export class IngestionRunner {
         if (admissionMigrationPending) report.continuationSources.push(connector.id);
         // An open resolution pass also holds the source open: the delivery that
         // empties it reconciles omissions and closures in the same message.
-        if (nextPendingRows.length && !report.continuationSources.includes(connector.id)) {
+        if (remainingRows.length && !report.continuationSources.includes(connector.id)) {
           report.continuationSources.push(connector.id);
         }
         if (nextPendingRows.length) report.pendingResolution[connector.id] = nextPendingRows.length;

@@ -1031,6 +1031,78 @@ describe('polling', () => {
     expect(references).not.toContain('https://jobs.example.com/unreachable');
   });
 
+  it('replays the Simplify timeout rows without losing completed rows or retrying the whole slice', async () => {
+    const store = new MemoryInternshipStore();
+    const failedUrls = [
+      'https://job-boards.greenhouse.io/compeerfinancial/jobs/5404850008',
+      'https://job-boards.greenhouse.io/compeerfinancial/jobs/5405050008',
+      'https://job-boards.greenhouse.io/compeerfinancial/jobs/5405015008',
+      'https://job-boards.greenhouse.io/compeerfinancial/jobs/5404994008',
+      'https://job-boards.greenhouse.io/sage49/jobs/6131191004',
+      'https://careers.medpace.com/jobs/12962',
+      'https://eofe.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/81251',
+      'https://eofe.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/81252',
+      'https://lifeattiktok.com/search/7670839727059339525',
+      'https://lifeattiktok.com/search/7670700387322300677',
+      'https://jobs.bytedance.com/en/position/7668489218234157365/detail',
+      'https://lifeattiktok.com/search/7668921505254410549',
+      'https://jobs.bytedance.com/en/position/7667378931599214853/detail',
+    ];
+    const rows = [...failedUrls, ...Array.from({ length: 12 }, (_, index) => `https://jobs.example.com/other-${index}`)]
+      .map((url, index) => ({ ...listing(url, 'github-example'), row: index + 1, title: `Software Engineering Intern ${index}` }));
+    let unavailable = true;
+    const validated: string[] = [];
+    const poll = () => new Poller([new Adapter('github-example', rows)], store, undefined, undefined,
+      async (url) => {
+        validated.push(url);
+        if (unavailable && failedUrls.includes(url)) throw new Error('Application link timed out');
+        return { url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+          recommendation: 'alert-eligible' as const, signals: ['source policy'] } } };
+      }, false).poll({ maxListingsPerSourceRun: 25 });
+
+    const first = await poll();
+    expect(first.failures).toEqual([]);
+    expect(first.continuationSources).toEqual([]);
+    expect(first.pendingResolution['github-example']).toBe(failedUrls.length);
+    expect((await store.getCheckpoint('github-example'))?.pendingResolutionRows).toHaveLength(failedUrls.length);
+    expect(validated).toHaveLength(25);
+
+    unavailable = false;
+    validated.length = 0;
+    const second = await poll();
+    expect(second.failures).toEqual([]);
+    expect(validated).toEqual(expect.arrayContaining(failedUrls));
+    expect(validated).toHaveLength(failedUrls.length);
+    expect((await store.getCheckpoint('github-example'))?.pendingResolutionRows).toBeUndefined();
+    expect([...store.jobs.values()].flatMap((job) => job.sourceReferences.map((reference) => reference.applyUrl)))
+      .toEqual(expect.arrayContaining(failedUrls));
+  });
+
+  it('keeps queue send timeouts out of the application link failure share', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'community-list';
+    const url = 'https://job-boards.greenhouse.io/axon/jobs/7978840003';
+    const snapshot: SourceFetchResult & SourceSnapshot = {
+      sourceId, outcome: 'changed', complete: true, rawCount: 1, contentHash: 'queue-timeout',
+      listings: [], notModified: false, checkpoint: { sourceId, successfulFetches: 1 },
+      postings: [{ sourceId, provenance: 'reviewed-community', externalId: 'row-1',
+        sourceUrl: 'https://github.com/example/jobs', fetchedAt: '2026-08-28T00:00:00Z',
+        employer: { name: 'Axon', authority: 'source-row' }, title: '2027 Engineering Internship',
+        content: [], locations: ['Arizona, USA'], applyUrl: url, sourceState: 'open', lifecycleAuthority: 'source' }],
+    };
+    const resolver = {
+      async resolveCanonicalEmployer() { return { id: 'axon', displayName: 'Axon' }; },
+      async resolveDestinationRule() { return undefined; },
+    };
+    const report = await new Poller([{ id: sourceId, async fetch() { return snapshot; } }],
+      store, undefined, undefined, undefined, undefined,
+      async () => { throw new Error('Queue send timed out'); }, resolver)
+      .poll({ maxListingsPerSourceRun: 25 });
+    expect(report.failures).toContain('community-list: row 1: Queue send timed out');
+    expect(report.failures.some((failure) => failure.includes('rows could not be verified'))).toBe(false);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toBeUndefined();
+  });
+
   it('still fails the delivery when a row fails for a non-probe reason and when the probe share is exceeded', async () => {
     const store = new MemoryInternshipStore();
     await store.putCheckpoint({ sourceId: 'one', successfulFetches: 1, lastRowCount: 0 });
