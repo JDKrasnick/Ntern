@@ -32,7 +32,7 @@ import {
 } from './sources/trust-policy.js';
 import { trustedCommunityCircuitBreaches, trustedCommunityMetrics, trustedCommunityThresholdsFor } from './sources/trusted-community-health.js';
 import { SourceFetchError } from './sources/source-error.js';
-import { extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence, projectRoleMetadata, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from './role-metadata.js';
+import { extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence, projectRoleMetadata, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES, withoutObservationTimestamps } from './role-metadata.js';
 import { failedSourceHealth, sourceFailureCategory, sourceFailureOutcome, successfulSourceHealth } from './source-health.js';
 import type {
   CatalogAdmission,
@@ -61,16 +61,6 @@ function stableSourceMaterial(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(value) ?? 'null';
-}
-
-function withoutObservationTimestamps(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutObservationTimestamps);
-  if (value && typeof value === 'object') return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .filter(([key, item]) => key !== 'observedAt' && item !== undefined)
-      .map(([key, item]) => [key, withoutObservationTimestamps(item)]),
-  );
-  return value;
 }
 
 function sourceOwnedMaterial(value: ProcessedListing | SourceOccurrence): string {

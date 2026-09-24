@@ -20,7 +20,7 @@ import type {
   RoleMetadataEvidence,
   RoleMetadataOmission,
 } from '../src/types.js';
-import { projectRoleMetadata, reconcileRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceHasFields, roleMetadataReviewFingerprint, ROLE_METADATA_EXTRACTION_VERSION, unsupportedMetadataCurrencies, unsupportedMetadataPeriods } from '../src/role-metadata.js';
+import { projectRoleMetadata, reconcileRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceContent, roleMetadataEvidenceHasFields, roleMetadataReviewFingerprint, ROLE_METADATA_EXTRACTION_VERSION, unsupportedMetadataCurrencies, unsupportedMetadataPeriods, withoutObservationTimestamps } from '../src/role-metadata.js';
 import { metadataApiRoute } from '../src/metadata-acquisition.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 
@@ -170,6 +170,31 @@ export function destinationOccurrenceKey(sourceId: string, externalId: string): 
   return hash(`${sourceId}\0${externalId}`);
 }
 
+// Mirror the role_metadata_evidence primary key so a stored row and an incoming
+// item compare by identity; `sourceClass` first because that is the PK order.
+function roleMetadataEvidenceKey(sourceClass: string, sourceId: string, sourceUrl: string, artifactHash: string): string {
+  return `${sourceClass}\0${sourceId}\0${sourceUrl}\0${artifactHash}`;
+}
+
+// One replacement scope: every current row for this source and source class.
+function roleMetadataEvidenceSlot(sourceId: string, sourceClass: string): string {
+  return `${sourceId}\0${sourceClass}`;
+}
+
+function metadataConflictId(jobId: string, conflict: MetadataConflict): string {
+  return createHash('sha256').update(`${jobId}\0${conflict.field}\0${conflict.applicabilityKey ?? ''}\0${JSON.stringify(conflict.values)}`).digest('hex');
+}
+
+/**
+ * Whether a reprojection of the durable evidence differs from what the job
+ * already stores. Observation timestamps are excluded: an unchanged artifact
+ * keeps its first evidence row while the job carries the time of its latest
+ * observation, so a re-observation must not read as a projection delta.
+ */
+function projectionDelta(projected: unknown, stored: unknown): boolean {
+  return JSON.stringify(withoutObservationTimestamps(projected)) !== JSON.stringify(withoutObservationTimestamps(stored));
+}
+
 export function providerIdentityForReference(reference: SourceOccurrence, prior?: CatalogAdmission['destination']): ProviderIdentity {
   let route: ReturnType<typeof providerPostingReference> = { provider: 'unknown' };
   try { route = providerPostingReference(reference.applyUrl); } catch { /* Malformed destinations remain fail-closed candidates. */ }
@@ -309,16 +334,27 @@ export class D1CatalogAdmissionStore {
     }
   }
 
-  private async roleMetadataCollectionCoverage(
-    jobsOrEligible: readonly Internship[] | Set<string>,
-    observedAfter: string,
-  ): Promise<RoleMetadataCollectionCoverage> {
+  /**
+   * The newest observation of each role-source pair. Coverage and candidate
+   * selection must agree on this or a role could read as stale while it is not
+   * yet due for collection.
+   *
+   * Freshness comes from the extraction-attempt row, which every completed
+   * collection advances, because an unchanged evidence replay no longer rewrites
+   * its evidence row. Field classification comes from the current page
+   * evidence: an attempt that found no fields — or failed — re-observed the
+   * destination without re-verifying the fields an earlier observation
+   * recorded, so that older evidence keeps its own time and goes stale.
+   */
+  private async roleMetadataObservations(): Promise<Map<string, {
+    observedAt: string; artifactHash: string; outcome: string; backfillToken?: string;
+  }>> {
     const [attempts, evidence] = await Promise.all([
-      this.db.prepare(`SELECT job_id, source_id, observed_at, outcome, backfill_token
+      this.db.prepare(`SELECT job_id, source_id, observed_at, artifact_hash, outcome, backfill_token
         FROM role_metadata_extraction_attempts WHERE extraction_version = ?`)
         .bind(ROLE_METADATA_EXTRACTION_VERSION)
-        .all<{ job_id: string; source_id: string; observed_at: string; outcome: string; backfill_token: string | null }>(),
-      this.db.prepare(`SELECT job_id, source_id, observed_at,
+        .all<{ job_id: string; source_id: string; observed_at: string; artifact_hash: string; outcome: string; backfill_token: string | null }>(),
+      this.db.prepare(`SELECT job_id, source_id, observed_at, artifact_hash,
           CASE WHEN coalesce(json_array_length(json_extract(evidence, '$.compensationRanges')), 0) > 0
             OR coalesce(json_array_length(json_extract(evidence, '$.housing')), 0) > 0
             OR coalesce(json_extract(evidence, '$.education'), '') NOT IN ('', 0)
@@ -331,24 +367,50 @@ export class D1CatalogAdmissionStore {
         FROM role_metadata_evidence WHERE extraction_version = ? AND is_current = 1
           AND source_class IN ('official-page', 'official-json-ld')`)
         .bind(ROLE_METADATA_EXTRACTION_VERSION)
-        .all<{ job_id: string; source_id: string; observed_at: string; has_fields: number }>(),
+        .all<{ job_id: string; source_id: string; observed_at: string; artifact_hash: string; has_fields: number }>(),
     ]);
-    const latest = new Map<string, { observedAt: string; outcome: string; backfillToken?: string }>();
-    const recordLatest = (key: string, value: { observedAt: string; outcome: string; backfillToken?: string }) => {
-      const previous = latest.get(key);
-      if (!previous || value.observedAt > previous.observedAt) latest.set(key, value);
-    };
-    for (const item of attempts.results) recordLatest(`${item.job_id}\0${item.source_id}`, {
-      observedAt: item.observed_at,
-      outcome: item.outcome,
-      ...(item.backfill_token ? { backfillToken: item.backfill_token } : {}),
-    });
-    for (const item of evidence.results) {
-      recordLatest(`${item.job_id}\0${item.source_id}`, {
-        observedAt: item.observed_at,
-        outcome: item.has_fields ? 'extracted' : 'no-explicit-metadata',
+    const attemptsByKey = new Map<string, { observedAt: string; artifactHash: string; outcome: string; backfillToken: string | null }>();
+    for (const row of attempts.results) {
+      const key = `${row.job_id}\0${row.source_id}`;
+      const previous = attemptsByKey.get(key);
+      if (!previous || row.observed_at > previous.observedAt) attemptsByKey.set(key, { observedAt: row.observed_at,
+        artifactHash: row.artifact_hash, outcome: row.outcome, backfillToken: row.backfill_token });
+    }
+    const pagesByKey = new Map<string, { observedAt: string; artifactHash: string; outcome: string }>();
+    for (const row of evidence.results) {
+      const key = `${row.job_id}\0${row.source_id}`;
+      const previous = pagesByKey.get(key);
+      if (!previous || row.observed_at > previous.observedAt) pagesByKey.set(key, { observedAt: row.observed_at,
+        artifactHash: row.artifact_hash, outcome: row.has_fields ? 'extracted' : 'no-explicit-metadata' });
+    }
+    const observations = new Map<string, { observedAt: string; artifactHash: string; outcome: string; backfillToken?: string }>();
+    for (const key of new Set([...attemptsByKey.keys(), ...pagesByKey.keys()])) {
+      const attempt = attemptsByKey.get(key);
+      const page = pagesByKey.get(key);
+      // A field-bearing observation from either source classifies the pair. A
+      // fieldless or failed attempt re-observed the destination without
+      // re-verifying fields an earlier observation recorded, so it cannot make
+      // that older evidence look newly verified — but the artifact hash still
+      // comes from the attempt, which owns the identity the collector asserts.
+      const outcome = page?.outcome === 'extracted' || attempt?.outcome === 'extracted' ? 'extracted'
+        : page?.outcome ?? attempt!.outcome;
+      const reverified = page?.outcome !== 'extracted' || attempt?.outcome === 'extracted';
+      observations.set(key, {
+        observedAt: attempt && reverified && attempt.observedAt >= (page?.observedAt ?? '')
+          ? attempt.observedAt : (page ?? attempt!).observedAt,
+        artifactHash: attempt?.artifactHash ?? page!.artifactHash,
+        outcome,
+        ...(attempt?.backfillToken ? { backfillToken: attempt.backfillToken } : {}),
       });
     }
+    return observations;
+  }
+
+  private async roleMetadataCollectionCoverage(
+    jobsOrEligible: readonly Internship[] | Set<string>,
+    observedAfter: string,
+  ): Promise<RoleMetadataCollectionCoverage> {
+    const latest = await this.roleMetadataObservations();
     const eligible = new Set<string>();
     if (jobsOrEligible instanceof Set) {
       for (const key of jobsOrEligible) eligible.add(key);
@@ -384,6 +446,16 @@ export class D1CatalogAdmissionStore {
     };
   }
 
+  /**
+   * Records one role's current evidence and conflict set.
+   *
+   * This runs at a source-refresh cadence that re-observes every row of a board,
+   * so an unconditional upsert billed an evidence row, a conflict row and two
+   * review-revision triggers for content that had not changed. The transition
+   * now compares the incoming set with the stored current set and writes only
+   * the difference. Re-observation freshness does not live in these rows: it is
+   * the extraction-attempt row (`recordRoleMetadataExtraction`) that advances.
+   */
   async recordRoleMetadataEvidence(
     jobId: string,
     evidence: readonly RoleMetadataEvidence[],
@@ -391,34 +463,63 @@ export class D1CatalogAdmissionStore {
     recordedAt: string,
     replace?: { sourceId: string; sourceClasses: readonly EvidenceSource[] },
   ): Promise<void> {
-    const statements = [];
-    if (replace?.sourceClasses.length) {
-      statements.push(this.db.prepare(`UPDATE role_metadata_evidence SET is_current = 0
-        WHERE job_id = ? AND source_id = ? AND source_class IN (${replace.sourceClasses.map(() => '?').join(', ')}) AND is_current = 1`)
-        .bind(jobId, replace.sourceId, ...replace.sourceClasses));
-    }
+    const governed = new Set<string>();
+    if (replace) for (const sourceClass of replace.sourceClasses) governed.add(roleMetadataEvidenceSlot(replace.sourceId, sourceClass));
+    const incoming = new Map<string, RoleMetadataEvidence>();
     for (const item of evidence) {
-      statements.push(this.db.prepare(`UPDATE role_metadata_evidence SET is_current = 0
-        WHERE job_id = ? AND source_class = ? AND source_id = ? AND artifact_hash <> ? AND is_current = 1`)
-        .bind(jobId, item.sourceClass, item.sourceId, item.artifactHash));
-      statements.push(this.db.prepare(`INSERT INTO role_metadata_evidence
-        (job_id, source_class, source_id, source_url, artifact_hash, extraction_version, evidence, observed_at, is_current)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-        ON CONFLICT(job_id, source_class, source_id, source_url, artifact_hash) DO UPDATE SET
-          extraction_version=excluded.extraction_version, evidence=excluded.evidence,
-          observed_at=excluded.observed_at, is_current=1`)
-        .bind(jobId, item.sourceClass, item.sourceId, item.sourceUrl, item.artifactHash,
-          item.extractionVersion, JSON.stringify(item), item.observedAt));
+      governed.add(roleMetadataEvidenceSlot(item.sourceId, item.sourceClass));
+      incoming.set(roleMetadataEvidenceKey(item.sourceClass, item.sourceId, item.sourceUrl, item.artifactHash), item);
     }
-    statements.push(this.db.prepare("UPDATE role_metadata_conflicts SET state = 'resolved', updated_at = ? WHERE job_id = ? AND state = 'open'")
-      .bind(recordedAt, jobId));
-    for (const conflict of conflicts) {
-      const id = createHash('sha256').update(`${jobId}\0${conflict.field}\0${conflict.applicabilityKey ?? ''}\0${JSON.stringify(conflict.values)}`).digest('hex');
+    const statements: D1PreparedStatement[] = [];
+    if (governed.size) {
+      const current = await this.db.prepare(`SELECT source_class, source_id, source_url, artifact_hash, extraction_version, evidence
+        FROM role_metadata_evidence WHERE job_id = ? AND is_current = 1`).bind(jobId)
+        .all<{ source_class: string; source_id: string; source_url: string; artifact_hash: string;
+          extraction_version: number; evidence: string }>();
+      const currentByKey = new Map(current.results.map((row) => [roleMetadataEvidenceKey(
+        row.source_class, row.source_id, row.source_url, row.artifact_hash), row]));
+      const superseded: D1PreparedStatement[] = [];
+      for (const row of current.results) {
+        const key = roleMetadataEvidenceKey(row.source_class, row.source_id, row.source_url, row.artifact_hash);
+        if (!governed.has(roleMetadataEvidenceSlot(row.source_id, row.source_class)) || incoming.has(key)) continue;
+        superseded.push(this.db.prepare(`UPDATE role_metadata_evidence SET is_current = 0
+          WHERE job_id = ? AND source_class = ? AND source_id = ? AND source_url = ? AND artifact_hash = ? AND is_current = 1`)
+          .bind(jobId, row.source_class, row.source_id, row.source_url, row.artifact_hash));
+      }
+      for (const [key, item] of incoming) {
+        const stored = currentByKey.get(key);
+        if (stored && stored.extraction_version === item.extractionVersion
+          && roleMetadataEvidenceContent(JSON.parse(stored.evidence) as RoleMetadataEvidence) === roleMetadataEvidenceContent(item)) continue;
+        statements.push(this.db.prepare(`INSERT INTO role_metadata_evidence
+          (job_id, source_class, source_id, source_url, artifact_hash, extraction_version, evidence, observed_at, is_current)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+          ON CONFLICT(job_id, source_class, source_id, source_url, artifact_hash) DO UPDATE SET
+            extraction_version=excluded.extraction_version, evidence=excluded.evidence,
+            observed_at=excluded.observed_at, is_current=1`)
+          .bind(jobId, item.sourceClass, item.sourceId, item.sourceUrl, item.artifactHash,
+            item.extractionVersion, JSON.stringify(item), item.observedAt));
+      }
+      // Insertions and reactivations precede retirements so an interrupted or
+      // chunked transition can only expose a superset of the current set.
+      statements.push(...superseded);
+    }
+    // Conflicts are compared in SQL: a resolution that matches nothing and a
+    // guarded re-open of an unchanged conflict both write no row, so an
+    // unchanged replay fires no revision trigger.
+    const incomingConflicts = new Map<string, MetadataConflict>();
+    for (const conflict of conflicts) incomingConflicts.set(metadataConflictId(jobId, conflict), conflict);
+    statements.push(this.db.prepare(`UPDATE role_metadata_conflicts SET state = 'resolved', updated_at = ?
+      WHERE job_id = ? AND state = 'open'${incomingConflicts.size ? ` AND id NOT IN (${[...incomingConflicts.keys()].map(() => '?').join(', ')})` : ''}`)
+      .bind(recordedAt, jobId, ...incomingConflicts.keys()));
+    for (const [id, conflict] of incomingConflicts) {
       statements.push(this.db.prepare(`INSERT INTO role_metadata_conflicts
         (id, job_id, field, applicability_key, evidence_hashes, values_json, state, opened_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)
         ON CONFLICT(id) DO UPDATE SET evidence_hashes=excluded.evidence_hashes,
-          values_json=excluded.values_json, state='open', updated_at=excluded.updated_at`)
+          values_json=excluded.values_json, state='open', updated_at=excluded.updated_at
+        WHERE role_metadata_conflicts.state <> 'open'
+          OR role_metadata_conflicts.evidence_hashes <> excluded.evidence_hashes
+          OR role_metadata_conflicts.values_json <> excluded.values_json`)
         .bind(id, jobId, conflict.field, conflict.applicabilityKey ?? null, JSON.stringify(conflict.evidenceHashes),
           JSON.stringify(conflict.values), recordedAt, recordedAt));
     }
@@ -431,6 +532,12 @@ export class D1CatalogAdmissionStore {
     }
   }
 
+  /**
+   * Records the newest observation of one artifact. This row, not the evidence
+   * rows, carries re-observation freshness, so it advances on every completed
+   * collection; an out-of-order or byte-identical redelivery writes nothing and
+   * cannot move the observation backwards.
+   */
   async recordRoleMetadataExtraction(value: {
     jobId: string; sourceId: string; sourceUrl: string; artifactHash: string; extractionVersion: number;
     outcome: 'extracted' | 'no-explicit-metadata'; observedAt: string; backfillToken?: string;
@@ -441,7 +548,11 @@ export class D1CatalogAdmissionStore {
         (id, job_id, source_id, source_url, artifact_hash, extraction_version, outcome, observed_at, backfill_token)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET outcome=excluded.outcome, observed_at=excluded.observed_at,
-          backfill_token=coalesce(excluded.backfill_token, role_metadata_extraction_attempts.backfill_token)`)
+          backfill_token=coalesce(excluded.backfill_token, role_metadata_extraction_attempts.backfill_token)
+        WHERE excluded.observed_at > role_metadata_extraction_attempts.observed_at
+          OR (excluded.observed_at = role_metadata_extraction_attempts.observed_at
+            AND (role_metadata_extraction_attempts.outcome <> excluded.outcome
+              OR (role_metadata_extraction_attempts.backfill_token IS NULL AND excluded.backfill_token IS NOT NULL)))`)
         .bind(id, value.jobId, value.sourceId, value.sourceUrl, value.artifactHash, value.extractionVersion,
           value.outcome, value.observedAt, value.backfillToken ?? null).run();
     } catch (error) {
@@ -506,7 +617,7 @@ export class D1CatalogAdmissionStore {
         if (result.deferredEvidenceHashes?.length) deferredProjections.push({ jobId: job.jobId, evidenceHashes: result.deferredEvidenceHashes });
         const projected = result.job;
         const fields = ['compensation', 'housing', 'programType', 'season', 'workMode', 'applicationDeadline', 'graduationWindow', 'locations', 'employerPublishedAt', 'employerUpdatedAt']
-          .filter((field) => JSON.stringify(projected[field as keyof Internship]) !== JSON.stringify(job[field as keyof Internship]));
+          .filter((field) => projectionDelta(projected[field as keyof Internship], job[field as keyof Internship]));
         if (fields.length) projectionOnlyOmissions.push({ jobId: job.jobId, fields });
         const missing = new Set(fields);
         for (const reference of job.sourceReferences) {
@@ -574,16 +685,8 @@ export class D1CatalogAdmissionStore {
     jobId: string; sourceId: string; externalId: string; candidateUrl: string; providerIdentity: ProviderIdentity;
     metadataArtifactHash?: string;
   }>> {
-    const [attempts, evidence, reservations] = await Promise.all([
-      this.db.prepare(`SELECT job_id, source_id, observed_at, artifact_hash
-        FROM role_metadata_extraction_attempts WHERE extraction_version = ?`)
-        .bind(ROLE_METADATA_EXTRACTION_VERSION)
-        .all<{ job_id: string; source_id: string; observed_at: string; artifact_hash: string }>(),
-      this.db.prepare(`SELECT job_id, source_id, observed_at, artifact_hash
-        FROM role_metadata_evidence WHERE extraction_version = ? AND is_current = 1
-          AND source_class IN ('official-page', 'official-json-ld')`)
-        .bind(ROLE_METADATA_EXTRACTION_VERSION)
-        .all<{ job_id: string; source_id: string; observed_at: string; artifact_hash: string }>(),
+    const [latest, reservations] = await Promise.all([
+      this.roleMetadataObservations(),
       this.db.prepare("SELECT job_id, source_id, lease_until, retry_after, json_extract(report, '$.extractionVersion') AS version FROM role_metadata_acquisition")
         .all<{ job_id: string; source_id: string; lease_until: string; retry_after: string; version: number | null }>(),
     ]);
@@ -595,12 +698,6 @@ export class D1CatalogAdmissionStore {
     // window applies, so this is self-limiting rather than a standing exemption.
     const providerApiRetryBefore = new Date(Date.parse(now) - 24 * 60 * 60_000).toISOString();
     const reservationsByKey = new Map(reservations.results.map((item) => [`${item.job_id}\0${item.source_id}`, item]));
-    const latest = new Map<string, { observedAt: string; artifactHash: string }>();
-    for (const item of [...attempts.results, ...evidence.results]) {
-      const key = `${item.job_id}\0${item.source_id}`;
-      const previous = latest.get(key);
-      if (!previous || item.observed_at > previous.observedAt) latest.set(key, { observedAt: item.observed_at, artifactHash: item.artifact_hash });
-    }
     const candidates: Array<{ jobId: string; sourceId: string; externalId: string; candidateUrl: string;
       providerIdentity: ProviderIdentity; metadataArtifactHash?: string; bypassDeferral?: true }> = [];
     // Match collectionCoverage's open-role cohort, including withheld roles.
@@ -851,7 +948,7 @@ export class D1CatalogAdmissionStore {
         const result = projectRoleMetadata({ ...job, sourceReferences, metadataOmission: validReview });
         conflicts.push(...result.conflicts);
         const proposed = JSON.stringify(result.job);
-        if (result.conflicts.length || proposed === row.value) continue;
+        if (result.conflicts.length || !projectionDelta(result.job, job)) continue;
         const jobBytes = utf8Bytes(row.value) + utf8Bytes(proposed);
         if (!staged.length && jobBytes > ATOMIC_REPAIR_BYTE_LIMIT) {
           throw new Error(`Role metadata repair job ${job.jobId} exceeds the atomic byte limit of ${ATOMIC_REPAIR_BYTE_LIMIT}`);
@@ -861,7 +958,7 @@ export class D1CatalogAdmissionStore {
         if (stagingFull || staged.length >= METADATA_REPAIR_RECORD_LIMIT || stagedBytes + jobBytes > ATOMIC_REPAIR_BYTE_LIMIT) {
           stagingFull = true; remainingJobs += 1; continue;
         }
-        for (const field of fields) if (JSON.stringify(result.job[field]) !== JSON.stringify(job[field])) {
+        for (const field of fields) if (projectionDelta(result.job[field], job[field])) {
           const target = job[field] === undefined || field === 'compensation' && !job.compensation.raw ? fillsByField : correctionsByField;
           target[field] = (target[field] ?? 0) + 1;
         }

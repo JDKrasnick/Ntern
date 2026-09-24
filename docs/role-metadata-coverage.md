@@ -78,6 +78,11 @@ role only when its occurrence has a destination admission classified
 `posting-detail`/`application-form`, or a confirmed posting identity
 (`metadataCollectionTarget`, `cloudflare/catalog-admission-store.ts:118`), and the
 role is re-collected only after `ROLE_METADATA_REVALIDATION_MS` (30 days).
+Freshness for that window is read from the newest extraction attempt of the
+role-source pair, not from the evidence rows: re-observing an unchanged artifact
+no longer rewrites them, so their timestamps hold while the attempt advances. A
+fieldless or failed attempt re-observes the destination without re-verifying the
+fields an earlier observation recorded, so those older fields keep their own time.
 
 Current snapshot (2026-09-19, 5,681 open internships, 4,269 of them unspecified):
 applying the real predicate across every reference splits them **3,613
