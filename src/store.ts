@@ -335,6 +335,8 @@ export interface UserStore {
   /** Validates the merged graph once and persists every item in bounded batches.
    * Returns only the items actually created. Avoids one full-bank read per item. */
   putResumeBankItems(values: ResumeBankItem[]): Promise<ResumeBankItem[]>;
+  /** Deletes exact bank items (a parent plus its bullets, when cascaded by the caller). */
+  deleteResumeBankItems(userId: string, bankItemIds: string[]): Promise<void>;
   listResumeProfiles(userId: string): Promise<ResumeProfile[]>;
   getResumeProfile(userId: string, profileId: string): Promise<ResumeProfile | undefined>;
   putResumeProfile(value: ResumeProfile, expectedRevision?: number): Promise<boolean>;
@@ -353,6 +355,8 @@ export interface UserStore {
   getResumeDraftUsage(userId: string, period: string): Promise<number>;
   /** Atomically consumes one monthly tailoring allowance. */
   claimResumeDraftAllowance(userId: string, period: string, limit: number, timestamp: string): Promise<boolean>;
+  /** Returns a consumed allowance when a draft could not be persisted. */
+  releaseResumeDraftAllowance(userId: string, period: string): Promise<void>;
   getReceipt(userId: string, dedupeKey: string, token: string): Promise<DeliveryReceipt | undefined>;
   /** Atomically claims a delivery key. Existing pending/ok receipts win; error receipts may be retried once. */
   claimReceipt(value: DeliveryReceipt): Promise<boolean>;
@@ -405,6 +409,7 @@ export class MemoryUserStore implements UserStore {
   async getResumeBankItem(userId: string, bankItemId: string) { const item = this.resumeBank.get(`${userId}#${bankItemId}`); return item && structuredClone(item); }
   async putResumeBankItem(value: ResumeBankItem, expectedRevision?: number) { if (this.deletedUsers.has(deletedUserTombstoneKey(value.userId).pk)) return false; const key = `${value.userId}#${value.bankItemId}`; const previous = this.resumeBank.get(key); if ((expectedRevision === undefined && previous) || (expectedRevision !== undefined && previous?.revision !== expectedRevision)) return false; validateResumeBankItemPlacement(value, await this.listResumeBank(value.userId)); this.resumeBank.set(key, structuredClone(value)); return true; }
   async putResumeBankItems(values: ResumeBankItem[]) { if (!values.length) return []; if (this.deletedUsers.has(deletedUserTombstoneKey(values[0]!.userId).pk)) return []; validateResumeBankGraph([...await this.listResumeBank(values[0]!.userId), ...values]); const created: ResumeBankItem[] = []; for (const value of values) { const key = `${value.userId}#${value.bankItemId}`; if (this.resumeBank.has(key)) continue; this.resumeBank.set(key, structuredClone(value)); created.push(structuredClone(value)); } return created; }
+  async deleteResumeBankItems(userId: string, bankItemIds: string[]) { for (const bankItemId of bankItemIds) this.resumeBank.delete(`${userId}#${bankItemId}`); }
   async listResumeProfiles(userId: string) { return [...this.resumeProfiles.values()].filter((item) => item.userId === userId).map((item) => structuredClone(item)); }
   async getResumeProfile(userId: string, profileId: string) { const item = this.resumeProfiles.get(`${userId}#${profileId}`); return item && structuredClone(item); }
   async putResumeProfile(value: ResumeProfile, expectedRevision?: number) { if (this.deletedUsers.has(deletedUserTombstoneKey(value.userId).pk)) return false; const key = `${value.userId}#${value.profileId}`; const previous = this.resumeProfiles.get(key); if ((expectedRevision === undefined && previous) || (expectedRevision !== undefined && previous?.revision !== expectedRevision)) return false; this.resumeProfiles.set(key, structuredClone(value)); return true; }
@@ -429,6 +434,7 @@ export class MemoryUserStore implements UserStore {
     this.resumeDraftUsage.set(key, used + 1);
     return true;
   }
+  async releaseResumeDraftAllowance(userId: string, period: string) { const key = `${userId}#${period}`; const used = this.resumeDraftUsage.get(key); if (used === undefined) return; this.resumeDraftUsage.set(key, Math.max(0, used - 1)); }
   async getReceipt(userId: string, dedupeKey: string, token: string) { return this.receipts.get(`${userId}#${dedupeKey}#${token}`); }
   async claimReceipt(value: DeliveryReceipt) { if (await this.isUserDeletionPending(value.userId)) return false; const key = `${value.userId}#${value.dedupeKey ?? value.jobId}#${value.token}`; const existing = this.receipts.get(key); if (existing && existing.status !== 'error') return false; this.receipts.set(key, structuredClone(value)); return true; }
   async putReceipt(value: DeliveryReceipt) { this.writable(value.userId); this.receipts.set(`${value.userId}#${value.dedupeKey ?? value.jobId}#${value.token}`, structuredClone(value)); }

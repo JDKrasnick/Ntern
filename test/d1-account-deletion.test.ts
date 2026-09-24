@@ -50,6 +50,26 @@ describe('D1 account deletion barrier', () => {
     expect(claims.filter(Boolean)).toHaveLength(2);
     expect(await users.getResumeDraftUsage('student', '2026-09')).toBe(2);
     expect(await users.getResumeDraftUsage('student', '2026-10')).toBe(0);
+    // A released credit is usable again, and releases never drive usage negative.
+    await users.releaseResumeDraftAllowance('student', '2026-09');
+    expect(await users.getResumeDraftUsage('student', '2026-09')).toBe(1);
+    await users.releaseResumeDraftAllowance('student', '2026-09');
+    await users.releaseResumeDraftAllowance('student', '2026-09');
+    expect(await users.getResumeDraftUsage('student', '2026-09')).toBe(0);
+    database.close();
+  });
+
+  it('deletes resume bank items only within their owner partition', async () => {
+    const database = new DatabaseSync(':memory:');
+    accountSchema(database);
+    const users = new D1UserStore(sqliteD1(database));
+    const item = (userId: string, bankItemId: string) => ({ userId, bankItemId, kind: 'project' as const, content: bankItemId, verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeBankItem(item('owner', 'keep'));
+    await users.putResumeBankItem(item('owner', 'gone'));
+    await users.putResumeBankItem(item('other-user', 'gone'));
+    await users.deleteResumeBankItems('owner', ['gone']);
+    expect((await users.listResumeBank('owner')).map((entry) => entry.bankItemId)).toEqual(['keep']);
+    expect((await users.listResumeBank('other-user')).map((entry) => entry.bankItemId)).toEqual(['gone']);
     database.close();
   });
 
