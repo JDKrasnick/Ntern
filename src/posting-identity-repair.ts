@@ -107,6 +107,9 @@ export type PostingIdentityApplyBatch = {
   repairToken: string;
   expectedChanges: number;
   expectedDuplicateJobs: number;
+  /** Per-batch bounds that permit a revalidated apply after unrelated catalog writes. */
+  eligibleDuplicateGroups: number;
+  unresolvedDuplicateGroups: number;
 };
 
 export type PostingIdentityRepairScope = 'all' | 'identity' | 'occurrences';
@@ -492,10 +495,48 @@ function comparablePresentationValue(field: PresentationField, value: unknown): 
  * other field deterministically. It takes the canonical member's company, title,
  * location and apply URL, and re-derives the admission from the merged
  * references, so a name, title or URL difference settles itself. A disagreement
- * about the *reviewed employer identity* is two different employers and stays
- * blocked for a human.
+ * about the *reviewed employer identity* is two different employers unless the
+ * records name a reviewed alias family or resolve to the same nonempty official
+ * application URL. A shared application destination is direct employer evidence:
+ * we preserve its canonical record and merge only that exact posting.
  */
 const MERGE_BLOCKING_PRESENTATION_FIELDS: readonly PresentationField[] = ['employerIdentity'];
+
+const EMPLOYER_ALIAS_FAMILIES: readonly (readonly string[])[] = [
+  ['sig', 'susquehanna', 'susquehanna investment group', 'susquehanna international group', 'susquehanna international group sig'],
+  ['amazon', 'amazon com services'],
+  ['by light', 'by light professional it services'],
+  ['cook group', 'cook medical'],
+  ['crum forster', 'crum forster insurance'],
+  ['d e shaw', 'de shaw'],
+  ['dev technology', 'dev technology group'],
+  ['dialogue', 'dialogue health technologies'],
+  ['eq bank', 'equitable bank'],
+  ['hexagon', 'hexagon ab'],
+  ['hilton', 'hilton worldwide'],
+  ['twg global', 'twg global ai'],
+  ['visier', 'visier solutions'],
+];
+
+function employerAliasFamily(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/gu, ' ').trim();
+  const index = EMPLOYER_ALIAS_FAMILIES.findIndex((family) => family.includes(normalized));
+  return index === -1 ? undefined : index;
+}
+
+function hasSharedApplicationUrl(members: Internship[]): boolean {
+  const urls = members.map((member) => {
+    if (!member.applyUrl?.trim()) return undefined;
+    try { return canonicalizePostingUrl(member.applyUrl); } catch { return undefined; }
+  });
+  return urls.every((url): url is string => Boolean(url)) && new Set(urls).size === 1;
+}
+
+function hasReviewedEmployerAlias(observed: Array<{ jobId: string; value: unknown }>): boolean {
+  const families = observed.map(({ value }) => employerAliasFamily(value));
+  return families.every((family): family is number => family !== undefined) && new Set(families).size === 1;
+}
 
 function presentationDisagreement(
   providerIdentity: string,
@@ -505,10 +546,12 @@ function presentationDisagreement(
 ): PresentationDisagreement | undefined {
   const values = {} as PresentationDisagreement['values'];
   const fields: PresentationField[] = [];
+  const sharedApplicationUrl = hasSharedApplicationUrl(members);
   for (const field of Object.keys(presentation(members[0]!, employerMappings)) as PresentationField[]) {
     if (!MERGE_BLOCKING_PRESENTATION_FIELDS.includes(field)) continue;
     const observed = members.map((job) => ({ jobId: job.jobId, value: presentation(job, employerMappings)[field] }));
     if (new Set(observed.map((item) => JSON.stringify(stable(comparablePresentationValue(field, item.value))))).size <= 1) continue;
+    if (field === 'employerIdentity' && (sharedApplicationUrl || hasReviewedEmployerAlias(observed))) continue;
     fields.push(field);
     values[field] = observed;
   }
