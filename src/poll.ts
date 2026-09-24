@@ -204,6 +204,11 @@ const SOURCE_WORK_CONCURRENCY = 24;
 const GITHUB_RESOLUTION_WORK_CONCURRENCY = 8;
 const SOURCE_PERSISTENCE_CONCURRENCY = 8;
 const SOURCE_MIGRATION_PERSISTENCE_CONCURRENCY = 4;
+class DestinationHandoffError extends Error {
+  constructor(cause: unknown) {
+    super(`Destination verification handoff failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}
 /**
  * Share of a delivery's rows with broken application pages before the source
  * itself is treated as broken. Inconclusive transport probes stay pending for
@@ -757,7 +762,8 @@ export class IngestionRunner {
     // link-integrity gate. Queue or persistence errors fail the delivery.
     const withdrawnProbeFailures: string[] = [];
     const brokenProbeFailures: string[] = [];
-    const retryableProbeExternalIds = new Set<string>();
+    const retryableRowExternalIds = new Set<string>();
+    const deferredHandoffFailures: string[] = [];
     const isProbeFailure = (error: unknown, fromValidator = false) => {
       const category = sourceFailureCategory(error);
       return (category === 'transport' || category === 'link')
@@ -1066,7 +1072,7 @@ export class IngestionRunner {
               if (isProbeFailure(error, true) && !stampSourceMetadata) {
                 withdrawnProbeFailures.push(failure);
                 if (isRetryableProbeFailure(error, true)) {
-                  retryableProbeExternalIds.add(id);
+                  retryableRowExternalIds.add(id);
                   failedExternalIds.add(id);
                   return;
                 }
@@ -1195,15 +1201,19 @@ export class IngestionRunner {
           && ['posting-detail', 'application-form'].includes(destination.classification);
         if (!browserDestination && this.enqueueDestinationVerification && listing.providerIdentity
           && (requiresBrowserVerification(destination) || needsPostingAttributionVerification)) {
-          await this.enqueueDestinationVerification({
-            jobId: listing.postingIdentity?.canonicalJobId ?? stableSourceOccurrenceJobId(listing.sourceId, id),
-            sourceId: listing.sourceId,
-            externalId: id,
-            providerIdentity: listing.providerIdentity,
-            candidateUrl: listing.applyUrl,
-            reason: existing?.normalizedUrl && existing.normalizedUrl !== normalizedUrl ? 'url-change' : 'first-sight',
-            metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
-          });
+          try {
+            await this.enqueueDestinationVerification({
+              jobId: listing.postingIdentity?.canonicalJobId ?? stableSourceOccurrenceJobId(listing.sourceId, id),
+              sourceId: listing.sourceId,
+              externalId: id,
+              providerIdentity: listing.providerIdentity,
+              candidateUrl: listing.applyUrl,
+              reason: existing?.normalizedUrl && existing.normalizedUrl !== normalizedUrl ? 'url-change' : 'first-sight',
+              metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
+            });
+          } catch (error) {
+            throw new DestinationHandoffError(error);
+          }
         } else if (providerShadowEligible && this.enqueueDestinationVerification && listing.providerIdentity
           && listing.postingIdentityDecision?.status === 'confirmed'
           && listing.technical !== false && listing.state === 'open' && shadowEvaluationAdmissionEligible(listing, admission)
@@ -1232,13 +1242,16 @@ export class IngestionRunner {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const failure = `${listing.sourceId}: row ${listing.row}: ${message}`;
-        if (isProbeFailure(error)) {
+        if (error instanceof DestinationHandoffError) {
+          deferredHandoffFailures.push(failure);
+          retryableRowExternalIds.add(id);
+        } else if (isProbeFailure(error)) {
           withdrawnProbeFailures.push(failure);
-          if (isRetryableProbeFailure(error)) retryableProbeExternalIds.add(id);
+          if (isRetryableProbeFailure(error)) retryableRowExternalIds.add(id);
           else brokenProbeFailures.push(failure);
         } else failures[slot] = failure;
         failedExternalIds.add(id);
-        await completeFailedAdmissionMigration();
+        if (!(error instanceof DestinationHandoffError)) await completeFailedAdmissionMigration();
       }
     }, workConcurrency);
     // Only completed negative probes can establish a broken-list failure.
@@ -1261,7 +1274,8 @@ export class IngestionRunner {
       failedExternalIds,
       providerShadowVerifications,
       withdrawnProbeFailures,
-      retryableProbeExternalIds,
+      deferredHandoffFailures,
+      retryableRowExternalIds,
       probeFailureShare,
     };
   }
@@ -1526,8 +1540,14 @@ export class IngestionRunner {
         const obligatedListings = migrationLimit === undefined ? [] : listingsToResolve;
         // A pass slice comes from the whole board rather than from a concurrent
         // migration's candidates, so neither pass can close the other early.
+        const previouslyActiveIds = new Set(previous?.activeExternalIds ?? []);
         const resolutionScope = pendingResolutionRows.size
-          ? batch.processed.listings.filter((listing) => pendingResolutionRows.has(externalId(listing)))
+          ? batch.processed.listings.filter((listing) => {
+            const id = externalId(listing);
+            if (pendingResolutionRows.has(id) || !previouslyActiveIds.has(id)) return true;
+            const priorMaterialHash = priorByExternalId.get(id)?.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash;
+            return priorMaterialHash !== undefined && priorMaterialHash !== sourceMaterialHash(listing);
+          })
           : migrationLimit === undefined ? listingsToResolve : [];
         const obligatedIds = new Set(obligatedListings.map(externalId));
         const sliceCapacity = options.maxListingsPerSourceRun === undefined
@@ -1563,7 +1583,7 @@ export class IngestionRunner {
         // the next scheduled poll retries them without a hot queue loop.
         const nextPendingRows = [...new Set([
           ...remainingRows,
-          ...resolvedListings.filter((listing) => resolution.retryableProbeExternalIds.has(externalId(listing))).map(externalId),
+          ...resolvedListings.filter((listing) => resolution.retryableRowExternalIds.has(externalId(listing))).map(externalId),
         ])];
         // Existing catalog decisions are the durable migration obligation.
         // Rows with no prior occurrence are evaluated with spare slice capacity
@@ -1574,8 +1594,15 @@ export class IngestionRunner {
             sourceId: connector.id,
             count: resolution.withdrawnProbeFailures.length,
             brokenShare: Number(resolution.probeFailureShare.toFixed(4)),
-            retryableCount: resolution.retryableProbeExternalIds.size,
+            retryableCount: resolution.retryableRowExternalIds.size,
             samples: resolution.withdrawnProbeFailures.slice(0, 5),
+          }));
+        }
+        if (resolution.deferredHandoffFailures.length) {
+          console.error(JSON.stringify({
+            event: 'row_handoff_deferred', sourceId: connector.id,
+            count: resolution.deferredHandoffFailures.length,
+            samples: resolution.deferredHandoffFailures.slice(0, 5),
           }));
         }
         const admissionEvidencePending = migrationLimit !== undefined && (

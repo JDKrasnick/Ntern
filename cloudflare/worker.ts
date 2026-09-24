@@ -2070,7 +2070,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
           config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT },
         }), SOURCE_MESSAGE_DEADLINE_MS);
-        if (result.poll && (result.poll.continuationSources.length || result.poll.failures.length)) {
+        if (result.poll && (result.poll.continuationSources.length || result.poll.failures.length
+          || Object.keys(result.poll.pendingResolution).length)) {
           console.log(JSON.stringify({
             event: 'github_admission_migration_slice',
             sourceId: source.id,
@@ -2082,10 +2083,18 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         }
         if (result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
         if (result.poll?.continuationSources.includes(source.id)) {
-          await sendQueueMessageWithin(env.GITHUB_QUEUE, {
-            sourceId: source.id,
-            ...(message.force === true ? { force: true } : {}),
-          });
+          try {
+            await sendQueueMessageWithin(env.GITHUB_QUEUE, {
+              sourceId: source.id,
+              ...(message.force === true ? { force: true } : {}),
+            });
+          } catch (error) {
+            // The poll committed its checkpoint before requesting continuation.
+            // The scheduled dispatcher will pick up the pending source; retrying
+            // this already-completed message can only duplicate committed work.
+            console.error(JSON.stringify({ event: 'github_continuation_deferred', sourceId: source.id,
+              pendingResolution: result.poll.pendingResolution[source.id] ?? 0, error: safeDiagnostic(error) }));
+          }
         }
         await resolveFailures(queued.id, queued.attempts);
         await completeTraffic(queued.id, 'success');

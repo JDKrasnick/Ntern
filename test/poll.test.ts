@@ -1078,7 +1078,7 @@ describe('polling', () => {
       .toEqual(expect.arrayContaining(failedUrls));
   });
 
-  it('keeps queue send timeouts out of the application link failure share', async () => {
+  it('defers a failed destination queue handoff and retries only that row', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'community-list';
     const url = 'https://job-boards.greenhouse.io/axon/jobs/7978840003';
@@ -1094,12 +1094,25 @@ describe('polling', () => {
       async resolveCanonicalEmployer() { return { id: 'axon', displayName: 'Axon' }; },
       async resolveDestinationRule() { return undefined; },
     };
-    const report = await new Poller([{ id: sourceId, async fetch() { return snapshot; } }],
+    let available = false;
+    const queued: string[] = [];
+    const poll = () => new Poller([{ id: sourceId, async fetch() { return snapshot; } }],
       store, undefined, undefined, undefined, undefined,
-      async () => { throw new Error('Queue send timed out'); }, resolver)
-      .poll({ maxListingsPerSourceRun: 25 });
-    expect(report.failures).toContain('community-list: row 1: Queue send timed out');
-    expect(report.failures.some((failure) => failure.includes('rows could not be verified'))).toBe(false);
+      async (request) => {
+        if (!available) throw new Error('Queue send timed out');
+        queued.push(request.externalId);
+      }, resolver).poll({ maxListingsPerSourceRun: 25 });
+
+    const first = await poll();
+    expect(first.failures).toEqual([]);
+    expect(first.continuationSources).toEqual([]);
+    expect(first.pendingResolution[sourceId]).toBe(1);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toEqual(['row-1']);
+
+    available = true;
+    const second = await poll();
+    expect(second.failures).toEqual([]);
+    expect(queued).toEqual(['row-1']);
     expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toBeUndefined();
   });
 
@@ -1382,6 +1395,22 @@ describe('polling', () => {
     expect(await store.getSourceOccurrences(sourceId)).toHaveLength(900);
     expect(report.failures).toEqual([]);
   }, 15_000);
+
+  it('includes newly added rows while a bounded resolution pass is pending', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const adapter = new SnapshotAdapter(sourceId, snapshotRows(30));
+    const poll = () => new Poller([adapter], store).poll({ maxListingsPerSourceRun: 25 });
+
+    expect((await poll()).pendingResolution[sourceId]).toBe(5);
+    adapter.setRows(snapshotRows(31));
+    const second = await poll();
+
+    expect(second.failures).toEqual([]);
+    expect(second.pendingResolution[sourceId]).toBeUndefined();
+    expect(await store.getSourceOccurrences(sourceId)).toHaveLength(31);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toBeUndefined();
+  });
 
   it('closes a resolution pass when pending rows leave the board', async () => {
     const store = new MemoryInternshipStore();

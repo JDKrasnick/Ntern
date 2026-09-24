@@ -871,12 +871,15 @@ describe('Cloudflare GitHub queue continuation', () => {
    * structured registry is empty, so the delivery reaches the reviewed GitHub
    * branch, and the source reports no prior health so quarantine cannot block it.
    */
-  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth } = {}) => {
+  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth; sendError?: Error } = {}) => {
     const sent: unknown[] = [];
     const handled: string[] = [];
     const polls: Array<{ command: string; sourceIds: string[]; maxListingsPerSourceRun: number | undefined }> = [];
     const workQueue: Queue = {
-      async send(message) { sent.push(message); },
+      async send(message) {
+        if (options.sendError) throw options.sendError;
+        sent.push(message);
+      },
       async sendBatch() {},
     };
     const logged: string[] = [];
@@ -926,6 +929,16 @@ describe('Cloudflare GitHub queue continuation', () => {
       sourceId: reviewedGithub.id, continuation: true, resolutionPending: 4, failureCount: 0,
     })]);
     expect(handled).toEqual(['ack']);
+  });
+
+  it('acks a committed slice when its continuation send fails for the scheduled dispatcher to resume', async () => {
+    const { sent, handled, sliceEvents } = await deliver({
+      continuationSources: [reviewedGithub.id], pendingResolution: { [reviewedGithub.id]: 4 }, failures: [],
+    }, { sendError: new Error('Queue send timed out') });
+
+    expect(sent).toEqual([]);
+    expect(handled).toEqual(['ack']);
+    expect(sliceEvents).toEqual([expect.objectContaining({ resolutionPending: 4, failureCount: 0 })]);
   });
 
   it('keeps forced recovery on every continuation while the source remains paused', async () => {
