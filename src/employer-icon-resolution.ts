@@ -36,6 +36,12 @@ export type IconEvidenceSignal =
   | 'opengraph'
   /** The employer's own site, established by the role's reviewed application destination. */
   | 'official-application-host'
+  /** The employer's own site as its ATS board declares it. */
+  | 'platform-website'
+  /** The employer's name as its ATS board declares it. */
+  | 'platform-name'
+  /** A domain a model proposed and that then verified itself against the employer. */
+  | 'proposed-domain'
   /** The posting's own reviewed ATS board slug names the canonical employer. */
   | 'ats-tenant'
   /** Logo.dev name search selected this domain. */
@@ -185,6 +191,27 @@ export function officialIconProvenance(provenance: OccurrenceProvenance | undefi
     || provenance === 'employer-submitted';
 }
 
+/** Page and program words that name a landing page rather than a company. */
+const EMPLOYER_NAME_STOPWORDS: Record<string, true> = {
+  join: true, talent: true, community: true, program: true, programme: true, careers: true,
+  career: true, jobs: true, job: true, opportunities: true, opportunity: true, apply: true,
+  hiring: true, internships: true, internship: true, students: true, graduate: true,
+  recruitment: true, recruiting: true, university: true, campus: true,
+};
+
+/**
+ * Whether a name a platform declares for its board is usable as an employer
+ * identity. ATS boards sometimes carry a landing-page title — Axon's board declares
+ * "Join Our Talent Community" — which names a page, not a company, and would send a
+ * provider search and a logo lookup in the wrong direction.
+ */
+export function plausibleEmployerName(name: string | undefined): boolean {
+  if (!name) return false;
+  const terms = name.trim().toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean);
+  if (!terms.length || EMPLOYER_NAME_STOPWORDS[terms[0]!] === true) return false;
+  return terms.some((term) => term.length > 2 && EMPLOYER_NAME_STOPWORDS[term] !== true);
+}
+
 /**
  * Organizational qualifiers a real posting page may legitimately omit, and whose
  * removal does not change which employer is being named. Catalog employer names
@@ -300,13 +327,16 @@ export function scoreIconCandidate(
   let score = 0;
   if (signals.includes('final-url') || signals.includes('redirect-host')) score += GROUP_WEIGHTS.url;
   if (signals.includes('official-application-host')) score += GROUP_WEIGHTS.officialHost;
-  if (signals.includes('jsonld-url') || signals.includes('jsonld-name')) score += GROUP_WEIGHTS.jsonld;
+  if (signals.includes('jsonld-url') || signals.includes('jsonld-name') || signals.includes('platform-website')) {
+    score += GROUP_WEIGHTS.jsonld;
+  }
   if (signals.includes('logo-dev')) score += GROUP_WEIGHTS.provider;
   if (signals.includes('brandfetch')) score += GROUP_WEIGHTS.provider;
   if (signals.includes('logo-dev') && signals.includes('brandfetch') && options.providersAgree) {
     score += PROVIDER_AGREEMENT_BONUS;
   }
-  if (signals.includes('page-title') || signals.includes('opengraph') || signals.includes('ats-tenant')) {
+  if (signals.includes('page-title') || signals.includes('opengraph') || signals.includes('ats-tenant')
+    || signals.includes('platform-name')) {
     score += GROUP_WEIGHTS.metadata;
   }
   // Decimal weights accumulate binary float error, and a resolved/unresolved
@@ -453,6 +483,52 @@ export function acceptIconTieBreak(
   if (cited.length !== decision.evidenceIds.length) return { accepted: false, reasonCode: 'evidence-does-not-support-domain' };
   if (cited.length < 2) return { accepted: false, reasonCode: 'insufficient-independent-evidence' };
   return { accepted: true, domain: selected.domain, reasonCode: 'accepted' };
+}
+
+/**
+ * The strict JSON schema for the proposal mode, used when the resolver has no
+ * candidate to choose among and must find a domain instead of ranking one.
+ */
+export const iconProposalSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['domain', 'confidence', 'reason'],
+  properties: {
+    domain: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+    reason: { type: 'string', minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+/** A proposed domain is only ever attempted at or above this confidence. */
+export const ICON_PROPOSAL_MINIMUM_CONFIDENCE = 0.9;
+
+export interface IconDomainProposal {
+  domain: string | null;
+  confidence: number;
+  reason: string;
+}
+
+/** Structural validation only; the domain is normalized to a registrable hostname. */
+export function parseIconProposal(value: unknown): IconDomainProposal | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).sort().join(',') !== 'confidence,domain,reason') return undefined;
+  const { domain, confidence, reason } = record;
+  if (domain !== null && typeof domain !== 'string') return undefined;
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) return undefined;
+  if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) return undefined;
+
+  let normalized: string | null = null;
+  if (typeof domain === 'string' && domain.trim()) {
+    const raw = domain.trim().toLowerCase();
+    const host = raw.includes('://') ? (() => { try { return new URL(raw).hostname; } catch { return ''; } })()
+      : raw.split('/')[0]!.split('@').pop()!.split(':')[0]!;
+    const registrable = registrableDomain(host.replace(/^www\./u, ''));
+    if (registrable.includes('.') && registrable.length <= 253) normalized = registrable;
+    else return undefined;
+  }
+  return { domain: normalized, confidence, reason: reason.trim() };
 }
 
 /**

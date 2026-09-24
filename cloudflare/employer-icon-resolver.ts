@@ -19,11 +19,14 @@ import {
   MAX_PROVIDER_CANDIDATES, decideIconDomain, acceptIconTieBreak, iconEvidenceFingerprint,
   iconTextMatchesEmployer, iconTieBreakSchema, isIconTransportHost, parseIconTieBreakDecision,
   tenantCorroboratesEmployer, employerNamesDomain, employerDistinctiveTerms, officialIconProvenance,
+  plausibleEmployerName, providerNameMatchesEmployer, parseIconProposal, iconProposalSchema,
+  ICON_PROPOSAL_MINIMUM_CONFIDENCE,
   type IconCandidateScore, type IconDomainCandidate, type IconDomainDecision, type IconEvidenceSignal,
   type IconTieBreakDecision, type EmployerIconSeed,
 } from '../src/employer-icon-resolution.js';
 import {
   ICON_PROVIDER_TIMEOUT_MS, MAX_ICON_ASSET_BYTES, brandfetchCandidateDomains, brandfetchSearchUrl,
+  proposedDomainMatchesEmployer,
   logoDevCandidateDomains, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence, validIconAsset,
   type IconPageEvidence,
 } from '../src/employer-icon-discovery.js';
@@ -244,16 +247,21 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
   }
 
   const gathered = await gatherIconEvidence(seed, deps);
+  // What the ATS board calls this employer, gated to names that denote a company
+  // rather than a landing page. Used both to widen the provider query and as
+  // identity evidence, so it is computed once.
+  const declaredName = plausibleEmployerName(gathered?.page.declaredEmployerName)
+    ? gathered!.page.declaredEmployerName : undefined;
   const providers = await lookupProviderDomains(seed, {
     ...(env.LOGO_DEV_TOKEN ? { logoDevToken: env.LOGO_DEV_TOKEN } : {}),
     ...(env.BRANDFETCH_CLIENT_ID ? { brandfetchClientId: env.BRANDFETCH_CLIENT_ID } : {}),
-  }, deps);
+  }, deps, declaredName);
   if (input.providerOutcomes) {
     for (const [provider, outcome] of Object.entries(providers.outcomes)) {
       input.providerOutcomes[`${provider}:${outcome}`] = (input.providerOutcomes[`${provider}:${outcome}`] ?? 0) + 1;
     }
   }
-  const candidates = iconCandidates(seed, context, gathered, providers);
+  const candidates = iconCandidates(seed, context, gathered, providers, declaredName);
   const decision = decideIconDomain(candidates);
   const attempt = task.attempts + 1;
 
@@ -261,8 +269,15 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
     return acceptSelectedDomain({ ...input, context, seed, decision, gathered, providers, attempt, at });
   }
   if (decision.outcome === 'llm-review') {
-    const escalation = await escalateToTieBreak({ ...input, context, seed, decision, gathered, providers, attempt, at });
+    const escalation = await escalateToTieBreak({ ...input, context, seed, decision, gathered, providers, attempt, at, declaredName });
     if (escalation) return escalation;
+  }
+  // Nothing to rank: on a platform host the page can name the employer without
+  // naming any domain, so the resolver may ask once for a domain — and then has to
+  // prove it, because the domain itself must say it belongs to this employer.
+  if (decision.outcome === 'unresolved') {
+    const proposal = await proposeDomain({ ...input, context, seed, decision, gathered, providers, attempt, at, declaredName });
+    if (proposal) return proposal;
   }
 
   // A provider that only failed transiently has not earned a day-long backoff.
@@ -298,6 +313,10 @@ interface AcceptInput extends ResolveTaskInput {
   providers: ProviderLookup;
   attempt: number;
   at: string;
+  /** The employer name the ATS board declares, when it is usable and differs. */
+  declaredName?: string;
+  /** Records which source produced the accepted domain. */
+  selectedSource?: 'logo-dev' | 'proposed';
   /** Present when a tie-breaker chose this domain, so the review record can show what it cited. */
   tieBreak?: { citedEvidenceIds: readonly string[]; inputTokens: number; outputTokens: number; reasonCode: string };
 }
@@ -354,7 +373,7 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
   await store.markResolved({
     taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
     selectedDomain: domain,
-    selectedSource: 'logo-dev',
+    selectedSource: input.selectedSource ?? 'logo-dev',
     confidence: decision.selectedScore ?? 0,
     evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
       outcome: 'resolved', reasonCode: 'domain-accepted', imageVerified,
@@ -422,6 +441,129 @@ interface TieBreakOutcome {
   outputTokens: number;
   decision?: IconTieBreakDecision;
 }
+
+/**
+ * Asks once for a domain, then proves it.
+  *
+  * This is the only path where a model introduces a URL rather than ranking
+  * submitted ones, so nothing about the answer is trusted: the proposed domain is
+  * fetched through the same SSRF controls as any other link, and it must present
+  * itself as this employer — naming either the catalog name or the name the
+  * employer's own board declares. Only then does it become a candidate, and the
+  * verified-image gate still applies afterwards. A proposal that fails verification
+  * is recorded and discarded.
+  *
+  * Shares the tie-breaker's budget: one call per employer per window.
+  */
+ async function proposeDomain(input: AcceptInput): Promise<ResolveOutcome | undefined> {
+   const { store, task, env, now, deps, context, seed, gathered, at, declaredName } = input;
+   const apiKey = env.OPENAI_KEY;
+   if (!apiKey) return undefined;
+   if (!withinTieBreakBudget(context, task.evidenceFingerprint, now)) return undefined;
+
+   const infer = deps.infer ?? ((request: OpenAIJsonRequest) => inferOpenAIJson(apiKey, request, deps.fetchImpl ?? fetch));
+   const result = await infer({
+     prompt: { system: proposalSystemPrompt, user: JSON.stringify(proposalInput(seed, gathered, declaredName)) },
+     schemaName: 'company_icon_domain_proposal', schema: iconProposalSchema,
+     model: shadowDefaultModelId, maxOutputTokens: 300,
+   });
+   await store.recordTieBreak({
+     canonicalEmployerId: context.id, at, evidenceFingerprint: task.evidenceFingerprint,
+     inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+   });
+
+   const proposal = parseIconProposal(result.response);
+   if (!proposal || !proposal.domain || proposal.confidence < ICON_PROPOSAL_MINIMUM_CONFIDENCE) {
+     logProposal(context.id, proposal?.domain ?? null, proposal?.confidence ?? null, 'not-attempted');
+     return undefined;
+   }
+   if (isIconTransportHost(proposal.domain)) {
+     logProposal(context.id, proposal.domain, proposal.confidence, 'transport-host');
+     return undefined;
+   }
+   const verified = await verifyProposedDomain(proposal.domain, context.displayName, declaredName, deps);
+   logProposal(context.id, proposal.domain, proposal.confidence, verified ? 'verified' : 'unverified');
+   if (!verified) return undefined;
+
+   return acceptSelectedDomain({
+     ...input,
+     decision: {
+       outcome: 'resolved', scores: decisionWithProposal(input.decision, proposal.domain),
+       selectedDomain: proposal.domain, selectedScore: proposal.confidence,
+       reason: `proposal ${proposal.confidence.toFixed(2)} verified against the domain itself`,
+     },
+     selectedSource: 'proposed',
+   });
+ }
+
+ /** Records the proposal as a candidate in the evidence trail before it is judged. */
+ function decisionWithProposal(decision: IconDomainDecision, domain: string): IconCandidateScore[] {
+   return [
+     ...decision.scores,
+     { domain, score: 0, signals: ['proposed-domain'], evidenceIds: [`proposed-domain:${domain}`], rejected: false },
+   ];
+ }
+
+ /**
+  * Fetches the proposed domain and requires it to name this employer. The homepage
+  * is the employer's own statement about itself, which is what makes a model's
+  * suggestion usable rather than merely plausible.
+  */
+ async function verifyProposedDomain(
+   domain: string,
+   displayName: string,
+   declaredName: string | undefined,
+   deps: EmployerIconResolverDependencies,
+ ): Promise<boolean> {
+   try {
+     const result = await safeFetchText(`https://${domain}/`, {
+       resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch,
+       timeoutMs: ICON_LINK_TIMEOUT_MS, maxRedirects: ICON_LINK_MAX_REDIRECTS, maxBodyBytes: ICON_LINK_MAX_BYTES,
+       onOversize: 'truncate',
+     });
+     if (result.status < 200 || result.status >= 300) return false;
+     return proposedDomainMatchesEmployer(parseIconPageEvidence(result.body), displayName, declaredName);
+   } catch {
+     return false;
+   }
+ }
+
+ function logProposal(employerId: string, domain: string | null, confidence: number | null, reasonCode: string): void {
+   console.log(JSON.stringify({
+     event: 'company_icon_resolution_proposal', canonicalEmployerId: employerId,
+     domain, confidence, reasonCode,
+   }));
+ }
+
+ const proposalSystemPrompt = [
+   'You identify the official website domain of the employer behind one job posting.',
+   'You are given bounded metadata from the posting because no provider nominated a domain.',
+   'Use only the supplied JSON. Never invent a domain and never answer with a URL path.',
+   'Answer with the registrable domain alone, for example "example.com", and be explicit about your confidence.',
+   'Answer null when the evidence does not identify one employer clearly.',
+ ].join(' ');
+
+ function proposalInput(
+   seed: EmployerIconSeed,
+   gathered: GatheredIconEvidence | undefined,
+   declaredName: string | undefined,
+ ): Record<string, unknown> {
+   return {
+     employer: seed.displayName.slice(0, 200),
+     ...(declaredName ? { employerAsItsBoardNamesIt: declaredName.slice(0, 200) } : {}),
+     role: seed.roleTitle.slice(0, 200),
+     source: { provider: seed.provider, ...(seed.tenant ? { tenant: seed.tenant.slice(0, 200) } : {}) },
+     urls: {
+       application: seed.applicationUrl.slice(0, 300),
+       ...(gathered ? { final: gathered.finalUrl.slice(0, 300) } : {}),
+     },
+     page: {
+       ...(gathered?.page.title ? { title: gathered.page.title.slice(0, 200) } : {}),
+       ...(gathered?.page.ogSiteName ? { siteName: gathered.page.ogSiteName.slice(0, 200) } : {}),
+       organizationDomains: (gathered?.page.organizations ?? []).flatMap((organization) => organization.domains ?? []).slice(0, 5),
+     },
+   };
+ }
 
 /**
  * The one bounded model call, shared by the live resolver and the read-only
@@ -560,13 +702,14 @@ async function lookupProviderDomains(
   seed: EmployerIconSeed,
   credentials: EmployerIconProviderCredentials,
   deps: EmployerIconResolverDependencies,
+  declaredName?: string,
 ): Promise<ProviderLookup> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const failures: Record<string, string> = {};
   const [logoDev, brandfetch] = await Promise.all([
-    searchProvider('logo-dev', credentials.logoDevToken, seed, fetchImpl, logoDevSearchUrl, logoDevCandidateDomains),
+    searchProvider('logo-dev', credentials.logoDevToken, seed, fetchImpl, logoDevSearchUrl, logoDevCandidateDomains, declaredName),
     searchProvider('brandfetch', credentials.brandfetchClientId, seed, fetchImpl,
-      (name) => brandfetchSearchUrl(name, credentials.brandfetchClientId!), brandfetchCandidateDomains),
+      (name) => brandfetchSearchUrl(name, credentials.brandfetchClientId!), brandfetchCandidateDomains, declaredName),
   ]);
   if (logoDev.failure) failures['logo-dev'] = logoDev.failure;
   if (brandfetch.failure) failures.brandfetch = brandfetch.failure;
@@ -603,17 +746,35 @@ async function searchProvider(
   fetchImpl: typeof fetch,
   url: (name: string) => string,
   parse: (value: unknown, displayName: string) => string[],
+  /** The employer name the ATS board declares, when it is usable and differs. */
+  declaredName?: string,
 ): Promise<ProviderResponse> {
   if (!credential) return { domains: [], failure: 'unconfigured' };
   const headers: Record<string, string> = provider === 'logo-dev' ? { authorization: `Bearer ${credential}` } : {};
   const first = await requestProviderDomains(url(seed.displayName), headers, seed.displayName, parse, fetchImpl);
   if (first.domains.length || first.failure !== undefined) return first;
 
-  // Only retry when dropping qualifiers actually changes the query.
+  // Only retry when the query actually changes, and always match the provider's
+  // answer against the name that was asked for.
   const brand = employerDistinctiveTerms(seed.displayName).join(' ');
   const full = seed.displayName.trim().toLowerCase().replace(/[^a-z0-9]+/gu, ' ').trim();
-  if (!brand || brand === full) return first;
-  return requestProviderDomains(url(brand), headers, seed.displayName, parse, fetchImpl);
+  const queries = [...new Set([
+    ...(brand && brand !== full ? [brand] : []),
+    // The board's own name for the employer, which the platform published and the
+    // catalog reviewed. It is what makes a renamed employer reachable: the board
+    // says "Rivian and Volkswagen Group Technologies" where the catalog says "RV Tech".
+    ...(declaredName && declaredName !== seed.displayName ? [declaredName] : []),
+  ])];
+  let failure: ProviderResponse | undefined;
+  for (const query of queries) {
+    const response = await requestProviderDomains(url(query), headers, query, parse, fetchImpl);
+    if (response.domains.length) return response;
+    // Keep trying the remaining queries: one query failing, or the provider having
+    // no answer for it, must not hide the name the employer's own board declares.
+    // The first problem is still reported when nothing answers.
+    if (failure === undefined && response.failure !== undefined) failure = response;
+  }
+  return failure ?? first;
 }
 
 /**
@@ -672,6 +833,7 @@ function iconCandidates(
   context: EmployerIconContext,
   gathered: GatheredIconEvidence | undefined,
   providers: ProviderLookup,
+  declaredName?: string,
 ): IconDomainCandidate[] {
   const signals: Record<string, IconEvidenceSignal[]> = {};
   const exempt: Record<string, boolean> = {};
@@ -685,6 +847,8 @@ function iconCandidates(
   let titleMatches = false;
   let siteMatches = false;
   let organizationNameMatches = false;
+
+  let declaredNameMatchesEmployer = false;
   let pageNamedDomain: string | undefined;
   // The host admission reviewed and recorded for this role. Where the link later
   // redirects stays evidence (final-url, redirect-host) but is not the recorded
@@ -699,6 +863,14 @@ function iconCandidates(
         && iconTextMatchesEmployer(organization.name, context.displayName));
     const matchedDomains = matched.flatMap((organization) => organization.domains!);
     for (const domain of matchedDomains) { add(domain, 'jsonld-url'); add(domain, 'jsonld-name'); }
+    // What the ATS board itself says the employer's site is, and what it calls the
+    // employer. Both are the platform's record for the board the catalog reviewed,
+    // read from the page already in hand.
+    const declaredDomain = gathered.page.declaredWebsite;
+    if (declaredDomain) add(declaredDomain, 'platform-website');
+    declaredNameMatchesEmployer = Boolean(declaredName)
+      && (iconTextMatchesEmployer(declaredName, context.displayName)
+        || providerNameMatchesEmployer(declaredName!, context.displayName));
     // A structured Organization block that names the employer but publishes no
     // canonical URL still proves *who* is hiring, so it corroborates a provider
     // nomination exactly as the document title does.
@@ -712,7 +884,8 @@ function iconCandidates(
     const fallback = hostOf(gathered.finalUrl);
     // A transport host can still be the page's own domain when it is the employer's
     // own site, so the page's naming evidence reaches Google or GitHub too.
-    pageNamedDomain = matchedDomains[0]
+    pageNamedDomain = declaredDomain
+      ?? matchedDomains[0]
       ?? (fallback && (!isIconTransportHost(fallback) || employerNamesDomain(context.displayName, fallback))
         ? registrableDomain(fallback) : undefined);
   }
@@ -731,6 +904,7 @@ function iconCandidates(
     if (titleMatches) add(target, 'page-title');
     if (siteMatches) add(target, 'opengraph');
     if (organizationNameMatches) add(target, 'jsonld-name');
+    if (declaredNameMatchesEmployer) add(target, 'platform-name');
     if (tenantCorroborates) add(target, 'ats-tenant');
   }
   for (const domain of providers.logoDev) add(domain, 'logo-dev');
@@ -969,8 +1143,10 @@ export async function diagnoseEmployerIcon(input: {
   const { seed, credentials, deps } = input;
   const context = input.context ?? { id: seed.canonicalEmployerId, displayName: seed.displayName };
   const gathered = await gatherIconEvidence(seed, deps);
-  const providers = await lookupProviderDomains(seed, credentials, deps);
-  const decision = decideIconDomain(iconCandidates(seed, context, gathered, providers));
+  const declaredName = plausibleEmployerName(gathered?.page.declaredEmployerName)
+    ? gathered!.page.declaredEmployerName : undefined;
+  const providers = await lookupProviderDomains(seed, credentials, deps, declaredName);
+  const decision = decideIconDomain(iconCandidates(seed, context, gathered, providers, declaredName));
   const submitted = decision.scores.filter((candidate) => !candidate.rejected).slice(0, 5);
   const imageVerified = decision.selectedDomain && credentials.logoDevToken
     ? (await probeLogoDevImage(decision.selectedDomain, credentials.logoDevToken, deps)).available

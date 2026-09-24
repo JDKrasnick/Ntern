@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  brandfetchSearchUrl, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence, validIconAsset,
+  brandfetchSearchUrl, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence,
+  proposedDomainMatchesEmployer, validIconAsset,
 } from '../src/employer-icon-discovery.js';
+import { parseIconProposal, plausibleEmployerName } from '../src/employer-icon-resolution.js';
 
 const org = (value: Record<string, unknown>) =>
   `<!doctype html><html><head><title>Careers</title><script type="application/ld+json">${JSON.stringify(value)}</script></head></html>`;
@@ -62,6 +64,77 @@ describe('page evidence parsing', () => {
       '@type': 'Organization', name: 'Acme', logo: 'https://cdn.example/logo.png',
     }));
     expect(page.organizations).toEqual([{ name: 'Acme' }]);
+  });
+
+  it('reads the employer site and name its ATS board declares', () => {
+    // Ashby publishes the employer's own site in its board payload.
+    const ashby = parseIconPageEvidence(
+      '<html><head><title>Rivian and Volkswagen Group Technologies Jobs</title></head><body>'
+      + `<script>window.__appData={"organization":{"publicWebsite":"https://rivianvw.tech/","customJobsPageUrl":null}}</script>`
+      + '</body></html>',
+    );
+    expect(ashby.declaredWebsite).toBe('rivianvw.tech');
+    expect(ashby.declaredEmployerName).toBe('Rivian and Volkswagen Group Technologies');
+
+    // Greenhouse publishes the employer's name in its own payload.
+    const greenhouse = parseIconPageEvidence(
+      '<html><head><title>Job Application for Summer Intern at IMC</title></head><body>'
+      + '<script>{"company_name":"IMC"}</script></body></html>',
+    );
+    expect(greenhouse.declaredEmployerName).toBe('IMC');
+    expect(greenhouse.declaredWebsite).toBeUndefined();
+
+    // Lever names the employer only in the title.
+    expect(parseIconPageEvidence('<html><head><title>Hermeus jobs</title></head></html>').declaredEmployerName).toBe('Hermeus');
+    // The employer's careers page still resolves to the employer's domain.
+    expect(parseIconPageEvidence('<html><body><script>{"publicWebsite":"https://x.test/","customJobsPageUrl":"https://www.retellai.com/careers"}</script></body></html>').declaredWebsite)
+      .toBe('x.test');
+    expect(parseIconPageEvidence('<html><body><script>{"customJobsPageUrl":"https://www.retellai.com/careers"}</script></body></html>').declaredWebsite)
+      .toBe('retellai.com');
+  });
+
+  it('accepts a proposed domain only when the domain itself names the employer', () => {
+    const evidence = parseIconPageEvidence('<html><head><title>Rivian and Volkswagen Group Technologies</title></head></html>');
+    // The catalog name is `RV Tech`; the company calls itself something else, and
+    // the board says so. Either name is enough, the domain is the judge.
+    expect(proposedDomainMatchesEmployer(evidence, 'RV Tech', 'Rivian and Volkswagen Group Technologies')).toBe(true);
+    expect(proposedDomainMatchesEmployer(evidence, 'RV Tech')).toBe(false);
+
+    const unrelated = parseIconPageEvidence('<html><head><title>Pylon AI</title><meta property="og:site_name" content="Pylon AI"></head></html>');
+    expect(proposedDomainMatchesEmployer(unrelated, 'Pylon')).toBe(true);
+    expect(proposedDomainMatchesEmployer(unrelated, 'Base Power')).toBe(false);
+  });
+});
+
+describe('domain proposal payload', () => {
+  it('accepts only a well-formed proposal and reduces it to a registrable domain', () => {
+    expect(parseIconProposal({ domain: 'Example.com', confidence: 0.95, reason: 'the employer states it' }))
+      .toMatchObject({ domain: 'example.com', confidence: 0.95 });
+    // A model often answers with the URL it saw; that is normalized, never used raw.
+    expect(parseIconProposal({ domain: 'https://www.example.com/careers', confidence: 0.9, reason: 'ok' })?.domain)
+      .toBe('example.com');
+    expect(parseIconProposal({ domain: 'example.com:443', confidence: 0.9, reason: 'ok' })?.domain).toBe('example.com');
+    expect(parseIconProposal({ domain: null, confidence: 0.9, reason: 'no idea' })?.domain).toBeNull();
+
+    // Structural rejections: extra keys, bad confidence, empty reason, junk domain.
+    expect(parseIconProposal({ domain: 'example.com', confidence: 0.9, reason: 'ok', extra: 1 })).toBeUndefined();
+    expect(parseIconProposal({ domain: 'example.com', confidence: 1.4, reason: 'ok' })).toBeUndefined();
+    expect(parseIconProposal({ domain: 'example.com', confidence: 0.9, reason: '   ' })).toBeUndefined();
+    expect(parseIconProposal({ domain: 'localhost', confidence: 0.9, reason: 'ok' })).toBeUndefined();
+    expect(parseIconProposal({ domain: 42, confidence: 0.9, reason: 'ok' })).toBeUndefined();
+    expect(parseIconProposal('example.com')).toBeUndefined();
+  });
+
+  it('treats a landing-page title as no employer name at all', () => {
+    // Axon's own board is titled "Join Our Talent Community"; it names a page.
+    expect(plausibleEmployerName('Join Our Talent Community')).toBe(false);
+    expect(plausibleEmployerName('Careers')).toBe(false);
+    expect(plausibleEmployerName('Students and Graduates')).toBe(false);
+    expect(plausibleEmployerName(undefined)).toBe(false);
+
+    expect(plausibleEmployerName('Astranis')).toBe(true);
+    expect(plausibleEmployerName('RV Tech')).toBe(true);
+    expect(plausibleEmployerName('Rivian and Volkswagen Group Technologies')).toBe(true);
   });
 });
 

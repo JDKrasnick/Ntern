@@ -13,7 +13,7 @@
  */
 
 import { registrableDomain } from './core/registrable-domain.js';
-import { MAX_PROVIDER_CANDIDATES, providerNameMatchesEmployer } from './employer-icon-resolution.js';
+import { MAX_PROVIDER_CANDIDATES, iconTextMatchesEmployer, providerNameMatchesEmployer } from './employer-icon-resolution.js';
 
 export const logoDevSearchEndpoint = 'https://api.logo.dev/search';
 export const logoDevImageEndpoint = 'https://img.logo.dev';
@@ -109,6 +109,21 @@ export interface IconOrganizationEvidence {
 
 export interface IconPageEvidence {
   organizations: IconOrganizationEvidence[];
+  /**
+   * The employer's own site as its ATS board declares it. Ashby publishes one
+   * (`publicWebsite`, else the careers page it hosts for the employer), and it is
+   * the employer's own statement about its domain — the same authority as a JSON-LD
+   * Organization URL, reached without a provider.
+   */
+  declaredWebsite?: string;
+  /**
+   * The employer's name as its ATS board declares it. Greenhouse publishes
+   * `company_name`; Lever and Ashby put it in the page title. It is the platform's
+   * own record for the board the catalog reviewed, so it identifies the employer
+   * even when the catalog name differs (`RV Tech` versus
+   * `Rivian and Volkswagen Group Technologies`).
+   */
+  declaredEmployerName?: string;
   title?: string;
   ogSiteName?: string;
   ogTitle?: string;
@@ -152,6 +167,30 @@ function collectOrganizations(node: unknown, found: IconOrganizationEvidence[], 
   for (const value of Object.values(record)) collectOrganizations(value, found, depth + 1);
 }
 
+function boundedString(html: string, pattern: RegExp): string | undefined {
+  const value = pattern.exec(html)?.[1]?.trim();
+  return value ? value.slice(0, 300) : undefined;
+}
+
+/**
+ * The employer's site and name as the ATS board declares them, read from the page
+ * the resolver already fetched. Ashby publishes a website; Greenhouse publishes a
+ * company name; Lever and Ashby name the employer in the title.
+ */
+function declaredEmployer(html: string, title: string | undefined): { website?: string; name?: string } {
+  const published = boundedString(html, /"publicWebsite"\s*:\s*"(https?:\/\/[^"]+)"/iu)
+    ?? boundedString(html, /"customJobsPageUrl"\s*:\s*"(https?:\/\/[^"]+)"/iu);
+  const companyName = boundedString(html, /"company_name"\s*:\s*"([^"\\]+)"/iu);
+  // "Job Application for <role> at <Employer>" (Greenhouse), or "<Employer> jobs"
+  // and "<Employer> Careers" (Lever, Ashby).
+  const fromTitle = /<(?:title|h1)[^>]*>[^<]*?\bat\s+([^<|]{2,120}?)\s*<\//iu.exec(html)?.[1]?.trim()
+    ?? (title ? /^(.*?)\s+(?:jobs|careers)$/iu.exec(title)?.[1]?.trim() : undefined);
+  return {
+    ...(published ? { website: registrableDomainOf(published) } : {}),
+    ...(companyName ?? fromTitle ? { name: (companyName ?? fromTitle)!.slice(0, 200) } : {}),
+  };
+}
+
 /**
  * Reads only the bounded metadata a page publishes about its owning employer.
  * Page HTML is never stored; callers keep at most the normalized domains and a
@@ -169,10 +208,39 @@ export function parseIconPageEvidence(html: string): IconPageEvidence {
   const title = /<title[^>]*>\s*([^<]+?)\s*<\/title>/iu.exec(html)?.[1]?.replace(/\s+/gu, ' ').trim().slice(0, 300);
   const ogSiteName = metaContent(html, 'og:site_name');
   const ogTitle = metaContent(html, 'og:title');
+  const declared = declaredEmployer(html, title);
   return {
     organizations: organizations.slice(0, MAX_JSON_LD_NODES),
+    ...(declared.website ? { declaredWebsite: declared.website } : {}),
+    ...(declared.name ? { declaredEmployerName: declared.name } : {}),
     ...(title ? { title } : {}),
     ...(ogSiteName ? { ogSiteName } : {}),
     ...(ogTitle ? { ogTitle } : {}),
   };
+}
+
+/**
+ * Whether a domain a model proposed really is the employer's site.
+ *
+ * This is the independent check that makes a proposal usable: the domain must
+ * present itself as that employer, in its own metadata, when fetched. It may name
+ * the catalog's employer name or the name the employer's ATS board declares —
+ * `RV Tech` is catalogued that way while the company calls itself `Rivian and
+ * Volkswagen Group Technologies`. Nothing else about the proposal is trusted, so a
+ * plausible but wrong domain cannot pass.
+ */
+export function proposedDomainMatchesEmployer(
+  evidence: IconPageEvidence,
+  canonicalName: string,
+  declaredName?: string,
+): boolean {
+  const stated = [
+    evidence.title, evidence.ogSiteName, evidence.ogTitle, evidence.declaredEmployerName,
+    ...evidence.organizations.flatMap((organization) => organization.name ?? []),
+  ].filter((value): value is string => Boolean(value));
+  for (const name of [canonicalName, ...(declaredName ? [declaredName] : [])]) {
+    if (stated.some((value) => iconTextMatchesEmployer(value, name))) return true;
+    if (stated.some((value) => providerNameMatchesEmployer(value, name))) return true;
+  }
+  return false;
 }

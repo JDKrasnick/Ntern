@@ -232,8 +232,8 @@ describe('employer icon diagnosis', () => {
     });
 
     const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
-    expect(winner?.signals).toEqual(expect.arrayContaining(['logo-dev', 'page-title', 'ats-tenant']));
-    expect(winner?.evidenceIds).toHaveLength(3);
+    expect(winner?.signals).toEqual(expect.arrayContaining(['logo-dev', 'page-title', 'platform-name', 'ats-tenant']));
+    expect(winner?.evidenceIds).toHaveLength(4);
     expect(diagnostic.decision.outcome).toBe('llm-review');
     // The transport host itself is still never selectable.
     expect(diagnostic.decision.scores.find((candidate) => candidate.domain === 'greenhouse.io')?.rejected).toBe(true);
@@ -487,7 +487,7 @@ describe('employer icon image gating', () => {
       .get('acme') as { evidence_json: string };
     const evidence = JSON.parse(row.evidence_json) as { tieBreak?: { citedEvidenceIds?: string[]; inputTokens?: number } };
     expect([...(evidence.tieBreak?.citedEvidenceIds ?? [])].sort())
-      .toEqual(['ats-tenant:acme.com', 'logo-dev:acme.com', 'page-title:acme.com']);
+      .toEqual(['ats-tenant:acme.com', 'logo-dev:acme.com', 'page-title:acme.com', 'platform-name:acme.com']);
     expect(evidence.tieBreak?.inputTokens).toBe(200);
   });
 
@@ -789,6 +789,151 @@ describe('employer icon official application host', () => {
     // nomination the shorter brand name legitimately matches.
     expect(diagnostic.logoDevDomains).toEqual(['flagshippioneering.com']);
     expect(diagnostic.decision.scores.find((entry) => entry.domain === 'flagshippioneering.com')?.rejected).toBe(false);
+  });
+});
+
+describe('employer icon platform declarations and proposals', () => {
+  const ashbyPage = (website: string, employer: string) => html(
+    `<!doctype html><html><head><title>${employer} Jobs</title></head><body>`
+    + `<script>window.__appData={"organization":{"publicWebsite":"${website}"}}</script></body></html>`,
+  );
+
+  it('resolves an Ashby posting from the site its own board declares, with no provider', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('retell-ai', 'Retell AI'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://jobs.ashbyhq.com/retell-ai/abc'),
+      canonicalEmployerId: 'retell-ai', displayName: 'Retell AI', provider: 'ashby', tenant: 'board-1',
+      provenance: 'official-ats',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      'https://jobs.ashbyhq.com/retell-ai/abc': () => ashbyPage('https://www.retellai.com/', 'Retell AI'),
+    });
+    const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => {
+      const input = JSON.parse(request.prompt.user) as { candidates: Array<{ domain: string; evidenceIds: string[] }> };
+      const chosen = input.candidates.find((candidate) => candidate.domain === 'retellai.com')!;
+      return {
+        response: { decision: 'accept', officialDomain: 'retellai.com', confidence: 0.95,
+          evidenceIds: chosen.evidenceIds, reason: 'the board declares this site' },
+        inputTokens: 10, outputTokens: 5, actualCostCents: 1,
+      };
+    };
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+    );
+
+    expect(result.resolved).toBe(1);
+    expect((await icons.context('retell-ai'))?.websiteDomain).toBe('retellai.com');
+  });
+
+  it('publishes a proposed domain only after the domain names the employer itself', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'),
+      provenance: 'official-ats',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      // The posting names nothing and the board does not corroborate the employer.
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html('<!doctype html><html><head><title>Open role</title></head></html>'),
+      // The proposed domain answers for itself.
+      'https://acme.com/': () => html('<!doctype html><html><head><title>Acme — building things</title></head></html>'),
+    });
+    const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => ({
+      response: request.schemaName === 'company_icon_domain_proposal'
+        ? { domain: 'https://www.acme.com/careers', confidence: 0.95, reason: 'the employer is Acme' }
+        : { decision: 'reject', officialDomain: null, confidence: 0, evidenceIds: [], reason: 'nothing to choose' },
+      inputTokens: 20, outputTokens: 8, actualCostCents: 1,
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+    );
+
+    expect(result.resolved).toBe(1);
+    const context = await icons.context('acme');
+    expect(context?.websiteDomain).toBe('acme.com');
+    const row = (subject().database, await icons.reviewQueue(5));
+    expect(row).toEqual([]);
+  });
+
+  it('discards a proposal the proposed domain itself does not confirm', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'),
+      provenance: 'official-ats',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html('<!doctype html><html><head><title>Open role</title></head></html>'),
+      // A plausible domain that turns out to belong to somebody else entirely.
+      'https://acme.com/': () => html('<!doctype html><html><head><title>Industrial Fastener Supply</title></head></html>'),
+    });
+    const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => ({
+      response: request.schemaName === 'company_icon_domain_proposal'
+        ? { domain: 'acme.com', confidence: 0.99, reason: 'the obvious domain' }
+        : { decision: 'reject', officialDomain: null, confidence: 0, evidenceIds: [], reason: 'nothing to choose' },
+      inputTokens: 20, outputTokens: 8, actualCostCents: 1,
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+    );
+
+    expect(result.resolved).toBe(0);
+    const context = await icons.context('acme');
+    expect(context?.websiteDomain).toBeUndefined();
+    expect(context?.resolutionStatus).toBe('unresolved');
+  });
+
+  it('refuses a proposed transport host outright', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'),
+      provenance: 'official-ats',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html('<!doctype html><html><head><title>Open role</title></head></html>'),
+    });
+    const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => ({
+      response: request.schemaName === 'company_icon_domain_proposal'
+        ? { domain: 'greenhouse.io', confidence: 0.99, reason: 'the host in the url' }
+        : { decision: 'reject', officialDomain: null, confidence: 0, evidenceIds: [], reason: 'nothing to choose' },
+      inputTokens: 20, outputTokens: 8, actualCostCents: 1,
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+    );
+
+    expect(result.resolved).toBe(0);
+    expect((await icons.context('acme'))?.websiteDomain).toBeUndefined();
+  });
+
+  it('searches the provider with the name the employer’s board declares', async () => {
+    const diagnostic = await diagnoseEmployerIcon({
+      seed: {
+        ...employerSeed('https://jobs.ashbyhq.com/rivianvw.tech/abc'),
+        canonicalEmployerId: 'rivianvw-tech', displayName: 'RV Tech', provider: 'ashby', tenant: 'board-1',
+      },
+      credentials: { logoDevToken: LOGO_TOKEN },
+      deps: DEPENDENCIES(scriptedFetch({
+        'https://jobs.ashbyhq.com/rivianvw.tech/abc': () => ashbyPage('https://rivianvw.tech/', 'Rivian and Volkswagen Group Technologies'),
+        [logoDevSearchUrl('RV Tech')]: () => ok([]),
+        [logoDevSearchUrl('Rivian and Volkswagen Group Technologies')]: () =>
+          ok([{ name: 'Rivian and Volkswagen Group Technologies', domain: 'rivianvw.tech' }]),
+      })),
+    });
+
+    // The catalog calls it `RV Tech`; the board knows the company's real name, and
+    // that is the query which finds the domain.
+    expect(diagnostic.logoDevDomains).toEqual(['rivianvw.tech']);
   });
 });
 
