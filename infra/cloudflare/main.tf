@@ -196,6 +196,7 @@ resource "cloudflare_workers_script" "application" {
   )
 
   migrations = {
+    old_tag            = ""
     new_tag            = "v4-resume-pdf-compiler-v2"
     new_sqlite_classes = ["ResumePdfCompilerV2"]
   }
