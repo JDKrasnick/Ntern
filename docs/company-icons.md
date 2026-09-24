@@ -42,31 +42,57 @@ Most canonical employers are created before anyone has an icon for them, and a r
 
 ### What the evidence can and cannot prove
 
-The catalog's dominant posting shape is an ATS-hosted page on `job-boards.greenhouse.io`, `jobs.lever.co`, or `jobs.ashbyhq.com`. Those pages prove *which employer is hiring* — the title usually ends in `at <Employer>` — but they never name the employer's domain, because the host is transport. Three separate kinds of employer-identity evidence are therefore collected, and any two of them are enough to send one candidate to the tie-breaker:
+Two posting shapes carry very different evidence.
+
+**On the employer's own domain** (a direct careers link, or an employer-hosted ATS riding a vanity host): the link itself proves the domain, and the page usually confirms the employer in its title, OpenGraph, or structured data. A Workday-backed role that starts on `jobs.intel.com` and redirects into a Workday host resolves to `intel.com` off the redirect chain, and the Workday host is rejected as transport.
+
+**On a platform host** (`job-boards.greenhouse.io`, `jobs.lever.co`, `jobs.ashbyhq.com`): the page proves *which employer is hiring* — the title usually ends in `at <Employer>` — but never names the employer's domain, because the host is transport. Here the provider's nomination carries the domain and the page carries the identity.
+
+Four kinds of employer-identity evidence are collected, and any two are enough to send one candidate to the tie-breaker:
 
 1. **The posting page** naming the employer in `<title>`, OpenGraph, or JSON-LD Organization. Compared after corporate suffixes *and* organizational qualifiers are removed, so a page showing the brand alone still counts for a catalog name like `Palantir Technologies` or `Flagship Pioneering Co-Op Program`.
-2. **The provider's own reported brand name**, matched with the same symmetry: it must contain every distinctive employer term and add no distinctive term of its own. `Flagship Pioneering` describes `Flagship Pioneering Co-Op Program`; `Scale Computing` never describes `Scale AI`.
-3. **The posting's reviewed ATS board slug**, compared against the canonical employer ID. It is part of the provider identity the catalog already reviewed, so it is independent of whatever domain a provider nominates.
+2. **The structured Organization block**, whose domain is read from `url` *and* `sameAs`. Publishers routinely use `sameAs` for an Organization's site — Stripe's own `hiringOrganization` does — and reading only `url` left this entire 0.35 evidence class dead in production. A profile URL in `sameAs` is collected but can never become a candidate, because social platforms are transport.
+3. **The provider's own reported brand name**, matched symmetrically: it must contain every distinctive employer term and add no distinctive term of its own. `Flagship Pioneering` describes `Flagship Pioneering Co-Op Program` and `IMC Trading` describes `IMC`; `Scale Computing` never describes `Scale AI`.
+4. **The posting's reviewed ATS board slug**, compared against the canonical employer ID on whole segments and affixes from four characters. It is independent of whatever domain a provider nominates, and it carries the case where the page is challenge-gated or names an agency (`axontalentcommunity` hosts `axon`).
 
 Identity evidence is attached to a domain the page itself named, or, when it names none, only to the candidates a **provider** nominated. It is never attached to an arbitrary host, so it cannot vouch for an unrelated domain, and a page naming a *different* employer contributes no page evidence at all.
 
+A platform domain is normally rejected outright. One narrow exemption keeps the platform owners reachable: `employerNamesDomain` unblocks the host when the employer's own name denotes it, so `google.com` is reachable for Google, `github.com` for GitHub, and `rippling.com` for Rippling, while `greenhouse.io` stays unreachable for anyone but Greenhouse.
+
 **Automatic resolution still requires two independent identifiers**, because the tie-breaker may only accept on that basis. A page cannot be the only evidence, and neither can a lone provider nomination.
 
-Measured against 18 real employers sampled from the live catalog (quant firms, public companies, and startups), driving the real resolver over the real application links, with real page fetches, real tenants read from the board URLs, and providers plus the image endpoint deterministically simulated so no credential was needed. The expected domain for each employer was **verified by fetching it and confirming it names that employer** — an earlier assumption of `rivian.com` for the Rivian/Volkswagen venture was wrong, and `bot.auto`, `rocketlabcorp.com`, and `scale.com` replaced guesses that no longer resolve.
+### Measured
 
-| Providers configured | Automatic | Correct | Incorrect | Then operator-confirmed |
-|---|---:|---:|---:|---:|
-| Neither | 0/18 | 0 | 0 | — |
-| Logo.dev only | 17/18 | 17 | **0** | **18/18** |
-| Logo.dev + Brandfetch | 17/18 | 17 | **0** | **18/18** |
+Two cohorts from the live catalog, driven through the real resolver over real application links, with real page fetches and the real reviewed board slug read from each board URL. Providers and the image endpoint were deterministically simulated, because no provider credential was available; provider *hit rates* therefore remain unmeasured, but every scoring, attribution, threshold, and validation rule is real. **Every expected domain was verified by fetching it and confirming it names that employer** — which corrected several of my own guesses, including that the Rivian/Volkswagen venture is `rivianvw.tech` and not `rivian.com`, and that `pylon.com` and `basepower.com` belong to *different* companies than Pylon and Base Power.
 
-With **no provider configured the resolver publishes nothing**, and that is correct: the posting page cannot prove a domain for an ATS-hosted role, so there is genuinely no domain evidence to act on.
+| Cohort | Providers | Model | Published | Correct | Incorrect |
+|---|---|---:|---:|---:|---:|
+| Own domain (28) | none | no | 3 | 3 | **0** |
+| Own domain (28) | none | yes | 20 | 20 | **0** |
+| Own domain (28) | Logo.dev | yes | 28 | 28 | **0** |
+| Own domain (28) | Logo.dev + Brandfetch | yes | 28 | 28 | **0** |
+| Platform host (26) | none | yes | 5 | 5 | **0** |
+| Platform host (26) | Logo.dev | yes | 26 | 26 | **0** |
+| Platform host (26) | Logo.dev + Brandfetch | yes | 26 | 26 | **0** |
 
-The one automatic remainder is the Rivian/Volkswagen joint venture: its catalog name is `RV Tech`, while both its page and the brand the provider reports are `Rivian and Volkswagen Group Technologies`, so the provider nomination is correctly refused rather than published as `rivian.com` — which is a *different company*. That is the case the exception queue exists for, and `POST …/employer-icons/confirm` settles it in one request.
+Four platform-hosted employers are excluded from the denominator because no domain of theirs could be verified at all; they are program or confidential boards (`walleyecapital-external-students`, `samsungresearchamericainternship`, `stackadapt-confidential`, `toshiba-global-commerce-solutions`).
 
-**No incorrect domain was published in any configuration**, across repeated runs. Provider *hit rates* remain unmeasured and need the operator's keys; only the decision logic is validated here.
+Read across: on its own domain a role resolves without **any** provider once structured data is present, and with one provider the coverage is complete. On a platform host, provider consensus resolves everything automatically, and Logo.dev alone reaches every employer through the tie-breaker. Provider-free operation is deliberately partial: a platform-hosted posting whose page declares nothing yields 21 monograms and no wrong domains.
 
-Two further findings from that run are recorded because they shaped the design: a page's metadata is best-effort (repeated rapid requests occasionally returned a page whose title omitted the employer, and the board-slug signal covered it), and a posting page larger than the ceiling is truncated rather than rejected — a 1.96 MB Lever page previously failed the whole fetch and cost that employer its icon.
+**No incorrect domain was published in any configuration.** Every evidence signal and every decision path was exercised by the run:
+
+| Signal | Times present on the winning candidate |
+|---|---:|
+| `page-title` | 120 |
+| `final-url` | 110 |
+| `logo-dev` | 108 |
+| `opengraph` | 68 |
+| `ats-tenant` | 57 |
+| `brandfetch` | 54 |
+| `redirect-host` | 34 |
+| `jsonld-url` / `jsonld-name` | 29 each |
+
+Decision paths taken: automatic resolution, tie-break acceptance, and monogram fallback, all in both cohorts.
 
 ### Provider terms
 

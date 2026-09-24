@@ -182,7 +182,8 @@
 - [x] Keep official-form opens from directly changing application records; Save is the explicit To Apply action and Applied requires a manual or confirmed Gmail transition.
 - [x] Add the reviewed default-deny assistance policy, versioned session API, short-lived handoff credentials, and session metadata TTL.
 - [x] Resolve company icons automatically: score the application link, redirect chain, JSON-LD Organization, and two independent logo providers; accept a domain only above the reviewed threshold; escalate one bounded, schema-validated tie-breaker in the middle band; back off on transient failures; and fall back to a deterministic monogram. Never block or hide a role.
-- [ ] Run the read-only `discover:employer-icon` sample over ~20 employers, then hold icon resolution in observe mode for a week before enabling automatic display.
+- [x] Validate the resolver read-only against two real cohorts from the live catalog — 28 employers whose application link is on their own domain and 26 platform-hosted employers — verifying every expected domain against the live site. Zero incorrect domains in any provider configuration; on its own domain a role resolves with no provider once structured data is present.
+- [ ] Hold icon resolution in observe mode for a week before enabling automatic display.
 - [ ] Enable Logo.dev R2 caching only after the selected plan's self-hosting and retention rights are confirmed.
 - [x] Define and test Greenhouse and Lever high-confidence route detection plus the simple-field, review-only, and never-fill policy.
 - [x] Build a local-only headed, no-submit browser companion pilot for reviewed Greenhouse and Lever test forms.
