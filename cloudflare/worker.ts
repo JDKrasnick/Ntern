@@ -168,8 +168,9 @@ function catalogAdmissionResolver(env: Environment): CatalogAdmissionResolver {
 }
 
 const DOH_QUERY_TIMEOUT_MS = 8_000;
+const DNS_RECORD_TYPE: Readonly<Record<'A' | 'AAAA' | 'TXT', number>> = { A: 1, AAAA: 28, TXT: 16 };
 
-export async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise<Array<{ data?: string }>> {
+export async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise<Array<{ type?: number; data?: string }>> {
   const endpoint = new URL('https://cloudflare-dns.com/dns-query');
   endpoint.searchParams.set('name', name); endpoint.searchParams.set('type', type);
   let response: Response;
@@ -181,8 +182,12 @@ export async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise
     throw new Error(`DNS verification timed out for ${name} (${type}): ${error instanceof Error ? error.message : String(error)}`);
   }
   if (!response.ok) throw new Error('DNS verification is temporarily unavailable');
-  const value = await response.json() as { Answer?: Array<{ data?: string }> };
-  return value.Answer ?? [];
+  const value = await response.json() as { Answer?: Array<{ type?: number; data?: string }> };
+  // A recursive answer carries the whole CNAME chain before the requested
+  // records. Keeping the CNAME target (for example `boards.us.example.com.`)
+  // would make `assertPublicHttpsUrl` treat a hostname as a non-public IP and
+  // reject an otherwise public host, so keep only the requested record type.
+  return (value.Answer ?? []).filter((answer) => answer.type === DNS_RECORD_TYPE[type]);
 }
 
 const publicHostResolver = {

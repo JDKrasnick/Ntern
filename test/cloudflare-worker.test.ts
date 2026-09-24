@@ -729,12 +729,28 @@ describe('Cloudflare DNS resolver queries', () => {
     globalThis.fetch = (async (url: URL | RequestInfo, init?: RequestInit) => {
       endpoints.push(String(url));
       signals.push(init?.signal ?? undefined);
-      return new Response(JSON.stringify({ Answer: [{ data: '203.0.113.10' }] }), { status: 200 });
+      return new Response(JSON.stringify({ Answer: [{ type: 1, data: '203.0.113.10' }] }), { status: 200 });
     }) as typeof fetch;
     try {
-      await expect(dnsJson('boards.example.test', 'A')).resolves.toEqual([{ data: '203.0.113.10' }]);
+      await expect(dnsJson('boards.example.test', 'A')).resolves.toEqual([{ type: 1, data: '203.0.113.10' }]);
       expect(signals[0]).toBeInstanceOf(AbortSignal);
       expect(endpoints[0]).toContain('type=A');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('keeps only the requested record type so a CNAME target is never an address', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ Answer: [
+      { type: 5, data: 'boards.us.example.test.' },
+      { type: 1, data: '13.32.241.9' },
+      { type: 1, data: '13.32.241.121' },
+    ] }), { status: 200 })) as typeof fetch;
+    try {
+      // `assertPublicHttpsUrl` rejects any answer that is not a public IP, so a
+      // CNAME target hostname must never reach its address list.
+      await expect(dnsJson('boards-api.example.test', 'A')).resolves.toEqual([{ type: 1, data: '13.32.241.9' }, { type: 1, data: '13.32.241.121' }]);
     } finally {
       globalThis.fetch = original;
     }
