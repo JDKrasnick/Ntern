@@ -126,18 +126,31 @@ jobs:
           aws s3 cp "$RUNNER_TEMP/cloudflare-before.tfstate" \
             "s3://intern-notifs-opentofu-state/$release/cloudflare-before.tfstate" \
             --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
-      - name: Reconcile the resume Worker migration state
+      - name: Reconcile Worker migration state
         shell: bash
         run: |
-          if ! rg -q 'old_tag\s*=\s*""' infra/cloudflare/main.tf; then
-            exit 0
+          reconcile_worker() {
+            local resource="$1"
+            local script_name="$2"
+            tofu -chdir=infra/cloudflare state rm "$resource"
+            tofu -chdir=infra/cloudflare import \
+              "$resource" \
+              "$TF_VAR_cloudflare_account_id/$script_name"
+          }
+
+          if rg -q 'new_tag\s*=\s*"v1-d1-traffic-controller"' infra/cloudflare/main.tf \
+            && rg -Uq 'old_tag\s*=\s*""\s*\n\s*new_tag\s*=\s*"v1-d1-traffic-controller"' infra/cloudflare/main.tf; then
+            if ! reconcile_worker cloudflare_workers_script.ingestion intern-notifs-ingestion; then
+              tofu -chdir=infra/cloudflare state push -force "$RUNNER_TEMP/cloudflare-before.tfstate"
+              exit 1
+            fi
           fi
-          tofu -chdir=infra/cloudflare state rm cloudflare_workers_script.application
-          if ! tofu -chdir=infra/cloudflare import \
-            cloudflare_workers_script.application \
-            "$TF_VAR_cloudflare_account_id/intern-notifs"; then
-            tofu -chdir=infra/cloudflare state push -force "$RUNNER_TEMP/cloudflare-before.tfstate"
-            exit 1
+
+          if rg -Uq 'old_tag\s*=\s*""\s*\n\s*new_tag\s*=\s*"v4-resume-pdf-compiler-v2"' infra/cloudflare/main.tf; then
+            if ! reconcile_worker cloudflare_workers_script.application intern-notifs; then
+              tofu -chdir=infra/cloudflare state push -force "$RUNNER_TEMP/cloudflare-before.tfstate"
+              exit 1
+            fi
           fi
       - name: Create and validate saved plan
         id: plan

@@ -317,13 +317,13 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     && isDeepStrictEqual(before.limits, { cpu_ms: 120_000, subrequests: 10_000 })
     && isDeepStrictEqual(after.limits, { cpu_ms: 120_000, subrequests: 50_000 });
   const permittedControllerMigration = address === 'cloudflare_workers_script.ingestion'
-    && permittedBindingChanged
     && (before.migrations === null || before.migrations === undefined)
     && isRecord(after.migrations)
+    && after.migrations.old_tag === ''
     && after.migrations.new_tag === 'v1-d1-traffic-controller'
     && isDeepStrictEqual(after.migrations.new_sqlite_classes, ['D1TrafficController'])
     && Object.entries(after.migrations).every(([key, value]) => (
-      ['new_tag', 'new_sqlite_classes'].includes(key) || value === null
+      ['old_tag', 'new_tag', 'new_sqlite_classes'].includes(key) || value === null
     ));
   const permittedResumeMigrationTagTransition = address === 'cloudflare_workers_script.application'
     && isResumeMigrationTagTransition(before.migrations, after.migrations);
