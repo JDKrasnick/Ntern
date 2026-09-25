@@ -290,11 +290,11 @@ All routes require the `X-Operations-Key` secret and return `Cache-Control: no-s
 |---|---|
 | `GET /internal/admission/employer-icons` | Settings, resolution counts by status, the exception queue, and which providers are configured. |
 | `PUT /internal/admission/employer-icons/settings` | `mode` (`off`, `observe`, `resolve`), `maxPerSweep`, and the retention confirmation. |
-| `POST /internal/admission/employer-icons/resolve` | Force a fresh decision for one employer, and re-arm one whose automatic decision was withdrawn. |
+| `POST /internal/admission/employer-icons/resolve` | Force a fresh decision for one employer, and re-arm one whose automatic decision was withdrawn. Re-arming re-uses the employer's own task, so a resolve never seeds a second one. |
 | `POST /internal/admission/employer-icons/confirm` | Settle one employer by hand with a bare hostname. Rejects an ATS or job-board host and refuses a domain with no real logo, so a person can name a domain but never vouch for a broken icon. |
 | `POST /internal/admission/employer-icons/report-wrong` | Withdraw an automatic icon immediately and sort the employer to the front of the exception queue. A reviewer-uploaded icon is never withdrawn. |
 
-A wrong-icon report is deliberately terminal for the automatic path: the sweep will not re-decide that employer until a person has looked at it. Once the review is finished, `resolve` re-arms the withdrawn rows, and the next sweep decides again from fresh evidence.
+A wrong-icon report is deliberately terminal for the automatic path: the sweep will not re-decide that employer until a person has looked at it. Once the review is finished, `resolve` re-arms the withdrawn rows, and the next sweep decides again from fresh evidence. An employer the resolver has never swept has no task row to withdraw, so the report writes one `invalidated` row of its own: a report always appears in the exception queue rather than leaving the employer silently withdrawn. `resolve` then re-arms that row, exactly as it would a swept one.
 
 A `confirm` on an employer the resolver has never swept is settled the same way: the canonical decision is written with no task row, so the backfill and any later admission skip it and a stale task seeded by an earlier deploy is dropped rather than allowed to overwrite the confirmed domain. That is different from an *automatic* resolution, which always leaves its resolved task row behind and is therefore still re-validated: after the 30-day window a fresh admission seeds a new task and the sweep decides again. `resolve` is the deliberate override for both: it clears the settled status and re-arms the rows, so a confirmed domain can be re-looked instead of being permanent.
 

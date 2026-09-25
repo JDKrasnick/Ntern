@@ -95,7 +95,12 @@ export async function handleEmployerIconOperations(
       // withdrawn decision becomes eligible again on this request.
       const reopened = await store.reopen(id, timestamp);
       const tenant = optionalText(input.tenant, 300);
-      const enqueued = await enqueueEmployerIconResolution(store, {
+      // A re-armed row already is the fresh decision. Enqueueing a second task would
+      // leave two claimable rows for one employer, and because `claimDue` has no
+      // per-employer exclusivity the stale reopened evidence could be decided after
+      // the new one and win. Seed only when `reopen` had nothing to re-arm: an
+      // employer a person settled before any sweep reached it.
+      const enqueued = reopened > 0 ? false : await enqueueEmployerIconResolution(store, {
         canonicalEmployerId: id,
         displayName: context.displayName,
         roleTitle: optionalText(input.roleTitle, 200) ?? '',

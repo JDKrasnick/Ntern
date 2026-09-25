@@ -1126,6 +1126,26 @@ describe('employer icon wrong-match reports', () => {
     expect(context?.iconKey).toBe('company-icons/globex/reviewed.webp');
     expect(context?.iconSource).toBe('reviewed');
   });
+
+  it('files a review row for a report on an employer the resolver never swept', async () => {
+    const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('kirin', 'Kirin'), NOW.toISOString());
+
+    // No sweep ever reached this employer, so there is no task row to withdraw. The
+    // report still has to surface: the queue reads the task table, and the backfill
+    // would otherwise treat the employer as undecided and re-decide it.
+    await icons.invalidate('kirin', NOW.toISOString(), 'wrong-icon-report');
+
+    const queue = await icons.reviewQueue(10);
+    expect(queue).toEqual([
+      expect.objectContaining({ canonicalEmployerId: 'kirin', status: 'invalidated', reviewPriority: 100 }),
+    ]);
+    expect((await icons.context('kirin'))?.resolutionStatus).toBe('invalidated');
+
+    // A second report updates the row it filed instead of adding another.
+    await icons.invalidate('kirin', NOW.toISOString(), 'wrong-icon-report');
+    expect(await icons.reviewQueue(10)).toHaveLength(1);
+  });
 });
 
 describe('employer icon idempotency', () => {
@@ -1896,6 +1916,41 @@ describe('employer icon confirm route', () => {
     expect(sweep.claimed).toBe(1);
     expect(sweep.resolved).toBe(1);
   });
+
+  it('reopens an automatic resolution without seeding a second task', async () => {
+    const { database, db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/role': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(),
+    });
+    const env = environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN });
+    expect((await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl))).resolved).toBe(1);
+
+    // The stored decision is stale. `resolve` re-arms its own task instead of seeding
+    // another, so the employer has exactly one claimable row and the stale evidence
+    // cannot be decided after a fresh one in the same pass.
+    const resolveRequest = new Request('https://api.test/internal/admission/employer-icons/resolve', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ canonicalEmployerId: 'acme' }),
+    });
+    const response = await handleEmployerIconOperations(
+      resolveRequest, icons, () => ({ logoDev: true, brandfetch: true, tieBreaker: true }), () => NOW,
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ enqueued: false, reopened: 1 });
+    expect((await icons.context('acme'))?.resolutionStatus).toBeUndefined();
+    const pending = database.prepare(`SELECT COUNT(*) AS count FROM employer_icon_resolutions
+      WHERE canonical_employer_id = 'acme' AND status IN ('retryable', 'unresolved')`).get() as { count: number };
+    expect(pending.count).toBe(1);
+
+    const sweep = await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl));
+    expect(sweep.claimed).toBe(1);
+    expect(sweep.resolved).toBe(1);
+  });
 });
 
 describe('employer icon tie-breaker budget', () => {
@@ -1973,9 +2028,9 @@ describe('employers needing resolution', () => {
     await admission.putCanonicalEmployer(employerRow('freeform', 'Freeform'), NOW.toISOString());
     await admission.putCanonicalEmployer(employerRow('kirin', 'Kirin'), NOW.toISOString());
     // An operator settles both before any sweep reaches them: `confirm` records the
-    // domain, `report-wrong` the withdrawal. Neither writes an employer_icon_resolutions
-    // row, so a decision read only from the task list would look undecided and its next
-    // sweep could overwrite the confirmed domain — or revive the reported one.
+    // domain with no task row, `report-wrong` files an invalidated one. Read from the
+    // task list alone, the confirmed employer would look undecided and its next sweep
+    // could overwrite the domain a person chose.
     await icons.markConfirmed({
       canonicalEmployerId: 'freeform', domain: 'freeformfuture.com', evidenceJson: '{"kind":"confirmed"}',
       revalidateAt: new Date(NOW.getTime() + 86_400_000).toISOString(), now: NOW.toISOString(),
@@ -1983,6 +2038,8 @@ describe('employers needing resolution', () => {
     await icons.invalidate('kirin', NOW.toISOString(), 'wrong-icon-report');
 
     expect(await icons.employersNeedingResolution(10)).toEqual([]);
+    // The report is queued for a person even though no sweep had reached it.
+    expect((await icons.reviewQueue(10)).map((item) => item.canonicalEmployerId)).toEqual(['kirin']);
     // A fresh admission for either employer is not a reason to re-decide them.
     expect(await enqueueEmployerIconResolution(icons, {
       canonicalEmployerId: 'freeform', displayName: 'Freeform', roleTitle: 'Intern',

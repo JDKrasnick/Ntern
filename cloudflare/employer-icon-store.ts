@@ -208,11 +208,11 @@ export class D1EmployerIconStore {
   /**
    * Whether an earlier task for this employer already ended `resolved`.
    *
-   * An automatic resolution always leaves one behind; a decision an operator wrote
-   * for an employer that was never swept (`confirm`, or `report-wrong`) does not.
-   * The resolver uses this to tell a task seeded under an operator's decision —
-   * which must be dropped — from a fresh task seeded after the revalidation
-   * window of an automatic one, which must be re-decided.
+   * An automatic resolution always leaves one behind; an operator `confirm` on an
+   * employer that was never swept does not. The resolver uses this to tell a task
+   * seeded under an operator's decision — which must be dropped — from a fresh
+   * task seeded after the revalidation window of an automatic one, which must be
+   * re-decided.
    */
   async hasResolvedTask(canonicalEmployerId: string): Promise<boolean> {
     const row = await this.db.prepare(`SELECT 1 AS found FROM employer_icon_resolutions
@@ -303,15 +303,32 @@ export class D1EmployerIconStore {
    * Invalidates every automatic decision for one employer and clears the icon the
    * resolver wrote. A reviewer-uploaded icon is preserved: only a key this
    * resolver owns (`icon_source = 'logo-dev'`) is withdrawn.
+   *
+   * An employer the resolver never swept has no task row, so the withdrawal would
+   * otherwise be invisible: `reviewQueue` reads this table and the canonical status
+   * alone surfaces nothing. A synthetic `invalidated` row is written in that case,
+   * so a person's report always reaches the exception queue instead of leaving the
+   * employer silently withdrawn. The insert is skipped whenever any row already
+   * exists, because the update above has just covered it.
    */
   async invalidate(canonicalEmployerId: string, now: string, reason: string): Promise<void> {
+    const boundedReason = reason.slice(0, 200);
     await this.db.batch([
       this.db.prepare(`UPDATE employer_icon_resolutions SET status = 'invalidated', invalidated_at = ?,
         review_priority = ?, next_retry_at = NULL, lease_token = NULL, lease_until = NULL,
         evidence_json = CASE WHEN json_valid(evidence_json)
           THEN json_set(evidence_json, '$.invalidatedReason', ?) ELSE evidence_json END,
         updated_at = ? WHERE canonical_employer_id = ? AND status <> 'invalidated'`)
-        .bind(now, employerIconWrongMatchPriority, reason.slice(0, 200), now, canonicalEmployerId),
+        .bind(now, employerIconWrongMatchPriority, boundedReason, now, canonicalEmployerId),
+      this.db.prepare(`INSERT INTO employer_icon_resolutions
+        (id, canonical_employer_id, evidence_fingerprint, status, evidence_json, attempts, next_retry_at,
+          review_priority, invalidated_at, created_at, updated_at)
+        SELECT ?, ?, 'operator-report', 'invalidated', ?, 0, NULL, ?, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM employer_icon_resolutions WHERE canonical_employer_id = ?)`)
+        .bind(crypto.randomUUID(), canonicalEmployerId, JSON.stringify({
+          version: 1, kind: 'operator-report', canonicalEmployerId,
+          reasonCode: 'operator-report', invalidatedReason: boundedReason,
+        }), employerIconWrongMatchPriority, now, now, now, canonicalEmployerId),
       this.db.prepare(`UPDATE canonical_employers SET
         icon_key = CASE WHEN icon_source IN ('logo-dev', 'platform', 'domain-asset') THEN NULL ELSE icon_key END,
         icon_source = CASE WHEN icon_source IN ('logo-dev', 'platform', 'domain-asset') THEN NULL ELSE icon_source END,
