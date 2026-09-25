@@ -424,12 +424,34 @@ export async function recordQueueFailure(input: QueueFailureInput): Promise<void
       safeDiagnostic(input.error), now, now).run();
 }
 
+/** Marker key for the last failure-ledger write that did not succeed. Read by
+ * the scheduled ingestion-health alert so the condition is not console-only. */
+export const LEDGER_FAILURE_PK = 'OPERATIONS#LEDGER_FAILURE';
+export const LEDGER_FAILURE_SK = 'LAST';
+
+/** Records that a per-message failure could not be written to the ledger. The
+ * ledger is already failing on this path, so the marker is best effort: a miss
+ * must never throw, and the console event remains the fallback signal. */
+export async function recordLedgerWriteFailure(
+  db: D1Database,
+  input: { at: string; queueName: string; messageId: string },
+): Promise<void> {
+  try {
+    await db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, ?, 'queue-failure-ledger-failure', ?)
+      ON CONFLICT(pk, sk) DO UPDATE SET value = excluded.value`)
+      .bind(LEDGER_FAILURE_PK, LEDGER_FAILURE_SK, JSON.stringify(input)).run();
+  } catch { /* the ledger is already failing; a marker miss is not a second incident */ }
+}
+
 export async function recordQueueFailureBestEffort(input: QueueFailureInput): Promise<boolean> {
   try {
     await recordQueueFailure(input);
     return true;
   } catch (error) {
     console.error(JSON.stringify({ command: 'queue-failure-ledger', messageId: input.messageId, error: safeDiagnostic(error) }));
+    await recordLedgerWriteFailure(input.db, {
+      at: (input.now ?? new Date()).toISOString(), queueName: input.queueName, messageId: input.messageId,
+    });
     return false;
   }
 }

@@ -59,6 +59,7 @@ import puppeteer, { type BrowserWorker } from '@cloudflare/puppeteer';
 import { destinationVerificationMessage, enqueueDueDestinationVerifications, processDestinationVerificationBatch,
   sendAdmissionOperationalAlert, sendShadowBudgetAlert } from './destination-verification.js';
 import { cleanupDlqRecords, handleDlqOperations, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type DlqName, type PeekedMessage } from './dlq-operations.js';
+import { ingestionHealthSignals } from './ingestion-health-alert.js';
 import { classifyD1Failure } from './d1-errors.js';
 import { recentD1OverloadCount } from './d1-overload-alert.js';
 import { measureDlqGrowth, recordDlqBaseline } from './dlq-growth-alert.js';
@@ -1521,10 +1522,13 @@ async function recordScheduledDispatch(
  * maintenance cron, and a thrown error used to abort the handler — which is how
  * one failing step held the catalog projection on a day-old snapshot. The
  * failure stays visible as an error-level event instead. */
-async function runScheduledStep<T>(step: string, run: () => Promise<T>): Promise<T | undefined> {
+async function runScheduledStep<T>(step: string, run: () => Promise<T>, failures?: string[]): Promise<T | undefined> {
   try {
     return await run();
   } catch (error) {
+    // A step failure is already logged; when a caller passes a collector it is
+    // also surfaced through the scheduled ingestion-health alert.
+    failures?.push(step);
     console.error(JSON.stringify({ event: 'scheduled_step_failed', step, error: error instanceof Error ? error.message : String(error) }));
     return undefined;
   }
@@ -1814,31 +1818,35 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // cancel it. While the refresh sat last, one failing verification email or
     // alert held the feed on a day-old snapshot.
     // See docs/197-ingestion-resource-bounds.md.
-    const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store, env.DOCUMENTS));
-    await runScheduledStep('prospective_shadow_metadata', () => publishProspectiveShadowMetadata(env,
+    // Every step this pass runs through `step`, so one collector carries the whole
+    // maintenance pass's failures into the alert below rather than only to console.
+    const maintenanceFailures: string[] = [];
+    const step = <T>(name: string, run: () => Promise<T>) => runScheduledStep(name, run, maintenanceFailures);
+    const projection = await step('catalog_projection', () => refreshCatalogProjection(store, env.DOCUMENTS));
+    await step('prospective_shadow_metadata', () => publishProspectiveShadowMetadata(env,
       () => refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS)));
-    const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
-    const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
-    const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
+    const recentOverloads = await step('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
+    const admissionVerificationRetries = await step('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
+    const providerShadowRecovery = await step('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
     // Metadata collection scans the open catalog. When D1 recently refused
     // queue writes, or pressure cannot be measured, defer this background scan
     // so the public projection and source consumers keep their capacity.
     const metadataCollection = recentOverloads === 0
-      ? await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt))
+      ? await step('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt))
       : { queued: 0, deferred: true };
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'metadata_collection_deferred', recentOverloads: recentOverloads ?? null }));
     // Icon resolution is pure background work that never gates publication, so it
     // yields to the projection on the same terms as metadata collection.
     const companyIconResolution = recentOverloads === 0
-      ? await runScheduledStep('company_icon_resolution', () => runEmployerIconResolutionPass(env, observedAt, {
+      ? await step('company_icon_resolution', () => runEmployerIconResolutionPass(env, observedAt, {
         resolver: publicHostResolver,
         ...(iconSvgRasterizer ? { rasterizeSvg: iconSvgRasterizer } : {}),
       }))
       : undefined;
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'company_icon_resolution_deferred', recentOverloads: recentOverloads ?? null }));
-    const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
-    const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
-    const dlqGrowth = await runScheduledStep('dlq_growth_metrics', () => measureDlqGrowth(env.DB, {
+    const queueMetrics = await step('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
+    const deadLetterMetrics = await step('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
+    const dlqGrowth = await step('dlq_growth_metrics', () => measureDlqGrowth(env.DB, {
       greenhouse: env.GREENHOUSE_DLQ, lever: env.LEVER_DLQ, ashby: env.ASHBY_DLQ,
       github: env.GITHUB_DLQ, gmail: env.GMAIL_DLQ,
       'destination-verification': env.DESTINATION_VERIFICATION_DLQ,
@@ -1847,15 +1855,22 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
     const queueAgeMs = queueMetrics?.oldestMessageTimestamp
       ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
+    // Beyond the DLQ: unresolved source failures, quarantined sources, a stalled
+    // catalog, an unavailable failure ledger, and any step that threw this pass.
+    const ingestionHealth = await step('ingestion_health_signals', () => ingestionHealthSignals(env.DB, observedAt));
     const operationalSignals = [
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),
       ...(recentOverloads ? ['d1-overloaded'] : []),
       ...(dlqGrowth && Object.keys(dlqGrowth.increases).length ? ['dlq-growth'] : []),
+      ...(ingestionHealth?.signals ?? []),
+      ...(maintenanceFailures.length ? ['maintenance-step-failed'] : []),
     ];
-    const alertSent = await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
+    const alertSent = await step('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
       signals: operationalSignals, observedAt: observedAt.toISOString(),
-      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}.`,
+      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}.`
+        + (maintenanceFailures.length ? `\n\nMaintenance steps that failed: ${[...new Set(maintenanceFailures)].join(', ')}.` : '')
+        + (ingestionHealth?.details ? `\n\n${ingestionHealth.details}` : ''),
     }));
     if (dlqGrowth?.changed && (!Object.keys(dlqGrowth.increases).length || alertSent)) {
       await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts));
