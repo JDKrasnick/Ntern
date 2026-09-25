@@ -5794,7 +5794,6 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   const [previewArtifact, setPreviewArtifact] = useState<ResumeArtifactCard>();
   const [previewImage, setPreviewImage] = useState<string>();
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [previewRevision, setPreviewRevision] = useState<number>();
   const [artifactSource, setArtifactSource] = useState("");
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [subscription, setSubscription] = useState<ResumeSubscriptionCard>();
@@ -5826,13 +5825,11 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
     void api<{ artifact: ResumeArtifactCard }>(`/me/resume-drafts/${encodeURIComponent(draft.draftId)}/preview`, token, { method: "POST" })
       .then(async ({ artifact: rendered }) => {
         setPreviewArtifact(rendered);
-        setPreviewRevision(draft.revision);
         setPreviewImage(await loadResumeArtifactPreview(rendered.artifactId, 1, token));
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't render that preview."))
       .finally(() => setPreviewBusy(false));
   };
-  const previewStale = Boolean(previewArtifact) && !artifact && previewRevision !== draft?.revision;
   const keepRemainingOriginals = () => {
     if (!draft || resumeBusy) return;
     const remaining = draft.changes.filter((change) => !change.decision);
@@ -6562,10 +6559,9 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
                 </>
               ) : previewArtifact ? (
                 <>
-                  {previewStale ? <Text style={styles.resumePreviewCaption}>Preview is out of date with your latest decisions.</Text> : null}
                   {previewImage ? <Image accessibilityLabel="Rendered resume preview" source={{ uri: previewImage }} resizeMode="contain" style={styles.resumeRenderedPage} /> : <Text style={styles.resumePreviewCaption}>Rendering preview…</Text>}
                   <View style={styles.resumeArtifactActions}>
-                    <Text style={styles.resumePreviewCaption}>{previewArtifact.pageCount ?? 1} page{previewArtifact.pageCount === 1 ? "" : "s"} · live preview, not final</Text>
+                    <Text style={styles.resumePreviewCaption}>{previewArtifact.pageCount ?? 1} page{previewArtifact.pageCount === 1 ? "" : "s"} · proposed résumé, not final</Text>
                     <ActionButton label={previewBusy ? "Rendering…" : "Refresh preview"} variant="secondary" onPress={renderPreview} disabled={previewBusy} />
                   </View>
                 </>

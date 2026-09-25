@@ -195,7 +195,7 @@ describe('resume API ownership and revisions', () => {
     expect(rows.some((row) => row.changeId === 'rewrite')).toBe(true);
   });
 
-  it('renders a live preview of the current review state and reuses it at finalize', async () => {
+  it('renders the original and proposed pages without recompiling per decision', async () => {
     const users = new MemoryUserStore();
     await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
     await users.putResumeBankItem({ userId: 'student', bankItemId: 'bank', kind: 'project', content: 'Built a dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
@@ -207,14 +207,45 @@ describe('resume API ownership and revisions', () => {
     const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex: async () => undefined, putPdf: async () => undefined, putPreview: async () => undefined, compile } });
     const preview = await handler(event('student', 'POST', '/me/resume-drafts/draft/preview'));
     expect(preview.statusCode).toBe(200);
-    expect(JSON.parse(preview.body)).toMatchObject({ artifact: { pageCount: 1, objectKey: expect.stringMatching(/\.pdf$/u) } });
-    expect(compile).toHaveBeenCalledOnce();
+    const body = JSON.parse(preview.body) as { artifact: { objectKey: string }; original: { objectKey: string }; rows: unknown[] };
+    expect(body.artifact).toMatchObject({ pageCount: 1, objectKey: expect.stringMatching(/\.pdf$/u) });
+    expect(body.original).toMatchObject({ pageCount: 1, objectKey: expect.stringMatching(/\.pdf$/u) });
+    expect(body.artifact.objectKey).not.toBe(body.original.objectKey);
+    expect(body.rows.length).toBeGreaterThan(0);
+    // Original + proposal: two compiles for the whole review, never one per decision.
+    expect(compile).toHaveBeenCalledTimes(2);
     const draft = JSON.parse((await handler(event('student', 'GET', '/me/resume-drafts/draft'))).body) as { status: string };
     expect(draft.status).toBe('reviewing');
-    // The identical content compiled for the preview is reused when finalizing.
+    // The identical proposal compiled for the preview is reused when finalizing.
     const finalized = await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }));
     expect(finalized.statusCode).toBe(200);
-    expect(compile).toHaveBeenCalledOnce();
+    expect(compile).toHaveBeenCalledTimes(2);
+  });
+
+  it('boxes each change on the original and proposed pages from the compiler line boxes', async () => {
+    const users = new MemoryUserStore();
+    await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'project', kind: 'project', content: 'Compiler Lab', details: { name: 'Compiler Lab', technologies: ['TypeScript'] }, verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'bullet', kind: 'bullet', parent: { kind: 'project', bankItemId: 'project' }, content: 'Built a recursive descent parser', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['project', 'bullet'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now', changes: [
+      { changeId: 'rewrite', type: 'rewrite', target: { kind: 'bullet', bankItemId: 'bullet', parent: { kind: 'project', bankItemId: 'project' } }, section: 'Projects', original: 'Built a recursive descent parser', suggestion: 'Built a parser', evidenceIds: ['bullet'], reason: 'fits' },
+    ] });
+    const head = { x: 0, y: 0.1, w: 0.4, h: 0.02, text: 'Compiler Lab — TypeScript' };
+    const proposalLines = [[head, { x: 0, y: 0.2, w: 0.5, h: 0.02, text: 'Built a parser' }]];
+    const originalLines = [[head, { x: 0, y: 0.2, w: 0.65, h: 0.02, text: 'Built a recursive descent parser' }]];
+    let call = 0;
+    const compile = vi.fn(async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer], lineBoxes: call++ === 0 ? proposalLines : originalLines }));
+    const stored = new Map<string, unknown>();
+    const storage = { putTex: async () => undefined, putPdf: async () => undefined, putPreview: async () => undefined, putLineBoxes: async (key: string, lines: string) => { stored.set(key, JSON.parse(lines)); }, getLineBoxes: async (key: string) => stored.get(key) as never, compile };
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: storage });
+    const preview = await handler(event('student', 'POST', '/me/resume-drafts/draft/preview'));
+    expect(preview.statusCode).toBe(200);
+    const row = (JSON.parse(preview.body) as { rows: Array<{ changeId?: string; beforeBox?: { page: number; x: number; y: number; w: number; h: number }; afterBox?: { page: number; x: number; y: number; w: number; h: number } }> }).rows.find((candidate) => candidate.changeId === 'rewrite');
+    expect(row?.beforeBox).toMatchObject({ page: 1, x: 0, y: 0.2 });
+    expect(row?.beforeBox?.w).toBeCloseTo(0.65, 4);
+    expect(row?.afterBox).toMatchObject({ page: 1, x: 0, y: 0.2 });
+    expect(row?.afterBox?.w).toBeCloseTo(0.5, 4);
   });
 
   it('refunds the monthly allowance when a draft cannot be persisted', async () => {

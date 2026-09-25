@@ -12,10 +12,10 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
-import { buildResumeReviewRows } from './resume-review.js';
+import { attachResumeReviewBoxes, buildResumeReviewRows } from './resume-review.js';
 import { RESUME_TEMPLATES, resumeTemplateList } from './resume-templates.js';
 import type { ResumeSemanticIndex } from './resume-embeddings.js';
 import { effectiveResumeSubscriptionPlan, resumeSubscriptionPeriod, resumeSubscriptionSummary } from './subscription.js';
@@ -393,6 +393,10 @@ export interface ResumeArtifactStorage {
   putTex(objectKey: string, tex: string): Promise<void>;
   putPdf(objectKey: string, pdf: ArrayBuffer): Promise<void>;
   putPreview?(objectKey: string, png: ArrayBuffer): Promise<void>;
+  /** Persists the compiled per-page line boxes so a review can point at a change
+   * without recompiling. */
+  putLineBoxes?(objectKey: string, lines: string): Promise<void>;
+  getLineBoxes?(objectKey: string): Promise<ResumeLineBox[][] | undefined>;
   compile(tex: string, resumeSpecHash: string): Promise<ResumeCompilation>;
 }
 
@@ -564,7 +568,9 @@ export function createApiHandler(dependencies: ApiDependencies) {
     await storage.putPdf(objectKey, compilation.pdf);
     const previewObjectKeys = compilation.previewPngs.map((_, index) => `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/preview-${index + 1}.png`);
     if (storage.putPreview) await Promise.all(compilation.previewPngs.map((png, index) => storage.putPreview!(previewObjectKeys[index]!, png)));
-    const artifact: ResumeArtifact = { userId, artifactId: randomUUID(), draftId: draft.draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, pageCount: compilation.pageCount, previewObjectKeys, createdAt };
+    const lineBoxObjectKey = compilation.lineBoxes ? `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/lines.json` : undefined;
+    if (lineBoxObjectKey && storage.putLineBoxes) await storage.putLineBoxes(lineBoxObjectKey, JSON.stringify(compilation.lineBoxes));
+    const artifact: ResumeArtifact = { userId, artifactId: randomUUID(), draftId: draft.draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, pageCount: compilation.pageCount, previewObjectKeys, ...(lineBoxObjectKey ? { lineBoxObjectKey } : {}), createdAt };
     if (!await dependencies.users.putResumeArtifact(artifact)) {
       // A concurrent compile claimed the same content-addressed row; reuse it.
       const raced = await findExisting();
@@ -1159,7 +1165,8 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const draftId = decodeURIComponent(previewDraftMatch[1]!);
           const previous = await dependencies.users.getResumeDraft(userId, draftId);
           if (!previous) return reply(404, { message: 'Resume draft not found' });
-          if (!dependencies.resumeArtifactStorage) return reply(503, { message: 'Preview rendering is temporarily unavailable' });
+          const storage = dependencies.resumeArtifactStorage;
+          if (!storage) return reply(503, { message: 'Preview rendering is temporarily unavailable' });
           const [profile, applicant, bankItems] = await Promise.all([
             dependencies.users.getResumeProfile(userId, previous.profileId),
             dependencies.users.getProfile(userId),
@@ -1167,18 +1174,32 @@ export function createApiHandler(dependencies: ApiDependencies) {
           ]);
           if (!profile) return reply(404, { message: 'Resume profile not found' });
           const allowed = new Set(profile.bankItemIds);
+          const selected = bankItems.filter((item) => allowed.has(item.bankItemId));
+          // The proposal renders every change and the original renders none, so a
+          // reviewer sees both pages; decisions are carried by the diff and never
+          // trigger a recompile.
+          const original: ResumeDraft = { ...previous, changes: [] };
+          const proposal: ResumeDraft = { ...previous, changes: previous.changes.map((change) => ({ ...change, decision: 'accepted' as const })) };
           try {
             validateResumeProfileSelection(profile.bankItemIds, bankItems);
-            // Only accepted changes render, so the preview matches the review state.
-            validateResumeChanges(previous.changes.filter((change) => change.decision === 'accepted'), bankItems.filter((item) => allowed.has(item.bankItemId)));
+            validateResumeChanges(proposal.changes, selected);
           } catch (error) {
             return reply(409, { message: error instanceof Error ? error.message : 'The resume source graph is no longer valid' });
           }
           if (!applicant?.contact.name.trim() || !applicant.contact.email.trim()) return reply(409, { message: 'Complete your name and email in your profile before previewing a PDF résumé' });
           let artifact: ResumeArtifact;
-          try { artifact = await compileResumeArtifact(userId, profile, applicant, previous, bankItems, timestamp); }
-          catch { return reply(503, { message: 'The preview could not be rendered right now; try again shortly' }); }
-          return reply(200, { artifact });
+          let originalArtifact: ResumeArtifact;
+          try {
+            [artifact, originalArtifact] = await Promise.all([
+              compileResumeArtifact(userId, profile, applicant, proposal, bankItems, timestamp),
+              compileResumeArtifact(userId, profile, applicant, original, bankItems, timestamp),
+            ]);
+          } catch { return reply(503, { message: 'The preview could not be rendered right now; try again shortly' }); }
+          const readLineBoxes = async (target: ResumeArtifact): Promise<ResumeLineBox[][]> =>
+            target.lineBoxObjectKey && storage.getLineBoxes ? await storage.getLineBoxes(target.lineBoxObjectKey) ?? [] : [];
+          const [originalPages, proposalPages] = await Promise.all([readLineBoxes(originalArtifact), readLineBoxes(artifact)]);
+          const rows = attachResumeReviewBoxes(buildResumeReviewRows(profile, applicant, previous, bankItems), originalPages, proposalPages);
+          return reply(200, { artifact, original: originalArtifact, rows });
         }
         const finalizeDraftMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/finalize$/u);
         if (finalizeDraftMatch && method === 'POST') {
@@ -1437,7 +1458,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
         try {
           if (documentStorage) await Promise.all([
             ...documents.map((document) => documentStorage.deleteObject(document.objectKey)),
-            ...artifacts.flatMap((artifact) => [artifact.objectKey, artifact.texObjectKey, ...(artifact.previewObjectKeys ?? [])].filter((key): key is string => Boolean(key)).map((key) => documentStorage.deleteObject(key))),
+            ...artifacts.flatMap((artifact) => [artifact.objectKey, artifact.texObjectKey, artifact.lineBoxObjectKey, ...(artifact.previewObjectKeys ?? [])].filter((key): key is string => Boolean(key)).map((key) => documentStorage.deleteObject(key))),
           ]);
           await dependencies.resumeSemanticIndex?.remove(userId, resumeBank.map((item) => item.bankItemId));
         } catch {

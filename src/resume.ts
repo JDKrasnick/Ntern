@@ -336,6 +336,8 @@ export interface ResumeArtifact {
   pageCount?: number;
   /** Private R2 object keys for rasterized PDF pages, in page order. */
   previewObjectKeys?: string[];
+  /** Private R2 object key for the per-page rendered line boxes (JSON). */
+  lineBoxObjectKey?: string;
   createdAt: string;
 }
 
@@ -344,6 +346,17 @@ export interface ResumeCompilation {
   pdf: ArrayBuffer;
   pageCount: number;
   previewPngs: ArrayBuffer[];
+  /** Per-page rendered line boxes, normalized to each page, in reading order. */
+  lineBoxes?: ResumeLineBox[][];
+}
+
+/** One rendered line of a compiled résumé page, in page-normalized coordinates. */
+export interface ResumeLineBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
 }
 
 export interface ResumeProfileRecommendation {

@@ -1,14 +1,49 @@
 import http.server
+import json
 import os
 import resource
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ElementTree
 import zipfile
 
 MAX_PDF_BYTES = 2 * 1024 * 1024
 MAX_PREVIEW_BYTES = 2 * 1024 * 1024
 MAX_PAGES = 6
 MAX_SOURCE_BYTES = 256000
+
+def line_boxes(pdf, directory):
+    """Per-page line boxes normalized to the page, in poppler reading order.
+    Used by the review screen to point at a change; a failure here must not fail
+    the compile, so it degrades to an empty list."""
+    def local(tag):
+        return tag.rsplit('}', 1)[-1]
+    try:
+        xml = os.path.join(directory, 'resume-lines.xml')
+        subprocess.run(['pdftotext', '-bbox-layout', pdf, xml], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=True)
+        # poppler can emit a raw control byte for a ligature/en-dash glyph, which
+        # is not valid XML 1.0; drop those bytes before parsing.
+        with open(xml, 'rb') as source: raw = source.read()
+        clean = bytes(byte for byte in raw if byte in (0x09, 0x0A, 0x0D) or byte >= 0x20)
+        pages = []
+        for page in (node for node in ElementTree.fromstring(clean).iter() if local(node.tag) == 'page'):
+            width = float(page.get('width') or 0)
+            height = float(page.get('height') or 0)
+            lines = []
+            if width > 0 and height > 0:
+                for line in (node for node in page.iter() if local(node.tag) == 'line'):
+                    text = ' '.join((word.text or '').strip() for word in line.iter() if local(word.tag) == 'word').strip()
+                    if not text: continue
+                    x0 = float(line.get('xMin') or 0); y0 = float(line.get('yMin') or 0)
+                    x1 = float(line.get('xMax') or 0); y1 = float(line.get('yMax') or 0)
+                    lines.append({
+                        'x': round(x0 / width, 4), 'y': round(y0 / height, 4),
+                        'w': round((x1 - x0) / width, 4), 'h': round((y1 - y0) / height, 4), 'text': text,
+                    })
+            pages.append(lines)
+        return pages
+    except (ElementTree.ParseError, ValueError, OSError, subprocess.SubprocessError):
+        return []
 
 def read_source(handler):
     length = handler.headers.get('Content-Length')
@@ -76,6 +111,7 @@ class Compiler(http.server.BaseHTTPRequestHandler):
             with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as output:
                 output.writestr('resume.pdf', data)
                 output.writestr('page-count.txt', str(pages))
+                output.writestr('lines.json', json.dumps(line_boxes(pdf, directory)))
                 for index, preview in enumerate(previews, start=1): output.writestr(f'preview-{index}.png', preview)
             with open(archive, 'rb') as output: payload = output.read()
             self.send_response(200); self.send_header('Content-Type', 'application/zip'); self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)

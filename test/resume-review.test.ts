@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { buildResumeReviewRows } from '../src/resume-review.js';
+import { attachResumeReviewBoxes, buildResumeReviewRows, matchResumeLineBox, orderResumeLineBoxes } from '../src/resume-review.js';
 import type { ApplicantProfile } from '../src/types.js';
-import type { ResumeBankItem, ResumeDraft, ResumeProfile } from '../src/resume.js';
+import type { ResumeBankItem, ResumeDraft, ResumeLineBox, ResumeProfile } from '../src/resume.js';
 
 const applicant: ApplicantProfile = { userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Ithaca, NY', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' };
 const profile: ResumeProfile = { userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['project', 'bullet-a', 'bullet-b'], sectionOrder: ['projects'], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' };
@@ -49,5 +49,56 @@ describe('resume review diff rows', () => {
     // The reordered bullet renders before its sibling.
     const bulletRows = rows.filter((row) => row.section === 'projects' && row.label === 'Compiler Lab').map((row) => row.after ?? row.before);
     expect(bulletRows.indexOf('Added type checking')).toBeLessThan(bulletRows.indexOf('Built a parser'));
+  });
+});
+
+describe('resume review boxes', () => {
+  const lines: ResumeLineBox[] = [
+    { x: 0.0706, y: 0.4996, w: 0.09, h: 0.0104, text: 'Languages:' },
+    { x: 0.1679, y: 0.4834, w: 0.3, h: 0.0327, text: 'TypeScript, Python, Go, SQL' },
+    { x: 0.0706, y: 0.3, w: 0.6, h: 0.02, text: 'Partnered with designers to ship a self-serve onboarding \u001dow' },
+  ];
+
+  it('keeps a bold label with its value and orders rows top to bottom', () => {
+    const ordered = orderResumeLineBoxes(lines);
+    expect(ordered.map((line) => line.text)).toEqual([
+      'Partnered with designers to ship a self-serve onboarding \u001dow',
+      'Languages:',
+      'TypeScript, Python, Go, SQL',
+    ]);
+  });
+
+  it('boxes a ligature-mangled wrapped line without failing to match', () => {
+    const box = matchResumeLineBox(lines, 'Partnered with designers to ship a self-serve onboarding flow');
+    expect(box).toBeDefined();
+    expect(box!.x).toBeCloseTo(0.0706, 4);
+    expect(box!.y).toBeCloseTo(0.3, 4);
+    expect(box!.w).toBeCloseTo(0.6, 4);
+    expect(box!.h).toBeCloseTo(0.02, 4);
+  });
+
+  it('boxes a label and value that poppler emits as separate runs', () => {
+    const box = matchResumeLineBox(lines, 'Languages: TypeScript, Python, Go, SQL');
+    expect(box).toBeDefined();
+    expect(box!.x).toBeCloseTo(0.0706, 4);
+    expect(box!.y).toBeCloseTo(0.4834, 4);
+    expect(box!.w).toBeCloseTo(0.3973, 4);
+    expect(box!.h).toBeCloseTo(0.0327, 4);
+  });
+
+  it('attaches before and after boxes to change rows and leaves context rows alone', () => {
+    const rows = [
+      { rowId: 'a', lineId: 'a', kind: 'context' as const, section: 'skills' as const, label: 'Languages', before: 'Languages: TypeScript, Python, Go, SQL', after: 'Languages: TypeScript, Python, Go, SQL' },
+      { rowId: 'b', lineId: 'b', kind: 'change' as const, section: 'experience' as const, label: 'Northwind', before: 'Built a parser', after: 'Built a recursive parser', changeId: 'c', type: 'rewrite' as const },
+    ];
+    const rawPages = [[{ x: 0, y: 0.2, w: 0.3, h: 0.02, text: 'Built a parser' }]];
+    const proposedPages = [[{ x: 0, y: 0.2, w: 0.4, h: 0.02, text: 'Built a recursive parser' }]];
+    const boxed = attachResumeReviewBoxes(rows, rawPages, proposedPages);
+    expect(boxed[0]?.beforeBox).toBeUndefined();
+    expect(boxed[0]?.afterBox).toBeUndefined();
+    expect(boxed[1]?.beforeBox).toMatchObject({ page: 1, x: 0, y: 0.2 });
+    expect(boxed[1]?.beforeBox?.w).toBeCloseTo(0.3, 4);
+    expect(boxed[1]?.afterBox).toMatchObject({ page: 1, x: 0, y: 0.2 });
+    expect(boxed[1]?.afterBox?.w).toBeCloseTo(0.4, 4);
   });
 });

@@ -1,9 +1,18 @@
 import { buildResumeDocument } from './resume-latex.js';
 import { RESUME_TEMPLATES } from './resume-templates.js';
 import type { ApplicantProfile } from './types.js';
-import type { ResumeBankItem, ResumeChange, ResumeDocument, ResumeDraft, ResumeProfile } from './resume.js';
+import type { ResumeBankItem, ResumeChange, ResumeDocument, ResumeDraft, ResumeLineBox, ResumeProfile } from './resume.js';
 
 export type ResumeReviewSection = 'education' | 'experience' | 'research' | 'projects' | 'skills';
+
+/** A rectangle on a rendered résumé page, normalized to the page box. */
+export interface ResumeReviewBox {
+  page: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 /** One aligned line of the review: the original résumé on the left, the
  * proposal on the right. `changeId` is present only when accepting this line is
@@ -24,6 +33,9 @@ export interface ResumeReviewRow {
   /** True when the change moved the line to a different position. */
   moved?: boolean;
   note?: string;
+  /** Where the line renders on the original page and on the proposed page. */
+  beforeBox?: ResumeReviewBox;
+  afterBox?: ResumeReviewBox;
 }
 
 interface ReviewLine {
@@ -144,4 +156,78 @@ export function buildResumeReviewRows(profile: ResumeProfile, applicant: Applica
     });
   }
   return rows;
+}
+
+/** Ligature-insensitive token stream. pdfTeX's T1 fonts render `fi`/`fl`/`ff`
+ * as one glyph that pdftotext can emit as a control character, so both sides of
+ * the comparison drop those pairs to keep a wrapped bullet matchable. */
+const lineTokens = (value: string): string[] =>
+  (value.toLowerCase().match(/[a-z0-9+#.]+/gu) ?? []).map((token) => token.replace(/ffl|ffi|ff|fi|fl/gu, ''));
+
+/** Groups rendered lines into visual rows (a bold label and its value share a
+ * baseline even though poppler emits them out of order), then orders rows
+ * top-to-bottom and each row left-to-right. */
+export function orderResumeLineBoxes(lines: readonly ResumeLineBox[]): ResumeLineBox[] {
+  const tolerance = 0.012;
+  const items = lines.map((line) => ({ line, center: line.y + line.h / 2 }));
+  items.sort((left, right) => left.center - right.center || left.line.x - right.line.x);
+  const rows: Array<{ center: number; items: typeof items }> = [];
+  for (const item of items) {
+    const row = rows[rows.length - 1];
+    if (row && Math.abs(row.center - item.center) <= tolerance) {
+      row.center = (row.center * row.items.length + item.center) / (row.items.length + 1);
+      row.items.push(item);
+    } else rows.push({ center: item.center, items: [item] });
+  }
+  return rows.flatMap((row) => row.items.sort((left, right) => left.line.x - right.line.x).map((item) => item.line));
+}
+
+/** Points at the rendered line(s) for a review line. The first target token
+ * anchors the match, then later tokens may span wrapped lines. Returns the union
+ * box so a reviewer sees the whole line without hunting for it. */
+export function matchResumeLineBox(lines: readonly ResumeLineBox[], text: string | undefined): Omit<ResumeReviewBox, 'page'> | undefined {
+  if (!text) return undefined;
+  const target = lineTokens(text);
+  if (!target.length) return undefined;
+  const ordered = orderResumeLineBoxes(lines);
+  const tokens = ordered.map((line) => lineTokens(line.text));
+  let best: { coverage: number; box: Omit<ResumeReviewBox, 'page'> } | undefined;
+  for (let index = 0; index < ordered.length; index += 1) {
+    if (!tokens[index]!.length || tokens[index]![0] !== target[0]) continue;
+    let cursor = 0;
+    let end = index;
+    for (let line = index; line < ordered.length && line < index + 8; line += 1) {
+      for (const token of tokens[line]!) if (cursor < target.length && token === target[cursor]) { cursor += 1; end = line; }
+      if (cursor >= target.length) break;
+    }
+    const required = Math.max(1, Math.ceil(target.length * 0.6));
+    if (cursor < required || cursor < Math.min(2, target.length)) continue;
+    let x0 = 1; let y0 = 1; let x1 = 0; let y1 = 0;
+    for (const line of ordered.slice(index, end + 1)) {
+      x0 = Math.min(x0, line.x); y0 = Math.min(y0, line.y);
+      x1 = Math.max(x1, line.x + line.w); y1 = Math.max(y1, line.y + line.h);
+    }
+    if (!best || cursor > best.coverage) best = { coverage: cursor, box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } };
+  }
+  return best?.box;
+}
+
+/** Attaches the rendered location of each change's before/after line, searching
+ * the pages of the compiled original and proposal. No decision needs a recompile:
+ * the boxes come from text matching against the two cached renders. */
+export function attachResumeReviewBoxes(rows: ResumeReviewRow[], rawPages: readonly ResumeLineBox[][], proposedPages: readonly ResumeLineBox[][]): ResumeReviewRow[] {
+  const find = (pages: readonly ResumeLineBox[][], text: string | undefined): ResumeReviewBox | undefined => {
+    if (text === undefined) return undefined;
+    for (const [index, lines] of pages.entries()) {
+      const box = matchResumeLineBox(lines, text);
+      if (box) return { page: index + 1, ...box };
+    }
+    return undefined;
+  };
+  return rows.map((row) => {
+    if (!row.changeId) return row;
+    const beforeBox = find(rawPages, row.before);
+    const afterBox = row.after === undefined ? undefined : find(proposedPages, row.after);
+    return { ...row, ...(beforeBox ? { beforeBox } : {}), ...(afterBox ? { afterBox } : {}) };
+  });
 }

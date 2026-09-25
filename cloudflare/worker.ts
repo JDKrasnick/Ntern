@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { unzipSync } from 'fflate';
 import { decodeMetadataCursor, encodeMetadataCursor } from '../src/metadata-audit.js';
 import { createApiHandler, type DocumentStorage, type ResumeArtifactStorage, type ResumeImportCache, type ResumeImportQueue } from '../src/api.js';
+import type { ResumeLineBox } from '../src/resume.js';
 import { ashbyWorkMessages, isAshbySourceDue } from '../src/ashby-dispatch.js';
 import { processAshbyQueue } from '../src/ashby-worker.js';
 import { greenhouseWorkMessages, isGreenhouseSourceDue } from '../src/greenhouse-dispatch.js';
@@ -654,11 +655,30 @@ export function resumeCompilerPoolName(resumeSpecHash: string, poolSize = RESUME
   return `resume-pdf-compiler-${Number.parseInt(resumeSpecHash.slice(0, 8), 16) % poolSize}`;
 }
 
+/** The compiler bundle ships per-page line boxes in `lines.json`. An older
+ * bundle without them (or a malformed file) still renders, just without boxes. */
+export function resumeCompilerLineBoxes(files: Record<string, Uint8Array>): ResumeLineBox[][] | undefined {
+  const file = files['lines.json'];
+  if (!file) return undefined;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(file)) as unknown;
+    return Array.isArray(parsed) ? parsed as ResumeLineBox[][] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
   return {
     async putTex(objectKey, tex) { const bytes = new TextEncoder().encode(tex); await env.DOCUMENTS.put(objectKey, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'application/x-tex; charset=utf-8' } }); },
     async putPdf(objectKey, pdf) { await env.DOCUMENTS.put(objectKey, pdf, { httpMetadata: { contentType: 'application/pdf' } }); },
     async putPreview(objectKey, png) { await env.DOCUMENTS.put(objectKey, png, { httpMetadata: { contentType: 'image/png' } }); },
+    async putLineBoxes(objectKey, lines) { const bytes = new TextEncoder().encode(lines); await env.DOCUMENTS.put(objectKey, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType: 'application/json' } }); },
+    async getLineBoxes(objectKey) {
+      const object = await env.DOCUMENTS.get(objectKey);
+      if (!object) return undefined;
+      try { const parsed = JSON.parse(await new Response(object.body).text()); return Array.isArray(parsed) ? parsed : undefined; } catch { return undefined; }
+    },
     async compile(tex, resumeSpecHash) {
       const stub = env.RESUME_PDF_COMPILER.get(env.RESUME_PDF_COMPILER.idFromName(resumeCompilerPoolName(resumeSpecHash)));
       const response = await stub.fetch(resumeCompilerRequest(tex));
@@ -668,7 +688,9 @@ function resumeArtifactStorage(env: Environment): ResumeArtifactStorage {
       const pageCount = pageCountText && Number.parseInt(new TextDecoder().decode(pageCountText), 10);
       const previewPngs = Object.entries(files).filter(([name]) => /^preview-\d+\.png$/u.test(name)).sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true })).map(([, value]) => value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
       if (!pdf || !Number.isInteger(pageCount) || pageCount < 1 || previewPngs.length !== pageCount) throw new Error('Resume PDF compiler returned an invalid artifact bundle');
-      return { pdf: pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) as ArrayBuffer, pageCount, previewPngs };
+      // Line boxes are optional: an older compiler bundle without them still renders.
+      const lineBoxes = resumeCompilerLineBoxes(files);
+      return { pdf: pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) as ArrayBuffer, pageCount, previewPngs, ...(lineBoxes ? { lineBoxes } : {}) };
     },
   };
 }
@@ -1300,6 +1322,16 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     const object = await env.DOCUMENTS.get(objectKey);
     if (!object) return withCors(Response.json({ message: 'Resume preview content was not found' }, { status: 404 }));
     return withCors(new Response(object.body, { headers: { 'Content-Type': 'image/png', 'Content-Disposition': `inline; filename="resume-${artifact.artifactId}-page-${page}.png"`, 'Cache-Control': 'private, no-store' } }));
+  }
+  const artifactLinesMatch = url.pathname.match(/^\/me\/resume-artifacts\/([^/]+)\/lines$/u);
+  if (artifactLinesMatch && request.method === 'GET') {
+    if (env.RESUME_TUNER_ENABLED !== 'true') return withCors(Response.json({ message: 'Resume tailoring is not enabled' }, { status: 404 }));
+    if (!userId) return withCors(Response.json({ message: 'Authentication required' }, { status: 401 }));
+    const artifact = await new D1UserStore(env.DB).getResumeArtifact(userId, decodeURIComponent(artifactLinesMatch[1]!));
+    if (!artifact?.lineBoxObjectKey) return withCors(Response.json({ message: 'Resume line boxes are not available' }, { status: 404 }));
+    const object = await env.DOCUMENTS.get(artifact.lineBoxObjectKey);
+    if (!object) return withCors(Response.json({ message: 'Resume line boxes were not found' }, { status: 404 }));
+    return withCors(new Response(object.body, { headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' } }));
   }
   const event = apiEvent(request, userId, request.method === 'GET' || request.method === 'HEAD' ? null : await request.text());
   const result = await handler(event);
