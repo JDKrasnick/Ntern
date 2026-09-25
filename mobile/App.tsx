@@ -4971,7 +4971,7 @@ function AppContent() {
               onUndoHide={undoHideLocally}
             />
           ) : tab === "resume" ? (
-            <View style={styles.pageColumn}>
+            <View style={[styles.pageColumn, styles.pageColumnWide]}>
               <ResumeWorkspace token={token} onDraftingChange={setResumeDrafting} />
             </View>
           ) : (
@@ -5570,7 +5570,7 @@ function GuestExperience({
                 />
               </View>
             ) : tab === "resume" ? (
-              <View style={styles.pageColumn}>
+              <View style={[styles.pageColumn, styles.pageColumnWide]}>
                 <ResumeWorkspace onSignIn={openAccount} />
               </View>
             ) : tab === "profile" ? (
@@ -5793,8 +5793,8 @@ function ResumeReviewBoard({ rows, changes, busy, mode, onMode, focusId, onFocus
   };
   const actions = (changeId: string, decision?: string) => (
     <View style={styles.resumeCardActions}>
-      <ActionButton compact tight grow label={decision === "rejected" ? "Original kept" : "Keep original"} variant="secondary" onPress={() => onDecide(changeId, "rejected")} disabled={busy} shortcut="N" />
-      <ActionButton compact tight grow label={decision === "accepted" ? "Applied" : "Apply change"} onPress={() => onDecide(changeId, "accepted")} disabled={busy} shortcut="Y" />
+      <ActionButton compact tight grow label={decision === "rejected" ? "Original kept" : "Keep"} variant="secondary" onPress={() => onDecide(changeId, "rejected")} disabled={busy} shortcut="N" />
+      <ActionButton compact tight grow label={decision === "accepted" ? "Applied" : "Apply"} onPress={() => onDecide(changeId, "accepted")} disabled={busy} shortcut="Y" />
     </View>
   );
   return (
@@ -9179,6 +9179,7 @@ const styles = StyleSheet.create({
   webScrollbarHidden: { scrollbarWidth: "none" } as unknown as ViewStyle,
   /** One content column for every tab: same gutter, same left edge, and a height
    * the lists inside can actually scroll in. */
+  pageColumnWide: { maxWidth: 1600 },
   pageColumn: {
     alignSelf: "center",
     flex: 1,
@@ -9432,7 +9433,7 @@ const styles = StyleSheet.create({
   catalogPaginationText: { color: colors.muted, fontSize: 14, lineHeight: 20, textAlign: "center" },
   catalogPaginationRetry: { alignItems: "center", justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },
   catalogPaginationRetryText: { color: colors.signal, fontSize: 14, fontWeight: "700" },
-  resumeContent: { maxWidth: 1360, paddingBottom: 44, paddingTop: 24, width: "100%" },
+  resumeContent: { maxWidth: 1600, paddingBottom: 44, paddingTop: 24, width: "100%" },
   resumePrimaryTask: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 900, padding: 20 },
   resumePrimaryTaskShell: { overflow: "hidden" },
   resumeRoot: { flex: 1 },
@@ -9450,15 +9451,15 @@ const styles = StyleSheet.create({
   resumeLoadingSection: { gap: 7, marginTop: 6 },
   resumeLoadingHeading: { height: 9, width: "32%" },
   resumeLoadingLine: { height: 6 },
-  resumeReviewPagePane: { alignItems: "center", flex: 0.9, gap: 10, minWidth: 0 },
-  resumeReviewPreviewPane: { alignItems: "center", flex: 0.9, gap: 10, justifyContent: "center", minWidth: 0 },
-  resumePageFrame: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, maxWidth: 460, overflow: "hidden", position: "relative", width: "100%" },
+  resumeReviewPagePane: { alignItems: "center", flex: 1.35, gap: 10, minWidth: 0 },
+  resumeReviewPreviewPane: { alignItems: "center", flex: 1.35, gap: 10, justifyContent: "center", minWidth: 0 },
+  resumePageFrame: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, maxWidth: 680, overflow: "hidden", position: "relative", width: "100%" },
   resumePageImage: { height: "100%", width: "100%" },
   resumePagePlaceholder: { alignItems: "center", flex: 1, justifyContent: "center", padding: 16 },
   resumePageHighlight: { borderRadius: 3, borderWidth: 1.5, position: "absolute" },
   resumePageHighlightAdded: { backgroundColor: "rgba(6,118,71,0.14)", borderColor: "rgba(6,118,71,0.65)" },
   resumePageHighlightRemoved: { backgroundColor: "rgba(180,35,24,0.12)", borderColor: "rgba(180,35,24,0.6)" },
-  resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1.2, minWidth: 0, overflow: "hidden" },
+  resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 0.9, minWidth: 330, overflow: "hidden" },
   resumeBoardHead: { alignItems: "center", borderBottomColor: colors.separator, borderBottomWidth: 1, flexDirection: "row", gap: 10, justifyContent: "space-between", padding: 12 },
   resumeModeToggle: { borderColor: colors.border, borderRadius: 10, borderWidth: 1, flexDirection: "row", overflow: "hidden" },
   resumeModeButton: { backgroundColor: colors.surface, paddingHorizontal: 12, paddingVertical: 6 },
