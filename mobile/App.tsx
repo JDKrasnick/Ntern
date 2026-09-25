@@ -6194,6 +6194,14 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
     return () => document.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- decideChange is stable for a draft
   }, [draft, focusChangeId]);
+  const loadReview = () => {
+    if (!signedIn || !draft) { setReviewRows([]); return; }
+    setReviewLoading(true);
+    void api<{ rows: ResumeReviewRow[] }>(`/me/resume-drafts/${encodeURIComponent(draft.draftId)}/review`, token)
+      .then(({ rows }) => setReviewRows(rows))
+      .catch((error) => { setReviewRows([]); setBankError(error instanceof Error ? error.message : "We couldn't load these changes."); })
+      .finally(() => setReviewLoading(false));
+  };
   useEffect(() => {
     if (!signedIn || !draft) { setReviewRows([]); return; }
     let cancelled = false;
@@ -6834,8 +6842,7 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
           ) : null}
           {(desktop || reviewMode === "changes") ? (
             draft.changes.length ? (
-              <>
-                {reviewLoading && !boardRows.length ? <Text style={styles.resumePreviewCaption}>Building the review…</Text> : null}
+              boardRows.length ? (
                 <ResumeReviewBoard
                 rows={boardRows}
                 changes={draft.changes}
@@ -6857,7 +6864,16 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
                 onSaveEdit={saveSuggestion}
                 onCancelEdit={() => setEditingChangeId(undefined)}
               />
-              </>
+              ) : (
+              <View style={styles.resumeChangePanel}>
+                <View style={styles.resumePreviewEmpty}>
+                  <Ionicons name={reviewLoading ? "hourglass-outline" : "alert-circle-outline"} size={28} color={colors.muted} />
+                  <Text style={styles.resumePreviewEmptyTitle}>{reviewLoading ? "Building the review…" : "We couldn't load these changes"}</Text>
+                  <Text style={styles.resumePreviewCaption}>{reviewLoading ? "Fetching the aligned lines and the rendered pages." : "Check your connection and try again."}</Text>
+                  {!reviewLoading ? <View style={styles.resumePreviewEmptyAction}><ActionButton label="Retry" onPress={() => { loadReview(); renderPreview(); }} /></View> : null}
+                </View>
+              </View>
+              )
             ) : (
               <View style={styles.resumeChangePanel}>
                 <View style={styles.resumePreviewEmpty}>
