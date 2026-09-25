@@ -39,17 +39,18 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('Sign in to import PDF or DOCX');
   });
 
-  it('offers an adaptive review workspace with a side-by-side decision diff', () => {
+  it('offers an adaptive review workspace with a card per change and rendered pages', () => {
     expect(app).toContain('reviewMode === "changes"');
     expect(app).toContain('resumeReviewWorkspaceWide');
-    expect(app).toContain('function ResumeReviewDiff');
-    expect(app).toContain('resumeDiffBoard');
+    expect(app).toContain('function ResumeReviewBoard');
+    expect(app).toContain('function ResumeRenderedPage');
+    expect(app).toContain('One at a time');
+    expect(app).toContain('View all');
     expect(app).toContain('onDecide={decideChange}');
     expect(app).toContain('decideChange');
     expect(app).toContain('/review`');
     expect(app).toContain('/preview`');
-    expect(app).toContain('Render preview');
-    expect(app).toContain('your résumé → tailored');
+    expect(app).toContain('Refresh preview');
     expect(app).toContain('No job-specific changes found');
     expect(app).toContain('/finalize`');
     expect(app).toContain('loadResumeArtifactPreview(result.artifact.artifactId, 1, token)');
@@ -117,7 +118,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('const [drafting, setDrafting] = useState(false);');
     expect(app).toContain('setDrafting(true);');
     expect(app).toContain('setResumeBusy(false); setDrafting(false);');
-    expect(app).toContain('{drafting ? (');
+    expect(app).toContain('visible={drafting}');
     expect(app).toContain('resumeLoadingPages');
     expect(app).toContain('timeoutMs: 90_000');
   });
