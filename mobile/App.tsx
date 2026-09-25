@@ -5477,8 +5477,7 @@ function GuestExperience({
     <View style={styles.guestRoot}>
       <SafeAreaView
         style={[styles.screen, showAccount && Platform.OS === "web" && styles.hiddenScreen]}
-        accessibilityElementsHidden={showAccount}
-        importantForAccessibility={showAccount ? "no-hide-descendants" : "auto"}
+        accessibilityElementsHidden={showAccount}        importantForAccessibility={showAccount ? "no-hide-descendants" : "auto"}
       >
         <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
           {usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} rail resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
@@ -5596,7 +5595,9 @@ function GuestExperience({
       </SafeAreaView>
       {showAccount ? (
         <View style={styles.authOverlay}>
-          <SignIn onSession={onSession} onBrowse={closeAccount} />
+          <View style={styles.authModal}>
+            <SignIn onSession={onSession} onBrowse={closeAccount} />
+          </View>
         </View>
       ) : null}
     </View>
@@ -5759,6 +5760,11 @@ function ResumeSavedProfilesGhost() {  const motionAllowed = useContext(MotionAl
   );
 }
 
+/** Remembers a job URL a guest submitted. Signing in swaps the guest tree for
+ * the signed-in one, remounting the workspace, so the URL is held here and
+ * imported as soon as the session exists. */
+let pendingResumeImportUrl: string | undefined;
+
 function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: () => void }) {
   const { width } = useWindowDimensions();
   const desktop = width >= 700;
@@ -5812,7 +5818,6 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   // the confirmation is visible before it slides away.
   const motionAllowed = useContext(MotionAllowedContext);
   const jobReady = jobImport?.status === "ready";
-  const guestImport = jobImport?.importId === "guest-job";
   const jobTaskCollapse = useRef(new Animated.Value(1)).current;
   const [jobTaskHeight, setJobTaskHeight] = useState(0);
   useEffect(() => {
@@ -6094,16 +6099,18 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
     setProfiles((all) => technicalBase ? all.map((item) => item.profileId === profile.profileId ? profile : item) : [...all, profile]);
     return profile;
   };
-  const importJob = () => {
-    if (!jobUrl.trim() || resumeBusy) return;
+  const importJobUrl = (rawUrl: string) => {
+    const url = rawUrl.trim();
+    if (!url || resumeBusy) return;
     if (!signedIn) {
-      setBankError(undefined);
-      setJobImport({ importId: "guest-job", canonicalUrl: jobUrl.trim(), description: "", status: "manual-description-required", revision: 1, updatedAt: new Date().toISOString() });
-      setDraft(undefined); setActiveChange(0); setBestExistingRecommendation(undefined); setResumeSourceMode("ideal");
+      // The tuner needs an account to fetch and compile, so open sign-in as a
+      // popup and import this URL once the session lands.
+      pendingResumeImportUrl = url;
+      onSignIn?.();
       return;
     }
     setResumeBusy(true); setBankError(undefined);
-    void api<ResumeImportCard>("/me/resume-jobs/resolve", token, { method: "POST", body: JSON.stringify({ url: jobUrl }) })
+    void api<ResumeImportCard>("/me/resume-jobs/resolve", token, { method: "POST", body: JSON.stringify({ url }) })
       .then(async (value) => {
         setJobImport(value); setDraft(undefined); setActiveChange(0); setBestExistingRecommendation(undefined);
         if (value.status === "ready") {
@@ -6116,6 +6123,15 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't import that job."))
       .finally(() => setResumeBusy(false));
   };
+  const importJob = () => importJobUrl(jobUrl);
+  const [pendingImportUrl, setPendingImportUrl] = useState<string | undefined>(pendingResumeImportUrl);
+  useEffect(() => {
+    if (!signedIn || !pendingImportUrl) return;
+    pendingResumeImportUrl = undefined;
+    setPendingImportUrl(undefined);
+    importJobUrl(pendingImportUrl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the pending URL is the only trigger
+  }, [signedIn, pendingImportUrl]);
   const saveManualDescription = () => {
     if (!jobImport || !manualDescription.trim() || resumeBusy) return;
     if (!signedIn) {
@@ -6244,18 +6260,15 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
               style={styles.resumeUrlInput}
             />
           </View>
-          <ActionButton label={resumeBusy ? "Checking…" : "Continue"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
+          <ActionButton label={!signedIn ? "Sign in to continue" : resumeBusy ? "Checking…" : "Continue"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
         </View>
         {bankError && (bankManagerOpen || jobImport || jobUrl.trim()) ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
         {jobImport ? (
           <View style={styles.resumeManualFallback}>
-            <Text style={styles.inputLabel}>{guestImport ? "Sign in to read the posting" : "Paste the job description to continue"}</Text>
-            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : guestImport ? "Ntern reads the employer's posting for signed-in accounts. Sign in, or paste the description to continue." : `${resumeImportFailureMessages[jobImport.failureReason ?? ""] ?? "We couldn't read the public page."} Paste the description to continue.`} Pasted text stays in your private resume workspace.</Text>
+            <Text style={styles.inputLabel}>Paste the job description to continue</Text>
+            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : `${resumeImportFailureMessages[jobImport.failureReason ?? ""] ?? "We couldn't read the public page."} Paste the description to continue.`} Pasted text stays in your private resume workspace.</Text>
             <TextInput value={manualDescription} onChangeText={setManualDescription} accessibilityLabel="Job description" multiline placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} />
-            <View style={styles.resumeManualActions}>
-              {guestImport && onSignIn ? <ActionButton compact tight label="Sign in" variant="secondary" onPress={onSignIn} /> : null}
-              <ActionButton compact tight label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} />
-            </View>
+            <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
           </View>
         ) : null}
         </>}
@@ -8750,10 +8763,16 @@ const styles = StyleSheet.create({
   guestRoot: { flex: 1 },
   // Keep native list state/layout intact. On web, opacity and pointerEvents
   // alone leave invisible descendants in the keyboard tab order.
+  // Keep native list state/layout intact. On web the popup dims the screen
+  // behind it, so the screen stays laid out but stops taking pointer input.
   hiddenScreen: Platform.OS === "web"
-    ? { display: "none" }
+    ? { pointerEvents: "none" }
     : { ...StyleSheet.absoluteFillObject, opacity: 0 },
-  authOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.canvas },
+  // The account view opens as a popup over the current screen rather than
+  // replacing it, so the work behind stays visible (the resume workspace, the
+  // catalog) and nothing navigates away.
+  authOverlay: { ...StyleSheet.absoluteFillObject, alignItems: "center", backgroundColor: colors.overlay, justifyContent: "center", padding: 24 },
+  authModal: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 18, borderWidth: 1, maxHeight: "88%", maxWidth: 520, overflow: "hidden", width: "100%" },
   appShell: { flex: 1 },
   appShellWide: { flexDirection: "row" },
   appMain: { flex: 1, minWidth: 0 },
@@ -9284,7 +9303,6 @@ const styles = StyleSheet.create({
   resumeParentOptionKind: { color: colors.signal, fontSize: 10, fontWeight: "800", letterSpacing: 0.5, textTransform: "uppercase" },
   resumeParentOptionText: { color: colors.body, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 3 },
   resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },
-  resumeManualActions: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 10 },
   resumeBankError: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 8 },
   resumeBankScroller: { maxHeight: 340 },
   resumeBankItems: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 8, marginTop: 16, paddingBottom: 2, paddingTop: 12 },
