@@ -713,8 +713,10 @@ npm run dlq -- inspect lever 25
 Stage a selective replay or irreversible discard with `DLQ_ACTION=replay` or
 `DLQ_ACTION=discard`, a comma-separated list of message IDs, and a reason. Apply
 the returned one-use plan within 15 minutes by passing its plan ID, repair token,
-and exact expected count. Catalog replay produces one fresh message per source;
-destination-verification replay stays disabled until issue #120 lands.
+and exact expected count. Catalog replay produces one fresh message per source and
+refuses a paused or quarantined source; destination-verification replay re-enqueues
+one per-job check verbatim and stays allowed even while the owning source is paused,
+because its consumer settles obsolete and duplicate checks safely.
 
 ```bash
 DLQ_ACTION=replay npm run dlq -- plan lever message-id-1,message-id-2 'Upstream fix verified'
