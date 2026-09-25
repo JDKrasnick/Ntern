@@ -5807,6 +5807,23 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   const [reviewLoading, setReviewLoading] = useState(false);
   const [editingChangeId, setEditingChangeId] = useState<string>();
   const [editValue, setEditValue] = useState("");
+  // Once a job is loaded the paste card has served its purpose, so collapse it
+  // and let the review fill the screen. The success card is held briefly first so
+  // the confirmation is visible before it slides away.
+  const motionAllowed = useContext(MotionAllowedContext);
+  const jobReady = jobImport?.status === "ready";
+  const jobTaskCollapse = useRef(new Animated.Value(1)).current;
+  const [jobTaskHeight, setJobTaskHeight] = useState(0);
+  useEffect(() => {
+    if (!jobReady) {
+      Animated.timing(jobTaskCollapse, { toValue: 1, duration: motionAllowed ? 240 : 0, useNativeDriver: false }).start();
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      Animated.timing(jobTaskCollapse, { toValue: 0, duration: motionAllowed ? 320 : 0, useNativeDriver: false }).start();
+    }, motionAllowed ? 900 : 0);
+    return () => clearTimeout(timer);
+  }, [jobReady, motionAllowed, jobTaskCollapse]);
   const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
   const decideChange = (changeId: string, decision: "accepted" | "rejected") => {
     if (!draft || resumeBusy) return;
@@ -6187,7 +6204,16 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
         </View> : null}
       </View>
 
-      <View style={styles.resumePrimaryTask}>
+      {jobReady && jobImport ? (
+        <View accessibilityLabel={`Tailoring for ${jobImport.title ?? jobImport.canonicalUrl}`} style={styles.resumeJobBanner}>
+          <Ionicons name="briefcase-outline" size={16} color={colors.signal} />
+          <Text numberOfLines={1} style={styles.resumeJobBannerTitle}>{jobImport.title ?? jobImport.canonicalUrl}</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Change job" onPress={resetImport}><Text style={styles.resumeCompactActionText}>Change role</Text></TouchableOpacity>
+        </View>
+      ) : null}
+
+      <Animated.View style={[styles.resumePrimaryTaskShell, { height: jobTaskHeight ? Animated.multiply(jobTaskCollapse, jobTaskHeight) : undefined, opacity: jobTaskCollapse }]}>
+      <View style={styles.resumePrimaryTask} onLayout={(event) => setJobTaskHeight(event.nativeEvent.layout.height)}>
         {jobImport?.status === "ready" ? (
           <View accessibilityLabel={`Job description loaded: ${jobImport.title ?? jobImport.canonicalUrl}`} style={styles.resumeImportSuccess}>
             <View style={styles.resumeImportSuccessBadge}><Ionicons name="checkmark" size={22} color={colors.onDark} /></View>
@@ -6244,6 +6270,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
           </View>
         ) : null}
       </View>
+      </Animated.View>
 
       {!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>
         <View style={styles.resumeSavedHeader}>
@@ -9106,6 +9133,9 @@ const styles = StyleSheet.create({
   catalogPaginationRetryText: { color: colors.signal, fontSize: 14, fontWeight: "700" },
   resumeContent: { maxWidth: 1360, paddingBottom: 44, paddingTop: 24, width: "100%" },
   resumePrimaryTask: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 900, padding: 20 },
+  resumePrimaryTaskShell: { overflow: "hidden" },
+  resumeJobBanner: { alignItems: "center", backgroundColor: colors.signalSoft, borderColor: "#BCE3EA", borderRadius: 12, borderWidth: 1, flexDirection: "row", gap: 10, marginTop: 12, maxWidth: 900, paddingHorizontal: 12, paddingVertical: 9 },
+  resumeJobBannerTitle: { color: colors.ink, flex: 1, fontSize: 14, fontWeight: "700", minWidth: 0 },
   resumeImportSuccess: { alignItems: "center", backgroundColor: colors.successSoft, borderColor: colors.successBorder, borderRadius: 14, borderWidth: 1, flexDirection: "row", gap: 14, padding: 16 },
   resumeImportSuccessBadge: { alignItems: "center", backgroundColor: colors.success, borderRadius: 999, height: 40, justifyContent: "center", width: 40 },
   resumeImportSuccessCopy: { flex: 1, minWidth: 0 },
