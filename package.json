@@ -67,7 +67,9 @@
     "cloudflare:dev:provision": "bash scripts/provision-cloudflare-dev.sh",
     "terraform:fmt": "tofu -chdir=infra/cloudflare fmt -check -recursive",
     "terraform:validate": "tofu -chdir=infra/cloudflare validate",
-    "deploy:cloudflare": "npm run build:cloudflare && tsx scripts/deploy-cloudflare.ts"
+    "deploy:cloudflare": "npm run build:cloudflare && tsx scripts/deploy-cloudflare.ts",
+    "eval:icons": "tsx scripts/company-icon-eval.ts --report eval/company-icon-results",
+    "eval:icons:no-model": "tsx scripts/company-icon-eval.ts --no-model --report eval/company-icon-results-no-model"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.0.16",

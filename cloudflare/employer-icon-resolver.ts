@@ -63,7 +63,7 @@ const ICON_LINK_MAX_BYTES = 512 * 1024;
 const ICON_PROVIDER_MAX_BYTES = 128 * 1024;
 const MAX_ICON_EVIDENCE_BYTES = 16 * 1024;
 /** How many employers a single pass may seed when they have no task row at all. */
-const ICON_BACKFILL_PER_PASS = 5;
+const ICON_BACKFILL_PER_PASS = 25;
 /**
  * The client identity the resolver presents when it reads an employer's public
  * posting. Greenhouse's edge answers a request that presents no client at all with
