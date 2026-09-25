@@ -5484,7 +5484,7 @@ function GuestExperience({
   return (
     <View style={styles.guestRoot}>
       <SafeAreaView
-        style={[styles.screen, showAccount && Platform.OS === "web" && styles.hiddenScreen]}
+        style={[styles.screen, showAccount && styles.inertScreen]}
         accessibilityElementsHidden={showAccount}        importantForAccessibility={showAccount ? "no-hide-descendants" : "auto"}
       >
         <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
@@ -8842,9 +8842,14 @@ const styles = StyleSheet.create({
   guestRoot: { flex: 1 },
   // Keep native list state/layout intact. On web, opacity and pointerEvents
   // alone leave invisible descendants in the keyboard tab order.
-  // Keep native list state/layout intact. On web the popup dims the screen
-  // behind it, so the screen stays laid out but stops taking pointer input.
+  // Hides an inactive tab's screen. On web `display: none` also keeps its
+  // descendants out of the keyboard tab order.
   hiddenScreen: Platform.OS === "web"
+    ? { display: "none" }
+    : { ...StyleSheet.absoluteFillObject, opacity: 0 },
+  // Keeps the screen laid out but not interactive while the account popup sits
+  // over it, so the work behind stays visible instead of being replaced.
+  inertScreen: Platform.OS === "web"
     ? { pointerEvents: "none" }
     : { ...StyleSheet.absoluteFillObject, opacity: 0 },
   // The account view opens as a popup over the current screen rather than
