@@ -277,7 +277,10 @@ describe('protected DLQ operations', () => {
     } as D1Database;
     await expect(recordQueueFailureBestEffort({ db, queueName: 'intern-notifs-github', messageId: 'm1', attempts: 4,
       body: { sourceId: 'github-pitt-csc' }, error: new Error('upstream failed') })).resolves.toBe(false);
-    expect(run).toHaveBeenCalledOnce();
+    // One ledger write, then one best-effort marker write so the scheduled
+    // ingestion-health alert can still surface the unavailable ledger. Both fail
+    // here without throwing.
+    expect(run).toHaveBeenCalledTimes(2);
   });
 });
 
