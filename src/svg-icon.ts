@@ -35,7 +35,12 @@ export type IconSvgRasterizer = (safeSvg: Uint8Array) => Promise<Uint8Array | un
  *
  * - `<!doctype` / `<!entity` are how entity expansion ("billion laughs") is declared.
  * - `<script>`, `<foreignObject>`, and the embedded-document elements run or embed
- *   live content.
+ *   live content. The element name may carry a namespace prefix (`<svg:script>`).
+ * - a SMIL animation element can retarget `href`/`src` after the static document was
+ *   scanned, so a mark that needs to animate is refused.
+ * - `@import` in a style loads a remote stylesheet, in either the `url(…)` or the
+ *   bare-substring form.
+ * - `xml:base` re-bases every relative reference off the employer's domain.
  * - an `on*=` attribute is an event handler.
  * - `javascript:` is a script URL.
  * - a non-`data:` scheme in `href`/`src` makes the renderer fetch a remote resource,
@@ -47,7 +52,11 @@ export type IconSvgRasterizer = (safeSvg: Uint8Array) => Promise<Uint8Array | un
  */
 const SVG_DANGEROUS = [
   /<!doctype/iu, /<!entity/iu, /<\?xml-stylesheet/iu,
-  /<script/iu, /<foreignobject/iu, /<iframe/iu, /<embed/iu, /<object/iu,
+  /<(?:[a-z0-9]+:)?script/iu, /<(?:[a-z0-9]+:)?foreignobject/iu,
+  /<(?:[a-z0-9]+:)?iframe/iu, /<(?:[a-z0-9]+:)?embed/iu, /<(?:[a-z0-9]+:)?object/iu,
+  /<(?:[a-z0-9]+:)?(?:animate|set|animatetransform|animatemotion|discard)\b/iu,
+  /@import/iu,
+  /xml:base\s*=/iu,
   /(?:^|[\s"'<(])on[a-z]{3,}\s*=/iu,
   /javascript:/iu,
   /(?:href|src)\s*=\s*["']?\s*(?!data:)[a-z][a-z0-9+.-]*:/iu,
@@ -58,6 +67,26 @@ const SVG_DANGEROUS = [
 const SVG_LEADING = /^(?:\uFEFF|\s|<\?xml[\s\S]*?\?>|<!--[\s\S]*?-->)+/u;
 
 /**
+ * Resolves XML character references, which are legal everywhere an ASCII character
+ * is and can spell a construct the patterns above look for (`&#x68;ttps://…`).
+ * Repeated a few times so a doubly-encoded reference is also settled; benign
+ * references (a copyright sign in a text node) decode to ordinary characters.
+ */
+function decodeXmlCharacterReferences(document: string): string {
+  let decoded = document;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = decoded.replace(/&#(x[0-9a-f]+|\d+);/giu, (whole, code: string) => {
+      const value = code[0]?.toLowerCase() === 'x'
+        ? Number.parseInt(code.slice(1), 16) : Number.parseInt(code, 10);
+      return Number.isFinite(value) && value > 0 && value <= 0x10ffff ? String.fromCodePoint(value) : whole;
+    });
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
+}
+
+/**
  * The document bytes when `bytes` is a bounded SVG that cannot execute script, load
  * a remote resource, or expand an entity; undefined otherwise.
  */
@@ -66,5 +95,6 @@ export function safeIconSvg(bytes: Uint8Array): Uint8Array | undefined {
   let document: string;
   try { document = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return undefined; }
   if (!/^<svg[\s>]/iu.test(document.replace(SVG_LEADING, ''))) return undefined;
-  return SVG_DANGEROUS.some((pattern) => pattern.test(document)) ? undefined : bytes;
+  const decoded = decodeXmlCharacterReferences(document);
+  return SVG_DANGEROUS.some((pattern) => pattern.test(document) || pattern.test(decoded)) ? undefined : bytes;
 }

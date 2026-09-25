@@ -85,11 +85,15 @@ describe('Cloudflare deployment plan guard', () => {
       { 'payload.js': { content_type: 'text/javascript', content_file: 'cloudflare/dist/ingestion/payload.js' } },
       { 'resvg.wasm': { ...part, content_type: 'text/plain' } },
       { 'resvg.wasm': { ...part, content_file: 'cloudflare/dist/ingestion/resvg.js' } },
+      { 'resvg.wasm': { ...part, content_file: '/etc/passwd.wasm' } },
       { 'resvg.wasm': 'cloudflare/dist/ingestion/resvg.wasm' },
     ]) {
       expect(() => validateCloudflarePlan(plan([{ ...updated, after: { ...updated.after, files } }])))
         .toThrow('Refusing unsafe Cloudflare plan');
     }
+    // The renderer belongs to the ingestion Worker; the API Worker stays wasm-free.
+    expect(() => validateCloudflarePlan(plan([{ ...updated, address: 'cloudflare_workers_script.application' }])))
+      .toThrow('Refusing unsafe Cloudflare plan');
   });
 
   it('accepts a computed namespace ID for an unchanged Durable Object binding', () => {

@@ -38,11 +38,30 @@ describe('board-logo SVG sanitizing', () => {
       '<rect style="fill:url(https://evil.test/x.svg#g)"/>',
       '<rect style="fill:url(//evil.test/x.svg#g)"/>',
       '<?xml-stylesheet href="https://evil.test/x.css"?>',
+      // Character references are legal XML and must not hide any of the above.
+      '<image href="&#x68;ttps://evil.test/x.png" width="8" height="8"/>',
+      '<a href="java&#115;cript:alert(1)"><path d="M0 0"/></a>',
+      '<image xlink:href="https&#58;//evil.test/x.png" width="8" height="8"/>',
+      // Namespace-prefixed element names.
+      '<svg:script>alert(1)</svg:script>',
+      '<xlink:script>alert(1)</xlink:script>',
+      '<svg:foreignObject><body/></svg:foreignObject>',
+      // CSS import in either form, and an off-domain base URI.
+      '<style>@import "https://evil.test/x.css";</style>',
+      '<style>@import url(https://evil.test/x.css);</style>',
+      '<image xml:base="https://evil.test/" href="x.png" width="8" height="8"/>',
+      // SMIL can retarget a reference after a static scan.
+      '<a><animate attributeName="href" to="https://evil.test"/></a>',
+      '<image><set attributeName="xlink:href" to="https://evil.test/x.png"/></image>',
     ];
     for (const body of dangerous) {
       expect(safeIconSvg(svg(body)), body).toBeUndefined();
       expect(safeIconSvg(bytes(body)), body).toBeUndefined();
     }
+  });
+
+  it('still accepts benign character references in text', () => {
+    expect(safeIconSvg(svg('<text x="4" y="60" fill="#fff">ACME &#169; 2026</text>'))).toBeDefined();
   });
 
   it('refuses a document that is not a bounded SVG at all', () => {

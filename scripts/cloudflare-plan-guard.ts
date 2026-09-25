@@ -59,7 +59,10 @@ function isPermittedModuleParts(before: unknown, after: unknown): boolean {
     const part = after[name];
     return isRecord(part)
       && part.content_type === 'application/wasm'
-      && typeof part.content_file === 'string' && part.content_file.endsWith('.wasm');
+      // A relative path, never an absolute one: Terraform emits `./../../…/resvg.wasm`,
+      // and nothing legitimate starts at the filesystem root.
+      && typeof part.content_file === 'string' && part.content_file.endsWith('.wasm')
+      && !part.content_file.startsWith('/');
   });
 }
 // Terraform redacts these production values in a Worker script update. They
@@ -391,7 +394,10 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   ));
   // A wasm-only change (a rasterizer bump) carries no new JavaScript, so the module
   // part is what makes it a release, and it must have the shape this build produces.
-  if (!isDeepStrictEqual(before.files, after.files) && !isPermittedModuleParts(before.files, after.files)) return false;
+  // The renderer belongs to the ingestion Worker alone — the API bundle must stay
+  // wasm-free — so a new module part is valid only on that address.
+  if (!isDeepStrictEqual(before.files, after.files)
+    && !(address === 'cloudflare_workers_script.ingestion' && isPermittedModuleParts(before.files, after.files))) return false;
   const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings)
     || isResumeTunerEnablement(before.bindings, after.bindings)
     || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, after.bindings));
