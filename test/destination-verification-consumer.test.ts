@@ -316,6 +316,43 @@ describe('destination verification queue consumer', () => {
     expect(shadowQueue.send).toHaveBeenCalledOnce();
   });
 
+  it('settles a provider-shadow message whose posting left the board instead of dead-lettering it', async () => {
+    const { database, db, jobs } = subject();
+    const { job, reference } = role();
+    reference.admission = {
+      canonicalEmployer: { id: 'acme', displayName: 'Acme' }, employerResolution: 'resolved', postingAttribution: 'attributed',
+      destination: { classification: 'application-form', candidateUrl: reference.applyUrl, finalUrl: reference.applyUrl,
+        provider: 'greenhouse', tenant: 'acme', expectedPostingId: reference.externalId, inspectedAt: '2026-08-30T00:00:00Z',
+        freshUntil: '2026-09-06T00:00:00Z', nextCheckAt: '2026-09-05T00:00:00Z', browserVisible: true },
+      metadata: { complete: true, title: 'complete', location: 'complete' }, catalogEligible: true, alertEligible: true,
+      reasonCodes: [], evaluatedAt: '2026-08-30T00:00:00Z', evidenceObservedAt: '2026-08-30T00:00:00Z',
+    };
+    reference.metadataExtraction = { version: 15, artifactHash: 'current-artifact',
+      observedAt: '2026-08-30T00:00:00Z', outcome: 'extracted' };
+    await jobs.putInternship({ ...job, sourceReferences: [reference] });
+    // The acquisition completes, but the board no longer publishes this posting,
+    // so it yields no artifact for the requested identity.
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => Response.json({ id: 0, title: 'other', content: 'x' })));
+    const shadowQueue = { send: vi.fn(), sendBatch: vi.fn() };
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId,
+      externalId: reference.externalId!, candidateUrl: reference.applyUrl, providerIdentity: {
+        provider: 'greenhouse', sourceId: reference.sourceId, sourceUrl: reference.sourceUrl,
+        tenant: 'acme', postingId: reference.externalId,
+      }, reason: 'content-change', queuedAt: '2026-08-30T00:00:00Z', idempotencyKey: 'gone-natural-shadow-handoff',
+      shadowContentHash: 'a'.repeat(64), shadowOrigin: 'provider-poll' });
+
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: shadowQueue,
+      SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn() } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(queued.retry).not.toHaveBeenCalled();
+    expect(shadowQueue.send).not.toHaveBeenCalled();
+    expect(database.prepare('SELECT count(*) AS count FROM destination_verification_completions WHERE idempotency_key = ?')
+      .get('gone-natural-shadow-handoff')).toEqual({ count: 1 });
+  });
+
   it('hands a staging-only official API backfill off to shadow extraction', async () => {
     const { database, db, jobs } = subject();
     const { job, reference } = role();
