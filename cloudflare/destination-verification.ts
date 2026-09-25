@@ -556,17 +556,18 @@ export async function processDestinationVerificationBatch(
         }
         let apiAcquisition = candidateOnly ? undefined : await acquireMetadata(message.providerIdentity, message.candidateUrl);
         if (naturalProviderShadow) {
-          // A completed acquisition that yields no artifact means the board no
-          // longer publishes this posting, or its identity changed, so the
-          // shadow re-check is obsolete: settle it instead of throwing. Only a
-          // failed or incomplete acquisition — a transient host or network
-          // condition — stays on the retry path so a shadow input is not lost.
-          // Throwing on the obsolete case dead-lettered every provider-shadow
-          // message for a posting that had left the board.
+          // An acquisition that yields no artifact for a non-retryable reason is
+          // permanent: the board no longer publishes the posting, its identity
+          // changed, or its body is past the acquisition ceiling (the Ashby
+          // boards exceed the 2 MB cap, so a provider-shadow message for one can
+          // never acquire). Settle it so the queue does not accumulate one dead
+          // letter per departed or oversized shadow posting. Only a failed
+          // acquisition with a retryable status stays on the retry path, where a
+          // transient host or network condition could still deliver the artifact.
           if (!apiAcquisition?.artifact?.text) {
-            if (apiAcquisition?.outcome === 'failed' || apiAcquisition?.outcome === 'incomplete') {
-              throw new Error('Natural provider shadow artifact is unavailable');
-            }
+            const status = apiAcquisition?.status;
+            const retryable = apiAcquisition?.outcome === 'failed' && (status === undefined || status === 429 || status >= 500);
+            if (retryable) throw new Error('Natural provider shadow artifact is unavailable');
             await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
             continue;
           }
