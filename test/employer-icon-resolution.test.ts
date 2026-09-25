@@ -317,6 +317,21 @@ describe('domain decision', () => {
     expect(strong.selectedScore).toBeCloseTo(0.95, 10);
   });
 
+  it('prefers the site the employer’s own board declares over a provider consensus', () => {
+    // Both providers agree on the unrelated namesake; the employer's board links the
+    // real site. The board's own word wins.
+    const decision = decideIconDomain([
+      candidate('figure.com', ['logo-dev', 'brandfetch', 'page-title']),
+      candidate('figure.ai', ['platform-website']),
+    ]);
+    expect(decision).toMatchObject({ outcome: 'resolved', selectedDomain: 'figure.ai' });
+    expect(decision.reason).toContain("the employer's own board names figure.ai");
+
+    // With no board declaration the consensus still auto-resolves exactly as before.
+    const consensus = decideIconDomain([candidate('figure.com', ['logo-dev', 'brandfetch', 'page-title'])]);
+    expect(consensus).toMatchObject({ outcome: 'resolved', selectedDomain: 'figure.com' });
+  });
+
   it('does not auto-resolve when a runner-up sits inside the margin', () => {
     const decision = decideIconDomain([
       candidate('acme.com', ['logo-dev', 'brandfetch']),

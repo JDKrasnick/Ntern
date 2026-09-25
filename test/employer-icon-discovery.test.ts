@@ -132,13 +132,29 @@ describe('page evidence parsing', () => {
     expect(ashby.declaredWebsite).toBe('rivianvw.tech');
     expect(ashby.declaredEmployerName).toBe('Rivian and Volkswagen Group Technologies');
 
-    // Greenhouse publishes the employer's name in its own payload.
+    // Greenhouse publishes the employer's name in its own payload, and its site as the
+    // destination of the board logo when the employer linked one.
     const greenhouse = parseIconPageEvidence(
       '<html><head><title>Job Application for Summer Intern at IMC</title></head><body>'
       + '<script>{"company_name":"IMC"}</script></body></html>',
     );
     expect(greenhouse.declaredEmployerName).toBe('IMC');
     expect(greenhouse.declaredWebsite).toBeUndefined();
+
+    // The Greenhouse board payload is serialized escaped; `logo.href` is the employer's
+    // own site and `logo.url` is the CDN image, which is not a domain.
+    const linked = parseIconPageEvidence(
+      '<html><head><title>Jobs at Figure</title></head><body><script>'
+      + '\\"logo\\":{\\"href\\":\\"https://www.figure.ai\\",\\"url\\":\\"https://s6-recruiting.cdn.greenhouse.io/logos/x.png\\"}'
+      + '</script></body></html>',
+    );
+    expect(linked.declaredWebsite).toBe('figure.ai');
+    // A board whose logo is not linked declares no site.
+    expect(parseIconPageEvidence('<html><body><script>{"logo":{"href":null,"url":"https://s6-recruiting.cdn.greenhouse.io/logos/x.png"}}</script></body></html>').declaredWebsite)
+      .toBeUndefined();
+    // A board that links its own posting host is a transport host, discarded in scoring.
+    expect(parseIconPageEvidence('<html><body><script>{"logo":{"href":"https://boards.greenhouse.io/acme","url":"https://s6-recruiting.cdn.greenhouse.io/logos/x.png"}}</script></body></html>').declaredWebsite)
+      .toBe('greenhouse.io');
 
     // Lever names the employer only in the title.
     expect(parseIconPageEvidence('<html><head><title>Hermeus jobs</title></head></html>').declaredEmployerName).toBe('Hermeus');

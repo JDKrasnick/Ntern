@@ -2058,3 +2058,40 @@ describe('employer icon resolver correctness fixes', () => {
     expect(await icons.reviewQueue(10)).toEqual([]);
   });
 });
+
+describe('employer declared-site precedence', () => {
+  it('publishes the site the employer’s Greenhouse board links over a provider namesake', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('figureai', 'Figure'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://job-boards.greenhouse.io/figureai/jobs/1'),
+      canonicalEmployerId: 'figureai', displayName: 'Figure', provider: 'greenhouse',
+      tenant: 'figureai', sourceId: 'greenhouse:figureai',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      // The board links the employer's real site beside a null CDN image, as Greenhouse
+      // serializes it escaped inside the board payload.
+      'https://job-boards.greenhouse.io/figureai/jobs/1': () => html(
+        '<!doctype html><html><head><title>Electrical Engineering Intern at Figure</title><script>'
+        + '\\"logo\\":{\\"href\\":\\"https://www.figure.ai\\",\\"url\\":null}'
+        + '</script></head></html>',
+      ),
+      // Both providers agree, wrongly, on the unrelated lending company.
+      [logoDevSearchUrl('Figure')]: () => ok([{ name: 'Figure', domain: 'figure.com' }]),
+      [brandfetchSearchUrl('Figure', BRANDFETCH_CLIENT)]: () => ok([{ name: 'Figure', domain: 'figure.com' }]),
+      [logoDevImageUrl('figure.ai', LOGO_IMAGE_TOKEN)]: () => webp(),
+      [IMAGE_URL]: () => status(404),
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, {
+        LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, BRANDFETCH_CLIENT_ID: BRANDFETCH_CLIENT,
+      }), NOW,
+      DEPENDENCIES(fetchImpl),
+    );
+
+    expect(result.resolved).toBe(1);
+    expect((await icons.context('figureai'))?.websiteDomain).toBe('figure.ai');
+  });
+});

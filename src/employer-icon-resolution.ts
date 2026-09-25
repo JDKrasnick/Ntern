@@ -441,6 +441,21 @@ export function decideIconDomain(candidates: readonly IconDomainCandidate[]): Ic
   if (!best) {
     return { outcome: 'unresolved', scores, reason: 'No eligible employer domain candidate' };
   }
+  // The employer's own ATS board declares the employer's site. When that declaration is
+  // a different domain from the one the providers agreed on, the employer's own word
+  // wins: two providers agreeing with each other is exactly how a namesake gets
+  // published (an employer that links `figure.ai` on its board while both providers
+  // nominate the unrelated `figure.com`), and the board's domain is the employer
+  // stating its own site. This is deliberately narrow — it only overrides a decision
+  // the providers would have made on their own; with no declaration, nothing changes.
+  const declared = eligible.find((candidate) => candidate.signals.includes('platform-website'));
+  if (declared && declared.domain !== best.domain) {
+    return {
+      outcome: 'resolved', scores, selectedDomain: declared.domain, selectedScore: declared.score,
+      runnerUpScore: best.score,
+      reason: `the employer's own board names ${declared.domain}, not ${best.domain}`,
+    };
+  }
   const runnerUp = eligible.find((candidate) => candidate.domain !== best.domain);
   const margin = runnerUp ? best.score - runnerUp.score : MAX_SCORE;
   if (best.score >= ICON_AUTO_RESOLVE_SCORE && margin >= ICON_AUTO_RESOLVE_MARGIN) {

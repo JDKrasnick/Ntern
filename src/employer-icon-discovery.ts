@@ -177,7 +177,9 @@ export function platformLogoUrls(html: string): string[] {
  * comes back, so a null or relative value is simply absent.
  */
 function payloadHttpsField(html: string, name: string): string | undefined {
-  const pattern = new RegExp(String.raw`\\?"${name}\\?"\s*:\s*\\?"((?:[^"\\]|\\.)*)\\?"`, 'u');
+  // The capture is lazy: a field followed by another field would otherwise swallow the
+  // next key through its escaped quotes (`logo.href` sits before `logo.url`).
+  const pattern = new RegExp(String.raw`\\?"${name}\\?"\s*:\s*\\?"((?:[^"\\]|\\.)*?)\\?"`, 'u');
   const value = pattern.exec(html)?.[1];
   if (!value) return undefined;
   const unescaped = value.replace(/\\\//gu, '/').replace(/\\"/gu, '"').replace(/\\\\/gu, '\\');
@@ -190,6 +192,21 @@ function greenhouseBoardLogoUrl(html: string): string | undefined {
   if (!marker) return undefined;
   const close = html.indexOf('}', marker.index);
   return close < 0 ? undefined : payloadHttpsField(html.slice(marker.index, close), 'url');
+}
+
+/**
+ * Greenhouse also publishes the employer's own site as the *destination* of the board
+ * logo — `"logo":{"href":"https://www.figure.ai","url":"https://…"}` — serialized
+ * escaped inside the board payload. It is the same kind of declaration as Ashby's
+ * `publicWebsite`: the employer's own board stating its domain. A board whose logo is
+ * not linked publishes `href: null`, and a board that links its own posting host
+ * (`boards.greenhouse.io/<slug>`) is read here as a transport host and discarded later.
+ */
+function greenhouseBoardLogoHref(html: string): string | undefined {
+  const marker = /\\?"logo\\?"\s*:\s*\{/u.exec(html);
+  if (!marker) return undefined;
+  const close = html.indexOf('}', marker.index);
+  return close < 0 ? undefined : payloadHttpsField(html.slice(marker.index, close), 'href');
 }
 
 /**
@@ -478,9 +495,10 @@ export interface IconPageEvidence {
   organizations: IconOrganizationEvidence[];
   /**
    * The employer's own site as its ATS board declares it. Ashby publishes one
-   * (`publicWebsite`, else the careers page it hosts for the employer), and it is
-   * the employer's own statement about its domain — the same authority as a JSON-LD
-   * Organization URL, reached without a provider.
+   * (`publicWebsite`, else the careers page it hosts for the employer), and Greenhouse
+   * publishes the destination of its board logo (`logo.href`); both are the employer's
+   * own statement about its domain — the same authority as a JSON-LD Organization URL,
+   * reached without a provider.
    */
   declaredWebsite?: string;
   /**
@@ -546,7 +564,8 @@ function boundedString(html: string, pattern: RegExp): string | undefined {
  */
 function declaredEmployer(html: string, title: string | undefined): { website?: string; name?: string } {
   const published = boundedString(html, /"publicWebsite"\s*:\s*"(https?:\/\/[^"]+)"/iu)
-    ?? boundedString(html, /"customJobsPageUrl"\s*:\s*"(https?:\/\/[^"]+)"/iu);
+    ?? boundedString(html, /"customJobsPageUrl"\s*:\s*"(https?:\/\/[^"]+)"/iu)
+    ?? greenhouseBoardLogoHref(html);
   const companyName = boundedString(html, /"company_name"\s*:\s*"([^"\\]+)"/iu);
   // "Job Application for <role> at <Employer>" (Greenhouse), or "<Employer> jobs"
   // and "<Employer> Careers" (Lever, Ashby).

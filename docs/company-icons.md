@@ -70,10 +70,12 @@ The posting page is already fetched for evidence, and the platforms publish more
 | Platform | Employer's own site | Employer's name |
 |---|---|---|
 | Ashby | **`publicWebsite`** in the board payload, else the careers page it hosts | page title |
-| Greenhouse | not published | **`company_name`** |
+| Greenhouse | **`logo.href`**, the destination of the employer's board logo (null when unlinked) | **`company_name`** |
 | Lever | not published | page title |
 
-Either declaration is read from the page in hand, so it costs no extra request and no credential. An Ashby board's `publicWebsite` is the employer's own statement about its domain, so it carries the same weight as a JSON-LD Organization URL, and it is what lets an Ashby-hosted role resolve with no provider configured.
+Either declaration is read from the page in hand, so it costs no extra request and no credential. An Ashby board's `publicWebsite` is the employer's own statement about its domain, so it carries the same weight as a JSON-LD Organization URL, and it is what lets an Ashby-hosted role resolve with no provider configured. Greenhouse publishes the same fact as the destination of its board logo (`logo.href`), and a board that links its own posting host there is read as a transport host and discarded.
+
+When the employer's own board declares a site and the providers agree on a *different* domain, the employer's own word wins: two providers agreeing with each other is how a namesake gets published, whereas the board's declaration is the employer stating its own site. This override is narrow — it only changes a decision the providers would otherwise have made on their own, and with no board declaration nothing changes.
 
 A declared name is only used when it denotes a company. ATS boards sometimes carry a landing-page title — Axon's board declares `Join Our Talent Community` — which names a page rather than an employer and would send a provider search and a logo lookup in the wrong direction, so those are rejected.
 
