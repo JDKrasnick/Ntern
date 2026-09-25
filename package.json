@@ -44,6 +44,7 @@
     "audit:catalog-index": "tsx src/migrate-open-index.ts",
     "notifications:log": "tsx scripts/notification-log.ts",
     "dlq": "tsx scripts/dlq-operations.ts",
+    "dlq:watch": "tsx scripts/catalog-dlq-watch.ts",
     "migrate:catalog-search": "tsx src/migrate-catalog-search.ts",
     "migrate:source-occurrences": "tsx src/migrate-source-occurrences.ts",
     "migrate:posting-identity": "tsx scripts/posting-identity-repair.ts",

@@ -1,0 +1,31 @@
+name: Catalog DLQ watch
+on:
+  schedule:
+    # Once a day, well after the overnight provider sweeps have settled.
+    - cron: '5 13 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    # A stray poison message can legitimately add a dead letter, so a growth
+    # report is a prompt to inspect, not a build failure. The step's exit code
+    # still shows red in the run.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Restore the previous DLQ snapshot
+        uses: actions/cache@v4
+        with:
+          path: .dlq-baseline.json
+          key: catalog-dlq-baseline-${{ github.run_id }}
+          restore-keys: catalog-dlq-baseline-
+      - name: Sample the catalog dead-letter queues
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run dlq:watch
