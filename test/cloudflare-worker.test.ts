@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -45,6 +45,15 @@ describe('Resume compiler transport', () => {
     expect(resumeCompilerPoolName('00000001abcdef12')).toBe('resume-pdf-compiler-1');
     expect(resumeCompilerPoolName('ffffffffabcdef12')).toBe('resume-pdf-compiler-1');
     expect(() => resumeCompilerPoolName('not-a-digest')).toThrow(/digest/u);
+  });
+
+  it('reads the optional line boxes and tolerates their absence', () => {
+    const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+    expect(resumeCompilerLineBoxes({})).toBeUndefined();
+    expect(resumeCompilerLineBoxes({ 'lines.json': new TextEncoder().encode('not json') })).toBeUndefined();
+    expect(resumeCompilerLineBoxes({ 'lines.json': encode({ pages: [] }) })).toBeUndefined();
+    const pages = [[{ x: 0, y: 0, w: 0.5, h: 0.02, text: 'Built a parser' }]];
+    expect(resumeCompilerLineBoxes({ 'lines.json': encode(pages) })).toEqual(pages);
   });
 });
 

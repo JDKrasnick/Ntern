@@ -23,10 +23,15 @@ function resolvedResumeBank(profile: ResumeProfile, draft: ResumeDraft, bankItem
   const removed = new Set<string>();
   const rewritten = new Map<string, string>();
   const added: ResumeBankItem[] = [];
+  const moveRank = new Map<string, number>();
+  let moveOrder = 0;
   for (const change of draft.changes) {
     if (change.decision !== 'accepted') continue;
     if (change.type === 'remove') removed.add(change.target.bankItemId);
     if (change.type === 'rewrite' && change.suggestion) rewritten.set(change.target.bankItemId, change.suggestion.trim());
+    // A move only matters as order: floated items render ahead of the rest of
+    // their section or parent, in the order the reviewer accepted them.
+    if (change.type === 'move' && !moveRank.has(change.target.bankItemId)) moveRank.set(change.target.bankItemId, moveOrder++);
     if (change.type === 'add' && change.suggestion) {
       const target = byId.get(change.target.bankItemId);
       const parent = target?.kind === 'bullet' ? target.parent
@@ -38,9 +43,11 @@ function resolvedResumeBank(profile: ResumeProfile, draft: ResumeDraft, bankItem
       });
     }
   }
+  const rankOf = (item: ResumeBankItem) => moveRank.get(item.bankItemId) ?? Number.MAX_SAFE_INTEGER;
   return [...selected, ...added]
     .filter((item) => !removed.has(item.bankItemId) && !(item.kind === 'bullet' && removed.has(item.parent.bankItemId)))
-    .map((item) => rewritten.has(item.bankItemId) ? { ...item, content: rewritten.get(item.bankItemId)! } : item);
+    .map((item) => rewritten.has(item.bankItemId) ? { ...item, content: rewritten.get(item.bankItemId)! } : item)
+    .sort((left, right) => rankOf(left) - rankOf(right));
 }
 
 /** Turns the bank graph into the only input shape a template may render. Child
@@ -48,8 +55,16 @@ function resolvedResumeBank(profile: ResumeProfile, draft: ResumeDraft, bankItem
 export function buildResumeDocument(profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[]): ResumeDocument {
   const resolved = resolvedResumeBank(profile, draft, bankItems);
   const bullets = new Map<string, string[]>();
+  const seenBullets = new Map<string, Set<string>>();
   for (const item of resolved) {
     if (item.kind !== 'bullet') continue;
+    // A duplicate line (for example an add that repeats an existing bullet) must
+    // never render twice under the same entry.
+    const seen = seenBullets.get(item.parent.bankItemId) ?? new Set<string>();
+    const key = item.content.trim().replace(/\s+/gu, ' ').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    seenBullets.set(item.parent.bankItemId, seen);
     bullets.set(item.parent.bankItemId, [...(bullets.get(item.parent.bankItemId) ?? []), item.content]);
   }
   const document: ResumeDocument = {

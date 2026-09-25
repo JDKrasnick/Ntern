@@ -12,9 +12,11 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { RESUME_DRAFT_MODELS_QUALITY } from './resume-generation.js';
+import { dropDuplicateAdditions, keepValidResumeChanges, normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
+import { attachResumeReviewBoxes, buildResumeReviewRows } from './resume-review.js';
 import { RESUME_TEMPLATES, resumeTemplateList } from './resume-templates.js';
 import type { ResumeSemanticIndex } from './resume-embeddings.js';
 import { effectiveResumeSubscriptionPlan, resumeSubscriptionPeriod, resumeSubscriptionSummary } from './subscription.js';
@@ -384,13 +386,19 @@ export interface ResumeImportCache {
 
 /** Model implementations return only proposed structured changes; API guards own validation. */
 export interface ResumeDraftGenerator {
-  generate(input: { job: ImportedJob; profile: ResumeProfile; bankItems: ResumeBankItem[] }): Promise<ResumeChange[]>;
+  /** `feedback` carries the previous attempt's validation error so the model can correct it.
+   * `models` overrides the default chain, which is how the paid tier selects its model. */
+  generate(input: { job: ImportedJob; profile: ResumeProfile; bankItems: ResumeBankItem[]; feedback?: string; models?: readonly string[] }): Promise<ResumeChange[]>;
 }
 
 export interface ResumeArtifactStorage {
   putTex(objectKey: string, tex: string): Promise<void>;
   putPdf(objectKey: string, pdf: ArrayBuffer): Promise<void>;
   putPreview?(objectKey: string, png: ArrayBuffer): Promise<void>;
+  /** Persists the compiled per-page line boxes so a review can point at a change
+   * without recompiling. */
+  putLineBoxes?(objectKey: string, lines: string): Promise<void>;
+  getLineBoxes?(objectKey: string): Promise<ResumeLineBox[][] | undefined>;
   compile(tex: string, resumeSpecHash: string): Promise<ResumeCompilation>;
 }
 
@@ -504,12 +512,17 @@ function resumeDraftChanges(job: ImportedJob, bankItems: ResumeBankItem[]): Resu
 
 /** Keeps a comprehensive Technical base out of the model context window while
  * retaining the source records with the strongest direct job-language match. */
-function resumeGenerationEvidence(job: ImportedJob, bankItems: ResumeBankItem[], limit = 80): ResumeBankItem[] {
+/** Selects the candidate slice sent to the model. Keyword overlap is the free
+ * fallback; a paid semantic score leads when present so candidates match the job
+ * by meaning. Every item is a candidate up to the limit, and the model makes the
+ * final call on rewrites, removals, and additions. */
+export function resumeGenerationEvidence(job: ImportedJob, bankItems: ResumeBankItem[], limit = 80, semanticScores: ReadonlyMap<string, number> = new Map()): ResumeBankItem[] {
   const jobWords = new Set(`${job.title ?? ''} ${job.company ?? ''} ${job.description}`.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
   const ranked = bankItems.map((item, index) => ({
     item, index,
-    score: [...new Set(item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? [])].filter((word) => jobWords.has(word)).length,
-  })).filter(({ score }) => score > 0).sort((left, right) => right.score - left.score || left.index - right.index).map(({ item }) => item);
+    semantic: semanticScores.get(item.bankItemId) ?? 0,
+    keyword: [...new Set(item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? [])].filter((word) => jobWords.has(word)).length,
+  })).sort((left, right) => right.semantic - left.semantic || right.keyword - left.keyword || left.index - right.index).map(({ item }) => item);
   const byId = new Map(bankItems.map((item) => [item.bankItemId, item]));
   const selected = new Map<string, ResumeBankItem>();
   for (const item of ranked) {
@@ -540,6 +553,34 @@ export function createApiHandler(dependencies: ApiDependencies) {
   // accounts never pay for embeddings; the recommendation route warms a paid
   // account's derived cache when it upgrades after importing.
   const semanticRankingEnabled = async (userId: string) => effectiveResumeSubscriptionPlan(await dependencies.users.getResumeSubscription(userId)).tier !== 'free';
+  /** Renders and compiles one content-addressed artifact, reusing an identical
+   * one. The draft's status is the caller's concern, so the same path serves a
+   * live preview and finalize. */
+  const compileResumeArtifact = async (userId: string, profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[], createdAt: string): Promise<ResumeArtifact> => {
+    const storage = dependencies.resumeArtifactStorage!;
+    const rendered = renderResumeLatex(profile, applicant, draft, bankItems);
+    const findExisting = async () => (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash
+      && artifact.templateVersion === RESUME_TEMPLATE_VERSION && artifact.compilerVersion === RESUME_COMPILER_VERSION);
+    const existing = await findExisting();
+    if (existing) return existing;
+    const compilation = await storage.compile(rendered.tex, rendered.resumeSpecHash);
+    const objectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf`;
+    const texObjectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
+    await storage.putTex(texObjectKey, rendered.tex);
+    await storage.putPdf(objectKey, compilation.pdf);
+    const previewObjectKeys = compilation.previewPngs.map((_, index) => `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/preview-${index + 1}.png`);
+    if (storage.putPreview) await Promise.all(compilation.previewPngs.map((png, index) => storage.putPreview!(previewObjectKeys[index]!, png)));
+    const lineBoxObjectKey = compilation.lineBoxes ? `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/lines.json` : undefined;
+    if (lineBoxObjectKey && storage.putLineBoxes) await storage.putLineBoxes(lineBoxObjectKey, JSON.stringify(compilation.lineBoxes));
+    const artifact: ResumeArtifact = { userId, artifactId: randomUUID(), draftId: draft.draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, pageCount: compilation.pageCount, previewObjectKeys, ...(lineBoxObjectKey ? { lineBoxObjectKey } : {}), createdAt };
+    if (!await dependencies.users.putResumeArtifact(artifact)) {
+      // A concurrent compile claimed the same content-addressed row; reuse it.
+      const raced = await findExisting();
+      if (raced) return raced;
+      throw new Error('Resume artifact could not be stored');
+    }
+    return artifact;
+  };
   return async (event: ApiEvent): Promise<ApiResponse> => {
     try {
       const method = event.requestContext?.http?.method ?? event.routeKey?.split(' ')[0] ?? 'GET'; const path = event.rawPath ?? event.routeKey?.split(' ')[1] ?? '/';
@@ -982,18 +1023,77 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (exhausted) return reply(402, exhausted);
             const allowed = new Set(profile.bankItemIds);
             const selected = bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified);
+            // Light semantic search picks candidates when the plan allows; the
+            // model still decides which changes to propose.
+            let evidenceScores = new Map<string, number>();
+            if (selected.length && dependencies.resumeSemanticIndex && await semanticRankingEnabled(userId)) {
+              try { evidenceScores = await dependencies.resumeSemanticIndex.scores(userId, imported.description, selected.map((item) => item.bankItemId)); } catch { /* keyword ranking is the safe fallback */ }
+            }
+            const evidence = resumeGenerationEvidence(imported, selected, 80, evidenceScores);
+            const generationStartedAt = Date.now();
             let changes: ResumeChange[];
+            let generation: { outcome: 'model' | 'model-retry' | 'fallback'; reason?: string };
             try {
-              changes = dependencies.resumeDraftGenerator
-                ? await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: resumeGenerationEvidence(imported, selected) })
-                : resumeDraftChanges(imported, selected);
-              validateResumeChanges(changes, selected);
-              if (!changes.length) changes = resumeDraftChanges(imported, selected);
-            } catch {
+              if (!dependencies.resumeDraftGenerator) {
+                changes = resumeDraftChanges(imported, selected);
+                generation = { outcome: 'fallback', reason: 'no generator configured' };
+              } else {
+                // The first attempt covers schema and validation failures alike:
+                // either way the model gets one corrective retry with the error.
+                // A model that repeats an existing line should not cost the whole
+                // draft: drop the duplicates and keep the real changes.
+                const accept = (generated: ResumeChange[]) => dropDuplicateAdditions(generated, selected);
+                // Pro buys the stronger chain; its whole allowance still costs
+                // cents against the plan price.
+                const models = plan.tier === 'pro' ? RESUME_DRAFT_MODELS_QUALITY : undefined;
+                try {
+                  changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, ...(models ? { models } : {}) }));
+                  validateResumeChanges(changes, selected);
+                  generation = { outcome: 'model' };
+                } catch (firstError) {
+                  const feedback = firstError instanceof Error ? firstError.message : 'The changes did not match the required schema.';
+                  changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, feedback, ...(models ? { models } : {}) }));
+                  try {
+                    validateResumeChanges(changes, selected);
+                    generation = { outcome: 'model-retry' };
+                  } catch (secondError) {
+                    // A single ungrounded change should not cost the whole draft.
+                    const salvaged = keepValidResumeChanges(changes, selected);
+                    if (!salvaged.length) throw secondError;
+                    validateResumeChanges(salvaged, selected);
+                    changes = salvaged;
+                    generation = { outcome: 'model-retry' };
+                  }
+                }
+                if (!changes.length) {
+                  changes = resumeDraftChanges(imported, selected);
+                  generation = { outcome: 'fallback', reason: 'model returned no changes' };
+                }
+              }
+            } catch (error) {
               // Generation availability must not make a verified base unusable.
               // The fallback remains evidence-linked and never invents a claim.
               changes = resumeDraftChanges(imported, selected);
+              generation = { outcome: 'fallback', reason: error instanceof Error ? error.message : String(error) };
             }
+            // Outcomes are logged and emitted as a metric so a silent fallback
+            // rate is alertable rather than invisible.
+            const durationMs = Date.now() - generationStartedAt;
+            console.log(JSON.stringify({
+              _aws: {
+                Timestamp: Date.now(),
+                CloudWatchMetrics: [{
+                  Namespace: 'InternNotifs/Resume',
+                  Dimensions: [['outcome']],
+                  Metrics: [{ Name: 'DraftGeneration', Unit: 'Count' }, { Name: 'DraftGenerationDurationMs', Unit: 'Milliseconds' }],
+                }],
+              },
+              event: 'resume_draft_generation', outcome: generation.outcome, reason: generation.reason,
+              // `plan` keeps the fallback rate readable per tier, since Pro runs
+              // a different chain.
+              plan: plan.tier,
+              changes: changes.length, evidence: evidence.length, semanticCandidates: evidenceScores.size, durationMs,
+            }));
             const readabilityChanges = proposeResumeReadabilityChanges(imported, selected);
             const readabilityTargets = new Set(readabilityChanges.map((change) => change.target.bankItemId));
             changes = [...readabilityChanges, ...changes.filter((change) => !readabilityTargets.has(change.target.bankItemId))].slice(0, 12);
@@ -1036,6 +1136,20 @@ export function createApiHandler(dependencies: ApiDependencies) {
             return reply(200, updated);
           }
         }
+        const reviewMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/review$/u);
+        if (reviewMatch && method === 'GET') {
+          const draftId = decodeURIComponent(reviewMatch[1]!);
+          const previous = await dependencies.users.getResumeDraft(userId, draftId);
+          if (!previous) return reply(404, { message: 'Resume draft not found' });
+          const [profile, applicant, bankItems] = await Promise.all([
+            dependencies.users.getResumeProfile(userId, previous.profileId),
+            dependencies.users.getProfile(userId),
+            dependencies.users.listResumeBank(userId),
+          ]);
+          if (!profile) return reply(404, { message: 'Resume profile not found' });
+          const fallbackApplicant: ApplicantProfile = { userId, contact: { name: '', email: '' }, location: '', workAuthorization: '', links: {}, education: [], reusableAnswers: {}, updatedAt: timestamp };
+          return reply(200, { rows: buildResumeReviewRows(profile, applicant ?? fallbackApplicant, previous, bankItems), profileName: profile.name, template: profile.template });
+        }
         const draftChangeMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/changes\/([^/]+)$/u);
         if (draftChangeMatch && method === 'PATCH') {
           const draftId = decodeURIComponent(draftChangeMatch[1]!);
@@ -1045,13 +1159,67 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (previous.status === 'finalized') return reply(409, { message: 'Finalized resume drafts cannot be changed' });
           const body = parseBody(event);
           if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume draft changed; refresh and retry' });
-          if (body.decision !== 'accepted' && body.decision !== 'rejected') return reply(400, { message: 'decision must be accepted or rejected' });
-          if (!previous.changes.some((change) => change.changeId === changeId)) return reply(404, { message: 'Resume change not found' });
-          const decision = body.decision as NonNullable<ResumeChange['decision']>;
-          const changes = previous.changes.map((change) => change.changeId === changeId ? { ...change, decision } : change);
+          const target = previous.changes.find((change) => change.changeId === changeId);
+          if (!target) return reply(404, { message: 'Resume change not found' });
+          const hasDecision = body.decision !== undefined;
+          if (hasDecision && body.decision !== 'accepted' && body.decision !== 'rejected') return reply(400, { message: 'decision must be accepted or rejected' });
+          const hasSuggestion = body.suggestion !== undefined;
+          if (!hasDecision && !hasSuggestion) return reply(400, { message: 'decision or suggestion is required' });
+          if (hasSuggestion && target.type !== 'add' && target.type !== 'rewrite') return reply(400, { message: 'Only added or rewritten lines can be edited' });
+          const changes = previous.changes.map((change) => change.changeId === changeId
+            ? { ...change, ...(hasDecision ? { decision: body.decision as NonNullable<ResumeChange['decision']> } : {}), ...(hasSuggestion ? { suggestion: resumeText(body.suggestion, 'suggestion', 2_000) } : {}) }
+            : change);
+          if (hasSuggestion) {
+            // An edited line must still be grounded in its cited evidence.
+            const [profile, bank] = await Promise.all([dependencies.users.getResumeProfile(userId, previous.profileId), dependencies.users.listResumeBank(userId)]);
+            const allowed = new Set(profile?.bankItemIds ?? []);
+            try { validateResumeChanges(changes, bank.filter((item) => allowed.has(item.bankItemId) && item.verified)); }
+            catch (error) { return reply(400, { message: error instanceof Error ? error.message : 'The edited line is not supported by its evidence' }); }
+          }
           const updated: ResumeDraft = { ...previous, changes, status: 'reviewing', revision: previous.revision + 1, updatedAt: timestamp };
           if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           return reply(200, updated);
+        }
+        const previewDraftMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/preview$/u);
+        if (previewDraftMatch && method === 'POST') {
+          const draftId = decodeURIComponent(previewDraftMatch[1]!);
+          const previous = await dependencies.users.getResumeDraft(userId, draftId);
+          if (!previous) return reply(404, { message: 'Resume draft not found' });
+          const storage = dependencies.resumeArtifactStorage;
+          if (!storage) return reply(503, { message: 'Preview rendering is temporarily unavailable' });
+          const [profile, applicant, bankItems] = await Promise.all([
+            dependencies.users.getResumeProfile(userId, previous.profileId),
+            dependencies.users.getProfile(userId),
+            dependencies.users.listResumeBank(userId),
+          ]);
+          if (!profile) return reply(404, { message: 'Resume profile not found' });
+          const allowed = new Set(profile.bankItemIds);
+          const selected = bankItems.filter((item) => allowed.has(item.bankItemId));
+          // The proposal renders every change and the original renders none, so a
+          // reviewer sees both pages; decisions are carried by the diff and never
+          // trigger a recompile.
+          const original: ResumeDraft = { ...previous, changes: [] };
+          const proposal: ResumeDraft = { ...previous, changes: dropDuplicateAdditions(previous.changes.map((change) => ({ ...change, decision: 'accepted' as const })), selected) };
+          try {
+            validateResumeProfileSelection(profile.bankItemIds, bankItems);
+            validateResumeChanges(proposal.changes, selected);
+          } catch (error) {
+            return reply(409, { message: error instanceof Error ? error.message : 'The resume source graph is no longer valid' });
+          }
+          if (!applicant?.contact.name.trim() || !applicant.contact.email.trim()) return reply(409, { message: 'Complete your name and email in your profile before previewing a PDF résumé' });
+          let artifact: ResumeArtifact;
+          let originalArtifact: ResumeArtifact;
+          try {
+            [artifact, originalArtifact] = await Promise.all([
+              compileResumeArtifact(userId, profile, applicant, proposal, bankItems, timestamp),
+              compileResumeArtifact(userId, profile, applicant, original, bankItems, timestamp),
+            ]);
+          } catch { return reply(503, { message: 'The preview could not be rendered right now; try again shortly' }); }
+          const readLineBoxes = async (target: ResumeArtifact): Promise<ResumeLineBox[][]> =>
+            target.lineBoxObjectKey && storage.getLineBoxes ? await storage.getLineBoxes(target.lineBoxObjectKey) ?? [] : [];
+          const [originalPages, proposalPages] = await Promise.all([readLineBoxes(originalArtifact), readLineBoxes(artifact)]);
+          const rows = attachResumeReviewBoxes(buildResumeReviewRows(profile, applicant, previous, bankItems), originalPages, proposalPages);
+          return reply(200, { artifact, original: originalArtifact, rows });
         }
         const finalizeDraftMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/finalize$/u);
         if (finalizeDraftMatch && method === 'POST') {
@@ -1078,28 +1246,12 @@ export function createApiHandler(dependencies: ApiDependencies) {
           }
           if (!applicant?.contact.name.trim() || !applicant.contact.email.trim()) return reply(409, { message: 'Complete your name and email in your profile before creating a PDF résumé' });
           const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
-          const rendered = renderResumeLatex(profile, applicant, updated, bankItems);
-          const existing = (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash
-            && artifact.templateVersion === RESUME_TEMPLATE_VERSION && artifact.compilerVersion === RESUME_COMPILER_VERSION);
-          if (existing) {
-            if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
-            return reply(200, { draft: updated, artifact: existing });
-          }
-          const artifactId = randomUUID();
-          const texObjectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
-          let compilation: ResumeCompilation;
+          let artifact: ResumeArtifact;
           try {
-            compilation = await dependencies.resumeArtifactStorage.compile(rendered.tex, rendered.resumeSpecHash);
+            artifact = await compileResumeArtifact(userId, profile, applicant, { ...updated, changes: dropDuplicateAdditions(updated.changes, selected) }, bankItems, timestamp);
           } catch {
             return reply(503, { message: 'PDF generation is temporarily unavailable; your draft was not finalized' });
           }
-          const objectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf`;
-          await dependencies.resumeArtifactStorage.putTex(texObjectKey, rendered.tex);
-          await dependencies.resumeArtifactStorage.putPdf(objectKey, compilation.pdf);
-          const previewObjectKeys = compilation.previewPngs.map((_, index) => `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/preview-${index + 1}.png`);
-          if (dependencies.resumeArtifactStorage.putPreview) await Promise.all(compilation.previewPngs.map((png, index) => dependencies.resumeArtifactStorage!.putPreview!(previewObjectKeys[index]!, png)));
-          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, pageCount: compilation.pageCount, previewObjectKeys, createdAt: timestamp };
-          if (!await dependencies.users.putResumeArtifact(artifact)) return reply(409, { message: 'Resume artifact changed; refresh and retry' });
           if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           return reply(200, { draft: updated, artifact });
         }
@@ -1326,7 +1478,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
         try {
           if (documentStorage) await Promise.all([
             ...documents.map((document) => documentStorage.deleteObject(document.objectKey)),
-            ...artifacts.flatMap((artifact) => [artifact.objectKey, artifact.texObjectKey, ...(artifact.previewObjectKeys ?? [])].filter((key): key is string => Boolean(key)).map((key) => documentStorage.deleteObject(key))),
+            ...artifacts.flatMap((artifact) => [artifact.objectKey, artifact.texObjectKey, artifact.lineBoxObjectKey, ...(artifact.previewObjectKeys ?? [])].filter((key): key is string => Boolean(key)).map((key) => documentStorage.deleteObject(key))),
           ]);
           await dependencies.resumeSemanticIndex?.remove(userId, resumeBank.map((item) => item.bankItemId));
         } catch {

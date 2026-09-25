@@ -174,6 +174,10 @@ export interface ResumeTemplate {
   displayName: string;
 }
 
+/** Why a résumé job import could not be read automatically, so the client can
+ * explain the failure instead of showing one generic message. */
+export type ResumeImportFailureReason = 'posting-unavailable' | 'rate-limited' | 'unreadable-page';
+
 export interface ImportedJob {
   importId: string;
   canonicalUrl: string;
@@ -183,6 +187,8 @@ export interface ImportedJob {
   source: 'catalog' | 'cache' | 'manual';
   contentHash: string;
   status: 'ready' | 'pending' | 'manual-description-required';
+  /** Set when status is manual-description-required. */
+  failureReason?: ResumeImportFailureReason;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -336,6 +342,8 @@ export interface ResumeArtifact {
   pageCount?: number;
   /** Private R2 object keys for rasterized PDF pages, in page order. */
   previewObjectKeys?: string[];
+  /** Private R2 object key for the per-page rendered line boxes (JSON). */
+  lineBoxObjectKey?: string;
   createdAt: string;
 }
 
@@ -344,6 +352,17 @@ export interface ResumeCompilation {
   pdf: ArrayBuffer;
   pageCount: number;
   previewPngs: ArrayBuffer[];
+  /** Per-page rendered line boxes, normalized to each page, in reading order. */
+  lineBoxes?: ResumeLineBox[][];
+}
+
+/** One rendered line of a compiled résumé page, in page-normalized coordinates. */
+export interface ResumeLineBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
 }
 
 export interface ResumeProfileRecommendation {
@@ -437,9 +456,42 @@ export function escapeLatex(value: string): string {
 }
 
 /** Model output cannot cite unknown or unverified facts, including numeric claims. */
+function normalizeResumeLine(value: string): string {
+  return value.trim().replace(/\s+/gu, ' ').toLowerCase();
+}
+
+/** Drops accepted additions that would repeat an existing line or each other.
+ * Generation rejects them so the model can rephrase, but a draft stored before
+ * that rule must still render — without the duplicate. */
+export function dropDuplicateAdditions(changes: readonly ResumeChange[], bank: readonly ResumeBankItem[]): ResumeChange[] {
+  const existing = new Set(bank.filter((item) => item.verified && item.kind === 'bullet').map((item) => normalizeResumeLine(item.content)));
+  const seen = new Set<string>();
+  return changes.filter((change) => {
+    if (change.type !== 'add') return true;
+    const key = normalizeResumeLine(change.suggestion ?? '');
+    if (!key || existing.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Keep only the changes that satisfy the contract on their own. Generation uses
+ * this as a last resort before the deterministic fallback: a model that gets one
+ * evidence id wrong should not cost the whole draft. Set-level rules (duplicate
+ * additions, identical added lines) are handled by `dropDuplicateAdditions`,
+ * which runs first. */
+export function keepValidResumeChanges(changes: readonly ResumeChange[], bank: readonly ResumeBankItem[]): ResumeChange[] {
+  const kept: ResumeChange[] = [];
+  for (const change of changes) {
+    try { validateResumeChanges([change], [...bank]); kept.push(change); } catch { /* drop this change */ }
+  }
+  return kept;
+}
+
 export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankItem[]): void {
   validateResumeBankGraph(bank);
   const verified = new Map(bank.filter((item) => item.verified).map((item) => [item.bankItemId, item]));
+  const addedLines = new Set<string>();
   for (const change of changes) {
     if (!change.evidenceIds.length || change.evidenceIds.some((id) => !verified.has(id))) {
       throw new Error('Each resume change must cite verified bank evidence.');
@@ -453,11 +505,21 @@ export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankI
       return targetParent || evidenceParent ? !targetParent || !evidenceParent || !sameResumeRef(targetParent, evidenceParent) : item.bankItemId !== target.bankItemId;
     })) throw new Error('Resume changes cannot combine bullets or evidence from different parent objects.');
     const evidence = evidenceItems.map((item) => item.content).join(' ');
+    // An added line that repeats existing material would render the same bullet
+    // twice in the proposal, so reject it and let the feedback retry rephrase.
+    if (change.type === 'add') {
+      const added = normalizeResumeLine(change.suggestion ?? '');
+      const repeats = [...verified.values()].some((item) => item.kind === 'bullet' && normalizeResumeLine(item.content) === added);
+      if (repeats) throw new Error('An added line must not repeat a line already in the source repository.');
+      if (addedLines.has(added)) throw new Error('Two added lines must not be identical.');
+      addedLines.add(added);
+    }
     if ((change.type === 'add' && (!change.suggestion || change.original))
       || (change.type === 'remove' && (!change.original || change.suggestion))
       || (change.type === 'move' && (!change.original || change.suggestion))
       || (change.type === 'rewrite' && (!change.original || !change.suggestion))) {
-      throw new Error('Resume changes must include the fields required by their change type.');
+      const expected = change.type === 'add' ? 'suggestion only' : change.type === 'rewrite' ? 'original and suggestion' : 'original only';
+      throw new Error(`Resume change ${change.changeId} of type ${change.type} must include ${expected}.`);
     }
     const evidenceWords = resumeWords(evidence);
     const unsupportedWords = substantiveResumeWords(change.suggestion ?? '').filter((word) => !evidenceWords.has(word));

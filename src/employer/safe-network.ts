@@ -23,6 +23,9 @@ export interface SafeFetchOptions {
    * not lose them because the page is large.
    */
   onOversize?: 'fail' | 'truncate';
+  /** Provider POST routes (for example a GraphQL posting lookup) supply a body. */
+  method?: string;
+  body?: string;
 }
 
 export interface SafeFetchResult {
@@ -216,7 +219,7 @@ export async function safeFetchBytes(value: string, options: SafeFetchOptions): 
     const { response, body } = await withFetchTimeout(
       fetcher,
       current,
-      { redirect: 'manual', headers: options.headers },
+      { redirect: 'manual', headers: options.headers, ...(options.method ? { method: options.method } : {}), ...(options.body !== undefined ? { body: options.body } : {}) },
       timeoutMs,
       async (received) => ({
         response: received,

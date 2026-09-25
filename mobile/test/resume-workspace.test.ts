@@ -30,7 +30,7 @@ describe('resume workspace navigation contract', () => {
   });
 
   it('offers guests a temporary resume workspace without persistent writes', () => {
-    expect(app).toContain('function ResumeWorkspace({ token = "", onSignIn }');
+    expect(app).toContain('function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }');
     expect(app).toContain('Guest session');
     expect(app).toContain('name="cloud-offline-outline"');
     expect(app).toContain('<Text style={styles.resumeGuestStatusDetail}>Not saved</Text>');
@@ -39,13 +39,19 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('Sign in to import PDF or DOCX');
   });
 
-  it('offers an adaptive review workspace with evidence and explicit decisions', () => {
+  it('offers an adaptive review workspace with a card per change and rendered pages', () => {
     expect(app).toContain('reviewMode === "changes"');
     expect(app).toContain('resumeReviewWorkspaceWide');
-    expect(app).toContain('Technical-base evidence');
-    expect(app).toContain('label="Keep original"');
-    expect(app).toContain('label="Apply change"');
-    expect(app).toContain('accessibilityLabel="Previous change"');
+    expect(app).toContain('function ResumeReviewBoard');
+    expect(app).toContain('function ResumeRenderedPage');
+    expect(app).toContain('One at a time');
+    expect(app).toContain('View all');
+    expect(app).toContain('onDecide={decideChange}');
+    expect(app).toContain('decideChange');
+    expect(app).toContain('/review`');
+    expect(app).toContain('/preview`');
+    expect(app).toContain('Refresh preview');
+    expect(app).toContain('No job-specific changes found');
     expect(app).toContain('/finalize`');
     expect(app).toContain('loadResumeArtifactPreview(result.artifact.artifactId, 1, token)');
     expect(app).toContain('loadResumeArtifactSource(result.artifact.artifactId, token)');
@@ -57,7 +63,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('const [bankManagerOpen, setBankManagerOpen] = useState(false);');
     expect(app).toContain('bankManagerOpen ? "Done editing" : "Edit master bank"');
     expect(app).toContain('{bankManagerOpen ? (');
-    expect(app).toContain('{!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>');
+    expect(app).toContain('{!bankManagerOpen && signedIn && !draft ? <View style={styles.resumeSavedSection}>');
     expect(app.indexOf('Paste the job URL')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
     expect(app).toContain('<Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>');
     expect(app).toContain('No clean source file? Use an LLM prompt');
@@ -83,7 +89,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('savedResumeProfiles.map((profile) =>');
     expect(app).toContain('aria-pressed={selected}');
     expect(app).toContain('setSelectedProfileId(profile.profileId); setResumeSourceMode("existing");');
-    expect(app).toContain('{!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>');
+    expect(app).toContain('{!bankManagerOpen && signedIn && !draft ? <View style={styles.resumeSavedSection}>');
   });
 
   it('offers the best saved resume and an ideal master-bank build', () => {
@@ -95,11 +101,25 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('profileId: sourceProfile.profileId');
   });
 
-  it('keeps server-owned plans collapsed and disables new tailoring at the monthly limit', () => {
+  it('keeps server-owned plans collapsed and explains the monthly limit', () => {
     expect(app).toContain('api<ResumeSubscriptionCard>("/me/subscription", token)');
     expect(app).toContain('planExpanded ? "Hide plan details" : "Plan details"');
     expect(app).toContain('subscription && planExpanded ? <View style={[styles.resumePlanGrid');
     expect(app).toContain('App Store purchase coming next');
-    expect(app).toContain('subscription?.usage.remaining === 0 ? "Monthly limit reached"');
+    expect(app).toContain('{signedIn && subscription?.usage.remaining === 0 ? (');
+    expect(app).toContain('accessibilityLabel="Monthly review limit reached"');
+    expect(app).toContain('You&apos;ve used all {subscription.usage.limit} free reviews this month');
+    expect(app).toContain('See plans');
+  });
+
+  it('shows a two-page ghost skeleton while the review is generated', () => {
+    expect(app).toContain('function ResumeReviewLoading');
+    expect(app).toContain('Reading the job and drafting your résumé…');
+    expect(app).toContain('const [drafting, setDrafting] = useState(false);');
+    expect(app).toContain('setDrafting(true);');
+    expect(app).toContain('setResumeBusy(false); setDrafting(false);');
+    expect(app).toContain('resumeLoadingScreen');
+    expect(app).toContain('resumeLoadingPages');
+    expect(app).toContain('timeoutMs: 90_000');
   });
 });

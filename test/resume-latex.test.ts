@@ -20,6 +20,20 @@ describe('fixed resume LaTeX rendering', () => {
     expect(result.resumeSpecHash).toMatch(/^[a-f0-9]{64}$/u);
   });
 
+  it('never renders the same bullet twice when an add repeats an existing line', () => {
+    const profile = { userId: 'student', profileId: 'profile', name: 'Candidate', tags: [], bankItemIds: ['project', 'bullet'], sectionOrder: ['Projects'], template: 'clean-standard' as const, approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    const bank = [
+      { userId: 'student', bankItemId: 'project', kind: 'project' as const, content: 'Compiler Lab', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
+      { userId: 'student', bankItemId: 'bullet', kind: 'bullet' as const, parent: { kind: 'project' as const, bankItemId: 'project' }, content: 'Built a parser', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
+    ];
+    const draft = { userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', revision: 0, status: 'finalized' as const, createdAt: 'now', updatedAt: 'now', changes: [
+      { changeId: 'duplicate-add', type: 'add' as const, target: { kind: 'project' as const, bankItemId: 'project' }, section: 'Projects', suggestion: 'Built a parser', evidenceIds: ['project'], reason: 'fit', decision: 'accepted' as const },
+    ] };
+    const applicant = { userId: 'student', contact: { name: 'Candidate', email: 'candidate@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' };
+    const { tex } = renderResumeLatex(profile, applicant, draft, bank);
+    expect(tex.match(/Built a parser/gu)?.length).toBe(1);
+  });
+
   it('renders the complete selected base while applying reviewed diffs', () => {
     const profile = { userId: 'student', profileId: 'profile', name: 'Candidate', tags: [], bankItemIds: ['role', 'project', 'skill', 'unused'], sectionOrder: ['Experience', 'Projects', 'Skills'], template: 'clean-standard' as const, approvedWording: { Education: 'Cornell University' }, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' };
     const draft = { userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [
@@ -44,8 +58,7 @@ describe('fixed resume LaTeX rendering', () => {
     expect(tex).toContain('Unrelated source-bank material');
   });
 
-  it('keeps bullets under their typed parent and changes section priority by template', () => {
-    const profile = { userId: 'student', profileId: 'profile', name: 'Technical', tags: [], bankItemIds: ['role', 'role-bullet', 'project', 'project-bullet'], sectionOrder: [], template: 'jake-technical' as const, approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' };
+  it('keeps bullets under their typed parent and changes section priority by template', () => {    const profile = { userId: 'student', profileId: 'profile', name: 'Technical', tags: [], bankItemIds: ['role', 'role-bullet', 'project', 'project-bullet'], sectionOrder: [], template: 'jake-technical' as const, approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' };
     const applicant = { userId: 'student', contact: { name: 'Candidate', email: 'candidate@example.test' }, location: 'Ithaca, NY', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' };
     const draft = { userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [], revision: 0, status: 'finalized' as const, createdAt: 'now', updatedAt: 'now' };
     const bank = [
@@ -76,5 +89,21 @@ describe('fixed resume LaTeX rendering', () => {
       expect(Number(sectionGaps?.[2])).toBeGreaterThanOrEqual(RESUME_LAYOUT_FLOORS.sectionAfterPoints);
       expect(source).not.toMatch(/\\vspace\{-/u);
     }
+  });
+
+  it('floats accepted move changes ahead of their siblings so a reorder is visible', () => {
+    const profile = { userId: 'student', profileId: 'profile', name: 'Candidate', tags: [], bankItemIds: ['project', 'bullet-a', 'bullet-b'], sectionOrder: [], template: 'clean-standard' as const, approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    const applicant = { userId: 'student', contact: { name: 'Candidate', email: 'candidate@example.test' }, location: 'Ithaca, NY', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' };
+    const bank = [
+      { userId: 'student', bankItemId: 'project', kind: 'project' as const, content: 'Compiler Lab', details: { name: 'Compiler Lab', technologies: ['TypeScript'] }, verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
+      { userId: 'student', bankItemId: 'bullet-a', kind: 'bullet' as const, parent: { kind: 'project' as const, bankItemId: 'project' }, content: 'Built a parser', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
+      { userId: 'student', bankItemId: 'bullet-b', kind: 'bullet' as const, parent: { kind: 'project' as const, bankItemId: 'project' }, content: 'Added type checking', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
+    ];
+    const move = { userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', revision: 0, status: 'reviewing' as const, createdAt: 'now', updatedAt: 'now', changes: [
+      { changeId: 'move-b', type: 'move' as const, target: { kind: 'bullet' as const, bankItemId: 'bullet-b', parent: { kind: 'project' as const, bankItemId: 'project' } }, section: 'Projects', original: 'Added type checking', evidenceIds: ['bullet-b'], reason: 'surface it', decision: 'accepted' as const },
+    ] };
+    expect(renderResumeLatex(profile, applicant, move, bank).document.projects[0]?.bullets).toEqual(['Added type checking', 'Built a parser']);
+    // Without an accepted move the base order is preserved.
+    expect(renderResumeLatex(profile, applicant, { ...move, changes: [] }, bank).document.projects[0]?.bullets).toEqual(['Built a parser', 'Added type checking']);
   });
 });
