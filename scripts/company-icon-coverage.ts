@@ -304,10 +304,16 @@ async function resolveCohort(entries: readonly CohortEntry[], credentials: Emplo
         : diagnostic.decision.outcome === 'resolved' ? 'score'
         : diagnostic.tieBreak?.accepted === true ? 'tie-break'
           : proposal === 'verified' ? 'proposal' : 'none';
+      // The domain the sweep would actually publish, which for a confirmed, tie-break,
+      // or proposed decision is not necessarily the top-scored candidate.
+      const acceptedDomain = diagnostic.confirmedDomain?.domain
+        ?? (diagnostic.tieBreak?.accepted === true ? diagnostic.tieBreak.domain : undefined)
+        ?? (proposal === 'verified' ? diagnostic.proposal?.domain ?? undefined : undefined)
+        ?? diagnostic.decision.selectedDomain;
       results.push({
         platform: entry.platform, employer: entry.employer,
         outcome: diagnostic.decision.outcome,
-        ...(diagnostic.decision.selectedDomain ? { domain: diagnostic.decision.selectedDomain } : {}),
+        ...(acceptedDomain ? { domain: acceptedDomain } : {}),
         published: path !== 'none' && diagnostic.imageVerified === true,
         providers: providerOutcomesOf(diagnostic), path, tieBreak, proposal, providerImages,
         ...(diagnostic.tieBreak?.decision ? {

@@ -158,7 +158,8 @@ export class D1EmployerIconStore {
       const leaseToken = crypto.randomUUID();
       const leaseUntil = new Date(Date.parse(now) + leaseMs).toISOString();
       const result = await this.db.prepare(`UPDATE employer_icon_resolutions SET lease_token = ?, lease_until = ?, updated_at = ?
-        WHERE id = ? AND (lease_until IS NULL OR lease_until <= ?)`).bind(leaseToken, leaseUntil, now, row.id, now).run();
+        WHERE id = ? AND status IN ('retryable', 'unresolved') AND (lease_until IS NULL OR lease_until <= ?)`)
+        .bind(leaseToken, leaseUntil, now, row.id, now).run();
       if (result.meta.changes !== 1) continue;
       claimed.push({
         id: row.id as string, canonicalEmployerId: row.canonical_employer_id as string,
@@ -341,6 +342,7 @@ export class D1EmployerIconStore {
       json_extract(evidence_json, '$.reasonCode') AS reason_code
       FROM employer_icon_resolutions
       WHERE status IN ('invalidated', 'unresolved')
+        AND COALESCE(json_extract(evidence_json, '$.droppedReason'), '') = ''
       ORDER BY review_priority DESC, updated_at ASC LIMIT ?`).bind(limit).all<Row>();
     return rows.results.map((row) => ({
       canonicalEmployerId: row.canonical_employer_id as string,

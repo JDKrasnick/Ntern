@@ -103,12 +103,13 @@ export function logoDevCredentials(env: {
   LOGO_DEV_TOKEN?: string;
   LOGO_DEV_IMAGE_TOKEN?: string;
   LOGO_SECRET_KEY?: string;
+  LOGO_PUBLISHABLE_KEY?: string;
   LOGO_DEV_PUBLISHABLE_KEY?: string;
   LOGO_DEV_PUBLISHABLE_TOKEN?: string;
 }): { logoDevToken?: string; logoDevImageToken?: string } {
   const logoDevToken = env.LOGO_DEV_TOKEN ?? env.LOGO_SECRET_KEY;
   const logoDevImageToken = env.LOGO_DEV_IMAGE_TOKEN
-    ?? env.LOGO_DEV_PUBLISHABLE_KEY ?? env.LOGO_DEV_PUBLISHABLE_TOKEN;
+    ?? env.LOGO_PUBLISHABLE_KEY ?? env.LOGO_DEV_PUBLISHABLE_KEY ?? env.LOGO_DEV_PUBLISHABLE_TOKEN;
   return {
     ...(logoDevToken ? { logoDevToken } : {}),
     ...(logoDevImageToken ? { logoDevImageToken } : {}),
@@ -132,6 +133,7 @@ export interface EmployerIconResolverEnvironment {
   LOGO_DEV_IMAGE_TOKEN?: string;
   /** Accepted aliases, so provisioning by either name works. */
   LOGO_SECRET_KEY?: string;
+  LOGO_PUBLISHABLE_KEY?: string;
   LOGO_DEV_PUBLISHABLE_KEY?: string;
   LOGO_DEV_PUBLISHABLE_TOKEN?: string;
   /** Brandfetch client ID; used for in-memory corroboration only. */
@@ -400,15 +402,33 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
       });
     }
   }
+  // A model call that throws — an OpenAI outage — must not become an immediate,
+  // un-backoff'd retry of the same task: record it as the transient failure it is.
+  const transientModelFailure = async (): Promise<ResolveOutcome> => {
+    await store.markRetryable({
+      taskId: task.id,
+      evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
+        outcome: 'retryable', reasonCode: 'model-call-failed', attempt,
+      })),
+      nextRetryAt: new Date(now.getTime() + transientRetryDelay(attempt)).toISOString(), now: at,
+    });
+    return { outcome: 'retryable', reasonCode: 'model-call-failed' };
+  };
   if (decision.outcome === 'llm-review') {
-    const escalation = await escalateToTieBreak({ ...input, context, seed, decision, gathered, providers, attempt, at, declaredName });
+    let escalation: ResolveOutcome | undefined;
+    try {
+      escalation = await escalateToTieBreak({ ...input, context, seed, decision, gathered, providers, attempt, at, declaredName });
+    } catch { return transientModelFailure(); }
     if (escalation) return escalation;
   }
   // Nothing to rank: on a platform host the page can name the employer without
   // naming any domain, so the resolver may ask once for a domain — and then has to
   // prove it, because the domain itself must say it belongs to this employer.
   if (decision.outcome === 'unresolved') {
-    const proposal = await proposeDomain({ ...input, context, seed, decision, gathered, providers, attempt, at, declaredName });
+    let proposal: ResolveOutcome | undefined;
+    try {
+      proposal = await proposeDomain({ ...input, context, seed, decision, gathered, providers, attempt, at, declaredName });
+    } catch { return transientModelFailure(); }
     if (proposal) return proposal;
   }
 
@@ -448,7 +468,9 @@ interface AcceptInput extends ResolveTaskInput {
   /** The employer name the ATS board declares, when it is usable and differs. */
   declaredName?: string;
   /** Records which source produced the accepted domain. */
-  selectedSource?: 'logo-dev' | 'proposed' | 'confirmed';
+  selectedSource?: 'logo-dev' | 'proposed' | 'confirmed' | 'tie-break';
+  /** Set when this task already made its one bounded model call. */
+  modelCallSpent?: boolean;
   /** Present when a tie-breaker chose this domain, so the review record can show what it cited. */
   tieBreak?: { citedEvidenceIds: readonly string[]; inputTokens: number; outputTokens: number; reasonCode: string };
 }
@@ -464,7 +486,7 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
   let iconKey: string | undefined;
   let imageVerified = false;
   let assetSource: 'declared' | 'model' | undefined;
-  const imageToken = env.LOGO_DEV_IMAGE_TOKEN;
+  const imageToken = logoDevCredentials(env).logoDevImageToken;
 
   if (imageToken) {
     const probe = await probeLogoDevImage(domain, imageToken, deps);
@@ -497,7 +519,10 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
     // and reading it needs no provider at all.
     const asset = await storeDomainAsset({
       store, env, context, task, domain, now, deps,
-      modelBudgetAvailable: withinTieBreakBudget(context, task.evidenceFingerprint, now),
+      // A task gets at most one model call. A tie-break or proposal already spent it,
+      // so the asset pick may not spend a second one in the same task.
+      modelBudgetAvailable: input.modelCallSpent !== true
+        && withinTieBreakBudget(context, task.evidenceFingerprint, now),
       ...(gathered?.siteAssetUrls ? { inHandSiteAssetUrls: gathered.siteAssetUrls } : {}),
     });
     if (asset) {
@@ -506,10 +531,12 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
     } else if (!imageToken) {
       // Still a configuration state rather than a verdict on this employer: say so,
       // and retry soon instead of spending its revalidation window on a monogram.
-      await store.markUnresolved({
-        taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
+      // `markRetryable` (not `markUnresolved`) keeps a config problem out of the
+      // exception queue and out of the attempt count.
+      await store.markRetryable({
+        taskId: task.id,
         evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
-          outcome: 'unresolved', reasonCode: 'image-token-missing',
+          outcome: 'retryable', reasonCode: 'image-token-missing',
         })),
         nextRetryAt: new Date(now.getTime() + transientRetryDelay(input.attempt)).toISOString(), now: at,
       });
@@ -586,6 +613,8 @@ async function escalateToTieBreak(input: AcceptInput): Promise<ResolveOutcome | 
   if (!result.accepted || !result.domain) return undefined;
   return acceptSelectedDomain({
     ...input,
+    selectedSource: 'tie-break',
+    modelCallSpent: true,
     tieBreak: {
       citedEvidenceIds: result.decision?.evidenceIds ?? [],
       inputTokens: result.inputTokens, outputTokens: result.outputTokens, reasonCode: result.reasonCode,
@@ -645,6 +674,7 @@ interface TieBreakOutcome {
 
    return acceptSelectedDomain({
      ...input,
+     modelCallSpent: true,
      decision: {
        outcome: 'resolved', scores: decisionWithProposal(input.decision, proposal.domain),
        selectedDomain: proposal.domain, selectedScore: proposal.confidence ?? 0,
@@ -1473,21 +1503,25 @@ async function storeDomainAsset(input: {
     hrefs: page ? siteAssetHrefs(page.body, page.url).slice(0, 12) : [],
     candidates,
   });
-  if (!pick) return undefined;
-  const asset = await fetchDomainAsset(pick.url, deps);
+  // The call happened, so it is paid for even when the answer is unusable — otherwise
+  // a rejected nomination or a failed fetch is bought again on the next sweep.
+  if (pick) {
+    await store.recordTieBreak({
+      canonicalEmployerId: context.id, at: now.toISOString(),
+      evidenceFingerprint: task.evidenceFingerprint,
+      inputTokens: pick.inputTokens, outputTokens: pick.outputTokens,
+    });
+  }
+  if (!pick?.nomination) return undefined;
+  const asset = await fetchDomainAsset(pick.nomination.url, deps);
   if (!asset) {
     console.log(JSON.stringify({
       event: 'company_icon_domain_asset_rejected', canonicalEmployerId: context.id,
-      url: pick.url, kind: pick.kind, confidence: pick.confidence,
+      url: pick.nomination.url, kind: pick.nomination.kind, confidence: pick.nomination.confidence,
     }));
     return undefined;
   }
-  await store.recordTieBreak({
-    canonicalEmployerId: context.id, at: now.toISOString(),
-    evidenceFingerprint: task.evidenceFingerprint,
-    inputTokens: pick.inputTokens, outputTokens: pick.outputTokens,
-  });
-  return storeCandidate(asset.bytes, asset.contentType, 'model', pick.url, candidates.length);
+  return storeCandidate(asset.bytes, asset.contentType, 'model', pick.nomination.url, candidates.length);
 }
 
 /** Whether an asset URL belongs to the employer's verified domain. */
@@ -1548,7 +1582,11 @@ async function runIconAssetPick(input: {
   domain: string;
   hrefs: readonly string[];
   candidates: readonly string[];
-}): Promise<{ url: string; kind: 'submitted' | 'nominated'; confidence: number; inputTokens: number; outputTokens: number } | undefined> {
+}): Promise<{
+  inputTokens: number;
+  outputTokens: number;
+  nomination?: { url: string; kind: 'submitted' | 'nominated'; confidence: number };
+} | undefined> {
   const { apiKey, deps, employer, domain, hrefs, candidates } = input;
   const infer = deps.infer ?? ((request: OpenAIJsonRequest) => inferOpenAIJson(apiKey, request, deps.fetchImpl ?? fetch));
   let result: OpenAIJsonResult;
@@ -1567,15 +1605,18 @@ async function runIconAssetPick(input: {
       model: shadowDefaultModelId, maxOutputTokens: 200,
     });
   } catch { return undefined; }
+  const tokens = { inputTokens: result.inputTokens, outputTokens: result.outputTokens };
   const nomination = acceptIconAssetPick(parseIconAssetPick(result.response), candidates, domain);
-  if (!nomination) return undefined;
+  // The tokens are owed even when the answer is unusable, so the caller can bill the
+  // employer's window for the call it actually made.
+  if (!nomination) return tokens;
   console.log(JSON.stringify({
     event: 'company_icon_domain_asset_nominated', employer, domain,
     url: nomination.url, kind: nomination.kind, confidence: nomination.confidence,
   }));
   return {
-    url: nomination.url, kind: nomination.kind, confidence: nomination.confidence,
-    inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+    ...tokens,
+    nomination: { url: nomination.url, kind: nomination.kind, confidence: nomination.confidence },
   };
 }
 
@@ -1609,7 +1650,9 @@ function unresolvedRetryDelay(attempt: number): number {
 
 function transientRetryDelay(attempt: number, retryAfterMs?: number): number {
   const backoff = Math.min(ICON_TRANSIENT_BASE_RETRY_MS * 2 ** Math.max(0, attempt - 1), ICON_TRANSIENT_MAX_RETRY_MS);
-  return Math.max(backoff, retryAfterMs ?? 0);
+  // A server may ask for a `Retry-After` beyond the revalidation horizon; that must
+  // never push an employer past the point where it would be re-checked anyway.
+  return Math.min(Math.max(backoff, retryAfterMs ?? 0), ICON_REVALIDATE_MS);
 }
 
 function parseIconSeed(evidenceJson: string, context: EmployerIconContext): EmployerIconSeed {
@@ -1795,19 +1838,14 @@ export async function diagnoseEmployerIcon(input: {
     ? await runIconProposal({ seed, gathered, declaredName, apiKey: input.tieBreakApiKey, deps })
     : undefined;
   const proposedDomain = proposal?.reasonCode === 'verified' ? proposal.domain ?? undefined : undefined;
-  const verifiedDomain = proposedDomain ?? decision.selectedDomain;
-  const imageVerified = verifiedDomain && credentials.logoDevImageToken
-    ? (await probeLogoDevImage(verifiedDomain, credentials.logoDevImageToken, deps)).available
+  const tieBreakDomain = tieBreak?.accepted === true ? tieBreak.domain : undefined;
+  // Probe the domain the sweep would actually publish, not the top-scored candidate
+  // the decision happened to rank first, so `imageVerified` describes the right domain.
+  const acceptedDomain = confirmed?.domain ?? tieBreakDomain ?? proposedDomain ?? decision.selectedDomain;
+  const imageVerified = acceptedDomain && credentials.logoDevImageToken
+    ? (await probeLogoDevImage(acceptedDomain, credentials.logoDevImageToken, deps)).available
     : undefined;
   return {
-    ...(confirmed ? {
-      decision: {
-        outcome: 'resolved' as const, scores: decision.scores,
-        selectedDomain: confirmed.domain, selectedScore: confirmed.score,
-        reason: `the domain names itself as ${input.seed.displayName}`,
-      },
-      confirmedDomain: { ...confirmed, evidenceIds: [...confirmed.evidenceIds] },
-    } : { decision }),
     seed,
     ...(gathered ? { finalUrl: gathered.finalUrl } : {}),
     redirectHosts: gathered?.redirectHosts ?? [],
@@ -1818,6 +1856,7 @@ export async function diagnoseEmployerIcon(input: {
     logoDevDomains: providers.logoDev,
     brandfetchDomains: providers.brandfetch,
     decision,
+    ...(confirmed ? { confirmedDomain: { ...confirmed, evidenceIds: [...confirmed.evidenceIds] } } : {}),
     ...(imageVerified === undefined ? {} : { imageVerified }),
     ...(tieBreak ? { tieBreak } : {}),
     ...(proposal ? { proposal } : {}),

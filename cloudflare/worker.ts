@@ -148,6 +148,7 @@ export interface Environment extends AuthEnvironment {
   LOGO_DEV_IMAGE_TOKEN?: string;
   /** Accepted aliases for the two Logo.dev credentials, so provisioning by either name works. */
   LOGO_SECRET_KEY?: string;
+  LOGO_PUBLISHABLE_KEY?: string;
   LOGO_DEV_PUBLISHABLE_KEY?: string;
   LOGO_DEV_PUBLISHABLE_TOKEN?: string;
   /** Brandfetch client ID; corroboration only, never persisted or fetched. */

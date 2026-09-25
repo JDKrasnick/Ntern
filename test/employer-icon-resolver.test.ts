@@ -136,7 +136,12 @@ function r2Stub() {
 const environment = (
   db: D1Database,
   documents: R2Bucket,
-  secrets: { LOGO_DEV_TOKEN?: string; LOGO_DEV_IMAGE_TOKEN?: string; BRANDFETCH_CLIENT_ID?: string; OPENAI_KEY?: string } = {},
+  secrets: {
+    LOGO_DEV_TOKEN?: string; LOGO_DEV_IMAGE_TOKEN?: string;
+    LOGO_SECRET_KEY?: string; LOGO_PUBLISHABLE_KEY?: string;
+    LOGO_DEV_PUBLISHABLE_KEY?: string; LOGO_DEV_PUBLISHABLE_TOKEN?: string;
+    BRANDFETCH_CLIENT_ID?: string; OPENAI_KEY?: string;
+  } = {},
 ) => ({ DB: db, DOCUMENTS: documents, ...secrets });
 
 const DEPENDENCIES = (fetchImpl: typeof fetch, resolver: HostResolver = PUBLIC_RESOLVER) => ({ resolver, fetchImpl });
@@ -1863,5 +1868,193 @@ describe('employers needing resolution', () => {
 
     expect((await icons.employersNeedingResolution(10)).map((employer) => employer.id)).toEqual(['aardvark', 'acme']);
     expect(await icons.employersNeedingResolution(1)).toEqual([{ id: 'aardvark', displayName: 'Aardvark' }]);
+  });
+});
+
+describe('employer icon resolver correctness fixes', () => {
+  it('accepts the publishable token under any documented alias', async () => {
+    const run = async (secrets: Record<string, string>) => {
+      const { db, admission, icons } = subject();
+      const r2 = r2Stub();
+      await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+      await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+      await enqueueEmployerIconResolution(icons, {
+        ...employerSeed('https://acme.com/careers/1'), provider: 'structured', provenance: 'official-ats',
+      }, NOW);
+      const result = await runEmployerIconResolutionPass(
+        environment(db, r2.bucket, secrets), NOW,
+        DEPENDENCIES(scriptedFetch({
+          'https://acme.com/careers/1': () => html('<!doctype html><html><head><title>Careers at Acme</title></head></html>'),
+          [IMAGE_URL]: () => webp(),
+        })),
+      );
+      return { result, icons };
+    };
+    // `LOGO_DEV_IMAGE_TOKEN` is the canonical name; the rest are the aliases an operator
+    // may already have provisioned, and the image endpoint must accept every one.
+    for (const alias of ['LOGO_DEV_IMAGE_TOKEN', 'LOGO_DEV_PUBLISHABLE_KEY', 'LOGO_DEV_PUBLISHABLE_TOKEN', 'LOGO_PUBLISHABLE_KEY']) {
+      const { result, icons } = await run({ [alias]: LOGO_IMAGE_TOKEN });
+      expect(result.resolved, alias).toBe(1);
+      expect((await icons.context('acme'))?.websiteDomain, alias).toBe('acme.com');
+    }
+  });
+
+  it('makes at most one model call per task even when the accepted domain has no provider image', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    let calls = 0;
+    const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => {
+      calls += 1;
+      const input = JSON.parse(request.prompt.user) as { candidates: Array<{ domain: string; evidenceIds: string[] }> };
+      if (request.schemaName === 'company_icon_domain_resolution') {
+        const chosen = input.candidates.find((candidate) => candidate.domain === 'acme.com')!;
+        return {
+          response: { decision: 'accept', officialDomain: 'acme.com', confidence: 0.95,
+            evidenceIds: chosen.evidenceIds, reason: 'the provider and the page agree' },
+          inputTokens: 10, outputTokens: 5, actualCostCents: 1,
+        };
+      }
+      return {
+        response: { assetUrl: 'https://acme.com/logo.png', confidence: 0.9, reason: 'the mark' },
+        inputTokens: 12, outputTokens: 6, actualCostCents: 1,
+      };
+    };
+    await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test' }), NOW,
+      {
+        ...DEPENDENCIES(scriptedFetch({
+          'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+            '<!doctype html><html><head><title>Software Engineering Intern at Acme</title></head></html>',
+          ),
+          [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+          // The domain does not name the employer, so confirmation cannot decide and the
+          // tie-break is the task's one call. It has no provider image either.
+          'https://acme.com/': () => html('<!doctype html><html><head><title>Domain for sale</title></head></html>'),
+          [IMAGE_URL]: () => status(404),
+        })),
+        infer,
+      },
+    );
+    expect(calls).toBe(1);
+  });
+
+  it('records a model-chosen domain as a tie-break decision, not a provider decision', async () => {
+    const { database, db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => {
+      const input = JSON.parse(request.prompt.user) as { candidates: Array<{ domain: string; evidenceIds: string[] }> };
+      const chosen = input.candidates.find((candidate) => candidate.domain === 'acme.com')!;
+      return {
+        response: { decision: 'accept', officialDomain: 'acme.com', confidence: 0.95,
+          evidenceIds: chosen.evidenceIds, reason: 'the provider and the page agree' },
+        inputTokens: 10, outputTokens: 5, actualCostCents: 1,
+      };
+    };
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test' }), NOW,
+      {
+        ...DEPENDENCIES(scriptedFetch({
+          'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+            '<!doctype html><html><head><title>Software Engineering Intern at Acme</title></head></html>',
+          ),
+          [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+          'https://acme.com/': () => html('<!doctype html><html><head><title>Domain for sale</title></head></html>'),
+          [IMAGE_URL]: () => webp(),
+        })),
+        infer,
+      },
+    );
+    expect(result.resolved).toBe(1);
+    const row = database.prepare(
+      "SELECT selected_source, selected_domain FROM employer_icon_resolutions WHERE canonical_employer_id = 'acme'",
+    ).get() as { selected_source: string; selected_domain: string };
+    expect(row).toEqual({ selected_source: 'tie-break', selected_domain: 'acme.com' });
+  });
+
+  it('bills the employer for an asset call the model answered but the asset fetch failed', async () => {
+    const { database, db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    let calls = 0;
+    const infer = async (): Promise<OpenAIJsonResult> => {
+      calls += 1;
+      return {
+        response: { assetUrl: 'https://acme.com/logo.png', confidence: 0.9, reason: 'the mark' },
+        inputTokens: 12, outputTokens: 6, actualCostCents: 1,
+      };
+    };
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, {
+        LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN,
+        BRANDFETCH_CLIENT_ID: BRANDFETCH_CLIENT, OPENAI_KEY: 'sk-test',
+      }), NOW,
+      {
+        ...DEPENDENCIES(scriptedFetch({
+          'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+            '<!doctype html><html><head><title>Software Engineering Intern at Acme</title></head></html>',
+          ),
+          // Consensus resolves the domain with no model call; the provider has no image,
+          // so the asset pick is the one call, and the asset it names 404s.
+          [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+          [brandfetchSearchUrl('Acme', BRANDFETCH_CLIENT)]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+          'https://acme.com/': () => html('<!doctype html><html><head><title>Acme</title></head></html>'),
+          [IMAGE_URL]: () => status(404),
+          'https://acme.com/logo.png': () => status(404),
+        })),
+        infer,
+      },
+    );
+    expect(calls).toBe(1);
+    expect(result.resolved).toBe(0);
+    const tokens = database.prepare(
+      "SELECT icon_tie_break_input_tokens AS input FROM canonical_employers WHERE id = 'acme'",
+    ).get() as { input: number };
+    expect(tokens.input).toBe(12);
+  });
+
+  it('backs off instead of retrying at once when a model call fails', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+    const infer = async (): Promise<OpenAIJsonResult> => { throw new Error('openai unavailable'); };
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+        '<!doctype html><html><head><title>Software Engineering Intern at Acme</title></head></html>',
+      ),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      'https://acme.com/': () => html('<!doctype html><html><head><title>Domain for sale</title></head></html>'),
+      [IMAGE_URL]: () => webp(),
+    });
+    const env = environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test' });
+
+    const first = await runEmployerIconResolutionPass(env, NOW, { ...DEPENDENCIES(fetchImpl), infer });
+    expect(first.reasonCodes).toContain('model-call-failed');
+    // The failure schedules a retry in the future, so the same instant cannot claim it again.
+    const second = await runEmployerIconResolutionPass(env, NOW, { ...DEPENDENCIES(fetchImpl), infer });
+    expect(second.claimed).toBe(0);
+  });
+
+  it('keeps a task dropped for an existing reviewer icon out of the exception queue', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/1'), NOW);
+    // A reviewer uploads an icon after the task was already queued.
+    await admission.putCanonicalEmployer(
+      employerRow('acme', 'Acme', 'company-icons/acme/reviewed.webp'), NOW.toISOString(),
+    );
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, {}), NOW, DEPENDENCIES(scriptedFetch({})),
+    );
+    expect(result.reasonCodes).toContain('reviewed-icon-present');
+    // A terminal drop is not an exception waiting for a person.
+    expect(await icons.reviewQueue(10)).toEqual([]);
   });
 });
