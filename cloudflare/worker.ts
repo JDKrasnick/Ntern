@@ -1964,13 +1964,12 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         const structured = resumeJobStructuredRoute(body.canonicalUrl);
         if (structured) {
           try {
-            // Ashby's posting API returns the whole tenant board, so a large board
-            // (Notion: ~2.2 MB) overruns a 2 MB budget and the import silently falls
-            // back to scraping a client-rendered shell. The host is a fixed reviewed
-            // provider route, so a larger bounded body is safe here.
-            const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 12 * 1024 * 1024, headers: { Accept: 'application/json' } });
+            // Every route fetches one posting (Ashby's board route is replaced by a
+            // per-posting GraphQL lookup), so a small bound is enough; the extracted
+            // description is capped at 30k characters downstream.
+            const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 2 * 1024 * 1024, headers: { Accept: structured.accept }, ...(structured.request ? { method: structured.request.method, body: structured.request.body } : {}) });
             if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
-            extracted = structured.parse(JSON.parse(fetched.body));
+            extracted = structured.parse(structured.accept === 'application/json' ? JSON.parse(fetched.body) : fetched.body);
             if (!extracted || extracted.description.length < 40) throw new Error('Structured job import did not contain enough readable role text');
             importedUrl = body.canonicalUrl;
           } catch { extracted = undefined; }

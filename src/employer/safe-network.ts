@@ -15,6 +15,9 @@ export interface SafeFetchOptions {
   maxRedirects?: number;
   maxBodyBytes?: number;
   headers?: HeadersInit;
+  /** Provider POST routes (for example a GraphQL posting lookup) supply a body. */
+  method?: string;
+  body?: string;
 }
 
 export interface SafeFetchResult {
@@ -187,7 +190,7 @@ export async function safeFetchText(value: string, options: SafeFetchOptions): P
     const { response, body } = await withFetchTimeout(
       fetcher,
       current,
-      { redirect: 'manual', headers: options.headers },
+      { redirect: 'manual', headers: options.headers, ...(options.method ? { method: options.method } : {}), ...(options.body !== undefined ? { body: options.body } : {}) },
       timeoutMs,
       async (received) => ({
         response: received,

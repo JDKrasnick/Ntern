@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { extractResumeJobText, resumeJobStructuredRoute } from '../src/resume-job-import.js';
-import fab2Probe from './fixtures/trusted-catalog/fab2-0c4dc4f4-01c9-4138-a666-e7234cda7e95.json' with { type: 'json' };
 
 describe('resume job import text extraction', () => {
   it('removes executable markup and preserves bounded readable job text', () => {
@@ -14,6 +13,7 @@ describe('resume job URL provider resolution', () => {
   it('resolves reviewed ATS postings to their structured public API', () => {
     const greenhouse = resumeJobStructuredRoute('https://job-boards.greenhouse.io/figma/jobs/6178851004');
     expect(greenhouse?.method).toBe('greenhouse-api');
+    expect(greenhouse?.accept).toBe('application/json');
     expect(greenhouse?.requestUrl).toBe('https://boards-api.greenhouse.io/v1/boards/figma/jobs/6178851004?pay_transparency=true&pay_input_ranges=true');
     expect(greenhouse?.parse({ id: 6178851004, title: 'Data Engineer Intern', content: '<p>Build data pipelines.</p>' }))
       .toMatchObject({ title: 'Data Engineer Intern', description: 'Build data pipelines.' });
@@ -23,25 +23,28 @@ describe('resume job URL provider resolution', () => {
     expect(lever?.requestUrl).toBe('https://api.lever.co/v0/postings/acme/ef725594-42dd-4f0d-ba8e-df8179dbc6cb?mode=json');
   });
 
-  it('selects the exact posting from the Ashby board listing and rejects a mismatched payload', () => {
+  it('fetches an Ashby posting with a single-posting GraphQL lookup, not the whole board', () => {
     const route = resumeJobStructuredRoute('https://jobs.ashbyhq.com/fab2/0c4dc4f4-01c9-4138-a666-e7234cda7e95');
     expect(route?.method).toBe('ashby-api');
-    expect(route?.requestUrl).toBe('https://api.ashbyhq.com/posting-api/job-board/fab2?includeCompensation=true');
-    expect(route?.parse(fab2Probe)).toMatchObject({ title: 'Fab Software Engineering Intern - Winter' });
-    // The public board lists many postings; a response without the exact ID is
-    // never accepted as that posting.
-    expect(route?.parse({ jobs: [] })).toBeUndefined();
-    expect(route?.parse({ jobs: [fab2Probe.jobs[0], fab2Probe.jobs[0]] })).toBeUndefined();
+    expect(route?.accept).toBe('application/json');
+    expect(route?.requestUrl).toBe('https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting');
+    expect(route?.request?.method).toBe('POST');
+    expect(JSON.parse(route!.request!.body)).toMatchObject({ variables: { organizationHostedJobsPageName: 'fab2', jobPostingId: '0c4dc4f4-01c9-4138-a666-e7234cda7e95' } });
+    expect(route?.parse({ data: { jobPosting: { id: '0c4dc4f4-01c9-4138-a666-e7234cda7e95', title: 'Fab Intern', descriptionHtml: '<p>Build compilers.</p>' } } }))
+      .toEqual({ title: 'Fab Intern', description: 'Build compilers.' });
+    // A posting the provider no longer resolves is never accepted.
+    expect(route?.parse({ data: { jobPosting: null } })).toBeUndefined();
+    expect(route?.parse({ errors: [{ message: 'not found' }] })).toBeUndefined();
   });
 
-  it('falls back to scraping for employer domains without a reviewed provider route', () => {
+  it('resolves an iCIMS posting to its HTML frame route on a provider-owned host', () => {
+    const route = resumeJobStructuredRoute('https://careers-garmin.icims.com/jobs/19643/job');
+    expect(route?.method).toBe('icims-page');
+    expect(route?.accept).toBe('text/html');
+    expect(route?.requestUrl).toBe('https://careers-garmin.icims.com/jobs/19643/job?in_iframe=1&mobile=false');
+  });
+
+  it('never invents a provider route for an arbitrary employer domain', () => {
     expect(resumeJobStructuredRoute('https://careers.example.test/jobs/1')).toBeUndefined();
-  });
-
-  it('never returns the HTML iCIMS frame route, whose host would come from a URL path segment', () => {
-    // metadataApiRoute resolves this to an icims-page route, but that response is
-    // HTML and the tenant is a path segment rather than a reviewed tenant, so the
-    // JSON-only structured path declines it and the importer scrapes instead.
-    expect(resumeJobStructuredRoute('https://careers.rivianvw.tech/acme/jobs/1234/job')).toBeUndefined();
   });
 });
