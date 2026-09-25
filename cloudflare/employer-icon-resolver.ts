@@ -324,8 +324,11 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
   const seed = parseIconSeed(task.evidenceJson, context);
   const previousInvalidation = parseInvalidatedReason(task.evidenceJson);
   // A reviewer-uploaded icon outranks every automatic answer, and a wrong-icon
-  // report must be reviewed by a person rather than retried automatically.
-  if (context.iconKey && context.iconSource !== 'logo-dev') {
+  // report must be reviewed by a person rather than retried automatically. Only
+  // `reviewed` is a person's icon: a board logo or a site asset this resolver wrote is
+  // machine work, so the employer's *domain* is still worth deciding on a revalidation —
+  // and `POST …/resolve` must be able to re-arm one.
+  if (context.iconKey && context.iconSource === 'reviewed') {
     await store.dropTask(task.id, at, 'reviewed-icon-present');
     return { outcome: 'resolved', reasonCode: 'reviewed-icon-present' };
   }

@@ -1663,6 +1663,41 @@ describe('employer icon uploaded board logo', () => {
     expect((await admission.getCanonicalEmployer('acme'))?.iconKey).toBeUndefined();
   });
 
+  it('leaves a reviewer’s icon alone, while a machine icon still lets the domain resolve', async () => {
+    const run = async (iconSource: string, iconArrivesAfterQueueing: boolean) => {
+      const { database, db, admission, icons } = subject();
+      await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+      const setIcon = () => database.prepare("UPDATE canonical_employers SET icon_key = ?, icon_source = ? WHERE id = 'acme'")
+        .run('company-icons/acme/existing.webp', iconSource);
+      if (!iconArrivesAfterQueueing) await setIcon();
+      await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+      await enqueueEmployerIconResolution(icons, { ...employerSeed('https://acme.com/careers/1'), provider: 'structured', provenance: 'official-ats' as const }, NOW);
+      if (iconArrivesAfterQueueing) await setIcon();
+      return runEmployerIconResolutionPass(
+        environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+        DEPENDENCIES(scriptedFetch({
+          'https://acme.com/careers/1': () => html('<!doctype html><html><head><title>Careers</title></head></html>'),
+          [IMAGE_URL]: () => webp(),
+        })),
+      );
+    };
+
+    // A reviewed icon that arrives before the queue exists produces no task at all.
+    const reviewedEarly = await run('reviewed', false);
+    expect(reviewedEarly.claimed).toBe(0);
+
+    // One that arrives after the task was queued ends it, with nothing overwritten.
+    const reviewedLate = await run('reviewed', true);
+    expect(reviewedLate.reasonCodes).toEqual(['reviewed-icon-present']);
+
+    // A board logo or a site asset is this resolver's own work, so a re-armed task
+    // still decides the employer's domain — which is what `POST …/resolve` needs to be
+    // able to do for an employer that already shows its own uploaded mark.
+    const platform = await run('platform', true);
+    expect(platform.resolved).toBe(1);
+    expect(platform.reasonCodes).toEqual(['domain-accepted']);
+  });
+
   it('never overwrites a reviewer’s icon and drops an unusable upload', async () => {
     const { db, admission, icons } = subject();
     const r2 = r2Stub();
