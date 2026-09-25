@@ -20,8 +20,11 @@ function parseModelJson(response: unknown): unknown {
 /** Current Workers AI text models, tried in order. Workers AI deprecates models
  * (the original `@cf/meta/llama-3.1-8b-instruct` now returns error 5028), which
  * previously disabled generation silently; a chain keeps one retirement from
- * turning every draft into the deterministic fallback. */
-export const RESUME_DRAFT_MODELS = ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/meta/llama-3.1-8b-instruct-fp8'] as const;
+ * turning every draft into the deterministic fallback. The older Llama models
+ * were also unreliable at this contract (empty `changes` arrays and `add`
+ * entries with no suggestion), so the chain leads with current
+ * instruction-following models. */
+export const RESUME_DRAFT_MODELS = ['@cf/openai/gpt-oss-120b', '@cf/qwen/qwen3.8-27b', '@cf/zai-org/glm-5.3'] as const;
 
 /** Resolves a model-authored target against the source repository. The model is
  * asked to copy a `ref` verbatim, but a single wrong parent kind used to fail the
@@ -29,27 +32,55 @@ export const RESUME_DRAFT_MODELS = ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', 
  * The id is the only reliable part, so resolve it to the canonical ref from the
  * real bank item and reject unknown ids with an actionable message the feedback
  * retry can act on. */
-export function resolveModelChangeTarget(bankItems: readonly ResumeBankItem[], value: unknown): ResumeChange['target'] {
-  const bankItemId = typeof value === 'string'
+export function findModelChangeTarget(bankItems: readonly ResumeBankItem[], value: unknown): ResumeBankItem {
+  const raw = typeof value === 'string'
     ? value
     : value && typeof value === 'object' && typeof (value as { bankItemId?: unknown }).bankItemId === 'string'
       ? (value as { bankItemId: string }).bankItemId
       : undefined;
-  if (!bankItemId) throw new Error('Each change target must name a source repository id');
-  const item = bankItems.find((candidate) => candidate.bankItemId === bankItemId);
-  if (!item) throw new Error(`Change target "${bankItemId}" is not one of the source repository ids`);
-  return resumeBankItemRef(item);
+  if (!raw) throw new Error('Each change target must name a source repository id');
+  // Models occasionally echo the line's text instead of its id; accept an exact
+  // content match so a usable change is not dropped over the pointer format.
+  const item = bankItems.find((candidate) => candidate.bankItemId === raw)
+    ?? bankItems.find((candidate) => candidate.content.trim() === raw.trim());
+  if (!item) throw new Error(`Change target "${raw}" is not one of the source repository ids`);
+  return item;
+}
+
+
+/** Workers AI returns legacy models as `{ response }` and current
+ * OpenAI-compatible models as `{ choices: [{ message: { content } }] }` (the
+ * binding sometimes hands that back as a JSON string). Accept every shape so
+ * swapping a model never needs a parser change. */
+export function modelResponseText(output: unknown): unknown {
+  if (!output || typeof output !== 'object') return output;
+  const value = output as { response?: unknown };
+  return typeof value.response === 'string' && value.response.trim() ? value.response : output;
+}
+
+/** Find the change list in a parsed model response: a bare array, `{ changes }`,
+ * or an OpenAI-compatible `{ choices:[{ message:{ content } }] }` wrapper. */
+export function extractModelChanges(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as { changes?: unknown; choices?: unknown; response?: unknown };
+  if (Array.isArray(record.changes)) return record.changes;
+  if (Array.isArray(record.choices)) {
+    const content = (record.choices[0] as { message?: { content?: unknown } } | undefined)?.message?.content;
+    if (typeof content === 'string') {
+      try { return extractModelChanges(parseModelJson(content)); } catch { throw new Error('Model response was not valid JSON'); }
+    }
+    if (content !== undefined) return extractModelChanges(content);
+  }
+  if (record.response !== undefined && record.response !== value) return extractModelChanges(record.response);
+  return undefined;
 }
 
 /** Parse untrusted model output before the API applies independent evidence guards.
  * When the source repository is supplied, targets are resolved to canonical refs
  * rather than trusted, so a malformed parent pointer cannot invalidate a draft. */
 export function parseResumeChanges(output: unknown, bankItems?: readonly ResumeBankItem[]): ResumeChange[] {
-  const response = typeof output === 'object' && output !== null && 'response' in output
-    ? (output as { response?: unknown }).response : output;
-  const parsed = parseModelJson(response);
-  const candidates = Array.isArray(parsed) ? parsed : typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { changes?: unknown }).changes)
-    ? (parsed as { changes: unknown[] }).changes : undefined;
+  const candidates = extractModelChanges(parseModelJson(modelResponseText(output)));
   if (!candidates || candidates.length > 12) throw new Error('Model response must contain at most 12 changes');
   // One malformed change must not discard the whole draft: keep every change that
   // does satisfy the contract, and only fail when none of them do.
@@ -76,7 +107,11 @@ function buildModelChange(candidate: unknown, bankItems?: readonly ResumeBankIte
       || value.evidenceIds.some((id) => typeof id !== 'string') || !value.evidenceIds.length) throw new Error('Model change schema is invalid');
     if (value.original !== undefined && typeof value.original !== 'string') throw new Error('Model original is invalid');
     if (value.suggestion !== undefined && typeof value.suggestion !== 'string') throw new Error('Model suggestion is invalid');
-    const original = typeof value.original === 'string' ? value.original.trim().slice(0, 2_000) : undefined;
+    const targetItem = bankItems ? findModelChangeTarget(bankItems, value.target) : undefined;
+    // Remove and move mean "the line already at the target", so the original
+    // text is the target's content even when the model omits it.
+    const original = (typeof value.original === 'string' && value.original.trim() ? value.original.trim().slice(0, 2_000) : undefined)
+      ?? (type === 'add' ? undefined : targetItem?.content);
     const suggestion = typeof value.suggestion === 'string' ? value.suggestion.trim().slice(0, 2_000) : undefined;
     // Coerce each type to its contract. Models routinely attach `original` to an
     // add (or `suggestion` to a move), which the validator rejects even though the
@@ -85,7 +120,7 @@ function buildModelChange(candidate: unknown, bankItems?: readonly ResumeBankIte
     if (type === 'add' && !suggestion) throw new Error('An add change must include a suggestion');
     if ((type === 'remove' || type === 'move') && !original) throw new Error(`A ${type} change must include the original line`);
     if (type === 'rewrite' && (!original || !suggestion)) throw new Error('A rewrite change must include original and suggestion');
-    return { changeId: randomUUID(), type, target: bankItems ? resolveModelChangeTarget(bankItems, value.target) : parseResumeBankItemRef(value.target), section: value.section.trim().slice(0, 120),
+    return { changeId: randomUUID(), type, target: targetItem ? resumeBankItemRef(targetItem) : parseResumeBankItemRef(value.target), section: value.section.trim().slice(0, 120),
       ...(type === 'add' ? {} : { original }),
       ...(type === 'remove' || type === 'move' ? {} : { suggestion }),
       evidenceIds: value.evidenceIds as string[], reason: value.reason.trim().slice(0, 500) };
@@ -108,7 +143,9 @@ export function workersAiResumeDraftGenerator(ai: WorkersAi) {
         // Only a model-availability failure (for example a deprecation) advances
         // the chain. A schema/parse failure is the caller's cue to retry with
         // feedback, so it must propagate unchanged.
-        try { output = await ai.run(model, { response_format: { type: 'json_object' }, max_tokens: 2_048, temperature: 0.2, messages }); }
+        // Reasoning models (gpt-oss, Qwen, GLM) spend part of this budget on
+        // hidden reasoning, so a 2k cap truncated the JSON mid-string.
+        try { output = await ai.run(model, { response_format: { type: 'json_object' }, max_tokens: 8_192, temperature: 0.2, messages }); }
         catch (error) { lastError = error; continue; }
         return parseResumeChanges(output, bankItems);
       }

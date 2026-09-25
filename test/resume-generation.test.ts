@@ -17,6 +17,17 @@ describe('resume model output parsing', () => {
     expect(changes.every((change) => change.changeId.length > 10)).toBe(true);
   });
 
+  it('reads an OpenAI-compatible response as well as the legacy response field', () => {
+    const content = JSON.stringify({ changes: [
+      { type: 'rewrite', target: { kind: 'role', bankItemId: 'b' }, section: 'Experience', original: 'Built app', suggestion: 'Built app', evidenceIds: ['b'], reason: 'clearer wording' },
+    ] });
+    const choices = { choices: [{ message: { content } }] };
+    expect(parseResumeChanges(choices)).toHaveLength(1);
+    // The Workers AI binding can hand the same result back as a JSON string.
+    expect(parseResumeChanges(JSON.stringify(choices))[0]?.type).toBe('rewrite');
+    expect(parseResumeChanges({ choices: [{ message: { content: JSON.parse(content) } }] })).toHaveLength(1);
+  });
+
   it('rejects malformed or unsupported output before evidence validation', () => {
     expect(() => parseResumeChanges({ response: '{"changes":[{"type":"invent","section":"X"}]}' })).toThrow('Model change schema is invalid');
     expect(() => parseResumeChanges({ response: 'not json' })).toThrow();
@@ -27,7 +38,8 @@ describe('resume model output parsing', () => {
     const ai = { async run(model: string) { calls.push(model); if (model === RESUME_DRAFT_MODELS[0]) throw new Error('5028: model deprecated'); return { response: JSON.stringify({ changes: [] }) }; } };
     const changes = await workersAiResumeDraftGenerator(ai).generate(input);
     expect(changes).toEqual([]);
-    expect(calls).toEqual([...RESUME_DRAFT_MODELS]);
+    // Advance past the unavailable model but stop at the first that answers.
+    expect(calls).toEqual([RESUME_DRAFT_MODELS[0], RESUME_DRAFT_MODELS[1]]);
   });
 
   it('does not advance the chain on a schema error so the caller can retry with feedback', async () => {
@@ -54,6 +66,20 @@ describe('resume model target resolution', () => {
 
   it('accepts a bare id and resolves it to the canonical ref', () => {
     expect(parseResumeChanges(output('bullet'), bank)[0]?.target).toEqual({ kind: 'bullet', bankItemId: 'bullet', parent: { kind: 'role', bankItemId: 'role' } });
+  });
+
+  it('resolves a target the model echoed as the line text', () => {
+    expect(parseResumeChanges(output('Northwind'), bank)[0]?.target).toEqual({ kind: 'role', bankItemId: 'role' });
+    expect(parseResumeChanges(output('Built it'), bank)[0]?.target).toEqual({ kind: 'bullet', bankItemId: 'bullet', parent: { kind: 'role', bankItemId: 'role' } });
+  });
+
+  it('defaults the original text from the target for a remove or move', () => {
+    const parsed = parseResumeChanges({ response: JSON.stringify({ changes: [
+      { type: 'remove', target: { kind: 'bullet', bankItemId: 'bullet' }, section: 'Experience', evidenceIds: ['bullet'], reason: 'r' },
+      { type: 'move', target: 'Northwind', section: 'Experience', evidenceIds: ['role'], reason: 'r' },
+    ] }) }, bank);
+    expect(parsed[0]).toMatchObject({ type: 'remove', original: 'Built it' });
+    expect(parsed[1]).toMatchObject({ type: 'move', original: 'Northwind' });
   });
 
   it('rejects an unknown id with an actionable message for the retry', () => {
