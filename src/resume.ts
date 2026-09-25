@@ -174,6 +174,10 @@ export interface ResumeTemplate {
   displayName: string;
 }
 
+/** Why a résumé job import could not be read automatically, so the client can
+ * explain the failure instead of showing one generic message. */
+export type ResumeImportFailureReason = 'posting-unavailable' | 'rate-limited' | 'unreadable-page';
+
 export interface ImportedJob {
   importId: string;
   canonicalUrl: string;
@@ -183,6 +187,8 @@ export interface ImportedJob {
   source: 'catalog' | 'cache' | 'manual';
   contentHash: string;
   status: 'ready' | 'pending' | 'manual-description-required';
+  /** Set when status is manual-description-required. */
+  failureReason?: ResumeImportFailureReason;
   revision: number;
   createdAt: string;
   updatedAt: string;

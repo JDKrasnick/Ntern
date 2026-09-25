@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractResumeJobText, resumeJobStructuredRoute } from '../src/resume-job-import.js';
+import { classifyResumeImportStatus, extractResumeJobText, looksLikeErrorPage, ResumeImportError, resumeJobStructuredRoute } from '../src/resume-job-import.js';
 
 describe('resume job import text extraction', () => {
   it('removes executable markup and preserves bounded readable job text', () => {
@@ -47,5 +47,22 @@ describe('resume job URL provider resolution', () => {
 
   it('never invents a provider route for an arbitrary employer domain', () => {
     expect(resumeJobStructuredRoute('https://careers.example.test/jobs/1')).toBeUndefined();
+  });
+});
+
+describe('resume job import failure classification', () => {
+  it('distinguishes a closed posting, a rate limit, and an unreadable page', () => {
+    expect(classifyResumeImportStatus(404)).toBe('posting-unavailable');
+    expect(classifyResumeImportStatus(410)).toBe('posting-unavailable');
+    expect(classifyResumeImportStatus(429)).toBe('rate-limited');
+    expect(classifyResumeImportStatus(500)).toBe('unreadable-page');
+    expect(classifyResumeImportStatus(undefined)).toBe('unreadable-page');
+    expect(new ResumeImportError('posting-unavailable').message).toBe('This posting looks closed or removed.');
+  });
+
+  it('rejects an obvious error page instead of accepting it as a description', () => {
+    expect(looksLikeErrorPage(extractResumeJobText('<title>Not found &ndash; 404 error</title><p>Not found &ndash; 404 error</p>'))).toBe(true);
+    expect(looksLikeErrorPage({ description: 'This job is no longer available.' })).toBe(true);
+    expect(looksLikeErrorPage({ title: 'Software Engineer Intern', description: 'Build reliable TypeScript systems and ship data pipelines for analysts across the company.' })).toBe(false);
   });
 });

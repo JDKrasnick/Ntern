@@ -44,7 +44,7 @@ import { companyIconResponse } from './company-icon.js';
 import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
 import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
-import { extractResumeJobText, resumeJobStructuredRoute } from '../src/resume-job-import.js';
+import { ResumeImportError, classifyResumeImportStatus, extractResumeJobText, looksLikeErrorPage, resumeJobStructuredRoute } from '../src/resume-job-import.js';
 import { workersAiResumeDraftGenerator, type WorkersAi } from '../src/resume-generation.js';
 import { workersAiResumeSemanticIndex, type ResumeVectorIndex } from '../src/resume-embeddings.js';
 import type { EmployerVerificationChallenge } from '../src/employer-types.js';
@@ -1902,10 +1902,12 @@ async function browserResumeJobText(canonicalUrl: string, env: Environment): Pro
         .then(() => request.continue())
         .catch(() => request.abort('blockedbyclient'));
     });
-    await page.goto(canonicalUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    const response = await page.goto(canonicalUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    const status = response?.status();
+    if (status === 404 || status === 410) throw new ResumeImportError(classifyResumeImportStatus(status));
     const finalUrl = (await assertPublicHttpsUrl(page.url(), publicHostResolver)).href;
     const result = extractResumeJobText(await page.content());
-    if (result.description.length < 40) throw new Error('Browser Rendering did not contain enough readable role text');
+    if (result.description.length < 40) throw new ResumeImportError('unreadable-page');
     return { url: finalUrl, ...result };
   } finally { await browser.close(); }
 }
@@ -1957,6 +1959,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           .bind(new Date(Date.now() + 30_000).toISOString(), startedAt, body.taskId).run();
         let importedUrl = body.canonicalUrl;
         let extracted: ReturnType<typeof extractResumeJobText> | undefined;
+        let failure: ResumeImportError | undefined;
         // Reviewed ATS providers publish a structured public API for the exact
         // posting. Use it before scraping: Ashby serves an empty client-rendered
         // shell and Lever's page exceeds the HTML byte budget, so both otherwise
@@ -1968,25 +1971,39 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
             // per-posting GraphQL lookup), so a small bound is enough; the extracted
             // description is capped at 30k characters downstream.
             const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 2 * 1024 * 1024, headers: { Accept: structured.accept, ...(structured.request ? { 'Content-Type': structured.request.contentType } : {}) }, ...(structured.request ? { method: structured.request.method, body: structured.request.body } : {}) });
-            if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
+            if (fetched.status < 200 || fetched.status >= 300) throw new ResumeImportError(classifyResumeImportStatus(fetched.status));
             extracted = structured.parse(structured.accept === 'application/json' ? JSON.parse(fetched.body) : fetched.body);
-            if (!extracted || extracted.description.length < 40) throw new Error('Structured job import did not contain enough readable role text');
+            if (!extracted || extracted.description.length < 40) throw new ResumeImportError('unreadable-page');
             importedUrl = body.canonicalUrl;
-          } catch { extracted = undefined; }
+          } catch (error) {
+            failure = error instanceof ResumeImportError ? error : new ResumeImportError('unreadable-page');
+          }
         }
-        if (!extracted) {
+        // A provider API that reports the posting missing (or throttling us) is
+        // definitive; scraping would only make the user wait for the same answer.
+        const definitive = failure?.code === 'posting-unavailable' || failure?.code === 'rate-limited';
+        if (!extracted && !definitive) {
           try {
             const fetched = await safeFetchText(body.canonicalUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 3, maxBodyBytes: 128 * 1024, headers: { Accept: 'text/html,application/xhtml+xml' } });
-            if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
+            if (fetched.status < 200 || fetched.status >= 300) throw new ResumeImportError(classifyResumeImportStatus(fetched.status));
             extracted = extractResumeJobText(fetched.body);
-            if (extracted.description.length < 40) throw new Error('Job import did not contain enough readable role text');
+            if (extracted.description.length < 40) throw new ResumeImportError('unreadable-page');
             importedUrl = fetched.url;
-          } catch {
+          } catch (error) {
+            failure = failure ?? (error instanceof ResumeImportError ? error : new ResumeImportError('unreadable-page'));
+          }
+        }
+        if (!extracted && !failure) {
+          try {
             const rendered = await browserResumeJobText(body.canonicalUrl, env);
             importedUrl = rendered.url;
             extracted = rendered;
+          } catch (error) {
+            failure = error instanceof ResumeImportError ? error : new ResumeImportError('unreadable-page');
           }
         }
+        if (!extracted) throw failure ?? new ResumeImportError('unreadable-page');
+        if (looksLikeErrorPage(extracted)) throw new ResumeImportError('posting-unavailable');
         const contentHash = createHash('sha256').update(extracted.description).digest('hex');
         const objectKey = `resume-imports/${contentHash}.txt`;
         const descriptionBytes = new TextEncoder().encode(extracted.description);
@@ -2010,7 +2027,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           .bind(new Date().toISOString(), body.taskId).run();
         const users = new D1UserStore(env.DB);
         const current = await users.getImportedResumeJob(body.userId, body.importId);
-        if (current?.status === 'pending') await users.putImportedResumeJob(body.userId, { ...current, status: 'manual-description-required', revision: current.revision + 1, updatedAt: new Date().toISOString() }, current.revision);
+        if (current?.status === 'pending') await users.putImportedResumeJob(body.userId, { ...current, status: 'manual-description-required', ...(error instanceof ResumeImportError ? { failureReason: error.code } : {}), revision: current.revision + 1, updatedAt: new Date().toISOString() }, current.revision);
         console.warn(JSON.stringify({ command: 'resume-job-import', importId: body.importId, error: safeDiagnostic(error) }));
         message.ack();
       }

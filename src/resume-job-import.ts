@@ -1,5 +1,6 @@
 import { metadataApiRoute, parseMetadataApiResponse, type MetadataAcquisition } from './metadata-acquisition.js';
 import { providerPostingReference } from './identity/posting.js';
+import type { ResumeImportFailureReason } from './resume.js';
 import type { ProviderIdentity } from './types.js';
 
 /** Treat fetched employer pages as untrusted text. This deliberately extracts no
@@ -39,6 +40,36 @@ export interface ResumeJobStructuredRoute {
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+/** Import failures a user can act on. Each carries the wording the client shows,
+ * so a closed posting, a rate limit, and an unreadable page are distinguishable. */
+export const resumeImportFailureMessage: Record<ResumeImportFailureReason, string> = {
+  'posting-unavailable': 'This posting looks closed or removed.',
+  'rate-limited': 'The employer is rate-limiting requests right now.',
+  'unreadable-page': 'We could not read this page.',
+};
+
+export class ResumeImportError extends Error {
+  constructor(readonly code: ResumeImportFailureReason) {
+    super(resumeImportFailureMessage[code]);
+    this.name = 'ResumeImportError';
+  }
+}
+
+export function classifyResumeImportStatus(status: number | undefined): ResumeImportFailureReason {
+  if (status === 404 || status === 410) return 'posting-unavailable';
+  if (status === 429) return 'rate-limited';
+  return 'unreadable-page';
+}
+
+/** A rendered error page (for example Lever's "Not found - 404 error") is short
+ * and starts with a not-found phrase. Never accept it as a job description. */
+export function looksLikeErrorPage(value: { title?: string; description: string }): boolean {
+  if (value.description.trim().length >= 400) return false;
+  const head = `${value.title ?? ''}\n${value.description.slice(0, 300)}`;
+  return /(?:^|\s)(?:not found|page not found|job not found|404|410)\b/iu.test(head)
+    || /(?:job|position|posting)\b[^.\n]{0,40}\b(?:no longer|has been)\s+(?:available|filled|closed|removed)/iu.test(head);
+}
 
 /** Ashby's board endpoint returns the tenant's entire board, which fails for a
  * large board and can omit an unlisted posting. The board page itself resolves a

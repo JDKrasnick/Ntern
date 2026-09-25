@@ -5645,7 +5645,12 @@ type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bank
 type ResumeSourceDocument = { documentId: string; fileName: string; contentType: string; createdAt: string };
 type ResumeTemplateCard = { template: ResumeTemplateId; displayName: string; description: string; bestFor: string };
 type ResumeProfileRecommendationCard = { profileId: string; score: number; explanation: string };
-type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
+type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; failureReason?: "posting-unavailable" | "rate-limited" | "unreadable-page"; revision: number; updatedAt: string };
+const resumeImportFailureMessages: Record<string, string> = {
+  "posting-unavailable": "This posting looks closed or removed.",
+  "rate-limited": "The employer is rate-limiting requests right now.",
+  "unreadable-page": "We couldn't read this page.",
+};
 type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; target: ResumeBankRef; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
 type ResumeArtifactCard = { artifactId: string; pageCount?: number };
 type ResumeReviewRow = { rowId: string; lineId: string; kind: "context" | "change"; section: string; label: string; before?: string; after?: string; changeId?: string; type?: "rewrite" | "add" | "remove" | "move"; decision?: "accepted" | "rejected"; moved?: boolean; note?: string };
@@ -6201,7 +6206,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
         {jobImport && jobImport.status !== "ready" ? (
           <View style={styles.resumeManualFallback}>
             <Text style={styles.inputLabel}>Paste the job description to continue</Text>
-            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : "We couldn't read the public page. Paste the description to continue."} Pasted text stays in your private resume workspace.</Text>
+            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : `${resumeImportFailureMessages[jobImport.failureReason ?? ""] ?? "We couldn't read the public page."} Paste the description to continue.`} Pasted text stays in your private resume workspace.</Text>
             <TextInput value={manualDescription} onChangeText={setManualDescription} accessibilityLabel="Job description" multiline placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} />
             <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
           </View>
