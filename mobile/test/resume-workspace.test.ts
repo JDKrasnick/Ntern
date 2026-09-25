@@ -30,7 +30,7 @@ describe('resume workspace navigation contract', () => {
   });
 
   it('offers guests a temporary resume workspace without persistent writes', () => {
-    expect(app).toContain('function ResumeWorkspace({ token = "", onSignIn }');
+    expect(app).toContain('function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }');
     expect(app).toContain('Guest session');
     expect(app).toContain('name="cloud-offline-outline"');
     expect(app).toContain('<Text style={styles.resumeGuestStatusDetail}>Not saved</Text>');
@@ -63,7 +63,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('const [bankManagerOpen, setBankManagerOpen] = useState(false);');
     expect(app).toContain('bankManagerOpen ? "Done editing" : "Edit master bank"');
     expect(app).toContain('{bankManagerOpen ? (');
-    expect(app).toContain('{!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>');
+    expect(app).toContain('{!bankManagerOpen && signedIn && !draft ? <View style={styles.resumeSavedSection}>');
     expect(app.indexOf('Paste the job URL')).toBeLessThan(app.indexOf('{bankManagerOpen ? ('));
     expect(app).toContain('<Text style={styles.resumeImportStageTitle}>{bankSaving ? "Adding your résumés…" : "Add your résumés"}</Text>');
     expect(app).toContain('No clean source file? Use an LLM prompt');
@@ -89,7 +89,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('savedResumeProfiles.map((profile) =>');
     expect(app).toContain('aria-pressed={selected}');
     expect(app).toContain('setSelectedProfileId(profile.profileId); setResumeSourceMode("existing");');
-    expect(app).toContain('{!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>');
+    expect(app).toContain('{!bankManagerOpen && signedIn && !draft ? <View style={styles.resumeSavedSection}>');
   });
 
   it('offers the best saved resume and an ideal master-bank build', () => {
@@ -118,7 +118,7 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('const [drafting, setDrafting] = useState(false);');
     expect(app).toContain('setDrafting(true);');
     expect(app).toContain('setResumeBusy(false); setDrafting(false);');
-    expect(app).toContain('visible={drafting}');
+    expect(app).toContain('resumeLoadingScreen');
     expect(app).toContain('resumeLoadingPages');
     expect(app).toContain('timeoutMs: 90_000');
   });

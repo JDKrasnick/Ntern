@@ -6449,6 +6449,72 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
       .finally(() => { setResumeBusy(false); setArtifactLoading(false); });
   };
 
+  const draftChanges = draft?.changes ?? [];
+  const reviewBoardNode = !draftChanges.length ? (
+    <View style={styles.resumeChangePanel}>
+      <View style={styles.resumePreviewEmpty}>
+        <Ionicons name="sparkles-outline" size={28} color={colors.muted} />
+        <Text style={styles.resumePreviewEmptyTitle}>No job-specific changes found</Text>
+        <Text style={styles.resumePreviewCaption}>Your saved base already fits this job. Compile it to inspect and save the PDF.</Text>
+      </View>
+    </View>
+  ) : boardRows.length ? (
+    <ResumeReviewBoard
+      rows={boardRows}
+      changes={draftChanges}
+      busy={resumeBusy}
+      mode={boardMode}
+      onMode={setBoardMode}
+      focusId={focusChangeId}
+      onFocus={setFocusChangeId}
+      onMove={(delta) => {
+        const ids = draftChanges.map((change) => change.changeId);
+        const index = Math.max(0, ids.indexOf(focusChangeId ?? ""));
+        setFocusChangeId(ids[(index + delta + ids.length) % ids.length]);
+      }}
+      onDecide={decideChange}
+      editingChangeId={editingChangeId}
+      editValue={editValue}
+      onEdit={(changeId, value) => { setEditingChangeId(changeId); setEditValue(value); }}
+      onEditChange={setEditValue}
+      onSaveEdit={saveSuggestion}
+      onCancelEdit={() => setEditingChangeId(undefined)}
+    />
+  ) : (
+    <View style={styles.resumeChangePanel}>
+      <View style={styles.resumePreviewEmpty}>
+        <Ionicons name={reviewLoading ? "hourglass-outline" : "alert-circle-outline"} size={28} color={colors.muted} />
+        <Text style={styles.resumePreviewEmptyTitle}>{reviewLoading ? "Building the review…" : "We couldn't load these changes"}</Text>
+        <Text style={styles.resumePreviewCaption}>{reviewLoading ? "Fetching the aligned lines and the rendered pages." : "Check your connection and try again."}</Text>
+        {!reviewLoading ? <View style={styles.resumePreviewEmptyAction}><ActionButton label="Retry" onPress={() => { loadReview(); renderPreview(); }} /></View> : null}
+      </View>
+    </View>
+  );
+  const reviewPreviewNode = artifact ? (
+    <ResumeCompiledArtifact
+      artifact={artifact}
+      mode={artifactMode}
+      onMode={setArtifactMode}
+      loading={artifactLoading}
+      preview={artifactPreview}
+      source={artifactSource}
+      onDownload={() => void shareResumeArtifact(artifact.artifactId, token).catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't download that résumé."))}
+    />
+  ) : previewArtifact ? (
+    <>
+      <ResumeRenderedPage kind="added" uri={previewImage} box={focusedRow?.afterBox} label="Proposed résumé page" empty="Rendering the proposal…" />
+      <View style={styles.resumeArtifactActions}>
+        <Text style={styles.resumePreviewCaption}>{previewArtifact.pageCount ?? 1} page{previewArtifact.pageCount === 1 ? "" : "s"} · proposed résumé, not final</Text>
+        <ActionButton label={previewBusy ? "Rendering…" : "Refresh preview"} variant="secondary" onPress={renderPreview} disabled={previewBusy} />
+      </View>
+    </>
+  ) : (
+    <View style={styles.resumePreviewEmpty}>
+      <Ionicons name="eye-outline" size={28} color={colors.muted} />
+      <Text style={styles.resumePreviewEmptyTitle}>Rendering the résumé…</Text>
+      <Text style={styles.resumePreviewCaption}>The original and the proposal render automatically when the review opens.</Text>
+    </View>
+  );
   return (
     <View style={styles.resumeRoot}>
     <ScrollView style={styles.list} contentContainerStyle={styles.resumeContent}>
@@ -6835,85 +6901,27 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
         </View>
         {draft ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
           {desktop ? (
-            <View style={styles.resumeReviewPagePane}>
-              <Text style={styles.resumeDiffType}>Your résumé</Text>
-              <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
-            </View>
-          ) : null}
-          {(desktop || reviewMode === "changes") ? (
-            draft.changes.length ? (
-              boardRows.length ? (
-                <ResumeReviewBoard
-                rows={boardRows}
-                changes={draft.changes}
-                busy={resumeBusy}
-                mode={boardMode}
-                onMode={setBoardMode}
-                focusId={focusChangeId}
-                onFocus={setFocusChangeId}
-                onMove={(delta) => {
-                  const ids = draft.changes.map((change) => change.changeId);
-                  const index = Math.max(0, ids.indexOf(focusChangeId ?? ""));
-                  setFocusChangeId(ids[(index + delta + ids.length) % ids.length]);
-                }}
-                onDecide={decideChange}
-                editingChangeId={editingChangeId}
-                editValue={editValue}
-                onEdit={(changeId, value) => { setEditingChangeId(changeId); setEditValue(value); }}
-                onEditChange={setEditValue}
-                onSaveEdit={saveSuggestion}
-                onCancelEdit={() => setEditingChangeId(undefined)}
-              />
-              ) : (
-              <View style={styles.resumeChangePanel}>
-                <View style={styles.resumePreviewEmpty}>
-                  <Ionicons name={reviewLoading ? "hourglass-outline" : "alert-circle-outline"} size={28} color={colors.muted} />
-                  <Text style={styles.resumePreviewEmptyTitle}>{reviewLoading ? "Building the review…" : "We couldn't load these changes"}</Text>
-                  <Text style={styles.resumePreviewCaption}>{reviewLoading ? "Fetching the aligned lines and the rendered pages." : "Check your connection and try again."}</Text>
-                  {!reviewLoading ? <View style={styles.resumePreviewEmptyAction}><ActionButton label="Retry" onPress={() => { loadReview(); renderPreview(); }} /></View> : null}
+            <>
+              <View style={styles.resumeReviewPagesRow}>
+                <View style={styles.resumeReviewPagePane}>
+                  <Text style={styles.resumeDiffType}>Your résumé</Text>
+                  <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
                 </View>
-              </View>
-              )
-            ) : (
-              <View style={styles.resumeChangePanel}>
-                <View style={styles.resumePreviewEmpty}>
-                  <Ionicons name="sparkles-outline" size={28} color={colors.muted} />
-                  <Text style={styles.resumePreviewEmptyTitle}>No job-specific changes found</Text>
-                  <Text style={styles.resumePreviewCaption}>Your saved base already fits this job. Compile it to inspect and save the PDF.</Text>
-                </View>
-              </View>
-            )
-          ) : null}
-          {(desktop || reviewMode === "preview") ? (
-            <View style={[styles.resumeReviewPreviewPane, !desktop && styles.resumePreviewPanel]}>
-              {artifact ? (
-                <ResumeCompiledArtifact
-                  artifact={artifact}
-                  mode={artifactMode}
-                  onMode={setArtifactMode}
-                  loading={artifactLoading}
-                  preview={artifactPreview}
-                  source={artifactSource}
-                  onDownload={() => void shareResumeArtifact(artifact.artifactId, token).catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't download that résumé."))}
-                />
-              ) : previewArtifact ? (
-                <>
+                <View style={styles.resumeReviewPagePane}>
                   <Text style={styles.resumeDiffType}>Tailored proposal</Text>
-                  <ResumeRenderedPage kind="added" uri={previewImage} box={focusedRow?.afterBox} label="Proposed résumé page" empty="Rendering the proposal…" />
-                  <View style={styles.resumeArtifactActions}>
-                    <Text style={styles.resumePreviewCaption}>{previewArtifact.pageCount ?? 1} page{previewArtifact.pageCount === 1 ? "" : "s"} · proposed résumé, not final</Text>
-                    <ActionButton label={previewBusy ? "Rendering…" : "Refresh preview"} variant="secondary" onPress={renderPreview} disabled={previewBusy} />
-                  </View>
-                </>
-              ) : (
-                <View style={styles.resumePreviewEmpty}>
-                  <Ionicons name="eye-outline" size={28} color={colors.muted} />
-                  <Text style={styles.resumePreviewEmptyTitle}>Rendering the résumé…</Text>
-                  <Text style={styles.resumePreviewCaption}>The original and the proposal render automatically when the review opens.</Text>
+                  {reviewPreviewNode}
                 </View>
-              )}
+              </View>
+              <View style={styles.resumeReviewBoardRow}>{reviewBoardNode}</View>
+            </>
+          ) : reviewMode === "changes" ? (
+            <View style={styles.resumeReviewBoardRow}>{reviewBoardNode}</View>
+          ) : (
+            <View style={[styles.resumeReviewPreviewPane, styles.resumePreviewPanel]}>
+              <Text style={styles.resumeDiffType}>Tailored proposal</Text>
+              {reviewPreviewNode}
             </View>
-          ) : null}
+          )}
         </View> : null}
         <View style={styles.resumeFinalizeRow}>
           <TouchableOpacity accessibilityRole="button" disabled={!draft || reviewed === draft.changes.length || resumeBusy} onPress={keepRemainingOriginals}>
@@ -9451,15 +9459,17 @@ const styles = StyleSheet.create({
   resumeLoadingSection: { gap: 7, marginTop: 6 },
   resumeLoadingHeading: { height: 9, width: "32%" },
   resumeLoadingLine: { height: 6 },
-  resumeReviewPagePane: { alignItems: "center", flex: 1.35, gap: 10, minWidth: 0 },
-  resumeReviewPreviewPane: { alignItems: "center", flex: 1.35, gap: 10, justifyContent: "center", minWidth: 0 },
+  resumeReviewPagesRow: { flexDirection: "row", gap: 18, justifyContent: "center", width: "100%" },
+  resumeReviewBoardRow: { alignItems: "center", width: "100%" },
+  resumeReviewPagePane: { alignItems: "center", flex: 1, gap: 10, maxWidth: 700, minWidth: 0 },
+  resumeReviewPreviewPane: { alignItems: "center", gap: 10, justifyContent: "center", minWidth: 0 },
   resumePageFrame: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, maxWidth: 680, overflow: "hidden", position: "relative", width: "100%" },
   resumePageImage: { height: "100%", width: "100%" },
   resumePagePlaceholder: { alignItems: "center", flex: 1, justifyContent: "center", padding: 16 },
   resumePageHighlight: { borderRadius: 3, borderWidth: 1.5, position: "absolute" },
   resumePageHighlightAdded: { backgroundColor: "rgba(6,118,71,0.14)", borderColor: "rgba(6,118,71,0.65)" },
   resumePageHighlightRemoved: { backgroundColor: "rgba(180,35,24,0.12)", borderColor: "rgba(180,35,24,0.6)" },
-  resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 0.9, minWidth: 330, overflow: "hidden" },
+  resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 860, overflow: "hidden", width: "100%" },
   resumeBoardHead: { alignItems: "center", borderBottomColor: colors.separator, borderBottomWidth: 1, flexDirection: "row", gap: 10, justifyContent: "space-between", padding: 12 },
   resumeModeToggle: { borderColor: colors.border, borderRadius: 10, borderWidth: 1, flexDirection: "row", overflow: "hidden" },
   resumeModeButton: { backgroundColor: colors.surface, paddingHorizontal: 12, paddingVertical: 6 },
@@ -9694,7 +9704,7 @@ const styles = StyleSheet.create({
   resumeSegmentText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
   resumeSegmentTextActive: { color: colors.ink },
   resumeReviewWorkspace: { marginTop: 15 },
-  resumeReviewWorkspaceWide: { alignItems: "stretch", flexDirection: "row", gap: 14 },
+  resumeReviewWorkspaceWide: { gap: 18 },
   resumeChangePanel: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1.1, minWidth: 0, padding: 18 },
   resumeDiffHeader: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
   resumeChangeCounter: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.8, textTransform: "uppercase" },
