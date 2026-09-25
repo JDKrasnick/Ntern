@@ -65,4 +65,24 @@ describe('resume model target resolution', () => {
     const changes = await workersAiResumeDraftGenerator(ai).generate({ ...input, bankItems: bank });
     expect(changes[0]?.target).toEqual({ kind: 'bullet', bankItemId: 'bullet', parent: { kind: 'role', bankItemId: 'role' } });
   });
+
+  it('coerces each change type to its contract instead of rejecting an extra field', () => {
+    const parsed = parseResumeChanges({ response: JSON.stringify({ changes: [
+      { type: 'add', target: { kind: 'role', bankItemId: 'role' }, section: 'Experience', original: 'stale', suggestion: 'Owned ingestion', evidenceIds: ['role'], reason: 'r' },
+      { type: 'move', target: { kind: 'bullet', bankItemId: 'bullet' }, section: 'Experience', original: 'Built it', suggestion: 'ignored', evidenceIds: ['bullet'], reason: 'r' },
+    ] }) }, bank);
+    expect(parsed[0]).toMatchObject({ type: 'add', suggestion: 'Owned ingestion' });
+    expect(parsed[0]?.original).toBeUndefined();
+    expect(parsed[1]).toMatchObject({ type: 'move', original: 'Built it' });
+    expect(parsed[1]?.suggestion).toBeUndefined();
+  });
+
+  it('names the missing field so the feedback retry can fix it', () => {
+    expect(() => parseResumeChanges({ response: JSON.stringify({ changes: [
+      { type: 'add', target: { kind: 'role', bankItemId: 'role' }, section: 'Experience', evidenceIds: ['role'], reason: 'r' },
+    ] }) })).toThrow(/add change must include a suggestion/);
+    expect(() => parseResumeChanges({ response: JSON.stringify({ changes: [
+      { type: 'rewrite', target: { kind: 'bullet', bankItemId: 'bullet' }, section: 'Experience', original: 'Built it', evidenceIds: ['bullet'], reason: 'r' },
+    ] }) })).toThrow(/rewrite change must include original and suggestion/);
+  });
 });

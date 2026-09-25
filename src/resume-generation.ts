@@ -54,14 +54,24 @@ export function parseResumeChanges(output: unknown, bankItems?: readonly ResumeB
   return candidates.map((candidate) => {
     if (typeof candidate !== 'object' || candidate === null) throw new Error('Model change must be an object');
     const value = candidate as Record<string, unknown>;
-    if (!supportedTypes.has(value.type as ResumeChange['type']) || typeof value.section !== 'string' || !value.section.trim()
+    const type = value.type as ResumeChange['type'];
+    if (!supportedTypes.has(type) || typeof value.section !== 'string' || !value.section.trim()
       || typeof value.reason !== 'string' || !value.reason.trim() || !Array.isArray(value.evidenceIds)
       || value.evidenceIds.some((id) => typeof id !== 'string') || !value.evidenceIds.length) throw new Error('Model change schema is invalid');
     if (value.original !== undefined && typeof value.original !== 'string') throw new Error('Model original is invalid');
     if (value.suggestion !== undefined && typeof value.suggestion !== 'string') throw new Error('Model suggestion is invalid');
-    return { changeId: randomUUID(), type: value.type as ResumeChange['type'], target: bankItems ? resolveModelChangeTarget(bankItems, value.target) : parseResumeBankItemRef(value.target), section: value.section.trim().slice(0, 120),
-      ...(typeof value.original === 'string' ? { original: value.original.trim().slice(0, 2_000) } : {}),
-      ...(typeof value.suggestion === 'string' ? { suggestion: value.suggestion.trim().slice(0, 2_000) } : {}),
+    const original = typeof value.original === 'string' ? value.original.trim().slice(0, 2_000) : undefined;
+    const suggestion = typeof value.suggestion === 'string' ? value.suggestion.trim().slice(0, 2_000) : undefined;
+    // Coerce each type to its contract. Models routinely attach `original` to an
+    // add (or `suggestion` to a move), which the validator rejects even though the
+    // intent is clear, so keep only the fields the type defines and say exactly
+    // what is missing when it is.
+    if (type === 'add' && !suggestion) throw new Error('An add change must include a suggestion');
+    if ((type === 'remove' || type === 'move') && !original) throw new Error(`A ${type} change must include the original line`);
+    if (type === 'rewrite' && (!original || !suggestion)) throw new Error('A rewrite change must include original and suggestion');
+    return { changeId: randomUUID(), type, target: bankItems ? resolveModelChangeTarget(bankItems, value.target) : parseResumeBankItemRef(value.target), section: value.section.trim().slice(0, 120),
+      ...(type === 'add' ? {} : { original }),
+      ...(type === 'remove' || type === 'move' ? {} : { suggestion }),
       evidenceIds: value.evidenceIds as string[], reason: value.reason.trim().slice(0, 500) };
   });
 }
