@@ -108,6 +108,17 @@ describe('Ashby board streaming integration', () => {
     expect(result?.outcome).toBe('identity-mismatch');
   });
 
+  it('keeps the real posting when a stray top-level array publishes a look-alike id first', async () => {
+    // A rejected candidate must not mask the genuine posting that follows it.
+    const stray = new TextEncoder().encode(JSON.stringify({
+      related: [{ id: uuidFor(1), title: 'Decoy', jobUrl: `https://evil.example/acme/${uuidFor(1)}`, descriptionPlain: 'decoy' }],
+      jobs: [{ id: uuidFor(1), title: 'Real', jobUrl: `https://jobs.ashbyhq.com/acme/${uuidFor(1)}`, descriptionPlain: 'real body' }],
+    }));
+    const result = await createMetadataAcquirer(async () => streamed(stray, 16))(identity(uuidFor(1)));
+    expect(result?.outcome).toBe('acquired');
+    expect(result?.artifact?.text).toContain('real body');
+  });
+
   it('treats a malformed board as a miss, never as a wrong artifact', async () => {
     const truncated = new TextEncoder().encode('{"jobs":[{"id":"' + uuidFor(1) + '","title":"Cut');
     const result = await createMetadataAcquirer(async () => streamed(truncated, 16))(identity(uuidFor(1)));

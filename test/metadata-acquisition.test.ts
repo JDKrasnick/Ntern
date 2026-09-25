@@ -256,6 +256,17 @@ describe('identity-bound public metadata APIs', () => {
     expect(result?.outcome).toBe('identity-mismatch');
     expect(result?.artifact).toBeUndefined();
   });
+  it('keeps the real posting when a stray top-level array publishes a look-alike id first', async () => {
+    // A candidate that carries the requested id but fails identity validation is
+    // not the posting; the walk must resume rather than settle a false miss.
+    const board = JSON.stringify({
+      related: [{ id: uuid, title: 'Decoy', jobUrl: `https://evil.example/acme/${uuid}`, descriptionPlain: 'decoy' }],
+      jobs: [{ id: uuid, title: 'Real Intern', jobUrl: `https://jobs.ashbyhq.com/acme/${uuid}`, descriptionPlain: 'the real body' }],
+    });
+    const result = await createMetadataAcquirer(async () => streamed(board, 16))(identity('ashby'));
+    expect(result?.outcome).toBe('acquired');
+    expect(result?.artifact?.text).toContain('the real body');
+  });
   it('reads an iCIMS posting from its frame route, the only response carrying the description', async () => {
     const icims = { ...identity('icims', '12891'), tenant: 'careers-springswindowfashions' };
     expect(metadataApiRoute(icims)).toEqual({ method: 'icims-page',

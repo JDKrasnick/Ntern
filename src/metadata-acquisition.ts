@@ -263,9 +263,12 @@ type AshbyScan = {
 
 /** Scans `text` from `position`, keeping the caller's state. A container stack of
  * exactly [root object, top-level array] identifies a job element. Every
- * top-level array is scanned; `parseMetadataApiResponse` validates the identity,
- * so a stray array cannot produce a false match. */
-function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected: string | undefined): unknown | undefined {
+ * top-level array is scanned; the caller validates each candidate with
+ * `parseMetadataApiResponse`, so a stray array can neither produce a false match
+ * nor mask the real element that follows it. Returns the next completed element
+ * whose `id` matches, and the position just past it, so a candidate a caller
+ * rejects can be followed by a resumed walk instead of a restart. */
+function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected: string | undefined): { job: unknown; position: number } | undefined {
   const append = (char: string) => {
     if (!scan.parts || scan.oversized) return;
     scan.parts.push(char);
@@ -302,8 +305,9 @@ function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected:
       scan.containers.pop();
       if (closesElement) {
         scan.parts!.push('}');
+        const next = index + 1;
         const job = takeElement();
-        if (record(job) && job.id === expected) return job;
+        if (record(job) && job.id === expected) return { job, position: next };
         continue;
       }
     }
@@ -327,15 +331,22 @@ async function extendAshbyBoard(board: AshbyBoard): Promise<void> {
 
 /** Reads the board only as far as needed to answer this posting. Each identity
  * restarts the walk at 0, so a posting published before another identity's match
- * is still found without a second network request. */
-async function findAshbyJob(board: AshbyBoard, expected: string | undefined): Promise<{ job?: unknown; truncated: boolean; bytes: number }> {
+ * is still found without a second network request. A candidate that carries the
+ * requested `id` but fails identity validation (a look-alike in a stray array) is
+ * rejected and the walk resumes, so it cannot mask the real posting behind it. */
+async function findAshbyJob(board: AshbyBoard, expected: string | undefined, accept: (job: unknown) => RoleMetadataArtifact | undefined): Promise<{ artifact?: RoleMetadataArtifact; truncated: boolean; bytes: number }> {
   const scan: AshbyScan = { containers: [], inString: false, escaped: false, parts: undefined, retained: 0, oversized: false };
   let position = 0;
   for (;;) {
-    const job = scanAshbyJob(scan, board.text, position, expected);
-    if (job !== undefined) return { job, truncated: false, bytes: board.bytes };
+    const found = scanAshbyJob(scan, board.text, position, expected);
+    if (found !== undefined) {
+      position = found.position;
+      const artifact = accept(found.job);
+      if (artifact) return { artifact, truncated: false, bytes: board.bytes };
+      continue;
+    }
     position = board.text.length;
-    if (board.done) return { job: undefined, truncated: board.truncated, bytes: board.bytes };
+    if (board.done) return { truncated: board.truncated, bytes: board.bytes };
     await extendAshbyBoard(board);
   }
 }
@@ -412,12 +423,12 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
       const board = boards.get(route.url)!;
       try {
         return await serialize(route.url, async () => {
-          const found = await findAshbyJob(board, identity.postingId);
-          const artifact = found.job === undefined ? undefined
-            : parseMetadataApiResponse(route.identity ?? identity, route.method, { jobs: [found.job] }, route.url);
+          const boardIdentity = route.identity ?? identity;
+          const found = await findAshbyJob(board, identity.postingId, (job) =>
+            parseMetadataApiResponse(boardIdentity, route.method, { jobs: [job] }, route.url));
           return { method: route.method, sourceUrl: route.url, status: result.status, bytes: found.bytes,
-            outcome: artifact ? 'acquired' as const : found.truncated ? 'incomplete' as const : 'identity-mismatch' as const,
-            ...(artifact ? { artifact } : {}) };
+            outcome: found.artifact ? 'acquired' as const : found.truncated ? 'incomplete' as const : 'identity-mismatch' as const,
+            ...(found.artifact ? { artifact: found.artifact } : {}) };
         });
       } catch { return { method: route.method, sourceUrl: route.url, outcome: 'failed' as const, status: result.status }; }
     }
