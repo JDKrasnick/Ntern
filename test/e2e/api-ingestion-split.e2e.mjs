@@ -1319,7 +1319,9 @@ async function withStructuredFetch(run) {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     const { hostname, searchParams } = new URL(url);
     if (hostname === 'cloudflare-dns.com') {
-      return Response.json(searchParams.get('type') === 'A' ? { Answer: [{ data: '93.184.216.34' }] } : { Answer: [] });
+      // `dnsJson` keeps only answers whose `type` matches the queried record, so
+      // the mock must stamp the A answer or the host reads as unresolvable.
+      return Response.json(searchParams.get('type') === 'A' ? { Answer: [{ type: 1, data: '93.184.216.34' }] } : { Answer: [] });
     }
     if (url === structuredSourceUrl) {
       return new Response(structuredJsonLdPage(), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
