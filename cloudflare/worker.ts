@@ -1972,8 +1972,9 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
             // description is capped at 30k characters downstream.
             const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 2 * 1024 * 1024, headers: { Accept: structured.accept, ...(structured.request ? { 'Content-Type': structured.request.contentType } : {}) }, ...(structured.request ? { method: structured.request.method, body: structured.request.body } : {}) });
             if (fetched.status < 200 || fetched.status >= 300) throw new ResumeImportError(classifyResumeImportStatus(fetched.status));
-            extracted = structured.parse(structured.accept === 'application/json' ? JSON.parse(fetched.body) : fetched.body);
-            if (!extracted || extracted.description.length < 40) throw new ResumeImportError('unreadable-page');
+            const parsed = structured.parse(structured.accept === 'application/json' ? JSON.parse(fetched.body) : fetched.body);
+            if (!parsed || parsed.description.length < 40) throw new ResumeImportError('unreadable-page');
+            extracted = parsed;
             importedUrl = body.canonicalUrl;
           } catch (error) {
             failure = error instanceof ResumeImportError ? error : new ResumeImportError('unreadable-page');
@@ -1986,8 +1987,9 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           try {
             const fetched = await safeFetchText(body.canonicalUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 3, maxBodyBytes: 128 * 1024, headers: { Accept: 'text/html,application/xhtml+xml' } });
             if (fetched.status < 200 || fetched.status >= 300) throw new ResumeImportError(classifyResumeImportStatus(fetched.status));
-            extracted = extractResumeJobText(fetched.body);
-            if (extracted.description.length < 40) throw new ResumeImportError('unreadable-page');
+            const scraped = extractResumeJobText(fetched.body);
+            if (scraped.description.length < 40) throw new ResumeImportError('unreadable-page');
+            extracted = scraped;
             importedUrl = fetched.url;
           } catch (error) {
             failure = failure ?? (error instanceof ResumeImportError ? error : new ResumeImportError('unreadable-page'));
@@ -1996,13 +1998,16 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         if (!extracted && !failure) {
           try {
             const rendered = await browserResumeJobText(body.canonicalUrl, env);
+            if (rendered.description.length < 40) throw new ResumeImportError('unreadable-page');
             importedUrl = rendered.url;
             extracted = rendered;
           } catch (error) {
             failure = error instanceof ResumeImportError ? error : new ResumeImportError('unreadable-page');
           }
         }
-        if (!extracted) throw failure ?? new ResumeImportError('unreadable-page');
+        // A stage that assigned `extracted` before its own check could leave an
+        // unusable result; never persist one.
+        if (!extracted || extracted.description.length < 40) throw failure ?? new ResumeImportError('unreadable-page');
         if (looksLikeErrorPage(extracted)) throw new ResumeImportError('posting-unavailable');
         const contentHash = createHash('sha256').update(extracted.description).digest('hex');
         const objectKey = `resume-imports/${contentHash}.txt`;
