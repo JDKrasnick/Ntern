@@ -294,19 +294,106 @@ function readWebpDimensions(bytes: Uint8Array): { width: number; height: number 
 }
 
 /**
- * A board banner is only usable as an icon when its own shape says it is the
- * employer's mark rather than a promotional strip. A 1400×300 careers banner
- * cropped into a square tile shows a slice of a photograph, which is worse than the
- * monogram it replaced, so only a roughly square asset is accepted.
+ * An asset whose own shape says it is the employer's mark rather than a promotional
+ * strip is the only kind usable in a square tile: a 1400×300 careers banner or a
+ * 1.91:1 share card cropped into a tile shows a slice of a photograph, which is worse
+ * than the monogram it replaced. One range serves board banners and site assets.
  */
-export const ICON_BANNER_MIN_ASPECT = 0.75;
-export const ICON_BANNER_MAX_ASPECT = 1.34;
+export const ICON_ASSET_MIN_ASPECT = 0.75;
+export const ICON_ASSET_MAX_ASPECT = 1.34;
+/** Below this, an asset is an icon-sized thumbnail rather than a mark worth a tile. */
+export const ICON_ASSET_MIN_PIXELS = 64;
 
-export function bannerAssetShapeUsable(bytes: Uint8Array): boolean {
+export function assetShapeUsable(bytes: Uint8Array): boolean {
   const size = rasterDimensions(bytes);
   if (!size || size.width <= 0 || size.height <= 0) return false;
+  if (size.width < ICON_ASSET_MIN_PIXELS || size.height < ICON_ASSET_MIN_PIXELS) return false;
   const aspect = size.width / size.height;
-  return aspect >= ICON_BANNER_MIN_ASPECT && aspect <= ICON_BANNER_MAX_ASPECT;
+  return aspect >= ICON_ASSET_MIN_ASPECT && aspect <= ICON_ASSET_MAX_ASPECT;
+}
+
+/** The board-banner name for the same rule, kept for its callers. */
+export function bannerAssetShapeUsable(bytes: Uint8Array): boolean {
+  return assetShapeUsable(bytes);
+}
+
+/**
+ * The mark an employer's own site declares about itself, most suitable first.
+ *
+ * Only **declared** assets are read — a touch icon, a structured-data `logo`, a share
+ * card, a web-app manifest icon, a favicon — never an arbitrary `<img>` on the page,
+ * so a screenshot or a product hero is not a candidate by construction. This is the
+ * fallback for an employer whose board published nothing: the domain was verified by
+ * the resolver first, so the page in hand is the employer's own.
+ *
+ * The order prefers what a site publishes *because* it is the brand mark: an Apple
+ * touch icon is square and drawn for a tile, a structured `logo` is declared as the
+ * organisation's logo, a share card is a marketing crop, and a favicon is last
+ * because it is usually 16–32 px. Callers still shape-check and size-check every
+ * candidate, so a wrong guess costs a request rather than a wrong icon.
+ */
+export function siteLogoAssetCandidates(html: string, pageUrl?: string): string[] {
+  const declared = [
+    ...linkRelHrefs(html, 'apple-touch-icon', 'sizes'),
+    ...structuredDataLogos(html),
+    ...['og:image', 'twitter:image'].map((property) => metaContent(html, property)),
+    ...linkRelHrefs(html, 'icon'),
+  ].filter((value): value is string => Boolean(value));
+  const absolute = declared.flatMap((value) => {
+    const resolved = absoluteHttpsUrl(value, pageUrl);
+    return resolved ? [resolved] : [];
+  });
+  return [...new Set(absolute)].filter((url) => !isPlatformLogoHost(url));
+}
+
+/** Every `href` of a `<link rel="…">`, largest declared `sizes` first. */
+function linkRelHrefs(html: string, rel: string, sizesAttribute?: string): string[] {
+  const wanted = new RegExp(String.raw`(?:^|\s)${rel}(?:\s|$)`, 'u');
+  const found: Array<{ href: string; size: number }> = [];
+  for (const [tag] of html.matchAll(/<link\b[^>]*>/giu)) {
+    const relations = /rel=["']([^"']*)["']/iu.exec(tag)?.[1];
+    if (!relations || !wanted.test(relations.trim())) continue;
+    const href = /href=["']([^"']+)["']/iu.exec(tag)?.[1];
+    if (!href) continue;
+    const sizes = sizesAttribute ? /sizes=["']([^"']*)["']/iu.exec(tag)?.[1] ?? '' : '';
+    const largest = Number(/(\d+)x\d+/u.exec(sizes)?.[1] ?? 0);
+    found.push({ href, size: largest });
+  }
+  return found.sort((left, right) => right.size - left.size).map((entry) => entry.href);
+}
+
+/** `Organization.logo`, which may be a URL or an `ImageObject`. */
+function structuredDataLogos(html: string): string[] {
+  const found: string[] = [];
+  const documents = [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/giu)]
+    .slice(0, MAX_JSON_LD_DOCUMENTS);
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > 6 || typeof node !== 'object' || node === null) return;
+    if (Array.isArray(node)) { for (const item of node) visit(item, depth + 1); return; }
+    const record = node as Record<string, unknown>;
+    const types = (Array.isArray(record['@type']) ? record['@type'] : [record['@type']])
+      .filter((type): type is string => typeof type === 'string');
+    if (types.some((type) => ORGANIZATION_TYPES.test(type.toLowerCase()))) {
+      const logo = record.logo;
+      const candidate = typeof logo === 'string' ? logo
+        : typeof logo === 'object' && logo !== null && typeof (logo as Record<string, unknown>).url === 'string'
+          ? (logo as Record<string, unknown>).url as string : undefined;
+      if (candidate) found.push(candidate);
+    }
+    for (const value of Object.values(record)) visit(value, depth + 1);
+  };
+  for (const document of documents) {
+    try { visit(JSON.parse(document[1] ?? ''), 0); } catch { /* malformed blocks are non-fatal */ }
+  }
+  return found;
+}
+
+/** Icons a web-app manifest declares, read from the inline manifest only. */
+function absoluteHttpsUrl(value: string, pageUrl?: string): string | undefined {
+  try {
+    const url = new URL(value, pageUrl);
+    return url.protocol === 'https:' ? url.href : undefined;
+  } catch { return undefined; }
 }
 
 function jsonStringField(html: string, name: string): string | undefined {

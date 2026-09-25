@@ -106,8 +106,19 @@ export const ICON_AUTO_RESOLVE_SCORE = 0.85;
 export const ICON_AUTO_RESOLVE_MARGIN = 0.15;
 /** The band where one bounded LLM tie-breaker may be consulted. */
 export const ICON_LLM_BAND_MINIMUM = 0.55;
-/** The LLM may never accept below this confidence. */
+/** The LLM may accept on its own word at or above this confidence. */
 export const ICON_LLM_MINIMUM_CONFIDENCE = 0.9;
+/**
+ * ...or below it, down to this floor, when the domain it selected proves itself.
+ *
+ * Measured against the live catalog, the real model answers *correctly* at 0.45–0.80
+ * more often than it answers at all above 0.90 — `notion.com`, `snowflake.com`, and
+ * `deepgram.com` all arrived at 0.80 — so a self-reported confidence is a poor gate
+ * on its own. What makes a below-floor answer usable is the same independent proof a
+ * proposal needs: the domain, fetched, must name the employer in its own metadata.
+ * A self-report is a guess; that is evidence.
+ */
+export const ICON_LLM_VERIFIED_MINIMUM_CONFIDENCE = 0.3;
 /** Each provider may contribute at most this many domain candidates. */
 export const MAX_PROVIDER_CANDIDATES = 5;
 
@@ -453,6 +464,12 @@ export interface IconTieBreakAcceptance {
   domain?: string;
   /** Compact, persistable reason code; never the model's prose. */
   reasonCode: string;
+  /**
+   * Set when every structural rule passed and only the model's own confidence fell
+   * short of the self-reporting floor. The caller may still accept the candidate by
+   * proving the domain names this employer, which is what makes the answer usable.
+   */
+  pendingVerification?: { domain: string; confidence: number };
 }
 
 /**
@@ -471,7 +488,6 @@ export function acceptIconTieBreak(
 ): IconTieBreakAcceptance {
   if (!decision) return { accepted: false, reasonCode: 'malformed-decision' };
   if (decision.decision !== 'accept') return { accepted: false, reasonCode: `decision-${decision.decision}` };
-  if (decision.confidence < ICON_LLM_MINIMUM_CONFIDENCE) return { accepted: false, reasonCode: 'confidence-below-floor' };
   const officialDomain = decision.officialDomain;
   if (!officialDomain) return { accepted: false, reasonCode: 'domain-missing' };
   const selected = submitted.find((candidate) => !candidate.rejected
@@ -482,7 +498,18 @@ export function acceptIconTieBreak(
   const cited = decision.evidenceIds.filter((id) => selected.evidenceIds.includes(id));
   if (cited.length !== decision.evidenceIds.length) return { accepted: false, reasonCode: 'evidence-does-not-support-domain' };
   if (cited.length < 2) return { accepted: false, reasonCode: 'insufficient-independent-evidence' };
-  return { accepted: true, domain: selected.domain, reasonCode: 'accepted' };
+  // Every structural rule holds, so the only question left is whether this answer is
+  // believed on its own confidence or has to be proven against the domain.
+  if (decision.confidence >= ICON_LLM_MINIMUM_CONFIDENCE) {
+    return { accepted: true, domain: selected.domain, reasonCode: 'accepted' };
+  }
+  if (decision.confidence < ICON_LLM_VERIFIED_MINIMUM_CONFIDENCE) {
+    return { accepted: false, reasonCode: 'confidence-below-floor' };
+  }
+  return {
+    accepted: false, reasonCode: 'needs-domain-confirmation',
+    pendingVerification: { domain: selected.domain, confidence: decision.confidence },
+  };
 }
 
 /**
@@ -502,6 +529,87 @@ export const iconProposalSchema = {
 
 /** A proposed domain is only ever attempted at or above this confidence. */
 export const ICON_PROPOSAL_MINIMUM_CONFIDENCE = 0.9;
+
+/**
+ * The schema for one bounded asset call.
+ *
+ * This is the single place a model is allowed to name an asset rather than a domain.
+ * The answer is never trusted on its own: a pick must be one of the assets submitted
+ * to it, and a URL it names itself is admitted only on the employer's verified domain
+ * and only after the same fetch, raster, size, and shape gates every other asset
+ * passes. `assetUrl` is therefore a *nomination*, exactly as a proposed domain is.
+ */
+export const iconAssetPickSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['assetUrl', 'confidence', 'reason'],
+  properties: {
+    assetUrl: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+    reason: { type: 'string', minLength: 1, maxLength: 300 },
+  },
+} as const;
+
+/** An asset answer is only ever attempted at or above this confidence. */
+export const ICON_ASSET_MINIMUM_CONFIDENCE = 0.5;
+
+/** One asset answer: either a submitted candidate, or a same-domain nomination. */
+export type IconAssetNomination =
+  | { kind: 'submitted'; url: string; confidence: number }
+  | { kind: 'nominated'; url: string; confidence: number };
+
+export interface IconAssetPick {
+  assetUrl: string | null;
+  confidence: number;
+  reason: string;
+}
+
+/** Structural validation only; the URL is normalized and never trusted as an asset yet. */
+export function parseIconAssetPick(value: unknown): IconAssetPick | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).sort().join(',') !== 'assetUrl,confidence,reason') return undefined;
+  const { assetUrl, confidence, reason } = record;
+  if (assetUrl !== null && typeof assetUrl !== 'string') return undefined;
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) return undefined;
+  if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) return undefined;
+  return {
+    assetUrl: typeof assetUrl === 'string' && assetUrl.trim() ? assetUrl.trim() : null,
+    confidence, reason: reason.trim(),
+  };
+}
+
+/**
+ * Applies the server-side rule to one asset answer.
+ *
+ * A submitted URL is admitted as a pick. Any other URL is a *nomination*, and is
+ * admitted only when it is `https` on the employer's own verified domain — the model
+ * may choose an asset the extraction missed, but it can never point us outside the
+ * domain we already established. Everything else about the answer, including whether
+ * the bytes are usable at all, is decided by the fetch and the gates afterwards.
+ */
+export function acceptIconAssetPick(
+  pick: IconAssetPick | undefined,
+  submitted: readonly string[],
+  verifiedDomain: string,
+): IconAssetNomination | undefined {
+  if (!pick || !pick.assetUrl || pick.confidence < ICON_ASSET_MINIMUM_CONFIDENCE) return undefined;
+  const url = normalizeAssetUrl(pick.assetUrl);
+  if (!url) return undefined;
+  const selected = submitted.find((candidate) => normalizeAssetUrl(candidate) === url);
+  if (selected) return { kind: 'submitted', url: selected, confidence: pick.confidence };
+  const host = new URL(url).hostname.toLowerCase();
+  const domain = verifiedDomain.toLowerCase();
+  const sameDomain = host === domain || host.endsWith(`.${domain}`);
+  return sameDomain ? { kind: 'nominated', url, confidence: pick.confidence } : undefined;
+}
+
+function normalizeAssetUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.href : undefined;
+  } catch { return undefined; }
+}
 
 export interface IconDomainProposal {
   domain: string | null;

@@ -59,9 +59,11 @@ const NOW = new Date('2026-09-24T12:00:00.000Z');
 const PUBLIC_RESOLVER: HostResolver = { async resolve() { return ['93.184.216.34']; } };
 /** Every host resolves inside a private range, so the SSRF guard rejects the link. */
 const BLOCKED_RESOLVER: HostResolver = { async resolve() { return ['10.0.0.1']; } };
-const LOGO_TOKEN = 'logo-dev-token';
+const LOGO_TOKEN = 'logo-dev-secret-key';
+/** Logo.dev's image endpoint takes the publishable token, never the secret key. */
+const LOGO_IMAGE_TOKEN = 'logo-dev-publishable-token';
 const BRANDFETCH_CLIENT = 'brandfetch-client';
-const IMAGE_URL = logoDevImageUrl('acme.com', LOGO_TOKEN);
+const IMAGE_URL = logoDevImageUrl('acme.com', LOGO_IMAGE_TOKEN);
 
 type FetchRoutes = Record<string, () => Response | Promise<Response>>;
 
@@ -122,7 +124,7 @@ function r2Stub() {
 const environment = (
   db: D1Database,
   documents: R2Bucket,
-  secrets: { LOGO_DEV_TOKEN?: string; BRANDFETCH_CLIENT_ID?: string; OPENAI_KEY?: string } = {},
+  secrets: { LOGO_DEV_TOKEN?: string; LOGO_DEV_IMAGE_TOKEN?: string; BRANDFETCH_CLIENT_ID?: string; OPENAI_KEY?: string } = {},
 ) => ({ DB: db, DOCUMENTS: documents, ...secrets });
 
 const DEPENDENCIES = (fetchImpl: typeof fetch, resolver: HostResolver = PUBLIC_RESOLVER) => ({ resolver, fetchImpl });
@@ -184,6 +186,128 @@ describe('employer icon diagnosis', () => {
     expect(winner?.signals).toEqual(expect.arrayContaining(['final-url', 'ats-tenant']));
     expect(diagnostic.decision.selectedDomain).toBe('acme.com');
     expect(diagnostic.decision.outcome).toBe('llm-review');
+  });
+
+  it('publishes a below-floor tie-break only when the domain itself names the employer', async () => {
+    // The real model answers correctly at 0.8 far more often than it answers at all
+    // above 0.90, so a below-floor selection is verified against the domain instead of
+    // trusted — and a domain that does not name the employer is still refused.
+    const run = async (homepage: () => Response) => {
+      const { db, admission, icons } = subject();
+      const r2 = r2Stub();
+      await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+      await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+      await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
+      const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => {
+        const input = JSON.parse(request.prompt.user) as { candidates: Array<{ domain: string; evidenceIds: string[] }> };
+        const chosen = input.candidates.find((candidate) => candidate.domain === 'acme.com')!;
+        return {
+          response: { decision: 'accept', officialDomain: 'acme.com', confidence: 0.8,
+            evidenceIds: chosen.evidenceIds, reason: 'the provider and the page agree' },
+          inputTokens: 10, outputTokens: 5, actualCostCents: 1,
+        };
+      };
+      const fetchImpl = scriptedFetch({
+        'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
+          '<!doctype html><html><head><title>Software Engineering Intern at Acme</title></head></html>',
+        ),
+        [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+        [brandfetchSearchUrl('Acme', BRANDFETCH_CLIENT)]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+        'https://acme.com/': homepage,
+        [IMAGE_URL]: () => webp(),
+      });
+      const result = await runEmployerIconResolutionPass(
+        environment(db, r2.bucket, {
+          LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, BRANDFETCH_CLIENT_ID: BRANDFETCH_CLIENT, OPENAI_KEY: 'sk-test',
+        }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+      );
+      return { result, icons };
+    };
+
+    // The domain's own homepage names the employer, so the answer is evidence-backed.
+    const confirmed = await run(() => html('<!doctype html><html><head><title>Acme — industrial supplies</title></head></html>'));
+    expect(confirmed.result.resolved).toBe(1);
+    expect((await confirmed.icons.context('acme'))?.websiteDomain).toBe('acme.com');
+
+    // A homepage that does not name the employer stays a monogram: the model's word
+    // alone is never enough below the floor.
+    const unconfirmed = await run(() => html('<!doctype html><html><head><title>Domain for sale</title></head></html>'));
+    expect(unconfirmed.result.resolved).toBe(0);
+    expect((await unconfirmed.icons.context('acme'))?.websiteDomain).toBeUndefined();
+  });
+
+  it('reads the employer’s own site when its board published nothing and the provider has no logo', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const seed = { ...employerSeed('https://acme.com/careers/1'), provider: 'structured', provenance: 'official-ats' as const };
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, seed, NOW);
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/1': () => html('<!doctype html><html><head><title>Careers</title></head></html>'),
+      // The provider has nothing for this domain.
+      [IMAGE_URL]: () => status(404),
+      // The employer's own homepage declares a square touch icon.
+      'https://acme.com/': () => html(
+        '<!doctype html><html><head><title>Acme</title>'
+        + '<link rel="apple-touch-icon" sizes="180x180" href="/touch-180.png"></head></html>',
+      ),
+      'https://acme.com/touch-180.png': () => new Response(pngBytes(180, 180), { headers: { 'content-type': 'image/png' } }),
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2.bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+    );
+
+    expect(result.resolved).toBe(1);
+    expect(r2.puts).toHaveLength(1);
+    expect(r2.puts[0]?.key).toMatch(/^company-icons\/acme\/site-[0-9a-f]{16}\.png$/u);
+    expect((await admission.getCanonicalEmployer('acme'))?.iconSource).toBe('domain-asset');
+    const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+    expect(events.find((event) => event.event === 'company_icon_domain_asset_stored'))
+      .toMatchObject({ source: 'declared', format: 'image/png' });
+  });
+
+  it('lets the model name an asset on the verified domain, and drops one outside it', async () => {
+    const run = async (assetUrl: string) => {
+      const { db, admission, icons } = subject();
+      const r2 = r2Stub();
+      const seed = { ...employerSeed('https://acme.com/careers/1'), provider: 'structured', provenance: 'official-ats' as const };
+      await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+      await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+      await enqueueEmployerIconResolution(icons, seed, NOW);
+      const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => ({
+        response: request.schemaName === 'company_icon_asset_pick'
+          ? { assetUrl, confidence: 0.8, reason: 'the mark on their brand page' }
+          : { decision: 'reject', officialDomain: null, confidence: 0, evidenceIds: [], reason: 'nothing to choose' },
+        inputTokens: 12, outputTokens: 6, actualCostCents: 1,
+      });
+      const fetchImpl = scriptedFetch({
+        'https://acme.com/careers/1': () => html('<!doctype html><html><head><title>Careers</title></head></html>'),
+        [IMAGE_URL]: () => status(404),
+        // The homepage declares nothing usable, so the model is the only way left.
+        'https://acme.com/': () => html('<!doctype html><html><head><title>Acme</title><img src="/irrelevant.png"></head></html>'),
+        'https://acme.com/brand/mark.png': () => new Response(pngBytes(512, 512), { headers: { 'content-type': 'image/png' } }),
+      });
+      const result = await runEmployerIconResolutionPass(
+        environment(db, r2.bucket, {
+          LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test',
+        }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+      );
+      return { result, r2, admission };
+    };
+
+    // A URL the model named on the employer's own domain is fetched and gated.
+    const named = await run('https://acme.com/brand/mark.png');
+    expect(named.result.resolved).toBe(1);
+    expect(named.r2.puts[0]?.key).toMatch(/^company-icons\/acme\/site-[0-9a-f]{16}\.png$/u);
+    expect((await named.admission.getCanonicalEmployer('acme'))?.iconSource).toBe('domain-asset');
+
+    // The same answer pointing somewhere else is dropped before any request.
+    const elsewhere = await run('https://cdn.evil.test/mark.png');
+    expect(elsewhere.result.resolved).toBe(0);
+    expect(elsewhere.r2.puts).toHaveLength(0);
+    expect((await elsewhere.admission.getCanonicalEmployer('acme'))?.iconKey).toBeUndefined();
   });
 
   it('records a blocked page, uses no page signals, and falls back to a monogram', async () => {
@@ -264,6 +388,55 @@ describe('employer icon diagnosis', () => {
     expect(headers.accept).toContain('text/html');
   });
 
+  it('refuses to publish a domain when the image credential is missing, and publishes with it', async () => {
+    // The same evidence, twice: an officially-admitted role on the employer's own
+    // domain, which scores 0.85 with no provider and no page metadata at all. What
+    // differs is only whether the image endpoint can be called.
+    const seed = {
+      ...employerSeed('https://acme.com/careers/1'),
+      provider: 'structured', provenance: 'official-ats' as const,
+    };
+    const page = () => html('<!doctype html><html><head><title>Careers</title></head></html>');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    // Only the secret key is provisioned. It authorizes the name search and is
+    // answered with 401 by the image endpoint, so no image can be verified — and
+    // nothing may be published on the strength of the key alone.
+    const first = subject();
+    const firstR2 = r2Stub();
+    await first.admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await first.icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(first.icons, seed, NOW);
+    const secretKeyOnly = await runEmployerIconResolutionPass(
+      environment(first.db, firstR2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), NOW,
+      DEPENDENCIES(scriptedFetch({ 'https://acme.com/careers/1': page })),
+    );
+
+    expect(secretKeyOnly.resolved).toBe(0);
+    expect(secretKeyOnly.reasonCodes).toContain('image-token-missing');
+    expect(firstR2.puts).toHaveLength(0);
+    expect((await first.icons.context('acme'))?.websiteDomain).toBeUndefined();
+    const warning = warn.mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>)
+      .find((event) => event.event === 'company_icon_resolution_image_token_missing');
+    expect(warning).toMatchObject({ canonicalEmployerId: 'acme', domain: 'acme.com' });
+
+    // The publishable token is what the image endpoint accepts, and with it the same
+    // evidence resolves.
+    const second = subject();
+    await second.admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await second.icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(second.icons, seed, NOW);
+    const published = await runEmployerIconResolutionPass(
+      environment(second.db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+      DEPENDENCIES(scriptedFetch({
+        'https://acme.com/careers/1': page,
+        [IMAGE_URL]: () => webp(),
+      })),
+    );
+    expect(published.resolved).toBe(1);
+    expect((await second.icons.context('acme'))?.websiteDomain).toBe('acme.com');
+  });
+
   it('resolves from provider consensus alone when the page is blocked', async () => {
     const fetchImpl = scriptedFetch({
       [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
@@ -272,7 +445,7 @@ describe('employer icon diagnosis', () => {
     });
     const diagnostic = await diagnoseEmployerIcon({
       seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'),
-      credentials: { logoDevToken: LOGO_TOKEN, brandfetchClientId: BRANDFETCH_CLIENT },
+      credentials: { logoDevToken: LOGO_TOKEN, logoDevImageToken: LOGO_IMAGE_TOKEN, brandfetchClientId: BRANDFETCH_CLIENT },
       deps: { resolver: BLOCKED_RESOLVER, fetchImpl },
     });
 
@@ -313,7 +486,7 @@ describe('employer icon diagnosis', () => {
     });
     const diagnostic = await diagnoseEmployerIcon({
       seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'),
-      credentials: { logoDevToken: LOGO_TOKEN }, deps: DEPENDENCIES(fetchImpl),
+      credentials: { logoDevToken: LOGO_TOKEN, logoDevImageToken: LOGO_IMAGE_TOKEN }, deps: DEPENDENCIES(fetchImpl),
     });
 
     const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
@@ -334,7 +507,7 @@ describe('employer icon diagnosis', () => {
     const diagnostic = await diagnoseEmployerIcon({
       // A board slug that does not name this employer, so no identity signal fires.
       seed: { ...employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'), tenant: 'board-1' },
-      credentials: { logoDevToken: LOGO_TOKEN }, deps: DEPENDENCIES(fetchImpl),
+      credentials: { logoDevToken: LOGO_TOKEN, logoDevImageToken: LOGO_IMAGE_TOKEN }, deps: DEPENDENCIES(fetchImpl),
     });
 
     const winner = diagnostic.decision.scores.find((candidate) => candidate.domain === 'acme.com');
@@ -348,7 +521,7 @@ describe('employer icon diagnosis', () => {
     // evidence is our own reviewed binding of this employer to its board.
     const diagnostic = await diagnoseEmployerIcon({
       seed: employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'),
-      credentials: { logoDevToken: LOGO_TOKEN },
+      credentials: { logoDevToken: LOGO_TOKEN, logoDevImageToken: LOGO_IMAGE_TOKEN },
       deps: { resolver: PUBLIC_RESOLVER, fetchImpl: scriptedFetch({
         'https://job-boards.greenhouse.io/acme/jobs/4001': () => status(403),
         [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
@@ -400,7 +573,7 @@ describe('employer icon diagnosis', () => {
     });
     const diagnostic = await diagnoseEmployerIcon({
       seed: { ...employerSeed('https://job-boards.greenhouse.io/acme/jobs/4001'), tenant: 'board-1' },
-      credentials: { logoDevToken: LOGO_TOKEN }, deps: DEPENDENCIES(fetchImpl),
+      credentials: { logoDevToken: LOGO_TOKEN, logoDevImageToken: LOGO_IMAGE_TOKEN }, deps: DEPENDENCIES(fetchImpl),
     });
 
     expect(diagnostic.pageOrganizations).toEqual([]);
@@ -440,7 +613,7 @@ describe('employer icon provider plumbing', () => {
       [IMAGE_URL]: () => status(404),
     });
     const diagnostic = await diagnoseEmployerIcon({
-      seed: employerSeed(''), credentials: { logoDevToken: LOGO_TOKEN }, deps: DEPENDENCIES(fetchImpl),
+      seed: employerSeed(''), credentials: { logoDevToken: LOGO_TOKEN, logoDevImageToken: LOGO_IMAGE_TOKEN }, deps: DEPENDENCIES(fetchImpl),
     });
 
     expect(diagnostic.logoDevDomains).toEqual(['acme.com']);
@@ -460,7 +633,7 @@ describe('employer icon provider plumbing', () => {
       [logoDevSearchUrl('Acme')]: () => status(404),
     });
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
     );
 
     expect(result.unresolved).toBe(1);
@@ -481,7 +654,7 @@ describe('employer icon provider plumbing', () => {
       [logoDevSearchUrl('Acme')]: () => status(429, { 'retry-after': '120' }),
     });
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
     );
 
     expect(result.retryable).toBe(1);
@@ -507,7 +680,7 @@ describe('employer icon image gating', () => {
       [IMAGE_URL]: imageResponse,
     });
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
     );
     return { database, icons, r2, result };
   };
@@ -554,7 +727,7 @@ describe('employer icon image gating', () => {
     };
 
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, OPENAI_KEY: 'sk-test' }), NOW,
+      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test' }), NOW,
       { ...DEPENDENCIES(fetchImpl), infer },
     );
 
@@ -607,7 +780,7 @@ describe('employer icon retention', () => {
       [IMAGE_URL]: () => webp(),
     });
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
     );
 
     expect(result.resolved).toBe(1);
@@ -637,7 +810,7 @@ describe('employer icon retention', () => {
       [IMAGE_URL]: () => webp(),
     }, calls);
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, BRANDFETCH_CLIENT_ID: BRANDFETCH_CLIENT }), NOW,
+      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, BRANDFETCH_CLIENT_ID: BRANDFETCH_CLIENT }), NOW,
       DEPENDENCIES(fetchImpl),
     );
 
@@ -662,7 +835,7 @@ describe('employer icon observe mode', () => {
       [IMAGE_URL]: () => webp(),
     });
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
     );
 
     expect(result.mode).toBe('observe');
@@ -692,7 +865,7 @@ describe('employer icon wrong-match reports', () => {
       [IMAGE_URL]: () => webp(),
     });
     const result = await runEmployerIconResolutionPass(
-      environment(parts.db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+      environment(parts.db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
     );
     return { ...parts, r2, fetchImpl, result };
   }
@@ -714,7 +887,7 @@ describe('employer icon wrong-match reports', () => {
     expect(queue[0]).toMatchObject({ canonicalEmployerId: 'acme', status: 'invalidated', reviewPriority: 100 });
 
     const sweep = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), invalidatedAt,
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), invalidatedAt,
       DEPENDENCIES(scriptedFetch({})),
     );
     expect(sweep.claimed).toBe(0);
@@ -740,7 +913,7 @@ describe('employer icon wrong-match reports', () => {
       [IMAGE_URL]: () => webp(),
     });
     const sweep = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN }), reopenedAt, DEPENDENCIES(fetchImpl),
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), reopenedAt, DEPENDENCIES(fetchImpl),
     );
 
     expect(sweep.claimed).toBe(1);
@@ -784,7 +957,7 @@ describe('employer icon idempotency', () => {
       [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
       [IMAGE_URL]: () => webp(),
     });
-    const env = environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN });
+    const env = environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN });
     expect((await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl))).resolved).toBe(1);
 
     const second = await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl));
@@ -828,9 +1001,10 @@ describe('employer icon official application host', () => {
     // A client-rendered page: it fetches cleanly and names nothing at all.
     const fetchImpl = scriptedFetch({
       'https://www.coinbase.com/careers/positions/1': () => html('<!doctype html><html><head><title>Careers</title></head></html>'),
+      [logoDevImageUrl('coinbase.com', LOGO_IMAGE_TOKEN)]: () => webp(),
     });
 
-    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl));
 
     expect(result.resolved).toBe(1);
     const context = await icons.context('coinbase');
@@ -850,7 +1024,7 @@ describe('employer icon official application host', () => {
       'https://some-list.example/roles/1': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
     });
 
-    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl));
 
     // A community link may point anywhere, so it stays a monogram rather than
     // publishing a domain the employer may not own.
@@ -864,7 +1038,7 @@ describe('employer icon official application host', () => {
         ...employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'),
         canonicalEmployerId: 'flagship', displayName: 'Flagship Pioneering Co-Op Program', tenant: 'board-1',
       },
-      credentials: { logoDevToken: LOGO_TOKEN },
+      credentials: { logoDevToken: LOGO_TOKEN, logoDevImageToken: LOGO_IMAGE_TOKEN },
       deps: DEPENDENCIES(scriptedFetch({
         'https://job-boards.greenhouse.io/board-1/jobs/1': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
         [logoDevSearchUrl('Flagship Pioneering Co-Op Program')]: () => ok([]),
@@ -896,6 +1070,7 @@ describe('employer icon platform declarations and proposals', () => {
     }, NOW);
     const fetchImpl = scriptedFetch({
       'https://jobs.ashbyhq.com/retell-ai/abc': () => ashbyPage('https://www.retellai.com/', 'Retell AI'),
+      [logoDevImageUrl('retellai.com', LOGO_IMAGE_TOKEN)]: () => webp(),
     });
     const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => {
       const input = JSON.parse(request.prompt.user) as { candidates: Array<{ domain: string; evidenceIds: string[] }> };
@@ -908,7 +1083,7 @@ describe('employer icon platform declarations and proposals', () => {
     };
 
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+      environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
     );
 
     expect(result.resolved).toBe(1);
@@ -928,6 +1103,7 @@ describe('employer icon platform declarations and proposals', () => {
       'https://job-boards.greenhouse.io/board-1/jobs/1': () => html('<!doctype html><html><head><title>Open role</title></head></html>'),
       // The proposed domain answers for itself.
       'https://acme.com/': () => html('<!doctype html><html><head><title>Acme — building things</title></head></html>'),
+      [logoDevImageUrl('acme.com', LOGO_IMAGE_TOKEN)]: () => webp(),
     });
     const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => ({
       response: request.schemaName === 'company_icon_domain_proposal'
@@ -937,7 +1113,7 @@ describe('employer icon platform declarations and proposals', () => {
     });
 
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+      environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
     );
 
     expect(result.resolved).toBe(1);
@@ -968,7 +1144,7 @@ describe('employer icon platform declarations and proposals', () => {
     });
 
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+      environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
     );
 
     expect(result.resolved).toBe(0);
@@ -996,7 +1172,7 @@ describe('employer icon platform declarations and proposals', () => {
     });
 
     const result = await runEmployerIconResolutionPass(
-      environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+      environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test' }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
     );
 
     expect(result.resolved).toBe(0);
@@ -1009,7 +1185,7 @@ describe('employer icon platform declarations and proposals', () => {
         ...employerSeed('https://jobs.ashbyhq.com/rivianvw.tech/abc'),
         canonicalEmployerId: 'rivianvw-tech', displayName: 'RV Tech', provider: 'ashby', tenant: 'board-1',
       },
-      credentials: { logoDevToken: LOGO_TOKEN },
+      credentials: { logoDevToken: LOGO_TOKEN, logoDevImageToken: LOGO_IMAGE_TOKEN },
       deps: DEPENDENCIES(scriptedFetch({
         'https://jobs.ashbyhq.com/rivianvw.tech/abc': () => ashbyPage('https://rivianvw.tech/', 'Rivian and Volkswagen Group Technologies'),
         [logoDevSearchUrl('RV Tech')]: () => ok([]),

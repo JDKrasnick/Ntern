@@ -77,7 +77,7 @@ describe('automatic company icon route', () => {
     companyIconResponse('acme', automaticEmployer, emptyDocuments, {
       automaticDomain: async () => ('domain' in options ? options.domain : 'acme.com'),
       ...(options.display === undefined ? {} : { automaticDisplay: async () => options.display! }),
-      logoDevToken: token, resolver, fetchImpl: providerFetch(response),
+      logoDevImageToken: token, resolver, fetchImpl: providerFetch(response),
     });
 
   it('withholds an automatic icon until display is enabled', async () => {

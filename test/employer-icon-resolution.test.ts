@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { registrableDomain, sameRegistrableDomain } from '../src/core/registrable-domain.js';
 import {
+  acceptIconAssetPick, parseIconAssetPick,
   acceptIconTieBreak, decideIconDomain, employerDistinctiveTerms, employerNamesDomain,
   iconEvidenceFingerprint, iconTextMatchesEmployer, isIconTransportHost, parseIconTieBreakDecision,
   providerNameMatchesEmployer, scoreIconCandidate, scoreIconCandidates, tenantCorroboratesEmployer,
@@ -412,8 +413,17 @@ describe('tie-break acceptance (the arbitrary-domain defence)', () => {
       .toEqual({ accepted: false, reasonCode: 'decision-uncertain' });
   });
 
-  it('rejects confidence below 0.90 and accepts exactly 0.90', () => {
+  it('accepts at 0.90 on the model word, and below it only by proving the domain', () => {
+    // Below the self-reporting floor, an otherwise valid answer becomes a candidate
+    // for verification rather than a refusal: the resolver then has to prove the
+    // domain names this employer.
     expect(acceptIconTieBreak(tieBreak({ confidence: 0.89 }), submitted))
+      .toEqual({
+        accepted: false, reasonCode: 'needs-domain-confirmation',
+        pendingVerification: { domain: 'acme.com', confidence: 0.89 },
+      });
+    // A guess too weak to be worth a verification request stays a refusal.
+    expect(acceptIconTieBreak(tieBreak({ confidence: 0.29 }), submitted))
       .toEqual({ accepted: false, reasonCode: 'confidence-below-floor' });
     expect(acceptIconTieBreak(tieBreak({ confidence: 0.9 }), submitted))
       .toEqual({ accepted: true, domain: 'acme.com', reasonCode: 'accepted' });
@@ -537,5 +547,52 @@ describe('company monogram', () => {
     expect(index).toBeGreaterThanOrEqual(0);
     expect(index).toBeLessThan(companyMonogramColors.length);
     expect(companyMonogramColorIndex('globex')).not.toBe(index);
+  });
+});
+
+describe('model-nominated assets', () => {
+  const submitted = ['https://acme.com/apple-touch-icon.png', 'https://acme.com/logo.svg'];
+
+  it('admits a submitted asset, and another URL only on the verified domain', () => {
+    // A pick from the candidates is exactly what the extraction already offered.
+    expect(acceptIconAssetPick(
+      { assetUrl: 'https://acme.com/logo.svg', confidence: 0.8, reason: 'the mark' }, submitted, 'acme.com',
+    )).toEqual({ kind: 'submitted', url: 'https://acme.com/logo.svg', confidence: 0.8 });
+    // A URL the model named itself is a nomination, allowed only on that domain — the
+    // one place a model may point at an asset, and still gated by the fetch.
+    expect(acceptIconAssetPick(
+      { assetUrl: 'https://cdn.acme.com/brand/mark.png', confidence: 0.7, reason: 'brand CDN' }, submitted, 'acme.com',
+    )).toEqual({ kind: 'nominated', url: 'https://cdn.acme.com/brand/mark.png', confidence: 0.7 });
+    // Off-domain, non-https, too weak, or absent are all dropped before any request.
+    for (const pick of [
+      { assetUrl: 'https://evil.test/mark.png', confidence: 0.99, reason: 'elsewhere' },
+      { assetUrl: 'https://acme.com.evil.test/mark.png', confidence: 0.99, reason: 'lookalike' },
+      { assetUrl: 'http://acme.com/logo.png', confidence: 0.99, reason: 'plain http' },
+      { assetUrl: 'https://acme.com/logo.png', confidence: 0.4, reason: 'guessing' },
+      { assetUrl: '', confidence: 0.99, reason: 'empty' },
+      { assetUrl: null, confidence: 0.99, reason: 'declined' },
+    ]) {
+      expect(acceptIconAssetPick(pick, submitted, 'acme.com'), JSON.stringify(pick)).toBeUndefined();
+    }
+    expect(acceptIconAssetPick(undefined, submitted, 'acme.com')).toBeUndefined();
+    // A path on the domain is resolved against it, so a relative answer still lands
+    // inside the domain rather than outside it.
+    expect(acceptIconAssetPick(
+      { assetUrl: 'https://www.acme.com/mark.png', confidence: 0.9, reason: 'site' }, submitted, 'acme.com',
+    )).toMatchObject({ kind: 'nominated', url: 'https://www.acme.com/mark.png' });
+  });
+
+  it('validates the answer structure before anything else', () => {
+    expect(parseIconAssetPick({ assetUrl: 'https://acme.com/x.png', confidence: 0.9, reason: 'ok' }))
+      .toEqual({ assetUrl: 'https://acme.com/x.png', confidence: 0.9, reason: 'ok' });
+    for (const value of [
+      null, [], 'x',
+      { assetUrl: 'https://acme.com/x.png', confidence: 0.9 },
+      { assetUrl: 'https://acme.com/x.png', confidence: 1.4, reason: 'ok' },
+      { assetUrl: 7, confidence: 0.9, reason: 'ok' },
+      { assetUrl: 'https://acme.com/x.png', confidence: 0.9, reason: '', extra: 1 },
+    ]) {
+      expect(parseIconAssetPick(value), JSON.stringify(value)).toBeUndefined();
+    }
   });
 });

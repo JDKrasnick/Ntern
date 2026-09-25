@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  bannerAssetShapeUsable, brandfetchSearchUrl, iconSvgAsset, isPlatformBannerUrl, logoDevImageUrl,
+  assetShapeUsable, bannerAssetShapeUsable, brandfetchSearchUrl, iconSvgAsset, isPlatformBannerUrl, logoDevImageUrl,
+  siteLogoAssetCandidates,
   logoDevSearchUrl, parseIconPageEvidence, rasterDimensions,
   iconAssetType, platformLogoUrls, proposedDomainMatchesEmployer, validIconAsset,
 } from '../src/employer-icon-discovery.js';
@@ -361,5 +362,60 @@ describe('provider request construction', () => {
     expect(validIconAsset('image/webp', 0)).toBe(false);
     expect(validIconAsset('image/webp', 3 * 1_024 * 1_024)).toBe(false);
     expect(validIconAsset(undefined, 1_024)).toBe(false);
+  });
+});
+
+describe('the employer’s own site assets', () => {
+  it('reads only declared marks, best first, and resolves them against the page', () => {
+    const html = [
+      '<link rel="icon" href="/favicon.ico">',
+      '<link rel="apple-touch-icon" sizes="180x180" href="/touch-180.png">',
+      '<link rel="apple-touch-icon" sizes="120x120" href="/touch-120.png">',
+      '<link rel="manifest" href="/site.webmanifest">',
+      '<meta property="og:image" content="/share-card.png">',
+      '<script type="application/ld+json">{"@type":"Organization","name":"Acme","logo":"/brand/logo.png"}</script>',
+      '<img src="/screenshot-of-the-app.png">',
+      '<img src="/hero.jpg">',
+    ].join('');
+    expect(siteLogoAssetCandidates(html, 'https://acme.com/careers/'))
+      .toEqual([
+        // A touch icon is drawn for a square tile; the largest wins.
+        'https://acme.com/touch-180.png',
+        'https://acme.com/touch-120.png',
+        // A structured `logo` is declared as the organisation's logo.
+        'https://acme.com/brand/logo.png',
+        // A share card is a marketing crop, and a favicon is last because it is tiny.
+        'https://acme.com/share-card.png',
+        'https://acme.com/favicon.ico',
+      ]);
+    // A screenshot or a hero image is never a candidate: only declared assets are read.
+    expect(siteLogoAssetCandidates(html, 'https://acme.com/careers/')).not.toContain('https://acme.com/hero.jpg');
+  });
+
+  it('takes an absolute URL as written and refuses anything not on the web', () => {
+    expect(siteLogoAssetCandidates('<link rel="apple-touch-icon" href="https://cdn.acme.com/mark.png">'))
+      .toEqual(['https://cdn.acme.com/mark.png']);
+    for (const html of [
+      '<link rel="apple-touch-icon" href="http://acme.com/mark.png">',
+      '<link rel="apple-touch-icon" href="data:image/png;base64,AAAA">',
+      '<meta property="og:image" content="/share.png">',
+      '<script type="application/ld+json">{"@type":"Organization","logo":{"url":false}}</script>',
+    ]) {
+      expect(siteLogoAssetCandidates(html, undefined)).toEqual([]);
+    }
+    // Board art is the other path's business, so a platform logo host is not a site asset.
+    expect(siteLogoAssetCandidates(
+      '<meta property="og:image" content="https://s4-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/377/100/original/x.png">',
+    )).toEqual([]);
+  });
+
+  it('requires an icon-sized, roughly square raster', () => {
+    expect(assetShapeUsable(pngBytes(180, 180))).toBe(true);
+    expect(assetShapeUsable(pngBytes(1200, 900))).toBe(true);
+    // Too small, a wide banner, and a tall crop are all refused.
+    expect(assetShapeUsable(pngBytes(32, 32))).toBe(false);
+    expect(assetShapeUsable(pngBytes(1200, 400))).toBe(false);
+    expect(assetShapeUsable(pngBytes(300, 900))).toBe(false);
+    expect(assetShapeUsable(new TextEncoder().encode('<svg/>'))).toBe(false);
   });
 });

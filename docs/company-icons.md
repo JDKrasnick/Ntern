@@ -39,7 +39,9 @@ Most canonical employers are created before anyone has an icon for them, and a r
 3. **Scoring decides.** Candidates are scored from the reviewed table — non-ATS final/careers URL 0.45, the reviewed application host of an officially-admitted role 0.40 on top of that, JSON-LD Organization 0.35, each provider's exact-name candidate 0.30, both providers agreeing on one domain 0.25, employer-identity evidence naming the employer 0.15, capped at 1.0. ATS and job-board hosts are transport and are rejected outright. A domain is accepted automatically only at 0.85 or above with a 0.15 margin over the runner-up.
 
    The 0.40 exists because a role admitted from an official ATS, structured, or employer-submitted source has already had its destination reviewed as the employer's own application form. If that form is served from a host that is not a transport platform, that host *is* the employer's application host, and nothing further needs to confirm what the catalog already established. Community listings are deliberately excluded: their links are not the employer's own destination. Scores are settled to six decimals before the threshold comparison, so `0.45 + 0.40` cannot miss 0.85 to a binary rounding error.
-4. **One tie-breaker for the middle band.** The resolver may make **one** schema-validated `gpt-4o-mini` call when the best score is in 0.55–0.84, when the top two candidates are within 0.15, or when the best candidate already carries two independent evidence IDs (a candidate the tie-breaker could actually accept, since its own rule requires exactly that). It receives only a compact JSON summary, may select only a submitted candidate, must cite at least two distinct evidence IDs that belong to that candidate, and must reach 0.90 confidence. Anything else downgrades to a monogram. The budget is one call per employer per 30 days, except when the job-link evidence materially changed.
+4. **One tie-breaker for the middle band.** The resolver may make **one** schema-validated `gpt-4o-mini` call when the best score is in 0.55–0.84, when the top two candidates are within 0.15, or when the best candidate already carries two independent evidence IDs (a candidate the tie-breaker could actually accept, since its own rule requires exactly that). It receives only a compact JSON summary, may select only a submitted candidate, must cite at least two distinct evidence IDs that belong to that candidate, and is accepted on its own word at **0.90** confidence. Below that — down to a 0.30 floor — an otherwise valid answer is **not** refused but set aside for verification: the resolver fetches the selected domain and requires it to name the employer in its own metadata, exactly as it does for a proposal. The budget is one call per employer per 30 days, except when the job-link evidence materially changed.
+
+   That second tier exists because of what the real model does. Over a 23-employer sample of the live catalog, `gpt-4o-mini` selected the **correct** domain at 0.45–0.80 thirteen times and reached 0.90 once; refusing those was losing employers we could prove. Eleven of those thirteen answers were confirmed by fetching the domain and finding the employer named in its own title. A self-reported confidence is a guess; a domain that names the employer is evidence, and the tier accepts on the evidence. The verifications are logged as `company_icon_resolution_tie_break_verified` with the domain and the model's confidence, so an operator can audit them.
 5. **A domain may be proposed when there is nothing to rank.** On a platform host the page can prove *who* is hiring and still name no domain, so when the candidate set is empty the same single model call is used in proposal mode: it answers with a registrable domain, and **nothing about that answer is trusted**. Transport hosts are refused outright, the proposed domain is fetched through the same SSRF controls as any other link, and it must present itself as this employer in its own metadata — naming either the catalog name or the name the employer's own board declares. A proposal that fails verification is recorded and discarded, and an accepted one still passes the verified-image gate, is stored as `selected_source = 'proposed'`, and carries a `proposed-domain` evidence ID so the review queue can tell how it was decided.
 6. **Failures back off.** A definitive no-match retries from one day, doubling to the 30-day revalidation ceiling. A transient provider failure (429/5xx/transport) retries from one hour and honours `Retry-After`.
 
@@ -104,6 +106,23 @@ Read across: a role on the employer's own domain needs no provider, and a platfo
 
 **The residual risk of a proposal is a name collision.** Verification asks whether the domain presents itself as this employer, and two companies can share a name — a domain titled `ACME Industrial Supply` does confirm an employer named `Acme`. That risk is inherent to any name-to-domain lookup, including a provider's own search, and it is bounded by the same guardrails: observe mode before anything is rendered, the exception queue, and `report-wrong` withdrawing a decision within a minute. Proposal decisions are marked `selected_source = 'proposed'` so they can be reviewed as their own class.
 
+### Measured with real credentials and a real model
+
+Everything in this section ran against the live catalog with the account's own Logo.dev credentials and the real `gpt-4o-mini`, through the resolver itself and nothing else: no simulated provider, no human standing in for the model, no write of any kind. The cohort was a random 23 employers from the mapped set.
+
+| Path | Result |
+|---|---|
+| Logo.dev name search | **nominated 21/23**, missed 2 |
+| Board logo, same employers (`npm run coverage:icons`) | **14/23** |
+| Domain path (real provider, real model, verified acceptance) | **17/23** — greenhouse 10/14, ashby 7/9 |
+| **Union** | **20/23 (87%)** |
+
+Every one of the 17 domain resolutions was accepted through the tie-breaker; none reached the 0.85 automatic threshold, because with only one provider configured the score tops out at 0.60–0.75. **That is the argument for Brandfetch**: consensus between two providers is what clears the threshold without a model call, and Brandfetch was unconfigured in this run. The measured confidence distribution is what drove the verification tier above: 13 answers at 0.45–0.80, 11 of them confirmed by the domain itself, which the old 0.90 floor had been discarding.
+
+The three employers left as monograms are the honest remainder: two where the model answered `uncertain`, and one confidential board (`stackadapt-confidential`) whose page did not answer us at all and which Logo.dev does not index. That last one is what the exception queue and a reviewer upload exist for.
+
+Superseded by the above: the earlier cohort table in this document was produced with **simulated** providers — deterministic stand-ins with no credential in the checkout — and a human answering the tie-breaker from the same bounded JSON the model receives. Its accuracy claims about scoring, attribution, and validation still hold, because those rules were real; its provider hit rates and its model behaviour do not, and are replaced here.
+
 ### The employer's own uploaded logo
 
 The best icon is the one the employer put on its own board, and every supported platform publishes it. The posting page is already fetched, so this is read from the page in hand — no provider, no credential, and no identity inference, because the page *is* the employer's own posting and the asset is on the platform's board-logo host.
@@ -146,8 +165,32 @@ The pipeline around the renderer is deliberately strict, because the input is un
 The module is uploaded as its own Worker part, `resvg.wasm` (`application/wasm`), named by `scripts/prepare-worker-modules.mjs` so the part key equals the import specifier and no content hash lands in `infra/cloudflare/main.tf`. Only the ingestion bundle imports it — the API Worker never resolves icons — and the import is deferred until the first SVG has to be rendered, so a run that meets no SVG never compiles it. The deploy plan guard permits exactly that part and nothing else new: a `files` change must carry `application/wasm` parts whose paths end in `.wasm`, and a wasm-only update counts as a code change rather than as drift.
 
 Cost, measured: the ingestion bundle goes from 1.27 MB to 2.20 MB compressed, and the renderer adds ~1 ms for a board logo after a one-off module compile. That is the whole reason this was worth wiring rather than shipping a provider-only fallback for three employers: it removes a permanent class of "board publishes only SVG" misses without a provider, a credential, or a request at render time.
-
 The bytes are copied into our own bucket under `company-icons/<id>/platform-<hash>.<ext>`, so rendering never depends on the platform's CDN and no third-party request happens at render time. The key is recorded with `icon_source = 'platform'`, which is what an operator sees in the exception queue, and `report-wrong` withdraws it like any other automatic decision. A reviewer's icon is never overwritten, and the icon is stored even when the employer's *domain* stays undecided — the icon and the domain are separate facts, so `icon_resolution_status` is left alone.
+
+
+### When the board publishes nothing: the employer's own site
+
+A third of platform-hosted employers publish no board art at all, so the sweep falls back to the employer's **own verified site** — the same domain the decision above just established, which is what makes reading it safe. Only **declared** assets are read, in the order a site publishes them as its brand mark:
+
+| Order | Field | Why |
+|---|---|---|
+| 1 | `<link rel="apple-touch-icon" sizes="…">`, largest first | square, drawn for a tile |
+| 2 | JSON-LD `Organization.logo` (a URL or an `ImageObject`) | declared as the organisation's logo |
+| 3 | `og:image` / `twitter:image` | a marketing crop; kept only if it survives the shape rule |
+| 4 | `<link rel="icon">` | usually 16–32 px, so it is last |
+
+A screenshot, a hero image, or any other `<img>` on the page is never a candidate: the extraction reads declarations, not pictures. Every candidate then passes the same gates as a board logo — https, ≤2 MiB, a raster (or an SVG through the sanitizer and renderer), **at least 64×64**, and a roughly square shape (0.75–1.34). Bytes are stored as `company-icons/<id>/site-<hash>.<ext>` with `icon_source = 'domain-asset'`, a distinct provenance so a reviewer can tell an asset read off the employer's own site from one the employer uploaded to its board, and `report-wrong` withdraws either.
+
+The fallback runs **after** the provider, not instead of it: a logo from the index is already a curated square mark, and the site path is the net for the cases where the provider has nothing for the domain, or no credential is configured to ask with. Measured on the domains that published through Logo.dev in the 23-employer sample, **12 of 17 declare a usable square asset of their own** (Apple touch icons, webclips, and ≥196 px favicons), which is what the fallback is worth when the provider's index misses.
+
+### A model may name an asset — inside one verified domain
+
+This is the single place the resolver breaks its own rule that a model nominates a *domain* and never an asset, and it is deliberately narrow. When the declared assets all fail the gates and the employer still has its one bounded call for the window, the model is asked once for the company's mark. It may answer with:
+
+- one of the declared assets it was shown (`kind: submitted`), or
+- **another https URL on the employer's own verified domain** (`kind: nominated`) — the case this exists for, where the mark sits at a path the extraction did not know about.
+
+Anything else is dropped *before a request is made*: an off-domain host, a lookalike domain (`acme.com.evil.test`), plain http, a missing or too-weak answer (below 0.5 confidence). A nominated URL is then fetched and gated exactly as any other asset — https, host on the verified domain, raster or SVG, ≤2 MiB, ≥64×64, shape — so the model's answer can move our request within a domain we already proved, and can never point us outside it, and can never cause a stored byte that a deterministic asset could not have caused. The nomination is logged (`company_icon_domain_asset_nominated`) with the URL, whether it was a pick or a nomination, and the model's confidence, and the acceptance is recorded as `assetSource: 'model'`.
 
 **No incorrect domain was published in any configuration.** Every evidence signal and every decision path was exercised by the run:
 
@@ -166,7 +209,9 @@ Decision paths taken: automatic resolution, tie-break acceptance, and monogram f
 
 ### Provider terms
 
-- **Logo.dev** supplies both the name search and the icon. The credential is a Worker secret (`LOGO_DEV_TOKEN`), never an `EXPO_PUBLIC_*` value, and never appears in a response, an R2 key, or a log.
+- **Logo.dev** supplies both the name search and the icon, through **two different credentials that are not interchangeable**. The secret key (`sk_…`) authorizes the name search and is answered with `401` by the image endpoint; only the account's publishable token (`pk_…`) authorizes `img.logo.dev`. Provisioned as `LOGO_DEV_TOKEN` and `LOGO_DEV_IMAGE_TOKEN` (aliases `LOGO_SECRET_KEY` and `LOGO_DEV_PUBLISHABLE_TOKEN` are accepted). Neither is an `EXPO_PUBLIC_*` value, and neither appears in a response, an R2 key, or a log. The publishable token is the one Logo.dev itself embeds in every `logo_url` a search returns; it is safe to expose in an image URL by design, and the resolver still keeps it server-side.
+
+  Passing the secret key where the publishable token belongs is not a subtle failure: the image probe returns `401` for every domain, so nothing provider-sourced can ever be verified or published. That configuration is now named as its own state — `image-token-missing`, retryable within the hour, with a `company_icon_resolution_image_token_missing` log line — instead of looking like an employer whose domain has no logo.
 - **Brandfetch** is corroboration only. Its standard Brand Search terms forbid persisting its data, so its results are used in memory, are never written to `employer_icon_resolutions`, and its logo is never fetched or stored. Only a bare agreement flag is recorded, and a candidate that only Brandfetch nominated is omitted from the stored evidence.
 - **Simple Icons and favicon services are not used.** The mobile client previously carried a hardcoded map of `cdn.simpleicons.org` and `icons.duckduckgo.com` URLs; it has been removed in favour of the first-party route and the monogram.
 

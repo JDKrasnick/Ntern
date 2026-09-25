@@ -41,7 +41,7 @@ import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalo
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { companyIconResponse } from './company-icon.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
-import { enqueueEmployerIconResolution, runEmployerIconResolutionPass, verifyIconDomain } from './employer-icon-resolver.js';
+import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, verifyIconDomain } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
 import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
 import type { IconSvgRasterizer } from '../src/svg-icon.js';
@@ -145,6 +145,10 @@ export interface Environment extends AuthEnvironment {
   GMAIL_REDIRECT_URI?: string;
   /** Server-side Logo.dev credential for company-icon resolution. */
   LOGO_DEV_TOKEN?: string;
+  LOGO_DEV_IMAGE_TOKEN?: string;
+  /** Accepted aliases for the two Logo.dev credentials, so provisioning by either name works. */
+  LOGO_SECRET_KEY?: string;
+  LOGO_DEV_PUBLISHABLE_TOKEN?: string;
   /** Brandfetch client ID; corroboration only, never persisted or fetched. */
   BRANDFETCH_CLIENT_ID?: string;
   OPENAI_KEY?: string;
@@ -834,6 +838,8 @@ export async function documentContent(request: Request, env: Environment, userId
 async function fetchHandler(request: Request, env: Environment): Promise<Response> {
   if (request.method === 'OPTIONS') return withCors(new Response(null, { status: 204 }));
   const url = new URL(request.url);
+  const credentials = logoDevCredentials(env);
+  const imageToken = credentials.logoDevImageToken;
   if (url.pathname === '/internal/billing-shutdown') return billingShutdown(request, env);
   if (await isShutdown(env)) return withCors(Response.json({ message: 'Service paused by billing guard' }, { status: 503 }));
   const companyIcon = /^\/company-icons\/([^/]+)$/u.exec(url.pathname);
@@ -842,7 +848,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     return withCors(await companyIconResponse(companyIcon[1]!, new D1CatalogAdmissionStore(env.DB), env.DOCUMENTS, {
       automaticDomain: (id) => employerIcons.automaticDomain(id),
       automaticDisplay: async () => (await employerIcons.settings()).mode === 'resolve',
-      ...(env.LOGO_DEV_TOKEN ? { logoDevToken: env.LOGO_DEV_TOKEN } : {}),
+      ...(imageToken ? { logoDevImageToken: imageToken } : {}),
       resolver: publicHostResolver,
     }));
   }
@@ -1012,11 +1018,12 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   if (url.pathname.startsWith('/internal/admission/employer-icons')) {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     return withCors(await handleEmployerIconOperations(request, new D1EmployerIconStore(env.DB), () => ({
-      logoDev: Boolean(env.LOGO_DEV_TOKEN),
+      logoDev: Boolean(credentials.logoDevToken),
+      logoDevImageToken: Boolean(credentials.logoDevImageToken),
       brandfetch: Boolean(env.BRANDFETCH_CLIENT_ID),
       tieBreaker: Boolean(env.OPENAI_KEY),
-    }), () => new Date(), env.LOGO_DEV_TOKEN
-      ? (domain) => verifyIconDomain(domain, { logoDevToken: env.LOGO_DEV_TOKEN! }, { resolver: publicHostResolver })
+    }), () => new Date(), imageToken
+      ? (domain) => verifyIconDomain(domain, credentials, { resolver: publicHostResolver })
       : undefined));
   }
   if (url.pathname.startsWith('/internal/admission/')) {

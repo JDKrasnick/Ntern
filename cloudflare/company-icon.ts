@@ -24,13 +24,17 @@ export interface CompanyIconDependencies {
   automaticDomain?: (employerId: string) => Promise<string | undefined>;
   /** Whether the operator has left observe mode and enabled automatic display. */
   automaticDisplay?: () => Promise<boolean>;
-  logoDevToken?: string;
+  /**
+   * Logo.dev's publishable token (`pk_…`), not its secret key: only the publishable
+   * token authorizes `img.logo.dev`, and the secret key is answered with `401`.
+   */
+  logoDevImageToken?: string;
   fetchImpl?: typeof fetch;
   resolver?: HostResolver;
 }
 
 /** Icon sources a machine path wrote; they render only once the operator leaves observe mode. */
-const MACHINE_ICON_SOURCES: Record<string, true> = { 'logo-dev': true, platform: true };
+const MACHINE_ICON_SOURCES: Record<string, true> = { 'logo-dev': true, platform: true, 'domain-asset': true };
 
 /** Serves only a reviewed icon linked to the requested canonical employer. */
 export async function companyIconResponse(
@@ -87,8 +91,8 @@ async function storedIconResponse(iconKey: string, documents: R2Bucket): Promise
  * within a minute.
  */
 async function automaticIconResponse(employerId: string, dependencies: CompanyIconDependencies): Promise<Response> {
-  const { automaticDomain, automaticDisplay, logoDevToken, fetchImpl, resolver } = dependencies;
-  if (!automaticDomain || !automaticDisplay || !logoDevToken || !resolver) return notFound();
+  const { automaticDomain, automaticDisplay, logoDevImageToken, fetchImpl, resolver } = dependencies;
+  if (!automaticDomain || !automaticDisplay || !logoDevImageToken || !resolver) return notFound();
   try {
     // The settings read and the resolution lookup sit inside the guard too: a
     // schema gap, a D1 hiccup, or a provider timeout must all degrade to the
@@ -96,7 +100,7 @@ async function automaticIconResponse(employerId: string, dependencies: CompanyIc
     if (!(await automaticDisplay())) return notFound();
     const domain = await automaticDomain(employerId);
     if (!domain) return notFound();
-    const result = await safeFetchBytes(logoDevImageUrl(domain, logoDevToken), {
+    const result = await safeFetchBytes(logoDevImageUrl(domain, logoDevImageToken), {
       resolver, fetcher: fetchImpl ?? fetch,
       timeoutMs: ICON_PROVIDER_TIMEOUT_MS, maxRedirects: 0, maxBodyBytes: MAX_ICON_ASSET_BYTES,
     });

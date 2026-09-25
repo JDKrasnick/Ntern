@@ -20,14 +20,16 @@ import {
   iconTextMatchesEmployer, iconTieBreakSchema, isIconTransportHost, parseIconTieBreakDecision,
   tenantCorroboratesEmployer, employerNamesDomain, employerDistinctiveTerms, officialIconProvenance,
   plausibleEmployerName, providerNameMatchesEmployer, parseIconProposal, iconProposalSchema,
+  acceptIconAssetPick, parseIconAssetPick, iconAssetPickSchema,
   ICON_PROPOSAL_MINIMUM_CONFIDENCE,
   type IconCandidateScore, type IconDomainCandidate, type IconDomainDecision, type IconEvidenceSignal,
   type IconTieBreakDecision, type EmployerIconSeed,
 } from '../src/employer-icon-resolution.js';
 import {
-  ICON_PROVIDER_TIMEOUT_MS, MAX_ICON_ASSET_BYTES, bannerAssetShapeUsable, brandfetchCandidateDomains, brandfetchSearchUrl,
+  ICON_PROVIDER_TIMEOUT_MS, MAX_ICON_ASSET_BYTES, assetShapeUsable, bannerAssetShapeUsable,
+  brandfetchCandidateDomains, brandfetchSearchUrl,
   iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls,
-  proposedDomainMatchesEmployer,
+  proposedDomainMatchesEmployer, siteLogoAssetCandidates,
   logoDevCandidateDomains, logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence,
   type IconPageEvidence,
 } from '../src/employer-icon-discovery.js';
@@ -75,11 +77,47 @@ export const ICON_PAGE_REQUEST_HEADERS: Record<string, string> = {
 };
 const tieBreakSchemaName = 'company_icon_domain_resolution';
 
+/**
+ * The two Logo.dev credentials, from either name an operator may have provisioned.
+ *
+ * They are not interchangeable: the secret key authorizes the name search
+ * (`Authorization: Bearer`), and only the account's publishable token authorizes
+ * `img.logo.dev` — the secret key is answered with `401` there. Presenting one where
+ * the other belongs silently disables every provider-sourced icon, because the
+ * verified-image gate can then never confirm one.
+ */
+export function logoDevCredentials(env: {
+  LOGO_DEV_TOKEN?: string;
+  LOGO_DEV_IMAGE_TOKEN?: string;
+  LOGO_SECRET_KEY?: string;
+  LOGO_DEV_PUBLISHABLE_TOKEN?: string;
+}): { logoDevToken?: string; logoDevImageToken?: string } {
+  const logoDevToken = env.LOGO_DEV_TOKEN ?? env.LOGO_SECRET_KEY;
+  const logoDevImageToken = env.LOGO_DEV_IMAGE_TOKEN ?? env.LOGO_DEV_PUBLISHABLE_TOKEN;
+  return {
+    ...(logoDevToken ? { logoDevToken } : {}),
+    ...(logoDevImageToken ? { logoDevImageToken } : {}),
+  };
+}
+
 export interface EmployerIconResolverEnvironment {
   DB: D1Database;
   DOCUMENTS: R2Bucket;
-  /** Server-side Logo.dev credential. Never emitted in a response, key, or log. */
+  /**
+   * Server-side Logo.dev credentials. Neither is emitted in a response, key, or log.
+   *
+   * They are two different credentials on purpose: the secret key authorizes the
+   * name search (`Authorization: Bearer`), and only the account's publishable token
+   * authorizes `img.logo.dev` — the secret key is answered with `401` there. Passing
+   * one where the other belongs silently disables every provider-sourced icon,
+   * because the verified-image gate can never confirm one.
+   */
   LOGO_DEV_TOKEN?: string;
+  /** Publishable Logo.dev token (`pk_…`) used for the image endpoint. */
+  LOGO_DEV_IMAGE_TOKEN?: string;
+  /** Accepted aliases, so provisioning by either name works. */
+  LOGO_SECRET_KEY?: string;
+  LOGO_DEV_PUBLISHABLE_TOKEN?: string;
   /** Brandfetch client ID; used for in-memory corroboration only. */
   BRANDFETCH_CLIENT_ID?: string;
   OPENAI_KEY?: string;
@@ -273,7 +311,7 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
   const declaredName = plausibleEmployerName(gathered?.page.declaredEmployerName)
     ? gathered!.page.declaredEmployerName : undefined;
   const providers = await lookupProviderDomains(seed, {
-    ...(env.LOGO_DEV_TOKEN ? { logoDevToken: env.LOGO_DEV_TOKEN } : {}),
+    ...logoDevCredentials(env),
     ...(env.BRANDFETCH_CLIENT_ID ? { brandfetchClientId: env.BRANDFETCH_CLIENT_ID } : {}),
   }, deps, declaredName);
   if (input.providerOutcomes) {
@@ -358,39 +396,68 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
   const domain = decision.selectedDomain!;
   let iconKey: string | undefined;
   let imageVerified = false;
+  let assetSource: 'declared' | 'model' | undefined;
+  const imageToken = env.LOGO_DEV_IMAGE_TOKEN;
 
-  if (env.LOGO_DEV_TOKEN) {
-    const probe = await probeLogoDevImage(domain, env.LOGO_DEV_TOKEN, deps);
-    if (!probe.available) {
-      if (probe.transient) {
-        await store.markRetryable({
-          taskId: task.id,
-          evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
-            outcome: 'retryable', reasonCode: 'image-probe-transient',
-          })),
-          nextRetryAt: new Date(now.getTime() + transientRetryDelay(input.attempt, probe.retryAfterMs)).toISOString(),
-          now: at,
-        });
-        return { outcome: 'retryable', reasonCode: 'image-probe-transient' };
-      }
-      // A selected domain with no real image is not usable. Record the decision
-      // but publish a monogram rather than a broken image.
-      const revalidateAt = new Date(now.getTime() + unresolvedRetryDelay(input.attempt)).toISOString();
+  if (imageToken) {
+    const probe = await probeLogoDevImage(domain, imageToken, deps);
+    if (probe.transient) {
+      await store.markRetryable({
+        taskId: task.id,
+        evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
+          outcome: 'retryable', reasonCode: 'image-probe-transient',
+        })),
+        nextRetryAt: new Date(now.getTime() + transientRetryDelay(input.attempt, probe.retryAfterMs)).toISOString(),
+        now: at,
+      });
+      return { outcome: 'retryable', reasonCode: 'image-probe-transient' };
+    }
+    imageVerified = probe.available;
+    // Bytes reach R2 only once an operator has confirmed the plan permits
+    // self-hosting; otherwise the icon is rendered from the provider's own CDN.
+    if (probe.available && settings.logoDevRetentionLicensedAt && probe.bytes && probe.contentType) {
+      iconKey = await storeIconAsset(env, context.id, probe.bytes, probe.contentType);
+    }
+  } else {
+    console.warn(JSON.stringify({
+      event: 'company_icon_resolution_image_token_missing', canonicalEmployerId: context.id, domain,
+    }));
+  }
+
+  if (!imageVerified) {
+    // The provider has nothing for this domain — no logo in its index, or no
+    // credential to ask with. The employer's own verified site is the next source,
+    // and reading it needs no provider at all.
+    const asset = await storeDomainAsset({
+      store, env, context, task, domain, now, deps,
+      modelBudgetAvailable: withinTieBreakBudget(context, task.evidenceFingerprint, now),
+    });
+    if (asset) {
+      iconKey = asset.key;
+      assetSource = asset.source;
+    } else if (!imageToken) {
+      // Still a configuration state rather than a verdict on this employer: say so,
+      // and retry soon instead of spending its revalidation window on a monogram.
+      await store.markUnresolved({
+        taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
+        evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
+          outcome: 'unresolved', reasonCode: 'image-token-missing',
+        })),
+        nextRetryAt: new Date(now.getTime() + transientRetryDelay(input.attempt)).toISOString(), now: at,
+      });
+      return { outcome: 'retryable', reasonCode: 'image-token-missing' };
+    } else {
+      // A selected domain with no real image anywhere we can read is not usable.
+      // Record the decision but publish a monogram rather than a broken image.
       await store.markUnresolved({
         taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
         evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
           outcome: 'unresolved', reasonCode: 'image-unavailable',
           ...(input.tieBreak ? { tieBreak: input.tieBreak } : {}),
         })),
-        nextRetryAt: revalidateAt, now: at,
+        nextRetryAt: new Date(now.getTime() + unresolvedRetryDelay(input.attempt)).toISOString(), now: at,
       });
       return { outcome: 'unresolved', reasonCode: 'image-unavailable' };
-    }
-    imageVerified = true;
-    // Bytes reach R2 only once an operator has confirmed the plan permits
-    // self-hosting; otherwise the icon is rendered from the provider's own CDN.
-    if (settings.logoDevRetentionLicensedAt && probe.bytes && probe.contentType) {
-      iconKey = await storeIconAsset(env, context.id, probe.bytes, probe.contentType);
     }
   }
 
@@ -403,7 +470,10 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
     selectedSource: input.selectedSource ?? 'logo-dev',
     confidence: decision.selectedScore ?? 0,
     evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
-      outcome: 'resolved', reasonCode: 'domain-accepted', imageVerified,
+      outcome: 'resolved',
+      reasonCode: assetSource ? `domain-accepted-site-${assetSource}` : 'domain-accepted',
+      imageVerified: imageVerified || assetSource !== undefined,
+      ...(assetSource ? { assetSource } : {}),
       ...(input.tieBreak ? { tieBreak: input.tieBreak } : {}),
       ...(iconKey ? { iconKey } : {}),
     })),
@@ -499,29 +569,53 @@ interface TieBreakOutcome {
      inputTokens: result.inputTokens, outputTokens: result.outputTokens,
    });
 
-   const proposal = parseIconProposal(result.response);
-   if (!proposal || !proposal.domain || proposal.confidence < ICON_PROPOSAL_MINIMUM_CONFIDENCE) {
-     logProposal(context.id, proposal?.domain ?? null, proposal?.confidence ?? null, 'not-attempted');
-     return undefined;
-   }
-   if (isIconTransportHost(proposal.domain)) {
-     logProposal(context.id, proposal.domain, proposal.confidence, 'transport-host');
-     return undefined;
-   }
-   const verified = await verifyProposedDomain(proposal.domain, context.displayName, declaredName, deps);
-   logProposal(context.id, proposal.domain, proposal.confidence, verified ? 'verified' : 'unverified');
-   if (!verified) return undefined;
+   const proposal = await judgeIconProposal({
+     displayName: context.displayName, declaredName, deps, response: result.response,
+   });
+   logProposal(context.id, proposal.domain, proposal.confidence, proposal.reasonCode);
+   if (proposal.reasonCode !== 'verified' || !proposal.domain) return undefined;
 
    return acceptSelectedDomain({
      ...input,
      decision: {
        outcome: 'resolved', scores: decisionWithProposal(input.decision, proposal.domain),
-       selectedDomain: proposal.domain, selectedScore: proposal.confidence,
-       reason: `proposal ${proposal.confidence.toFixed(2)} verified against the domain itself`,
+       selectedDomain: proposal.domain, selectedScore: proposal.confidence ?? 0,
+       reason: `proposal ${(proposal.confidence ?? 0).toFixed(2)} verified against the domain itself`,
      },
      selectedSource: 'proposed',
    });
  }
+
+/** What one proposal attempt concluded, and why, whether or not it was usable. */
+export interface IconProposalOutcome {
+  domain: string | null;
+  confidence: number | null;
+  reasonCode: 'not-attempted' | 'transport-host' | 'verified' | 'unverified';
+}
+
+/**
+ * Judges one proposal answer: structural validation, the transport refusal, and then
+ * proof that the domain names this employer in its own metadata. Shared by the live
+ * sweep and the read-only diagnostic so both report the same verdict for the same
+ * answer, and so a diagnostic cannot claim a proposal the resolver would refuse.
+ */
+export async function judgeIconProposal(input: {
+  displayName: string;
+  declaredName?: string;
+  deps: EmployerIconResolverDependencies;
+  response: unknown;
+}): Promise<IconProposalOutcome> {
+  const { displayName, declaredName, deps, response } = input;
+  const proposal = parseIconProposal(response);
+  if (!proposal || !proposal.domain || proposal.confidence < ICON_PROPOSAL_MINIMUM_CONFIDENCE) {
+    return { domain: proposal?.domain ?? null, confidence: proposal?.confidence ?? null, reasonCode: 'not-attempted' };
+  }
+  if (isIconTransportHost(proposal.domain)) {
+    return { domain: proposal.domain, confidence: proposal.confidence, reasonCode: 'transport-host' };
+  }
+  const verified = await verifyProposedDomain(proposal.domain, displayName, declaredName, deps);
+  return { domain: proposal.domain, confidence: proposal.confidence, reasonCode: verified ? 'verified' : 'unverified' };
+}
 
  /** Records the proposal as a candidate in the evidence trail before it is judged. */
  function decisionWithProposal(decision: IconDomainDecision, domain: string): IconCandidateScore[] {
@@ -554,6 +648,31 @@ interface TieBreakOutcome {
      return false;
    }
  }
+
+/**
+ * One proposal attempt for the read-only diagnostic: the same model call, the same
+ * judge, and no store write.
+ */
+async function runIconProposal(input: {
+  seed: EmployerIconSeed;
+  gathered?: GatheredIconEvidence;
+  declaredName?: string;
+  apiKey: string;
+  deps: EmployerIconResolverDependencies;
+}): Promise<IconProposalOutcome> {
+  const { seed, gathered, declaredName, apiKey, deps } = input;
+  const infer = deps.infer ?? ((request: OpenAIJsonRequest) => inferOpenAIJson(apiKey, request, deps.fetchImpl ?? fetch));
+  try {
+    const result = await infer({
+      prompt: { system: proposalSystemPrompt, user: JSON.stringify(proposalInput(seed, gathered, declaredName)) },
+      schemaName: 'company_icon_domain_proposal', schema: iconProposalSchema,
+      model: shadowDefaultModelId, maxOutputTokens: 300,
+    });
+    return await judgeIconProposal({ displayName: seed.displayName, declaredName, deps, response: result.response });
+  } catch {
+    return { domain: null, confidence: null, reasonCode: 'not-attempted' };
+  }
+}
 
  function logProposal(employerId: string, domain: string | null, confidence: number | null, reasonCode: string): void {
    console.log(JSON.stringify({
@@ -612,10 +731,25 @@ async function runIconTieBreak(input: {
   });
   const decision = parseIconTieBreakDecision(result.response);
   const acceptance = acceptIconTieBreak(decision, submitted);
+  // Everything structural held and only the model's own confidence fell short, so the
+  // answer is proven the way a proposal is: the domain itself must name this employer.
+  // A self-reported confidence is a guess; a page that names the employer is evidence.
+  let verified = false;
+  if (acceptance.pendingVerification) {
+    verified = await verifyProposedDomain(acceptance.pendingVerification.domain, seed.displayName, undefined, deps);
+    console.log(JSON.stringify({
+      event: 'company_icon_resolution_tie_break_verified',
+      canonicalEmployerId: seed.canonicalEmployerId,
+      domain: acceptance.pendingVerification.domain,
+      confidence: acceptance.pendingVerification.confidence,
+      verified,
+    }));
+  }
+  const accepted = acceptance.accepted || verified;
   return {
-    accepted: acceptance.accepted,
-    ...(acceptance.domain ? { domain: acceptance.domain } : {}),
-    reasonCode: acceptance.reasonCode,
+    accepted,
+    ...(accepted ? { domain: acceptance.domain ?? acceptance.pendingVerification!.domain } : {}),
+    reasonCode: acceptance.accepted ? acceptance.reasonCode : verified ? 'accepted-domain-confirmed' : acceptance.reasonCode,
     inputTokens: result.inputTokens, outputTokens: result.outputTokens,
     ...(decision ? { decision } : {}),
   };
@@ -751,7 +885,10 @@ function providerOutcome(response: ProviderResponse): string {
 
 /** Server-side provider credentials. A token never reaches a response or a key. */
 export interface EmployerIconProviderCredentials {
+  /** Logo.dev secret key (`sk_…`): authorizes the name search only. */
   logoDevToken?: string;
+  /** Logo.dev publishable token (`pk_…`): authorizes the image endpoint only. */
+  logoDevImageToken?: string;
   brandfetchClientId?: string;
 }
 
@@ -1118,17 +1255,189 @@ async function platformAsset(
   return { usable: true, bytes: png, contentType: 'image/png', rasterized: true };
 }
 
+/**
+ * The employer's own site, read when its board published nothing usable and the
+ * provider has no icon for the domain.
+ *
+ * The domain is already verified by the time this runs, so the page in hand is the
+ * employer's own: only **declared** assets are read (touch icon, structured `logo`,
+ * share card, favicon), in the order a site publishes them as its brand mark, and
+ * each one must survive the same fetch, raster, size, and shape gates as any other
+ * asset. When none does, and the employer still has its one bounded model call, the
+ * model may choose among the candidates — or name a URL on that same domain, which is
+ * the one place a model is allowed to point at an asset. Nothing else is trusted: an
+ * off-domain URL is dropped before a request is made, and the bytes still have to
+ * pass every gate.
+ */
+async function storeDomainAsset(input: {
+  store: D1EmployerIconStore;
+  env: EmployerIconResolverEnvironment;
+  context: EmployerIconContext;
+  task: EmployerIconTask;
+  domain: string;
+  now: Date;
+  deps: EmployerIconResolverDependencies;
+  /** True when the employer's single model call for this window is still unspent. */
+  modelBudgetAvailable: boolean;
+}): Promise<{ key: string; source: 'declared' | 'model'; candidates: number } | undefined> {
+  const { store, env, context, task, domain, now, deps, modelBudgetAvailable } = input;
+  if (context.iconKey) return undefined;
+  let page: { body: string; url: string };
+  try {
+    const result = await safeFetchText(`https://${domain}/`, {
+      resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch, headers: ICON_PAGE_REQUEST_HEADERS,
+      timeoutMs: ICON_LINK_TIMEOUT_MS, maxRedirects: ICON_LINK_MAX_REDIRECTS, maxBodyBytes: ICON_LINK_MAX_BYTES,
+      onOversize: 'truncate',
+    });
+    if (result.status < 200 || result.status >= 300) return undefined;
+    page = { body: result.body, url: result.url };
+  } catch { return undefined; }
+
+  const candidates = siteLogoAssetCandidates(page.body, page.url).slice(0, 6);
+  const store1 = async (bytes: Uint8Array, contentType: string, source: 'declared' | 'model', url: string) => {
+    const key = await storeIconAsset(env, context.id, bytes, contentType, 'domain-asset');
+    await store.markPlatformIcon({
+      canonicalEmployerId: context.id, iconKey: key, now: now.toISOString(), source: 'domain-asset',
+    });
+    console.log(JSON.stringify({
+      event: 'company_icon_domain_asset_stored', canonicalEmployerId: context.id, key,
+      source, url, candidates: candidates.length, format: contentType,
+    }));
+    return { key, source, candidates: candidates.length };
+  };
+
+  for (const url of candidates) {
+    const asset = await fetchDomainAsset(url, deps);
+    if (asset) return store1(asset.bytes, asset.contentType, 'declared', url);
+  }
+  if (!candidates.length) console.log(JSON.stringify({
+    event: 'company_icon_domain_asset_none', canonicalEmployerId: context.id, domain,
+  }));
+  if (!modelBudgetAvailable || !env.OPENAI_KEY) return undefined;
+
+  const pick = await runIconAssetPick({
+    apiKey: env.OPENAI_KEY, deps,
+    employer: context.displayName, domain,
+    hrefs: siteAssetHrefs(page.body, page.url).slice(0, 12),
+    candidates,
+  });
+  if (!pick) return undefined;
+  const asset = await fetchDomainAsset(pick.url, deps);
+  if (!asset) {
+    console.log(JSON.stringify({
+      event: 'company_icon_domain_asset_rejected', canonicalEmployerId: context.id,
+      url: pick.url, kind: pick.kind, confidence: pick.confidence,
+    }));
+    return undefined;
+  }
+  await store.recordTieBreak({
+    canonicalEmployerId: context.id, at: now.toISOString(),
+    evidenceFingerprint: task.evidenceFingerprint,
+    inputTokens: pick.inputTokens, outputTokens: pick.outputTokens,
+  });
+  return store1(asset.bytes, asset.contentType, 'model', pick.url);
+}
+
+/** One asset fetch, judged exactly as a board logo is. */
+async function fetchDomainAsset(
+  url: string,
+  deps: EmployerIconResolverDependencies,
+): Promise<{ bytes: Uint8Array; contentType: string } | undefined> {
+  try {
+    const result = await safeFetchBytes(url, {
+      resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch,
+      timeoutMs: ICON_PROVIDER_TIMEOUT_MS, maxRedirects: 1, maxBodyBytes: MAX_ICON_ASSET_BYTES,
+    });
+    if (result.status < 200 || result.status >= 300) return undefined;
+    const raster = iconAssetType(result.headers.get('content-type'), result.body);
+    if (raster) return assetShapeUsable(result.body) ? { bytes: result.body, contentType: raster } : undefined;
+    const svg = iconSvgAsset(result.headers.get('content-type'), result.body);
+    if (!svg || !deps.rasterizeSvg) return undefined;
+    const safe = safeIconSvg(svg);
+    if (!safe) return undefined;
+    const png = await deps.rasterizeSvg(safe);
+    if (!png || png.byteLength === 0 || png.byteLength > MAX_ICON_ASSET_BYTES) return undefined;
+    return assetShapeUsable(png) ? { bytes: png, contentType: 'image/png' } : undefined;
+  } catch { return undefined; }
+}
+
+/** Every `https` image URL the page references, for the model to choose from. */
+function siteAssetHrefs(html: string, pageUrl: string): string[] {
+  const found = new Set<string>();
+  for (const [, value] of html.matchAll(VISIBLE_ASSET_PATTERN)) {
+    try {
+      const url = new URL(value, pageUrl);
+      if (url.protocol === 'https:') found.add(url.href);
+    } catch { /* relative junk */ }
+  }
+  return [...found].filter((url) => !isPlatformBannerUrl(url));
+}
+
+const VISIBLE_ASSET_PATTERN = /<img\b[^>]+src=["']([^"']+)["']|srcset=["']([^"']+)["']|url\(\s*["']?(https?:\/\/[^"')]+)["']?\s*\)/giu;
+
+/**
+ * The one call that may name an asset. It receives the assets read from the page and
+ * the page's other image URLs, and may answer with one of them or with another URL on
+ * the same domain; the answer is admitted only through `acceptIconAssetPick`.
+ */
+async function runIconAssetPick(input: {
+  apiKey: string;
+  deps: EmployerIconResolverDependencies;
+  employer: string;
+  domain: string;
+  hrefs: readonly string[];
+  candidates: readonly string[];
+}): Promise<{ url: string; kind: 'submitted' | 'nominated'; confidence: number; inputTokens: number; outputTokens: number } | undefined> {
+  const { apiKey, deps, employer, domain, hrefs, candidates } = input;
+  const infer = deps.infer ?? ((request: OpenAIJsonRequest) => inferOpenAIJson(apiKey, request, deps.fetchImpl ?? fetch));
+  let result: OpenAIJsonResult;
+  try {
+    result = await infer({
+      prompt: {
+        system: assetSystemPrompt,
+        user: JSON.stringify({
+          employer,
+          domain,
+          declaredLogoAssets: [...candidates],
+          imagesOnThePage: [...hrefs],
+        }),
+      },
+      schemaName: 'company_icon_asset_pick', schema: iconAssetPickSchema,
+      model: shadowDefaultModelId, maxOutputTokens: 200,
+    });
+  } catch { return undefined; }
+  const nomination = acceptIconAssetPick(parseIconAssetPick(result.response), candidates, domain);
+  if (!nomination) return undefined;
+  console.log(JSON.stringify({
+    event: 'company_icon_domain_asset_nominated', employer, domain,
+    url: nomination.url, kind: nomination.kind, confidence: nomination.confidence,
+  }));
+  return {
+    url: nomination.url, kind: nomination.kind, confidence: nomination.confidence,
+    inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+  };
+}
+
+const assetSystemPrompt = [
+  'You choose the image that is one company\'s own logo, to be shown as a square app icon.',
+  'Use only the supplied JSON. The declaredLogoAssets array lists the assets the company publishes as its mark, best first.',
+  'Answer with one of those URLs, or, when none of them is the mark, with another https URL on the company\'s own domain.',
+  'Never answer with a URL on another domain. Answer null when nothing in the input is the company mark.',
+  'Prefer a square mark over a wide wordmark, and a real logotype over a share card or a screenshot.',
+].join(' ');
+
 /** Stores the provider's WebP output under an immutable, content-addressed key. */
 async function storeIconAsset(
   env: EmployerIconResolverEnvironment,
   canonicalEmployerId: string,
   bytes: Uint8Array,
   contentType: string,
-  kind: 'logo' | 'platform' = 'logo',
+  kind: 'logo' | 'platform' | 'domain-asset' = 'logo',
 ): Promise<string> {
+  const prefix = kind === 'domain-asset' ? 'site' : kind;
   const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
   const extension = contentType === 'image/webp' ? 'webp' : contentType.split('/')[1]!.replace('jpeg', 'jpg');
-  const key = `company-icons/${canonicalEmployerId}/${kind}-${digest}.${extension}`;
+  const key = `company-icons/${canonicalEmployerId}/${prefix}-${digest}.${extension}`;
   await env.DOCUMENTS.put(key, bytes.buffer as ArrayBuffer, { httpMetadata: { contentType } });
   return key;
 }
@@ -1259,8 +1568,8 @@ export async function verifyIconDomain(
   credentials: EmployerIconProviderCredentials,
   deps: EmployerIconResolverDependencies,
 ): Promise<boolean> {
-  if (!credentials.logoDevToken) return false;
-  return (await probeLogoDevImage(domain, credentials.logoDevToken, deps)).available;
+  if (!credentials.logoDevImageToken) return false;
+  return (await probeLogoDevImage(domain, credentials.logoDevImageToken, deps)).available;
 }
 
 /**
@@ -1286,6 +1595,8 @@ export interface EmployerIconDiagnostic {
   decision: IconDomainDecision;
   imageVerified?: boolean;
   tieBreak?: TieBreakOutcome & { called: true };
+  /** Present when the candidate set was empty and one bounded call proposed a domain. */
+  proposal?: IconProposalOutcome;
 }
 
 export async function diagnoseEmployerIcon(input: {
@@ -1305,11 +1616,18 @@ export async function diagnoseEmployerIcon(input: {
   const providers = await lookupProviderDomains(seed, credentials, deps, declaredName);
   const decision = decideIconDomain(iconCandidates(seed, context, gathered, providers, declaredName));
   const submitted = decision.scores.filter((candidate) => !candidate.rejected).slice(0, 5);
-  const imageVerified = decision.selectedDomain && credentials.logoDevToken
-    ? (await probeLogoDevImage(decision.selectedDomain, credentials.logoDevToken, deps)).available
-    : undefined;
   const tieBreak = decision.outcome === 'llm-review' && input.tieBreakApiKey && submitted.length
     ? { called: true as const, ...await runIconTieBreak({ seed, gathered, submitted, apiKey: input.tieBreakApiKey, deps }) }
+    : undefined;
+  // Nothing to rank: the live sweep asks once for a domain and then proves it, so the
+  // diagnostic does the same rather than reporting a monogram the resolver would not.
+  const proposal = decision.outcome === 'unresolved' && input.tieBreakApiKey
+    ? await runIconProposal({ seed, gathered, declaredName, apiKey: input.tieBreakApiKey, deps })
+    : undefined;
+  const proposedDomain = proposal?.reasonCode === 'verified' ? proposal.domain ?? undefined : undefined;
+  const verifiedDomain = proposedDomain ?? decision.selectedDomain;
+  const imageVerified = verifiedDomain && credentials.logoDevImageToken
+    ? (await probeLogoDevImage(verifiedDomain, credentials.logoDevImageToken, deps)).available
     : undefined;
   return {
     seed,
@@ -1324,5 +1642,6 @@ export async function diagnoseEmployerIcon(input: {
     decision,
     ...(imageVerified === undefined ? {} : { imageVerified }),
     ...(tieBreak ? { tieBreak } : {}),
+    ...(proposal ? { proposal } : {}),
   };
 }
