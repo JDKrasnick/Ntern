@@ -23,8 +23,28 @@ function parseModelJson(response: unknown): unknown {
  * turning every draft into the deterministic fallback. */
 export const RESUME_DRAFT_MODELS = ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/meta/llama-3.1-8b-instruct-fp8'] as const;
 
-/** Parse untrusted model output before the API applies independent evidence guards. */
-export function parseResumeChanges(output: unknown): ResumeChange[] {
+/** Resolves a model-authored target against the source repository. The model is
+ * asked to copy a `ref` verbatim, but a single wrong parent kind used to fail the
+ * whole draft ("parent must be a typed role, project, or education pointer").
+ * The id is the only reliable part, so resolve it to the canonical ref from the
+ * real bank item and reject unknown ids with an actionable message the feedback
+ * retry can act on. */
+export function resolveModelChangeTarget(bankItems: readonly ResumeBankItem[], value: unknown): ResumeChange['target'] {
+  const bankItemId = typeof value === 'string'
+    ? value
+    : value && typeof value === 'object' && typeof (value as { bankItemId?: unknown }).bankItemId === 'string'
+      ? (value as { bankItemId: string }).bankItemId
+      : undefined;
+  if (!bankItemId) throw new Error('Each change target must name a source repository id');
+  const item = bankItems.find((candidate) => candidate.bankItemId === bankItemId);
+  if (!item) throw new Error(`Change target "${bankItemId}" is not one of the source repository ids`);
+  return resumeBankItemRef(item);
+}
+
+/** Parse untrusted model output before the API applies independent evidence guards.
+ * When the source repository is supplied, targets are resolved to canonical refs
+ * rather than trusted, so a malformed parent pointer cannot invalidate a draft. */
+export function parseResumeChanges(output: unknown, bankItems?: readonly ResumeBankItem[]): ResumeChange[] {
   const response = typeof output === 'object' && output !== null && 'response' in output
     ? (output as { response?: unknown }).response : output;
   const parsed = parseModelJson(response);
@@ -39,7 +59,7 @@ export function parseResumeChanges(output: unknown): ResumeChange[] {
       || value.evidenceIds.some((id) => typeof id !== 'string') || !value.evidenceIds.length) throw new Error('Model change schema is invalid');
     if (value.original !== undefined && typeof value.original !== 'string') throw new Error('Model original is invalid');
     if (value.suggestion !== undefined && typeof value.suggestion !== 'string') throw new Error('Model suggestion is invalid');
-    return { changeId: randomUUID(), type: value.type as ResumeChange['type'], target: parseResumeBankItemRef(value.target), section: value.section.trim().slice(0, 120),
+    return { changeId: randomUUID(), type: value.type as ResumeChange['type'], target: bankItems ? resolveModelChangeTarget(bankItems, value.target) : parseResumeBankItemRef(value.target), section: value.section.trim().slice(0, 120),
       ...(typeof value.original === 'string' ? { original: value.original.trim().slice(0, 2_000) } : {}),
       ...(typeof value.suggestion === 'string' ? { suggestion: value.suggestion.trim().slice(0, 2_000) } : {}),
       evidenceIds: value.evidenceIds as string[], reason: value.reason.trim().slice(0, 500) };
@@ -64,7 +84,7 @@ export function workersAiResumeDraftGenerator(ai: WorkersAi) {
         // feedback, so it must propagate unchanged.
         try { output = await ai.run(model, { response_format: { type: 'json_object' }, max_tokens: 2_048, temperature: 0.2, messages }); }
         catch (error) { lastError = error; continue; }
-        return parseResumeChanges(output);
+        return parseResumeChanges(output, bankItems);
       }
       throw lastError instanceof Error ? lastError : new Error('No Workers AI resume model was available');
     },
