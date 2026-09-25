@@ -5941,6 +5941,8 @@ function ResumeReviewLoading({ caption }: { caption: string }) {
 
 function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: string; onSignIn?: () => void; onDraftingChange?: (value: boolean) => void }) {  const { width } = useWindowDimensions();
   const desktop = width >= 700;
+  /** Two pages only sit beside each other when each still gets a readable width. */
+  const sideBySide = width >= 1800;
   const signedIn = Boolean(token);
   const [jobUrl, setJobUrl] = useState("");
   const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
@@ -5982,7 +5984,6 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
   const [previewRows, setPreviewRows] = useState<ResumeReviewRow[]>([]);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [boardMode, setBoardMode] = useState<"one" | "all">("one");
-  const [pageMode, setPageMode] = useState<"raw" | "proposed">("proposed");
   const [focusChangeId, setFocusChangeId] = useState<string>();
   const [artifactSource, setArtifactSource] = useState("");
   const [artifactLoading, setArtifactLoading] = useState(false);
@@ -6158,14 +6159,7 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
   useEffect(() => {
     setFocusChangeId(draft?.changes[0]?.changeId);
     setBoardMode("one");
-    setPageMode("proposed");
   }, [draft?.draftId]);
-  useEffect(() => {
-    const row = boardRows.find((candidate) => candidate.changeId === focusChangeId);
-    if (row?.afterBox) setPageMode("proposed");
-    else if (row?.beforeBox) setPageMode("raw");
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- follow the focused change
-  }, [focusChangeId]);
   // Web keyboard review: arrows move, Y applies, N keeps, V toggles the view.
   useEffect(() => {
     if (Platform.OS !== "web" || typeof document === "undefined" || !draft) return undefined;
@@ -6894,21 +6888,29 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
         {draft ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
           {desktop ? (
             <>
-              <View style={styles.resumePageBar}>
-                <View style={styles.resumeModeToggle}>
-                  {(["raw", "proposed"] as const).map((value) => (
-                    <TouchableOpacity key={value} accessibilityRole="button" aria-pressed={pageMode === value} onPress={() => setPageMode(value)} style={[styles.resumeModeButton, pageMode === value && styles.resumeModeButtonActive]}>
-                      <Text style={[styles.resumeModeButtonText, pageMode === value && styles.resumeModeButtonTextActive]}>{value === "raw" ? "Your résumé" : "Tailored proposal"}</Text>
-                    </TouchableOpacity>
-                  ))}
+              {sideBySide ? (
+                <View style={styles.resumeReviewPagesRow}>
+                  <View style={styles.resumeReviewPagePane}>
+                    <Text style={styles.resumeDiffType}>Your résumé</Text>
+                    <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
+                  </View>
+                  <View style={styles.resumeReviewPagePane}>
+                    <Text style={styles.resumeDiffType}>Tailored proposal</Text>
+                    {reviewPreviewNode}
+                  </View>
                 </View>
-                <Text style={styles.resumePreviewCaption}>{pageMode === "raw" ? "Unchanged original" : "Proposal · not final"}</Text>
-              </View>
-              <View style={styles.resumePageFull}>
-                {pageMode === "raw"
-                  ? <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
-                  : reviewPreviewNode}
-              </View>
+              ) : (
+                <>
+                  <View style={styles.resumePageFull}>
+                    <Text style={styles.resumeDiffType}>Your résumé</Text>
+                    <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
+                  </View>
+                  <View style={styles.resumePageFull}>
+                    <Text style={styles.resumeDiffType}>Tailored proposal</Text>
+                    {reviewPreviewNode}
+                  </View>
+                </>
+              )}
               <View style={styles.resumeReviewBoardRow}>{reviewBoardNode}</View>
             </>
           ) : reviewMode === "changes" ? (
@@ -9458,10 +9460,10 @@ const styles = StyleSheet.create({
   resumeLoadingLine: { height: 6 },
   resumeReviewPagesRow: { flexDirection: "row", gap: 18, justifyContent: "center", width: "100%" },
   resumePageBar: { alignItems: "center", flexDirection: "row", gap: 12, justifyContent: "space-between", maxWidth: 1600, width: "100%" },
-  resumePageFull: { alignItems: "center", width: "100%" },
+  resumePageFull: { alignItems: "center", gap: 8, width: "100%" },
 
   resumeReviewBoardRow: { alignItems: "center", width: "100%" },
-  resumeReviewPagePane: { alignItems: "center", flex: 1, gap: 10, maxWidth: 700, minWidth: 0 },
+  resumeReviewPagePane: { alignItems: "center", flex: 1, gap: 10, maxWidth: 1400, minWidth: 0 },
   resumeReviewPreviewPane: { alignItems: "center", gap: 10, justifyContent: "center", minWidth: 0 },
   resumePageFrame: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, maxWidth: 1400, overflow: "hidden", position: "relative", width: "100%" },
   resumePageImage: { height: "100%", width: "100%" },
