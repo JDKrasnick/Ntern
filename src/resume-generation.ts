@@ -51,7 +51,23 @@ export function parseResumeChanges(output: unknown, bankItems?: readonly ResumeB
   const candidates = Array.isArray(parsed) ? parsed : typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { changes?: unknown }).changes)
     ? (parsed as { changes: unknown[] }).changes : undefined;
   if (!candidates || candidates.length > 12) throw new Error('Model response must contain at most 12 changes');
-  return candidates.map((candidate) => {
+  // One malformed change must not discard the whole draft: keep every change that
+  // does satisfy the contract, and only fail when none of them do.
+  const accepted: ResumeChange[] = [];
+  let firstError: unknown;
+  for (const candidate of candidates) {
+    try {
+      accepted.push(buildModelChange(candidate, bankItems));
+    } catch (error) {
+      firstError = firstError ?? error;
+    }
+  }
+  if (!accepted.length && candidates.length) throw firstError instanceof Error ? firstError : new Error('Model output contained no usable change');
+  return accepted;
+}
+
+function buildModelChange(candidate: unknown, bankItems?: readonly ResumeBankItem[]): ResumeChange {
+  {
     if (typeof candidate !== 'object' || candidate === null) throw new Error('Model change must be an object');
     const value = candidate as Record<string, unknown>;
     const type = value.type as ResumeChange['type'];
@@ -73,7 +89,7 @@ export function parseResumeChanges(output: unknown, bankItems?: readonly ResumeB
       ...(type === 'add' ? {} : { original }),
       ...(type === 'remove' || type === 'move' ? {} : { suggestion }),
       evidenceIds: value.evidenceIds as string[], reason: value.reason.trim().slice(0, 500) };
-  });
+  }
 }
 
 export function workersAiResumeDraftGenerator(ai: WorkersAi) {

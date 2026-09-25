@@ -77,6 +77,15 @@ describe('resume model target resolution', () => {
     expect(parsed[1]?.suggestion).toBeUndefined();
   });
 
+  it('keeps the usable changes when one candidate is malformed', () => {
+    const parsed = parseResumeChanges({ response: JSON.stringify({ changes: [
+      { type: 'add', target: { kind: 'role', bankItemId: 'role' }, section: 'Experience', evidenceIds: ['role'], reason: 'r' },
+      { type: 'rewrite', target: { kind: 'bullet', bankItemId: 'bullet' }, section: 'Experience', original: 'Built it', suggestion: 'Built it', evidenceIds: ['bullet'], reason: 'r' },
+    ] }) }, bank);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({ type: 'rewrite' });
+  });
+
   it('names the missing field so the feedback retry can fix it', () => {
     expect(() => parseResumeChanges({ response: JSON.stringify({ changes: [
       { type: 'add', target: { kind: 'role', bankItemId: 'role' }, section: 'Experience', evidenceIds: ['role'], reason: 'r' },

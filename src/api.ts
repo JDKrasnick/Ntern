@@ -1038,13 +1038,16 @@ export function createApiHandler(dependencies: ApiDependencies) {
               } else {
                 // The first attempt covers schema and validation failures alike:
                 // either way the model gets one corrective retry with the error.
+                // A model that repeats an existing line should not cost the whole
+                // draft: drop the duplicates and keep the real changes.
+                const accept = (generated: ResumeChange[]) => dropDuplicateAdditions(generated, selected);
                 try {
-                  changes = await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence });
+                  changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence }));
                   validateResumeChanges(changes, selected);
                   generation = { outcome: 'model' };
                 } catch (firstError) {
                   const feedback = firstError instanceof Error ? firstError.message : 'The changes did not match the required schema.';
-                  changes = await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, feedback });
+                  changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, feedback }));
                   validateResumeChanges(changes, selected);
                   generation = { outcome: 'model-retry' };
                 }
