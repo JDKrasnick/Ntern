@@ -34,7 +34,7 @@ export interface ResumeJobStructuredRoute {
   /** JSON responses are parsed; the iCIMS frame route answers with HTML. */
   accept: 'application/json' | 'text/html';
   /** Present for provider routes that need a body (Ashby's posting lookup). */
-  request?: { method: 'POST'; body: string };
+  request?: { method: 'POST'; contentType: string; body: string };
   parse(payload: unknown): { title?: string; description: string } | undefined;
 }
 
@@ -61,7 +61,7 @@ export function resumeJobStructuredRoute(canonicalUrl: string): ResumeJobStructu
       requestUrl: ASHBY_POSTING_URL,
       method: 'ashby-api',
       accept: 'application/json',
-      request: { method: 'POST', body: JSON.stringify({ operationName: 'ApiJobPosting', variables: { organizationHostedJobsPageName: reference.tenant, jobPostingId: reference.postingId }, query: ASHBY_POSTING_QUERY }) },
+      request: { method: 'POST', contentType: 'application/json', body: JSON.stringify({ operationName: 'ApiJobPosting', variables: { organizationHostedJobsPageName: reference.tenant, jobPostingId: reference.postingId }, query: ASHBY_POSTING_QUERY }) },
       parse(payload) {
         const job = isRecord(payload) && isRecord(payload.data) ? payload.data.jobPosting : undefined;
         if (!isRecord(job) || typeof job.descriptionHtml !== 'string' || !job.descriptionHtml.trim()) return undefined;

@@ -29,6 +29,7 @@ describe('resume job URL provider resolution', () => {
     expect(route?.accept).toBe('application/json');
     expect(route?.requestUrl).toBe('https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting');
     expect(route?.request?.method).toBe('POST');
+    expect(route?.request?.contentType).toBe('application/json');
     expect(JSON.parse(route!.request!.body)).toMatchObject({ variables: { organizationHostedJobsPageName: 'fab2', jobPostingId: '0c4dc4f4-01c9-4138-a666-e7234cda7e95' } });
     expect(route?.parse({ data: { jobPosting: { id: '0c4dc4f4-01c9-4138-a666-e7234cda7e95', title: 'Fab Intern', descriptionHtml: '<p>Build compilers.</p>' } } }))
       .toEqual({ title: 'Fab Intern', description: 'Build compilers.' });

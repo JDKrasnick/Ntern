@@ -1967,7 +1967,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
             // Every route fetches one posting (Ashby's board route is replaced by a
             // per-posting GraphQL lookup), so a small bound is enough; the extracted
             // description is capped at 30k characters downstream.
-            const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 2 * 1024 * 1024, headers: { Accept: structured.accept }, ...(structured.request ? { method: structured.request.method, body: structured.request.body } : {}) });
+            const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 2 * 1024 * 1024, headers: { Accept: structured.accept, ...(structured.request ? { 'Content-Type': structured.request.contentType } : {}) }, ...(structured.request ? { method: structured.request.method, body: structured.request.body } : {}) });
             if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
             extracted = structured.parse(structured.accept === 'application/json' ? JSON.parse(fetched.body) : fetched.body);
             if (!extracted || extracted.description.length < 40) throw new Error('Structured job import did not contain enough readable role text');
