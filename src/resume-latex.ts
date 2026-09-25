@@ -55,8 +55,16 @@ function resolvedResumeBank(profile: ResumeProfile, draft: ResumeDraft, bankItem
 export function buildResumeDocument(profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[]): ResumeDocument {
   const resolved = resolvedResumeBank(profile, draft, bankItems);
   const bullets = new Map<string, string[]>();
+  const seenBullets = new Map<string, Set<string>>();
   for (const item of resolved) {
     if (item.kind !== 'bullet') continue;
+    // A duplicate line (for example an add that repeats an existing bullet) must
+    // never render twice under the same entry.
+    const seen = seenBullets.get(item.parent.bankItemId) ?? new Set<string>();
+    const key = item.content.trim().replace(/\s+/gu, ' ').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    seenBullets.set(item.parent.bankItemId, seen);
     bullets.set(item.parent.bankItemId, [...(bullets.get(item.parent.bankItemId) ?? []), item.content]);
   }
   const document: ResumeDocument = {

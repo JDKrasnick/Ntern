@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { dropDuplicateAdditions, normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 import { attachResumeReviewBoxes, buildResumeReviewRows } from './resume-review.js';
@@ -1179,7 +1179,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
           // reviewer sees both pages; decisions are carried by the diff and never
           // trigger a recompile.
           const original: ResumeDraft = { ...previous, changes: [] };
-          const proposal: ResumeDraft = { ...previous, changes: previous.changes.map((change) => ({ ...change, decision: 'accepted' as const })) };
+          const proposal: ResumeDraft = { ...previous, changes: dropDuplicateAdditions(previous.changes.map((change) => ({ ...change, decision: 'accepted' as const })), selected) };
           try {
             validateResumeProfileSelection(profile.bankItemIds, bankItems);
             validateResumeChanges(proposal.changes, selected);
@@ -1228,7 +1228,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
           const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
           let artifact: ResumeArtifact;
           try {
-            artifact = await compileResumeArtifact(userId, profile, applicant, updated, bankItems, timestamp);
+            artifact = await compileResumeArtifact(userId, profile, applicant, { ...updated, changes: dropDuplicateAdditions(updated.changes, selected) }, bankItems, timestamp);
           } catch {
             return reply(503, { message: 'PDF generation is temporarily unavailable; your draft was not finalized' });
           }

@@ -456,9 +456,29 @@ export function escapeLatex(value: string): string {
 }
 
 /** Model output cannot cite unknown or unverified facts, including numeric claims. */
+function normalizeResumeLine(value: string): string {
+  return value.trim().replace(/\s+/gu, ' ').toLowerCase();
+}
+
+/** Drops accepted additions that would repeat an existing line or each other.
+ * Generation rejects them so the model can rephrase, but a draft stored before
+ * that rule must still render — without the duplicate. */
+export function dropDuplicateAdditions(changes: readonly ResumeChange[], bank: readonly ResumeBankItem[]): ResumeChange[] {
+  const existing = new Set(bank.filter((item) => item.verified && item.kind === 'bullet').map((item) => normalizeResumeLine(item.content)));
+  const seen = new Set<string>();
+  return changes.filter((change) => {
+    if (change.type !== 'add') return true;
+    const key = normalizeResumeLine(change.suggestion ?? '');
+    if (!key || existing.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankItem[]): void {
   validateResumeBankGraph(bank);
   const verified = new Map(bank.filter((item) => item.verified).map((item) => [item.bankItemId, item]));
+  const addedLines = new Set<string>();
   for (const change of changes) {
     if (!change.evidenceIds.length || change.evidenceIds.some((id) => !verified.has(id))) {
       throw new Error('Each resume change must cite verified bank evidence.');
@@ -472,6 +492,15 @@ export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankI
       return targetParent || evidenceParent ? !targetParent || !evidenceParent || !sameResumeRef(targetParent, evidenceParent) : item.bankItemId !== target.bankItemId;
     })) throw new Error('Resume changes cannot combine bullets or evidence from different parent objects.');
     const evidence = evidenceItems.map((item) => item.content).join(' ');
+    // An added line that repeats existing material would render the same bullet
+    // twice in the proposal, so reject it and let the feedback retry rephrase.
+    if (change.type === 'add') {
+      const added = normalizeResumeLine(change.suggestion ?? '');
+      const repeats = [...verified.values()].some((item) => item.kind === 'bullet' && normalizeResumeLine(item.content) === added);
+      if (repeats) throw new Error('An added line must not repeat a line already in the source repository.');
+      if (addedLines.has(added)) throw new Error('Two added lines must not be identical.');
+      addedLines.add(added);
+    }
     if ((change.type === 'add' && (!change.suggestion || change.original))
       || (change.type === 'remove' && (!change.original || change.suggestion))
       || (change.type === 'move' && (!change.original || change.suggestion))

@@ -20,6 +20,12 @@ describe('resume safety contracts', () => {
     expect(() => validateResumeChanges([{ changeId: 'c', type: 'rewrite', target, section: 'Experience', original: 'Improved 20% with Python', suggestion: 'Improved 20%', evidenceIds: ['other'], reason: 'fit' }], [verified])).toThrow('verified');
   });
 
+  it('rejects an added line that repeats material already in the source repository', () => {
+    const project = { userId: 'owner', bankItemId: 'project', kind: 'project' as const, content: 'Compiler Lab', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    const bullet = { userId: 'owner', bankItemId: 'bullet', kind: 'bullet' as const, parent: { kind: 'project' as const, bankItemId: 'project' }, content: 'Built a parser', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    expect(() => validateResumeChanges([{ changeId: 'c', type: 'add', target: { kind: 'project' as const, bankItemId: 'project' }, section: 'Projects', suggestion: 'Built a parser', evidenceIds: ['project'], reason: 'fit' }], [project, bullet])).toThrow('must not repeat a line already in the source repository');
+  });
+
   it('rejects unrelated nonnumeric claims and invalid change shapes', () => {
     const verified = { userId: 'owner', bankItemId: 'bank-1', kind: 'project' as const, content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
     const target = { kind: 'project' as const, bankItemId: 'bank-1' };

@@ -20,6 +20,20 @@ describe('fixed resume LaTeX rendering', () => {
     expect(result.resumeSpecHash).toMatch(/^[a-f0-9]{64}$/u);
   });
 
+  it('never renders the same bullet twice when an add repeats an existing line', () => {
+    const profile = { userId: 'student', profileId: 'profile', name: 'Candidate', tags: [], bankItemIds: ['project', 'bullet'], sectionOrder: ['Projects'], template: 'clean-standard' as const, approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    const bank = [
+      { userId: 'student', bankItemId: 'project', kind: 'project' as const, content: 'Compiler Lab', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
+      { userId: 'student', bankItemId: 'bullet', kind: 'bullet' as const, parent: { kind: 'project' as const, bankItemId: 'project' }, content: 'Built a parser', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' },
+    ];
+    const draft = { userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', revision: 0, status: 'finalized' as const, createdAt: 'now', updatedAt: 'now', changes: [
+      { changeId: 'duplicate-add', type: 'add' as const, target: { kind: 'project' as const, bankItemId: 'project' }, section: 'Projects', suggestion: 'Built a parser', evidenceIds: ['project'], reason: 'fit', decision: 'accepted' as const },
+    ] };
+    const applicant = { userId: 'student', contact: { name: 'Candidate', email: 'candidate@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' };
+    const { tex } = renderResumeLatex(profile, applicant, draft, bank);
+    expect(tex.match(/Built a parser/gu)?.length).toBe(1);
+  });
+
   it('renders the complete selected base while applying reviewed diffs', () => {
     const profile = { userId: 'student', profileId: 'profile', name: 'Candidate', tags: [], bankItemIds: ['role', 'project', 'skill', 'unused'], sectionOrder: ['Experience', 'Projects', 'Skills'], template: 'clean-standard' as const, approvedWording: { Education: 'Cornell University' }, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' };
     const draft = { userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', changes: [
