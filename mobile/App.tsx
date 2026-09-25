@@ -4620,6 +4620,13 @@ function AppContent() {
           await sessionStorage.set(idToken);
           sessionRequestId.current += 1;
           acceptSessionToken(idToken);
+          // Signing in from the resume workspace swaps to the signed-in tree,
+          // whose default tab is Roles; return there so the pending import runs
+          // and the user does not lose their place.
+          if (pendingResumeImportUrl || pendingResumeReturn) {
+            pendingResumeReturn = false;
+            setTab("resume");
+          }
         }}
       />
       <CatalogGroupSheet
@@ -5762,8 +5769,10 @@ function ResumeSavedProfilesGhost() {  const motionAllowed = useContext(MotionAl
 
 /** Remembers a job URL a guest submitted. Signing in swaps the guest tree for
  * the signed-in one, remounting the workspace, so the URL is held here and
- * imported as soon as the session exists. */
+ * imported as soon as the session exists. `pendingResumeReturn` keeps the user on
+ * Resume after any sign-in started from the workspace. */
 let pendingResumeImportUrl: string | undefined;
+let pendingResumeReturn = false;
 
 function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: () => void }) {
   const { width } = useWindowDimensions();
@@ -6106,6 +6115,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
       // The tuner needs an account to fetch and compile, so open sign-in as a
       // popup and import this URL once the session lands.
       pendingResumeImportUrl = url;
+      pendingResumeReturn = true;
       onSignIn?.();
       return;
     }
@@ -6217,7 +6227,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
             <Text style={styles.resumeGuestStatusTitle}>Guest session</Text>
             <Text style={styles.resumeGuestStatusDetail}>Not saved</Text>
           </View>
-          {onSignIn ? <TouchableOpacity accessibilityRole="button" onPress={onSignIn} style={styles.resumeGuestSignIn}><Text style={styles.resumeCompactActionText}>Sign in</Text></TouchableOpacity> : null}
+          {onSignIn ? <TouchableOpacity accessibilityRole="button" onPress={() => { pendingResumeReturn = true; onSignIn(); }} style={styles.resumeGuestSignIn}><Text style={styles.resumeCompactActionText}>Sign in</Text></TouchableOpacity> : null}
         </View> : null}
       </View>
 
@@ -6552,7 +6562,20 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
             </TouchableOpacity>
           ))}
         </ScrollView>
-        <View style={styles.resumeBankComposerAction}><ActionButton label={!signedIn ? "Sign in to run review" : subscription?.usage.remaining === 0 ? "Monthly limit reached" : resumeSourceMode === "ideal" ? "Build ideal review" : "Review best match"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length) || resumeBusy || subscription?.usage.remaining === 0} /></View>
+        <View style={styles.resumeBankComposerAction}>
+          {signedIn && subscription?.usage.remaining === 0 ? (
+            <View accessibilityLabel="Monthly review limit reached" style={styles.resumeLimitNotice}>
+              <Ionicons name="lock-closed-outline" size={17} color={colors.muted} />
+              <View style={styles.resumeLimitNoticeCopy}>
+                <Text style={styles.resumeLimitNoticeTitle}>You&apos;ve used all {subscription.usage.limit} free reviews this month</Text>
+                <Text style={styles.resumeLimitNoticeDetail}>They reset on the 1st. Pick a plan to keep tailoring now.</Text>
+              </View>
+              <TouchableOpacity accessibilityRole="button" onPress={() => setPlanExpanded(true)} style={styles.resumeCompactAction}><Text style={styles.resumeCompactActionText}>See plans</Text></TouchableOpacity>
+            </View>
+          ) : (
+            <ActionButton label={!signedIn ? "Sign in to run review" : resumeSourceMode === "ideal" ? "Build ideal review" : "Review best match"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length) || resumeBusy} />
+          )}
+        </View>
       </View> : null}
 
       {draft ? <View style={styles.resumeSection}>
@@ -9303,6 +9326,10 @@ const styles = StyleSheet.create({
   resumeParentOptionKind: { color: colors.signal, fontSize: 10, fontWeight: "800", letterSpacing: 0.5, textTransform: "uppercase" },
   resumeParentOptionText: { color: colors.body, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 3 },
   resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },
+  resumeLimitNotice: { alignItems: "center", backgroundColor: colors.canvas, borderColor: colors.separator, borderRadius: 12, borderWidth: 1, flexDirection: "row", gap: 12, maxWidth: 560, padding: 14 },
+  resumeLimitNoticeCopy: { flex: 1, minWidth: 0 },
+  resumeLimitNoticeTitle: { color: colors.ink, fontSize: 14, fontWeight: "700" },
+  resumeLimitNoticeDetail: { color: colors.muted, fontSize: 12.5, marginTop: 2 },
   resumeBankError: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 8 },
   resumeBankScroller: { maxHeight: 340 },
   resumeBankItems: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 8, marginTop: 16, paddingBottom: 2, paddingTop: 12 },
