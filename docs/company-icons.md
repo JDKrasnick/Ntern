@@ -112,14 +112,18 @@ Everything in this section ran against the live catalog with the account's own L
 
 | Path | Result |
 |---|---|
-| Logo.dev name search | **nominated 21/23**, missed 2 |
+| Logo.dev name search | **nominated 21/23**, and has a real logo image for **30 of the 34 domains** it nominated — 21 of 23 employers |
 | Board logo, same employers (`npm run coverage:icons`) | **14/23** |
-| Domain path (real provider, real model, verified acceptance) | **17/23** — greenhouse 10/14, ashby 7/9 |
-| **Union** | **20/23 (87%)** |
+| Domain path (real provider, real model) | **19/23** — greenhouse 12/14, ashby 7/9 |
+| **Union** | **21/23 (91%)** |
 
-Every one of the 17 domain resolutions was accepted through the tie-breaker; none reached the 0.85 automatic threshold, because with only one provider configured the score tops out at 0.60–0.75. **That is the argument for Brandfetch**: consensus between two providers is what clears the threshold without a model call, and Brandfetch was unconfigured in this run. The measured confidence distribution is what drove the verification tier above: 13 answers at 0.45–0.80, 11 of them confirmed by the domain itself, which the old 0.90 floor had been discarding.
+The resolver needed the model for only **4** of its 19 resolutions. Fifteen were decided by proof: a candidate our own evidence already corroborated (two or more independent evidence ids, so there was nothing to choose between) whose domain, fetched, names the employer in its own metadata. That ordering is deliberate — the proof is the same one a proposal needs, so it can only accept a domain a proposal could have justified, and it costs a fetch instead of a model call and the employer's 30-day budget.
 
-The three employers left as monograms are the honest remainder: two where the model answered `uncertain`, and one confidential board (`stackadapt-confidential`) whose page did not answer us at all and which Logo.dev does not index. That last one is what the exception queue and a reviewer upload exist for.
+None of the 19 reached the 0.85 automatic threshold, because with one provider the score tops out at 0.60–0.75. **That is the argument for Brandfetch**: consensus between two providers is what clears the threshold with no call at all, and Brandfetch was unconfigured in this run.
+
+The two remaining monograms are the honest remainder, and both are the exception queue's business: `replit`, whose nomination carries our corroboration bar for one domain but not the trademark-confirming one, and `stackadapt-confidential`, whose board did not answer us and which Logo.dev does not index.
+
+Two risks this measurement makes explicit. A corroborated candidate is accepted on self-confirmation, so a namesake domain that presents itself under the employer's name could be chosen over the right one — mitigated by the two-independent-evidence requirement, the exact-name provider rule, observe mode, the recorded evidence ids, and `report-wrong`, but not eliminated. And a single-provider deployment leans on the model or on proof far more than a two-provider one; the counters below are how an operator sees which case they are in.
 
 Superseded by the above: the earlier cohort table in this document was produced with **simulated** providers — deterministic stand-ins with no credential in the checkout — and a human answering the tie-breaker from the same bounded JSON the model receives. Its accuracy claims about scoring, attribution, and validation still hold, because those rules were real; its provider hit rates and its model behaviour do not, and are replaced here.
 
@@ -209,7 +213,7 @@ Decision paths taken: automatic resolution, tie-break acceptance, and monogram f
 
 ### Provider terms
 
-- **Logo.dev** supplies both the name search and the icon, through **two different credentials that are not interchangeable**. The secret key (`sk_…`) authorizes the name search and is answered with `401` by the image endpoint; only the account's publishable token (`pk_…`) authorizes `img.logo.dev`. Provisioned as `LOGO_DEV_TOKEN` and `LOGO_DEV_IMAGE_TOKEN` (aliases `LOGO_SECRET_KEY` and `LOGO_DEV_PUBLISHABLE_TOKEN` are accepted). Neither is an `EXPO_PUBLIC_*` value, and neither appears in a response, an R2 key, or a log. The publishable token is the one Logo.dev itself embeds in every `logo_url` a search returns; it is safe to expose in an image URL by design, and the resolver still keeps it server-side.
+- **Logo.dev** supplies both the name search and the icon, through **two different credentials that are not interchangeable**. The secret key (`sk_…`) authorizes the name search and is answered with `401` by the image endpoint; only the account's publishable token (`pk_…`) authorizes `img.logo.dev`. Provisioned as `LOGO_DEV_TOKEN` and `LOGO_DEV_IMAGE_TOKEN`, with `LOGO_SECRET_KEY` accepted for the first and `LOGO_DEV_PUBLISHABLE_KEY` or `LOGO_DEV_PUBLISHABLE_TOKEN` for the second, so a checkout that already carries either name works unchanged. Neither is an `EXPO_PUBLIC_*` value, and neither appears in a response, an R2 key, or a log. The publishable token is the one Logo.dev itself embeds in every `logo_url` a search returns; it is safe to expose in an image URL by design, and the resolver still keeps it server-side.
 
   Passing the secret key where the publishable token belongs is not a subtle failure: the image probe returns `401` for every domain, so nothing provider-sourced can ever be verified or published. That configuration is now named as its own state — `image-token-missing`, retryable within the hour, with a `company_icon_resolution_image_token_missing` log line — instead of looking like an employer whose domain has no logo.
 - **Brandfetch** is corroboration only. Its standard Brand Search terms forbid persisting its data, so its results are used in memory, are never written to `employer_icon_resolutions`, and its logo is never fetched or stored. Only a bare agreement flag is recorded, and a candidate that only Brandfetch nominated is omitted from the stored evidence.

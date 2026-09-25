@@ -188,6 +188,44 @@ describe('employer icon diagnosis', () => {
     expect(diagnostic.decision.outcome).toBe('llm-review');
   });
 
+  it('accepts a single corroborated candidate by proving it, without spending the model call', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    // The board slug names the employer too, so the candidate carries the provider
+    // nomination and that corroboration, and scores inside the middle band.
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'), NOW);
+    let modelCalls = 0;
+    const infer = async (): Promise<OpenAIJsonResult> => {
+      modelCalls += 1;
+      throw new Error('the model must not be consulted for a corroborated candidate');
+    };
+    // A provider nomination plus the page naming the employer is two independent
+    // signals on one candidate, and the domain proves the rest.
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/acme/jobs/1': () => html(
+        '<!doctype html><html><head><title>Software Engineering Intern at Acme</title></head></html>',
+      ),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      'https://acme.com/': () => html('<!doctype html><html><head><title>Acme — industrial supplies</title></head></html>'),
+      [IMAGE_URL]: () => webp(),
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2.bucket, {
+        LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'sk-test',
+      }), NOW, { ...DEPENDENCIES(fetchImpl), infer },
+    );
+
+    expect(result.resolved).toBe(1);
+    expect(modelCalls).toBe(0);
+    expect((await icons.context('acme'))?.websiteDomain).toBe('acme.com');
+    const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+    expect(events.find((event) => event.event === 'company_icon_resolution_domain_confirmed'))
+      .toMatchObject({ domain: 'acme.com' });
+  });
+
   it('publishes a below-floor tie-break only when the domain itself names the employer', async () => {
     // The real model answers correctly at 0.8 far more often than it answers at all
     // above 0.90, so a below-floor selection is verified against the domain instead of

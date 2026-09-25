@@ -62,7 +62,7 @@ function fromEnvironment(name: string, dotenvKey = name): string | undefined {
 // only the publishable token authorizes `img.logo.dev`. Either may be provisioned
 // under a second name, so both spellings are read.
 const logoDevToken = fromEnvironment('LOGO_DEV_TOKEN') ?? fromEnvironment('LOGO_SECRET_KEY');
-const logoDevImageToken = fromEnvironment('LOGO_DEV_IMAGE_TOKEN') ?? fromEnvironment('LOGO_DEV_PUBLISHABLE_TOKEN');
+const logoDevImageToken = fromEnvironment('LOGO_DEV_IMAGE_TOKEN') ?? fromEnvironment('LOGO_DEV_PUBLISHABLE_KEY') ?? fromEnvironment('LOGO_DEV_PUBLISHABLE_TOKEN');
 const credentials = {
   ...(logoDevToken ? { logoDevToken } : {}),
   ...(logoDevImageToken ? { logoDevImageToken } : {}),

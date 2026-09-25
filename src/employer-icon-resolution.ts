@@ -459,6 +459,21 @@ export function parseIconTieBreakDecision(value: unknown): IconTieBreakDecision 
     confidence, evidenceIds: [...new Set(evidenceIds.map((id) => (id as string).trim()))], reason: reason.trim() };
 }
 
+/**
+ * The candidates our own evidence already corroborates: not rejected, and carrying
+ * two or more independent evidence ids. A single candidate in this state is
+ * unambiguous by our own rules — there is nothing to choose between — so it is the
+ * one case where a domain can be accepted by proving it, without asking the model at
+ * all. Measured on the live catalog, two of three remaining monograms in a 23-employer
+ * sample were exactly this: one provider nomination plus the page naming the employer,
+ * with the correct domain confirmed by its own title.
+ */
+export function corroboratedIconCandidates(
+  submitted: readonly IconCandidateScore[],
+): IconCandidateScore[] {
+  return submitted.filter((candidate) => !candidate.rejected && candidate.evidenceIds.length >= 2);
+}
+
 export interface IconTieBreakAcceptance {
   accepted: boolean;
   domain?: string;

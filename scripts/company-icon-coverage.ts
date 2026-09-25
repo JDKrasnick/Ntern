@@ -31,8 +31,10 @@
  * real page fetches, real Logo.dev search and image endpoints, and the bounded model
  * call when a key is present — and reports how many employers would publish an icon.
  * Credentials come from the environment or `.env`: `LOGO_DEV_TOKEN` (or
- * `LOGO_SECRET_KEY`) for search, `LOGO_DEV_IMAGE_TOKEN` (or
- * `LOGO_DEV_PUBLISHABLE_TOKEN`) for images, `BRANDFETCH_CLIENT_ID`, `OPENAI_KEY`.
+ * `LOGO_SECRET_KEY`) for search, and for images `LOGO_DEV_IMAGE_TOKEN` (or
+ * `LOGO_DEV_PUBLISHABLE_KEY`, or `LOGO_DEV_PUBLISHABLE_TOKEN`); a `.env` that carries
+ * only the account's own names works unchanged. Also `BRANDFETCH_CLIENT_ID` and
+ * `OPENAI_KEY`.
  * `--sample <n>` limits the run so a provider quota is not spent on a first look.
  */
 
@@ -43,8 +45,8 @@ import {
   bannerAssetShapeUsable, iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls,
 } from '../src/employer-icon-discovery.js';
 import {
-  ICON_PAGE_REQUEST_HEADERS, diagnoseEmployerIcon, type EmployerIconDiagnostic,
-  type EmployerIconProviderCredentials,
+  ICON_PAGE_REQUEST_HEADERS, diagnoseEmployerIcon, probeLogoDevImage,
+  type EmployerIconDiagnostic, type EmployerIconProviderCredentials,
 } from '../cloudflare/employer-icon-resolver.js';
 import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
 import type { HostResolver } from '../src/employer/safe-network.js';
@@ -75,7 +77,10 @@ function fromEnvironment(name: string): string | undefined {
  * `img.logo.dev`, and the wrong one there returns 401.
  */
 const logoDevToken = fromEnvironment('LOGO_DEV_TOKEN') ?? fromEnvironment('LOGO_SECRET_KEY');
-const logoDevImageToken = fromEnvironment('LOGO_DEV_IMAGE_TOKEN') ?? fromEnvironment('LOGO_DEV_PUBLISHABLE_TOKEN');
+const configuredImageToken = fromEnvironment('LOGO_DEV_IMAGE_TOKEN');
+const configuredPublishableKey = fromEnvironment('LOGO_PUBLISHABLE_KEY');
+const configuredPublishableToken = fromEnvironment('LOGO_DEV_PUBLISHABLE_TOKEN');
+const logoDevImageToken = configuredImageToken ?? configuredPublishableKey ?? configuredPublishableToken;
 const brandfetchClientId = fromEnvironment('BRANDFETCH_CLIENT_ID');
 const openAiKey = fromEnvironment('OPENAI_KEY') ?? fromEnvironment('OPENAI_API_KEY');
 
@@ -263,6 +268,8 @@ async function resolveCohort(entries: readonly CohortEntry[], credentials: Emplo
   interface Row {
     platform: string; employer: string; outcome: string; domain?: string; published: boolean;
     providers: Record<string, string>; path: string; tieBreak: string; proposal: string;
+    /** Whether Logo.dev's image endpoint has a logo for each domain it nominated. */
+    providerImages: Record<string, boolean>;
     /** What the model answered, so a refused decision can be judged rather than assumed. */
     modelDomain?: string | null; modelConfidence?: number;
   }
@@ -275,9 +282,20 @@ async function resolveCohort(entries: readonly CohortEntry[], credentials: Emplo
         seed: seedFor(entry), credentials, deps: { resolver: nodeResolver },
         ...(openAiKey ? { tieBreakApiKey: openAiKey } : {}),
       });
+      // The provider's own ceiling, independent of any decision: for the domains it
+      // nominated, does its image endpoint actually have a logo? This is the number
+      // that says whether a provider can carry an employer at all.
+      const providerImages: Record<string, boolean> = {};
+      if (credentials.logoDevImageToken) {
+        for (const domain of diagnostic.logoDevDomains.slice(0, 2)) {
+          const probe = await probeLogoDevImage(domain, credentials.logoDevImageToken, { resolver: nodeResolver });
+          providerImages[domain] = probe.available;
+        }
+      }
       const proposal = diagnostic.proposal?.reasonCode ?? 'not-called';
       const tieBreak = diagnostic.tieBreak ? (diagnostic.tieBreak.accepted ? 'accepted' : `declined:${diagnostic.tieBreak.reasonCode}`) : 'not-called';
-      const path = diagnostic.decision.outcome === 'resolved' ? 'score'
+      const path = diagnostic.confirmedDomain ? 'proof'
+        : diagnostic.decision.outcome === 'resolved' ? 'score'
         : diagnostic.tieBreak?.accepted === true ? 'tie-break'
           : proposal === 'verified' ? 'proposal' : 'none';
       results.push({
@@ -285,7 +303,7 @@ async function resolveCohort(entries: readonly CohortEntry[], credentials: Emplo
         outcome: diagnostic.decision.outcome,
         ...(diagnostic.decision.selectedDomain ? { domain: diagnostic.decision.selectedDomain } : {}),
         published: path !== 'none' && diagnostic.imageVerified === true,
-        providers: providerOutcomesOf(diagnostic), path, tieBreak, proposal,
+        providers: providerOutcomesOf(diagnostic), path, tieBreak, proposal, providerImages,
         ...(diagnostic.tieBreak?.decision ? {
           modelDomain: diagnostic.tieBreak.decision.officialDomain,
           modelConfidence: diagnostic.tieBreak.decision.confidence,
@@ -306,6 +324,9 @@ async function resolveCohort(entries: readonly CohortEntry[], credentials: Emplo
   console.log(`  below-floor model confidences: ${tally(belowFloor.map((row) => String(row.modelConfidence)))}`);
   console.log(`  below-floor answers: ${belowFloor.map((row) => `${row.employer}->${row.modelDomain}@${row.modelConfidence}`).join(', ')}`);
   console.log(`  provider outcomes: ${tally(results.flatMap((row) => Object.entries(row.providers).map(([name, outcome]) => `${name}:${outcome}`)))}`);
+  const nominated = results.flatMap((row) => Object.entries(row.providerImages));
+  console.log(`  logo.dev image for a nominated domain: ${nominated.filter(([, has]) => has).length}/${nominated.length} domains`
+    + ` across ${results.filter((row) => Object.keys(row.providerImages).length).length} employers`);
   console.log(`  unmatched (no image for the accepted domain): ${tally(results.filter((row) => row.path !== 'none' && !row.published).map((row) => `${row.path}:${row.providers['logo-dev'] ?? 'n/a'}`))}`);
   console.log(`  undecided: ${tally(results.filter((row) => row.path === 'none').map((row) => `${row.outcome}:${row.proposal}`))}`);
   writeFileSync('/tmp/icon-resolve-results.json', JSON.stringify(results, null, 1));

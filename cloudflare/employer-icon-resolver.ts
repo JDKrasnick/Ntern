@@ -20,7 +20,7 @@ import {
   iconTextMatchesEmployer, iconTieBreakSchema, isIconTransportHost, parseIconTieBreakDecision,
   tenantCorroboratesEmployer, employerNamesDomain, employerDistinctiveTerms, officialIconProvenance,
   plausibleEmployerName, providerNameMatchesEmployer, parseIconProposal, iconProposalSchema,
-  acceptIconAssetPick, parseIconAssetPick, iconAssetPickSchema,
+  acceptIconAssetPick, parseIconAssetPick, iconAssetPickSchema, corroboratedIconCandidates,
   ICON_PROPOSAL_MINIMUM_CONFIDENCE,
   type IconCandidateScore, type IconDomainCandidate, type IconDomainDecision, type IconEvidenceSignal,
   type IconTieBreakDecision, type EmployerIconSeed,
@@ -76,9 +76,11 @@ export const ICON_PAGE_REQUEST_HEADERS: Record<string, string> = {
   accept: 'text/html,application/xhtml+xml',
 };
 const tieBreakSchemaName = 'company_icon_domain_resolution';
+/** A domain decision confirms at most this many corroborated candidates by fetching them. */
+const MAX_CONFIRMATION_PROBES = 3;
 
 /**
- * The two Logo.dev credentials, from either name an operator may have provisioned.
+ * The two Logo.dev credentials, from any name an operator may have provisioned.
  *
  * They are not interchangeable: the secret key authorizes the name search
  * (`Authorization: Bearer`), and only the account's publishable token authorizes
@@ -90,10 +92,12 @@ export function logoDevCredentials(env: {
   LOGO_DEV_TOKEN?: string;
   LOGO_DEV_IMAGE_TOKEN?: string;
   LOGO_SECRET_KEY?: string;
+  LOGO_DEV_PUBLISHABLE_KEY?: string;
   LOGO_DEV_PUBLISHABLE_TOKEN?: string;
 }): { logoDevToken?: string; logoDevImageToken?: string } {
   const logoDevToken = env.LOGO_DEV_TOKEN ?? env.LOGO_SECRET_KEY;
-  const logoDevImageToken = env.LOGO_DEV_IMAGE_TOKEN ?? env.LOGO_DEV_PUBLISHABLE_TOKEN;
+  const logoDevImageToken = env.LOGO_DEV_IMAGE_TOKEN
+    ?? env.LOGO_DEV_PUBLISHABLE_KEY ?? env.LOGO_DEV_PUBLISHABLE_TOKEN;
   return {
     ...(logoDevToken ? { logoDevToken } : {}),
     ...(logoDevImageToken ? { logoDevImageToken } : {}),
@@ -117,6 +121,7 @@ export interface EmployerIconResolverEnvironment {
   LOGO_DEV_IMAGE_TOKEN?: string;
   /** Accepted aliases, so provisioning by either name works. */
   LOGO_SECRET_KEY?: string;
+  LOGO_DEV_PUBLISHABLE_KEY?: string;
   LOGO_DEV_PUBLISHABLE_TOKEN?: string;
   /** Brandfetch client ID; used for in-memory corroboration only. */
   BRANDFETCH_CLIENT_ID?: string;
@@ -334,6 +339,25 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
     return acceptSelectedDomain({ ...input, context, seed, decision, gathered, providers, attempt, at });
   }
   if (decision.outcome === 'llm-review') {
+    // A corroborated candidate is decided by proof, before spending the employer's
+    // model call at all: the proof is the same one a proposal needs, so a domain can
+    // never be accepted here that a proposal could not have justified.
+    const confirmed = await confirmCorroboratedDomain({ decision, displayName: context.displayName, declaredName, deps });
+    if (confirmed) {
+      console.log(JSON.stringify({
+        event: 'company_icon_resolution_domain_confirmed', canonicalEmployerId: context.id,
+        domain: confirmed.domain, evidenceIds: confirmed.evidenceIds, score: confirmed.score,
+      }));
+      return acceptSelectedDomain({
+        ...input, context, seed, gathered, providers, attempt, at,
+        decision: {
+          outcome: 'resolved', scores: decision.scores,
+          selectedDomain: confirmed.domain, selectedScore: confirmed.score,
+          reason: `the domain confirmed itself against ${confirmed.evidenceIds.length} independent signals`,
+        },
+        selectedSource: 'corroborated',
+      });
+    }
     const escalation = await escalateToTieBreak({ ...input, context, seed, decision, gathered, providers, attempt, at, declaredName });
     if (escalation) return escalation;
   }
@@ -381,7 +405,7 @@ interface AcceptInput extends ResolveTaskInput {
   /** The employer name the ATS board declares, when it is usable and differs. */
   declaredName?: string;
   /** Records which source produced the accepted domain. */
-  selectedSource?: 'logo-dev' | 'proposed';
+  selectedSource?: 'logo-dev' | 'proposed' | 'corroborated';
   /** Present when a tie-breaker chose this domain, so the review record can show what it cited. */
   tieBreak?: { citedEvidenceIds: readonly string[]; inputTokens: number; outputTokens: number; reasonCode: string };
 }
@@ -585,6 +609,39 @@ interface TieBreakOutcome {
      selectedSource: 'proposed',
    });
  }
+
+/**
+ * The one candidate our evidence already corroborates, proven against its own domain.
+ *
+ * The candidates our own evidence corroborates — not rejected, two or more independent
+ * evidence ids — are the ones the resolver can decide without asking the model: each is
+ * fetched and required to name the employer in its own metadata, the same proof a
+ * proposal needs. Exactly one of them confirming is a decision; two confirming is a real
+ * tie, which stays with the model. A provider often nominates a domain *and* a near
+ * miss ("replit.com" and "asdf.xyz"), so requiring a single corroborated candidate would
+ * hand those employers to the model for no gain.
+ *
+ * Shared by the sweep and the diagnostic so neither can report a decision the other
+ * would not reach.
+ */
+async function confirmCorroboratedDomain(input: {
+  decision: IconDomainDecision;
+  displayName: string;
+  declaredName?: string;
+  deps: EmployerIconResolverDependencies;
+}): Promise<{ domain: string; score: number; evidenceIds: readonly string[] } | undefined> {
+  const { decision, displayName, declaredName, deps } = input;
+  if (decision.outcome !== 'llm-review') return undefined;
+  // Bounded: a decision needs at most a few probes, and the cost is one fetch each.
+  const corroborated = corroboratedIconCandidates(decision.scores).slice(0, MAX_CONFIRMATION_PROBES);
+  const confirmed: Array<{ domain: string; score: number; evidenceIds: readonly string[] }> = [];
+  for (const candidate of corroborated) {
+    if (await verifyProposedDomain(candidate.domain, displayName, declaredName, deps)) {
+      confirmed.push({ domain: candidate.domain, score: candidate.score, evidenceIds: candidate.evidenceIds });
+    }
+  }
+  return confirmed.length === 1 ? confirmed[0] : undefined;
+}
 
 /** What one proposal attempt concluded, and why, whether or not it was usable. */
 export interface IconProposalOutcome {
@@ -1132,7 +1189,7 @@ interface ImageProbe {
  * Confirms a real raster logo exists for the domain. `fallback=404` is what
  * distinguishes a genuine logo from Logo.dev's generated monogram tile.
  */
-async function probeLogoDevImage(
+export async function probeLogoDevImage(
   domain: string,
   token: string,
   deps: EmployerIconResolverDependencies,
@@ -1593,6 +1650,8 @@ export interface EmployerIconDiagnostic {
   logoDevDomains: string[];
   brandfetchDomains: string[];
   decision: IconDomainDecision;
+  /** Set when the decision came from proving a corroborated candidate, not the model. */
+  confirmedDomain?: { domain: string; score: number; evidenceIds: string[] };
   imageVerified?: boolean;
   tieBreak?: TieBreakOutcome & { called: true };
   /** Present when the candidate set was empty and one bounded call proposed a domain. */
@@ -1616,7 +1675,8 @@ export async function diagnoseEmployerIcon(input: {
   const providers = await lookupProviderDomains(seed, credentials, deps, declaredName);
   const decision = decideIconDomain(iconCandidates(seed, context, gathered, providers, declaredName));
   const submitted = decision.scores.filter((candidate) => !candidate.rejected).slice(0, 5);
-  const tieBreak = decision.outcome === 'llm-review' && input.tieBreakApiKey && submitted.length
+  const confirmed = await confirmCorroboratedDomain({ decision, displayName: input.seed.displayName, ...(declaredName ? { declaredName } : {}), deps });
+  const tieBreak = !confirmed && decision.outcome === 'llm-review' && input.tieBreakApiKey && submitted.length
     ? { called: true as const, ...await runIconTieBreak({ seed, gathered, submitted, apiKey: input.tieBreakApiKey, deps }) }
     : undefined;
   // Nothing to rank: the live sweep asks once for a domain and then proves it, so the
@@ -1630,6 +1690,14 @@ export async function diagnoseEmployerIcon(input: {
     ? (await probeLogoDevImage(verifiedDomain, credentials.logoDevImageToken, deps)).available
     : undefined;
   return {
+    ...(confirmed ? {
+      decision: {
+        outcome: 'resolved' as const, scores: decision.scores,
+        selectedDomain: confirmed.domain, selectedScore: confirmed.score,
+        reason: `the domain confirmed itself against ${confirmed.evidenceIds.length} independent signals`,
+      },
+      confirmedDomain: { ...confirmed, evidenceIds: [...confirmed.evidenceIds] },
+    } : { decision }),
     seed,
     ...(gathered ? { finalUrl: gathered.finalUrl } : {}),
     redirectHosts: gathered?.redirectHosts ?? [],
