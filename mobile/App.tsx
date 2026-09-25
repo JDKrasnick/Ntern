@@ -5645,7 +5645,7 @@ type ResumeProfileCard = { profileId: string; name: string; tags: string[]; bank
 type ResumeSourceDocument = { documentId: string; fileName: string; contentType: string; createdAt: string };
 type ResumeTemplateCard = { template: ResumeTemplateId; displayName: string; description: string; bestFor: string };
 type ResumeProfileRecommendationCard = { profileId: string; score: number; explanation: string };
-type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; failureReason?: "posting-unavailable" | "rate-limited" | "unreadable-page"; revision: number; updatedAt: string };
+type ResumeImportCard = { importId: string; canonicalUrl: string; title?: string; source?: "catalog" | "cache" | "manual"; description: string; status: "ready" | "pending" | "manual-description-required"; failureReason?: "posting-unavailable" | "rate-limited" | "unreadable-page"; revision: number; updatedAt: string };
 const resumeImportFailureMessages: Record<string, string> = {
   "posting-unavailable": "This posting looks closed or removed.",
   "rate-limited": "The employer is rate-limiting requests right now.",
@@ -6089,6 +6089,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
       .then(async (value) => {
         setJobImport(value); setDraft(undefined); setActiveChange(0); setBestExistingRecommendation(undefined);
         if (value.status === "ready") {
+          setJobUrl("");
           const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
           const best = bestSavedResumeRecommendation(result.recommendations, profiles);
           if (best) { setBestExistingRecommendation(best); setSelectedProfileId(best.profileId); setResumeSourceMode("existing"); }
@@ -6101,18 +6102,23 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
     if (!jobImport || !manualDescription.trim() || resumeBusy) return;
     if (!signedIn) {
       setJobImport({ ...jobImport, description: manualDescription.trim(), status: "ready", revision: jobImport.revision + 1, updatedAt: new Date().toISOString() });
+      setManualDescription(""); setJobUrl("");
       return;
     }
     setResumeBusy(true);
     void api<ResumeImportCard>(`/me/resume-jobs/${jobImport.importId}/manual-description`, token, { method: "POST", body: JSON.stringify({ revision: jobImport.revision, description: manualDescription }) })
       .then(async (value) => {
-        setJobImport(value);
+        setJobImport(value); setManualDescription(""); setJobUrl("");
         const result = await api<{ recommendations: ResumeProfileRecommendationCard[] }>(`/me/resume-jobs/${value.importId}/recommendation`, token, { method: "POST" });
         const best = bestSavedResumeRecommendation(result.recommendations, profiles);
         if (best) { setBestExistingRecommendation(best); setSelectedProfileId(best.profileId); setResumeSourceMode("existing"); }
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that description."))
       .finally(() => setResumeBusy(false));
+  };
+  const resetImport = () => {
+    setJobImport(undefined); setJobUrl(""); setManualDescription("");
+    setDraft(undefined); setBestExistingRecommendation(undefined); setActiveChange(0);
   };
   const createDraft = () => {
     if (!jobImport || jobImport.status !== "ready" || resumeBusy || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length)) return;
@@ -6182,6 +6188,17 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
       </View>
 
       <View style={styles.resumePrimaryTask}>
+        {jobImport?.status === "ready" ? (
+          <View accessibilityLabel={`Job description loaded: ${jobImport.title ?? jobImport.canonicalUrl}`} style={styles.resumeImportSuccess}>
+            <View style={styles.resumeImportSuccessBadge}><Ionicons name="checkmark" size={22} color={colors.onDark} /></View>
+            <View style={styles.resumeImportSuccessCopy}>
+              <Text style={styles.resumeImportSuccessEyebrow}>Job description loaded</Text>
+              <Text numberOfLines={1} style={styles.resumeImportSuccessTitle}>{jobImport.title ?? jobImport.canonicalUrl}</Text>
+              <Text numberOfLines={1} style={styles.resumeImportSuccessDetail}>{jobImport.description.length.toLocaleString()} characters · {jobImport.source === "manual" ? "from your pasted description" : "fetched from the employer"}</Text>
+            </View>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Change job" onPress={resetImport} style={styles.resumeCompactAction}><Text style={styles.resumeCompactActionText}>Change role</Text></TouchableOpacity>
+          </View>
+        ) : <>
         <Text style={styles.sectionTitle}>Paste the job URL</Text>
         <Text style={styles.resumeSectionDescription}>Use the employer’s official posting.</Text>
         <View style={[styles.resumeUrlRow, !desktop && styles.resumeUrlRowStacked]}>
@@ -6203,7 +6220,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
           <ActionButton label={resumeBusy ? "Checking…" : "Continue"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
         </View>
         {bankError && (bankManagerOpen || jobImport || jobUrl.trim()) ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
-        {jobImport && jobImport.status !== "ready" ? (
+        {jobImport ? (
           <View style={styles.resumeManualFallback}>
             <Text style={styles.inputLabel}>Paste the job description to continue</Text>
             <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : `${resumeImportFailureMessages[jobImport.failureReason ?? ""] ?? "We couldn't read the public page."} Paste the description to continue.`} Pasted text stays in your private resume workspace.</Text>
@@ -6211,6 +6228,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
             <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
           </View>
         ) : null}
+        </>}
         <View style={styles.resumeBaseAccessRow}>
           <Text style={styles.resumeBaseAccessStatus}>{bankLoading ? "Checking your saved experience…" : bankItems.length ? `${bankItems.length} ${signedIn ? "saved" : "session"} source item${bankItems.length === 1 ? "" : "s"}` : signedIn ? "No saved experience yet" : "No session experience yet"}</Text>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel={bankManagerOpen ? "Close master bank editor" : "Edit master bank"} aria-expanded={bankManagerOpen} onPress={() => setBankManagerOpen((value) => !value)} style={styles.resumeCompactAction}>
@@ -9088,6 +9106,12 @@ const styles = StyleSheet.create({
   catalogPaginationRetryText: { color: colors.signal, fontSize: 14, fontWeight: "700" },
   resumeContent: { maxWidth: 1360, paddingBottom: 44, paddingTop: 24, width: "100%" },
   resumePrimaryTask: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 900, padding: 20 },
+  resumeImportSuccess: { alignItems: "center", backgroundColor: colors.successSoft, borderColor: colors.successBorder, borderRadius: 14, borderWidth: 1, flexDirection: "row", gap: 14, padding: 16 },
+  resumeImportSuccessBadge: { alignItems: "center", backgroundColor: colors.success, borderRadius: 999, height: 40, justifyContent: "center", width: 40 },
+  resumeImportSuccessCopy: { flex: 1, minWidth: 0 },
+  resumeImportSuccessEyebrow: { color: colors.success, fontSize: 11, fontWeight: "800", letterSpacing: 0.6, textTransform: "uppercase" },
+  resumeImportSuccessTitle: { color: colors.ink, fontSize: 17, fontWeight: "700", marginTop: 2 },
+  resumeImportSuccessDetail: { color: colors.muted, fontSize: 13, marginTop: 2 },
   resumeHeadingRow: { gap: 12, marginBottom: 18 },
   resumeHeadingRowWide: { alignItems: "flex-start", flexDirection: "row", justifyContent: "space-between" },
   resumeHeadingCopy: { flex: 1, minWidth: 0 },
