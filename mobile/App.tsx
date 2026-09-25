@@ -5684,14 +5684,20 @@ function bestSavedResumeRecommendation(recommendations: ResumeProfileRecommendat
 
 /** One rendered résumé page with a rectangle over the focused change. The frame
  * keeps the page aspect ratio so the normalized box lines up with the image. */
-function ResumeRenderedPage({ uri, box, label, empty }: { uri?: string; box?: ResumeReviewBox; label: string; empty: string }) {
+function ResumeRenderedPage({ uri, box, kind, label, empty }: { uri?: string; box?: ResumeReviewBox; kind: "added" | "removed"; label: string; empty: string }) {
   const percent = (value: number) => `${Number((value * 100).toFixed(3))}%` as `${number}%`;
   return (
     <View style={styles.resumePageFrame}>
       {uri
         ? <Image accessibilityLabel={label} source={{ uri }} resizeMode="contain" style={styles.resumePageImage} />
         : <View style={styles.resumePagePlaceholder}><Text style={styles.resumePreviewCaption}>{empty}</Text></View>}
-      {uri && box ? <View pointerEvents="none" style={[styles.resumePageHighlight, { height: percent(box.h), left: percent(box.x), top: percent(box.y), width: percent(box.w) }]} /> : null}
+      {uri && box ? (
+        <View
+          pointerEvents="none"
+          accessibilityLabel={kind === "added" ? "Added line" : "Original line"}
+          style={[styles.resumePageHighlight, kind === "added" ? styles.resumePageHighlightAdded : styles.resumePageHighlightRemoved, { height: percent(box.h), left: percent(box.x), top: percent(box.y), width: percent(box.w) }]}
+        />
+      ) : null}
     </View>
   );
 }
@@ -6823,7 +6829,7 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
           {desktop ? (
             <View style={styles.resumeReviewPagePane}>
               <Text style={styles.resumeDiffType}>Your résumé</Text>
-              <ResumeRenderedPage uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
+              <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
             </View>
           ) : null}
           {(desktop || reviewMode === "changes") ? (
@@ -6877,7 +6883,7 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
               ) : previewArtifact ? (
                 <>
                   <Text style={styles.resumeDiffType}>Tailored proposal</Text>
-                  <ResumeRenderedPage uri={previewImage} box={focusedRow?.afterBox} label="Proposed résumé page" empty="Rendering the proposal…" />
+                  <ResumeRenderedPage kind="added" uri={previewImage} box={focusedRow?.afterBox} label="Proposed résumé page" empty="Rendering the proposal…" />
                   <View style={styles.resumeArtifactActions}>
                     <Text style={styles.resumePreviewCaption}>{previewArtifact.pageCount ?? 1} page{previewArtifact.pageCount === 1 ? "" : "s"} · proposed résumé, not final</Text>
                     <ActionButton label={previewBusy ? "Rendering…" : "Refresh preview"} variant="secondary" onPress={renderPreview} disabled={previewBusy} />
@@ -9433,7 +9439,9 @@ const styles = StyleSheet.create({
   resumePageFrame: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, maxWidth: 460, overflow: "hidden", position: "relative", width: "100%" },
   resumePageImage: { height: "100%", width: "100%" },
   resumePagePlaceholder: { alignItems: "center", flex: 1, justifyContent: "center", padding: 16 },
-  resumePageHighlight: { backgroundColor: "rgba(14,116,144,0.16)", borderColor: "rgba(14,116,144,0.6)", borderRadius: 3, borderWidth: 1.5, position: "absolute" },
+  resumePageHighlight: { borderRadius: 3, borderWidth: 1.5, position: "absolute" },
+  resumePageHighlightAdded: { backgroundColor: "rgba(6,118,71,0.14)", borderColor: "rgba(6,118,71,0.65)" },
+  resumePageHighlightRemoved: { backgroundColor: "rgba(180,35,24,0.12)", borderColor: "rgba(180,35,24,0.6)" },
   resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1.2, minWidth: 0, overflow: "hidden" },
   resumeBoardHead: { alignItems: "center", borderBottomColor: colors.separator, borderBottomWidth: 1, flexDirection: "row", gap: 10, justifyContent: "space-between", padding: 12 },
   resumeModeToggle: { borderColor: colors.border, borderRadius: 10, borderWidth: 1, flexDirection: "row", overflow: "hidden" },
