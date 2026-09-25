@@ -5941,8 +5941,6 @@ function ResumeReviewLoading({ caption }: { caption: string }) {
 
 function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: string; onSignIn?: () => void; onDraftingChange?: (value: boolean) => void }) {  const { width } = useWindowDimensions();
   const desktop = width >= 700;
-  /** Two pages only sit beside each other when each still gets a readable width. */
-  const sideBySide = width >= 1800;
   const signedIn = Boolean(token);
   const [jobUrl, setJobUrl] = useState("");
   const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
@@ -6888,30 +6886,17 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
         {draft ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
           {desktop ? (
             <>
-              {sideBySide ? (
-                <View style={styles.resumeReviewPagesRow}>
-                  <View style={styles.resumeReviewPagePane}>
-                    <Text style={styles.resumeDiffType}>Your résumé</Text>
-                    <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
-                  </View>
-                  <View style={styles.resumeReviewPagePane}>
-                    <Text style={styles.resumeDiffType}>Tailored proposal</Text>
-                    {reviewPreviewNode}
-                  </View>
+              <View style={styles.resumePagesArea}>
+                <View style={styles.resumeReviewPagePane}>
+                  <Text style={styles.resumeDiffType}>Your résumé</Text>
+                  <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
                 </View>
-              ) : (
-                <>
-                  <View style={styles.resumePageFull}>
-                    <Text style={styles.resumeDiffType}>Your résumé</Text>
-                    <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
-                  </View>
-                  <View style={styles.resumePageFull}>
-                    <Text style={styles.resumeDiffType}>Tailored proposal</Text>
-                    {reviewPreviewNode}
-                  </View>
-                </>
-              )}
-              <View style={styles.resumeReviewBoardRow}>{reviewBoardNode}</View>
+                <View style={styles.resumeReviewPagePane}>
+                  <Text style={styles.resumeDiffType}>Tailored proposal</Text>
+                  {reviewPreviewNode}
+                </View>
+              </View>
+              <View style={styles.resumeEditPanel}>{reviewBoardNode}</View>
             </>
           ) : reviewMode === "changes" ? (
             <View style={styles.resumeReviewBoardRow}>{reviewBoardNode}</View>
@@ -9471,9 +9456,9 @@ const styles = StyleSheet.create({
   resumePageHighlight: { borderRadius: 3, borderWidth: 1.5, position: "absolute" },
   resumePageHighlightAdded: { backgroundColor: "rgba(6,118,71,0.14)", borderColor: "rgba(6,118,71,0.65)" },
   resumePageHighlightRemoved: { backgroundColor: "rgba(180,35,24,0.12)", borderColor: "rgba(180,35,24,0.6)" },
-  resumeDecision: { alignItems: "center", flexDirection: "row", gap: 16, padding: 14 },
+  resumeDecision: { gap: 10, padding: 14 },
   resumeDecisionMain: { flex: 1, gap: 6, minWidth: 0 },
-  resumeDecisionSide: { alignItems: "flex-end", gap: 8 },
+  resumeDecisionSide: { alignItems: "stretch", flexDirection: "row", gap: 8, justifyContent: "space-between" },
   resumeDecisionHead: { alignItems: "center", flexDirection: "row", gap: 8 },
   resumeDecisionWhere: { color: colors.muted, flex: 1, fontSize: 12, fontWeight: "700", minWidth: 0 },
   resumeDecisionStep: { color: colors.muted, fontSize: 11, fontWeight: "800" },
@@ -9486,7 +9471,7 @@ const styles = StyleSheet.create({
   resumeMiniRow: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", gap: 10, paddingHorizontal: 14, paddingVertical: 10 },
   resumeMiniRowCurrent: { backgroundColor: colors.signalSoft },
   resumeMiniLines: { flex: 1, gap: 2, minWidth: 0 },
-  resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 860, overflow: "hidden", width: "100%" },
+  resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, overflow: "hidden", width: "100%" },
   resumeBoardHead: { alignItems: "center", borderBottomColor: colors.separator, borderBottomWidth: 1, flexDirection: "row", gap: 10, justifyContent: "space-between", padding: 12 },
   resumeModeToggle: { borderColor: colors.border, borderRadius: 10, borderWidth: 1, flexDirection: "row", overflow: "hidden" },
   resumeModeButton: { backgroundColor: colors.surface, paddingHorizontal: 12, paddingVertical: 6 },
@@ -9721,7 +9706,9 @@ const styles = StyleSheet.create({
   resumeSegmentText: { color: colors.muted, fontSize: 13, fontWeight: "700" },
   resumeSegmentTextActive: { color: colors.ink },
   resumeReviewWorkspace: { marginTop: 15 },
-  resumeReviewWorkspaceWide: { gap: 18 },
+  resumeReviewWorkspaceWide: { alignItems: "flex-start", flexDirection: "row", gap: 16 },
+  resumePagesArea: { flex: 1, flexDirection: "row", gap: 14, minWidth: 0 },
+  resumeEditPanel: { flexShrink: 0, width: 360 },
   resumeChangePanel: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1.1, minWidth: 0, padding: 18 },
   resumeDiffHeader: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
   resumeChangeCounter: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.8, textTransform: "uppercase" },
