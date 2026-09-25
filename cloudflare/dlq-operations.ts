@@ -357,6 +357,13 @@ export async function applyDlq(input: { planId?: unknown; repairToken?: unknown;
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(randomUUID(), plan.plan_id, plan.queue_name, item.message_id, item.payload_hash, item.logical_key,
             plan.operation, classification, diagnostic, plan.reason, actor, now.toISOString()),
+        // The message has left the DLQ, so its failure-ledger row is no longer
+        // pending: resolve it with the disposition. Otherwise a reconciled DLQ
+        // leaves rows unresolved until the 30-day cleanup and the operator
+        // "unresolved" signal keeps counting work a human already handled.
+        dependencies.db.prepare(`UPDATE queue_failure_events SET resolved_at = ?
+          WHERE queue_name = ? AND message_id = ? AND resolved_at IS NULL`)
+          .bind(now.toISOString(), queueName(plan.queue_name, false), item.message_id),
       ]);
     }
     const conflicts = pending.filter((entry) => failed.has(entry.selection.ref)).map((entry) => entry.item.message_id);

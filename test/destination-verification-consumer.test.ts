@@ -6,6 +6,7 @@ import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { enqueueDueDestinationVerifications, processDestinationVerificationBatch, sendAdmissionOperationalAlert, sendShadowBudgetAlert,
   type DestinationVerificationEnvironment,
   type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
+import { recordQueueFailure } from '../cloudflare/dlq-operations.js';
 import type { D1Database, D1PreparedStatement, MessageBatch, QueueMessage, R2Bucket } from '../cloudflare/types.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import type { Internship, SourceOccurrence } from '../src/types.js';
@@ -39,7 +40,8 @@ function subject() {
     '0012_destination_verification_schedule.sql', '0015_role_metadata_enrichment.sql', '0016_role_metadata_repair_plans.sql',
     '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
     '0020_shadow_extraction.sql', '0021_shadow_extraction_fencing.sql',
-    '0022_shadow_extraction_cache_expiry.sql', '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql']) {
+    '0022_shadow_extraction_cache_expiry.sql', '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql',
+    '0015_dlq_recovery.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   const db = sqliteD1(database);
@@ -62,8 +64,8 @@ function role(): { job: Internship; reference: SourceOccurrence } {
   } };
 }
 
-function queueMessage(body: DestinationVerificationMessage) {
-  return { id: 'message-1', body, ack: vi.fn(), retry: vi.fn() } satisfies QueueMessage<DestinationVerificationMessage>;
+function queueMessage(body: DestinationVerificationMessage, attempts?: number) {
+  return { id: 'message-1', ...(attempts === undefined ? {} : { attempts }), body, ack: vi.fn(), retry: vi.fn() } satisfies QueueMessage<DestinationVerificationMessage>;
 }
 
 function environment(db: D1Database): DestinationVerificationEnvironment {
@@ -95,6 +97,32 @@ describe('destination verification queue consumer', () => {
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(queued.retry).not.toHaveBeenCalled();
     expect(newPage).not.toHaveBeenCalled();
+  });
+
+  it('resolves the pending failure-ledger row when a retried delivery settles', async () => {
+    const { database, db, operations } = subject();
+    await operations.recordVerificationCompletion('already-complete', '2026-08-30T00:00:00Z');
+    const { reference } = role();
+    const body = { version: 1, jobId: 'job-1', sourceId: reference.sourceId,
+      externalId: reference.externalId!, candidateUrl: reference.applyUrl, providerIdentity: {
+        provider: 'greenhouse', sourceId: reference.sourceId, sourceUrl: reference.sourceUrl,
+        tenant: 'acme', postingId: reference.externalId,
+      }, reason: 'daily-retry', queuedAt: '2026-08-30T00:00:00Z', idempotencyKey: 'already-complete' } as const;
+    // A prior attempt of this exact message failed before it settled, so the
+    // consumer ledgered it. This delivery finds the work already complete and
+    // acks, which must clear the row instead of leaving it pending forever.
+    await recordQueueFailure({ db, queueName: 'intern-notifs-destination-verification', messageId: 'message-1', attempts: 1,
+      body, error: new Error('Protocol error: Connection closed.'), now: new Date('2026-08-30T00:00:10Z') });
+    expect(database.prepare("SELECT resolved_at FROM queue_failure_events WHERE message_id = 'message-1'").get())
+      .toMatchObject({ resolved_at: null });
+
+    const queued = queueMessage(body, 2);
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, environment(db));
+
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(queued.retry).not.toHaveBeenCalled();
+    expect(database.prepare("SELECT resolved_at FROM queue_failure_events WHERE message_id = 'message-1'").get())
+      .toMatchObject({ resolved_at: expect.any(String) });
   });
 
   it('discards a live message when the occurrence URL and posting identity have changed', async () => {
