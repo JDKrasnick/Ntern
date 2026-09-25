@@ -5840,17 +5840,19 @@ function ResumeReviewBoard({ rows, changes, busy, mode, onMode, focusId, onFocus
         </ScrollView>
       ) : null}
       <View style={styles.resumeBoardFoot}>
-        <View style={styles.resumeBoardDots}>
-          {changes.map((change, index) => (
-            <TouchableOpacity key={change.changeId} accessibilityRole="button" accessibilityLabel={`Go to change ${index + 1}`} onPress={() => onFocus(change.changeId)} style={[styles.resumeBoardDot, change.decision === "accepted" && styles.resumeBoardDotAccepted, change.decision === "rejected" && styles.resumeBoardDotRejected, change.changeId === focusId && styles.resumeBoardDotCurrent]} />
-          ))}
+        <View style={styles.resumeBoardFootRow}>
+          <View style={styles.resumeBoardDots}>
+            {changes.map((change, index) => (
+              <TouchableOpacity key={change.changeId} accessibilityRole="button" accessibilityLabel={`Go to change ${index + 1}`} onPress={() => onFocus(change.changeId)} style={[styles.resumeBoardDot, change.decision === "accepted" && styles.resumeBoardDotAccepted, change.decision === "rejected" && styles.resumeBoardDotRejected, change.changeId === focusId && styles.resumeBoardDotCurrent]} />
+            ))}
+          </View>
+          <View style={styles.resumeBoardStepper}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous change" onPress={() => onMove(-1)} style={styles.resumeBoardStepButton}><Ionicons name="chevron-back" size={16} color={colors.muted} /></TouchableOpacity>
+            <Text style={styles.resumeCardStep}>{order.length ? position + 1 : 0} / {order.length}</Text>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Next change" onPress={() => onMove(1)} style={styles.resumeBoardStepButton}><Ionicons name="chevron-forward" size={16} color={colors.muted} /></TouchableOpacity>
+          </View>
         </View>
         <Text style={styles.resumeBoardKeys}>← → move · Y apply · N keep · V view</Text>
-        <View style={styles.resumeBoardStepper}>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous change" onPress={() => onMove(-1)} style={styles.resumeBoardStepButton}><Ionicons name="chevron-back" size={16} color={colors.muted} /></TouchableOpacity>
-          <Text style={styles.resumeCardStep}>{order.length ? position + 1 : 0} / {order.length}</Text>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Next change" onPress={() => onMove(1)} style={styles.resumeBoardStepButton}><Ionicons name="chevron-forward" size={16} color={colors.muted} /></TouchableOpacity>
-        </View>
       </View>
     </View>
   );
@@ -5939,8 +5941,10 @@ function ResumeReviewLoading({ caption }: { caption: string }) {
   );
 }
 
-function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: string; onSignIn?: () => void; onDraftingChange?: (value: boolean) => void }) {  const { width } = useWindowDimensions();
+function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: string; onSignIn?: () => void; onDraftingChange?: (value: boolean) => void }) {  const { width, height } = useWindowDimensions();
   const desktop = width >= 700;
+  /** Fixed height so the pages scroll on the left while the panel stays put. */
+  const reviewPaneHeight = Math.max(460, height - 320);
   const signedIn = Boolean(token);
   const [jobUrl, setJobUrl] = useState("");
   const [bankItems, setBankItems] = useState<ResumeBankCard[]>([]);
@@ -6886,17 +6890,19 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
         {draft ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
           {desktop ? (
             <>
-              <View style={styles.resumePagesArea}>
-                <View style={styles.resumeReviewPagePane}>
-                  <Text style={styles.resumeDiffType}>Your résumé</Text>
-                  <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
-                </View>
-                <View style={styles.resumeReviewPagePane}>
-                  <Text style={styles.resumeDiffType}>Tailored proposal</Text>
-                  {reviewPreviewNode}
-                </View>
+              <View style={[styles.resumePagesArea, { height: reviewPaneHeight }]}>
+                <ScrollView contentContainerStyle={styles.resumePagesContent} nestedScrollEnabled style={styles.resumePagesScroller}>
+                  <View style={styles.resumeReviewPagePane}>
+                    <Text style={styles.resumeDiffType}>Your résumé</Text>
+                    <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
+                  </View>
+                  <View style={styles.resumeReviewPagePane}>
+                    <Text style={styles.resumeDiffType}>Tailored proposal</Text>
+                    {reviewPreviewNode}
+                  </View>
+                </ScrollView>
               </View>
-              <View style={styles.resumeEditPanel}>{reviewBoardNode}</View>
+              <View style={[styles.resumeEditPanel, { height: reviewPaneHeight }]}>{reviewBoardNode}</View>
             </>
           ) : reviewMode === "changes" ? (
             <View style={styles.resumeReviewBoardRow}>{reviewBoardNode}</View>
@@ -9448,7 +9454,7 @@ const styles = StyleSheet.create({
   resumePageFull: { alignItems: "center", gap: 8, width: "100%" },
 
   resumeReviewBoardRow: { alignItems: "center", width: "100%" },
-  resumeReviewPagePane: { alignItems: "center", flex: 1, gap: 10, maxWidth: 1400, minWidth: 0 },
+  resumeReviewPagePane: { alignItems: "center", gap: 8, minWidth: 0, width: "100%" },
   resumeReviewPreviewPane: { alignItems: "center", gap: 10, justifyContent: "center", minWidth: 0 },
   resumePageFrame: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, maxWidth: 1400, overflow: "hidden", position: "relative", width: "100%" },
   resumePageImage: { height: "100%", width: "100%" },
@@ -9471,7 +9477,7 @@ const styles = StyleSheet.create({
   resumeMiniRow: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", gap: 10, paddingHorizontal: 14, paddingVertical: 10 },
   resumeMiniRowCurrent: { backgroundColor: colors.signalSoft },
   resumeMiniLines: { flex: 1, gap: 2, minWidth: 0 },
-  resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, overflow: "hidden", width: "100%" },
+  resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1, overflow: "hidden", minHeight: 0, width: "100%" },
   resumeBoardHead: { alignItems: "center", borderBottomColor: colors.separator, borderBottomWidth: 1, flexDirection: "row", gap: 10, justifyContent: "space-between", padding: 12 },
   resumeModeToggle: { borderColor: colors.border, borderRadius: 10, borderWidth: 1, flexDirection: "row", overflow: "hidden" },
   resumeModeButton: { backgroundColor: colors.surface, paddingHorizontal: 12, paddingVertical: 6 },
@@ -9479,7 +9485,8 @@ const styles = StyleSheet.create({
   resumeModeButtonText: { color: colors.muted, fontSize: 12, fontWeight: "700" },
   resumeModeButtonTextActive: { color: colors.signal },
   resumeBoardList: { maxHeight: 620 },
-  resumeBoardFoot: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", gap: 10, justifyContent: "space-between", padding: 12 },
+  resumeBoardFoot: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 8, padding: 12 },
+  resumeBoardFootRow: { alignItems: "center", flexDirection: "row", gap: 10, justifyContent: "space-between" },
   resumeBoardDots: { flexDirection: "row", gap: 6 },
   resumeBoardDot: { backgroundColor: colors.border, borderRadius: 999, height: 9, width: 9 },
   resumeBoardDotAccepted: { backgroundColor: colors.success },
@@ -9487,7 +9494,7 @@ const styles = StyleSheet.create({
   resumeBoardDotCurrent: { borderColor: colors.signal, borderWidth: 2 },
   resumeBoardStepper: { alignItems: "center", flexDirection: "row", gap: 8 },
   resumeBoardStepButton: { alignItems: "center", borderColor: colors.border, borderRadius: 9, borderWidth: 1, height: 28, justifyContent: "center", width: 30 },
-  resumeBoardKeys: { color: colors.muted, fontSize: 11, paddingBottom: 10, paddingHorizontal: 12, textAlign: "center" },
+  resumeBoardKeys: { color: colors.muted, fontSize: 11, textAlign: "center" },
   resumeChip: { borderRadius: 6, fontSize: 10, fontWeight: "800", letterSpacing: 0.6, overflow: "hidden", paddingHorizontal: 8, paddingVertical: 3, textTransform: "uppercase" },
   resumeChipRewrite: { backgroundColor: colors.signalSoft, color: colors.signal },
   resumeChipAdd: { backgroundColor: colors.successSoft, color: colors.success },
@@ -9707,8 +9714,10 @@ const styles = StyleSheet.create({
   resumeSegmentTextActive: { color: colors.ink },
   resumeReviewWorkspace: { marginTop: 15 },
   resumeReviewWorkspaceWide: { alignItems: "flex-start", flexDirection: "row", gap: 16 },
-  resumePagesArea: { flex: 1, flexDirection: "row", gap: 14, minWidth: 0 },
-  resumeEditPanel: { flexShrink: 0, width: 360 },
+  resumePagesArea: { flex: 1, minWidth: 0 },
+  resumePagesScroller: { flex: 1 },
+  resumePagesContent: { gap: 18, paddingRight: 4 },
+  resumeEditPanel: { flexShrink: 0, width: 380 },
   resumeChangePanel: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, flex: 1.1, minWidth: 0, padding: 18 },
   resumeDiffHeader: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
   resumeChangeCounter: { color: colors.signal, fontSize: 12, fontWeight: "800", letterSpacing: 0.8, textTransform: "uppercase" },
