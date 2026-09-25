@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { dropDuplicateAdditions, normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { dropDuplicateAdditions, keepValidResumeChanges, normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 import { attachResumeReviewBoxes, buildResumeReviewRows } from './resume-review.js';
@@ -1048,8 +1048,17 @@ export function createApiHandler(dependencies: ApiDependencies) {
                 } catch (firstError) {
                   const feedback = firstError instanceof Error ? firstError.message : 'The changes did not match the required schema.';
                   changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, feedback }));
-                  validateResumeChanges(changes, selected);
-                  generation = { outcome: 'model-retry' };
+                  try {
+                    validateResumeChanges(changes, selected);
+                    generation = { outcome: 'model-retry' };
+                  } catch (secondError) {
+                    // A single ungrounded change should not cost the whole draft.
+                    const salvaged = keepValidResumeChanges(changes, selected);
+                    if (!salvaged.length) throw secondError;
+                    validateResumeChanges(salvaged, selected);
+                    changes = salvaged;
+                    generation = { outcome: 'model-retry' };
+                  }
                 }
                 if (!changes.length) {
                   changes = resumeDraftChanges(imported, selected);

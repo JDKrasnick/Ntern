@@ -475,6 +475,19 @@ export function dropDuplicateAdditions(changes: readonly ResumeChange[], bank: r
   });
 }
 
+/** Keep only the changes that satisfy the contract on their own. Generation uses
+ * this as a last resort before the deterministic fallback: a model that gets one
+ * evidence id wrong should not cost the whole draft. Set-level rules (duplicate
+ * additions, identical added lines) are handled by `dropDuplicateAdditions`,
+ * which runs first. */
+export function keepValidResumeChanges(changes: readonly ResumeChange[], bank: readonly ResumeBankItem[]): ResumeChange[] {
+  const kept: ResumeChange[] = [];
+  for (const change of changes) {
+    try { validateResumeChanges([change], [...bank]); kept.push(change); } catch { /* drop this change */ }
+  }
+  return kept;
+}
+
 export function validateResumeChanges(changes: ResumeChange[], bank: ResumeBankItem[]): void {
   validateResumeBankGraph(bank);
   const verified = new Map(bank.filter((item) => item.verified).map((item) => [item.bankItemId, item]));

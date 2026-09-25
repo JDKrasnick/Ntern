@@ -28,6 +28,13 @@ describe('resume model output parsing', () => {
     expect(parseResumeChanges({ choices: [{ message: { content: JSON.parse(content) } }] })).toHaveLength(1);
   });
 
+  it('caps a long change list instead of rejecting it', () => {
+    const changes = parseResumeChanges({ response: JSON.stringify({ changes: Array.from({ length: 15 }, (_, index) => ({
+      type: 'rewrite', target: { kind: 'role', bankItemId: `b${index}` }, section: 'Experience', original: 'Built app', suggestion: 'Built app', evidenceIds: ['b'], reason: 'r',
+    })) }) });
+    expect(changes).toHaveLength(12);
+  });
+
   it('rejects malformed or unsupported output before evidence validation', () => {
     expect(() => parseResumeChanges({ response: '{"changes":[{"type":"invent","section":"X"}]}' })).toThrow('Model change schema is invalid');
     expect(() => parseResumeChanges({ response: 'not json' })).toThrow();
