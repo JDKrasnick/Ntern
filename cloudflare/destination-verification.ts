@@ -556,7 +556,20 @@ export async function processDestinationVerificationBatch(
         }
         let apiAcquisition = candidateOnly ? undefined : await acquireMetadata(message.providerIdentity, message.candidateUrl);
         if (naturalProviderShadow) {
-          if (!apiAcquisition?.artifact?.text) throw new Error('Natural provider shadow artifact is unavailable');
+          // A completed acquisition that yields no artifact means the board no
+          // longer publishes this posting, or its identity changed, so the
+          // shadow re-check is obsolete: settle it instead of throwing. Only a
+          // failed or incomplete acquisition — a transient host or network
+          // condition — stays on the retry path so a shadow input is not lost.
+          // Throwing on the obsolete case dead-lettered every provider-shadow
+          // message for a posting that had left the board.
+          if (!apiAcquisition?.artifact?.text) {
+            if (apiAcquisition?.outcome === 'failed' || apiAcquisition?.outcome === 'incomplete') {
+              throw new Error('Natural provider shadow artifact is unavailable');
+            }
+            await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
+            continue;
+          }
           // The producer hashes the canonical persisted title, which may be a
           // reviewed repair of the provider's raw title.
           const title = reference.title;
