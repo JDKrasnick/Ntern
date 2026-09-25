@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
+  ActivityIndicator,
   Alert,
   Animated,
   AppState,
@@ -5774,8 +5775,54 @@ function ResumeSavedProfilesGhost() {  const motionAllowed = useContext(MotionAl
 let pendingResumeImportUrl: string | undefined;
 let pendingResumeReturn = false;
 
-function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: () => void }) {
-  const { width } = useWindowDimensions();
+/** Full-screen skeleton shown while a draft is generated. Two page-shaped ghost
+ * blocks read as "a résumé is being prepared" instead of a bare spinner, and the
+ * pulse lets the user see the work is alive during a long model call. */
+function ResumeReviewLoading({ caption }: { caption: string }) {
+  const motionAllowed = useContext(MotionAllowedContext);
+  const pulse = useRef(new Animated.Value(0.45)).current;
+  useEffect(() => {
+    if (!motionAllowed) {
+      pulse.setValue(0.7);
+      return undefined;
+    }
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 1, duration: 850, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 0.45, duration: 850, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [motionAllowed, pulse]);
+  const lines = ["100%", "84%", "94%", "72%", "88%", "62%"] as const;
+  return (
+    <View accessibilityLabel={caption} style={styles.resumeLoading}>
+      <View style={styles.resumeLoadingHead}>
+        <ActivityIndicator color={colors.signal} />
+        <Text style={styles.resumeLoadingCaption}>{caption}</Text>
+      </View>
+      <View style={styles.resumeLoadingPages}>
+        {[0, 1].map((page) => (
+          <View key={page} style={styles.resumeLoadingPage}>
+            <Animated.View style={[styles.resumeLoadingPageBody, { opacity: pulse }]}>
+              <View style={[styles.resumeLoadingBar, styles.resumeLoadingName]} />
+              <View style={[styles.resumeLoadingBar, styles.resumeLoadingMeta]} />
+              {[0, 1, 2].map((section) => (
+                <View key={section} style={styles.resumeLoadingSection}>
+                  <View style={[styles.resumeLoadingBar, styles.resumeLoadingHeading]} />
+                  {lines.slice(0, section === 0 ? 6 : 4).map((width, index) => (
+                    <View key={index} style={[styles.resumeLoadingBar, styles.resumeLoadingLine, { width }]} />
+                  ))}
+                </View>
+              ))}
+            </Animated.View>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: () => void }) {  const { width } = useWindowDimensions();
   const desktop = width >= 700;
   const signedIn = Boolean(token);
   const [jobUrl, setJobUrl] = useState("");
@@ -5820,6 +5867,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   const [documents, setDocuments] = useState<ResumeSourceDocument[]>([]);
   const [reviewRows, setReviewRows] = useState<ResumeReviewRow[]>([]);
   const [reviewLoading, setReviewLoading] = useState(false);
+  const [drafting, setDrafting] = useState(false);
   const [editingChangeId, setEditingChangeId] = useState<string>();
   const [editValue, setEditValue] = useState("");
   // Once a job is loaded the paste card has served its purpose, so collapse it
@@ -5859,7 +5907,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   const renderPreview = () => {
     if (!draft || previewBusy) return;
     setPreviewBusy(true); setBankError(undefined);
-    void api<{ artifact: ResumeArtifactCard }>(`/me/resume-drafts/${encodeURIComponent(draft.draftId)}/preview`, token, { method: "POST" })
+    void api<{ artifact: ResumeArtifactCard }>(`/me/resume-drafts/${encodeURIComponent(draft.draftId)}/preview`, token, { method: "POST", timeoutMs: 60_000 })
       .then(async ({ artifact: rendered }) => {
         setPreviewArtifact(rendered);
         setPreviewImage(await loadResumeArtifactPreview(rendered.artifactId, 1, token));
@@ -6171,15 +6219,16 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
       return;
     }
     setResumeBusy(true);
+    setDrafting(true);
     const request = async () => {
       const sourceProfile = resumeSourceMode === "ideal" ? await syncTechnicalBase() : profiles.find((profile) => profile.profileId === selectedProfileId);
       if (!sourceProfile) throw new Error("Select a saved resume base before creating a review.");
       if (sourceProfile.template !== selectedTemplate) {
         const updated = await api<ResumeProfileCard>(`/me/resume-profiles/${sourceProfile.profileId}`, token, { method: "PATCH", body: JSON.stringify({ revision: sourceProfile.revision, template: selectedTemplate }) });
         setProfiles((all) => all.map((profile) => profile.profileId === updated.profileId ? updated : profile));
-        return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: updated.profileId }) });
+        return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", timeoutMs: 90_000, body: JSON.stringify({ importId: jobImport.importId, profileId: updated.profileId }) });
       }
-      return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", body: JSON.stringify({ importId: jobImport.importId, profileId: sourceProfile.profileId }) });
+      return api<ResumeDraftCard>("/me/resume-drafts", token, { method: "POST", timeoutMs: 90_000, body: JSON.stringify({ importId: jobImport.importId, profileId: sourceProfile.profileId }) });
     };
     void request()
       .then((value) => {
@@ -6187,12 +6236,12 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
         setSubscription((currentPlan) => currentPlan ? { ...currentPlan, usage: { ...currentPlan.usage, used: currentPlan.usage.used + 1, remaining: Math.max(0, currentPlan.usage.remaining - 1) } } : currentPlan);
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't create a grounded draft."))
-      .finally(() => setResumeBusy(false));
+      .finally(() => { setResumeBusy(false); setDrafting(false); });
   };
   const finalizeDraft = () => {
     if (!draft || draft.status === "finalized" || resumeBusy) return;
     setResumeBusy(true);
-    void api<{ draft: ResumeDraftCard; artifact?: ResumeArtifactCard }>(`/me/resume-drafts/${draft.draftId}/finalize`, token, { method: "POST", body: JSON.stringify({ revision: draft.revision }) })
+    void api<{ draft: ResumeDraftCard; artifact?: ResumeArtifactCard }>(`/me/resume-drafts/${draft.draftId}/finalize`, token, { method: "POST", timeoutMs: 60_000, body: JSON.stringify({ revision: draft.revision }) })
       .then(async (result) => {
         setDraft(result.draft);
         if (!result.artifact) return;
@@ -6212,6 +6261,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   };
 
   return (
+    <View style={styles.resumeRoot}>
     <ScrollView style={styles.list} contentContainerStyle={styles.resumeContent}>
       <View style={[styles.resumeHeadingRow, desktop && styles.resumeHeadingRowWide]}>
         <View style={styles.resumeHeadingCopy}>
@@ -6272,7 +6322,6 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
           </View>
           <ActionButton label={!signedIn ? "Sign in to continue" : resumeBusy ? "Checking…" : "Continue"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
         </View>
-        {bankError && (bankManagerOpen || jobImport || jobUrl.trim()) ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
         {jobImport ? (
           <View style={styles.resumeManualFallback}>
             <Text style={styles.inputLabel}>Paste the job description to continue</Text>
@@ -6298,6 +6347,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
         ) : null}
       </View>
       </Animated.View>
+      {bankError ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
 
       {!bankManagerOpen && signedIn ? <View style={styles.resumeSavedSection}>
         <View style={styles.resumeSavedHeader}>
@@ -6573,7 +6623,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
               <TouchableOpacity accessibilityRole="button" onPress={() => setPlanExpanded(true)} style={styles.resumeCompactAction}><Text style={styles.resumeCompactActionText}>See plans</Text></TouchableOpacity>
             </View>
           ) : (
-            <ActionButton label={!signedIn ? "Sign in to run review" : resumeSourceMode === "ideal" ? "Build ideal review" : "Review best match"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length) || resumeBusy} />
+            <ActionButton label={!signedIn ? "Sign in to run review" : resumeBusy ? "Drafting…" : resumeSourceMode === "ideal" ? "Build ideal review" : "Review best match"} onPress={createDraft} disabled={!jobImport || jobImport.status !== "ready" || (resumeSourceMode === "existing" && !selectedProfileId) || (resumeSourceMode === "ideal" && !bankItems.length) || resumeBusy} />
           )}
         </View>
       </View> : null}
@@ -6674,6 +6724,12 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
         </View>
       </View> : null}
     </ScrollView>
+    {drafting ? (
+      <View style={styles.resumeLoadingOverlay}>
+        <ResumeReviewLoading caption="Reading the job and drafting your résumé…" />
+      </View>
+    ) : null}
+    </View>
   );
 }
 
@@ -9180,6 +9236,20 @@ const styles = StyleSheet.create({
   resumeContent: { maxWidth: 1360, paddingBottom: 44, paddingTop: 24, width: "100%" },
   resumePrimaryTask: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 900, padding: 20 },
   resumePrimaryTaskShell: { overflow: "hidden" },
+  resumeRoot: { flex: 1 },
+  resumeLoadingOverlay: { ...StyleSheet.absoluteFillObject, alignItems: "center", backgroundColor: colors.canvas, justifyContent: "center", padding: 24, zIndex: 20 },
+  resumeLoading: { alignItems: "center", gap: 22, maxWidth: 1100, width: "100%" },
+  resumeLoadingHead: { alignItems: "center", flexDirection: "row", gap: 10 },
+  resumeLoadingCaption: { color: colors.ink, fontSize: 16, fontWeight: "700" },
+  resumeLoadingPages: { flexDirection: "row", flexWrap: "wrap", gap: 24, justifyContent: "center", width: "100%" },
+  resumeLoadingPage: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 12, borderWidth: 1, maxWidth: 340, minWidth: 230, padding: 22, width: "42%" },
+  resumeLoadingPageBody: { flex: 1, gap: 14 },
+  resumeLoadingBar: { backgroundColor: colors.separator, borderRadius: 4, height: 8 },
+  resumeLoadingName: { alignSelf: "center", height: 13, width: "56%" },
+  resumeLoadingMeta: { alignSelf: "center", height: 7, width: "36%" },
+  resumeLoadingSection: { gap: 7, marginTop: 6 },
+  resumeLoadingHeading: { height: 9, width: "32%" },
+  resumeLoadingLine: { height: 6 },
   resumeJobBanner: { alignItems: "center", backgroundColor: colors.signalSoft, borderColor: "#BCE3EA", borderRadius: 12, borderWidth: 1, flexDirection: "row", gap: 10, marginTop: 12, maxWidth: 900, paddingHorizontal: 12, paddingVertical: 9 },
   resumeJobBannerTitle: { color: colors.ink, flex: 1, fontSize: 14, fontWeight: "700", minWidth: 0 },
   resumeImportSuccess: { alignItems: "center", backgroundColor: colors.successSoft, borderColor: colors.successBorder, borderRadius: 14, borderWidth: 1, flexDirection: "row", gap: 14, padding: 16 },

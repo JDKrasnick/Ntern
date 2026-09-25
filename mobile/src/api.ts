@@ -52,10 +52,13 @@ async function fetchOnce(path: string, token: string, init: RequestInit, timeout
   }
 }
 
-export async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
+export async function api<T>(path: string, token: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   if (!baseUrl) throw new ApiError('The service is not configured.', 'unexpected');
-  const read = isReadRequest(init);
-  const deadline = Date.now() + requestTimeoutMs;
+  // Model generation and PDF compilation take far longer than a normal read, so
+  // those callers pass a larger budget than the default.
+  const { timeoutMs = requestTimeoutMs, ...requestInit } = init;
+  const read = isReadRequest(requestInit);
+  const deadline = Date.now() + timeoutMs;
   let response: Response | undefined;
   let lastTransportError: ApiError | undefined;
   for (let attempt = 0; attempt <= (read ? readRetryDelaysMs.length : 0); attempt += 1) {
@@ -65,7 +68,7 @@ export async function api<T>(path: string, token: string, init: RequestInit = {}
       await wait(delay);
     }
     try {
-      response = await fetchOnce(path, token, init, Math.max(1, deadline - Date.now()));
+      response = await fetchOnce(path, token, requestInit, Math.max(1, deadline - Date.now()));
       lastTransportError = undefined;
     } catch (error) {
       if (!(error instanceof ApiError)) throw error;

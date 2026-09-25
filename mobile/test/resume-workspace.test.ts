@@ -100,11 +100,25 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('profileId: sourceProfile.profileId');
   });
 
-  it('keeps server-owned plans collapsed and disables new tailoring at the monthly limit', () => {
+  it('keeps server-owned plans collapsed and explains the monthly limit', () => {
     expect(app).toContain('api<ResumeSubscriptionCard>("/me/subscription", token)');
     expect(app).toContain('planExpanded ? "Hide plan details" : "Plan details"');
     expect(app).toContain('subscription && planExpanded ? <View style={[styles.resumePlanGrid');
     expect(app).toContain('App Store purchase coming next');
-    expect(app).toContain('subscription?.usage.remaining === 0 ? "Monthly limit reached"');
+    expect(app).toContain('{signedIn && subscription?.usage.remaining === 0 ? (');
+    expect(app).toContain('accessibilityLabel="Monthly review limit reached"');
+    expect(app).toContain('You&apos;ve used all {subscription.usage.limit} free reviews this month');
+    expect(app).toContain('See plans');
+  });
+
+  it('shows a two-page ghost skeleton while the review is generated', () => {
+    expect(app).toContain('function ResumeReviewLoading');
+    expect(app).toContain('Reading the job and drafting your résumé…');
+    expect(app).toContain('const [drafting, setDrafting] = useState(false);');
+    expect(app).toContain('setDrafting(true);');
+    expect(app).toContain('setResumeBusy(false); setDrafting(false);');
+    expect(app).toContain('{drafting ? (');
+    expect(app).toContain('resumeLoadingPages');
+    expect(app).toContain('timeoutMs: 90_000');
   });
 });
