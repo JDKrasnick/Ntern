@@ -309,7 +309,7 @@ npx wrangler secret put LOGO_DEV_IMAGE_TOKEN --config wrangler.api.jsonc   # ser
 npx wrangler secret put BRANDFETCH_CLIENT_ID --config wrangler.ingestion.jsonc   # corroboration: consensus is the automatic path
 ```
 
-The `api` Worker needs the publishable token only, because it renders an accepted domain's image on a cache miss; without it an accepted domain falls back to the employer's own site asset and then to a monogram. Aliases are accepted for either credential — `LOGO_SECRET_KEY` for the search key, and `LOGO_DEV_PUBLISHABLE_KEY` or `LOGO_DEV_PUBLISHABLE_TOKEN` for the image token — so a checkout that already carries one of those names needs no rename. `npm run coverage:icons -- --resolve` reports which of the four secrets it can see before it spends anything.
+The `api` Worker needs the publishable token only, because it renders an accepted domain's image on a cache miss; without it an accepted domain falls back to the employer's own site asset and then to a monogram. Aliases are accepted for either credential — `LOGO_SECRET_KEY` for the search key, and `LOGO_PUBLISHABLE_KEY`, `LOGO_DEV_PUBLISHABLE_KEY`, or `LOGO_DEV_PUBLISHABLE_TOKEN` for the image token — so a checkout that already carries one of those names needs no rename. `npm run coverage:icons -- --resolve` reports which of the four secrets it can see before it spends anything.
 
 `OPENAI_KEY` is needed only for the middle-band tie-breaker; without it the resolver records an unresolved decision and renders a monogram. Terraform sets `keep_bindings = ["secret_text"]`, so these secrets survive a deploy and never appear in a plan.
 
