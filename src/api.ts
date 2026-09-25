@@ -506,12 +506,17 @@ function resumeDraftChanges(job: ImportedJob, bankItems: ResumeBankItem[]): Resu
 
 /** Keeps a comprehensive Technical base out of the model context window while
  * retaining the source records with the strongest direct job-language match. */
-function resumeGenerationEvidence(job: ImportedJob, bankItems: ResumeBankItem[], limit = 80): ResumeBankItem[] {
+/** Selects the candidate slice sent to the model. Keyword overlap is the free
+ * fallback; a paid semantic score leads when present so candidates match the job
+ * by meaning. Every item is a candidate up to the limit, and the model makes the
+ * final call on rewrites, removals, and additions. */
+export function resumeGenerationEvidence(job: ImportedJob, bankItems: ResumeBankItem[], limit = 80, semanticScores: ReadonlyMap<string, number> = new Map()): ResumeBankItem[] {
   const jobWords = new Set(`${job.title ?? ''} ${job.company ?? ''} ${job.description}`.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? []);
   const ranked = bankItems.map((item, index) => ({
     item, index,
-    score: [...new Set(item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? [])].filter((word) => jobWords.has(word)).length,
-  })).filter(({ score }) => score > 0).sort((left, right) => right.score - left.score || left.index - right.index).map(({ item }) => item);
+    semantic: semanticScores.get(item.bankItemId) ?? 0,
+    keyword: [...new Set(item.content.toLowerCase().match(/[a-z][a-z0-9+#.-]{2,}/gu) ?? [])].filter((word) => jobWords.has(word)).length,
+  })).sort((left, right) => right.semantic - left.semantic || right.keyword - left.keyword || left.index - right.index).map(({ item }) => item);
   const byId = new Map(bankItems.map((item) => [item.bankItemId, item]));
   const selected = new Map<string, ResumeBankItem>();
   for (const item of ranked) {
@@ -984,7 +989,13 @@ export function createApiHandler(dependencies: ApiDependencies) {
             if (exhausted) return reply(402, exhausted);
             const allowed = new Set(profile.bankItemIds);
             const selected = bankItems.filter((item) => allowed.has(item.bankItemId) && item.verified);
-            const evidence = resumeGenerationEvidence(imported, selected);
+            // Light semantic search picks candidates when the plan allows; the
+            // model still decides which changes to propose.
+            let evidenceScores = new Map<string, number>();
+            if (selected.length && dependencies.resumeSemanticIndex && await semanticRankingEnabled(userId)) {
+              try { evidenceScores = await dependencies.resumeSemanticIndex.scores(userId, imported.description, selected.map((item) => item.bankItemId)); } catch { /* keyword ranking is the safe fallback */ }
+            }
+            const evidence = resumeGenerationEvidence(imported, selected, 80, evidenceScores);
             const generationStartedAt = Date.now();
             let changes: ResumeChange[];
             let generation: { outcome: 'model' | 'model-retry' | 'fallback'; reason?: string };
@@ -1016,9 +1027,21 @@ export function createApiHandler(dependencies: ApiDependencies) {
               changes = resumeDraftChanges(imported, selected);
               generation = { outcome: 'fallback', reason: error instanceof Error ? error.message : String(error) };
             }
-            // Outcomes are logged so a silent fallback rate is visible in logs.
-            console.log(JSON.stringify({ event: 'resume_draft_generation', outcome: generation.outcome, reason: generation.reason,
-              changes: changes.length, evidence: evidence.length, durationMs: Date.now() - generationStartedAt }));
+            // Outcomes are logged and emitted as a metric so a silent fallback
+            // rate is alertable rather than invisible.
+            const durationMs = Date.now() - generationStartedAt;
+            console.log(JSON.stringify({
+              _aws: {
+                Timestamp: Date.now(),
+                CloudWatchMetrics: [{
+                  Namespace: 'InternNotifs/Resume',
+                  Dimensions: [['outcome']],
+                  Metrics: [{ Name: 'DraftGeneration', Unit: 'Count' }, { Name: 'DraftGenerationDurationMs', Unit: 'Milliseconds' }],
+                }],
+              },
+              event: 'resume_draft_generation', outcome: generation.outcome, reason: generation.reason,
+              changes: changes.length, evidence: evidence.length, semanticCandidates: evidenceScores.size, durationMs,
+            }));
             const readabilityChanges = proposeResumeReadabilityChanges(imported, selected);
             const readabilityTargets = new Set(readabilityChanges.map((change) => change.target.bankItemId));
             changes = [...readabilityChanges, ...changes.filter((change) => !readabilityTargets.has(change.target.bankItemId))].slice(0, 12);
@@ -1084,10 +1107,23 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (previous.status === 'finalized') return reply(409, { message: 'Finalized resume drafts cannot be changed' });
           const body = parseBody(event);
           if (!Number.isInteger(body.revision) || body.revision !== previous.revision) return reply(409, { message: 'Resume draft changed; refresh and retry' });
-          if (body.decision !== 'accepted' && body.decision !== 'rejected') return reply(400, { message: 'decision must be accepted or rejected' });
-          if (!previous.changes.some((change) => change.changeId === changeId)) return reply(404, { message: 'Resume change not found' });
-          const decision = body.decision as NonNullable<ResumeChange['decision']>;
-          const changes = previous.changes.map((change) => change.changeId === changeId ? { ...change, decision } : change);
+          const target = previous.changes.find((change) => change.changeId === changeId);
+          if (!target) return reply(404, { message: 'Resume change not found' });
+          const hasDecision = body.decision !== undefined;
+          if (hasDecision && body.decision !== 'accepted' && body.decision !== 'rejected') return reply(400, { message: 'decision must be accepted or rejected' });
+          const hasSuggestion = body.suggestion !== undefined;
+          if (!hasDecision && !hasSuggestion) return reply(400, { message: 'decision or suggestion is required' });
+          if (hasSuggestion && target.type !== 'add' && target.type !== 'rewrite') return reply(400, { message: 'Only added or rewritten lines can be edited' });
+          const changes = previous.changes.map((change) => change.changeId === changeId
+            ? { ...change, ...(hasDecision ? { decision: body.decision as NonNullable<ResumeChange['decision']> } : {}), ...(hasSuggestion ? { suggestion: resumeText(body.suggestion, 'suggestion', 2_000) } : {}) }
+            : change);
+          if (hasSuggestion) {
+            // An edited line must still be grounded in its cited evidence.
+            const [profile, bank] = await Promise.all([dependencies.users.getResumeProfile(userId, previous.profileId), dependencies.users.listResumeBank(userId)]);
+            const allowed = new Set(profile?.bankItemIds ?? []);
+            try { validateResumeChanges(changes, bank.filter((item) => allowed.has(item.bankItemId) && item.verified)); }
+            catch (error) { return reply(400, { message: error instanceof Error ? error.message : 'The edited line is not supported by its evidence' }); }
+          }
           const updated: ResumeDraft = { ...previous, changes, status: 'reviewing', revision: previous.revision + 1, updatedAt: timestamp };
           if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           return reply(200, updated);

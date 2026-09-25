@@ -43,7 +43,9 @@ describe('resume review diff rows', () => {
     ] };
     const rows = buildResumeReviewRows(profile, applicant, draft, bank);
     const move = rows.find((row) => row.changeId === 'move-b');
-    expect(move).toMatchObject({ kind: 'change', type: 'move', before: 'Added type checking', after: 'Added type checking', note: 'Reordered', decision: 'accepted' });
+    expect(move).toMatchObject({ kind: 'change', type: 'move', before: 'Added type checking', after: 'Added type checking', note: 'Reordered', decision: 'accepted', moved: true });
+    // Every row carries a stable line id independent of its text.
+    expect(rows.every((row) => typeof row.lineId === 'string' && row.lineId.length > 0)).toBe(true);
     // The reordered bullet renders before its sibling.
     const bulletRows = rows.filter((row) => row.section === 'projects' && row.label === 'Compiler Lab').map((row) => row.after ?? row.before);
     expect(bulletRows.indexOf('Added type checking')).toBeLessThan(bulletRows.indexOf('Built a parser'));

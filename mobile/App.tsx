@@ -5648,7 +5648,7 @@ type ResumeProfileRecommendationCard = { profileId: string; score: number; expla
 type ResumeImportCard = { importId: string; canonicalUrl: string; description: string; status: "ready" | "pending" | "manual-description-required"; revision: number; updatedAt: string };
 type ResumeDraftCard = { draftId: string; changes: Array<{ changeId: string; type: "rewrite" | "add" | "remove" | "move"; target: ResumeBankRef; section: string; original?: string; suggestion?: string; evidenceIds: string[]; reason: string; decision?: "accepted" | "rejected" }>; revision: number; status: "reviewing" | "finalized" };
 type ResumeArtifactCard = { artifactId: string; pageCount?: number };
-type ResumeReviewRow = { rowId: string; kind: "context" | "change"; section: string; label: string; before?: string; after?: string; changeId?: string; type?: "rewrite" | "add" | "remove" | "move"; decision?: "accepted" | "rejected"; note?: string };
+type ResumeReviewRow = { rowId: string; lineId: string; kind: "context" | "change"; section: string; label: string; before?: string; after?: string; changeId?: string; type?: "rewrite" | "add" | "remove" | "move"; decision?: "accepted" | "rejected"; moved?: boolean; note?: string };
 type ResumeSubscriptionCard = {
   tier: "free" | "plus" | "pro";
   plan: { name: string; priceUsdMonthly: number; tailoredDraftsPerMonth: number };
@@ -5661,18 +5661,26 @@ function bestSavedResumeRecommendation(recommendations: ResumeProfileRecommendat
   return recommendations.find((recommendation) => savedIds.has(recommendation.profileId));
 }
 
-function ResumeReviewDiff({ rows, busy, onDecide }: { rows: ResumeReviewRow[]; busy: boolean; onDecide: (changeId: string, decision: "accepted" | "rejected") => void }) {
+function ResumeReviewDiff({ rows, busy, onDecide, editingChangeId, editValue, onEdit, onEditChange, onSaveEdit, onCancelEdit }: {
+  rows: ResumeReviewRow[]; busy: boolean;
+  onDecide: (changeId: string, decision: "accepted" | "rejected") => void;
+  editingChangeId?: string; editValue: string;
+  onEdit: (changeId: string, value: string) => void; onEditChange: (value: string) => void;
+  onSaveEdit: (changeId: string) => void; onCancelEdit: () => void;
+}) {
   let lastLabel = "";
   return (
     <View style={styles.resumeDiffBoard}>
       {rows.map((row) => {
         const changed = row.kind === "change";
+        const editable = changed && (row.type === "add" || row.type === "rewrite") && Boolean(row.changeId);
+        const editing = editingChangeId === row.changeId;
         const showLabel = row.label !== lastLabel;
         lastLabel = row.label;
         const leftChanged = changed && row.before !== undefined && row.before !== row.after;
         const rightChanged = changed && row.after !== undefined && row.before !== row.after;
         return (
-          <View key={row.rowId}>
+          <View key={row.lineId}>
             {showLabel ? <Text style={styles.resumeDiffRowLabel}>{row.label}</Text> : null}
             <View style={styles.resumeDiffRow}>
               <View style={[styles.resumeDiffCell, leftChanged && styles.resumeDiffCellRemoved, changed && row.before === undefined && styles.resumeDiffCellEmpty]}>
@@ -5688,13 +5696,29 @@ function ResumeReviewDiff({ rows, busy, onDecide }: { rows: ResumeReviewRow[]; b
                       <Ionicons name="close" size={12} color={row.decision === "rejected" ? colors.onDark : colors.muted} />
                     </TouchableOpacity>
                   </View>
-                ) : null}
+                ) : row.moved ? <Ionicons name="swap-vertical" size={15} color={colors.muted} /> : null}
               </View>
               <View style={[styles.resumeDiffCell, rightChanged && styles.resumeDiffCellAdded, changed && row.after === undefined && styles.resumeDiffCellEmpty]}>
-                {row.after !== undefined ? <Text style={[styles.resumeDiffLineText, rightChanged && styles.resumeDiffAddedText]}>{row.after}</Text> : null}
+                {editing ? (
+                  <TextInput value={editValue} onChangeText={onEditChange} multiline accessibilityLabel="Edit proposed line" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeDiffEditInput} />
+                ) : row.after !== undefined ? (
+                  <Text style={[styles.resumeDiffLineText, rightChanged && styles.resumeDiffAddedText]}>{row.after}</Text>
+                ) : null}
+                {editable && !editing ? (
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Edit proposed line" disabled={busy} onPress={() => onEdit(row.changeId!, row.after ?? "")} style={styles.resumeDiffEdit}>
+                    <Ionicons name="pencil" size={12} color={colors.signal} />
+                  </TouchableOpacity>
+                ) : null}
+                {editing ? (
+                  <View style={styles.resumeDiffEditActions}>
+                    <ActionButton label="Save" onPress={() => onSaveEdit(row.changeId!)} disabled={busy || !editValue.trim()} />
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cancel edit" disabled={busy} onPress={onCancelEdit}><Text style={styles.resumeKeepAll}>Cancel</Text></TouchableOpacity>
+                  </View>
+                ) : null}
               </View>
             </View>
-            {row.note ? <Text style={styles.resumeDiffNote}>{row.note}{row.type ? ` · ${row.type}` : ""}</Text> : null}
+            {row.moved ? <Text style={styles.resumeDiffNote}>Moved{row.type ? ` · ${row.type}` : ""}</Text>
+              : row.note ? <Text style={styles.resumeDiffNote}>{row.note}{row.type ? ` · ${row.type}` : ""}</Text> : null}
           </View>
         );
       })}
@@ -5773,6 +5797,8 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   const [documents, setDocuments] = useState<ResumeSourceDocument[]>([]);
   const [reviewRows, setReviewRows] = useState<ResumeReviewRow[]>([]);
   const [reviewLoading, setReviewLoading] = useState(false);
+  const [editingChangeId, setEditingChangeId] = useState<string>();
+  const [editValue, setEditValue] = useState("");
   const reviewed = draft?.changes.filter((change) => change.decision).length ?? 0;
   const decideChange = (changeId: string, decision: "accepted" | "rejected") => {
     if (!draft || resumeBusy) return;
@@ -5780,6 +5806,14 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
     void api<ResumeDraftCard>(`/me/resume-drafts/${draft.draftId}/changes/${changeId}`, token, { method: "PATCH", body: JSON.stringify({ revision: draft.revision, decision }) })
       .then((updated) => setDraft(updated))
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that decision."))
+      .finally(() => setResumeBusy(false));
+  };
+  const saveSuggestion = (changeId: string) => {
+    if (!draft || resumeBusy || !editValue.trim()) return;
+    setResumeBusy(true); setBankError(undefined);
+    void api<ResumeDraftCard>(`/me/resume-drafts/${draft.draftId}/changes/${changeId}`, token, { method: "PATCH", body: JSON.stringify({ revision: draft.revision, suggestion: editValue.trim() }) })
+      .then((updated) => { setDraft(updated); setEditingChangeId(undefined); })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that edit."))
       .finally(() => setResumeBusy(false));
   };
   const keepRemainingOriginals = () => {
@@ -6465,7 +6499,17 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
               {draft.changes.length ? (
                 reviewLoading && !reviewRows.length ? <Text style={styles.resumePreviewCaption}>Building the diff…</Text> : (
                   <ScrollView nestedScrollEnabled style={styles.resumeDiffScroller}>
-                    <ResumeReviewDiff rows={reviewRows} busy={resumeBusy} onDecide={decideChange} />
+                    <ResumeReviewDiff
+                      rows={reviewRows}
+                      busy={resumeBusy}
+                      onDecide={decideChange}
+                      editingChangeId={editingChangeId}
+                      editValue={editValue}
+                      onEdit={(changeId, value) => { setEditingChangeId(changeId); setEditValue(value); }}
+                      onEditChange={setEditValue}
+                      onSaveEdit={saveSuggestion}
+                      onCancelEdit={() => setEditingChangeId(undefined)}
+                    />
                   </ScrollView>
                 )
               ) : (
@@ -9224,6 +9268,9 @@ const styles = StyleSheet.create({
   resumeDiffReject: { alignItems: "center", borderColor: colors.border, borderRadius: 999, borderWidth: 1, height: 21, justifyContent: "center", width: 21 },
   resumeDiffRejectActive: { backgroundColor: colors.muted, borderColor: colors.muted },
   resumeDiffNote: { backgroundColor: colors.canvas, color: colors.muted, fontSize: 11, fontStyle: "italic", paddingHorizontal: 12, paddingVertical: 4 },
+  resumeDiffEdit: { alignItems: "center", alignSelf: "flex-end", backgroundColor: colors.signalSoft, borderRadius: 999, height: 22, justifyContent: "center", marginTop: 6, width: 22 },
+  resumeDiffEditInput: { backgroundColor: colors.surface, borderColor: colors.signal, borderRadius: 8, borderWidth: 1, color: colors.ink, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 12.5, lineHeight: 18, minHeight: 44, paddingHorizontal: 8, paddingVertical: 6 },
+  resumeDiffEditActions: { alignItems: "center", flexDirection: "row", gap: 10, marginTop: 6 },
   resumeEvidence: { alignItems: "center", flexDirection: "row", gap: 6, marginTop: 14 },
   resumeEvidenceText: { color: colors.signal, fontSize: 13, fontWeight: "700" },
   resumeReason: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },

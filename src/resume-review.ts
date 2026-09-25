@@ -10,6 +10,8 @@ export type ResumeReviewSection = 'education' | 'experience' | 'research' | 'pro
  * a decision the user can make. */
 export interface ResumeReviewRow {
   rowId: string;
+  /** Stable identity of the aligned line, independent of its text. */
+  lineId: string;
   kind: 'context' | 'change';
   section: ResumeReviewSection;
   /** Entry the line belongs to, so the UI can group headings with their lines. */
@@ -19,12 +21,16 @@ export interface ResumeReviewRow {
   changeId?: string;
   type?: ResumeChange['type'];
   decision?: 'accepted' | 'rejected';
+  /** True when the change moved the line to a different position. */
+  moved?: boolean;
   note?: string;
 }
 
 interface ReviewLine {
   key: string;
   slot: string;
+  /** Stable within one rendering even when duplicate text exists. */
+  lineId: string;
   section: ResumeReviewSection;
   label: string;
   text: string;
@@ -38,9 +44,13 @@ const toSection = (value: string): ResumeReviewSection => sections.has(value.toL
 
 function linesFor(document: ResumeDocument, order: ResumeReviewSection[]): ReviewLine[] {
   const lines: ReviewLine[] = [];
+  const slotCounts = new Map<string, number>();
   const push = (section: ResumeReviewSection, label: string, slot: string, text: string | undefined) => {
     const trimmed = (text ?? '').trim();
-    if (trimmed) lines.push({ key: `${slot}\u0000${trimmed}`, slot, section, label, text: trimmed });
+    if (!trimmed) return;
+    const occurrence = slotCounts.get(slot) ?? 0;
+    slotCounts.set(slot, occurrence + 1);
+    lines.push({ key: `${slot}\u0000${trimmed}`, slot, lineId: `${slot}#${occurrence}`, section, label, text: trimmed });
   };
   for (const section of order) {
     if (section === 'education') for (const entry of document.education) {
@@ -90,10 +100,10 @@ export function buildResumeReviewRows(profile: ResumeProfile, applicant: Applica
     if (change) used.add(change.changeId);
     return change;
   };
-  const row = (line: ReviewLine, change: ResumeChange | undefined, before: string | undefined, after: string | undefined, note?: string): ResumeReviewRow => ({
-    rowId: line.key, kind: change ? 'change' : 'context', section: line.section, label: line.label,
+  const row = (line: ReviewLine, change: ResumeChange | undefined, before: string | undefined, after: string | undefined, note?: string, moved?: boolean): ResumeReviewRow => ({
+    rowId: line.key, lineId: line.lineId, kind: change ? 'change' : 'context', section: line.section, label: line.label,
     ...(before !== undefined ? { before } : {}), ...(after !== undefined ? { after } : {}),
-    ...(change ? { changeId: change.changeId, type: change.type } : {}), ...(change?.decision ? { decision: change.decision } : {}), ...(note ? { note } : {}),
+    ...(change ? { changeId: change.changeId, type: change.type } : {}), ...(change?.decision ? { decision: change.decision } : {}), ...(moved ? { moved } : {}), ...(note ? { note } : {}),
   });
 
   const baseIndexOf = (line: ReviewLine) => base.filter((candidate) => candidate.slot === line.slot).findIndex((candidate) => candidate.text === line.text);
@@ -108,7 +118,7 @@ export function buildResumeReviewRows(profile: ResumeProfile, applicant: Applica
     const move = take((change) => change.type === 'move' && trimmed(change.original) === line.text);
     if (move) {
       const reordered = baseIndexOf(line) !== proposedIndexOf(line);
-      rows.push(row(line, move, line.text, line.text, reordered ? 'Reordered' : 'No visible change'));
+      rows.push(row(line, move, line.text, line.text, reordered ? 'Reordered' : 'No visible change', reordered));
       continue;
     }
     rows.push(row(line, undefined, line.text, line.text));
@@ -128,7 +138,7 @@ export function buildResumeReviewRows(profile: ResumeProfile, applicant: Applica
   for (const change of draft.changes) {
     if (used.has(change.changeId)) continue;
     rows.push({
-      rowId: `change:${change.changeId}`, kind: 'change', section: toSection(change.section), label: change.section,
+      rowId: `change:${change.changeId}`, lineId: `change:${change.changeId}`, kind: 'change', section: toSection(change.section), label: change.section,
       ...(change.original ? { before: change.original } : {}), ...(change.suggestion ? { after: change.suggestion } : {}),
       changeId: change.changeId, type: change.type, ...(change.decision ? { decision: change.decision } : {}), note: 'No visible change',
     });

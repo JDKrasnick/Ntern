@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createApiHandler } from '../src/api.js';
+import { createApiHandler, resumeGenerationEvidence } from '../src/api.js';
 import { MemoryInternshipStore, MemoryUserStore } from '../src/store.js';
 
 const event = (userId: string | undefined, method: string, rawPath: string, body?: unknown) => ({
@@ -115,6 +115,50 @@ describe('resume API ownership and revisions', () => {
     expect(limited.statusCode).toBe(402);
     expect(JSON.parse(limited.body)).toMatchObject({ code: 'RESUME_SUBSCRIPTION_LIMIT_REACHED', subscription: { usage: { used: 2, remaining: 0 } } });
     expect(generate).toHaveBeenCalledTimes(2);
+  });
+
+  it('ranks generation candidates by semantic score when available', () => {
+    const common = { userId: 'student', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    const job = { importId: 'j', canonicalUrl: 'https://x.test', description: 'unrelated job words', source: 'manual' as const, contentHash: 'h', status: 'ready' as const, revision: 0, createdAt: 'now', updatedAt: 'now' };
+    const bank = [
+      { ...common, bankItemId: 'a', kind: 'project' as const, content: 'Built a compiler' },
+      { ...common, bankItemId: 'b', kind: 'project' as const, content: 'Wrote marketing copy' },
+    ];
+    // With no keyword overlap, the semantic score decides candidate order and
+    // every item still reaches the model.
+    const evidence = resumeGenerationEvidence(job, bank, 80, new Map([['b', 0.9]]));
+    expect(evidence[0]?.bankItemId).toBe('b');
+    expect(evidence).toHaveLength(2);
+  });
+
+  it('emits a generation metric for each draft', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'TypeScript dashboard role', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(201);
+      const line = spy.mock.calls.map((args) => String(args[0])).find((entry) => entry.includes('InternNotifs/Resume'));
+      expect(line).toBeDefined();
+      expect(JSON.parse(line!)).toMatchObject({ event: 'resume_draft_generation', _aws: { CloudWatchMetrics: [{ Namespace: 'InternNotifs/Resume' }] } });
+    } finally { spy.mockRestore(); }
+  });
+
+  it('edits an added or rewritten line only when it stays grounded in evidence', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now', changes: [
+      { changeId: 'add', type: 'add', target: { kind: 'project', bankItemId: 'evidence' }, section: 'Projects', suggestion: 'Built a TypeScript dashboard', evidenceIds: ['evidence'], reason: 'r' },
+    ] });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true });
+    const edited = await handler(event('student', 'PATCH', '/me/resume-drafts/draft/changes/add', { revision: 0, suggestion: 'Built a TypeScript dashboard' }));
+    expect(edited.statusCode).toBe(200);
+    expect((JSON.parse(edited.body) as { changes: Array<{ suggestion?: string }> }).changes[0]?.suggestion).toBe('Built a TypeScript dashboard');
+    const unsupported = await handler(event('student', 'PATCH', '/me/resume-drafts/draft/changes/add', { revision: 1, suggestion: 'Led a global security team' }));
+    expect(unsupported.statusCode).toBe(400);
   });
 
   it('retries generation with validation feedback before falling back', async () => {
