@@ -218,8 +218,9 @@ scheduled ones discarded.
 | destination-verification | replay | 76 | `5c469321-a5a4-4f8f-9837-429495d9ed94` |
 | destination-verification | discard | 513 | `4f7069ed-edfd-4176-b818-907f4668a0f2` |
 
-All six DLQs read 0 after the disposition, and every message is recorded in
-`dlq_disposition_audit`. The protected `POST /internal/operations/dlq` endpoint
+The four catalog DLQs and the destination-verification DLQ read 0 after the
+disposition; the gmail DLQ is untouched at 1. Every disposed message is recorded
+in `dlq_disposition_audit`. The protected `POST /internal/operations/dlq` endpoint
 was unusable for this pass — the operator key did not match the deployed
 `OPERATIONS_SHARED_SECRET` — so the same peek → send/purge → audit sequence ran
 directly against the Cloudflare queue API and the audit rows were written to D1.
