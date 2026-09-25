@@ -352,6 +352,14 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
     await store.release(task.id, at);
     return { outcome: 'unresolved', reasonCode: 'awaiting-review' };
   }
+  if (context.resolutionStatus === 'resolved') {
+    // A domain a person confirmed is final until `POST …/resolve` clears the status.
+    // The operator route can write that decision without a task row, and a task seeded
+    // by an earlier deploy must not re-decide it: dropping the task ends the row so the
+    // sweep cannot overwrite a domain a person chose with a provider's namesake.
+    await store.dropTask(task.id, at, 'canonical-decision-settled');
+    return { outcome: 'unresolved', reasonCode: 'canonical-decision-settled' };
+  }
 
   const gathered = await gatherIconEvidence(seed, deps);
   // What the ATS board calls this employer, gated to names that denote a company

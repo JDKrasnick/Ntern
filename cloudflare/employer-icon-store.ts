@@ -115,8 +115,16 @@ export class D1EmployerIconStore {
    * a caller can count genuine enqueues rather than redeliveries.
    *
    * The insert is skipped when the employer already has a reviewed icon or a
-   * currently valid automatic decision, which is what keeps the task list from
-   * growing for employers that need nothing.
+   * settled decision, which is what keeps the task list from growing for
+   * employers that need nothing.
+   *
+   * A settled decision is read from `canonical_employers.icon_resolution_status`
+   * as well as from the task list. An operator's `confirm` or `report-wrong` on an
+   * employer that has never been swept writes the canonical decision but no task
+   * row, so the task list alone would call it undecided and let a later admission
+   * or backfill re-resolve it — overwriting a correct domain or reviving a report
+   * a person already rejected. Only `POST …/resolve` reopens a revoked decision,
+   * and it clears the status first, so a deliberate re-look still works.
    */
   async enqueue(input: {
     id: string;
@@ -129,7 +137,9 @@ export class D1EmployerIconStore {
     const result = await this.db.prepare(`INSERT INTO employer_icon_resolutions
       (id, canonical_employer_id, evidence_fingerprint, status, evidence_json, attempts, next_retry_at, created_at, updated_at)
       SELECT ?, ?, ?, 'retryable', ?, 0, ?, ?, ?
-      WHERE EXISTS (SELECT 1 FROM canonical_employers WHERE id = ? AND (icon_key IS NULL OR icon_key = ''))
+      WHERE EXISTS (SELECT 1 FROM canonical_employers WHERE id = ?
+          AND (icon_key IS NULL OR icon_key = '')
+          AND (icon_resolution_status IS NULL OR icon_resolution_status NOT IN ('resolved', 'invalidated')))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions
           WHERE canonical_employer_id = ? AND status = 'resolved'
             AND (next_retry_at IS NULL OR next_retry_at > ?))
@@ -402,10 +412,17 @@ export class D1EmployerIconStore {
   /**
    * Employers that have no icon and no outstanding task at all. This is what
    * lets the resolver reach employers that were admitted before it existed.
+   *
+   * `icon_resolution_status` is consulted as well, so an employer that a person
+   * has already settled — confirmed on its own domain, or withdrawn after a
+   * wrong-icon report — is never seeded again even though its decision never
+   * produced a task row. The backfill is for the undecided, not for undoing a
+   * person's answer.
    */
   async employersNeedingResolution(limit: number): Promise<Array<{ id: string; displayName: string }>> {
     const rows = await this.db.prepare(`SELECT employer.id, employer.display_name FROM canonical_employers AS employer
       WHERE (employer.icon_key IS NULL OR employer.icon_key = '')
+        AND (employer.icon_resolution_status IS NULL OR employer.icon_resolution_status NOT IN ('resolved', 'invalidated'))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS task
           WHERE task.canonical_employer_id = employer.id
             AND (task.status IN ('resolved', 'invalidated') OR task.next_retry_at IS NOT NULL))

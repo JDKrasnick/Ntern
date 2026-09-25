@@ -1159,6 +1159,37 @@ describe('employer icon idempotency', () => {
     expect(second.resolved).toBe(0);
   });
 
+  it('does not re-decide a claimable task left under a domain a person confirmed', async () => {
+    const { database, db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('freeform', 'Freeform'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      canonicalEmployerId: 'freeform', displayName: 'Freeform', roleTitle: 'Intern',
+      applicationUrl: 'https://job-boards.greenhouse.io/freeformfuturecorp/jobs/1',
+      provider: 'greenhouse', tenant: 'freeformfuturecorp', sourceId: 'greenhouse:freeformfuturecorp',
+    }, NOW);
+    await icons.markConfirmed({
+      canonicalEmployerId: 'freeform', domain: 'freeformfuture.com', evidenceJson: '{"kind":"confirmed"}',
+      revalidateAt: new Date(NOW.getTime() + 86_400_000).toISOString(), now: NOW.toISOString(),
+    });
+    // An older deploy leaves the seeded task claimable after the confirm. The page would
+    // otherwise resolve to a namesake, so the settled decision has to outrank the task.
+    database.prepare(`UPDATE employer_icon_resolutions SET status = 'retryable', selected_domain = NULL,
+      selected_source = NULL, next_retry_at = ? WHERE canonical_employer_id = 'freeform'`).run(NOW.toISOString());
+
+    const sweep = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+      DEPENDENCIES(scriptedFetch({
+        'https://job-boards.greenhouse.io/freeformfuturecorp/jobs/1': () => html(
+          linkPage({ name: 'Freeform', url: 'https://freeformspaces.com' }),
+        ),
+        [logoDevImageUrl('freeformspaces.com', LOGO_IMAGE_TOKEN)]: () => webp(),
+      })),
+    );
+    expect(sweep.resolved).toBe(0);
+    expect((await icons.context('freeform'))?.websiteDomain).toBe('freeformfuture.com');
+  });
+
   it('skips a task another sweep already holds under lease', async () => {
     const { database, db, admission, icons } = subject();
     await admission.putCanonicalEmployer(employerRow('beta', 'Beta'), NOW.toISOString());
@@ -1868,6 +1899,34 @@ describe('employers needing resolution', () => {
 
     expect((await icons.employersNeedingResolution(10)).map((employer) => employer.id)).toEqual(['aardvark', 'acme']);
     expect(await icons.employersNeedingResolution(1)).toEqual([{ id: 'aardvark', displayName: 'Aardvark' }]);
+  });
+
+  it('never re-seeds an employer a person settled before it was ever swept', async () => {
+    const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('freeform', 'Freeform'), NOW.toISOString());
+    await admission.putCanonicalEmployer(employerRow('kirin', 'Kirin'), NOW.toISOString());
+    // An operator settles both before any sweep reaches them: `confirm` records the
+    // domain, `report-wrong` the withdrawal. Neither writes an employer_icon_resolutions
+    // row, so a decision read only from the task list would look undecided and its next
+    // sweep could overwrite the confirmed domain — or revive the reported one.
+    await icons.markConfirmed({
+      canonicalEmployerId: 'freeform', domain: 'freeformfuture.com', evidenceJson: '{"kind":"confirmed"}',
+      revalidateAt: new Date(NOW.getTime() + 86_400_000).toISOString(), now: NOW.toISOString(),
+    });
+    await icons.invalidate('kirin', NOW.toISOString(), 'wrong-icon-report');
+
+    expect(await icons.employersNeedingResolution(10)).toEqual([]);
+    // A fresh admission for either employer is not a reason to re-decide them.
+    expect(await enqueueEmployerIconResolution(icons, {
+      canonicalEmployerId: 'freeform', displayName: 'Freeform', roleTitle: 'Intern',
+      applicationUrl: 'https://job-boards.greenhouse.io/freeformfuturecorp/jobs/1',
+      provider: 'greenhouse', tenant: 'freeformfuturecorp', sourceId: 'greenhouse:freeformfuturecorp',
+    }, NOW)).toBe(false);
+    expect(await enqueueEmployerIconResolution(icons, {
+      canonicalEmployerId: 'kirin', displayName: 'Kirin', roleTitle: 'Intern',
+      applicationUrl: 'https://jobs.ashbyhq.com/kirin/1', provider: 'ashby', sourceId: 'ashby:kirin',
+    }, NOW)).toBe(false);
+    expect((await icons.context('freeform'))?.websiteDomain).toBe('freeformfuture.com');
   });
 });
 
