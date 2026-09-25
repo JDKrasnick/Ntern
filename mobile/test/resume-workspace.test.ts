@@ -47,6 +47,8 @@ describe('resume workspace navigation contract', () => {
     expect(app).toContain('onDecide={decideChange}');
     expect(app).toContain('decideChange');
     expect(app).toContain('/review`');
+    expect(app).toContain('/preview`');
+    expect(app).toContain('Render preview');
     expect(app).toContain('your résumé → tailored');
     expect(app).toContain('No job-specific changes found');
     expect(app).toContain('/finalize`');

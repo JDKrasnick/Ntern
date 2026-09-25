@@ -5791,6 +5791,10 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   const [artifact, setArtifact] = useState<ResumeArtifactCard>();
   const [artifactMode, setArtifactMode] = useState<"rendered" | "latex">("rendered");
   const [artifactPreview, setArtifactPreview] = useState<string>();
+  const [previewArtifact, setPreviewArtifact] = useState<ResumeArtifactCard>();
+  const [previewImage, setPreviewImage] = useState<string>();
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewRevision, setPreviewRevision] = useState<number>();
   const [artifactSource, setArtifactSource] = useState("");
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [subscription, setSubscription] = useState<ResumeSubscriptionCard>();
@@ -5816,6 +5820,19 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't save that edit."))
       .finally(() => setResumeBusy(false));
   };
+  const renderPreview = () => {
+    if (!draft || previewBusy) return;
+    setPreviewBusy(true); setBankError(undefined);
+    void api<{ artifact: ResumeArtifactCard }>(`/me/resume-drafts/${encodeURIComponent(draft.draftId)}/preview`, token, { method: "POST" })
+      .then(async ({ artifact: rendered }) => {
+        setPreviewArtifact(rendered);
+        setPreviewRevision(draft.revision);
+        setPreviewImage(await loadResumeArtifactPreview(rendered.artifactId, 1, token));
+      })
+      .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't render that preview."))
+      .finally(() => setPreviewBusy(false));
+  };
+  const previewStale = Boolean(previewArtifact) && !artifact && previewRevision !== draft?.revision;
   const keepRemainingOriginals = () => {
     if (!draft || resumeBusy) return;
     const remaining = draft.changes.filter((change) => !change.decision);
@@ -5913,6 +5930,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
     return () => { cancelled = true; };
   }, [jobImport?.importId, jobImport?.status, profiles, token]);
   useEffect(() => () => releaseResumeArtifactPreview(artifactPreview), [artifactPreview]);
+  useEffect(() => () => releaseResumeArtifactPreview(previewImage), [previewImage]);
   useEffect(() => {
     if (!signedIn || !draft) { setReviewRows([]); return; }
     let cancelled = false;
@@ -6542,11 +6560,21 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
                     <ActionButton label="Download PDF" variant="secondary" onPress={() => void shareResumeArtifact(artifact.artifactId, token).catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't download that résumé."))} />
                   </View>
                 </>
+              ) : previewArtifact ? (
+                <>
+                  {previewStale ? <Text style={styles.resumePreviewCaption}>Preview is out of date with your latest decisions.</Text> : null}
+                  {previewImage ? <Image accessibilityLabel="Rendered resume preview" source={{ uri: previewImage }} resizeMode="contain" style={styles.resumeRenderedPage} /> : <Text style={styles.resumePreviewCaption}>Rendering preview…</Text>}
+                  <View style={styles.resumeArtifactActions}>
+                    <Text style={styles.resumePreviewCaption}>{previewArtifact.pageCount ?? 1} page{previewArtifact.pageCount === 1 ? "" : "s"} · live preview, not final</Text>
+                    <ActionButton label={previewBusy ? "Rendering…" : "Refresh preview"} variant="secondary" onPress={renderPreview} disabled={previewBusy} />
+                  </View>
+                </>
               ) : (
                 <View style={styles.resumePreviewEmpty}>
-                  <Ionicons name="document-text-outline" size={28} color={colors.muted} />
-                  <Text style={styles.resumePreviewEmptyTitle}>Rendered preview after review</Text>
-                  <Text style={styles.resumePreviewCaption}>Review each diff, then compile the résumé to inspect the real PDF and its LaTeX source before downloading.</Text>
+                  <Ionicons name="eye-outline" size={28} color={colors.muted} />
+                  <Text style={styles.resumePreviewEmptyTitle}>See the rendered résumé</Text>
+                  <Text style={styles.resumePreviewCaption}>Render a preview of your accepted changes as they are, then compile to save the PDF. Undecided changes stay out.</Text>
+                  <View style={styles.resumePreviewEmptyAction}><ActionButton label={previewBusy ? "Rendering…" : "Render preview"} onPress={renderPreview} disabled={previewBusy} /></View>
                 </View>
               )}
             </View>
@@ -9283,6 +9311,7 @@ const styles = StyleSheet.create({
   resumePreviewLine: { color: colors.body, fontSize: 12, lineHeight: 18, marginTop: 7 },
   resumePreviewCaption: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 12, textAlign: "center" },
   resumePreviewEmpty: { alignItems: "center", alignSelf: "center", maxWidth: 330, padding: 24 },
+  resumePreviewEmptyAction: { marginTop: 12 },
   resumePreviewEmptyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800", marginTop: 10 },
   resumeArtifactTabs: { alignSelf: "center", backgroundColor: "#DDE1E7", borderRadius: 9, flexDirection: "row", padding: 3 },
   resumeArtifactTab: { alignItems: "center", borderRadius: 7, justifyContent: "center", minHeight: 44, paddingHorizontal: 12 },

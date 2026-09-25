@@ -195,6 +195,28 @@ describe('resume API ownership and revisions', () => {
     expect(rows.some((row) => row.changeId === 'rewrite')).toBe(true);
   });
 
+  it('renders a live preview of the current review state and reuses it at finalize', async () => {
+    const users = new MemoryUserStore();
+    await users.putProfile({ userId: 'student', contact: { name: 'Student', email: 'student@example.test' }, location: 'Remote', workAuthorization: 'US', links: {}, education: [], reusableAnswers: {}, updatedAt: 'now' });
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'bank', kind: 'project', content: 'Built a dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['bank'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeDraft({ userId: 'student', draftId: 'draft', profileId: 'profile', importId: 'job', revision: 0, status: 'reviewing', createdAt: 'now', updatedAt: 'now', changes: [
+      { changeId: 'add', type: 'add', target: { kind: 'project', bankItemId: 'bank' }, section: 'Projects', suggestion: 'Built a dashboard', evidenceIds: ['bank'], reason: 'r', decision: 'accepted' },
+    ] });
+    const compile = vi.fn(async () => ({ pdf: new Uint8Array([37, 80, 68, 70]).buffer, pageCount: 1, previewPngs: [new Uint8Array([137, 80, 78, 71]).buffer] }));
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeArtifactStorage: { putTex: async () => undefined, putPdf: async () => undefined, putPreview: async () => undefined, compile } });
+    const preview = await handler(event('student', 'POST', '/me/resume-drafts/draft/preview'));
+    expect(preview.statusCode).toBe(200);
+    expect(JSON.parse(preview.body)).toMatchObject({ artifact: { pageCount: 1, objectKey: expect.stringMatching(/\.pdf$/u) } });
+    expect(compile).toHaveBeenCalledOnce();
+    const draft = JSON.parse((await handler(event('student', 'GET', '/me/resume-drafts/draft'))).body) as { status: string };
+    expect(draft.status).toBe('reviewing');
+    // The identical content compiled for the preview is reused when finalizing.
+    const finalized = await handler(event('student', 'POST', '/me/resume-drafts/draft/finalize', { revision: 0 }));
+    expect(finalized.statusCode).toBe(200);
+    expect(compile).toHaveBeenCalledOnce();
+  });
+
   it('refunds the monthly allowance when a draft cannot be persisted', async () => {
     class ConflictStore extends MemoryUserStore {
       async putResumeDraft(): Promise<boolean> { return false; }

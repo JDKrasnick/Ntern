@@ -12,7 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
-import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
+import { normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
 import { buildResumeReviewRows } from './resume-review.js';
@@ -547,6 +547,32 @@ export function createApiHandler(dependencies: ApiDependencies) {
   // accounts never pay for embeddings; the recommendation route warms a paid
   // account's derived cache when it upgrades after importing.
   const semanticRankingEnabled = async (userId: string) => effectiveResumeSubscriptionPlan(await dependencies.users.getResumeSubscription(userId)).tier !== 'free';
+  /** Renders and compiles one content-addressed artifact, reusing an identical
+   * one. The draft's status is the caller's concern, so the same path serves a
+   * live preview and finalize. */
+  const compileResumeArtifact = async (userId: string, profile: ResumeProfile, applicant: ApplicantProfile, draft: ResumeDraft, bankItems: ResumeBankItem[], createdAt: string): Promise<ResumeArtifact> => {
+    const storage = dependencies.resumeArtifactStorage!;
+    const rendered = renderResumeLatex(profile, applicant, draft, bankItems);
+    const findExisting = async () => (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash
+      && artifact.templateVersion === RESUME_TEMPLATE_VERSION && artifact.compilerVersion === RESUME_COMPILER_VERSION);
+    const existing = await findExisting();
+    if (existing) return existing;
+    const compilation = await storage.compile(rendered.tex, rendered.resumeSpecHash);
+    const objectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf`;
+    const texObjectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
+    await storage.putTex(texObjectKey, rendered.tex);
+    await storage.putPdf(objectKey, compilation.pdf);
+    const previewObjectKeys = compilation.previewPngs.map((_, index) => `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/preview-${index + 1}.png`);
+    if (storage.putPreview) await Promise.all(compilation.previewPngs.map((png, index) => storage.putPreview!(previewObjectKeys[index]!, png)));
+    const artifact: ResumeArtifact = { userId, artifactId: randomUUID(), draftId: draft.draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, pageCount: compilation.pageCount, previewObjectKeys, createdAt };
+    if (!await dependencies.users.putResumeArtifact(artifact)) {
+      // A concurrent compile claimed the same content-addressed row; reuse it.
+      const raced = await findExisting();
+      if (raced) return raced;
+      throw new Error('Resume artifact could not be stored');
+    }
+    return artifact;
+  };
   return async (event: ApiEvent): Promise<ApiResponse> => {
     try {
       const method = event.requestContext?.http?.method ?? event.routeKey?.split(' ')[0] ?? 'GET'; const path = event.rawPath ?? event.routeKey?.split(' ')[1] ?? '/';
@@ -1128,6 +1154,32 @@ export function createApiHandler(dependencies: ApiDependencies) {
           if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           return reply(200, updated);
         }
+        const previewDraftMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/preview$/u);
+        if (previewDraftMatch && method === 'POST') {
+          const draftId = decodeURIComponent(previewDraftMatch[1]!);
+          const previous = await dependencies.users.getResumeDraft(userId, draftId);
+          if (!previous) return reply(404, { message: 'Resume draft not found' });
+          if (!dependencies.resumeArtifactStorage) return reply(503, { message: 'Preview rendering is temporarily unavailable' });
+          const [profile, applicant, bankItems] = await Promise.all([
+            dependencies.users.getResumeProfile(userId, previous.profileId),
+            dependencies.users.getProfile(userId),
+            dependencies.users.listResumeBank(userId),
+          ]);
+          if (!profile) return reply(404, { message: 'Resume profile not found' });
+          const allowed = new Set(profile.bankItemIds);
+          try {
+            validateResumeProfileSelection(profile.bankItemIds, bankItems);
+            // Only accepted changes render, so the preview matches the review state.
+            validateResumeChanges(previous.changes.filter((change) => change.decision === 'accepted'), bankItems.filter((item) => allowed.has(item.bankItemId)));
+          } catch (error) {
+            return reply(409, { message: error instanceof Error ? error.message : 'The resume source graph is no longer valid' });
+          }
+          if (!applicant?.contact.name.trim() || !applicant.contact.email.trim()) return reply(409, { message: 'Complete your name and email in your profile before previewing a PDF résumé' });
+          let artifact: ResumeArtifact;
+          try { artifact = await compileResumeArtifact(userId, profile, applicant, previous, bankItems, timestamp); }
+          catch { return reply(503, { message: 'The preview could not be rendered right now; try again shortly' }); }
+          return reply(200, { artifact });
+        }
         const finalizeDraftMatch = path.match(/^\/me\/resume-drafts\/([^/]+)\/finalize$/u);
         if (finalizeDraftMatch && method === 'POST') {
           const draftId = decodeURIComponent(finalizeDraftMatch[1]!);
@@ -1153,28 +1205,12 @@ export function createApiHandler(dependencies: ApiDependencies) {
           }
           if (!applicant?.contact.name.trim() || !applicant.contact.email.trim()) return reply(409, { message: 'Complete your name and email in your profile before creating a PDF résumé' });
           const updated: ResumeDraft = { ...previous, status: 'finalized', revision: previous.revision + 1, updatedAt: timestamp };
-          const rendered = renderResumeLatex(profile, applicant, updated, bankItems);
-          const existing = (await dependencies.users.listResumeArtifacts(userId)).find((artifact) => artifact.resumeSpecHash === rendered.resumeSpecHash
-            && artifact.templateVersion === RESUME_TEMPLATE_VERSION && artifact.compilerVersion === RESUME_COMPILER_VERSION);
-          if (existing) {
-            if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
-            return reply(200, { draft: updated, artifact: existing });
-          }
-          const artifactId = randomUUID();
-          const texObjectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.tex`;
-          let compilation: ResumeCompilation;
+          let artifact: ResumeArtifact;
           try {
-            compilation = await dependencies.resumeArtifactStorage.compile(rendered.tex, rendered.resumeSpecHash);
+            artifact = await compileResumeArtifact(userId, profile, applicant, updated, bankItems, timestamp);
           } catch {
             return reply(503, { message: 'PDF generation is temporarily unavailable; your draft was not finalized' });
           }
-          const objectKey = `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}.pdf`;
-          await dependencies.resumeArtifactStorage.putTex(texObjectKey, rendered.tex);
-          await dependencies.resumeArtifactStorage.putPdf(objectKey, compilation.pdf);
-          const previewObjectKeys = compilation.previewPngs.map((_, index) => `private/${userId}/resume-artifacts/${rendered.resumeSpecHash}/preview-${index + 1}.png`);
-          if (dependencies.resumeArtifactStorage.putPreview) await Promise.all(compilation.previewPngs.map((png, index) => dependencies.resumeArtifactStorage!.putPreview!(previewObjectKeys[index]!, png)));
-          const artifact = { userId, artifactId, draftId, objectKey, texObjectKey, templateVersion: RESUME_TEMPLATE_VERSION, compilerVersion: RESUME_COMPILER_VERSION, resumeSpecHash: rendered.resumeSpecHash, pageCount: compilation.pageCount, previewObjectKeys, createdAt: timestamp };
-          if (!await dependencies.users.putResumeArtifact(artifact)) return reply(409, { message: 'Resume artifact changed; refresh and retry' });
           if (!await dependencies.users.putResumeDraft(updated, previous.revision)) return reply(409, { message: 'Resume draft changed; refresh and retry' });
           return reply(200, { draft: updated, artifact });
         }
