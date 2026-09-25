@@ -5812,6 +5812,7 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
   // the confirmation is visible before it slides away.
   const motionAllowed = useContext(MotionAllowedContext);
   const jobReady = jobImport?.status === "ready";
+  const guestImport = jobImport?.importId === "guest-job";
   const jobTaskCollapse = useRef(new Animated.Value(1)).current;
   const [jobTaskHeight, setJobTaskHeight] = useState(0);
   useEffect(() => {
@@ -6248,10 +6249,13 @@ function ResumeWorkspace({ token = "", onSignIn }: { token?: string; onSignIn?: 
         {bankError && (bankManagerOpen || jobImport || jobUrl.trim()) ? <Text style={styles.resumeBankError}>{bankError}</Text> : null}
         {jobImport ? (
           <View style={styles.resumeManualFallback}>
-            <Text style={styles.inputLabel}>Paste the job description to continue</Text>
-            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : `${resumeImportFailureMessages[jobImport.failureReason ?? ""] ?? "We couldn't read the public page."} Paste the description to continue.`} Pasted text stays in your private resume workspace.</Text>
+            <Text style={styles.inputLabel}>{guestImport ? "Sign in to read the posting" : "Paste the job description to continue"}</Text>
+            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : guestImport ? "Ntern reads the employer's posting for signed-in accounts. Sign in, or paste the description to continue." : `${resumeImportFailureMessages[jobImport.failureReason ?? ""] ?? "We couldn't read the public page."} Paste the description to continue.`} Pasted text stays in your private resume workspace.</Text>
             <TextInput value={manualDescription} onChangeText={setManualDescription} accessibilityLabel="Job description" multiline placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} />
-            <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
+            <View style={styles.resumeManualActions}>
+              {guestImport && onSignIn ? <ActionButton compact tight label="Sign in" variant="secondary" onPress={onSignIn} /> : null}
+              <ActionButton compact tight label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} />
+            </View>
           </View>
         ) : null}
         </>}
@@ -9280,6 +9284,7 @@ const styles = StyleSheet.create({
   resumeParentOptionKind: { color: colors.signal, fontSize: 10, fontWeight: "800", letterSpacing: 0.5, textTransform: "uppercase" },
   resumeParentOptionText: { color: colors.body, fontSize: 12, fontWeight: "700", lineHeight: 17, marginTop: 3 },
   resumeBankComposerAction: { alignSelf: "flex-start", marginTop: 10 },
+  resumeManualActions: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 10 },
   resumeBankError: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 8 },
   resumeBankScroller: { maxHeight: 340 },
   resumeBankItems: { borderTopColor: colors.separator, borderTopWidth: 1, gap: 8, marginTop: 16, paddingBottom: 2, paddingTop: 12 },
