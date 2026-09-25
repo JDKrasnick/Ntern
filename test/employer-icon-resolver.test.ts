@@ -1126,6 +1126,26 @@ describe('employer icon wrong-match reports', () => {
     expect(context?.iconKey).toBe('company-icons/globex/reviewed.webp');
     expect(context?.iconSource).toBe('reviewed');
   });
+
+  it('files a review row for a report on an employer the resolver never swept', async () => {
+    const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('kirin', 'Kirin'), NOW.toISOString());
+
+    // No sweep ever reached this employer, so there is no task row to withdraw. The
+    // report still has to surface: the queue reads the task table, and the backfill
+    // would otherwise treat the employer as undecided and re-decide it.
+    await icons.invalidate('kirin', NOW.toISOString(), 'wrong-icon-report');
+
+    const queue = await icons.reviewQueue(10);
+    expect(queue).toEqual([
+      expect.objectContaining({ canonicalEmployerId: 'kirin', status: 'invalidated', reviewPriority: 100 }),
+    ]);
+    expect((await icons.context('kirin'))?.resolutionStatus).toBe('invalidated');
+
+    // A second report updates the row it filed instead of adding another.
+    await icons.invalidate('kirin', NOW.toISOString(), 'wrong-icon-report');
+    expect(await icons.reviewQueue(10)).toHaveLength(1);
+  });
 });
 
 describe('employer icon idempotency', () => {
@@ -1157,6 +1177,68 @@ describe('employer icon idempotency', () => {
     const second = await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl));
     expect(second.claimed).toBe(0);
     expect(second.resolved).toBe(0);
+  });
+
+  it('re-seeds an automatically resolved employer after the revalidation window', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role'), NOW);
+
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/role': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      'https://acme.com/careers/role-2': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(),
+    });
+    // No retention license, so the decision is recorded without an R2 icon key:
+    // exactly the production state while self-hosting rights are unconfirmed.
+    const env = environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN });
+    expect((await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl))).resolved).toBe(1);
+    expect((await icons.context('acme'))?.iconKey).toBeUndefined();
+
+    // The resolved task is still live, so nothing is re-seeded inside the window.
+    expect(await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role-2'),
+      new Date(NOW.getTime() + 24 * 60 * 60 * 1_000))).toBe(false);
+
+    // Once the revalidation deadline passes a fresh admission seeds a new task and the
+    // sweep decides again, rather than freezing the automatic answer forever.
+    const later = new Date(NOW.getTime() + 31 * 24 * 60 * 60 * 1_000);
+    expect(await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role-2'), later)).toBe(true);
+    const sweep = await runEmployerIconResolutionPass(env, later, DEPENDENCIES(fetchImpl));
+    expect(sweep.claimed).toBe(1);
+    expect(sweep.resolved).toBe(1);
+  });
+
+  it('does not re-decide a claimable task left under a domain a person confirmed', async () => {
+    const { database, db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('freeform', 'Freeform'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      canonicalEmployerId: 'freeform', displayName: 'Freeform', roleTitle: 'Intern',
+      applicationUrl: 'https://job-boards.greenhouse.io/freeformfuturecorp/jobs/1',
+      provider: 'greenhouse', tenant: 'freeformfuturecorp', sourceId: 'greenhouse:freeformfuturecorp',
+    }, NOW);
+    await icons.markConfirmed({
+      canonicalEmployerId: 'freeform', domain: 'freeformfuture.com', evidenceJson: '{"kind":"confirmed"}',
+      revalidateAt: new Date(NOW.getTime() + 86_400_000).toISOString(), now: NOW.toISOString(),
+    });
+    // An older deploy leaves the seeded task claimable after the confirm. The page would
+    // otherwise resolve to a namesake, so the settled decision has to outrank the task.
+    database.prepare(`UPDATE employer_icon_resolutions SET status = 'retryable', selected_domain = NULL,
+      selected_source = NULL, next_retry_at = ? WHERE canonical_employer_id = 'freeform'`).run(NOW.toISOString());
+
+    const sweep = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+      DEPENDENCIES(scriptedFetch({
+        'https://job-boards.greenhouse.io/freeformfuturecorp/jobs/1': () => html(
+          linkPage({ name: 'Freeform', url: 'https://freeformspaces.com' }),
+        ),
+        [logoDevImageUrl('freeformspaces.com', LOGO_IMAGE_TOKEN)]: () => webp(),
+      })),
+    );
+    expect(sweep.resolved).toBe(0);
+    expect((await icons.context('freeform'))?.websiteDomain).toBe('freeformfuture.com');
   });
 
   it('skips a task another sweep already holds under lease', async () => {
@@ -1798,6 +1880,77 @@ describe('employer icon confirm route', () => {
     expect(context?.resolutionStatus).toBe('resolved');
     expect(context?.websiteDomain).toBe('acme.com');
   });
+
+  it('forces a fresh decision for an employer a person confirmed', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await icons.markConfirmed({
+      canonicalEmployerId: 'acme', domain: 'acme.com', evidenceJson: '{"kind":"confirmed"}',
+      revalidateAt: new Date(NOW.getTime() + 365 * 24 * 60 * 60 * 1_000).toISOString(), now: NOW.toISOString(),
+    });
+    expect((await icons.context('acme'))?.resolutionStatus).toBe('resolved');
+
+    // The confirmed domain is stale. `POST …/resolve` clears the settled status so the
+    // next sweep decides again instead of the confirm being permanent.
+    const resolveRequest = new Request('https://api.test/internal/admission/employer-icons/resolve', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ canonicalEmployerId: 'acme', applicationUrl: 'https://acme.com/careers/role' }),
+    });
+    const response = await handleEmployerIconOperations(
+      resolveRequest, icons, () => ({ logoDev: true, brandfetch: true, tieBreaker: true }), () => NOW,
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ enqueued: true });
+    expect((await icons.context('acme'))?.resolutionStatus).toBeUndefined();
+
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/role': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(),
+    });
+    const sweep = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+      DEPENDENCIES(fetchImpl),
+    );
+    expect(sweep.claimed).toBe(1);
+    expect(sweep.resolved).toBe(1);
+  });
+
+  it('reopens an automatic resolution without seeding a second task', async () => {
+    const { database, db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role'), NOW);
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/role': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(),
+    });
+    const env = environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN });
+    expect((await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl))).resolved).toBe(1);
+
+    // The stored decision is stale. `resolve` re-arms its own task instead of seeding
+    // another, so the employer has exactly one claimable row and the stale evidence
+    // cannot be decided after a fresh one in the same pass.
+    const resolveRequest = new Request('https://api.test/internal/admission/employer-icons/resolve', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ canonicalEmployerId: 'acme' }),
+    });
+    const response = await handleEmployerIconOperations(
+      resolveRequest, icons, () => ({ logoDev: true, brandfetch: true, tieBreaker: true }), () => NOW,
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ enqueued: false, reopened: 1 });
+    expect((await icons.context('acme'))?.resolutionStatus).toBeUndefined();
+    const pending = database.prepare(`SELECT COUNT(*) AS count FROM employer_icon_resolutions
+      WHERE canonical_employer_id = 'acme' AND status IN ('retryable', 'unresolved')`).get() as { count: number };
+    expect(pending.count).toBe(1);
+
+    const sweep = await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl));
+    expect(sweep.claimed).toBe(1);
+    expect(sweep.resolved).toBe(1);
+  });
 });
 
 describe('employer icon tie-breaker budget', () => {
@@ -1868,6 +2021,36 @@ describe('employers needing resolution', () => {
 
     expect((await icons.employersNeedingResolution(10)).map((employer) => employer.id)).toEqual(['aardvark', 'acme']);
     expect(await icons.employersNeedingResolution(1)).toEqual([{ id: 'aardvark', displayName: 'Aardvark' }]);
+  });
+
+  it('never re-seeds an employer a person settled before it was ever swept', async () => {
+    const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('freeform', 'Freeform'), NOW.toISOString());
+    await admission.putCanonicalEmployer(employerRow('kirin', 'Kirin'), NOW.toISOString());
+    // An operator settles both before any sweep reaches them: `confirm` records the
+    // domain with no task row, `report-wrong` files an invalidated one. Read from the
+    // task list alone, the confirmed employer would look undecided and its next sweep
+    // could overwrite the domain a person chose.
+    await icons.markConfirmed({
+      canonicalEmployerId: 'freeform', domain: 'freeformfuture.com', evidenceJson: '{"kind":"confirmed"}',
+      revalidateAt: new Date(NOW.getTime() + 86_400_000).toISOString(), now: NOW.toISOString(),
+    });
+    await icons.invalidate('kirin', NOW.toISOString(), 'wrong-icon-report');
+
+    expect(await icons.employersNeedingResolution(10)).toEqual([]);
+    // The report is queued for a person even though no sweep had reached it.
+    expect((await icons.reviewQueue(10)).map((item) => item.canonicalEmployerId)).toEqual(['kirin']);
+    // A fresh admission for either employer is not a reason to re-decide them.
+    expect(await enqueueEmployerIconResolution(icons, {
+      canonicalEmployerId: 'freeform', displayName: 'Freeform', roleTitle: 'Intern',
+      applicationUrl: 'https://job-boards.greenhouse.io/freeformfuturecorp/jobs/1',
+      provider: 'greenhouse', tenant: 'freeformfuturecorp', sourceId: 'greenhouse:freeformfuturecorp',
+    }, NOW)).toBe(false);
+    expect(await enqueueEmployerIconResolution(icons, {
+      canonicalEmployerId: 'kirin', displayName: 'Kirin', roleTitle: 'Intern',
+      applicationUrl: 'https://jobs.ashbyhq.com/kirin/1', provider: 'ashby', sourceId: 'ashby:kirin',
+    }, NOW)).toBe(false);
+    expect((await icons.context('freeform'))?.websiteDomain).toBe('freeformfuture.com');
   });
 });
 

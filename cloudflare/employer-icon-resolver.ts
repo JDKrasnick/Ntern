@@ -352,6 +352,18 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
     await store.release(task.id, at);
     return { outcome: 'unresolved', reasonCode: 'awaiting-review' };
   }
+  if (context.resolutionStatus === 'resolved' && !(await store.hasResolvedTask(context.id))) {
+    // A decision a person settled before any sweep reached the employer — an
+    // operator `confirm` on an unswept employer — writes the canonical status but
+    // no resolved task row, so the task in hand can only be a stale seed from an
+    // earlier deploy. Dropping it ends the row without letting the sweep overwrite
+    // a domain a person chose with a provider's namesake. An employer the resolver
+    // itself resolved still has its resolved task, so it is not dropped here: that
+    // task is a fresh revalidation the sweep is meant to decide. `POST …/resolve`
+    // clears the status to re-open a settled decision deliberately.
+    await store.dropTask(task.id, at, 'canonical-decision-settled');
+    return { outcome: 'unresolved', reasonCode: 'canonical-decision-settled' };
+  }
 
   const gathered = await gatherIconEvidence(seed, deps);
   // What the ATS board calls this employer, gated to names that denote a company
