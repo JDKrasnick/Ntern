@@ -18,6 +18,8 @@ import { metadataFieldOutcomes, type MetadataAuditOutcome } from '../src/metadat
 import type { D1Database, MessageBatch, Queue, R2Bucket } from './types.js';
 import { enqueueShadowExtraction, type ShadowBaseline } from './shadow-extraction.js';
 import { normalizeExactPostingDescription, type ShadowExtractionOrigin } from '../src/shadow-extraction.js';
+import { safeDiagnostic } from '../src/source-health.js';
+import { recordQueueFailureBestEffort } from './dlq-operations.js';
 
 export interface DestinationVerificationMessage {
   version: 1;
@@ -824,10 +826,21 @@ export async function processDestinationVerificationBatch(
           queued.ack();
         }
       } catch (error) {
+        // The delivery never reached recordVerificationAttempt, so a failure
+        // here left no server-side trace and accumulated in the dead-letter
+        // queue as an unclassifiable message. Record it before the retry so a
+        // systematic failure is diagnosable instead of invisible.
+        await recordQueueFailureBestEffort({ db: env.DB, queueName: 'intern-notifs-destination-verification',
+          messageId: queued.id, attempts: queued.attempts, timestamp: queued.timestamp, sourceId: message.sourceId,
+          sourceKind: message.providerIdentity.provider, body: queued.body, error });
+        console.error(JSON.stringify({ command: 'destination-verification', messageId: queued.id,
+          sourceId: message.sourceId, reason: message.reason, error: safeDiagnostic(error) }));
         queued.retry({ delaySeconds: 300 }, error);
       }
     }
   } catch (error) {
+    console.error(JSON.stringify({ command: 'destination-verification-batch',
+      messageIds: pending.map(({ queued }) => queued.id), error: safeDiagnostic(error) }));
     for (const { queued } of pending) queued.retry({ delaySeconds: 300 }, error);
   } finally {
     if (browser) await browser.close();
