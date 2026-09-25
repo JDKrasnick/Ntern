@@ -115,7 +115,7 @@ export class D1EmployerIconStore {
    * a caller can count genuine enqueues rather than redeliveries.
    *
    * The insert is skipped when the employer already has a reviewed icon or a
-   * settled decision, which is what keeps the task list from growing for
+   * decision a person settled, which is what keeps the task list from growing for
    * employers that need nothing.
    *
    * A settled decision is read from `canonical_employers.icon_resolution_status`
@@ -123,8 +123,11 @@ export class D1EmployerIconStore {
    * employer that has never been swept writes the canonical decision but no task
    * row, so the task list alone would call it undecided and let a later admission
    * or backfill re-resolve it — overwriting a correct domain or reviving a report
-   * a person already rejected. Only `POST …/resolve` reopens a revoked decision,
-   * and it clears the status first, so a deliberate re-look still works.
+   * a person already rejected. An employer the resolver itself resolved still has
+   * its resolved task row, so it is deliberately not frozen here: a fresh
+   * admission after the revalidation window (`next_retry_at`) seeds a new task and
+   * the sweep decides again. Only `POST …/resolve` reopens a settled decision, and
+   * it clears the status first, so a deliberate re-look still works.
    */
   async enqueue(input: {
     id: string;
@@ -139,7 +142,11 @@ export class D1EmployerIconStore {
       SELECT ?, ?, ?, 'retryable', ?, 0, ?, ?, ?
       WHERE EXISTS (SELECT 1 FROM canonical_employers WHERE id = ?
           AND (icon_key IS NULL OR icon_key = '')
-          AND (icon_resolution_status IS NULL OR icon_resolution_status NOT IN ('resolved', 'invalidated')))
+          AND (icon_resolution_status IS NULL OR icon_resolution_status NOT IN ('resolved', 'invalidated')
+            OR (icon_resolution_status = 'resolved'
+              AND EXISTS (SELECT 1 FROM employer_icon_resolutions AS settled
+                WHERE settled.canonical_employer_id = canonical_employers.id
+                  AND settled.status = 'resolved'))))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions
           WHERE canonical_employer_id = ? AND status = 'resolved'
             AND (next_retry_at IS NULL OR next_retry_at > ?))
@@ -196,6 +203,21 @@ export class D1EmployerIconStore {
       ...(row.icon_tie_break_input_tokens === null ? {} : { tieBreakInputTokens: Number(row.icon_tie_break_input_tokens) }),
       ...(row.icon_tie_break_output_tokens === null ? {} : { tieBreakOutputTokens: Number(row.icon_tie_break_output_tokens) }),
     };
+  }
+
+  /**
+   * Whether an earlier task for this employer already ended `resolved`.
+   *
+   * An automatic resolution always leaves one behind; a decision an operator wrote
+   * for an employer that was never swept (`confirm`, or `report-wrong`) does not.
+   * The resolver uses this to tell a task seeded under an operator's decision —
+   * which must be dropped — from a fresh task seeded after the revalidation
+   * window of an automatic one, which must be re-decided.
+   */
+  async hasResolvedTask(canonicalEmployerId: string): Promise<boolean> {
+    const row = await this.db.prepare(`SELECT 1 AS found FROM employer_icon_resolutions
+      WHERE canonical_employer_id = ? AND status = 'resolved' LIMIT 1`).bind(canonicalEmployerId).first<Row>();
+    return row !== null && row !== undefined;
   }
 
   /**
@@ -378,8 +400,10 @@ export class D1EmployerIconStore {
   }
 
   /**
-   * Re-arms every withdrawn decision for one employer, after a person has
-   * finished reviewing the exception that caused the withdrawal. Without this the
+   * Re-arms every settled decision for one employer so `POST …/resolve` can force
+   * a fresh decision: a withdrawn (`invalidated`) decision once a person has
+   * reviewed the exception, and a resolved one, so a confirmed domain can be
+   * re-looked and a stale automatic decision can be replaced. Without this the
    * invalidation would be permanent for an employer whose only task was dropped.
    *
    * Both halves are required: re-arming the task rows alone leaves the employer
@@ -392,10 +416,10 @@ export class D1EmployerIconStore {
         review_priority = 0, invalidated_at = NULL, lease_token = NULL, lease_until = NULL,
         evidence_json = CASE WHEN json_valid(evidence_json)
           THEN json_remove(evidence_json, '$.invalidatedReason') ELSE evidence_json END,
-        updated_at = ? WHERE canonical_employer_id = ? AND status = 'invalidated'`)
+        updated_at = ? WHERE canonical_employer_id = ? AND status IN ('invalidated', 'resolved')`)
         .bind(now, now, canonicalEmployerId),
       this.db.prepare(`UPDATE canonical_employers SET
-        icon_resolution_status = CASE WHEN icon_resolution_status = 'invalidated' THEN NULL ELSE icon_resolution_status END,
+        icon_resolution_status = CASE WHEN icon_resolution_status IN ('invalidated', 'resolved') THEN NULL ELSE icon_resolution_status END,
         updated_at = ? WHERE id = ?`).bind(now, canonicalEmployerId),
     ]);
     return reopened?.meta.changes ?? 0;

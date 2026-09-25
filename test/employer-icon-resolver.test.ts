@@ -1159,6 +1159,37 @@ describe('employer icon idempotency', () => {
     expect(second.resolved).toBe(0);
   });
 
+  it('re-seeds an automatically resolved employer after the revalidation window', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role'), NOW);
+
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/role': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      'https://acme.com/careers/role-2': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(),
+    });
+    // No retention license, so the decision is recorded without an R2 icon key:
+    // exactly the production state while self-hosting rights are unconfirmed.
+    const env = environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN });
+    expect((await runEmployerIconResolutionPass(env, NOW, DEPENDENCIES(fetchImpl))).resolved).toBe(1);
+    expect((await icons.context('acme'))?.iconKey).toBeUndefined();
+
+    // The resolved task is still live, so nothing is re-seeded inside the window.
+    expect(await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role-2'),
+      new Date(NOW.getTime() + 24 * 60 * 60 * 1_000))).toBe(false);
+
+    // Once the revalidation deadline passes a fresh admission seeds a new task and the
+    // sweep decides again, rather than freezing the automatic answer forever.
+    const later = new Date(NOW.getTime() + 31 * 24 * 60 * 60 * 1_000);
+    expect(await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role-2'), later)).toBe(true);
+    const sweep = await runEmployerIconResolutionPass(env, later, DEPENDENCIES(fetchImpl));
+    expect(sweep.claimed).toBe(1);
+    expect(sweep.resolved).toBe(1);
+  });
+
   it('does not re-decide a claimable task left under a domain a person confirmed', async () => {
     const { database, db, admission, icons } = subject();
     await admission.putCanonicalEmployer(employerRow('freeform', 'Freeform'), NOW.toISOString());
@@ -1828,6 +1859,42 @@ describe('employer icon confirm route', () => {
     const context = await icons.context('acme');
     expect(context?.resolutionStatus).toBe('resolved');
     expect(context?.websiteDomain).toBe('acme.com');
+  });
+
+  it('forces a fresh decision for an employer a person confirmed', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await icons.markConfirmed({
+      canonicalEmployerId: 'acme', domain: 'acme.com', evidenceJson: '{"kind":"confirmed"}',
+      revalidateAt: new Date(NOW.getTime() + 365 * 24 * 60 * 60 * 1_000).toISOString(), now: NOW.toISOString(),
+    });
+    expect((await icons.context('acme'))?.resolutionStatus).toBe('resolved');
+
+    // The confirmed domain is stale. `POST …/resolve` clears the settled status so the
+    // next sweep decides again instead of the confirm being permanent.
+    const resolveRequest = new Request('https://api.test/internal/admission/employer-icons/resolve', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ canonicalEmployerId: 'acme', applicationUrl: 'https://acme.com/careers/role' }),
+    });
+    const response = await handleEmployerIconOperations(
+      resolveRequest, icons, () => ({ logoDev: true, brandfetch: true, tieBreaker: true }), () => NOW,
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ enqueued: true });
+    expect((await icons.context('acme'))?.resolutionStatus).toBeUndefined();
+
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/role': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(),
+    });
+    const sweep = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+      DEPENDENCIES(fetchImpl),
+    );
+    expect(sweep.claimed).toBe(1);
+    expect(sweep.resolved).toBe(1);
   });
 });
 

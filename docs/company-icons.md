@@ -296,6 +296,8 @@ All routes require the `X-Operations-Key` secret and return `Cache-Control: no-s
 
 A wrong-icon report is deliberately terminal for the automatic path: the sweep will not re-decide that employer until a person has looked at it. Once the review is finished, `resolve` re-arms the withdrawn rows, and the next sweep decides again from fresh evidence.
 
+A `confirm` on an employer the resolver has never swept is settled the same way: the canonical decision is written with no task row, so the backfill and any later admission skip it and a stale task seeded by an earlier deploy is dropped rather than allowed to overwrite the confirmed domain. That is different from an *automatic* resolution, which always leaves its resolved task row behind and is therefore still re-validated: after the 30-day window a fresh admission seeds a new task and the sweep decides again. `resolve` is the deliberate override for both: it clears the settled status and re-arms the rows, so a confirmed domain can be re-looked instead of being permanent.
+
 `mode` is stored in `system_state`, not in Wrangler, so enabling the resolver never changes a Worker binding and the deploy plan guard stays clean.
 
 ### Staged rollout
