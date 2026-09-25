@@ -49,6 +49,16 @@ describe('resume model output parsing', () => {
     expect(calls).toEqual([RESUME_DRAFT_MODELS[0], RESUME_DRAFT_MODELS[1]]);
   });
 
+  it('dials reasoning down for the models that support it', async () => {
+    const calls: Array<{ model: string; input: Record<string, unknown> }> = [];
+    const ai = { async run(model: string, input: Record<string, unknown>) { calls.push({ model, input }); return { response: JSON.stringify({ changes: [] }) }; } };
+    await workersAiResumeDraftGenerator(ai).generate({ ...input, models: ['@cf/openai/gpt-oss-120b'] });
+    expect(calls[0]?.input).toMatchObject({ reasoning_effort: 'low' });
+    calls.length = 0;
+    await workersAiResumeDraftGenerator(ai).generate({ ...input, models: ['@cf/qwen/qwen3-30b-a3b-fp8'] });
+    expect(calls[0]?.input).not.toHaveProperty('reasoning_effort');
+  });
+
   it('uses an explicit chain when the caller supplies one', async () => {
     const calls: string[] = [];
     const ai = { async run(model: string) { calls.push(model); return { response: JSON.stringify({ changes: [] }) }; } };

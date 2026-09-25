@@ -36,6 +36,14 @@ export const RESUME_DRAFT_MODELS = ['@cf/qwen/qwen3-30b-a3b-fp8', '@cf/ibm-grani
  * availability fallback. */
 export const RESUME_DRAFT_MODELS_QUALITY = ['@cf/openai/gpt-oss-120b', '@cf/qwen/qwen3-30b-a3b-fp8'] as const;
 
+/** Per-model request options. gpt-oss reasons by default (medium effort), which
+ * cost ~312 neurons and ~50 s per draft. Low effort keeps the change quality —
+ * a remove/rewrite/move mix — while landing at ~100-180 neurons and ~10 s, so
+ * Pro sees the review at about the same time as Free. */
+const RESUME_DRAFT_MODEL_OPTIONS: Record<string, Record<string, unknown>> = {
+  '@cf/openai/gpt-oss-120b': { reasoning_effort: 'low' },
+};
+
 /** Resolves a model-authored target against the source repository. The model is
  * asked to copy a `ref` verbatim, but a single wrong parent kind used to fail the
  * whole draft ("parent must be a typed role, project, or education pointer").
@@ -163,7 +171,7 @@ export function workersAiResumeDraftGenerator(ai: WorkersAi) {
         // feedback, so it must propagate unchanged.
         // Reasoning models (gpt-oss, Qwen, GLM) spend part of this budget on
         // hidden reasoning, so a 2k cap truncated the JSON mid-string.
-        try { output = await ai.run(model, { response_format: { type: 'json_object' }, max_tokens: 8_192, temperature: 0.2, messages }); }
+        try { output = await ai.run(model, { response_format: { type: 'json_object' }, max_tokens: 8_192, temperature: 0.2, ...(RESUME_DRAFT_MODEL_OPTIONS[model] ?? {}), messages }); }
         catch (error) { lastError = error; continue; }
         return parseResumeChanges(output, bankItems);
       }
