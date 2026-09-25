@@ -359,7 +359,7 @@ describe('employer icon diagnosis', () => {
         const input = JSON.parse(request.prompt.user) as { candidates: Array<{ domain: string; evidenceIds: string[] }> };
         const chosen = input.candidates.find((candidate) => candidate.domain === 'acme.com')!;
         return {
-          response: { decision: 'accept', officialDomain: 'acme.com', confidence: 0.8,
+          response: { decision: 'accept', officialDomain: 'acme.com', confidence: 0.75,
             evidenceIds: chosen.evidenceIds, reason: 'the provider and the page agree' },
           inputTokens: 10, outputTokens: 5, actualCostCents: 1,
         };
@@ -2093,5 +2093,41 @@ describe('employer declared-site precedence', () => {
 
     expect(result.resolved).toBe(1);
     expect((await icons.context('figureai'))?.websiteDomain).toBe('figure.ai');
+  });
+});
+
+describe('employer icon backfill', () => {
+  it('carries the employer’s own posting link so a backfilled employer resolves from its board', async () => {
+    const { database, db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('aevex', 'AEVEX'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    // No task row: the employer existed before the resolver. Its live posting does.
+    database.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, ?, 'internship', ?)")
+      .run('aevex-posting', 'posting', JSON.stringify({
+        normalizedUrl: 'https://job-boards.greenhouse.io/aevexaerospace/jobs/5415815008',
+        title: 'Robotics Engineering Co-op',
+        admission: { destination: { provider: 'greenhouse' } },
+        sourceReferences: [{ sourceId: 'greenhouse-aevexaerospace', provenance: 'official-ats' }],
+        internshipIdentity: { company: { canonicalId: 'aevex' } },
+      }));
+
+    const fetchImpl = scriptedFetch({
+      'https://job-boards.greenhouse.io/aevexaerospace/jobs/5415815008': () => html(
+        '<!doctype html><html><head><title>Robotics Engineering Co-op at AEVEX</title><script>'
+        + '\\"logo\\":{\\"href\\":\\"https://aevex.com\\",\\"url\\":null}'
+        + '</script></head></html>',
+      ),
+      [logoDevImageUrl('aevex.com', LOGO_IMAGE_TOKEN)]: () => webp(),
+      [IMAGE_URL]: () => status(404),
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+    );
+
+    // The backfill seeded it with the real link and the same pass resolved it.
+    expect(result.backfilled).toBe(1);
+    expect(result.resolved).toBe(1);
+    expect((await icons.context('aevex'))?.websiteDomain).toBe('aevex.com');
   });
 });

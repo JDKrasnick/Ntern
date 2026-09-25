@@ -107,7 +107,7 @@ export const ICON_AUTO_RESOLVE_MARGIN = 0.15;
 /** The band where one bounded LLM tie-breaker may be consulted. */
 export const ICON_LLM_BAND_MINIMUM = 0.55;
 /** The LLM may accept on its own word at or above this confidence. */
-export const ICON_LLM_MINIMUM_CONFIDENCE = 0.9;
+export const ICON_LLM_MINIMUM_CONFIDENCE = 0.8;
 /**
  * ...or below it, down to this floor, when the domain it selected proves itself.
  *
@@ -116,7 +116,8 @@ export const ICON_LLM_MINIMUM_CONFIDENCE = 0.9;
  * `deepgram.com` all arrived at 0.80 — so a self-reported confidence is a poor gate
  * on its own. What makes a below-floor answer usable is the same independent proof a
  * proposal needs: the domain, fetched, must name the employer in its own metadata.
- * A self-report is a guess; that is evidence.
+ * A self-report is a guess; that is evidence. The floor is where the model is simply
+ * guessing, not where it is unsure.
  */
 export const ICON_LLM_VERIFIED_MINIMUM_CONFIDENCE = 0.3;
 /** Each provider may contribute at most this many domain candidates. */
@@ -441,19 +442,25 @@ export function decideIconDomain(candidates: readonly IconDomainCandidate[]): Ic
   if (!best) {
     return { outcome: 'unresolved', scores, reason: 'No eligible employer domain candidate' };
   }
-  // The employer's own ATS board declares the employer's site. When that declaration is
-  // a different domain from the one the providers agreed on, the employer's own word
-  // wins: two providers agreeing with each other is exactly how a namesake gets
-  // published (an employer that links `figure.ai` on its board while both providers
-  // nominate the unrelated `figure.com`), and the board's domain is the employer
-  // stating its own site. This is deliberately narrow — it only overrides a decision
-  // the providers would have made on their own; with no declaration, nothing changes.
-  const declared = eligible.find((candidate) => candidate.signals.includes('platform-website'));
-  if (declared && declared.domain !== best.domain) {
+  // The employer's own structured declaration — the site its ATS board publishes
+  // (`platform-website`) or the URL its Organization node publishes (`jsonld-url`) — is
+  // the employer stating its own domain. When any eligible candidate carries one, that
+  // candidate is the answer: it settles a close runner-up (two providers agreeing with
+  // each other is how a namesake is published) and it never needs a model call, which is
+  // what makes an unambiguous case like `meta.com` beside the `metacareers.com` careers
+  // host deterministic instead of a coin flip the model declined. A domain that is only
+  // a final URL, a provider nomination, or a page title cannot trigger this: it is
+  // strictly the employer's own declaration.
+  const declared = eligible.find((candidate) =>
+    candidate.signals.includes('platform-website') || candidate.signals.includes('jsonld-url'));
+  if (declared) {
+    const next = eligible.find((candidate) => candidate.domain !== declared.domain);
     return {
       outcome: 'resolved', scores, selectedDomain: declared.domain, selectedScore: declared.score,
-      runnerUpScore: best.score,
-      reason: `the employer's own board names ${declared.domain}, not ${best.domain}`,
+      ...(next ? { runnerUpScore: next.score } : {}),
+      reason: declared.domain === best.domain
+        ? `the employer's own declaration names ${declared.domain}`
+        : `the employer's own declaration names ${declared.domain}, not ${best.domain}`,
     };
   }
   const runnerUp = eligible.find((candidate) => candidate.domain !== best.domain);
