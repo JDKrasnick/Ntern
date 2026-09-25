@@ -226,8 +226,10 @@ export function attachResumeReviewBoxes(rows: ResumeReviewRow[], rawPages: reado
   };
   return rows.map((row) => {
     if (!row.changeId) return row;
-    const beforeBox = find(rawPages, row.before);
-    const afterBox = row.after === undefined ? undefined : find(proposedPages, row.after);
+    // An entry heading (a role, project, or education line) renders differently
+    // from the stored sentence, so fall back to the line's label.
+    const beforeBox = find(rawPages, row.before) ?? find(rawPages, row.label);
+    const afterBox = row.after === undefined ? undefined : find(proposedPages, row.after) ?? find(proposedPages, row.label);
     return { ...row, ...(beforeBox ? { beforeBox } : {}), ...(afterBox ? { afterBox } : {}) };
   });
 }

@@ -5684,29 +5684,32 @@ function bestSavedResumeRecommendation(recommendations: ResumeProfileRecommendat
 
 /** One rendered résumé page with a rectangle over the focused change. The frame
  * keeps the page aspect ratio so the normalized box lines up with the image. */
-function ResumeRenderedPage({ uri, box, kind, before, label, empty }: { uri?: string; box?: ResumeReviewBox; kind: "added" | "removed"; before?: string; label: string; empty: string }) {
+function ResumeRenderedPage({ uri, box, kind, marker, markerText, label, empty }: {
+  uri?: string; box?: ResumeReviewBox; kind: "added" | "removed";
+  marker?: ResumeReviewBox; markerText?: string; label: string; empty: string;
+}) {
   const percent = (value: number) => `${Number((value * 100).toFixed(3))}%` as `${number}%`;
-  const stripAbove = before !== undefined && box !== undefined && box.y >= box.h;
+  // A little breathing room around the line so the box does not clip the text.
+  const inflate = (value: ResumeReviewBox): ResumeReviewBox => {
+    const dx = 0.007; const dy = 0.005;
+    const x = Math.max(0, value.x - dx); const y = Math.max(0, value.y - dy);
+    return { page: value.page, x, y, w: Math.min(1 - x, value.w + dx * 2), h: Math.min(1 - y, value.h + dy * 2) };
+  };
+  const main = box ? inflate(box) : undefined;
+  const mark = marker ? inflate(marker) : undefined;
+  const rect = (value: ResumeReviewBox) => ({ height: percent(value.h), left: percent(value.x), top: percent(value.y), width: percent(value.w) });
   return (
     <View style={styles.resumePageFrame}>
       {uri
         ? <Image accessibilityLabel={label} source={{ uri }} resizeMode="contain" style={styles.resumePageImage} />
         : <View style={styles.resumePagePlaceholder}><Text style={styles.resumePreviewCaption}>{empty}</Text></View>}
-      {uri && box && stripAbove ? (
-        <View
-          pointerEvents="none"
-          accessibilityLabel="Original line"
-          style={[styles.resumePageHighlight, styles.resumePageHighlightRemoved, { height: percent(box.h), left: percent(box.x), top: percent(box.y - box.h), width: percent(box.w), justifyContent: "center" }]}
-        >
-          <Text numberOfLines={1} style={styles.resumePageHighlightText}>− {before}</Text>
+      {uri && mark ? (
+        <View pointerEvents="none" accessibilityLabel="Original position" style={[styles.resumePageHighlight, styles.resumePageHighlightRemoved, rect(mark), styles.resumePageHighlightLabeled]}>
+          {markerText ? <Text numberOfLines={1} style={styles.resumePageHighlightText}>− {markerText}</Text> : null}
         </View>
       ) : null}
-      {uri && box ? (
-        <View
-          pointerEvents="none"
-          accessibilityLabel={kind === "added" ? "Added line" : "Original line"}
-          style={[styles.resumePageHighlight, kind === "added" ? styles.resumePageHighlightAdded : styles.resumePageHighlightRemoved, { height: percent(box.h), left: percent(box.x), top: percent(box.y), width: percent(box.w) }]}
-        />
+      {uri && main ? (
+        <View pointerEvents="none" accessibilityLabel={kind === "added" ? "Added line" : "Original line"} style={[styles.resumePageHighlight, kind === "added" ? styles.resumePageHighlightAdded : styles.resumePageHighlightRemoved, rect(main)]} />
       ) : null}
     </View>
   );
@@ -6028,7 +6031,21 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
   const boardRows = previewRows.length ? previewRows : reviewRows;
   const focusedRow = boardRows.find((row) => row.changeId === focusChangeId);
   /** One page at a time: the proposal boxes a new line, the original boxes a removal. */
-  const pageSide: "raw" | "proposed" = focusedRow && focusedRow.afterBox === undefined && focusedRow.beforeBox !== undefined ? "raw" : "proposed";
+  const pageSide: "raw" | "proposed" = focusedRow?.type === "remove" ? "raw" : "proposed";
+  /** A move only shows boxes when it actually reorders; a no-op move changes nothing. */
+  const moveReordered = focusedRow?.type === "move" && focusedRow.moved === true;
+  const mainBox = focusedRow?.type === "move" && !moveReordered
+    ? undefined
+    : pageSide === "proposed" ? focusedRow?.afterBox : focusedRow?.beforeBox;
+  /** The other end of the change, drawn as a red box so a move shows where the
+   * line came from and a rewrite shows the replaced line just above the new one. */
+  const markerBox = pageSide === "proposed" && focusedRow
+    ? focusedRow.type === "move"
+      ? (moveReordered ? focusedRow.beforeBox : undefined)
+      : focusedRow.type === "rewrite" && focusedRow.afterBox && focusedRow.before !== focusedRow.after
+        ? { ...focusedRow.afterBox, y: Math.max(0, focusedRow.afterBox.y - focusedRow.afterBox.h) }
+        : undefined
+    : undefined;
   const decideChange = (changeId: string, decision: "accepted" | "rejected") => {
     if (!draft || resumeBusy) return;
     setResumeBusy(true);
@@ -6909,8 +6926,9 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
                     <ResumeRenderedPage
                       kind={pageSide === "proposed" ? "added" : "removed"}
                       uri={pageSide === "proposed" ? previewImage : previewOriginalImage}
-                      box={pageSide === "proposed" ? focusedRow?.afterBox : focusedRow?.beforeBox}
-                      before={pageSide === "proposed" && focusedRow?.before !== focusedRow?.after ? focusedRow?.before : undefined}
+                      box={mainBox}
+                      marker={markerBox}
+                      markerText={markerBox ? focusedRow?.before : undefined}
                       label={pageSide === "proposed" ? "Proposed résumé page" : "Original résumé page"}
                       empty="Rendering the résumé…"
                     />
@@ -9475,9 +9493,10 @@ const styles = StyleSheet.create({
   resumePageImage: { height: "100%", width: "100%" },
   resumePagePlaceholder: { alignItems: "center", flex: 1, justifyContent: "center", padding: 16 },
   resumePageHighlight: { borderRadius: 3, borderWidth: 1.5, position: "absolute" },
-  resumePageHighlightAdded: { backgroundColor: "rgba(6,118,71,0.14)", borderColor: "rgba(6,118,71,0.65)" },
+  resumePageHighlightAdded: { backgroundColor: "rgba(6,118,71,0.12)", borderColor: colors.success, borderWidth: 2 },
+  resumePageHighlightLabeled: { justifyContent: "center" },
   resumePageHighlightText: { color: colors.danger, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 10, paddingHorizontal: 3 },
-  resumePageHighlightRemoved: { backgroundColor: "rgba(180,35,24,0.12)", borderColor: "rgba(180,35,24,0.6)" },
+  resumePageHighlightRemoved: { backgroundColor: "rgba(180,35,24,0.10)", borderColor: colors.danger, borderWidth: 2 },
   resumeDecision: { gap: 8, padding: 11 },
   resumeDecisionMain: { flex: 1, gap: 6, minWidth: 0 },
   resumeDecisionSide: { alignItems: "stretch", flexDirection: "row", gap: 8, justifyContent: "space-between" },
