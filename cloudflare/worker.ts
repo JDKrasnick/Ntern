@@ -30,8 +30,8 @@ import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRep
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
-import { isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
-import { withinMessageDeadline } from '../src/sqs-fifo-batch.js';
+import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
+import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary } from './shadow-extraction.js';
 import { handleShadowPublication, publishProspectiveShadowMetadata } from './shadow-publication.js';
 import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
@@ -1907,6 +1907,16 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   const completeTraffic = async (messageId: string, outcome: 'success' | 'failure' | 'cancelled', error?: unknown) => {
     await trafficObservations.get(messageId)?.complete(outcome, error);
   };
+  // A deferred delivery is acknowledged and never redelivered, so its failure
+  // ledger row would otherwise stay unresolved until the 30-day cleanup and
+  // inflate the operator "unresolved" signal. Resolve it here: the source health
+  // row and the dispatcher's own cadence are the durable retry state.
+  const resolveDeferredFailure = async (messageId: string) => {
+    try { await resolveQueueFailures(env.DB, batch.queue, messageId); }
+    catch (error) {
+      console.error(JSON.stringify({ command: 'catalog-deferred-ledger-resolution', messageId, error: safeDiagnostic(error) }));
+    }
+  };
   if (batch.queue.includes('destination-verification')) {
     await observeQueueBatch(batch, trafficObservations, (observed) => processDestinationVerificationBatch(observed, env));
     return;
@@ -2019,7 +2029,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     } catch (error) {
       for (const queued of batch.messages) {
         const parsed = (() => {
-          try { return JSON.parse(typeof queued.body === 'string' ? queued.body : JSON.stringify(queued.body)) as { sourceId?: string; sourceKind?: string }; }
+          try { return JSON.parse(typeof queued.body === 'string' ? queued.body : JSON.stringify(queued.body)) as { sourceId?: string; sourceKind?: string; force?: boolean }; }
           catch { return undefined; }
         })();
         await recordQueueFailureBestEffort({
@@ -2029,7 +2039,20 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         });
         console.error(JSON.stringify({ command: 'github-poll-setup', messageId: queued.id, error: safeDiagnostic(error) }));
         await completeTraffic(queued.id, 'failure', error);
-        queued.retry({ delaySeconds: d1QueueRetryDelay(error, queued.attempts) });
+        // This registry read gates the whole GitHub lane, so a source-scoped
+        // message that fails every attempt here is still work the dispatcher
+        // re-issues from its next sweep. Only poison, and a forced recovery the
+        // dispatcher can never re-issue, stay on the retry path. No poll ran, so
+        // no source health is written; the dispatch lease is what re-issues it.
+        if (catalogDeliveryIsDeferred(error, parsed?.sourceId, queued.attempts,
+          { dispatcherCanReissue: parsed?.force !== true })) {
+          console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
+            sourceId: parsed?.sourceId, messageId: queued.id, attempts: queued.attempts, error: safeDiagnostic(error) }));
+          await resolveDeferredFailure(queued.id);
+          queued.ack();
+        } else {
+          queued.retry({ delaySeconds: d1QueueRetryDelay(error, queued.attempts) });
+        }
       }
       return;
     }
@@ -2059,6 +2082,11 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
             await resolveFailures(queued.id, queued.attempts);
             await completeTraffic(queued.id, 'success');
           } else {
+            // The source is paused, quarantined, or backed off, so this delivery
+            // runs no poll and the message is acked. Resolve any row an earlier
+            // attempt wrote: a blocked source is never re-polled on its own, so
+            // the row would otherwise stay unresolved until the 30-day cleanup.
+            await resolveFailures(queued.id, queued.attempts);
             await completeTraffic(queued.id, 'cancelled');
           }
           continue;
@@ -2068,6 +2096,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         if (githubSourceRunBlocked(priorHealth, message.force)) {
           console.log(JSON.stringify({ event: 'source_poll_skipped', command: 'github-poll', sourceId: source.id,
             reason: priorHealth?.state === 'quarantined' ? 'quarantined' : priorHealth?.sourceStatus === 'paused' ? 'paused' : 'backoff' }));
+          // A blocked source is acked and never re-polled on its own, so an
+          // earlier attempt's failure row would sit unresolved until the 30-day
+          // cleanup. Resolve it here, matching the ATS lane's ack path.
+          await resolveFailures(queued.id, queued.attempts);
           await completeTraffic(queued.id, 'cancelled');
           continue;
         }
@@ -2091,7 +2123,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
           config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT },
         }), SOURCE_MESSAGE_DEADLINE_MS);
-        if (result.poll && (result.poll.continuationSources.length || result.poll.failures.length)) {
+        if (result.poll && (result.poll.continuationSources.length || result.poll.failures.length
+          || Object.keys(result.poll.pendingResolution).length)) {
           console.log(JSON.stringify({
             event: 'github_admission_migration_slice',
             sourceId: source.id,
@@ -2103,15 +2136,22 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         }
         if (result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
         if (result.poll?.continuationSources.includes(source.id)) {
-          await sendQueueMessageWithin(env.GITHUB_QUEUE, {
-            sourceId: source.id,
-            ...(message.force === true ? { force: true } : {}),
-          });
+          try {
+            await sendQueueMessageWithin(env.GITHUB_QUEUE, {
+              sourceId: source.id,
+              ...(message.force === true ? { force: true } : {}),
+            });
+          } catch (error) {
+            // The poll committed its checkpoint before requesting continuation.
+            // The scheduled dispatcher will pick up the pending source; retrying
+            // this already-completed message can only duplicate committed work.
+            console.error(JSON.stringify({ event: 'github_continuation_deferred', sourceId: source.id,
+              pendingResolution: result.poll.pendingResolution[source.id] ?? 0, error: safeDiagnostic(error) }));
+          }
         }
         await resolveFailures(queued.id, queued.attempts);
         await completeTraffic(queued.id, 'success');
       } catch (error) {
-        failed.add(record.messageId);
         const delay = d1QueueRetryDelay(error, queued.attempts);
         if (delay) overloadDelays.set(record.messageId, delay);
         // Structured sources already persist their own failure health. The
@@ -2142,6 +2182,33 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         });
         console.error(JSON.stringify({ command: 'github-poll', messageId: record.messageId, error: safeDiagnostic(error) }));
         await completeTraffic(queued.id, 'failure', error);
+        // The scheduled dispatcher owns every reviewed source's retry through
+        // its health row and cadence, so a source-scoped failure that survives
+        // all deliveries is deferred instead of dead-lettered. Only a message
+        // the dispatcher can never re-issue stays on the retry path.
+        //
+        // A forced recovery is that message here: the scheduled GitHub dispatch
+        // skips quarantined sources and this lane has no recovery probe, so a
+        // forced recovery is the only thing that would ever re-issue them.
+        // Acking one that fails every delivery would hide it with no automatic
+        // retry, so it stays on the retry path and dead-letters for a human.
+        // Ordinary polls carry no `force` flag and are still re-issued from the
+        // dispatcher's next sweep. A poll that leaves its source quarantined is
+        // acked like any other deferral rather than dead-lettered: quarantine is
+        // the intended terminal state for a broken board, the scheduled dispatch
+        // skips it either way, and the source stays visible in source health for
+        // a manual recovery. Deferring it also keeps the quarantine ack
+        // consistent with the earlier attempts, which the blocked-source path
+        // above already acks.
+        if (catalogDeliveryIsDeferred(error, parsedMessage?.sourceId, queued.attempts,
+          { dispatcherCanReissue: parsedMessage?.force !== true })) {
+          console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: 'github',
+            sourceId: parsedMessage?.sourceId, messageId: record.messageId, attempts: queued.attempts,
+            error: safeDiagnostic(error) }));
+          await resolveDeferredFailure(record.messageId);
+        } else {
+          failed.add(record.messageId);
+        }
       }
     }
     for (const message of batch.messages) {
@@ -2156,6 +2223,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   const event = { Records: records };
   const messageById = new Map(batch.messages.map((message) => [message.id, message]));
   const overloadDelays = new Map<string, number>();
+  const deferred = new Set<string>();
   // Catalog polls carry only a sourceId. Persist the exact failure category and
   // diagnostic before the platform retries and dead-letters the message, so the
   // guarded DLQ inspector can explain every dead-letter instead of only GitHub.
@@ -2167,12 +2235,58 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     const queued = messageById.get(record.messageId);
     const delay = d1QueueRetryDelay(error, queued?.attempts);
     if (delay) overloadDelays.set(record.messageId, delay);
+    // The ATS workers write failure health for every error their own poll
+    // throws, but `processFifoBatch` raises a message-deadline rejection around
+    // the record, outside that catch. Recording it here keeps `lastAttemptAt`
+    // advancing for a stalled board instead of letting the cadence-slip alarm
+    // fire on a source the dispatcher is in fact re-issuing.
+    //
+    // `processFifoBatch` reports a blocked record with the error of the record
+    // ahead of it in the same FIFO group. Cloudflare delivers one message per
+    // group here (`queueHandler` builds records with no MessageGroupId), so
+    // every reported record ran; revisit this if SQS-style grouping returns, so
+    // a blocked record is not recorded as a stalled board.
+    if (error instanceof QueueMessageDeadlineError && parsed?.sourceId) {
+      try {
+        // Capture both timestamps before the health read: a slow `getSourceHealth`
+        // would otherwise push `startedAt` past `completedAt` and clamp
+        // `durationMs` to zero.
+        const observedAt = new Date();
+        const completedAt = observedAt.toISOString();
+        // The deadline fires after the record ran for `deadlineMs`, so the
+        // attempt began then. `queued.timestamp` is the message send time, so
+        // using it here would fold the queue wait and every earlier retry into
+        // `durationMs`.
+        const startedAt = new Date(observedAt.getTime() - error.deadlineMs).toISOString();
+        const healthStore = new D1InternshipStore(env.DB);
+        await healthStore.putSourceHealth(failedSourceHealth({
+          sourceId: parsed.sourceId,
+          provider: catalogProvider,
+          previous: await healthStore.getSourceHealth(parsed.sourceId),
+          startedAt,
+          completedAt,
+          error,
+        }));
+      } catch (healthError) {
+        console.error(JSON.stringify({ command: 'catalog-health', provider: catalogProvider,
+          messageId: record.messageId, error: safeDiagnostic(healthError) }));
+      }
+    }
     await recordQueueFailureBestEffort({
       db: env.DB, queueName: batch.queue, messageId: record.messageId,
       attempts: queued?.attempts, timestamp: queued?.timestamp, sourceId: parsed?.sourceId,
       sourceKind: catalogProvider, body: record.body, error,
     });
     await completeTraffic(record.messageId, 'failure', error);
+    // The provider dispatcher re-issues any reviewed source on its cadence, so a
+    // source-scoped failure that survives all deliveries is deferred instead of
+    // dead-lettered. Only poison stays on the retry path.
+    if (catalogDeliveryIsDeferred(error, parsed?.sourceId, queued?.attempts)) {
+      deferred.add(record.messageId);
+      console.error(JSON.stringify({ event: 'catalog_delivery_deferred', provider: catalogProvider,
+        sourceId: parsed?.sourceId, messageId: record.messageId, attempts: queued?.attempts, error: safeDiagnostic(error) }));
+      await resolveDeferredFailure(record.messageId);
+    }
   };
   let registry: Awaited<ReturnType<typeof reviewedProviderRegistry>>;
   try {
@@ -2182,7 +2296,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     registry = await reviewedProviderRegistry(new D1EmployerStore(env.DB));
   } catch (error) {
     for (const record of records) await onRecordFailure(record, error);
-    for (const message of batch.messages) message.retry({ delaySeconds: d1QueueRetryDelay(error, message.attempts) });
+    for (const message of batch.messages) {
+      if (deferred.has(message.id)) message.ack();
+      else message.retry({ delaySeconds: overloadDelays.get(message.id) ?? d1QueueRetryDelay(error, message.attempts) });
+    }
     console.error(JSON.stringify({ command: 'catalog-poll-setup', provider: catalogProvider,
       messageIds: records.map((record) => record.messageId), error: safeDiagnostic(error) }));
     return;
@@ -2204,7 +2321,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
       : [];
   } catch (error) {
     for (const record of records) await onRecordFailure(record, error);
-    for (const message of batch.messages) message.retry({ delaySeconds: d1QueueRetryDelay(error, message.attempts) });
+    for (const message of batch.messages) {
+      if (deferred.has(message.id)) message.ack();
+      else message.retry({ delaySeconds: overloadDelays.get(message.id) ?? d1QueueRetryDelay(error, message.attempts) });
+    }
     console.error(JSON.stringify({ command: 'catalog-poll-setup', provider: catalogProvider,
       messageIds: records.map((record) => record.messageId), error: safeDiagnostic(error) }));
     return;
@@ -2222,8 +2342,15 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   for (const message of batch.messages) {
     if (failed.has(message.id)) {
       await completeTraffic(message.id, 'failure');
-      const delay = overloadDelays.get(message.id);
-      message.retry(delay ? { delaySeconds: delay } : undefined);
+      if (deferred.has(message.id)) {
+        // The dispatcher owns this source; ack so the platform never
+        // dead-letters a poll it will re-issue. The failure ledger and source
+        // health already record why.
+        message.ack();
+      } else {
+        const delay = overloadDelays.get(message.id);
+        message.retry(delay ? { delaySeconds: delay } : undefined);
+      }
     }
     else {
       await completeTraffic(message.id, 'success');

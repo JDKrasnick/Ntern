@@ -8,7 +8,7 @@ import { catalogProviderIds, integrationRegistry } from '../src/integration-regi
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import { D1EmployerStore } from '../cloudflare/employer-store.js';
-import { isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
+import { CATALOG_DELIVERY_MAX_ATTEMPTS, isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
 import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
 import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
@@ -719,6 +719,128 @@ describe('Catalog queue setup failures', () => {
     ]);
     vi.restoreAllMocks();
   });
+
+  it('defers source-scoped setup failures on the final delivery instead of dead-lettering', async () => {
+    const failureRows: unknown[][] = [];
+    const statements: string[] = [];
+    const prepare = vi.fn((query: string) => {
+      statements.push(query);
+      return {
+        async first() { return null; },
+        bind: (...values: unknown[]) => ({
+          async all() {
+            if (query.includes('reviewed_source_registry')) throw new Error('D1 DB is overloaded. Requests queued for too long.');
+            return { results: [] };
+          },
+          async run() {
+            if (query.includes('INSERT INTO queue_failure_events')) failureRows.push(values);
+            return { meta: { changes: 1 } };
+          },
+        }),
+      };
+    });
+    const first = { id: 'first', body: { sourceId: 'greenhouse-acme' }, attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-greenhouse', messages: [first] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.ack).toHaveBeenCalledOnce();
+    expect(first.retry).not.toHaveBeenCalled();
+    expect(failureRows).toHaveLength(1);
+    // The deferred message is never redelivered, so the ledger row is resolved
+    // here instead of inflating the unresolved count for 30 days.
+    expect(statements.some((query) => query.includes('UPDATE queue_failure_events') && query.includes('resolved_at'))).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it('defers the GitHub lane when the structured registry read fails on the final delivery', async () => {
+    const failureRows: unknown[][] = [];
+    const statements: string[] = [];
+    const prepare = vi.fn((query: string) => {
+      statements.push(query);
+      return {
+        async first() { return null; },
+        bind: (...values: unknown[]) => ({
+          async all() { return { results: [] }; },
+          async run() {
+            if (query.includes('INSERT INTO queue_failure_events')) failureRows.push(values);
+            return { meta: { changes: 1 } };
+          },
+        }),
+      };
+    });
+    // The structured registry read gates every GitHub delivery, so a source-scoped
+    // message that survives all attempts here is still work the dispatcher owns.
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources')
+      .mockRejectedValue(new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'));
+    const first = { id: 'first', body: { sourceId: defaultSources[0]!.id }, attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [first] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.ack).toHaveBeenCalledOnce();
+    expect(first.retry).not.toHaveBeenCalled();
+    expect(failureRows).toHaveLength(1);
+    expect(statements.some((query) => query.includes('UPDATE queue_failure_events') && query.includes('resolved_at'))).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it('still retries a GitHub setup failure the dispatcher cannot re-own', async () => {
+    const prepare = vi.fn(() => ({
+      async first() { return null; },
+      bind: () => ({
+        async all() { return { results: [] }; },
+        async run() { return { meta: { changes: 1 } }; },
+      }),
+    }));
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources')
+      .mockRejectedValue(new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'));
+    // A body without a source ID names no work the dispatcher could re-issue, so
+    // it stays on the retry path even on the final delivery.
+    const first = { id: 'first', body: 'not-json', attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [first] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.retry).toHaveBeenCalledOnce();
+    expect(first.ack).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it('still retries a forced GitHub recovery the dispatcher cannot re-issue', async () => {
+    const prepare = vi.fn(() => ({
+      async first() { return null; },
+      bind: () => ({
+        async all() { return { results: [] }; },
+        async run() { return { meta: { changes: 1 } }; },
+      }),
+    }));
+    vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources')
+      .mockRejectedValue(new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'));
+    // The scheduled GitHub dispatch skips quarantined sources and the lane has
+    // no recovery probe, so a forced recovery is the only message that would
+    // re-issue one: it must dead-letter instead of being acked into silence.
+    const first = { id: 'first', body: { sourceId: defaultSources[0]!.id, force: true },
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS, ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [first] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(first.retry).toHaveBeenCalledOnce();
+    expect(first.ack).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
 });
 
 describe('Cloudflare DNS resolver queries', () => {
@@ -887,12 +1009,16 @@ describe('Cloudflare GitHub queue continuation', () => {
    * structured registry is empty, so the delivery reaches the reviewed GitHub
    * branch, and the source reports no prior health so quarantine cannot block it.
    */
-  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth } = {}) => {
+  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth; sendError?: Error; attempts?: number; pollError?: Error; expectNoPoll?: boolean } = {}) => {
     const sent: unknown[] = [];
     const handled: string[] = [];
+    const statements: string[] = [];
     const polls: Array<{ command: string; sourceIds: string[]; maxListingsPerSourceRun: number | undefined }> = [];
     const workQueue: Queue = {
-      async send(message) { sent.push(message); },
+      async send(message) {
+        if (options.sendError) throw options.sendError;
+        sent.push(message);
+      },
       async sendBatch() {},
     };
     const logged: string[] = [];
@@ -904,30 +1030,48 @@ describe('Cloudflare GitHub queue continuation', () => {
         sourceIds: (dependencies.sources ?? []).map((source) => source.id),
         maxListingsPerSourceRun: dependencies.maxListingsPerSourceRun,
       });
+      if (options.pollError) throw options.pollError;
       return { poll: report };
     });
     vi.spyOn(console, 'log').mockImplementation((line) => { logged.push(String(line)); });
     const message = {
-      id: 'github-first', body: { sourceId: reviewedGithub.id, ...(options.force ? { force: true } : {}) }, attempts: 1,
+      id: 'github-first', body: { sourceId: reviewedGithub.id, ...(options.force ? { force: true } : {}) }, attempts: options.attempts ?? 1,
       ack() { handled.push('ack'); }, retry() { handled.push('retry'); },
     };
     try {
       await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [message] }, {
-        DB: { prepare: () => ({ async first() { return null; } }), async batch() { return []; } },
+        // The health and failure-ledger writes run on the real path, so the fake
+        // DB supports `bind`; without it they threw and the ledger assertions
+        // could never observe a write.
+        DB: {
+          prepare: (query: string) => {
+            statements.push(query);
+            return {
+              async first() { return null; },
+              bind: () => ({
+                async all() { return { results: [] }; },
+                async run() { return { meta: { changes: 1 } }; },
+              }),
+            };
+          },
+          async batch() { return []; },
+        },
         GITHUB_QUEUE: workQueue,
       } as unknown as Environment);
     } finally {
       vi.restoreAllMocks();
     }
     // One bounded poll slice per delivery is the delivery's whole reason to
-    // re-enqueue itself, so every case pins the poll it issued.
-    expect(polls).toEqual([{
+    // re-enqueue itself, so every case pins the poll it issued. A blocked source
+    // is skipped before the poll, so it asserts the opposite.
+    if (options.expectNoPoll) expect(polls).toEqual([]);
+    else expect(polls).toEqual([{
       command: 'poll', sourceIds: [reviewedGithub.id],
       maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
     }]);
     const sliceEvents = logged.map((line) => JSON.parse(line) as Record<string, unknown>)
       .filter((event) => event.event === 'github_admission_migration_slice');
-    return { sent, handled, sliceEvents };
+    return { sent, handled, statements, sliceEvents };
   };
 
   it('re-enqueues the source once and acks while the delivery leaves a pending resolution slice', async () => {
@@ -942,6 +1086,76 @@ describe('Cloudflare GitHub queue continuation', () => {
       sourceId: reviewedGithub.id, continuation: true, resolutionPending: 4, failureCount: 0,
     })]);
     expect(handled).toEqual(['ack']);
+  });
+
+  it('acks a committed slice when its continuation send fails for the scheduled dispatcher to resume', async () => {
+    const { sent, handled, sliceEvents } = await deliver({
+      continuationSources: [reviewedGithub.id], pendingResolution: { [reviewedGithub.id]: 4 }, failures: [],
+    }, { sendError: new Error('Queue send timed out') });
+
+    expect(sent).toEqual([]);
+    expect(handled).toEqual(['ack']);
+    expect(sliceEvents).toEqual([expect.objectContaining({ resolutionPending: 4, failureCount: 0 })]);
+  });
+
+  it('defers a source failure that survives every delivery instead of dead-lettering it', async () => {
+    const { sent, handled, statements } = await deliver({}, {
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      pollError: new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'),
+    });
+
+    expect(sent).toEqual([]);
+    expect(handled).toEqual(['ack']);
+    // A deferred message is acked and never redelivered, so its failure row is
+    // resolved here instead of inflating the unresolved count.
+    expect(statements.some((query) => query.includes('UPDATE queue_failure_events') && query.includes('resolved_at'))).toBe(true);
+  });
+
+  it('resolves an earlier failure row when a blocked source is acked', async () => {
+    const { handled, statements } = await deliver({}, {
+      attempts: 2,
+      expectNoPoll: true,
+      priorHealth: {
+        sourceId: reviewedGithub.id, state: 'quarantined', sourceStatus: 'paused',
+        lastAttemptAt: '2026-08-26T12:00:00.000Z', consecutiveFailures: 2, durationMs: 4,
+      },
+    });
+
+    // The blocked source runs no poll, so the delivery is acked; its earlier
+    // failed attempt's row must still be resolved rather than lingering.
+    expect(handled).toEqual(['ack']);
+    expect(statements.some((query) => query.includes('UPDATE queue_failure_events') && query.includes('resolved_at'))).toBe(true);
+  });
+
+  it('retries a source failure before the final delivery', async () => {
+    const { handled } = await deliver({}, {
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS - 1,
+      pollError: new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'),
+    });
+
+    expect(handled).toEqual(['retry']);
+  });
+
+  it('still returns a message the dispatcher cannot re-own to the platform', async () => {
+    const { handled } = await deliver({}, {
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      pollError: new Error('Unknown reviewed source "ghost"'),
+    });
+
+    expect(handled).toEqual(['retry']);
+  });
+
+  it('keeps a forced recovery on the retry path so a failed recovery dead-letters', async () => {
+    const { handled } = await deliver({}, {
+      force: true,
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS,
+      pollError: new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'),
+    });
+
+    // The scheduled GitHub dispatch skips quarantined sources and the lane has
+    // no recovery probe, so a forced recovery is the only message that would
+    // re-issue one. It must dead-letter instead of being acked into silence.
+    expect(handled).toEqual(['retry']);
   });
 
   it('keeps forced recovery on every continuation while the source remains paused', async () => {

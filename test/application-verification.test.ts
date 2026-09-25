@@ -197,12 +197,10 @@ describe('verification in the poll', () => {
     expect(before.open).toBe(true);
 
     const report = await new IngestionRunner([adapter(rows)], store, () => new Date('2026-07-29T13:00:00.000Z'),
-      undefined, async () => { throw new Error('fetch timed out'); }).run();
+      undefined, async () => { throw new Error('fetch timed out'); }, false).run();
 
-    // A one-row timeout exceeds the share gate, which reports the aggregate
-    // source failure before retaining the sampled per-row timeout for diagnosis.
-    expect(report.failures).toContainEqual(expect.stringContaining('1 of 1 rows could not be verified'));
-    expect(report.failures).toContainEqual(expect.stringContaining('fetch timed out'));
+    expect(report.failures).toEqual([]);
+    expect((await store.getCheckpoint('markdown-list'))?.pendingResolutionRows).toHaveLength(1);
     expect((await store.getJob(before.jobId))?.invalidApplicationUrl).toBeUndefined();
     expect((await store.getJob(before.jobId))?.open).toBe(true);
   });
