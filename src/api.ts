@@ -12,6 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
+import { RESUME_DRAFT_MODELS_QUALITY } from './resume-generation.js';
 import { dropDuplicateAdditions, keepValidResumeChanges, normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
 import { RESUME_COMPILER_VERSION, RESUME_TEMPLATE_VERSION, renderResumeLatex } from './resume-latex.js';
@@ -385,8 +386,9 @@ export interface ResumeImportCache {
 
 /** Model implementations return only proposed structured changes; API guards own validation. */
 export interface ResumeDraftGenerator {
-  /** `feedback` carries the previous attempt's validation error so the model can correct it. */
-  generate(input: { job: ImportedJob; profile: ResumeProfile; bankItems: ResumeBankItem[]; feedback?: string }): Promise<ResumeChange[]>;
+  /** `feedback` carries the previous attempt's validation error so the model can correct it.
+   * `models` overrides the default chain, which is how the paid tier selects its model. */
+  generate(input: { job: ImportedJob; profile: ResumeProfile; bankItems: ResumeBankItem[]; feedback?: string; models?: readonly string[] }): Promise<ResumeChange[]>;
 }
 
 export interface ResumeArtifactStorage {
@@ -1041,13 +1043,16 @@ export function createApiHandler(dependencies: ApiDependencies) {
                 // A model that repeats an existing line should not cost the whole
                 // draft: drop the duplicates and keep the real changes.
                 const accept = (generated: ResumeChange[]) => dropDuplicateAdditions(generated, selected);
+                // Pro buys the stronger chain; its whole allowance still costs
+                // cents against the plan price.
+                const models = plan.tier === 'pro' ? RESUME_DRAFT_MODELS_QUALITY : undefined;
                 try {
-                  changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence }));
+                  changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, ...(models ? { models } : {}) }));
                   validateResumeChanges(changes, selected);
                   generation = { outcome: 'model' };
                 } catch (firstError) {
                   const feedback = firstError instanceof Error ? firstError.message : 'The changes did not match the required schema.';
-                  changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, feedback }));
+                  changes = accept(await dependencies.resumeDraftGenerator.generate({ job: imported, profile, bankItems: evidence, feedback, ...(models ? { models } : {}) }));
                   try {
                     validateResumeChanges(changes, selected);
                     generation = { outcome: 'model-retry' };
@@ -1084,6 +1089,9 @@ export function createApiHandler(dependencies: ApiDependencies) {
                 }],
               },
               event: 'resume_draft_generation', outcome: generation.outcome, reason: generation.reason,
+              // `plan` keeps the fallback rate readable per tier, since Pro runs
+              // a different chain.
+              plan: plan.tier,
               changes: changes.length, evidence: evidence.length, semanticCandidates: evidenceScores.size, durationMs,
             }));
             const readabilityChanges = proposeResumeReadabilityChanges(imported, selected);

@@ -49,6 +49,13 @@ describe('resume model output parsing', () => {
     expect(calls).toEqual([RESUME_DRAFT_MODELS[0], RESUME_DRAFT_MODELS[1]]);
   });
 
+  it('uses an explicit chain when the caller supplies one', async () => {
+    const calls: string[] = [];
+    const ai = { async run(model: string) { calls.push(model); return { response: JSON.stringify({ changes: [] }) }; } };
+    await workersAiResumeDraftGenerator(ai).generate({ ...input, models: ['@cf/openai/gpt-oss-120b', '@cf/qwen/qwen3-30b-a3b-fp8'] });
+    expect(calls).toEqual(['@cf/openai/gpt-oss-120b']);
+  });
+
   it('does not advance the chain on a schema error so the caller can retry with feedback', async () => {
     const calls: string[] = [];
     const ai = { async run(model: string) { calls.push(model); return { response: 'not json' }; } };

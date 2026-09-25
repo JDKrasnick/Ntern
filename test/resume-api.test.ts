@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createApiHandler, resumeGenerationEvidence } from '../src/api.js';
+import { RESUME_DRAFT_MODELS_QUALITY } from '../src/resume-generation.js';
 import { MemoryInternshipStore, MemoryUserStore } from '../src/store.js';
 
 const event = (userId: string | undefined, method: string, rawPath: string, body?: unknown) => ({
@@ -178,6 +179,21 @@ describe('resume API ownership and revisions', () => {
     expect(generate).toHaveBeenCalledTimes(2);
     expect(feedback[1]).toContain('evidence');
     expect((JSON.parse(response.body) as { changes: unknown[] }).changes.length).toBeGreaterThan(0);
+  });
+
+  it('buys Pro the stronger chain and leaves Free on the default', async () => {
+    const users = new MemoryUserStore();
+    await users.putResumeBankItem({ userId: 'student', bankItemId: 'evidence', kind: 'project', content: 'Built a TypeScript dashboard', verified: true, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putResumeProfile({ userId: 'student', profileId: 'profile', name: 'Base', tags: [], bankItemIds: ['evidence'], sectionOrder: [], template: 'clean-standard', approvedWording: {}, bankRevision: 0, revision: 0, createdAt: 'now', updatedAt: 'now' });
+    await users.putImportedResumeJob('student', { importId: 'job', canonicalUrl: 'https://careers.example.test/job', description: 'TypeScript dashboard role', source: 'manual', contentHash: 'job', status: 'ready', revision: 0, createdAt: 'now', updatedAt: 'now' });
+    const generate = vi.fn(async (input: { models?: readonly string[] }) => { void input; return []; });
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users, resumeTunerEnabled: true, resumeDraftGenerator: { generate } });
+    expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(201);
+    expect(generate.mock.calls[0]?.[0]).not.toHaveProperty('models');
+    await users.putResumeSubscription({ userId: 'student', tier: 'pro', status: 'active', provider: 'manual', updatedAt: 'now' });
+    generate.mockClear();
+    expect((await handler(event('student', 'POST', '/me/resume-drafts', { profileId: 'profile', importId: 'job' }))).statusCode).toBe(201);
+    expect(generate.mock.calls[0]?.[0]).toMatchObject({ models: RESUME_DRAFT_MODELS_QUALITY });
   });
 
   it('drops a duplicate addition instead of discarding the model changes', async () => {
