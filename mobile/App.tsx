@@ -5757,46 +5757,23 @@ function ResumeReviewBoard({ rows, changes, busy, mode, onMode, focusId, onFocus
       {resumeTypeLabels[(type as NonNullable<ResumeReviewRow["type"]>) ?? "rewrite"]}
     </Text>
   );
-  const blocks = (row: ResumeReviewRow, type: string | undefined) => {
-    const primary = row.before ?? row.after ?? "";
-    const secondary = row.after ?? row.before ?? "";
-    if (type === "add") return (
-      <View style={[styles.resumeCardBlock, styles.resumeCardBlockAdded]}>
-        <Text style={styles.resumeCardBlockLabelAdded}>+ Add this line</Text>
-        <Text style={[styles.resumeCardBlockText, styles.resumeCardBlockTextAdded]}>{secondary}</Text>
-      </View>
-    );
-    if (type === "remove") return (
-      <View style={[styles.resumeCardBlock, styles.resumeCardBlockRemoved]}>
-        <Text style={styles.resumeCardBlockLabelRemoved}>− Remove this line</Text>
-        <Text style={[styles.resumeCardBlockText, styles.resumeCardBlockTextRemoved]}>{primary}</Text>
-      </View>
-    );
-    if (type === "move") return (
-      <View style={[styles.resumeCardBlock, styles.resumeCardBlockMoved]}>
-        <Text style={styles.resumeCardBlockLabelMoved}>↕ This line moves</Text>
-        <Text style={styles.resumeCardBlockText}>{primary}</Text>
-      </View>
-    );
-    return (
-      <View>
-        <View style={[styles.resumeCardBlock, styles.resumeCardBlockRemoved]}>
-          <Text style={styles.resumeCardBlockLabelRemoved}>− Your résumé</Text>
-          <Text style={[styles.resumeCardBlockText, styles.resumeCardBlockTextRemoved]}>{primary}</Text>
-        </View>
-        <View style={[styles.resumeCardBlock, styles.resumeCardBlockAdded]}>
-          <Text style={styles.resumeCardBlockLabelAdded}>+ Suggested</Text>
-          <Text style={[styles.resumeCardBlockText, styles.resumeCardBlockTextAdded]}>{secondary}</Text>
-        </View>
-      </View>
-    );
-  };
   const actions = (changeId: string, decision?: string) => (
-    <View style={styles.resumeCardActions}>
-      <ActionButton compact tight grow label={decision === "rejected" ? "Original kept" : "Keep"} variant="secondary" onPress={() => onDecide(changeId, "rejected")} disabled={busy} shortcut="N" />
-      <ActionButton compact tight grow label={decision === "accepted" ? "Applied" : "Apply"} onPress={() => onDecide(changeId, "accepted")} disabled={busy} shortcut="Y" />
+    <View style={styles.resumeDecisionActions}>
+      <ActionButton compact tight label={decision === "rejected" ? "Kept" : "Keep"} variant="secondary" onPress={() => onDecide(changeId, "rejected")} disabled={busy} shortcut="N" />
+      <ActionButton compact tight label={decision === "accepted" ? "Applied" : "Apply"} onPress={() => onDecide(changeId, "accepted")} disabled={busy} shortcut="Y" />
     </View>
   );
+  const diff = (row: ResumeReviewRow, type: string | undefined) => {
+    const primary = row.before ?? row.after ?? "";
+    const secondary = row.after ?? row.before ?? "";
+    if (type === "move") return <Text numberOfLines={2} style={[styles.resumeDecisionLine, { color: colors.body, fontFamily: mono }]}>↕ {primary}</Text>;
+    return (
+      <>
+        {row.before !== undefined ? <Text numberOfLines={2} style={[styles.resumeDecisionLine, styles.resumeDecisionRemoved, { fontFamily: mono }]}>− {primary}</Text> : null}
+        {row.after !== undefined ? <Text numberOfLines={2} style={[styles.resumeDecisionLine, styles.resumeDecisionAdded, { fontFamily: mono }]}>+ {secondary}</Text> : null}
+      </>
+    );
+  };
   return (
     <View style={styles.resumeBoard}>
       <View style={styles.resumeBoardHead}>
@@ -5810,32 +5787,38 @@ function ResumeReviewBoard({ rows, changes, busy, mode, onMode, focusId, onFocus
         </View>
       </View>
       {mode === "one" && focus && focusChange ? (
-        <ScrollView nestedScrollEnabled style={styles.resumeBoardList}>
-          <View accessibilityLabel={`Change ${position + 1} of ${order.length}`} style={[styles.resumeCard, focusChange.decision === "accepted" && styles.resumeCardAccepted]}>
-            <View style={styles.resumeCardHead}>
-              <View style={styles.resumeCardHeadLeft}>{chip(focusChange.type)}<Text numberOfLines={1} style={styles.resumeCardWhere}>{[focus.section, focus.label].filter(Boolean).join(" · ")}</Text></View>
-              <Text style={styles.resumeCardStep}>Change {position + 1} of {order.length}</Text>
-            </View>
-            {blocks(focus, focusChange.type)}
-            {focusChange.reason ? <Text style={styles.resumeCardReason}><Text style={styles.resumeCardReasonLead}>Why: </Text>{focusChange.reason}</Text> : null}
-            {editingChangeId === focusChange.changeId ? (
-              <View style={styles.resumeCardEdit}>
-                <TextInput value={editValue} onChangeText={onEditChange} multiline accessibilityLabel="Edit proposed line" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeCardEditInput} />
-                <View style={styles.resumeCardEditActions}>
-                  <ActionButton compact tight label="Save line" onPress={() => onSaveEdit(focusChange.changeId)} disabled={busy || !editValue.trim()} />
-                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cancel edit" disabled={busy} onPress={onCancelEdit}><Text style={styles.resumeKeepAll}>Cancel</Text></TouchableOpacity>
-                </View>
+        <>
+          <View accessibilityLabel={`Change ${position + 1} of ${order.length}`} style={styles.resumeDecision}>
+            <View style={styles.resumeDecisionMain}>
+              <View style={styles.resumeDecisionHead}>
+                {chip(focusChange.type)}
+                <Text numberOfLines={1} style={styles.resumeDecisionWhere}>{[focus.section, focus.label].filter(Boolean).join(" · ")}</Text>
+                <Text style={styles.resumeDecisionStep}>{position + 1} / {order.length}</Text>
               </View>
-            ) : (focusChange.type === "add" || focusChange.type === "rewrite") ? (
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Edit this line" disabled={busy} onPress={() => onEdit(focusChange.changeId, focus.after ?? "")} style={styles.resumeCardEditLink}>
-                <Ionicons name="pencil" size={13} color={colors.signal} />
-                <Text style={styles.resumeCompactActionText}>Edit this line</Text>
-              </TouchableOpacity>
-            ) : null}
-            {focus.note ? <Text style={styles.resumeDiffNote}>{focus.note}</Text> : null}
-            {actions(focusChange.changeId, focusChange.decision)}
+              {diff(focus, focusChange.type)}
+              {focus.note ? <Text style={styles.resumeDecisionNote}>{focus.note}</Text> : null}
+              {focusChange.reason ? <Text numberOfLines={1} style={styles.resumeDecisionNote}>{focusChange.reason}</Text> : null}
+            </View>
+            <View style={styles.resumeDecisionSide}>
+              {actions(focusChange.changeId, focusChange.decision)}
+              {(focusChange.type === "add" || focusChange.type === "rewrite") ? (
+                <TouchableOpacity accessibilityRole="button" accessibilityLabel="Edit this line" disabled={busy} onPress={() => onEdit(focusChange.changeId, focus.after ?? "")} style={styles.resumeDecisionEditLink}>
+                  <Ionicons name="pencil" size={13} color={colors.signal} />
+                  <Text style={styles.resumeCompactActionText}>Edit</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
           </View>
-        </ScrollView>
+          {editingChangeId === focusChange.changeId ? (
+            <View style={styles.resumeCardEdit}>
+              <TextInput value={editValue} onChangeText={onEditChange} multiline accessibilityLabel="Edit proposed line" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeCardEditInput} />
+              <View style={styles.resumeCardEditActions}>
+                <ActionButton compact tight label="Save line" onPress={() => onSaveEdit(focusChange.changeId)} disabled={busy || !editValue.trim()} />
+                <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cancel edit" disabled={busy} onPress={onCancelEdit}><Text style={styles.resumeKeepAll}>Cancel</Text></TouchableOpacity>
+              </View>
+            </View>
+          ) : null}
+        </>
       ) : null}
       {mode === "all" ? (
         <ScrollView nestedScrollEnabled style={styles.resumeBoardList}>
@@ -5843,13 +5826,13 @@ function ResumeReviewBoard({ rows, changes, busy, mode, onMode, focusId, onFocus
             const row = byChange.get(change.changeId);
             if (!row) return null;
             return (
-              <TouchableOpacity key={change.changeId} accessibilityRole="button" accessibilityLabel={`Focus change ${index + 1}`} onPress={() => onFocus(change.changeId)} style={[styles.resumeMini, change.changeId === focusId && styles.resumeMiniCurrent, change.decision === "accepted" && styles.resumeMiniAccepted]}>
-                <View style={styles.resumeCardHead}>
-                  <View style={styles.resumeCardHeadLeft}>{chip(change.type)}<Text numberOfLines={1} style={styles.resumeCardWhere}>{[row.section, row.label].filter(Boolean).join(" · ")}</Text></View>
-                  <Text style={styles.resumeCardStep}>{change.decision === "accepted" ? "Applied" : change.decision === "rejected" ? "Kept original" : `Change ${index + 1}`}</Text>
+              <TouchableOpacity key={change.changeId} accessibilityRole="button" accessibilityLabel={`Focus change ${index + 1}`} onPress={() => onFocus(change.changeId)} style={[styles.resumeMiniRow, change.changeId === focusId && styles.resumeMiniRowCurrent]}>
+                {chip(change.type)}
+                <View style={styles.resumeMiniLines}>
+                  <Text numberOfLines={1} style={styles.resumeDecisionWhere}>{[row.section, row.label].filter(Boolean).join(" · ")}</Text>
+                  <Text numberOfLines={1} style={[styles.resumeDecisionLine, styles.resumeDecisionRemoved, { fontFamily: mono }]}>− {row.before ?? row.after}</Text>
+                  {row.after !== undefined && row.after !== row.before ? <Text numberOfLines={1} style={[styles.resumeDecisionLine, styles.resumeDecisionAdded, { fontFamily: mono }]}>+ {row.after}</Text> : null}
                 </View>
-                {blocks(row, change.type)}
-                {change.reason ? <Text numberOfLines={2} style={styles.resumeCardReason}>{change.reason}</Text> : null}
                 {actions(change.changeId, change.decision)}
               </TouchableOpacity>
             );
@@ -5862,23 +5845,24 @@ function ResumeReviewBoard({ rows, changes, busy, mode, onMode, focusId, onFocus
             <TouchableOpacity key={change.changeId} accessibilityRole="button" accessibilityLabel={`Go to change ${index + 1}`} onPress={() => onFocus(change.changeId)} style={[styles.resumeBoardDot, change.decision === "accepted" && styles.resumeBoardDotAccepted, change.decision === "rejected" && styles.resumeBoardDotRejected, change.changeId === focusId && styles.resumeBoardDotCurrent]} />
           ))}
         </View>
+        <Text style={styles.resumeBoardKeys}>← → move · Y apply · N keep · V view</Text>
         <View style={styles.resumeBoardStepper}>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Previous change" onPress={() => onMove(-1)} style={styles.resumeBoardStepButton}><Ionicons name="chevron-back" size={16} color={colors.muted} /></TouchableOpacity>
           <Text style={styles.resumeCardStep}>{order.length ? position + 1 : 0} / {order.length}</Text>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Next change" onPress={() => onMove(1)} style={styles.resumeBoardStepButton}><Ionicons name="chevron-forward" size={16} color={colors.muted} /></TouchableOpacity>
         </View>
       </View>
-      <Text style={styles.resumeBoardKeys}>← → move · Y apply · N keep · V view</Text>
     </View>
   );
 }
 
-function ResumeSavedProfilesGhost() {  const motionAllowed = useContext(MotionAllowedContext);
+function ResumeSavedProfilesGhost() {
+  const motionAllowed = useContext(MotionAllowedContext);
   const opacity = useRef(new Animated.Value(0.48)).current;
   useEffect(() => {
     if (!motionAllowed) {
       opacity.setValue(0.68);
-      return;
+      return undefined;
     }
     const animation = Animated.loop(Animated.sequence([
       Animated.timing(opacity, { toValue: 0.82, duration: 650, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
@@ -5998,6 +5982,7 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
   const [previewRows, setPreviewRows] = useState<ResumeReviewRow[]>([]);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [boardMode, setBoardMode] = useState<"one" | "all">("one");
+  const [pageMode, setPageMode] = useState<"raw" | "proposed">("proposed");
   const [focusChangeId, setFocusChangeId] = useState<string>();
   const [artifactSource, setArtifactSource] = useState("");
   const [artifactLoading, setArtifactLoading] = useState(false);
@@ -6173,7 +6158,14 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
   useEffect(() => {
     setFocusChangeId(draft?.changes[0]?.changeId);
     setBoardMode("one");
+    setPageMode("proposed");
   }, [draft?.draftId]);
+  useEffect(() => {
+    const row = boardRows.find((candidate) => candidate.changeId === focusChangeId);
+    if (row?.afterBox) setPageMode("proposed");
+    else if (row?.beforeBox) setPageMode("raw");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- follow the focused change
+  }, [focusChangeId]);
   // Web keyboard review: arrows move, Y applies, N keeps, V toggles the view.
   useEffect(() => {
     if (Platform.OS !== "web" || typeof document === "undefined" || !draft) return undefined;
@@ -6902,15 +6894,20 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
         {draft ? <View style={[styles.resumeReviewWorkspace, desktop && styles.resumeReviewWorkspaceWide]}>
           {desktop ? (
             <>
-              <View style={styles.resumeReviewPagesRow}>
-                <View style={styles.resumeReviewPagePane}>
-                  <Text style={styles.resumeDiffType}>Your résumé</Text>
-                  <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
+              <View style={styles.resumePageBar}>
+                <View style={styles.resumeModeToggle}>
+                  {(["raw", "proposed"] as const).map((value) => (
+                    <TouchableOpacity key={value} accessibilityRole="button" aria-pressed={pageMode === value} onPress={() => setPageMode(value)} style={[styles.resumeModeButton, pageMode === value && styles.resumeModeButtonActive]}>
+                      <Text style={[styles.resumeModeButtonText, pageMode === value && styles.resumeModeButtonTextActive]}>{value === "raw" ? "Your résumé" : "Tailored proposal"}</Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
-                <View style={styles.resumeReviewPagePane}>
-                  <Text style={styles.resumeDiffType}>Tailored proposal</Text>
-                  {reviewPreviewNode}
-                </View>
+                <Text style={styles.resumePreviewCaption}>{pageMode === "raw" ? "Unchanged original" : "Proposal · not final"}</Text>
+              </View>
+              <View style={styles.resumePageFull}>
+                {pageMode === "raw"
+                  ? <ResumeRenderedPage kind="removed" uri={previewOriginalImage} box={focusedRow?.beforeBox} label="Original résumé page" empty="Rendering the original…" />
+                  : reviewPreviewNode}
               </View>
               <View style={styles.resumeReviewBoardRow}>{reviewBoardNode}</View>
             </>
@@ -9460,15 +9457,33 @@ const styles = StyleSheet.create({
   resumeLoadingHeading: { height: 9, width: "32%" },
   resumeLoadingLine: { height: 6 },
   resumeReviewPagesRow: { flexDirection: "row", gap: 18, justifyContent: "center", width: "100%" },
+  resumePageBar: { alignItems: "center", flexDirection: "row", gap: 12, justifyContent: "space-between", maxWidth: 1600, width: "100%" },
+  resumePageFull: { alignItems: "center", width: "100%" },
+
   resumeReviewBoardRow: { alignItems: "center", width: "100%" },
   resumeReviewPagePane: { alignItems: "center", flex: 1, gap: 10, maxWidth: 700, minWidth: 0 },
   resumeReviewPreviewPane: { alignItems: "center", gap: 10, justifyContent: "center", minWidth: 0 },
-  resumePageFrame: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, maxWidth: 680, overflow: "hidden", position: "relative", width: "100%" },
+  resumePageFrame: { aspectRatio: 816 / 1056, backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 10, borderWidth: 1, maxWidth: 1400, overflow: "hidden", position: "relative", width: "100%" },
   resumePageImage: { height: "100%", width: "100%" },
   resumePagePlaceholder: { alignItems: "center", flex: 1, justifyContent: "center", padding: 16 },
   resumePageHighlight: { borderRadius: 3, borderWidth: 1.5, position: "absolute" },
   resumePageHighlightAdded: { backgroundColor: "rgba(6,118,71,0.14)", borderColor: "rgba(6,118,71,0.65)" },
   resumePageHighlightRemoved: { backgroundColor: "rgba(180,35,24,0.12)", borderColor: "rgba(180,35,24,0.6)" },
+  resumeDecision: { alignItems: "center", flexDirection: "row", gap: 16, padding: 14 },
+  resumeDecisionMain: { flex: 1, gap: 6, minWidth: 0 },
+  resumeDecisionSide: { alignItems: "flex-end", gap: 8 },
+  resumeDecisionHead: { alignItems: "center", flexDirection: "row", gap: 8 },
+  resumeDecisionWhere: { color: colors.muted, flex: 1, fontSize: 12, fontWeight: "700", minWidth: 0 },
+  resumeDecisionStep: { color: colors.muted, fontSize: 11, fontWeight: "800" },
+  resumeDecisionLine: { fontSize: 13, lineHeight: 18 },
+  resumeDecisionRemoved: { color: colors.danger },
+  resumeDecisionAdded: { color: colors.success },
+  resumeDecisionNote: { color: colors.muted, fontSize: 11 },
+  resumeDecisionActions: { flexDirection: "row", gap: 8 },
+  resumeDecisionEditLink: { alignItems: "center", flexDirection: "row", gap: 6 },
+  resumeMiniRow: { alignItems: "center", borderTopColor: colors.separator, borderTopWidth: 1, flexDirection: "row", gap: 10, paddingHorizontal: 14, paddingVertical: 10 },
+  resumeMiniRowCurrent: { backgroundColor: colors.signalSoft },
+  resumeMiniLines: { flex: 1, gap: 2, minWidth: 0 },
   resumeBoard: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 16, borderWidth: 1, maxWidth: 860, overflow: "hidden", width: "100%" },
   resumeBoardHead: { alignItems: "center", borderBottomColor: colors.separator, borderBottomWidth: 1, flexDirection: "row", gap: 10, justifyContent: "space-between", padding: 12 },
   resumeModeToggle: { borderColor: colors.border, borderRadius: 10, borderWidth: 1, flexDirection: "row", overflow: "hidden" },
