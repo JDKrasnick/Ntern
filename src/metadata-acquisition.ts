@@ -230,6 +230,81 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
     workMode: text(job.workplaceType) || undefined, publishedAt: text(job.publishedAt) || undefined };
 }
 
+/** Ashby's public posting API returns the whole board. A large board exceeds the
+ * acquisition byte ceiling, so buffering it to a string never yields the one
+ * posting the caller needs. Walk the stream with a string- and escape-aware
+ * scanner instead and keep only the matching element, so peak memory is one
+ * posting rather than the board. */
+const ASHBY_ELEMENT_BYTE_LIMIT = 512 * 1024;
+const ASHBY_STREAM_BYTE_LIMIT = 64 * 1024 * 1024;
+
+async function readAshbyJob(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  expected: string | undefined,
+): Promise<{ job?: unknown; bytes: number; truncated: boolean }> {
+  const decoder = new TextDecoder();
+  // A container stack of exactly [root object, top-level array] identifies a job
+  // element. Every top-level array is scanned; `parseMetadataApiResponse`
+  // validates the identity, so a stray array cannot produce a false match.
+  const containers: Array<'object' | 'array'> = [];
+  let inString = false;
+  let escaped = false;
+  let parts: string[] | undefined;
+  let retained = 0;
+  let oversized = false;
+  let bytes = 0;
+  const append = (char: string) => {
+    if (!parts || oversized) return;
+    parts.push(char);
+    retained += char.length;
+    // A single posting is far below this; an oversized element is dropped rather
+    // than parsed, so one pathological row cannot blow the isolate's memory.
+    if (retained > ASHBY_ELEMENT_BYTE_LIMIT) { oversized = true; parts = undefined; }
+  };
+  const takeElement = (): unknown => {
+    const text = parts?.join('') ?? '';
+    parts = undefined; retained = 0; oversized = false;
+    if (!text.includes('"id"')) return undefined;
+    try { return JSON.parse(text) as unknown; } catch { return undefined; }
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > ASHBY_STREAM_BYTE_LIMIT) return { bytes, truncated: true };
+    const chunk = decoder.decode(value, { stream: true });
+    for (const char of chunk) {
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+      } else if (char === '"') {
+        inString = true;
+      } else if (char === '{') {
+        if (containers.length === 2 && containers[0] === 'object' && containers[1] === 'array' && !parts) {
+          parts = ['{']; retained = 1; oversized = false;
+          containers.push('object');
+          continue;
+        }
+        containers.push('object');
+      } else if (char === '[') {
+        containers.push('array');
+      } else if (char === '}' || char === ']') {
+        const closesElement = char === '}' && parts !== undefined && containers.length === 3;
+        containers.pop();
+        if (closesElement) {
+          parts!.push('}');
+          const job = takeElement();
+          if (record(job) && job.id === expected) return { job, bytes, truncated: false };
+          continue;
+        }
+      }
+      append(char);
+    }
+  }
+  return { bytes, truncated: false };
+}
+
 /** A request/batch-scoped cache, not isolate-global I/O state. Hosts, redirects,
  * content type, timeout and streamed byte budget are checked before parsing. */
 export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
@@ -265,8 +340,16 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
         }
         const reader = response.body?.getReader();
         if (!reader) return { outcome: 'incomplete' as const, status: response.status };
-        const decoder = new TextDecoder(); let body = ''; let bytes = 0;
         try {
+          if (route.method === 'ashby-api') {
+            const streamed = await readAshbyJob(reader, identity.postingId);
+            await reader.cancel().catch(() => undefined);
+            if (streamed.job === undefined) {
+              return { outcome: streamed.truncated ? 'incomplete' as const : 'acquired' as const, bytes: streamed.bytes, status: response.status };
+            }
+            return { outcome: 'acquired' as const, payload: { jobs: [streamed.job] }, bytes: streamed.bytes, status: response.status };
+          }
+          const decoder = new TextDecoder(); let body = ''; let bytes = 0;
           for (;;) {
             const chunk = await reader.read();
             if (chunk.done) break;
@@ -275,8 +358,8 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
             body += decoder.decode(chunk.value, { stream: true });
           }
           body += decoder.decode();
+          return { outcome: 'acquired' as const, payload: html ? body : JSON.parse(body) as unknown, bytes, status: response.status };
         } finally { reader.releaseLock(); }
-        return { outcome: 'acquired' as const, payload: html ? body : JSON.parse(body) as unknown, bytes, status: response.status };
       } catch { return { outcome: 'failed' as const }; }
     })());
     const result = await requests.get(route.url)!;

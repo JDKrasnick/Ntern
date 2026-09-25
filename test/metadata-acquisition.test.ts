@@ -13,6 +13,18 @@ const uuid = 'ef725594-42dd-4f0d-ba8e-df8179dbc6cb';
 const identity = (provider: ProviderIdentity['provider'], postingId = uuid): ProviderIdentity => ({ provider, postingId, tenant: 'acme', sourceId: 'github-discovery', sourceUrl: 'https://github.test/jobs' });
 const extract = (artifact: Parameters<typeof extractPostingMetadataEvidence>[0]['artifact']) => extractPostingMetadataEvidence({ artifact, sourceClass: 'official-ats', sourceId: 'test', sourceUrl: 'https://api.example.test/job', observedAt: '2026-09-05T00:00:00Z', exactPosting: true });
 
+const ashbyBoard = (rows: Array<{ id: string; title: string; descriptionPlain?: string; descriptionHtml?: string }>) =>
+  JSON.stringify({ jobs: rows.map((row) => ({ ...row, jobUrl: `https://jobs.ashbyhq.com/acme/${row.id}` })) });
+function streamed(body: string, chunkSize: number): Response {
+  const bytes = new TextEncoder().encode(body);
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let index = 0; index < bytes.length; index += chunkSize) controller.enqueue(bytes.slice(index, index + chunkSize));
+      controller.close();
+    },
+  }), { headers: { 'content-type': 'application/json' } });
+}
+
 describe('identity-bound public metadata APIs', () => {
   it('preserves degree-specific nested HTML pay rows through acquisition and reconciliation', () => {
     const artifact = parseMetadataApiResponse(identity('greenhouse', '123'), 'greenhouse-api', { id: 123, title: 'Engineering Intern',
@@ -214,6 +226,35 @@ describe('identity-bound public metadata APIs', () => {
       expect(metadataApiRoute({ ...identity('ashby'), tenant })).toBeUndefined();
     }
     expect(metadataApiRoute({ ...identity('greenhouse', '123'), tenant: 'persona.ai' })).toBeUndefined();
+  });
+  it('streams a board past the acquisition ceiling and keeps only the requested posting', async () => {
+    const filler = 'x'.repeat(20_000);
+    const rows = Array.from({ length: 150 }, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, title: `Role ${index}`, descriptionPlain: filler }));
+    const board = ashbyBoard([...rows, { id: uuid, title: 'Target Intern', descriptionPlain: 'Build streaming acquisition.' }]);
+    expect(board.length).toBeGreaterThan(2_000_000);
+
+    const result = await createMetadataAcquirer(async () => streamed(board, 8_192))(identity('ashby'));
+
+    expect(result?.outcome).toBe('acquired');
+    expect(result?.artifact?.text).toContain('Build streaming acquisition.');
+    expect(result?.bytes).toBeGreaterThan(2_000_000);
+  });
+  it('keeps the matching posting across small chunk boundaries, strings, and escapes', async () => {
+    const board = ashbyBoard([
+      { id: '00000000-0000-4000-8000-000000000000', title: 'Other', descriptionPlain: 'y'.repeat(4_000) },
+      { id: uuid, title: 'Target "Intern" \\ Role', descriptionPlain: 'Line with "quotes" and a backslash \\ inside.' },
+    ]);
+
+    for (const chunkSize of [5, 17, 128, 4_093]) {
+      const result = await createMetadataAcquirer(async () => streamed(board, chunkSize))(identity('ashby'));
+      expect(result?.artifact?.text, `chunk ${chunkSize}`).toContain('backslash');
+    }
+  });
+  it('reports identity-mismatch when the board does not publish the posting', async () => {
+    const board = ashbyBoard([{ id: '00000000-0000-4000-8000-000000000000', title: 'Other', descriptionPlain: 'zzz' }]);
+    const result = await createMetadataAcquirer(async () => streamed(board, 32))(identity('ashby'));
+    expect(result?.outcome).toBe('identity-mismatch');
+    expect(result?.artifact).toBeUndefined();
   });
   it('reads an iCIMS posting from its frame route, the only response carrying the description', async () => {
     const icims = { ...identity('icims', '12891'), tenant: 'careers-springswindowfashions' };
