@@ -40,6 +40,11 @@ import { D1EmployerStore } from './employer-store.js';
 import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { companyIconResponse } from './company-icon.js';
+import { handleEmployerIconOperations } from './employer-icon-api.js';
+import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, verifyIconDomain } from './employer-icon-resolver.js';
+import { D1EmployerIconStore } from './employer-icon-store.js';
+import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
+import type { IconSvgRasterizer } from '../src/svg-icon.js';
 import { handleEmployerApi } from './employer-api.js';
 import { closeEmployerOccurrence, handleEmployerOperations, runEmployerMaintenance } from './employer-operations-api.js';
 import { assertPublicHttpsUrl, safeFetchText, verifyDnsChallenge, verifyWellKnownChallenge } from '../src/employer/index.js';
@@ -138,6 +143,17 @@ export interface Environment extends AuthEnvironment {
   GMAIL_TOKEN_ENCRYPTION_KEY?: string;
   GMAIL_MESSAGE_HMAC_KEY?: string;
   GMAIL_REDIRECT_URI?: string;
+  /** Server-side Logo.dev credential for company-icon resolution. */
+  LOGO_DEV_TOKEN?: string;
+  LOGO_DEV_IMAGE_TOKEN?: string;
+  /** Accepted aliases for the two Logo.dev credentials, so provisioning by either name works. */
+  LOGO_SECRET_KEY?: string;
+  LOGO_PUBLISHABLE_KEY?: string;
+  LOGO_DEV_PUBLISHABLE_KEY?: string;
+  LOGO_DEV_PUBLISHABLE_TOKEN?: string;
+  /** Brandfetch client ID; corroboration only, never persisted or fetched. */
+  BRANDFETCH_CLIENT_ID?: string;
+  OPENAI_KEY?: string;
 }
 
 function catalogAdmissionResolver(env: Environment): CatalogAdmissionResolver {
@@ -170,6 +186,31 @@ function catalogAdmissionResolver(env: Environment): CatalogAdmissionResolver {
 const DOH_QUERY_TIMEOUT_MS = 8_000;
 const DNS_RECORD_TYPE: Readonly<Record<'A' | 'AAAA' | 'TXT', number>> = { A: 1, AAAA: 28, TXT: 16 };
 
+/**
+ * Records company-icon tasks for admitted employers.
+ *
+ * An icon is never worth failing a poll, so this binding swallows its own
+ * failures, and it memoizes each employer per delivery: a source with hundreds of
+ * postings from one employer performs one insert attempt rather than hundreds.
+ * A task that is missed here is picked up by the sweep's backfill instead.
+ */
+function employerIconEnqueue(env: Environment): (seed: EmployerIconSeed) => Promise<void> {
+  const store = new D1EmployerIconStore(env.DB);
+  const attempted = new Set<string>();
+  return async (seed) => {
+    if (attempted.has(seed.canonicalEmployerId)) return;
+    attempted.add(seed.canonicalEmployerId);
+    try {
+      await enqueueEmployerIconResolution(store, seed, new Date());
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'company_icon_resolution_enqueue_failed',
+        canonicalEmployerId: seed.canonicalEmployerId, error: safeDiagnostic(error),
+      }));
+    }
+  };
+}
+
 export async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise<Array<{ type?: number; data?: string }>> {
   const endpoint = new URL('https://cloudflare-dns.com/dns-query');
   endpoint.searchParams.set('name', name); endpoint.searchParams.set('type', type);
@@ -190,7 +231,22 @@ export async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise
   return (value.Answer ?? []).filter((answer) => answer.type === DNS_RECORD_TYPE[type]);
 }
 
-const publicHostResolver = {
+/**
+ * The SVG rasterizer, provided by the entry point that can carry it.
+ *
+ * Only the ingestion Worker runs the icon sweep, and only its bundle references the
+ * 2.5 MB resvg module, so the ingestion entry registers the renderer here at startup
+ * instead of every bundle importing it. An unregistered renderer is not a failure: a
+ * board that publishes only SVG is then reported as `svg-not-servable` and the sweep
+ * carries on, which is what the API Worker and the unit tests do.
+ */
+let iconSvgRasterizer: IconSvgRasterizer | undefined;
+
+export function provideIconSvgRasterizer(rasterizer: IconSvgRasterizer): void {
+  iconSvgRasterizer = rasterizer;
+}
+
+export const publicHostResolver = {
   async resolve(hostname: string): Promise<string[]> {
     const [ipv4, ipv6] = await Promise.all([dnsJson(hostname, 'A'), dnsJson(hostname, 'AAAA')]);
     return [...ipv4, ...ipv6].map((answer) => answer.data).filter((value): value is string => Boolean(value));
@@ -297,6 +353,7 @@ async function runStructuredSource(source: ReviewedStructuredSource, env: Enviro
   const result = await runRuntimeCommand('poll', { store, userStore, sources: [connector], validateCatalogOnPoll: false,
     enqueueDestinationVerification: (request) => env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage(request)),
     catalogAdmissionResolver: catalogAdmissionResolver(env),
+    enqueueEmployerIconResolution: employerIconEnqueue(env),
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
     allowCompleteEmptySnapshot: true,
@@ -783,11 +840,19 @@ export async function documentContent(request: Request, env: Environment, userId
 async function fetchHandler(request: Request, env: Environment): Promise<Response> {
   if (request.method === 'OPTIONS') return withCors(new Response(null, { status: 204 }));
   const url = new URL(request.url);
+  const credentials = logoDevCredentials(env);
+  const imageToken = credentials.logoDevImageToken;
   if (url.pathname === '/internal/billing-shutdown') return billingShutdown(request, env);
   if (await isShutdown(env)) return withCors(Response.json({ message: 'Service paused by billing guard' }, { status: 503 }));
   const companyIcon = /^\/company-icons\/([^/]+)$/u.exec(url.pathname);
   if (request.method === 'GET' && companyIcon) {
-    return withCors(await companyIconResponse(companyIcon[1]!, new D1CatalogAdmissionStore(env.DB), env.DOCUMENTS));
+    const employerIcons = new D1EmployerIconStore(env.DB);
+    return withCors(await companyIconResponse(companyIcon[1]!, new D1CatalogAdmissionStore(env.DB), env.DOCUMENTS, {
+      automaticDomain: (id) => employerIcons.automaticDomain(id),
+      automaticDisplay: async () => (await employerIcons.settings()).mode === 'resolve',
+      ...(imageToken ? { logoDevImageToken: imageToken } : {}),
+      resolver: publicHostResolver,
+    }));
   }
   if (request.method === 'GET' && url.pathname === '/oauth/gmail/callback') return withCors(await gmailCallback(request, env));
   if (request.method === 'POST' && url.pathname === '/internal/refresh-catalog') {
@@ -951,6 +1016,17 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   if (request.method === 'GET' && url.pathname === '/internal/operations/bulk-window') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     return withCors(await bulkOperationWindow(env) ?? Response.json({ ready: true }));
+  }
+  if (url.pathname.startsWith('/internal/admission/employer-icons')) {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    return withCors(await handleEmployerIconOperations(request, new D1EmployerIconStore(env.DB), () => ({
+      logoDev: Boolean(credentials.logoDevToken),
+      logoDevImageToken: Boolean(credentials.logoDevImageToken),
+      brandfetch: Boolean(env.BRANDFETCH_CLIENT_ID),
+      tieBreaker: Boolean(env.OPENAI_KEY),
+    }), () => new Date(), imageToken
+      ? (domain) => verifyIconDomain(domain, credentials, { resolver: publicHostResolver })
+      : undefined));
   }
   if (url.pathname.startsWith('/internal/admission/')) {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
@@ -1751,6 +1827,15 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       ? await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt))
       : { queued: 0, deferred: true };
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'metadata_collection_deferred', recentOverloads: recentOverloads ?? null }));
+    // Icon resolution is pure background work that never gates publication, so it
+    // yields to the projection on the same terms as metadata collection.
+    const companyIconResolution = recentOverloads === 0
+      ? await runScheduledStep('company_icon_resolution', () => runEmployerIconResolutionPass(env, observedAt, {
+        resolver: publicHostResolver,
+        ...(iconSvgRasterizer ? { rasterizeSvg: iconSvgRasterizer } : {}),
+      }))
+      : undefined;
+    if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'company_icon_resolution_deferred', recentOverloads: recentOverloads ?? null }));
     const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
     const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
     const dlqGrowth = await runScheduledStep('dlq_growth_metrics', () => measureDlqGrowth(env.DB, {
@@ -1782,7 +1867,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       }));
     }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
-    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
+    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection, companyIconResolution }));
     return;
   }
   if (event.cron === '*/5 * * * *') {
@@ -2110,6 +2195,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           validateCatalogOnPoll: false,
           enqueueDestinationVerification: (request) => sendQueueMessageWithin(env.DESTINATION_VERIFICATION_QUEUE, destinationVerificationMessage(request)),
           catalogAdmissionResolver: admissionResolver,
+          enqueueEmployerIconResolution: employerIconEnqueue(env),
           identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
           trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
           // One row can perform several bounded HTTP probes, so this stays well
@@ -2308,6 +2394,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB),
     enqueueDestinationVerification: (request: Parameters<typeof destinationVerificationMessage>[0]) => sendQueueMessageWithin(env.DESTINATION_VERIFICATION_QUEUE, destinationVerificationMessage(request)),
     catalogAdmissionResolver: catalogAdmissionResolver(env),
+    enqueueEmployerIconResolution: employerIconEnqueue(env),
     onRecordFailure,
   };
   // Legacy Lever admissions are irrelevant to Greenhouse and Ashby polls.

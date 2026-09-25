@@ -68,6 +68,19 @@ describe('bounded safe fetch', () => {
     await expect(safeFetchText('https://public.test', { resolver: publicResolver, fetcher: stalledBody, timeoutMs: 5 }))
       .rejects.toThrow(/timed out/);
   });
+
+  it('keeps the bounded prefix of an oversized body when truncation is requested', async () => {
+    const oversized = async () => new Response('0123456789', { status: 200 });
+    const truncated = await safeFetchText('https://public.test', {
+      resolver: publicResolver, fetcher: oversized, maxBodyBytes: 5, onOversize: 'truncate',
+    });
+    expect(truncated.body).toBe('01234');
+    expect(truncated.status).toBe(200);
+
+    // The default stays fail-closed for every existing caller.
+    await expect(safeFetchText('https://public.test', { resolver: publicResolver, fetcher: oversized, maxBodyBytes: 5 }))
+      .rejects.toThrow(/body exceeds/);
+  });
 });
 
 describe('approved application host contracts', () => {

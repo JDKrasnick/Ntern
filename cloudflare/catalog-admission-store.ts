@@ -1283,6 +1283,7 @@ export class D1CatalogAdmissionStore {
       id: row.id as string, displayName: row.display_name as string, reviewedAt: row.reviewed_at as string,
       reviewedBy: row.reviewed_by as string,
       ...(row.icon_key ? { iconKey: row.icon_key as string } : {}),
+      ...(row.icon_source ? { iconSource: row.icon_source as string } : {}),
       ...(row.icon_updated_at ? { iconUpdatedAt: row.icon_updated_at as string } : {}),
       ...(row.parent_employer_id ? { parentEmployerId: row.parent_employer_id as string } : {}),
       ...(row.brand_of_employer_id ? { brandOfEmployerId: row.brand_of_employer_id as string } : {}),
@@ -1290,14 +1291,24 @@ export class D1CatalogAdmissionStore {
   }
 
   async putCanonicalEmployer(value: CanonicalEmployer, now: string): Promise<void> {
+    // `icon_source` records who owns the current key: a reviewer upload is
+    // 'reviewed', a resolver-written cache is 'logo-dev'. Invalidation withdraws
+    // only the machine key, so this distinction is what protects a human choice.
+    // Every SET expression below reads the row's pre-update values, which is why
+    // the CASE can compare the old key with the incoming one.
     await this.db.prepare(`INSERT INTO canonical_employers
-      (id, display_name, icon_key, icon_updated_at, reviewed_at, reviewed_by, parent_employer_id, brand_of_employer_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, reviewed_at=excluded.reviewed_at,
+      (id, display_name, icon_key, icon_source, icon_updated_at, reviewed_at, reviewed_by, parent_employer_id, brand_of_employer_id, created_at, updated_at)
+      VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE 'reviewed' END, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        icon_source=CASE
+          WHEN excluded.icon_key IS NULL THEN NULL
+          WHEN canonical_employers.icon_key IS excluded.icon_key THEN canonical_employers.icon_source
+          ELSE 'reviewed' END,
+        display_name=excluded.display_name, reviewed_at=excluded.reviewed_at,
         reviewed_by=excluded.reviewed_by, parent_employer_id=excluded.parent_employer_id,
         brand_of_employer_id=excluded.brand_of_employer_id, icon_key=excluded.icon_key,
         icon_updated_at=excluded.icon_updated_at, updated_at=excluded.updated_at`)
-      .bind(value.id, value.displayName, value.iconKey ?? null, value.iconUpdatedAt ?? null, value.reviewedAt, value.reviewedBy, value.parentEmployerId ?? null, value.brandOfEmployerId ?? null, now, now).run();
+      .bind(value.id, value.displayName, value.iconKey ?? null, value.iconKey ?? null, value.iconUpdatedAt ?? null, value.reviewedAt, value.reviewedBy, value.parentEmployerId ?? null, value.brandOfEmployerId ?? null, now, now).run();
   }
 
   async listEmployerMappings(): Promise<EmployerMapping[]> {

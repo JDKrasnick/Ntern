@@ -36,6 +36,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
 import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
+import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
@@ -124,6 +125,10 @@ type Job = {
   applicationUrlValidatedAt?: string;
   invalidApplicationUrl?: string;
   postingIdentityStatus?: "confirmed" | "unconfirmed";
+  /** Stable reviewed employer identity; clients use this to resolve a first-party icon. */
+  canonicalEmployerId?: string;
+  /** Raw admission carried by plain job payloads, before catalog projection derives the id above. */
+  admission?: { canonicalEmployer?: { id: string; displayName: string } };
   sourceReferences: Array<{
     sourceId: string;
     provenance?: "official-ats" | "official-structured" | "employer-submitted" | "reviewed-community";
@@ -184,6 +189,8 @@ type CatalogGroupRole = {
   applicationUrlValidatedAt?: string;
   invalidApplicationUrl?: string;
   postingIdentityStatus?: "confirmed" | "unconfirmed";
+  /** Stable reviewed employer identity; clients use this to resolve a first-party icon. */
+  canonicalEmployerId?: string;
 };
 type CatalogGroupDetails = { group: CatalogGroupRow; roles: CatalogGroupRole[] };
 type AppTab = "roles" | "queue" | "catalog" | "resume" | "profile";
@@ -359,15 +366,6 @@ const colors = {
 
 type DesktopRolesVariant = "simplify" | "yc" | "blend";
 
-const companyLogoUris: Record<string, string> = {
-  astranis: "https://icons.duckduckgo.com/ip3/astranis.com.ico",
-  figma: "https://cdn.simpleicons.org/figma",
-  freeform: "https://icons.duckduckgo.com/ip3/freeform.co.ico",
-  newsbreak: "https://icons.duckduckgo.com/ip3/newsbreak.com.ico",
-  palantir: "https://cdn.simpleicons.org/palantir",
-  ramp: "https://icons.duckduckgo.com/ip3/ramp.com.ico",
-  vercel: "https://cdn.simpleicons.org/vercel",
-};
 const companyMarkColors = ["#E6F6F8", "#F0E8FF", "#FFF0E7", "#E8F5EA", "#E8EEFF", "#FCE8F1"];
 
 function companyInitials(company: string) {
@@ -379,21 +377,28 @@ function companyMarkColor(company: string) {
   return company.split("").reduce((total, character) => total + character.charCodeAt(0), 0) % companyMarkColors.length;
 }
 
-function CompanyMark({ company, size = 38 }: { company: string; size?: number }) {
+function CompanyMark({ company, employerId, size = 38 }: { company: string; employerId?: string; size?: number }) {
   const [imageUnavailable, setImageUnavailable] = useState(false);
-  const logoUri = companyLogoUris[company.trim().toLowerCase()];
-  const backgroundColor = companyMarkColors[companyMarkColor(company)];
+  // A recycled row can keep its state; a new employer must retry its own icon.
+  useEffect(() => {
+    setImageUnavailable(false);
+  }, [employerId]);
+  const iconUri = employerId ? `${publicConfig.apiUrl.replace(/\/$/, "")}/company-icons/${encodeURIComponent(employerId)}` : undefined;
+  // A reviewed employer keeps one tile across renames: its canonical identity
+  // drives the tint, while an unprojected company falls back to its display name.
+  const backgroundColor = employerId ? companyMonogramColors[companyMonogramColorIndex(employerId)] : companyMarkColors[companyMarkColor(company)];
+  const initials = employerId ? companyMonogramInitials(company) : companyInitials(company);
   const label = `${company} logo`;
   return (
     <View accessibilityLabel={label} style={[styles.companyMark, { backgroundColor, borderRadius: Math.round(size * 0.29), height: size, width: size }]}>
-      {logoUri && !imageUnavailable ? (
+      {iconUri && !imageUnavailable ? (
         <Image
           accessibilityLabel={label}
           onError={() => setImageUnavailable(true)}
-          source={{ uri: logoUri }}
+          source={{ uri: iconUri }}
           style={{ height: Math.round(size * 0.66), width: Math.round(size * 0.66) }}
         />
-      ) : <Text style={[styles.companyMarkFallback, { fontSize: Math.max(11, Math.round(size * 0.32)) }]}>{companyInitials(company)}</Text>}
+      ) : <Text style={[styles.companyMarkFallback, { fontSize: Math.max(11, Math.round(size * 0.32)) }]}>{initials}</Text>}
     </View>
   );
 }
@@ -824,6 +829,7 @@ function JobCard({
   roleFeed?: boolean;
 }) {
   const display = presentCatalogRole(job);
+  const employerId = job.canonicalEmployerId ?? job.admission?.canonicalEmployer?.id;
   const { width } = useWindowDimensions();
   const compactMobile = width < 600;
   // Inspired by Linear's issue list: wide screens use stable information and
@@ -919,7 +925,7 @@ function JobCard({
               <View style={styles.simplifyRoleContent}>
                 <View style={styles.simplifyRoleTopline}>
                   <View style={styles.desktopRoleIdentity}>
-                    <CompanyMark company={display.company} />
+                    <CompanyMark company={display.company} employerId={employerId} />
                     <View style={styles.simplifyRoleCopy}>
                       <Text style={styles.simplifyRoleCompany} numberOfLines={1}>{display.company}</Text>
                       <Text style={styles.simplifyRoleTitle} numberOfLines={2}>{display.title}</Text>
@@ -938,7 +944,7 @@ function JobCard({
             ) : desktopVariant === "yc" ? (
               <View style={styles.ycRoleContent}>
                 <View style={styles.desktopRoleIdentity}>
-                  <CompanyMark company={display.company} />
+                  <CompanyMark company={display.company} employerId={employerId} />
                   <View style={styles.ycRoleCopy}>
                     <Text style={styles.ycRoleCompany} numberOfLines={1}>{display.company}</Text>
                     <Text style={styles.ycRoleSource} numberOfLines={1}>{source.primary}</Text>
@@ -962,7 +968,7 @@ function JobCard({
               <View style={styles.blendRoleContent}>
                 <View style={styles.blendRoleTopline}>
                   <View style={styles.desktopRoleIdentity}>
-                    <CompanyMark company={display.company} />
+                    <CompanyMark company={display.company} employerId={employerId} />
                     <Text style={styles.blendRoleCompany} numberOfLines={1}>{display.company}</Text>
                   </View>
                   <Text style={styles.blendRoleOpen}>View role ›</Text>
@@ -982,7 +988,7 @@ function JobCard({
             <View style={[wideEditorialRow && styles.editorialRolePrimary, roleTable && styles.appleResultPrimary]}>
               <View style={styles.jobCompanyRow}>
                 <View style={[styles.jobCompanyLeft, showMobileRoleIdentity && styles.mobileRoleCompanyIdentity]}>
-                  {showMobileRoleIdentity ? <CompanyMark company={display.company} size={30} /> : null}
+                  {showMobileRoleIdentity ? <CompanyMark company={display.company} employerId={employerId} size={30} /> : null}
                   <Text style={styles.company} numberOfLines={1}>{display.company}</Text>
                 </View>
                 {job.disciplines?.length || recencyBadge ? (
@@ -1071,6 +1077,7 @@ function catalogRoleJob(role: CatalogGroupRole): Job {
     ...(role.applicationUrlValidatedAt ? { applicationUrlValidatedAt: role.applicationUrlValidatedAt } : {}),
     ...(role.invalidApplicationUrl ? { invalidApplicationUrl: role.invalidApplicationUrl } : {}),
     ...(role.postingIdentityStatus ? { postingIdentityStatus: role.postingIdentityStatus } : {}),
+    ...(role.canonicalEmployerId ? { canonicalEmployerId: role.canonicalEmployerId } : {}),
   };
 }
 

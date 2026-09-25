@@ -20,6 +20,7 @@ import { evaluateSourceFreshness } from './ingestion/monitoring.js';
 import { sourceProvider, sourceRegion } from './integration-registry.js';
 import { processSnapshot, SOURCE_METADATA_PROCESSING_REVISION } from './ingestion/processor.js';
 import { deriveCanonicalAdmission, evaluateCatalogAdmission } from './catalog-admission.js';
+import type { EmployerIconSeed } from './employer-icon-resolution.js';
 import { classifyDestination, matchingBrowserDestination, requiresBrowserVerification, type CatalogAdmissionResolver, type DestinationVerificationRequest } from './destination-verification.js';
 import { reviewedBoardIndex } from './sources/index.js';
 import { sourceQualityFailures } from './sources/quality.js';
@@ -512,6 +513,11 @@ export class IngestionRunner {
     private readonly catalogAdmissionResolver?: CatalogAdmissionResolver,
     private readonly publishUnconfirmedIdentities = true,
     private readonly trustedCommunityCatalogEnabled = false,
+    /**
+     * Records a background company-icon task for an admitted employer. The
+     * binding must swallow its own failures: an icon is never worth failing a poll.
+     */
+    private readonly enqueueEmployerIconResolution?: (seed: EmployerIconSeed) => Promise<void>,
   ) {}
 
   private async quarantine(job: Internship) {
@@ -1002,10 +1008,28 @@ export class IngestionRunner {
         };
         if (supportsAdmission && listing.providerIdentity && this.catalogAdmissionResolver) {
           const canonicalEmployer = await this.catalogAdmissionResolver.resolveCanonicalEmployer(listing.providerIdentity);
-          if (canonicalEmployer) listing = {
-            ...listing,
-            employerEvidence: { authority: 'reviewed-registry', canonicalEmployer },
-          };
+          if (canonicalEmployer) {
+            // The employer is known and the application link is in hand, which is
+            // exactly the evidence an icon needs. Recording the task costs one
+            // deduplicated insert and no network call, so publication still never
+            // waits on a provider.
+            if (this.enqueueEmployerIconResolution) {
+              await this.enqueueEmployerIconResolution({
+                canonicalEmployerId: canonicalEmployer.id,
+                displayName: canonicalEmployer.displayName,
+                roleTitle: listing.title,
+                applicationUrl: normalizedUrl,
+                provider: listing.providerIdentity.provider,
+                ...(listing.providerIdentity.tenant ? { tenant: listing.providerIdentity.tenant } : {}),
+                ...(listing.provenance ? { provenance: listing.provenance } : {}),
+                sourceId: listing.sourceId,
+              });
+            }
+            listing = {
+              ...listing,
+              employerEvidence: { authority: 'reviewed-registry', canonicalEmployer },
+            };
+          }
         }
         // Existing unclassified rows keep their rollout behavior until a
         // reviewed mapping exists. A refreshed URL is also safe when an

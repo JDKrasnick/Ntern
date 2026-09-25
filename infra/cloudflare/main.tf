@@ -1,6 +1,10 @@
 locals {
   api_worker_bundle       = "${path.module}/../../cloudflare/dist/api/api-worker.js"
   ingestion_worker_bundle = "${path.module}/../../cloudflare/dist/ingestion/ingestion-worker.js"
+  # The SVG rasterizer only the ingestion bundle imports; Wrangler emits it as its
+  # own module part, and `scripts/prepare-worker-modules.mjs` gives it this stable
+  # name so the `files` part key can equal the import specifier.
+  ingestion_worker_module = "${path.module}/../../cloudflare/dist/ingestion/resvg.wasm"
   ingestion_worker_name   = "${var.worker_name}-ingestion"
   catalog_providers       = toset(["greenhouse", "lever", "ashby", "github"])
   asynchronous_queues     = setunion(local.catalog_providers, toset(["gmail", "destination-verification", "shadow-extraction", "resume-job-import"]))
@@ -126,11 +130,17 @@ resource "cloudflare_queue" "dead_letter" {
 }
 
 resource "cloudflare_workers_script" "ingestion" {
-  account_id          = var.cloudflare_account_id
-  script_name         = local.ingestion_worker_name
-  main_module         = "ingestion-worker.js"
-  content_file        = local.ingestion_worker_bundle
-  content_sha256      = filesha256(local.ingestion_worker_bundle)
+  account_id     = var.cloudflare_account_id
+  script_name    = local.ingestion_worker_name
+  main_module    = "ingestion-worker.js"
+  content_file   = local.ingestion_worker_bundle
+  content_sha256 = filesha256(local.ingestion_worker_bundle)
+  files = {
+    "resvg.wasm" = {
+      content_type = "application/wasm"
+      content_file = local.ingestion_worker_module
+    }
+  }
   compatibility_date  = "2026-09-08"
   compatibility_flags = ["nodejs_compat"]
   keep_bindings       = ["secret_text"]

@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { register } from 'node:module';
 import { after, before, test } from 'node:test';
 import { fileURLToPath, URL } from 'node:url';
 import { Miniflare } from 'miniflare';
 import { unstable_splitSqlQuery as splitSqlQuery } from 'wrangler';
+
+// The compiled bundle imports its SVG rasterizer as `./resvg.wasm`, which Node cannot
+// import without the hook below. The artifact under test is the one that ships.
+register('./wasm-module-loader.mjs', import.meta.url);
 
 // Node's global constructor; the eslint `no-undef` rule does not know Node globals in this file.
 const { Response } = globalThis;
@@ -37,6 +43,21 @@ let runtime;
 let api;
 let ingestion;
 
+/**
+ * The bundle's module parts: the entry itself, plus `resvg.wasm` when that bundle
+ * ships the SVG rasterizer. Only the ingestion bundle imports it, so the part is
+ * added when it exists rather than assumed.
+ */
+async function moduleManifest(bundleDirectory, bundleName) {
+  const modules = {
+    [bundleName]: { type: 'esm', contents: await readFile(join(bundleDirectory, bundleName), 'utf8') },
+  };
+  if (existsSync(join(bundleDirectory, 'resvg.wasm'))) {
+    modules['resvg.wasm'] = { type: 'wasm', contents: await readFile(join(bundleDirectory, 'resvg.wasm')) };
+  }
+  return modules;
+}
+
 async function createWorkerConfig(name, bundleDirectory, bundleName, env) {
   return {
     config: {
@@ -47,12 +68,7 @@ async function createWorkerConfig(name, bundleDirectory, bundleName, env) {
       manifest: {
         mainModule: bundleName,
         modulesRoot: bundleDirectory,
-        modules: {
-          [bundleName]: {
-            type: 'esm',
-            contents: await readFile(join(bundleDirectory, bundleName), 'utf8'),
-          },
-        },
+        modules: await moduleManifest(bundleDirectory, bundleName),
       },
       env,
     },

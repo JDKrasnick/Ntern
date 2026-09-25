@@ -41,7 +41,30 @@ const resumeWorkerBindings: Record<string, Array<Record<string, unknown>>> = {
   ],
 };
 
-const allowedContentFields = new Set(['content_file', 'content_sha256']);
+const allowedContentFields = new Set(['content_file', 'content_sha256', 'files']);
+/**
+ * The only extra module part a release may carry is the SVG rasterizer, which
+ * Wrangler emits and `scripts/prepare-worker-modules.mjs` names. A part is accepted
+ * only as an `application/wasm` file whose path is a wasm file, so a plan cannot
+ * smuggle an arbitrary file into the upload, and a `files` change counts as a
+ * content change so a wasm-only update is still a legitimate release.
+ */
+function isPermittedModuleParts(before: unknown, after: unknown): boolean {
+  if (!isRecord(after)) return false;
+  const priorNames = isRecord(before) ? Object.keys(before) : [];
+  const names = Object.keys(after);
+  if (!names.length || names.some((name) => !/^[a-z0-9._-]+\.wasm$/u.test(name))) return false;
+  if (priorNames.some((name) => !names.includes(name))) return false;
+  return names.every((name) => {
+    const part = after[name];
+    return isRecord(part)
+      && part.content_type === 'application/wasm'
+      // A relative path, never an absolute one: Terraform emits `./../../…/resvg.wasm`,
+      // and nothing legitimate starts at the filesystem root.
+      && typeof part.content_file === 'string' && part.content_file.endsWith('.wasm')
+      && !part.content_file.startsWith('/');
+  });
+}
 // Terraform redacts these production values in a Worker script update. They
 // are the only configuration bindings that the production release workflow is
 // allowed to reconcile along with a new Worker bundle.
@@ -369,6 +392,12 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   const contentChanged = [...allowedContentFields].some((field) => (
     !isDeepStrictEqual(before[field], after[field])
   ));
+  // A wasm-only change (a rasterizer bump) carries no new JavaScript, so the module
+  // part is what makes it a release, and it must have the shape this build produces.
+  // The renderer belongs to the ingestion Worker alone — the API bundle must stay
+  // wasm-free — so a new module part is valid only on that address.
+  if (!isDeepStrictEqual(before.files, after.files)
+    && !(address === 'cloudflare_workers_script.ingestion' && isPermittedModuleParts(before.files, after.files))) return false;
   const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings)
     || isResumeTunerEnablement(before.bindings, after.bindings)
     || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, after.bindings));
