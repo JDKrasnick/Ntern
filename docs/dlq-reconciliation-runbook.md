@@ -190,3 +190,38 @@ The sub-minute pairs are retried deliveries of the same source; the 10-minute
 figures are the cron cadence. The all-time maxima (46.7 and 128.9 minutes) are
 pre-fix stalls. A source now has to miss two full sweeps to be reported
 degraded, which is the intended signal — widening the window would hide it.
+
+## 7. Reconciliation record: 2026-09-25
+
+Applied after #398 made every source-scoped catalog failure defer to the
+provider dispatcher and ack on its final delivery, so the catalog DLQs hold
+poison only. The residual below predates that change and is superseded work:
+every source has been re-dispatched since its message was dead-lettered, so a
+catalog replay would only send a duplicate poll.
+
+| Queue | Action | Messages | Plan |
+| --- | --- | ---: | --- |
+| github | discard | 191 | `822b686e-7856-4d47-ab39-4dc12ba32c92` |
+| greenhouse | discard | 128 | `6e7fbdcc-93be-4d5c-bba5-34759e134c69` |
+| lever | discard | 6 | `db117068-8d07-4b17-a7ad-dca7273f8a09` |
+| ashby | discard | 26 | `ae814d02-66e5-4e0a-9009-29dc5feaa56e` |
+
+Destination verification is the opposite case: nothing re-inspects an admitted
+destination after the 2026-09-17 durable-admission decision, so an acked message
+drops work rather than deferring it. The classified backlog was 89% `daily-retry`
+— scheduled re-checks that decision removed — so the admission-relevant reasons
+(`content-change`, `historical-backfill`) were replayed and the vestigial
+scheduled ones discarded.
+
+| Queue | Action | Messages | Plan |
+| --- | --- | ---: | --- |
+| destination-verification | replay | 76 | `5c469321-a5a4-4f8f-9837-429495d9ed94` |
+| destination-verification | discard | 513 | `4f7069ed-edfd-4176-b818-907f4668a0f2` |
+
+All six DLQs read 0 after the disposition, and every message is recorded in
+`dlq_disposition_audit`. The protected `POST /internal/operations/dlq` endpoint
+was unusable for this pass — the operator key did not match the deployed
+`OPERATIONS_SHARED_SECRET` — so the same peek → send/purge → audit sequence ran
+directly against the Cloudflare queue API and the audit rows were written to D1.
+Reconcile the operator key before the next reconciliation so the guarded plan
+and one-use token flow is available again.
