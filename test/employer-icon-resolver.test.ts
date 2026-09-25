@@ -226,6 +226,49 @@ describe('employer icon diagnosis', () => {
       .toMatchObject({ domain: 'acme.com' });
   });
 
+  it('accepts a lone provider nomination once the domain names itself, and leaves a real tie to the model', async () => {
+    // A platform-hosted posting with one provider nomination and no second signal: the
+    // domain decides, because the domain naming itself is the same proof a proposal needs.
+    const single = async () => {
+      const { db, admission, icons } = subject();
+      const r2 = r2Stub();
+      await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+      await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+      // A board slug that does not name the employer, so only the provider speaks.
+      await enqueueEmployerIconResolution(icons, { ...employerSeed('https://jobs.lever.co/acme/1'), provider: 'lever', tenant: 'job-1', sourceId: 'lever:job-1' }, NOW);
+      return { db, r2, icons };
+    };
+
+    const confirmed = await single();
+    const confirmedPass = await runEmployerIconResolutionPass(
+      environment(confirmed.db, confirmed.r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+      DEPENDENCIES(scriptedFetch({
+        'https://jobs.lever.co/acme/1': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
+        [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+        'https://acme.com/': () => html('<!doctype html><html><head><title>Acme — industrial supplies</title></head></html>'),
+        [IMAGE_URL]: () => webp(),
+      })),
+    );
+    expect(confirmedPass.resolved).toBe(1);
+    expect((await confirmed.icons.context('acme'))?.websiteDomain).toBe('acme.com');
+
+    // Two nominations that both name themselves are a genuine tie: the model decides,
+    // and with no model configured the employer keeps its monogram.
+    const tied = await single();
+    const tiedPass = await runEmployerIconResolutionPass(
+      environment(tied.db, tied.r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+      DEPENDENCIES(scriptedFetch({
+        'https://jobs.lever.co/acme/1': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
+        [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }, { name: 'Acme', domain: 'acme-group.com' }]),
+        'https://acme.com/': () => html('<!doctype html><html><head><title>Acme — industrial supplies</title></head></html>'),
+        'https://acme-group.com/': () => html('<!doctype html><html><head><title>Acme Group — holding company</title></head></html>'),
+        [IMAGE_URL]: () => webp(),
+      })),
+    );
+    expect(tiedPass.resolved).toBe(0);
+    expect((await tied.icons.context('acme'))?.websiteDomain).toBeUndefined();
+  });
+
   it('publishes a below-floor tie-break only when the domain itself names the employer', async () => {
     // The real model answers correctly at 0.8 far more often than it answers at all
     // above 0.90, so a below-floor selection is verified against the domain instead of
@@ -304,6 +347,39 @@ describe('employer icon diagnosis', () => {
     const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
     expect(events.find((event) => event.event === 'company_icon_domain_asset_stored'))
       .toMatchObject({ source: 'declared', format: 'image/png' });
+  });
+
+  it('reads the mark the posting page itself declares, with no extra request', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    // The employer's postings live on its own domain, so the page already fetched for
+    // evidence is the page that declares its mark.
+    const seed = { ...employerSeed('https://acme.com/careers/1'), provider: 'structured', provenance: 'official-ats' as const };
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, seed, NOW);
+    const requested: string[] = [];
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/1': () => html(
+        '<!doctype html><html><head><title>Careers</title>'
+        + '<link rel="apple-touch-icon" sizes="180x180" href="/touch-180.png"></head></html>',
+      ),
+      [IMAGE_URL]: () => status(404),
+      'https://acme.com/touch-180.png': () => new Response(pngBytes(180, 180), { headers: { 'content-type': 'image/png' } }),
+      'https://acme.com/': () => { requested.push('homepage'); return status(500); },
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2.bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+    );
+
+    expect(result.resolved).toBe(1);
+    expect(r2.puts[0]?.key).toMatch(/^company-icons\/acme\/site-[0-9a-f]{16}\.png$/u);
+    // The mark came from the page already in hand, so the homepage was never requested.
+    expect(requested).toEqual([]);
+    const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
+    expect(events.find((event) => event.event === 'company_icon_domain_asset_stored'))
+      .toMatchObject({ source: 'declared', url: 'https://acme.com/touch-180.png' });
   });
 
   it('lets the model name an asset on the verified domain, and drops one outside it', async () => {
@@ -669,6 +745,10 @@ describe('employer icon provider plumbing', () => {
     const fetchImpl = scriptedFetch({
       'https://job-boards.greenhouse.io/acme/jobs/4001': () => html(linkPage({ name: 'Globex', url: 'https://globex.com' })),
       [logoDevSearchUrl('Acme')]: () => status(404),
+      // The page declares another name, so the provider is asked about that too:
+      // a clean miss on every query is what makes this an unresolved employer rather
+      // than a retry.
+      [logoDevSearchUrl('Globex')]: () => status(404),
     });
     const result = await runEmployerIconResolutionPass(
       environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),

@@ -230,7 +230,12 @@ export function plausibleEmployerName(name: string | undefined): boolean {
  * while the page usually shows the brand alone.
  */
 const EMPLOYER_QUALIFIERS: Record<string, true> = {
-  program: true, programme: true, coop: true, op: true, internship: true, intern: true,
+  program: true, programme: true, programs: true, coop: true, op: true,
+  internship: true, internships: true, intern: true, interns: true,
+  apprenticeship: true, apprenticeships: true, apprentice: true, apprentices: true,
+  fellowship: true, fellowships: true, fellow: true, fellows: true, rotational: true,
+  rotation: true, cohort: true, student: true, students: true,
+  graduate: true, graduates: true, grad: true, newgrad: true, class: true,
   summer: true, spring: true, fall: true, winter: true, university: true, campus: true,
   careers: true, technologies: true, technology: true, group: true, holdings: true,
   international: true, global: true, solutions: true, systems: true, labs: true,
@@ -247,8 +252,16 @@ const EMPLOYER_QUALIFIERS: Record<string, true> = {
  */
 export function employerDistinctiveTerms(displayName: string): string[] {
   return canonicalCompanyKey(displayName).split(' ')
-    .filter((term) => term.length > 2 && EMPLOYER_QUALIFIERS[term] !== true);
+    .filter((term) => term.length > 2 && EMPLOYER_QUALIFIERS[term] !== true && !CALENDAR_YEAR.test(term));
 }
+
+/**
+ * A season's year identifies a hiring cycle, never a company: "Acme Summer 2026
+ * Students" is Acme, and treating `2026` as a distinctive term made the page rule and
+ * the provider rule both fail on a name that is otherwise unambiguous. Only four-digit
+ * calendar years are dropped, so `500 Global` and `37signals` keep their numbers.
+ */
+const CALENDAR_YEAR = /^(?:19|20)\d{2}$/u;
 
 /**
  * A metadata string clearly names the employer when every distinctive term
@@ -264,6 +277,22 @@ export function iconTextMatchesEmployer(text: string | undefined, displayName: s
 }
 
 /**
+ * A company name reduced to what a brand treats as the same name: case, punctuation,
+ * spaces, and — for an entry that is the domain itself — the trailing public suffix are
+ * removed. `distinctive terms` still decides meaning; this only settles spelling.
+ */
+function simplifyCompanyName(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  // `rivetindustries.com` is the same name as `Rivet Industries`; a dot only appears in
+  // a host, so the last label is a public suffix rather than part of the name.
+  const withoutSuffix = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u.test(trimmed) ? trimmed.split('.').slice(0, -1).join('') : trimmed;
+  return withoutSuffix.replace(/[^a-z0-9]/gu, '');
+}
+
+/** Shorter than this, a simplified name is a generic word rather than a brand. */
+const MIN_SIMPLIFIED_NAME = 6;
+
+/**
  * Whether a provider's own reported brand name denotes the canonical employer.
  *
  * Symmetric with the page rule: the provider name must contain every distinctive
@@ -273,15 +302,40 @@ export function iconTextMatchesEmployer(text: string | undefined, displayName: s
  * — the extra distinctive token is exactly the evidence of a different company.
  */
 export function providerNameMatchesEmployer(providerName: string, displayName: string): boolean {
+  return providerNameMatchStrength(providerName, displayName) > 0;
+}
+
+/**
+ * How well a provider's reported brand name denotes the employer: `2` when the names
+ * are the same name under our canonical rules, `1` when they are the same name only
+ * under a brand's own spelling, `0` when they are not the same employer.
+ *
+ * The strength exists so a caller can order candidates rather than take the index's
+ * word for which entry is best. Search results put a domain-shaped entry
+ * (`appiancorporation.com`) ahead of the brand's own (`appian.com`) for the query
+ * "Appian Corporation", and the first one may well have no logo: strength keeps the
+ * exact match ahead of the spelling variant.
+ */
+export function providerNameMatchStrength(providerName: string, displayName: string): 0 | 1 | 2 {
   const reported = canonicalCompanyKey(providerName);
-  if (!reported) return false;
-  if (reported === canonicalCompanyKey(displayName)) return true;
+  if (!reported) return 0;
+  if (reported === canonicalCompanyKey(displayName)) return 2;
   const terms = employerDistinctiveTerms(displayName);
-  if (!terms.length) return false;
   const reportedTerms = reported.split(' ');
-  if (!terms.every((term) => reportedTerms.includes(term))) return false;
-  return reportedTerms.every((term) => terms.includes(term)
-    || term.length <= 3 || EMPLOYER_QUALIFIERS[term] === true);
+  if (terms.length
+    && terms.every((term) => reportedTerms.includes(term))
+    && reportedTerms.every((term) => terms.includes(term)
+      || term.length <= 3 || EMPLOYER_QUALIFIERS[term] === true)) {
+    return 2;
+  }
+  // The same name written the way brands write it: `Rendezvous Robotics` is indexed as
+  // `rendezvousrobotics`, `Toshiba Global Commerce Solutions` as
+  // `toshibaglobalcommercesolutions`, and an index entry is sometimes the domain itself
+  // (`rivetindustries.com`). Equality only — never containment — so `Bree` still does not
+  // match `Breeze` and `N1` does not match `Nexl`, and both sides must be long enough
+  // that a short generic word cannot be the whole of the other.
+  const simplified = simplifyCompanyName(providerName);
+  return simplified.length >= MIN_SIMPLIFIED_NAME && simplified === simplifyCompanyName(displayName) ? 1 : 0;
 }
 
 /**
@@ -457,21 +511,6 @@ export function parseIconTieBreakDecision(value: unknown): IconTieBreakDecision 
   if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) return undefined;
   return { decision, officialDomain: officialDomain === null ? null : officialDomain.trim().toLowerCase(),
     confidence, evidenceIds: [...new Set(evidenceIds.map((id) => (id as string).trim()))], reason: reason.trim() };
-}
-
-/**
- * The candidates our own evidence already corroborates: not rejected, and carrying
- * two or more independent evidence ids. A single candidate in this state is
- * unambiguous by our own rules — there is nothing to choose between — so it is the
- * one case where a domain can be accepted by proving it, without asking the model at
- * all. Measured on the live catalog, two of three remaining monograms in a 23-employer
- * sample were exactly this: one provider nomination plus the page naming the employer,
- * with the correct domain confirmed by its own title.
- */
-export function corroboratedIconCandidates(
-  submitted: readonly IconCandidateScore[],
-): IconCandidateScore[] {
-  return submitted.filter((candidate) => !candidate.rejected && candidate.evidenceIds.length >= 2);
 }
 
 export interface IconTieBreakAcceptance {

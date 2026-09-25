@@ -13,7 +13,9 @@
  */
 
 import { registrableDomain } from './core/registrable-domain.js';
-import { MAX_PROVIDER_CANDIDATES, iconTextMatchesEmployer, providerNameMatchesEmployer } from './employer-icon-resolution.js';
+import {
+  MAX_PROVIDER_CANDIDATES, iconTextMatchesEmployer, providerNameMatchStrength, providerNameMatchesEmployer,
+} from './employer-icon-resolution.js';
 
 export const logoDevSearchEndpoint = 'https://api.logo.dev/search';
 export const logoDevImageEndpoint = 'https://img.logo.dev';
@@ -57,18 +59,21 @@ export function validIconAsset(contentType: string | null | undefined, byteLengt
     && byteLength > 0 && byteLength <= MAX_ICON_ASSET_BYTES;
 }
 
-/**
- * A provider nominates a domain only when its own reported brand name denotes the
- * canonical employer. A fuzzy provider hit is not evidence of employer identity,
- * and accepting one is how a wrong logo reaches the catalog.
- */
-function exactProviderName(providerName: unknown, displayName: string): boolean {
-  return typeof providerName === 'string' && providerName.trim() !== ''
-    && providerNameMatchesEmployer(providerName, displayName);
-}
 
 /** Domains Logo.dev reported for the employer name, deduplicated and capped. */
 export function logoDevCandidateDomains(value: unknown, displayName: string): string[] {
+  return providerDomainCandidates(value, displayName).domains;
+}
+
+/**
+ * The domains a provider reported, with how well the entry they came from denotes the
+ * employer (`2` same name, `1` the brand's own spelling of it, `0` neither).
+ *
+ * The strength is what lets a caller keep looking: a search for "Appian Corporation"
+ * answers with a domain-shaped entry that has no logo, and a caller that treats that as
+ * the answer never asks the brand's own name — which does have one.
+ */
+export function providerDomainCandidates(value: unknown, displayName: string): { domains: string[]; strength: 0 | 1 | 2 } {
   return providerDomains(value, displayName);
 }
 
@@ -77,22 +82,34 @@ export function logoDevCandidateDomains(value: unknown, displayName: string): st
  * as ephemeral corroboration: they are never persisted and never fetched.
  */
 export function brandfetchCandidateDomains(value: unknown, displayName: string): string[] {
-  return providerDomains(value, displayName);
+  return providerDomainCandidates(value, displayName).domains;
 }
 
-function providerDomains(value: unknown, displayName: string): string[] {
-  if (!Array.isArray(value)) return [];
+function providerDomains(value: unknown, displayName: string): { domains: string[]; strength: 0 | 1 | 2 } {
+  if (!Array.isArray(value)) return { domains: [], strength: 0 };
+  // Strongest match first, then the index's own order: a search for "Appian
+  // Corporation" returns the domain-shaped `appiancorporation.com` before `appian.com`,
+  // and only the second one has a logo. Taking the first *matching* entry would pick the
+  // weaker one.
+  const ranked = value
+    .map((entry, index) => ({ entry, index }))
+    .filter((candidate) => typeof candidate.entry === 'object' && candidate.entry !== null && !Array.isArray(candidate.entry))
+    .map((candidate) => {
+      const record = candidate.entry as Record<string, unknown>;
+      const name = typeof record.name === 'string' ? record.name.trim() : '';
+      return { record, index: candidate.index, strength: name ? providerNameMatchStrength(name, displayName) : 0 };
+    })
+    .filter((candidate) => candidate.strength > 0)
+    .sort((left, right) => right.strength - left.strength || left.index - right.index);
   const domains: string[] = [];
-  for (const entry of value) {
+  for (const candidate of ranked) {
     if (domains.length >= MAX_PROVIDER_CANDIDATES) break;
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
-    const record = entry as Record<string, unknown>;
-    if (!exactProviderName(record.name, displayName)) continue;
+    const record = candidate.record;
     const domain = typeof record.domain === 'string' ? registrableDomain(record.domain) : '';
     if (!domain.includes('.')) continue;
     if (!domains.includes(domain)) domains.push(domain);
   }
-  return domains;
+  return { domains, strength: ranked.length ? ranked[0]!.strength as 1 | 2 : 0 };
 }
 
 /**

@@ -109,6 +109,37 @@ describe('employer text matching', () => {
     expect(employerDistinctiveTerms('AB Corp')).toEqual([]);
   });
 
+  it('matches a brand’s own spelling of the same name, and nothing looser', () => {
+    // Real cases from the provider audit: the index stores the brand the way the brand
+    // writes itself, while the catalog carries the program name.
+    for (const [providerName, displayName] of [
+      ['rendezvousrobotics', 'Rendezvous Robotics'],
+      ['lilasciences', 'Lila Sciences'],
+      ['toshibaglobalcommercesolutions', 'Toshiba Global Commerce Solutions'],
+      ['rivetindustries.com', 'Rivet Industries'],
+      ['Walleye Capital', 'Walleye Capital Internships'],
+      ['Acme', 'Acme Internship Program'],
+      ['Acme', 'Acme Co-Op'],
+      ['Acme', 'Acme Summer 2026 Students'],
+    ] as const) {
+      expect(providerNameMatchesEmployer(providerName, displayName), `${providerName} vs ${displayName}`).toBe(true);
+    }
+    // Equality, never containment: a short generic word is not a longer brand, and a
+    // prefix of a multi-word employer is not the employer.
+    for (const [providerName, displayName] of [
+      ['Breeze', 'Bree'],
+      ['Nexl', 'N1'],
+      ['Kiddie Academy', 'k-ID'],
+      ['Scale Computing', 'Scale AI'],
+      ['Apple', 'Apple Bank'],
+      ['North', 'Northwind'],
+      ['Stripe', 'Strip'],
+      ['Canvas', 'Canva'],
+    ] as const) {
+      expect(providerNameMatchesEmployer(providerName, displayName), `${providerName} vs ${displayName}`).toBe(false);
+    }
+  });
+
   it('accepts a provider brand name that omits qualifiers but never one that adds a distinctive term', () => {
     // The provider must contain every distinctive employer term...
     expect(providerNameMatchesEmployer('Palantir', 'Palantir Technologies')).toBe(true);

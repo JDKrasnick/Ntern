@@ -43,7 +43,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { lookup } from 'node:dns/promises';
 import {
   bannerAssetShapeUsable, iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls,
-  logoDevCandidateDomains, logoDevSearchUrl,
+  logoDevSearchUrl, providerDomainCandidates,
 } from '../src/employer-icon-discovery.js';
 import { employerDistinctiveTerms } from '../src/employer-icon-resolution.js';
 import {
@@ -351,7 +351,7 @@ function providerOutcomesOf(diagnostic: EmployerIconDiagnostic): Record<string, 
 interface ProviderAuditRow {
   name: string;
   query: 'display-name' | 'brand-terms';
-  outcome: 'usable' | 'no-image' | 'name-mismatch' | 'no-results' | 'rate-limited' | 'failed';
+  outcome: 'usable' | 'no-image' | 'name-mismatch' | 'no-results' | 'weak-match' | 'rate-limited' | 'failed';
   returned: number;
   domain?: string;
 }
@@ -375,36 +375,44 @@ async function auditLogoDev(names: readonly string[]): Promise<void> {
   await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, 4)) }, async () => {
     while (cursor < names.length) {
       const name = names[cursor++]!;
-      const attempt = async (query: 'display-name' | 'brand-terms'): Promise<ProviderAuditRow> => {
+      const attempt = async (query: 'display-name' | 'brand-terms'): Promise<ProviderAuditRow & { strength: 0 | 1 | 2 }> => {
         const query2 = query === 'display-name' ? name : employerDistinctiveTerms(name).join(' ');
         try {
           const response = await fetch(logoDevSearchUrl(query2), { headers: { authorization: `Bearer ${token}` } });
-          if (response.status === 429) return { name, query, outcome: 'rate-limited', returned: 0 };
-          if (!response.ok) return { name, query, outcome: 'failed', returned: 0 };
+          if (response.status === 429) return { name, query, outcome: 'rate-limited', returned: 0, strength: 0 };
+          if (!response.ok) return { name, query, outcome: 'failed', returned: 0, strength: 0 };
           const raw = await response.json() as unknown;
           const returned = Array.isArray(raw) ? raw.length : 0;
-          const nominated = logoDevCandidateDomains(raw, name);
+          const { domains: nominated, strength } = providerDomainCandidates(raw, name);
           if (!nominated.length) {
-            return { name, query, outcome: returned ? 'name-mismatch' : 'no-results', returned };
+            return { name, query, outcome: returned ? 'name-mismatch' : 'no-results', returned, strength: 0 };
           }
-          if (!imageToken) return { name, query, outcome: 'no-image', returned, domain: nominated[0] };
+          // The image decides usability; the strength only decides whether another name
+          // is worth asking for before settling on this one.
+          if (!imageToken) return { name, query, outcome: 'no-image', returned, domain: nominated[0]!, strength };
           const probe = await probeLogoDevImage(nominated[0]!, imageToken, { resolver: nodeResolver });
           return {
-            name, query, returned, domain: nominated[0]!,
+            name, query, returned, domain: nominated[0]!, strength,
             outcome: probe.available ? 'usable' : 'no-image',
           };
-        } catch { return { name, query, outcome: 'failed', returned: 0 }; }
+        } catch { return { name, query, outcome: 'failed', returned: 0, strength: 0 }; }
       };
-      let row = await attempt('display-name');
-      // The resolver retries once with the brand itself when the full name finds nothing.
-      if (row.outcome === 'no-results' || row.outcome === 'name-mismatch') {
-        const brand = employerDistinctiveTerms(name).join(' ');
-        if (brand && brand !== name.trim().toLowerCase()) {
-          const second = await attempt('brand-terms');
-          if (second.outcome === 'usable' || second.outcome === 'no-image') row = second;
-          else if (row.outcome === 'no-results') row = second;
-        }
+      const brand = employerDistinctiveTerms(name).join(' ');
+      const queries: Array<'display-name' | 'brand-terms'> = brand && brand !== name.trim().toLowerCase()
+        ? ['display-name', 'brand-terms'] : ['display-name'];
+      // Exactly the resolver's rule: a spelling-variant answer is kept but not settled
+      // for, because the next name may reach the entry that actually carries a logo.
+      let row: ProviderAuditRow = { name, query: 'display-name', outcome: 'no-results', returned: 0 };
+      let best: ProviderAuditRow | undefined;
+      for (const query of queries) {
+        const attemptRow = await attempt(query);
+        const { strength, ...result } = attemptRow;
+        if (strength === 2) { row = result; best = undefined; break; }
+        if (attemptRow.outcome === 'usable' || attemptRow.outcome === 'no-image') best ??= result;
+        else if (!best) row = result;
+        if (strength === 0 && (attemptRow.outcome === 'name-mismatch' || attemptRow.outcome === 'no-results')) row = result;
       }
+      if (best) row = best;
       rows.push(row);
     }
   }));
@@ -415,7 +423,7 @@ async function auditLogoDev(names: readonly string[]): Promise<void> {
   console.log(`  search + image usable: ${usable.length}/${rows.length} = ${Math.round(100 * usable.length / rows.length)}%`);
   console.log(`  outcomes: ${tally(rows.map((row) => row.outcome))}`);
   console.log(`  resolved by: ${tally(usable.map((row) => row.query))}`);
-  for (const outcome of ['name-mismatch', 'no-results', 'no-image'] as const) {
+  for (const outcome of ['name-mismatch', 'no-results', 'no-image', 'weak-match'] as const) {
     const examples = rows.filter((row) => row.outcome === outcome).slice(0, 8);
     if (examples.length) {
       console.log(`  ${outcome} examples:`);
