@@ -317,17 +317,27 @@ describe('domain decision', () => {
     expect(strong.selectedScore).toBeCloseTo(0.95, 10);
   });
 
-  it('prefers the site the employer’s own board declares over a provider consensus', () => {
+  it('prefers the site the employer’s own board or Organization declares over a provider consensus', () => {
     // Both providers agree on the unrelated namesake; the employer's board links the
-    // real site. The board's own word wins.
+    // real site. The employer's own declaration wins.
     const decision = decideIconDomain([
       candidate('figure.com', ['logo-dev', 'brandfetch', 'page-title']),
       candidate('figure.ai', ['platform-website']),
     ]);
     expect(decision).toMatchObject({ outcome: 'resolved', selectedDomain: 'figure.ai' });
-    expect(decision.reason).toContain("the employer's own board names figure.ai");
+    expect(decision.reason).toContain("the employer's own declaration names figure.ai");
 
-    // With no board declaration the consensus still auto-resolves exactly as before.
+    // The Organization URL is the same kind of declaration, so it settles a close
+    // runner-up too: `meta.com` beside the `metacareers.com` careers host resolves
+    // without spending the model on a decision the employer already made.
+    const organization = decideIconDomain([
+      candidate('meta.com', ['jsonld-url', 'jsonld-name', 'page-title', 'platform-name']),
+      candidate('metacareers.com', ['final-url', 'redirect-host', 'logo-dev']),
+    ]);
+    expect(organization).toMatchObject({ outcome: 'resolved', selectedDomain: 'meta.com' });
+    expect(organization.reason).toContain("the employer's own declaration names meta.com");
+
+    // With no declaration the consensus still auto-resolves exactly as before.
     const consensus = decideIconDomain([candidate('figure.com', ['logo-dev', 'brandfetch', 'page-title'])]);
     expect(consensus).toMatchObject({ outcome: 'resolved', selectedDomain: 'figure.com' });
   });
@@ -459,18 +469,20 @@ describe('tie-break acceptance (the arbitrary-domain defence)', () => {
       .toEqual({ accepted: false, reasonCode: 'decision-uncertain' });
   });
 
-  it('accepts at 0.90 on the model word, and below it only by proving the domain', () => {
+  it('accepts on the model word at or above 0.80, and below it only by proving the domain', () => {
     // Below the self-reporting floor, an otherwise valid answer becomes a candidate
     // for verification rather than a refusal: the resolver then has to prove the
     // domain names this employer.
-    expect(acceptIconTieBreak(tieBreak({ confidence: 0.89 }), submitted))
+    expect(acceptIconTieBreak(tieBreak({ confidence: 0.79 }), submitted))
       .toEqual({
         accepted: false, reasonCode: 'needs-domain-confirmation',
-        pendingVerification: { domain: 'acme.com', confidence: 0.89 },
+        pendingVerification: { domain: 'acme.com', confidence: 0.79 },
       });
     // A guess too weak to be worth a verification request stays a refusal.
     expect(acceptIconTieBreak(tieBreak({ confidence: 0.29 }), submitted))
       .toEqual({ accepted: false, reasonCode: 'confidence-below-floor' });
+    expect(acceptIconTieBreak(tieBreak({ confidence: 0.8 }), submitted))
+      .toEqual({ accepted: true, domain: 'acme.com', reasonCode: 'accepted' });
     expect(acceptIconTieBreak(tieBreak({ confidence: 0.9 }), submitted))
       .toEqual({ accepted: true, domain: 'acme.com', reasonCode: 'accepted' });
   });

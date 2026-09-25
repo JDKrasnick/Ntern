@@ -281,9 +281,21 @@ async function backfillSeedlessEmployers(
   const candidates = await store.employersNeedingResolution(ICON_BACKFILL_PER_PASS);
   let seeded = 0;
   for (const employer of candidates) {
+    // Carry the employer's own posting link when the catalog still has one: a task with
+    // a link resolves exactly as a live admission would, while a nameless seed can only
+    // reach a provider nomination and often declines ("AEVEX" has no provider entry,
+    // but the Greenhouse posting's own board link names `aevex.com`).
+    const posting = await store.latestPostingForEmployer(employer.id);
+    const provider = posting?.provider ?? 'reviewed-registry';
+    const sourceId = posting?.sourceId ?? 'reviewed-registry';
+    const prefix = `${provider}-`;
+    const tenant = sourceId.startsWith(prefix) ? sourceId.slice(prefix.length) : undefined;
     const recorded = await enqueueEmployerIconResolution(store, {
-      canonicalEmployerId: employer.id, displayName: employer.displayName, roleTitle: '',
-      applicationUrl: '', provider: 'reviewed-registry', sourceId: 'reviewed-registry',
+      canonicalEmployerId: employer.id, displayName: employer.displayName,
+      roleTitle: posting?.title ?? '', applicationUrl: posting?.url ?? '',
+      provider, sourceId,
+      ...(tenant ? { tenant } : {}),
+      ...(posting?.provenance ? { provenance: posting.provenance } : {}),
     }, now);
     if (recorded) seeded += 1;
   }
@@ -903,6 +915,8 @@ const tieBreakSystemPrompt = [
   'You identify the official web domain of the employer behind one job posting.',
   'Use only the supplied JSON. Never invent a domain and never answer with a URL.',
   'The candidates array lists every domain that may be selected, each with the evidence ids that support it.',
+  "A candidate the employer's own Organization node or ATS board declares (evidence ids beginning jsonld-url or platform-website) is the employer's own statement of its domain, and outranks a careers host, an ATS host, or a provider nomination that merely shares the name.",
+  'When two candidates both fit the name, prefer the corporate brand domain over a careers or jobs subdomain and over a namesake.',
   'Answer with decision "accept" only when the candidates themselves prove the official domain;',
   'cite at least two distinct evidence ids that belong to that candidate.',
   'Answer "uncertain" or "reject" when the evidence does not prove one official domain.',

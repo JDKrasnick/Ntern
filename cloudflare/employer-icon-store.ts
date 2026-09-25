@@ -413,6 +413,43 @@ export class D1EmployerIconStore {
     return rows.results.map((row) => ({ id: row.id as string, displayName: row.display_name as string }));
   }
 
+  /**
+   * One live catalog posting for an employer, so a backfilled task carries the
+   * employer's own application link instead of no evidence at all. Without a link the
+   * sweep can only match the employer's name against a provider; with it, the posting
+   * page supplies the same evidence — and the same declared site — a live admission
+   * would.
+   */
+  async latestPostingForEmployer(canonicalEmployerId: string): Promise<{
+    url: string;
+    title?: string;
+    provider?: string;
+    sourceId?: string;
+    provenance?: 'official-ats' | 'official-structured' | 'employer-submitted' | 'reviewed-community';
+  } | undefined> {
+    const row = await this.db.prepare(`SELECT
+        json_extract(value, '$.normalizedUrl') AS url,
+        json_extract(value, '$.title') AS title,
+        json_extract(value, '$.admission.destination.provider') AS provider,
+        json_extract(value, '$.sourceReferences[0].sourceId') AS source_id,
+        json_extract(value, '$.sourceReferences[0].provenance') AS provenance
+      FROM catalog_items
+      WHERE kind = 'internship'
+        AND json_extract(value, '$.internshipIdentity.company.canonicalId') = ?
+      LIMIT 1`).bind(canonicalEmployerId).first<Row>();
+    if (!row || typeof row.url !== 'string' || !row.url.startsWith('http')) return undefined;
+    const provenance = row.provenance;
+    return {
+      url: row.url,
+      ...(typeof row.title === 'string' && row.title ? { title: row.title } : {}),
+      ...(typeof row.provider === 'string' && row.provider ? { provider: row.provider } : {}),
+      ...(typeof row.source_id === 'string' && row.source_id ? { sourceId: row.source_id } : {}),
+      ...(provenance === 'official-ats' || provenance === 'official-structured'
+        || provenance === 'employer-submitted' || provenance === 'reviewed-community'
+        ? { provenance } : {}),
+    };
+  }
+
   async counts(): Promise<EmployerIconResolutionCounts> {
     const [statuses, sources] = await Promise.all([
       this.db.prepare('SELECT status, COUNT(*) AS count FROM employer_icon_resolutions GROUP BY status').all<Row>(),
