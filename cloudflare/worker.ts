@@ -1964,7 +1964,11 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         const structured = resumeJobStructuredRoute(body.canonicalUrl);
         if (structured) {
           try {
-            const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 2 * 1024 * 1024, headers: { Accept: 'application/json' } });
+            // Ashby's posting API returns the whole tenant board, so a large board
+            // (Notion: ~2.2 MB) overruns a 2 MB budget and the import silently falls
+            // back to scraping a client-rendered shell. The host is a fixed reviewed
+            // provider route, so a larger bounded body is safe here.
+            const fetched = await safeFetchText(structured.requestUrl, { resolver: publicHostResolver, timeoutMs: 8_000, maxRedirects: 2, maxBodyBytes: 12 * 1024 * 1024, headers: { Accept: 'application/json' } });
             if (fetched.status < 200 || fetched.status >= 300) throw new Error(`Job import returned HTTP ${fetched.status}`);
             extracted = structured.parse(JSON.parse(fetched.body));
             if (!extracted || extracted.description.length < 40) throw new Error('Structured job import did not contain enough readable role text');
