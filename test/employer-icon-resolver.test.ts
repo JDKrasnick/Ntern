@@ -67,13 +67,25 @@ const IMAGE_URL = logoDevImageUrl('acme.com', LOGO_IMAGE_TOKEN);
 
 type FetchRoutes = Record<string, () => Response | Promise<Response>>;
 
+/**
+ * A fetch double over exact URLs.
+ *
+ * An unrouted URL throws, which keeps a test honest about what it stubbed. Provider
+ * searches are the exception: every employer asks each configured provider, and a test
+ * is about one thing at a time, so a search it did not route is answered as a clean miss
+ * — the provider simply has nothing under that name. That way adding a provider to the
+ * resolver (as Brandfetch was) does not quietly break dozens of unrelated fixtures.
+ */
 function scriptedFetch(routes: FetchRoutes, log: string[] = []): typeof fetch {
   const impl = async (input: RequestInfo | URL): Promise<Response> => {
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     log.push(href);
     const route = routes[href];
-    if (!route) throw new Error(`unexpected fetch: ${href}`);
-    return route();
+    if (route) return route();
+    if (href.startsWith('https://api.logo.dev/search') || href.startsWith('https://api.brandfetch.io/v2/search')) {
+      return status(404);
+    }
+    throw new Error(`unexpected fetch: ${href}`);
   };
   return impl as unknown as typeof fetch;
 }
@@ -186,6 +198,65 @@ describe('employer icon diagnosis', () => {
     expect(winner?.signals).toEqual(expect.arrayContaining(['final-url', 'ats-tenant']));
     expect(diagnostic.decision.selectedDomain).toBe('acme.com');
     expect(diagnostic.decision.outcome).toBe('llm-review');
+  });
+
+  it('corroborates with Brandfetch and publishes on consensus, with no model call', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    // A board slug that names nobody: the two providers agreeing is the whole case.
+    await enqueueEmployerIconResolution(icons, { ...employerSeed('https://jobs.lever.co/acme/1'), provider: 'lever', tenant: 'job-1', sourceId: 'lever:job-1' }, NOW);
+    let modelCalls = 0;
+    const infer = async (): Promise<OpenAIJsonResult> => {
+      modelCalls += 1;
+      throw new Error('two providers agreeing must not need the model');
+    };
+    const fetchImpl = scriptedFetch({
+      'https://jobs.lever.co/acme/1': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      // No client id is configured, and the search still answers.
+      [brandfetchSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(),
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2.bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW,
+      { ...DEPENDENCIES(fetchImpl), infer },
+    );
+
+    expect(result.resolved).toBe(1);
+    expect(modelCalls).toBe(0);
+    // Consensus clears the automatic threshold, so neither the model nor a
+    // confirmation fetch was needed.
+    expect(result.confirmationProbes).toBe(0);
+    expect((await icons.context('acme'))?.websiteDomain).toBe('acme.com');
+  });
+
+  it('ranks an exhausted employer for review and says why', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, { ...employerSeed('https://jobs.lever.co/acme/1'), provider: 'lever', tenant: 'job-1', sourceId: 'lever:job-1' }, NOW);
+    // Three attempts of clean misses: nothing left for the resolver to try. Each pass
+    // runs past the previous one's backoff, since that backoff is what spaces them.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const when = new Date(NOW.getTime() + attempt * 2 * 24 * 60 * 60 * 1000);
+      await runEmployerIconResolutionPass(
+        environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), when,
+        DEPENDENCIES(scriptedFetch({
+          'https://jobs.lever.co/acme/1': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
+          [logoDevSearchUrl('Acme')]: () => status(404),
+        })),
+      );
+    }
+
+    const queue = await icons.reviewQueue(10);
+    expect(queue[0]).toMatchObject({ canonicalEmployerId: 'acme', status: 'unresolved', reasonCode: 'no-reliable-domain' });
+    expect(queue[0]?.attempts).toBeGreaterThanOrEqual(3);
+    // A wrong-icon report outranks an exhausted miss, so the queue stays triage-ordered.
+    expect(queue[0]?.reviewPriority).toBeGreaterThan(0);
+    expect(queue[0]?.reviewPriority).toBeLessThan(100);
   });
 
   it('accepts a single corroborated candidate by proving it, without spending the model call', async () => {

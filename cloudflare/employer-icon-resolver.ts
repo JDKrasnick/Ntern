@@ -76,6 +76,12 @@ export const ICON_PAGE_REQUEST_HEADERS: Record<string, string> = {
   accept: 'text/html,application/xhtml+xml',
 };
 const tieBreakSchemaName = 'company_icon_domain_resolution';
+/** What the confirmation path cost this pass, shared with its caller. */
+interface ConfirmationStats {
+  probes: number;
+  ties: number;
+}
+
 /** How many declared site assets the fallback will consider from one page. */
 const MAX_SITE_ASSET_CANDIDATES = 6;
 /** Bounded provider work per employer: one query each for the names worth asking. */
@@ -162,6 +168,14 @@ export interface EmployerIconSweepResult {
   unresolved: number;
   retryable: number;
   reasonCodes: string[];
+  /**
+   * Employer-domain fetches spent confirming candidates, and how many employers were
+   * left to the model because two candidates both named themselves. This is the price of
+   * the confirmation path, and observe mode is where it should be read before anyone
+   * raises the sweep size.
+   */
+  confirmationProbes: number;
+  confirmationTies: number;
 }
 
 /**
@@ -203,6 +217,7 @@ export async function runEmployerIconResolutionPass(
   const settings = await store.settings();
   const result: EmployerIconSweepResult = {
     mode: settings.mode, claimed: 0, backfilled: 0, resolved: 0, unresolved: 0, retryable: 0, reasonCodes: [],
+    confirmationProbes: 0, confirmationTies: 0,
   };
   if (settings.mode === 'off') return result;
 
@@ -210,10 +225,11 @@ export async function runEmployerIconResolutionPass(
   const tasks = await store.claimDue(now.toISOString(), settings.maxPerSweep, ICON_LEASE_MS);
   result.claimed = tasks.length;
   const providerOutcomes: Record<string, number> = {};
+  const confirmation: ConfirmationStats = { probes: 0, ties: 0 };
 
   for (const task of tasks) {
     try {
-      const outcome = await resolveEmployerIconTask({ store, task, settings, env, now, deps, providerOutcomes });
+      const outcome = await resolveEmployerIconTask({ store, task, settings, env, now, deps, providerOutcomes, confirmation });
       result[outcome.outcome] += 1;
       result.reasonCodes.push(outcome.reasonCode);
     } catch (error) {
@@ -231,6 +247,8 @@ export async function runEmployerIconResolutionPass(
     }
   }
 
+  result.confirmationProbes = confirmation.probes;
+  result.confirmationTies = confirmation.ties;
   const reasonCodes: Record<string, number> = {};
   for (const reasonCode of result.reasonCodes) reasonCodes[reasonCode] = (reasonCodes[reasonCode] ?? 0) + 1;
   console.log(JSON.stringify({
@@ -238,6 +256,8 @@ export async function runEmployerIconResolutionPass(
     mode: result.mode,
     company_icon_resolution_attempted_total: result.claimed,
     company_icon_resolution_resolved_total: result.resolved,
+    company_icon_resolution_confirmation_probes: result.confirmationProbes,
+    company_icon_resolution_confirmation_ties: result.confirmationTies,
     company_icon_resolution_monogram_total: result.unresolved + result.retryable,
     company_icon_resolution_retryable_total: result.retryable,
     company_icon_resolution_backfilled_total: result.backfilled,
@@ -284,6 +304,8 @@ interface ResolveTaskInput {
    * finding employers, so the caller owns the tally.
    */
   providerOutcomes?: Record<string, number>;
+  /** Pass-level tally of what confirming candidates cost and how often it tied. */
+  confirmation?: ConfirmationStats;
 }
 
 interface ResolveOutcome {
@@ -355,7 +377,10 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
   // the employer's model call at all — and it is the same proof a proposal needs, so a
   // domain can never be accepted here that a proposal could not have justified.
   if (decision.outcome !== 'resolved') {
-    const confirmed = await confirmDomainCandidate({ decision, displayName: context.displayName, declaredName, deps });
+    const confirmed = await confirmDomainCandidate({
+      decision, displayName: context.displayName, declaredName, deps,
+      ...(input.confirmation ? { stats: input.confirmation } : {}),
+    });
     if (confirmed) {
       console.log(JSON.stringify({
         event: 'company_icon_resolution_domain_confirmed', canonicalEmployerId: context.id,
@@ -645,17 +670,22 @@ async function confirmDomainCandidate(input: {
   displayName: string;
   declaredName?: string;
   deps: EmployerIconResolverDependencies;
+  /** Counted so a pass reports what its confirmations cost. */
+  stats?: ConfirmationStats;
 }): Promise<{ domain: string; score: number; evidenceIds: readonly string[] } | undefined> {
-  const { decision, displayName, declaredName, deps } = input;
+  const { decision, displayName, declaredName, deps, stats } = input;
   if (decision.outcome === 'resolved') return undefined;
   // Bounded: a decision needs at most a few probes, and the cost is one fetch each.
   const candidates = decision.scores.filter((candidate) => !candidate.rejected).slice(0, MAX_CONFIRMATION_PROBES);
   const confirmed: Array<{ domain: string; score: number; evidenceIds: readonly string[] }> = [];
   for (const candidate of candidates) {
+    if (stats) stats.probes += 1;
     if (await verifyProposedDomain(candidate.domain, displayName, declaredName, deps)) {
       confirmed.push({ domain: candidate.domain, score: candidate.score, evidenceIds: candidate.evidenceIds });
     }
   }
+  // Two candidates naming themselves is a real tie, and the model owns it.
+  if (stats && confirmed.length > 1) stats.ties += 1;
   return confirmed.length === 1 ? confirmed[0] : undefined;
 }
 
@@ -985,7 +1015,7 @@ async function lookupProviderDomains(
   const [logoDev, brandfetch] = await Promise.all([
     searchProvider('logo-dev', credentials.logoDevToken, seed, fetchImpl, logoDevSearchUrl, providerDomainCandidates, declaredNames),
     searchProvider('brandfetch', credentials.brandfetchClientId, seed, fetchImpl,
-      (name) => brandfetchSearchUrl(name, credentials.brandfetchClientId!), providerDomainCandidates, declaredNames),
+      (name) => brandfetchSearchUrl(name, credentials.brandfetchClientId), providerDomainCandidates, declaredNames),
   ]);
   if (logoDev.failure) failures['logo-dev'] = logoDev.failure;
   if (brandfetch.failure) failures.brandfetch = brandfetch.failure;
@@ -1031,8 +1061,11 @@ async function searchProvider(
   /** Names the employer's own board and page declare, strongest first. */
   declaredNames: readonly string[],
 ): Promise<ProviderResponse> {
-  if (!credential) return { domains: [], failure: 'unconfigured' };
-  const headers: Record<string, string> = provider === 'logo-dev' ? { authorization: `Bearer ${credential}` } : {};
+  // Logo.dev's search is authorized by its secret key; Brandfetch's answers without a
+  // client id, which only attributes the call to the account.
+  if (!credential && provider === 'logo-dev') return { domains: [], failure: 'unconfigured' };
+  const headers: Record<string, string> = credential && provider === 'logo-dev'
+    ? { authorization: `Bearer ${credential}` } : {};
   const first = await requestProviderDomains(url(seed.displayName), headers, seed.displayName, parse, fetchImpl);
   if ((first.domains.length && first.strength === 2) || first.failure !== undefined) return first;
 

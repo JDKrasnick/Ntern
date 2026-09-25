@@ -38,8 +38,15 @@ export function logoDevSearchUrl(displayName: string): string {
   return `${logoDevSearchEndpoint}?q=${encodeURIComponent(displayName.trim().slice(0, 100))}`;
 }
 
-export function brandfetchSearchUrl(displayName: string, clientId: string): string {
-  return `${brandfetchSearchEndpoint}/${encodeURIComponent(displayName.trim().slice(0, 100))}?c=${encodeURIComponent(clientId)}`;
+/**
+ * Brandfetch's brand search. Its endpoint answers without a client id, and the `c`
+ * parameter identifies the account rather than authorizing the call, so the id is
+ * appended when one is configured and omitted otherwise: the resolver can corroborate
+ * with Brandfetch today and attribute the traffic as soon as a key exists.
+ */
+export function brandfetchSearchUrl(displayName: string, clientId?: string): string {
+  const query = clientId ? `?c=${encodeURIComponent(clientId)}` : '';
+  return `${brandfetchSearchEndpoint}/${encodeURIComponent(displayName.trim().slice(0, 100))}${query}`;
 }
 
 /**

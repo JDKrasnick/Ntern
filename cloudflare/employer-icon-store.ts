@@ -21,6 +21,13 @@ export const employerIconSettingsKey = 'company_icon_resolution';
 export const employerIconDefaultMaxPerSweep = 5;
 /** Wrong-icon reports sort ahead of every other review item. */
 export const employerIconWrongMatchPriority = 100;
+/**
+ * Ranked below a wrong-icon report but above a fresh miss: an employer the resolver has
+ * tried several times is where a human is now the cheaper path.
+ */
+export const employerIconExhaustedPriority = 10;
+/** Attempts before an unresolved employer is ranked for review rather than retried quietly. */
+export const employerIconReviewAfterAttempts = 3;
 /** One tie-breaker per employer per retry window. */
 export const employerIconTieBreakWindowMs = 30 * 24 * 60 * 60 * 1_000;
 
@@ -59,6 +66,10 @@ export interface EmployerIconReviewItem {
   selectedSource?: string;
   confidence?: number;
   reviewPriority: number;
+  /** How many automatic attempts this employer has had, so a reviewer can triage. */
+  attempts?: number;
+  /** The compact reason the last decision ended where it did. */
+  reasonCode?: string;
   invalidatedAt?: string;
   updatedAt: string;
 }
@@ -208,14 +219,23 @@ export class D1EmployerIconStore {
     ]);
   }
 
-  /** Records a decision that will not change until new evidence arrives. */
+  /**
+   * Records a decision that will not change until new evidence arrives.
+   *
+   * The attempt count is what tells a reviewer which rows deserve attention: an
+   * employer that has exhausted the automatic paths outranks one that has just become
+   * unresolved and may still resolve itself on the next retry. `invalidated` rows (a
+   * wrong-icon report) keep their own, higher, priority.
+   */
   async markUnresolved(input: {
     taskId: string; canonicalEmployerId: string; evidenceJson: string; nextRetryAt: string; now: string;
   }): Promise<void> {
     await this.db.batch([
       this.db.prepare(`UPDATE employer_icon_resolutions SET status = 'unresolved', evidence_json = ?, attempts = attempts + 1,
+        review_priority = MAX(review_priority, CASE WHEN attempts + 1 >= ? THEN ? ELSE 0 END),
         next_retry_at = ?, lease_token = NULL, lease_until = NULL, updated_at = ? WHERE id = ?`)
-        .bind(input.evidenceJson, input.nextRetryAt, input.now, input.taskId),
+        .bind(input.evidenceJson, employerIconReviewAfterAttempts, employerIconExhaustedPriority,
+          input.nextRetryAt, input.now, input.taskId),
       this.db.prepare(`UPDATE canonical_employers SET icon_resolution_status = 'unresolved', updated_at = ?
         WHERE id = ? AND icon_resolution_status IS NOT 'resolved'`)
         .bind(input.now, input.canonicalEmployerId),
@@ -314,10 +334,12 @@ export class D1EmployerIconStore {
     ]);
   }
 
-  /** The exception queue: wrong-icon reports first, then unresolved employers. */
+  /** The exception queue: wrong-icon reports first, then the employers the resolver exhausted. */
   async reviewQueue(limit: number): Promise<EmployerIconReviewItem[]> {
     const rows = await this.db.prepare(`SELECT canonical_employer_id, status, selected_domain, selected_source,
-      confidence, review_priority, invalidated_at, updated_at FROM employer_icon_resolutions
+      confidence, review_priority, attempts, invalidated_at, updated_at,
+      json_extract(evidence_json, '$.reasonCode') AS reason_code
+      FROM employer_icon_resolutions
       WHERE status IN ('invalidated', 'unresolved')
       ORDER BY review_priority DESC, updated_at ASC LIMIT ?`).bind(limit).all<Row>();
     return rows.results.map((row) => ({
@@ -326,7 +348,10 @@ export class D1EmployerIconStore {
       ...(row.selected_domain ? { selectedDomain: row.selected_domain as string } : {}),
       ...(row.selected_source ? { selectedSource: row.selected_source as string } : {}),
       ...(row.confidence === null ? {} : { confidence: Number(row.confidence) }),
+      /** What to do about it: confirm a domain, upload a mark, or leave the monogram. */
+      ...(row.reason_code ? { reasonCode: String(row.reason_code) } : {}),
       reviewPriority: Number(row.review_priority ?? 0),
+      attempts: Number(row.attempts ?? 0),
       ...(row.invalidated_at ? { invalidatedAt: row.invalidated_at as string } : {}),
       updatedAt: row.updated_at as string,
     }));

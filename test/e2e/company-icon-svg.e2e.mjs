@@ -69,6 +69,11 @@ function internet(request) {
       : request.url;
   const url = new URL(requested);
   seenOutbound.push(url.href);
+  // Provider lookups are always asked — Brandfetch's search needs no credential — and
+  // this employer's board publishes its mark directly, so both providers miss cleanly.
+  if (url.hostname === 'api.logo.dev' || url.hostname === 'api.brandfetch.io') {
+    return Promise.resolve(new Response(null, { status: 404 }));
+  }
   if (url.hostname === 'cloudflare-dns.com' && url.pathname === '/dns-query') {
     const name = url.searchParams.get('name') ?? '';
     const type = url.searchParams.get('type') ?? 'A';
@@ -207,11 +212,13 @@ test('renders the employer’s SVG board logo from the maintenance cron and stor
   assert.equal(view.getUint32(20), 256);
   assert.ok(!new TextDecoder().decode(bytes).includes('<svg'), 'the document must never be stored');
 
-  // The sweep read the posting page and its board logo, and nothing else.
+  // The sweep read the posting page and its board logo, and — beyond the provider
+  // lookups every employer gets, including the backfilled ones — nothing else on the web.
   assert.ok(seenOutbound.includes(applicationUrl), 'the sweep must read the posting');
   assert.ok(seenOutbound.includes(logoUrl), 'the sweep must read the board logo');
   assert.deepEqual(
-    seenOutbound.filter((url) => !url.startsWith('https://cloudflare-dns.com/')),
+    seenOutbound.filter((url) => !url.startsWith('https://cloudflare-dns.com/')
+      && !url.startsWith('https://api.logo.dev/') && !url.startsWith('https://api.brandfetch.io/')),
     [applicationUrl, logoUrl],
   );
 
