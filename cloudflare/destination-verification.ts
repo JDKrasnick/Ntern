@@ -18,6 +18,8 @@ import { metadataFieldOutcomes, type MetadataAuditOutcome } from '../src/metadat
 import type { D1Database, MessageBatch, Queue, R2Bucket } from './types.js';
 import { enqueueShadowExtraction, type ShadowBaseline } from './shadow-extraction.js';
 import { normalizeExactPostingDescription, type ShadowExtractionOrigin } from '../src/shadow-extraction.js';
+import { safeDiagnostic } from '../src/source-health.js';
+import { recordQueueFailureBestEffort } from './dlq-operations.js';
 
 export interface DestinationVerificationMessage {
   version: 1;
@@ -554,7 +556,21 @@ export async function processDestinationVerificationBatch(
         }
         let apiAcquisition = candidateOnly ? undefined : await acquireMetadata(message.providerIdentity, message.candidateUrl);
         if (naturalProviderShadow) {
-          if (!apiAcquisition?.artifact?.text) throw new Error('Natural provider shadow artifact is unavailable');
+          // An acquisition that yields no artifact for a non-retryable reason is
+          // permanent: the board no longer publishes the posting, its identity
+          // changed, or its body is past the acquisition ceiling (the Ashby
+          // boards exceed the 2 MB cap, so a provider-shadow message for one can
+          // never acquire). Settle it so the queue does not accumulate one dead
+          // letter per departed or oversized shadow posting. Only a failed
+          // acquisition with a retryable status stays on the retry path, where a
+          // transient host or network condition could still deliver the artifact.
+          if (!apiAcquisition?.artifact?.text) {
+            const status = apiAcquisition?.status;
+            const retryable = apiAcquisition?.outcome === 'failed' && (status === undefined || status === 429 || status >= 500);
+            if (retryable) throw new Error('Natural provider shadow artifact is unavailable');
+            await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
+            continue;
+          }
           // The producer hashes the canonical persisted title, which may be a
           // reviewed repair of the provider's raw title.
           const title = reference.title;
@@ -824,10 +840,21 @@ export async function processDestinationVerificationBatch(
           queued.ack();
         }
       } catch (error) {
+        // The delivery never reached recordVerificationAttempt, so a failure
+        // here left no server-side trace and accumulated in the dead-letter
+        // queue as an unclassifiable message. Record it before the retry so a
+        // systematic failure is diagnosable instead of invisible.
+        await recordQueueFailureBestEffort({ db: env.DB, queueName: 'intern-notifs-destination-verification',
+          messageId: queued.id, attempts: queued.attempts, timestamp: queued.timestamp, sourceId: message.sourceId,
+          sourceKind: message.providerIdentity.provider, body: queued.body, error });
+        console.error(JSON.stringify({ command: 'destination-verification', messageId: queued.id,
+          sourceId: message.sourceId, reason: message.reason, error: safeDiagnostic(error) }));
         queued.retry({ delaySeconds: 300 }, error);
       }
     }
   } catch (error) {
+    console.error(JSON.stringify({ command: 'destination-verification-batch',
+      messageIds: pending.map(({ queued }) => queued.id), error: safeDiagnostic(error) }));
     for (const { queued } of pending) queued.retry({ delaySeconds: 300 }, error);
   } finally {
     if (browser) await browser.close();

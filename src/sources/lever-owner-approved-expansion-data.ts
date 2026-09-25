@@ -140,7 +140,12 @@ export const reviewedLeverOwnerApprovedExpansionSources: ReviewedLeverSource[] =
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "status": "shadow",
     "region": "global",
-    "evidenceStatus": "agent-verified"
+    "evidenceStatus": "agent-verified",
+    "emptyBoardAcknowledged": {
+      "acknowledgedBy": "JDKrasnick",
+      "acknowledgedAt": "2026-09-25T17:37:40.000Z",
+      "reason": "No open roles as of 2026-09-25; evrealtyus.com still links jobs.lever.co/evrealty-us"
+    }
   },
   {
     "id": "lever-malt",

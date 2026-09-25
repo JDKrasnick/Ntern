@@ -284,6 +284,37 @@ Next, enable and exercise `GET /operations/employers/queues` behind the existing
 
 Monitor verification failures and expiry, review-queue age, source freshness, duplicate merges, rejection/quarantine rates, reports, and automatic-publishing suspensions. `GET /operations/employers/reviewed-sources/export` provides the redacted reviewed-source evidence export without members, tokens, private notes, or reviewer identities. The daily maintenance run deletes expired challenge secrets, removes invitations after their grace period, closes date-deadline submissions at the end of their IANA-local date, and suspends expired organizations.
 
+## Company-icon resolution rollout
+
+Automatic company-icon resolution is off until an operator enables it, and it is enabled from D1 rather than from Wrangler, so turning it on never changes a Worker binding and never trips the deploy plan guard. The full behaviour, scoring table, provider terms, and operator routes are in [`company-icons.md`](company-icons.md).
+
+Apply the migration before deploying the Worker. `putCanonicalEmployer` and the resolver both read the columns `0034_employer_icon_resolution.sql` adds, so a Worker that runs ahead of its schema cannot review employers:
+
+```bash
+npm run cloudflare:migrate:remote
+npm run build:cloudflare
+```
+
+The ingestion bundle now ships the SVG rasterizer as a second module part, `resvg.wasm` (`application/wasm`), and the API Worker's bundle ships none. `npm run build:cloudflare` runs `scripts/prepare-worker-modules.mjs` after each `wrangler deploy --dry-run`, which renames Wrangler's content-hashed wasm file to `resvg.wasm` and rewrites the import specifier, so the part key matches what the bundle imports and no content hash reaches `infra/cloudflare/main.tf`. OpenTofu uploads it through the `files` map on the ingestion Worker only, and `scripts/cloudflare-plan-guard.ts` permits exactly that shape: `application/wasm` parts whose paths end in `.wasm`, with a wasm-only change counted as a code change. A plan that adds any other part, or that changes a protected binding, still fails the guard. The API Worker needs no part because only the ingestion entry carries the renderer.
+
+Provision the provider credentials interactively; never put their values in Git, Terraform variables, shell arguments, Wrangler `vars`, mobile configuration, or `EXPO_PUBLIC_*` values. Logo.dev needs **two** credentials, and they are not interchangeable — the secret key authorizes the name search and the image endpoint answers it with `401`, so only the publishable token can verify or publish an icon:
+
+```bash
+# The name search. Logo.dev dashboard → API keys → secret key (`sk_…`).
+npx wrangler secret put LOGO_DEV_TOKEN --config wrangler.ingestion.jsonc
+# The image endpoint. Dashboard → API keys → publishable key (`pk_…`); the same token
+# appears in every `logo_url` a search returns.
+npx wrangler secret put LOGO_DEV_IMAGE_TOKEN --config wrangler.ingestion.jsonc
+npx wrangler secret put LOGO_DEV_IMAGE_TOKEN --config wrangler.api.jsonc   # serves the image on a cache miss
+npx wrangler secret put BRANDFETCH_CLIENT_ID --config wrangler.ingestion.jsonc   # corroboration: consensus is the automatic path
+```
+
+The `api` Worker needs the publishable token only, because it renders an accepted domain's image on a cache miss; without it an accepted domain falls back to the employer's own site asset and then to a monogram. Aliases are accepted for either credential — `LOGO_SECRET_KEY` for the search key, and `LOGO_PUBLISHABLE_KEY`, `LOGO_DEV_PUBLISHABLE_KEY`, or `LOGO_DEV_PUBLISHABLE_TOKEN` for the image token — so a checkout that already carries one of those names needs no rename. `npm run coverage:icons -- --resolve` reports which of the four secrets it can see before it spends anything.
+
+`OPENAI_KEY` is needed only for the middle-band tie-breaker; without it the resolver records an unresolved decision and renders a monogram. Terraform sets `keep_bindings = ["secret_text"]`, so these secrets survive a deploy and never appear in a plan.
+
+Stage the rollout in the order [`company-icons.md`](company-icons.md) documents: run `tsx scripts/discover-employer-icon.ts` read-only over a representative employer sample, set `mode: "observe"` for a week of recorded decisions, then switch to `mode: "resolve"`. Enable R2 caching only after Logo.dev confirms that the selected plan permits self-hosting and retention; until then the route renders the provider's own CDN image and stores no bytes.
+
 ## Catalog quality D1 repair
 
 Deploy the Worker code before inspecting or repairing legacy catalog values. The
@@ -713,8 +744,10 @@ npm run dlq -- inspect lever 25
 Stage a selective replay or irreversible discard with `DLQ_ACTION=replay` or
 `DLQ_ACTION=discard`, a comma-separated list of message IDs, and a reason. Apply
 the returned one-use plan within 15 minutes by passing its plan ID, repair token,
-and exact expected count. Catalog replay produces one fresh message per source;
-destination-verification replay stays disabled until issue #120 lands.
+and exact expected count. Catalog replay produces one fresh message per source and
+refuses a paused or quarantined source; destination-verification replay re-enqueues
+one per-job check verbatim and stays allowed even while the owning source is paused,
+because its consumer settles obsolete and duplicate checks safely.
 
 ```bash
 DLQ_ACTION=replay npm run dlq -- plan lever message-id-1,message-id-2 'Upstream fix verified'

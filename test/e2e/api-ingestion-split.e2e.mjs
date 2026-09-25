@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { register } from 'node:module';
 import { after, before, test } from 'node:test';
 import { fileURLToPath, URL } from 'node:url';
 import { Miniflare } from 'miniflare';
 import { unstable_splitSqlQuery as splitSqlQuery } from 'wrangler';
+
+// The compiled bundle imports its SVG rasterizer as `./resvg.wasm`, which Node cannot
+// import without the hook below. The artifact under test is the one that ships.
+register('./wasm-module-loader.mjs', import.meta.url);
 
 // Node's global constructor; the eslint `no-undef` rule does not know Node globals in this file.
 const { Response } = globalThis;
@@ -37,6 +43,21 @@ let runtime;
 let api;
 let ingestion;
 
+/**
+ * The bundle's module parts: the entry itself, plus `resvg.wasm` when that bundle
+ * ships the SVG rasterizer. Only the ingestion bundle imports it, so the part is
+ * added when it exists rather than assumed.
+ */
+async function moduleManifest(bundleDirectory, bundleName) {
+  const modules = {
+    [bundleName]: { type: 'esm', contents: await readFile(join(bundleDirectory, bundleName), 'utf8') },
+  };
+  if (existsSync(join(bundleDirectory, 'resvg.wasm'))) {
+    modules['resvg.wasm'] = { type: 'wasm', contents: await readFile(join(bundleDirectory, 'resvg.wasm')) };
+  }
+  return modules;
+}
+
 async function createWorkerConfig(name, bundleDirectory, bundleName, env) {
   return {
     config: {
@@ -47,12 +68,7 @@ async function createWorkerConfig(name, bundleDirectory, bundleName, env) {
       manifest: {
         mainModule: bundleName,
         modulesRoot: bundleDirectory,
-        modules: {
-          [bundleName]: {
-            type: 'esm',
-            contents: await readFile(join(bundleDirectory, bundleName), 'utf8'),
-          },
-        },
+        modules: await moduleManifest(bundleDirectory, bundleName),
       },
       env,
     },
@@ -1053,4 +1069,335 @@ test('keeps a production-scale scheduled cycle recoverable without direct dead l
   assert.deepEqual(queues.greenhouse.sent, []);
   assert.deepEqual(queues.lever.sent, []);
   assert.deepEqual(queues.ashby.sent, []);
+});
+
+// ---------------------------------------------------------------------------
+// Queue handoff and continuation failure handling (PR #395 hardening).
+//
+// These tests drive the compiled ingestion Worker through its real GitHub queue
+// consumer with synthetic boards served from a stubbed fetch. They assert the
+// three guarantees the hardening introduced, end to end:
+//   1. a transient application-link timeout stays owed by the durable
+//      checkpoint without failing the delivery or dead-lettering it;
+//   2. a continuation enqueue failure after the checkpoint commit acknowledges
+//      the completed slice so the scheduled dispatcher can resume it;
+//   3. rows added while a pass is open join the next slice.
+// ---------------------------------------------------------------------------
+
+const handoffSourceId = 'vanshb03-summer-2027';
+const handoffBoardHosts = ['careers-a.example.test', 'careers-b.example.test'];
+const handoffBoardUrl = (index) => `https://${handoffBoardHosts[index % handoffBoardHosts.length]}/board/role-${index}`;
+// README rows sit at 0-19 and the off-season rows at 100-109 so a bounded
+// 25-row slice ends inside the second document and the two documents never
+// collide on an application URL.
+const handoffDocuments = [
+  { path: 'README.md', season: 'summer-2027', rows: 20, offset: 0, format: 'gfm' },
+  { path: 'OFFSEASON_README.md', season: 'offseason-2027', rows: 10, offset: 100, format: 'html' },
+];
+const handoffDocumentUrl = (path) => `https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/${path}`;
+const handoffExternalId = (index) => `${index >= 100 ? 'OFFSEASON_README.md' : 'README.md'}:${handoffBoardUrl(index)}`;
+
+function handoffMarkdown({ rows, offset, format }) {
+  const detail = 'Mentored internship building observable systems under review. '.repeat(4);
+  const parts = format === 'gfm'
+    ? ['| Company | Role | Location | Apply | Detail |', '| --- | --- | --- | --- | --- |']
+    : ['# Board', '', '<table>', '<thead><tr><th>Company</th><th>Role</th><th>Location</th><th>Application</th><th>Detail</th></tr></thead>', '<tbody>'];
+  for (let index = 0; index < rows; index += 1) {
+    const position = offset + index;
+    parts.push(format === 'gfm'
+      ? `| Acme ${position} | Software Engineering Intern | Remote | [Apply](${handoffBoardUrl(position)}) | ${detail} |`
+      : `<tr><td><strong>Acme ${position}</strong></td><td>Software Engineering Intern</td><td>Remote</td><td><a href="${handoffBoardUrl(position)}">Apply</a></td><td>${detail}</td></tr>`);
+  }
+  parts.push(format === 'gfm' ? '' : '</tbody></table>');
+  return `${parts.join('\n')}\n`;
+}
+
+function handoffEmployerPage(url) {
+  const role = new URL(url).pathname.split('/').pop() ?? '0';
+  return '<!doctype html><html><head>'
+    + `<title>Software Engineering Intern - Acme ${role}</title>`
+    + `<meta name="description" content="Software engineering internship at Acme ${role}.">`
+    + '</head><body><main><h1>Software Engineering Intern</h1>'
+    + `<p>${'Join our engineering team to build internship tooling with a mentor. '.repeat(8)}</p>`
+    + '<h2>Requirements</h2><p>Current enrollment in a computer science or related program.</p>'
+    + '</main></body></html>';
+}
+
+async function createHandoffRuntime(name) {
+  const runtime = new Miniflare({ workers: [
+    await createWorkerConfig(name, join(repositoryRoot, 'cloudflare/dist/ingestion'), 'ingestion-worker.js', {
+      DEPLOYMENT_ROLE: { type: 'text', value: 'ingestion' },
+      DB: { type: 'd1', id: name },
+    }),
+  ] });
+  await runtime.ready;
+  const database = await runtime.getD1Database('DB', name);
+  await applyMigrations(database);
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  return { runtime, database, builtWorker };
+}
+
+function handoffHarness(database, { failContinuation = false, failDestination = false } = {}) {
+  const acks = [];
+  const retries = [];
+  const sent = [];
+  const batchSent = [];
+  const deadLetter = [];
+  const continuationAttempts = [];
+  const destinationSent = [];
+  const destinationAttempts = [];
+  const githubQueue = {
+    async send(message) {
+      continuationAttempts.push(message);
+      if (failContinuation) throw new Error('Queue send timed out');
+      sent.push(message);
+    },
+    async sendBatch(messages) { batchSent.push(...messages.map(({ body }) => body)); },
+  };
+  const destinationQueue = {
+    async send(message) {
+      destinationAttempts.push(message);
+      if (failDestination) throw new Error('Queue send timed out');
+      destinationSent.push(message);
+    },
+  };
+  const environment = {
+    DB: database,
+    GITHUB_QUEUE: githubQueue,
+    GITHUB_DLQ: { async send(message) { deadLetter.push(message); } },
+    DESTINATION_VERIFICATION_QUEUE: destinationQueue,
+    DESTINATION_VERIFICATION_DLQ: { async send(message) { deadLetter.push(message); } },
+    IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'false',
+    TRUSTED_COMMUNITY_CATALOG_ENABLED: 'false',
+    PUBLIC_API_URL: 'https://api.example.test',
+  };
+  const message = (messageId, scheduledAt, body = { sourceId: handoffSourceId }) => ({
+    id: messageId,
+    body,
+    attempts: 1,
+    timestamp: new Date(scheduledAt),
+    ack() { acks.push(messageId); },
+    retry(options) { retries.push({ messageId, options }); },
+  });
+  return { acks, retries, sent, batchSent, deadLetter, continuationAttempts, destinationSent, destinationAttempts, environment, message };
+}
+
+const handoffScheduledAt = '2026-09-24T16:00:00.000Z';
+const handoffTimeoutError = () => {
+  const error = new Error('probe deadline exceeded');
+  error.name = 'TimeoutError';
+  return error;
+};
+
+async function withHandoffFetch(documents, failing, run) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const { hostname } = new URL(url);
+    if (hostname === 'raw.githubusercontent.com') return new Response(documents.get(url) ?? '', { status: 200 });
+    if (hostname.endsWith('.example.test')) {
+      if (failing.has(url)) throw handoffTimeoutError();
+      return init?.method === 'HEAD'
+        ? new Response(null, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } })
+        : new Response(handoffEmployerPage(url), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+    throw new Error(`unexpected provider request ${url}`);
+  };
+  try { return await run(); } finally { globalThis.fetch = originalFetch; }
+}
+
+const handoffDocumentsMap = () => new Map(handoffDocuments.map((document) => [handoffDocumentUrl(document.path), handoffMarkdown(document)]));
+
+async function deliverGithubMessage(builtWorker, environment, message) {
+  await builtWorker.queue({ queue: 'intern-notifs-e2e-github', messages: [message] }, environment);
+}
+
+async function readCheckpoint(database, sourceId) {
+  const row = await database.prepare('SELECT value FROM catalog_items WHERE pk = ? AND sk = ?')
+    .bind(`SOURCE#${sourceId}`, 'CHECKPOINT').first();
+  return JSON.parse(row.value);
+}
+
+async function readOccurrenceExternalIds(database, sourceId) {
+  const rows = await database.prepare("SELECT value FROM catalog_items WHERE kind = 'source-occurrence' AND source_id = ?")
+    .bind(sourceId).all();
+  return new Set(rows.results.map((row) => JSON.parse(row.value).externalId));
+}
+
+test('retains timed-out link probes in the durable checkpoint and resolves them without dead-lettering', async () => {
+  const { runtime, database, builtWorker } = await createHandoffRuntime('intern-notifs-e2e-handoff');
+  const documents = handoffDocumentsMap();
+  const failing = new Set([0, 1, 2].map(handoffBoardUrl));
+  const harness = handoffHarness(database);
+
+  try {
+    await withHandoffFetch(documents, failing, async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('github-1', handoffScheduledAt));
+    });
+
+    const checkpoint = await readCheckpoint(database, handoffSourceId);
+    const pending = new Set(checkpoint.pendingResolutionRows ?? []);
+    const owed = [
+      ...([0, 1, 2].map(handoffExternalId)),
+      ...[105, 106, 107, 108, 109].map(handoffExternalId),
+    ];
+    assert.deepEqual([...pending].sort(), owed.sort(),
+      'the checkpoint must owe the timed-out rows and the unvisited tail of the slice');
+    assert.deepEqual(harness.acks, ['github-1']);
+    assert.deepEqual(harness.retries, []);
+    assert.deepEqual(harness.deadLetter, []);
+    assert.deepEqual(harness.sent, [{ sourceId: handoffSourceId }], 'the open pass must re-enqueue exactly once');
+
+    // A later pass resolves exactly the owed rows; a row added while the pass
+    // was open joins the same slice.
+    failing.clear();
+    documents.set(handoffDocumentUrl('README.md'), handoffMarkdown({ rows: 21, offset: 0, format: 'gfm' }));
+    await withHandoffFetch(documents, failing, async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('github-2', handoffScheduledAt));
+    });
+
+    const drained = await readCheckpoint(database, handoffSourceId);
+    assert.equal(drained.pendingResolutionRows, undefined, 'the pass must close once every owed row resolves');
+    const occurrences = await readOccurrenceExternalIds(database, handoffSourceId);
+    for (const index of [0, 1, 2, 20, 105, 106, 107, 108, 109]) {
+      assert.ok(occurrences.has(handoffExternalId(index)),
+        `row ${index} must persist an occurrence after the retry`);
+    }
+    assert.deepEqual(harness.deadLetter, [], 'no delivery may be dead-lettered');
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+test('acknowledges a committed slice when its continuation enqueue fails so the dispatcher can resume it', async () => {
+  const { runtime, database, builtWorker } = await createHandoffRuntime('intern-notifs-e2e-handoff-dispatch');
+  const documents = handoffDocumentsMap();
+  const failing = new Set([0, 1, 2].map(handoffBoardUrl));
+  const harness = handoffHarness(database, { failContinuation: true });
+  const scheduledAt = Date.parse('2026-09-24T16:05:00.000Z');
+
+  try {
+    await withHandoffFetch(documents, failing, async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('github-1', handoffScheduledAt));
+    });
+
+    const checkpoint = await readCheckpoint(database, handoffSourceId);
+    assert.equal((checkpoint.pendingResolutionRows ?? []).length, 8,
+      'the committed slice must leave its owed rows in the checkpoint');
+    assert.deepEqual(harness.acks, ['github-1'], 'a committed slice must be acknowledged even when its continuation fails');
+    assert.deepEqual(harness.retries, [], 'the completed message must not be returned to the platform');
+    assert.deepEqual(harness.deadLetter, []);
+    assert.deepEqual(harness.continuationAttempts, [{ sourceId: handoffSourceId }], 'the continuation send must have been attempted');
+
+    // The scheduled dispatcher owns the pending source after the ack.
+    await builtWorker.scheduled({ cron: '7-57/10 * * * *', scheduledTime: scheduledAt }, harness.environment);
+    assert.ok(harness.batchSent.some((body) => body.sourceId === handoffSourceId),
+      'the scheduled dispatcher must re-enqueue the pending source');
+
+    failing.clear();
+    await withHandoffFetch(documents, failing, async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('github-2', handoffScheduledAt));
+    });
+    const drained = await readCheckpoint(database, handoffSourceId);
+    assert.equal(drained.pendingResolutionRows, undefined, 'the resumed delivery must drain the pass');
+    assert.deepEqual(harness.retries, []);
+    assert.deepEqual(harness.deadLetter, [], 'no delivery may be dead-lettered');
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+const structuredHandoffSourceId = 'structured-handoff';
+const structuredSourceUrl = 'https://careers.example.test/jobs';
+const structuredApplyUrl = 'https://careers.example.test/apply/R1';
+
+function structuredJsonLdPage() {
+  return '<!doctype html><html><head><script type="application/ld+json">'
+    + JSON.stringify({
+      '@context': 'https://schema.org', '@type': 'JobPosting', identifier: 'R1',
+      title: 'Software Engineering Intern', url: structuredApplyUrl,
+      datePosted: '2026-09-01T00:00:00.000Z', jobLocationType: 'TELECOMMUTE',
+      description: 'Build internship tooling with a mentor.',
+    })
+    + '</script></head><body></body></html>';
+}
+
+/** A generic careers index carries no posting-specific evidence, so the
+ * destination stays unresolved and the browser verifier must be queued. */
+function genericCareersPage() {
+  return '<!doctype html><html><head><title>Careers | Acme</title></head>'
+    + '<body><p>Join the Acme team.</p></body></html>';
+}
+
+async function withStructuredFetch(run) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const { hostname, searchParams } = new URL(url);
+    if (hostname === 'cloudflare-dns.com') {
+      // `dnsJson` keeps only answers whose `type` matches the queried record, so
+      // the mock must stamp the A answer or the host reads as unresolvable.
+      return Response.json(searchParams.get('type') === 'A' ? { Answer: [{ type: 1, data: '93.184.216.34' }] } : { Answer: [] });
+    }
+    if (url === structuredSourceUrl) {
+      return new Response(structuredJsonLdPage(), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+    if (hostname === 'careers.example.test') {
+      return init?.method === 'HEAD'
+        ? new Response(null, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } })
+        : new Response(genericCareersPage(), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+    throw new Error(`unexpected request ${url}`);
+  };
+  try { return await run(); } finally { globalThis.fetch = originalFetch; }
+}
+
+async function seedStructuredHandoffSource(database, now) {
+  await database.prepare(`
+    INSERT INTO reviewed_source_registry (source_id, provider, organization_id, config_json, evidence_json, state, created_at, updated_at)
+    VALUES (?, 'json-ld', NULL, ?, '{}', 'active', ?, ?)
+    ON CONFLICT(source_id) DO UPDATE SET provider = 'json-ld', state = 'active', config_json = excluded.config_json, updated_at = excluded.updated_at
+  `).bind(structuredHandoffSourceId, JSON.stringify({
+    id: structuredHandoffSourceId, url: structuredSourceUrl,
+    employer: { name: 'Acme' }, allowedApplicationHosts: [{ host: 'careers.example.test' }],
+  }), now, now).run();
+}
+
+test('defers a failed destination-verification handoff and resumes the row on the next pass', async () => {
+  const { runtime, database, builtWorker } = await createHandoffRuntime('intern-notifs-e2e-handoff-destination');
+  const now = '2026-09-24T16:00:00.000Z';
+  await seedStructuredHandoffSource(database, now);
+  const harness = handoffHarness(database, { failDestination: true });
+  const body = { sourceId: structuredHandoffSourceId, sourceKind: 'structured' };
+
+  try {
+    await withStructuredFetch(async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('structured-1', handoffScheduledAt, body));
+    });
+
+    const checkpoint = await readCheckpoint(database, structuredHandoffSourceId);
+    assert.deepEqual(checkpoint.pendingResolutionRows, ['R1'],
+      'a failed destination handoff must leave its row owed by the checkpoint');
+    assert.deepEqual(harness.acks, ['structured-1'], 'a deferred handoff must not fail the delivery');
+    assert.deepEqual(harness.retries, [], 'the delivery must not be returned to the platform');
+    assert.deepEqual(harness.deadLetter, []);
+    assert.equal(harness.destinationAttempts.length, 1, 'the destination handoff must have been attempted');
+
+    // The next delivery retries only the owed row once the queue accepts sends.
+    harness.environment.DESTINATION_VERIFICATION_QUEUE = {
+      async send(message) { harness.destinationSent.push(message); },
+    };
+    await withStructuredFetch(async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('structured-2', handoffScheduledAt, body));
+    });
+
+    const drained = await readCheckpoint(database, structuredHandoffSourceId);
+    assert.equal(drained.pendingResolutionRows, undefined, 'the retry must clear the owed row');
+    assert.equal(harness.destinationSent.length, 1, 'the retry must hand the row to destination verification');
+    assert.equal(harness.destinationSent[0].externalId, 'R1');
+    assert.deepEqual(harness.retries, []);
+    assert.deepEqual(harness.deadLetter, [], 'no delivery may be dead-lettered');
+  } finally {
+    await runtime.dispose();
+  }
 });

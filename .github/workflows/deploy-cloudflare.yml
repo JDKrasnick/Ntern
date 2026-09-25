@@ -168,6 +168,15 @@ jobs:
       - name: Apply exact saved plan
         if: steps.plan.outputs.changed == 'true'
         run: tofu -chdir=infra/cloudflare apply -auto-approve "$RUNNER_TEMP/cloudflare.tfplan"
+      - name: Require converged state
+        run: tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode
+      - name: Publish and roll out the resume PDF compiler container
+        shell: bash
+        run: |
+          config="$GITHUB_WORKSPACE/.wrangler.api.production.jsonc"
+          trap 'rm -f "$config"' EXIT
+          jq 'del(.vars)' wrangler.api.jsonc > "$config"
+          npx wrangler deploy --config "$config" --keep-vars
       - name: Restore operations binding if its deployment check rejects the key
         shell: bash
         run: |
@@ -182,15 +191,6 @@ jobs:
                 | npx wrangler secret put OPERATIONS_SHARED_SECRET --config wrangler.api.jsonc
             fi
           fi
-      - name: Require converged state
-        run: tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode
-      - name: Publish and roll out the resume PDF compiler container
-        shell: bash
-        run: |
-          config="$GITHUB_WORKSPACE/.wrangler.api.production.jsonc"
-          trap 'rm -f "$config"' EXIT
-          jq 'del(.vars)' wrangler.api.jsonc > "$config"
-          npx wrangler deploy --config "$config" --keep-vars
       - name: Back up post-deploy state
         if: always() && steps.backup_before.outcome == 'success'
         shell: bash

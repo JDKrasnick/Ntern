@@ -230,6 +230,127 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
     workMode: text(job.workplaceType) || undefined, publishedAt: text(job.publishedAt) || undefined };
 }
 
+/** Ashby's public posting API returns the whole board, and one board is shared by
+ * every posting on it. Destination verification builds one acquirer per batch
+ * and asks it for each posting, so the board is fetched once per batch and then
+ * scanned per posting: refetching per posting multiplies provider load and
+ * re-triggers host throttling. The board is retained only as far as the furthest
+ * requested posting, so an early posting still reads a few KB rather than the
+ * whole board and a board past the old ceiling still yields every posting. */
+const ASHBY_ELEMENT_BYTE_LIMIT = 512 * 1024;
+const ASHBY_STREAM_BYTE_LIMIT = 64 * 1024 * 1024;
+
+/** One board, fetched once per batch and read on demand. */
+type AshbyBoard = {
+  reader: ReadableStreamDefaultReader<Uint8Array>;
+  decoder: TextDecoder;
+  text: string;
+  bytes: number;
+  done: boolean;
+  truncated: boolean;
+};
+
+/** Scanner state that survives a chunk boundary, so an appended chunk continues
+ * the walk instead of restarting it. */
+type AshbyScan = {
+  containers: Array<'object' | 'array'>;
+  inString: boolean;
+  escaped: boolean;
+  parts: string[] | undefined;
+  retained: number;
+  oversized: boolean;
+};
+
+/** Scans `text` from `position`, keeping the caller's state. A container stack of
+ * exactly [root object, top-level array] identifies a job element. Every
+ * top-level array is scanned; the caller validates each candidate with
+ * `parseMetadataApiResponse`, so a stray array can neither produce a false match
+ * nor mask the real element that follows it. Returns the next completed element
+ * whose `id` matches, and the position just past it, so a candidate a caller
+ * rejects can be followed by a resumed walk instead of a restart. */
+function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected: string | undefined): { job: unknown; position: number } | undefined {
+  const append = (char: string) => {
+    if (!scan.parts || scan.oversized) return;
+    scan.parts.push(char);
+    scan.retained += char.length;
+    // A single posting is far below this; an oversized element is dropped rather
+    // than parsed, so one pathological row cannot blow the isolate's memory.
+    if (scan.retained > ASHBY_ELEMENT_BYTE_LIMIT) { scan.oversized = true; scan.parts = undefined; }
+  };
+  const takeElement = (): unknown => {
+    const element = scan.parts?.join('') ?? '';
+    scan.parts = undefined; scan.retained = 0; scan.oversized = false;
+    if (!element.includes('"id"')) return undefined;
+    try { return JSON.parse(element) as unknown; } catch { return undefined; }
+  };
+  for (let index = position; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (scan.inString) {
+      if (scan.escaped) scan.escaped = false;
+      else if (char === '\\') scan.escaped = true;
+      else if (char === '"') scan.inString = false;
+    } else if (char === '"') {
+      scan.inString = true;
+    } else if (char === '{') {
+      if (scan.containers.length === 2 && scan.containers[0] === 'object' && scan.containers[1] === 'array' && !scan.parts) {
+        scan.parts = ['{']; scan.retained = 1; scan.oversized = false;
+        scan.containers.push('object');
+        continue;
+      }
+      scan.containers.push('object');
+    } else if (char === '[') {
+      scan.containers.push('array');
+    } else if (char === '}' || char === ']') {
+      const closesElement = char === '}' && scan.parts !== undefined && scan.containers.length === 3;
+      scan.containers.pop();
+      if (closesElement) {
+        scan.parts!.push('}');
+        const next = index + 1;
+        const job = takeElement();
+        if (record(job) && job.id === expected) return { job, position: next };
+        continue;
+      }
+    }
+    append(char);
+  }
+  return undefined;
+}
+
+/** Reads one more chunk into the board, if any remains. */
+async function extendAshbyBoard(board: AshbyBoard): Promise<void> {
+  const { done, value } = await board.reader.read();
+  if (done) { board.text += board.decoder.decode(); board.done = true; return; }
+  board.bytes += value.byteLength;
+  if (board.bytes > ASHBY_STREAM_BYTE_LIMIT) {
+    board.truncated = true; board.done = true;
+    await board.reader.cancel().catch(() => undefined);
+    return;
+  }
+  board.text += board.decoder.decode(value, { stream: true });
+}
+
+/** Reads the board only as far as needed to answer this posting. Each identity
+ * restarts the walk at 0, so a posting published before another identity's match
+ * is still found without a second network request. A candidate that carries the
+ * requested `id` but fails identity validation (a look-alike in a stray array) is
+ * rejected and the walk resumes, so it cannot mask the real posting behind it. */
+async function findAshbyJob(board: AshbyBoard, expected: string | undefined, accept: (job: unknown) => RoleMetadataArtifact | undefined): Promise<{ artifact?: RoleMetadataArtifact; truncated: boolean; bytes: number }> {
+  const scan: AshbyScan = { containers: [], inString: false, escaped: false, parts: undefined, retained: 0, oversized: false };
+  let position = 0;
+  for (;;) {
+    const found = scanAshbyJob(scan, board.text, position, expected);
+    if (found !== undefined) {
+      position = found.position;
+      const artifact = accept(found.job);
+      if (artifact) return { artifact, truncated: false, bytes: board.bytes };
+      continue;
+    }
+    position = board.text.length;
+    if (board.done) return { truncated: board.truncated, bytes: board.bytes };
+    await extendAshbyBoard(board);
+  }
+}
+
 /** A request/batch-scoped cache, not isolate-global I/O state. Hosts, redirects,
  * content type, timeout and streamed byte budget are checked before parsing. */
 export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
@@ -237,6 +358,15 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
   deferHost?: (host: string, retryAfter: string) => Promise<void>;
 } = {}) {
   const requests = new Map<string, Promise<{ payload?: unknown; status?: number; bytes?: number; outcome: MetadataAcquisition['outcome'] }>>();
+  const boards = new Map<string, AshbyBoard>();
+  const boardTails = new Map<string, Promise<unknown>>();
+  /** Serializes work per board so concurrent identities do not race the reader. */
+  const serialize = <T>(key: string, task: () => Promise<T>): Promise<T> => {
+    const prior = boardTails.get(key) ?? Promise.resolve();
+    const next = prior.then(task, task);
+    boardTails.set(key, next.catch(() => undefined));
+    return next;
+  };
   const throttled = new Set<string>();
   return async (identity: ProviderIdentity, candidateUrl?: string): Promise<MetadataAcquisition | undefined> => {
     const route = metadataApiRoute(identity, candidateUrl);
@@ -265,8 +395,14 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
         }
         const reader = response.body?.getReader();
         if (!reader) return { outcome: 'incomplete' as const, status: response.status };
-        const decoder = new TextDecoder(); let body = ''; let bytes = 0;
+        // An Ashby board is read lazily across the batch's postings, so its
+        // reader stays open here instead of being released with the others.
+        if (route.method === 'ashby-api') {
+          boards.set(route.url, { reader, decoder: new TextDecoder(), text: '', bytes: 0, done: false, truncated: false });
+          return { outcome: 'acquired' as const, status: response.status };
+        }
         try {
+          const decoder = new TextDecoder(); let body = ''; let bytes = 0;
           for (;;) {
             const chunk = await reader.read();
             if (chunk.done) break;
@@ -275,11 +411,27 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
             body += decoder.decode(chunk.value, { stream: true });
           }
           body += decoder.decode();
+          return { outcome: 'acquired' as const, payload: html ? body : JSON.parse(body) as unknown, bytes, status: response.status };
         } finally { reader.releaseLock(); }
-        return { outcome: 'acquired' as const, payload: html ? body : JSON.parse(body) as unknown, bytes, status: response.status };
       } catch { return { outcome: 'failed' as const }; }
     })());
     const result = await requests.get(route.url)!;
+    // The board route is shared by every posting on the board, so each identity
+    // scans the one fetched board rather than fetching it again. Reads are
+    // serialized per board because callers may request postings concurrently.
+    if (route.method === 'ashby-api' && boards.has(route.url)) {
+      const board = boards.get(route.url)!;
+      try {
+        return await serialize(route.url, async () => {
+          const boardIdentity = route.identity ?? identity;
+          const found = await findAshbyJob(board, identity.postingId, (job) =>
+            parseMetadataApiResponse(boardIdentity, route.method, { jobs: [job] }, route.url));
+          return { method: route.method, sourceUrl: route.url, status: result.status, bytes: found.bytes,
+            outcome: found.artifact ? 'acquired' as const : found.truncated ? 'incomplete' as const : 'identity-mismatch' as const,
+            ...(found.artifact ? { artifact: found.artifact } : {}) };
+        });
+      } catch { return { method: route.method, sourceUrl: route.url, outcome: 'failed' as const, status: result.status }; }
+    }
     const artifact = result.payload ? parseMetadataApiResponse(route.identity ?? identity, route.method, result.payload, route.url) : undefined;
     return { method: route.method, sourceUrl: route.url, status: result.status, bytes: result.bytes,
       outcome: result.outcome === 'acquired' && !artifact ? 'identity-mismatch' : result.outcome, ...(artifact ? { artifact } : {}) };

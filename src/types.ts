@@ -394,6 +394,13 @@ export interface CanonicalEmployer {
   displayName: string;
   /** First-party R2 key for the reviewed company icon. */
   iconKey?: string;
+  /**
+   * Who owns the current icon key: a reviewer, or a machine path
+   * (`logo-dev` for a cached provider icon, `platform` for the logo the employer
+   * uploaded to its own ATS board). Absent on rows written before this was
+   * recorded, which are reviewer icons.
+   */
+  iconSource?: string;
   iconUpdatedAt?: string;
   reviewedAt: string;
   reviewedBy: string;

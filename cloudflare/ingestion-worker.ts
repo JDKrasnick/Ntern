@@ -1,6 +1,10 @@
-import legacyWorker, { type Environment } from './worker.js';
+import legacyWorker, { provideIconSvgRasterizer, type Environment } from './worker.js';
+import { rasterizeSvgIcon } from './svg-raster-wasm.js';
 import { secretMatches } from './split.js';
 export { D1TrafficController } from './d1-traffic-controller.js';
+
+// This entry owns the icon sweep, so it is the one that can carry the rasterizer.
+provideIconSvgRasterizer(rasterizeSvgIcon);
 
 export interface IngestionEnvironment extends Partial<Environment> {
   INTERNAL_SERVICE_SECRET: string;
