@@ -43,7 +43,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { lookup } from 'node:dns/promises';
 import {
   bannerAssetShapeUsable, iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls,
+  logoDevCandidateDomains, logoDevSearchUrl,
 } from '../src/employer-icon-discovery.js';
+import { employerDistinctiveTerms } from '../src/employer-icon-resolution.js';
 import {
   ICON_PAGE_REQUEST_HEADERS, diagnoseEmployerIcon, probeLogoDevImage,
   type EmployerIconDiagnostic, type EmployerIconProviderCredentials,
@@ -63,6 +65,10 @@ const onlyPlatform = option('--platform');
 const concurrency = Math.max(1, Number(option('--concurrency') ?? 6));
 /** Run the real resolver read-only over the cohort instead of only reading board art. */
 const resolveMode = has('--resolve');
+/** Measure Logo.dev alone over a cohort: its search, then its image endpoint, nothing else. */
+const providerAudit = has('--provider-audit');
+/** `mapped` is the population the sweep acts on; `wide` adds catalog companies with no mapping. */
+const cohort = option('--cohort') ?? 'mapped';
 const sample = Number(option('--sample') ?? 0);
 
 function fromEnvironment(name: string): string | undefined {
@@ -342,9 +348,109 @@ function providerOutcomesOf(diagnostic: EmployerIconDiagnostic): Record<string, 
   return outcomes;
 }
 
+interface ProviderAuditRow {
+  name: string;
+  query: 'display-name' | 'brand-terms';
+  outcome: 'usable' | 'no-image' | 'name-mismatch' | 'no-results' | 'rate-limited' | 'failed';
+  returned: number;
+  domain?: string;
+}
+
+/**
+ * Logo.dev on its own: does its search return a domain for this employer under the
+ * name our rules accept, and does its image endpoint then hold a real logo for it?
+ *
+ * Nothing else is involved — no page fetch, no model, no decision — because the point
+ * is to separate *the provider's coverage* from everything this resolver layers on top
+ * of it: a search that returns nothing, a search whose results carry no matching name,
+ * and a nomination with no image are three different problems with three different
+ * fixes.
+ */
+async function auditLogoDev(names: readonly string[]): Promise<void> {
+  const token = logoDevToken;
+  const imageToken = logoDevImageToken;
+  if (!token) { console.error('LOGO_DEV_TOKEN (or LOGO_SECRET_KEY) is required'); process.exitCode = 1; return; }
+  const rows: ProviderAuditRow[] = [];
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, 4)) }, async () => {
+    while (cursor < names.length) {
+      const name = names[cursor++]!;
+      const attempt = async (query: 'display-name' | 'brand-terms'): Promise<ProviderAuditRow> => {
+        const query2 = query === 'display-name' ? name : employerDistinctiveTerms(name).join(' ');
+        try {
+          const response = await fetch(logoDevSearchUrl(query2), { headers: { authorization: `Bearer ${token}` } });
+          if (response.status === 429) return { name, query, outcome: 'rate-limited', returned: 0 };
+          if (!response.ok) return { name, query, outcome: 'failed', returned: 0 };
+          const raw = await response.json() as unknown;
+          const returned = Array.isArray(raw) ? raw.length : 0;
+          const nominated = logoDevCandidateDomains(raw, name);
+          if (!nominated.length) {
+            return { name, query, outcome: returned ? 'name-mismatch' : 'no-results', returned };
+          }
+          if (!imageToken) return { name, query, outcome: 'no-image', returned, domain: nominated[0] };
+          const probe = await probeLogoDevImage(nominated[0]!, imageToken, { resolver: nodeResolver });
+          return {
+            name, query, returned, domain: nominated[0]!,
+            outcome: probe.available ? 'usable' : 'no-image',
+          };
+        } catch { return { name, query, outcome: 'failed', returned: 0 }; }
+      };
+      let row = await attempt('display-name');
+      // The resolver retries once with the brand itself when the full name finds nothing.
+      if (row.outcome === 'no-results' || row.outcome === 'name-mismatch') {
+        const brand = employerDistinctiveTerms(name).join(' ');
+        if (brand && brand !== name.trim().toLowerCase()) {
+          const second = await attempt('brand-terms');
+          if (second.outcome === 'usable' || second.outcome === 'no-image') row = second;
+          else if (row.outcome === 'no-results') row = second;
+        }
+      }
+      rows.push(row);
+    }
+  }));
+  const tally = (values: string[]) => [...values.reduce((counts, value) => counts.set(value, (counts.get(value) ?? 0) + 1), new Map<string, number>())]
+    .sort((left, right) => right[1] - left[1]).map(([value, count]) => `${value} x${count}`).join(', ');
+  const usable = rows.filter((row) => row.outcome === 'usable');
+  console.log(`\nLogo.dev alone over ${rows.length} employer names (images: ${imageToken ? 'checked' : 'NOT checked'})`);
+  console.log(`  search + image usable: ${usable.length}/${rows.length} = ${Math.round(100 * usable.length / rows.length)}%`);
+  console.log(`  outcomes: ${tally(rows.map((row) => row.outcome))}`);
+  console.log(`  resolved by: ${tally(usable.map((row) => row.query))}`);
+  for (const outcome of ['name-mismatch', 'no-results', 'no-image'] as const) {
+    const examples = rows.filter((row) => row.outcome === outcome).slice(0, 8);
+    if (examples.length) {
+      console.log(`  ${outcome} examples:`);
+      for (const row of examples) {
+        console.log(`    ${row.name.slice(0, 44).padEnd(46)} returned=${String(row.returned).padEnd(3)} ${row.domain ?? ''}`);
+      }
+    }
+  }
+  writeFileSync('/tmp/provider-audit.json', JSON.stringify(rows, null, 1));
+}
+
 async function main(): Promise<void> {
-  const cohort = buildCohort();
-  const entries = cohort.entries
+  if (providerAudit) {
+    if (cohort === 'wide') {
+      // Every distinct company name on a platform host, including postings with no
+      // canonical employer — the population a bigger sweep would have to handle.
+      const wide = query(`SELECT DISTINCT json_extract(value, '$.internshipIdentity.company.displayName.value') AS name
+        FROM catalog_items WHERE kind = 'internship'
+          AND (json_extract(value, '$.normalizedUrl') LIKE '%//job-boards.greenhouse.io/%'
+            OR json_extract(value, '$.normalizedUrl') LIKE '%//jobs.lever.co/%'
+            OR json_extract(value, '$.normalizedUrl') LIKE '%//jobs.ashbyhq.com/%')`);
+      const names = wide.map((row) => String(row.name ?? '')).filter((name) => name.length > 1);
+      const selected = sample > 0 ? names.filter((_, index) => index % Math.ceil(names.length / sample) === 0).slice(0, sample) : names;
+      await auditLogoDev(selected);
+      return;
+    }
+    const mapped = buildCohort();
+    const names = [...new Set(mapped.entries.map((entry) => entry.displayName ?? entry.employer))];
+    const selected = sample > 0 && sample < names.length
+      ? names.filter((_, index) => index % Math.ceil(names.length / sample) === 0).slice(0, sample) : names;
+    await auditLogoDev(selected);
+    return;
+  }
+  const cohortEntries = buildCohort();
+  const entries = cohortEntries.entries
     .filter((entry) => (only.length ? only.includes(entry.employer) : true))
     .filter((entry) => (onlyPlatform ? entry.platform === onlyPlatform : true));
   if (!entries.length) {
@@ -372,7 +478,7 @@ async function main(): Promise<void> {
   }));
 
   if (asJson) {
-    console.log(JSON.stringify({ vanityHosted: cohort.vanityHosted, results }, null, 2));
+    console.log(JSON.stringify({ vanityHosted: cohortEntries.vanityHosted, results }, null, 2));
     return;
   }
   for (const platform of Object.keys(PLATFORM_HOSTS)) {
@@ -395,7 +501,7 @@ async function main(): Promise<void> {
   const stored = results.filter((row) => row.outcome === 'stored');
   console.log(`\nall platforms: ${stored.length}/${results.length} (${pct(stored.length, results.length)})`);
   console.log(`banner used instead of a square logo: ${stored.filter((row) => row.candidateKind === 'banner').length}`);
-  console.log(`mapped employers whose live posting rides a vanity host (domain path, no board logo): ${cohort.vanityHosted}`);
+  console.log(`mapped employers whose live posting rides a vanity host (domain path, no board logo): ${cohortEntries.vanityHosted}`);
   console.log('\nRead-only: nothing was enqueued, published, or written.');
 }
 

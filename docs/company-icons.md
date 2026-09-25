@@ -106,6 +106,40 @@ Read across: a role on the employer's own domain needs no provider, and a platfo
 
 **The residual risk of a proposal is a name collision.** Verification asks whether the domain presents itself as this employer, and two companies can share a name — a domain titled `ACME Industrial Supply` does confirm an employer named `Acme`. That risk is inherent to any name-to-domain lookup, including a provider's own search, and it is bounded by the same guardrails: observe mode before anything is rendered, the exception queue, and `report-wrong` withdrawing a decision within a minute. Proposal decisions are marked `selected_source = 'proposed'` so they can be reviewed as their own class.
 
+### How good is Logo.dev on our own catalog?
+
+`npm run coverage:icons -- --provider-audit` answers this directly: it runs **only** Logo.dev, over a cohort of employer names — no page fetch, no model, no decision — and reports what its search returns and whether its image endpoint then holds a real logo. That separates the provider's coverage from everything this resolver layers on top, and the failure classes have different fixes.
+
+| Cohort | Names | Search + image usable |
+|---|---:|---:|
+| Mapped employers (the population the sweep acts on) | 158 | **145 = 92%** |
+| Wider catalog, including companies with no canonical employer | 147 | **135 = 92%** |
+
+Failure classes, with counts from the 158-name run:
+
+| Outcome | Count | What it means | Fix |
+|---|---:|---|---|
+| `usable` | 145 | a domain under a matching name, with an image | — |
+| `name-mismatch` | 11 | the search **returned results**, none of which passed our exact-name rule | **our matcher** |
+| `no-image` | 2 | a nominated domain with no logo in the index (`limetax.de`, `opusclip.io`) | site-asset fallback, or a reviewer |
+| `no-results` | 0 | nothing in the index for the query | — |
+
+The failure that mattered was the second row, and reading the actual responses showed why. Our rule requires the provider's entry name to equal the employer name, and the index stores brands the way brands write themselves:
+
+| Catalog name | What Logo.dev returns | Correct? |
+|---|---|---|
+| `Rendezvous Robotics` | `rendezvousrobotics` → rendezvousrobotics.com | yes — spaces |
+| `Walleye Capital Internships` | `Walleye Capital` → walleyecapital.com | yes — program suffix |
+| `Optiver - ICML` | `Optiver` → optiver.com | yes — event suffix |
+| `Lila Sciences` | `lilasciences` → lilasciences.ai | yes — spaces |
+| `Medecins Sans Frontieres (Doctors Without Borders)` | `Doctors Without Borders` → doctorswithoutborders.org | yes — parenthetical |
+| `Toshiba Global Commerce Solutions` | `toshibaglobalcommercesolutions` → …solutions.com | yes — spaces |
+| `Bree`, `N1`, `k-ID` | Breeze, Breedon, Nexl, Netflix… | **no** — short or ambiguous names |
+
+So of eleven apparent misses, **eight were the correct domain already in the index**, rejected because the catalog writes `Rendezvous Robotics` where the brand writes `rendezvousrobotics`. Normalising the comparison — punctuation and whitespace removed, program suffixes tolerated, the employer's distinctive terms required to be contained — would recover those, taking provider-only coverage from 92% to roughly **97%**. The genuine misses are short and ambiguous names (`Bree`, `N1`, `k-ID`), where the index has nothing under a name we could accept.
+
+Two limits on this measurement, stated because they bound the answer. It measures *a logo for the domain the provider names under a name we accept*, not that the logo is the right one for the legal entity — a subsidiary can resolve to its parent's mark. And both cohorts are ATS-posted companies, which skew towards technology employers with real websites; employers that never post to Greenhouse, Lever, or Ashby are not represented at all.
+
 ### Measured with real credentials and a real model
 
 Everything in this section ran against the live catalog with the account's own Logo.dev credentials and the real `gpt-4o-mini`, through the resolver itself and nothing else: no simulated provider, no human standing in for the model, no write of any kind. The cohort was a random 23 employers from the mapped set.
