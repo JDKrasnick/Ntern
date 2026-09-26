@@ -1823,6 +1823,10 @@ export class D1CatalogAdmissionStore {
    * eligible. A stalled publication pipeline shows up here as an aging
    * `newest` while `eligible` stays non-zero, which is the operator signal that
    * new roles have stopped reaching the feed.
+   *
+   * The filter mirrors the public catalog exactly: `groupCatalogJobs` shows a
+   * role unless it is explicitly non-technical, so a non-technical role must not
+   * keep the feed looking fresh.
    */
   async catalogPublicationRecency(): Promise<{ newest?: string; eligible: number }> {
     const row = await this.db.prepare(`SELECT count(*) AS eligible,
@@ -1830,7 +1834,8 @@ export class D1CatalogAdmissionStore {
       FROM catalog_items
       WHERE kind = 'internship'
         AND json_extract(value, '$.open') = 1
-        AND json_extract(value, '$.admission.catalogEligible') = 1`).first<{ eligible: number; newest: string | null }>();
+        AND json_extract(value, '$.admission.catalogEligible') = 1
+        AND COALESCE(json_extract(value, '$.technical'), 1) <> 0`).first<{ eligible: number; newest: string | null }>();
     return { ...(row?.newest ? { newest: row.newest } : {}), eligible: Number(row?.eligible ?? 0) };
   }
 
