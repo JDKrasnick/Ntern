@@ -223,6 +223,44 @@ describe('trusted community source policy', () => {
     });
   });
 
+  it('uses an exact ATS route and reviewed mapping to resolve a community employer and enqueue its icon', async () => {
+    const store = new MemoryInternshipStore();
+    const applyUrl = 'https://acme.wd1.myworkdayjobs.com/External/job/Remote/Software-Engineering-Intern_REQ-123';
+    const row = listing({ sourceId: 'community-list', applyUrl, externalId: `README.md:${applyUrl}`,
+      providerIdentity: { provider: 'github', sourceId: 'community-list', sourceUrl: 'https://github.com/example/jobs', postingId: 'req-123' } });
+    const adapter: SourceAdapter = { id: row.sourceId, async fetch(previous) {
+      return { sourceId: row.sourceId, listings: [row], rawRowCount: 1, notModified: false,
+        checkpoint: { sourceId: row.sourceId, successfulFetches: (previous?.successfulFetches ?? 0) + 1, lastRowCount: 1 } };
+    } };
+    const resolvedIdentities: NonNullable<ProcessedListing['providerIdentity']>[] = [];
+    const resolver = {
+      async configurationVersion() { return 'registry-v1'; },
+      async resolveCanonicalEmployer(identity: NonNullable<ProcessedListing['providerIdentity']>) {
+        resolvedIdentities.push(identity);
+        return identity.provider === 'workday' && identity.tenant === 'acme'
+          ? { id: 'acme', displayName: 'Acme' } : undefined;
+      },
+      async resolveDestinationRule() { return undefined; },
+    };
+    const validate = async (url: string) => ({ url, evidence: { url, title: row.title, postingIdPresent: true,
+      confidence: { score: 100, level: 'high' as const, recommendation: 'alert-eligible' as const, signals: [] } } });
+    const icons = vi.fn().mockResolvedValue(undefined);
+
+    await new Poller([adapter], store, () => new Date(inspectedAt), undefined, validate, false,
+      undefined, resolver, true, true, icons).poll();
+
+    expect(resolvedIdentities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: 'github' }),
+      expect.objectContaining({ provider: 'workday', tenant: 'acme', postingId: 'req-123' }),
+    ]));
+    const [job] = [...store.jobs.values()];
+    expect(job?.admission).toMatchObject({ employerResolution: 'resolved', canonicalEmployer: { id: 'acme' } });
+    expect(icons).toHaveBeenCalledOnce();
+    expect(icons).toHaveBeenCalledWith(expect.objectContaining({
+      canonicalEmployerId: 'acme', provider: 'workday', tenant: 'acme', applicationUrl: applyUrl,
+    }));
+  });
+
   it('still blocks generic source-reported employer metadata', () => {
     const qualification = advanceTrustedCommunityQualification({ destination: destination(), postingIdentityDecision: unconfirmed(),
       alertMode: policy.alertMode, completeFetchSequence: 1 });

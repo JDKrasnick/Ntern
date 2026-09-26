@@ -4,7 +4,7 @@ import { assessApplicationPageForListing, canonicalApplicationUrl, type Applicat
 import { boardReference, reachabilityFromFailure, reachabilityFromSignals, verifyApplication, type AttributionBasis, type Reachability } from './core/application-verification.js';
 import { inferSeason, isPastSeason } from './core/early-career.js';
 import { normalizeUrl } from './core/normalize.js';
-import type { ProviderPostingReference } from './identity/posting.js';
+import { providerPostingReference, type ProviderPostingReference } from './identity/posting.js';
 import { resolvePostingIdentityDecision, stableSourceOccurrenceJobId } from './identity/registry.js';
 import {
   providerEvidenceForOccurrence,
@@ -40,6 +40,7 @@ import type {
   Internship,
   ProcessedListing,
   ProcessedSnapshot,
+  ProviderIdentity,
   SourceAdapter,
   SourceCheckpoint,
   SourceFetchResult,
@@ -719,6 +720,56 @@ export class IngestionRunner {
     return references;
   }
 
+  private employerResolutionIdentities(
+    listing: ProcessedListing,
+    reviewedReferences: readonly ProviderPostingReference[],
+  ): ProviderIdentity[] {
+    const identities: ProviderIdentity[] = listing.providerIdentity ? [listing.providerIdentity] : [];
+    const append = (reference: ProviderPostingReference, sourceId = listing.sourceId) => {
+      if (reference.provider === 'unknown') return;
+      identities.push({
+        provider: reference.provider,
+        sourceId,
+        sourceUrl: listing.applyUrl,
+        ...(reference.tenant ? { tenant: reference.tenant } : {}),
+        ...(reference.postingId ? { postingId: reference.postingId } : {}),
+      });
+    };
+    try { append(providerPostingReference(listing.applyUrl)); } catch { /* Invalid URLs fail admission elsewhere. */ }
+    for (const reference of reviewedReferences) {
+      const sourceId = 'sourceId' in reference && typeof reference.sourceId === 'string'
+        ? reference.sourceId : listing.sourceId;
+      append(reference, sourceId);
+    }
+    const unique = new Map<string, ProviderIdentity>();
+    for (const identity of identities) {
+      const key = `${identity.provider}\0${identity.sourceId}\0${identity.tenant ?? ''}\0${identity.employerScope ?? ''}`;
+      if (!unique.has(key)) unique.set(key, identity);
+    }
+    return [...unique.values()];
+  }
+
+  private async resolveCanonicalEmployer(
+    listing: ProcessedListing,
+    reviewedReferences: readonly ProviderPostingReference[],
+  ): Promise<{ employer: { id: string; displayName: string }; identity: ProviderIdentity } | undefined> {
+    if (!this.catalogAdmissionResolver) return undefined;
+    const resolutions = await Promise.all(this.employerResolutionIdentities(listing, reviewedReferences).map(async (identity) => ({
+      identity,
+      employer: await this.catalogAdmissionResolver!.resolveCanonicalEmployer(identity),
+    })));
+    const resolved = resolutions.filter((value): value is { identity: ProviderIdentity; employer: { id: string; displayName: string } } => Boolean(value.employer));
+    const employers = new Set(resolved.map((value) => value.employer.id));
+    if (employers.size > 1) {
+      console.error(JSON.stringify({
+        event: 'catalog_employer_resolution_conflict', sourceId: listing.sourceId,
+        externalId: listing.externalId, employerIds: [...employers].sort(),
+      }));
+      return undefined;
+    }
+    return resolved[0];
+  }
+
   private async inferredEmbedAliases(listing: ProcessedListing): Promise<string[]> {
     const evidence = listing.providerEvidence;
     if (evidence?.provider !== 'greenhouse') return [];
@@ -1006,9 +1057,10 @@ export class IngestionRunner {
           postingIdentityDecision: identityResult.decision,
           ...(identity ? { postingIdentity: identity } : {}),
         };
-        if (supportsAdmission && listing.providerIdentity && this.catalogAdmissionResolver) {
-          const canonicalEmployer = await this.catalogAdmissionResolver.resolveCanonicalEmployer(listing.providerIdentity);
-          if (canonicalEmployer) {
+        if (supportsAdmission && this.catalogAdmissionResolver) {
+          const resolvedEmployer = await this.resolveCanonicalEmployer(listing, reviewedProviderReferences);
+          if (resolvedEmployer) {
+            const { employer: canonicalEmployer, identity: employerIdentity } = resolvedEmployer;
             // The employer is known and the application link is in hand, which is
             // exactly the evidence an icon needs. Recording the task costs one
             // deduplicated insert and no network call, so publication still never
@@ -1019,8 +1071,8 @@ export class IngestionRunner {
                 displayName: canonicalEmployer.displayName,
                 roleTitle: listing.title,
                 applicationUrl: normalizedUrl,
-                provider: listing.providerIdentity.provider,
-                ...(listing.providerIdentity.tenant ? { tenant: listing.providerIdentity.tenant } : {}),
+                provider: employerIdentity.provider,
+                ...(employerIdentity.tenant ? { tenant: employerIdentity.tenant } : {}),
                 ...(listing.provenance ? { provenance: listing.provenance } : {}),
                 sourceId: listing.sourceId,
               });
