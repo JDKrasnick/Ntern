@@ -255,6 +255,25 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('accepts retiring the stale-evidence alert threshold binding', () => {
+    const name = 'ADMISSION_STALE_ALERT_THRESHOLD';
+    expect(validateCloudflarePlan(plan([{
+      address: 'cloudflare_workers_script.ingestion',
+      actions: ['update'],
+      before: { ...worker, content_sha256: 'old-sha', bindings: [...worker.bindings, { name, type: 'plain_text', text: '1' }] },
+      after: { ...worker, content_sha256: 'new-sha', bindings: worker.bindings },
+    }]))).toHaveLength(1);
+  });
+
+  it('rejects retiring a binding that is not on the reviewed retirement list', () => {
+    expect(() => validateCloudflarePlan(plan([{
+      address: 'cloudflare_workers_script.ingestion',
+      actions: ['update'],
+      before: { ...worker, content_sha256: 'old-sha', bindings: [...worker.bindings, { name: 'UNRELATED_SETTING', type: 'plain_text', text: '1' }] },
+      after: { ...worker, content_sha256: 'new-sha', bindings: worker.bindings },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits only the reviewed monthly shadow headroom change and rollback', () => {
     const name = 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS';
     const change = (beforeText: string, afterText: string) => ({

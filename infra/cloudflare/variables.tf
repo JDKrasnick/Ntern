@@ -165,9 +165,3 @@ variable "admission_queue_age_alert_hours" {
   type        = number
   default     = 120
 }
-
-variable "admission_stale_alert_threshold" {
-  description = "Number of stale destination evidence records that triggers a deduplicated operational alert."
-  type        = number
-  default     = 1
-}

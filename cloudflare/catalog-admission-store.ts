@@ -1806,6 +1806,18 @@ export class D1CatalogAdmissionStore {
     }));
   }
 
+  /**
+   * Incidents opened since a cutoff, across every state. Durable admission
+   * (2026-09-17) stopped re-inspecting admitted destinations, so the active
+   * backlog never resolves on its own; a newly opened incident is the only
+   * admission signal that still reports something changing.
+   */
+  async countIncidentsOpenedSince(since: string): Promise<number> {
+    const row = await this.db.prepare('SELECT count(*) AS count FROM admission_incidents WHERE opened_at >= ?')
+      .bind(since).first<{ count: number }>();
+    return Number(row?.count ?? 0);
+  }
+
   async resolveIncidents(jobId: string, sourceId: string, updatedAt: string, exceptReason?: AdmissionIncident['reasonCode']): Promise<void> {
     const condition = exceptReason ? ' AND reason_code <> ?' : '';
     await this.db.prepare(`UPDATE admission_incidents SET state = 'resolved', updated_at = ?

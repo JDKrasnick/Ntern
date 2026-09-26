@@ -98,13 +98,11 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('max_wait_time_ms = contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000');
   });
 
-  it('keeps admission alert thresholds synchronized across Wrangler and OpenTofu', () => {
+  it('keeps the admission queue-age alert threshold synchronized across Wrangler and OpenTofu', () => {
     const terraform = read('infra/cloudflare/main.tf');
 
     expect(ingestion.vars.ADMISSION_QUEUE_AGE_ALERT_HOURS).toBe('120');
-    expect(ingestion.vars.ADMISSION_STALE_ALERT_THRESHOLD).toBe('1');
     expect(terraform).toContain('{ name = "ADMISSION_QUEUE_AGE_ALERT_HOURS", type = "plain_text", text = tostring(var.admission_queue_age_alert_hours) }');
-    expect(terraform).toContain('{ name = "ADMISSION_STALE_ALERT_THRESHOLD", type = "plain_text", text = tostring(var.admission_stale_alert_threshold) }');
   });
 
   it('keeps every work-queue consumer concurrency synchronized in Wrangler and OpenTofu', () => {

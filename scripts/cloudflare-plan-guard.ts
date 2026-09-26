@@ -73,6 +73,12 @@ const permittedPlainTextBindings = new Set([
   'IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED',
   'IDENTITY_CONFIRMED_COVERAGE_FLOOR',
 ]);
+// A binding this release may remove. Durable admission (2026-09-17) made the
+// stale-evidence alert structural rather than actionable, so its threshold is
+// retired with the signal. Every other binding removal still fails closed.
+const retiredPlainTextBindings = new Set([
+  'ADMISSION_STALE_ALERT_THRESHOLD',
+]);
 const disabledMetadataPolicy = {
   enabled: false,
   version: 'disabled',
@@ -276,6 +282,16 @@ function isAppliedMigrationRetirement(address: string, before: Record<string, un
     ));
 }
 
+/** Permits removing exactly the bindings in `retiredPlainTextBindings`: the
+ * retained bindings must be byte-identical to `after`. */
+function isPermittedBindingRetirement(before: unknown, after: unknown): boolean {
+  if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length + 1) return false;
+  const retired = before.filter((binding) => isRecord(binding) && retiredPlainTextBindings.has(String(binding.name)));
+  if (retired.length !== 1) return false;
+  const retained = before.filter((binding) => !(isRecord(binding) && retiredPlainTextBindings.has(String(binding.name))));
+  return isDeepStrictEqual(retained, after);
+}
+
 function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after)) return false;
   const controllers = after.filter((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER');
@@ -399,6 +415,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   if (!isDeepStrictEqual(before.files, after.files)
     && !(address === 'cloudflare_workers_script.ingestion' && isPermittedModuleParts(before.files, after.files))) return false;
   const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings)
+    || isPermittedBindingRetirement(before.bindings, after.bindings)
     || isResumeTunerEnablement(before.bindings, after.bindings)
     || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, after.bindings));
   // The ingestion Worker exhausted its 10,000-subrequest invocation budget

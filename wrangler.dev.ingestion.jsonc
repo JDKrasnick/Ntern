@@ -64,7 +64,6 @@
     "SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS": "2000",
     "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":false,\"version\":\"disabled\",\"allowedFields\":[],\"cohort\":[]}",
     "ADMISSION_QUEUE_AGE_ALERT_HOURS": "120",
-    "ADMISSION_STALE_ALERT_THRESHOLD": "1",
     "GMAIL_CLIENT_ID": "17433524169-4753680goh32205can9g00ijqan3hic5.apps.googleusercontent.com",
     "GMAIL_REDIRECT_URI": "https://intern-notifs-dev.jdkrasnick.workers.dev/oauth/gmail/callback",
     "CLOUDFLARE_ACCOUNT_ID": "4d67a0f1b73641df84af0a283dd5b3d8",

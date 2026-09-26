@@ -70,7 +70,6 @@ locals {
       { name = "SHADOW_EXTRACTION_QUEUE_NAME", type = "plain_text", text = cloudflare_queue.work["shadow-extraction"].queue_name },
       { name = "DEPLOYMENT_ROLE", type = "plain_text", text = "ingestion" },
       { name = "ADMISSION_QUEUE_AGE_ALERT_HOURS", type = "plain_text", text = tostring(var.admission_queue_age_alert_hours) },
-      { name = "ADMISSION_STALE_ALERT_THRESHOLD", type = "plain_text", text = tostring(var.admission_stale_alert_threshold) },
     ],
     [for provider in local.catalog_providers : { name = "${upper(provider)}_QUEUE_ID", type = "plain_text", text = cloudflare_queue.work[provider].queue_id }],
     var.auth_from_email == null ? [] : [{ name = "AUTH_FROM_EMAIL", type = "plain_text", text = var.auth_from_email }],
