@@ -2054,6 +2054,24 @@ describe('employers needing resolution', () => {
   });
 });
 
+describe('employer icon provider cache', () => {
+  it('records a cached provider icon without displacing an existing one', async () => {
+    const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.markProviderIcon({ canonicalEmployerId: 'acme', iconKey: 'company-icons/acme/logo-abc.webp', now: NOW.toISOString() });
+    const cached = await icons.context('acme');
+    expect(cached?.iconKey).toBe('company-icons/acme/logo-abc.webp');
+    expect(cached?.iconSource).toBe('logo-dev');
+
+    // A reviewer's icon is the strongest answer, so a read-path cache never takes it.
+    await admission.putCanonicalEmployer(employerRow('globex', 'Globex', 'company-icons/globex/reviewed.webp'), NOW.toISOString());
+    await icons.markProviderIcon({ canonicalEmployerId: 'globex', iconKey: 'company-icons/globex/logo-abc.webp', now: NOW.toISOString() });
+    const reviewed = await icons.context('globex');
+    expect(reviewed?.iconKey).toBe('company-icons/globex/reviewed.webp');
+    expect(reviewed?.iconSource).toBe('reviewed');
+  });
+});
+
 describe('employer icon resolver correctness fixes', () => {
   it('accepts the publishable token under any documented alias', async () => {
     const run = async (secrets: Record<string, string>) => {

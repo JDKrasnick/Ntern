@@ -73,10 +73,18 @@ describe('automatic company icon route', () => {
     };
     return impl as unknown as typeof fetch;
   };
-  const automatic = (response: () => Response, options: { display?: boolean; domain?: string | undefined } = {}) =>
+  const automatic = (
+    response: () => Response,
+    options: {
+      display?: boolean;
+      domain?: string | undefined;
+      retainIcon?: (employerId: string, asset: { bytes: Uint8Array; contentType: string }) => Promise<void>;
+    } = {},
+  ) =>
     companyIconResponse('acme', automaticEmployer, emptyDocuments, {
       automaticDomain: async () => ('domain' in options ? options.domain : 'acme.com'),
       ...(options.display === undefined ? {} : { automaticDisplay: async () => options.display! }),
+      ...(options.retainIcon ? { retainIcon: options.retainIcon } : {}),
       logoDevImageToken: token, resolver, fetchImpl: providerFetch(response),
     });
 
@@ -122,5 +130,37 @@ describe('automatic company icon route', () => {
 
     expect(response.status).toBe(404);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+
+  it('caches the provider image it just served when retention is licensed', async () => {
+    const retained: Array<{ id: string; bytes: number[]; contentType: string }> = [];
+    const response = await automatic(() => image('image/webp', new Uint8Array([9, 8, 7])), {
+      display: true,
+      retainIcon: async (id, asset) => { retained.push({ id, bytes: [...asset.bytes], contentType: asset.contentType }); },
+    });
+
+    expect(response.status).toBe(200);
+    expect(retained).toEqual([{ id: 'acme', bytes: [9, 8, 7], contentType: 'image/webp' }]);
+  });
+
+  it('does not cache a provider response it never served', async () => {
+    let calls = 0;
+    const response = await automatic(() => new Response(null, { status: 404 }), {
+      display: true,
+      retainIcon: async () => { calls += 1; },
+    });
+
+    expect(response.status).toBe(404);
+    expect(calls).toBe(0);
+  });
+
+  it('serves the icon even when the cache write fails', async () => {
+    const response = await automatic(() => image(), {
+      display: true,
+      retainIcon: async () => { throw new Error('the documents bucket is unavailable'); },
+    });
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3, 4]));
   });
 });

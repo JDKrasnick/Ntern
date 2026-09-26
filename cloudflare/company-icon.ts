@@ -25,6 +25,12 @@ export interface CompanyIconDependencies {
   /** Whether the operator has left observe mode and enabled automatic display. */
   automaticDisplay?: () => Promise<boolean>;
   /**
+   * Stores the provider image the read path just served, so the next request for
+   * this employer is an R2 read instead of another provider fetch. Supplied only
+   * after the operator has confirmed the provider's self-hosting rights.
+   */
+  retainIcon?: (employerId: string, asset: { bytes: Uint8Array; contentType: string }) => Promise<void>;
+  /**
    * Logo.dev's publishable token (`pk_…`), not its secret key: only the publishable
    * token authorizes `img.logo.dev`, and the secret key is answered with `401`.
    */
@@ -95,7 +101,7 @@ async function storedIconResponse(iconKey: string, documents: R2Bucket): Promise
  * within a minute.
  */
 async function automaticIconResponse(employerId: string, dependencies: CompanyIconDependencies): Promise<Response> {
-  const { automaticDomain, automaticDisplay, logoDevImageToken, fetchImpl, resolver } = dependencies;
+  const { automaticDomain, automaticDisplay, logoDevImageToken, retainIcon, fetchImpl, resolver } = dependencies;
   if (!automaticDomain || !automaticDisplay || !logoDevImageToken || !resolver) return notFound();
   try {
     // The settings read and the resolution lookup sit inside the guard too: a
@@ -111,6 +117,12 @@ async function automaticIconResponse(employerId: string, dependencies: CompanyIc
     if (result.status < 200 || result.status >= 300) return notFound();
     const contentType = result.headers.get('content-type');
     if (!validIconAsset(contentType, result.body.byteLength)) return notFound();
+    // Cache the bytes this request already paid for, so the next reader of this
+    // employer gets an R2 read. Best-effort: a cache write must never turn a good
+    // icon into a 404.
+    if (retainIcon) {
+      try { await retainIcon(employerId, { bytes: result.body, contentType: contentType! }); } catch { /* serve the icon regardless */ }
+    }
     return new Response(result.body.buffer as ArrayBuffer, {
       headers: {
         'Content-Type': contentType!.split(';')[0]!.trim().toLowerCase(),

@@ -41,7 +41,7 @@ import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalo
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { companyIconResponse } from './company-icon.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
-import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, verifyIconDomain } from './employer-icon-resolver.js';
+import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, storeProviderIcon, verifyIconDomain } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
 import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
 import type { IconSvgRasterizer } from '../src/svg-icon.js';
@@ -852,7 +852,15 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     // trip instead of three.
     let employerId = companyIcon[1]!;
     try { employerId = decodeURIComponent(employerId); } catch { /* the raw segment is the id */ }
-    const iconState = await employerIcons.context(employerId);
+    const [iconState, settings] = await Promise.all([employerIcons.context(employerId), employerIcons.settings()]);
+    const display = settings.mode === 'resolve';
+    // Provider bytes are cached only once the operator confirms self-hosting rights.
+    const retainIcon = settings.logoDevRetentionLicensedAt
+      ? async (id: string, asset: { bytes: Uint8Array; contentType: string }) => {
+        const key = await storeProviderIcon(env, id, asset.bytes, asset.contentType);
+        await employerIcons.markProviderIcon({ canonicalEmployerId: id, iconKey: key, now: new Date().toISOString() });
+      }
+      : undefined;
     return withCors(await companyIconResponse(companyIcon[1]!, {
       async getCanonicalEmployer(id) {
         if (!iconState || iconState.id !== id) return undefined;
@@ -867,7 +875,8 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       },
     }, env.DOCUMENTS, {
       automaticDomain: async () => iconState?.resolutionStatus === 'resolved' ? iconState.websiteDomain : undefined,
-      automaticDisplay: async () => (await employerIcons.settings()).mode === 'resolve',
+      automaticDisplay: async () => display,
+      ...(retainIcon ? { retainIcon } : {}),
       ...(imageToken ? { logoDevImageToken: imageToken } : {}),
       resolver: publicHostResolver,
     }));
