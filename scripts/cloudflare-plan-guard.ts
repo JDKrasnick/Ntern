@@ -282,14 +282,23 @@ function isAppliedMigrationRetirement(address: string, before: Record<string, un
     ));
 }
 
-/** Permits removing exactly the bindings in `retiredPlainTextBindings`: the
- * retained bindings must be byte-identical to `after`. */
+/** Permits removing the bindings in `retiredPlainTextBindings`. The retained
+ * bindings must match `after` except that a permitted plain-text binding may also
+ * carry its own reviewed text change, so a retirement can land in the same
+ * release as a reconciled binding. */
 function isPermittedBindingRetirement(before: unknown, after: unknown): boolean {
-  if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length + 1) return false;
-  const retired = before.filter((binding) => isRecord(binding) && retiredPlainTextBindings.has(String(binding.name)));
-  if (retired.length !== 1) return false;
+  if (!Array.isArray(before) || !Array.isArray(after)) return false;
   const retained = before.filter((binding) => !(isRecord(binding) && retiredPlainTextBindings.has(String(binding.name))));
-  return isDeepStrictEqual(retained, after);
+  if (retained.length === before.length || retained.length !== after.length) return false;
+  return retained.every((binding, index) => {
+    const next = after[index];
+    if (!isRecord(binding) || !isRecord(next) || binding.name !== next.name) return false;
+    if (!permittedPlainTextBindings.has(String(binding.name))) return isDeepStrictEqual(binding, next);
+    if (binding.type !== 'plain_text' || next.type !== 'plain_text') return false;
+    const { text: beforeText, ...beforeRest } = binding;
+    const { text: afterText, ...afterRest } = next;
+    return typeof beforeText === 'string' && typeof afterText === 'string' && isDeepStrictEqual(beforeRest, afterRest);
+  });
 }
 
 function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
@@ -414,10 +423,27 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   // wasm-free — so a new module part is valid only on that address.
   if (!isDeepStrictEqual(before.files, after.files)
     && !(address === 'cloudflare_workers_script.ingestion' && isPermittedModuleParts(before.files, after.files))) return false;
-  const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, after.bindings)
-    || isPermittedBindingRetirement(before.bindings, after.bindings)
-    || isResumeTunerEnablement(before.bindings, after.bindings)
-    || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, after.bindings));
+  // Normalize Durable Object namespace IDs before evaluating binding changes.
+  // The provider reports `namespace_id = (known after apply)` whenever it will
+  // re-resolve a binding, and a permitted plain-text change alongside that would
+  // otherwise read as an unpermitted identity change.
+  let afterUnknown = change.after_unknown;
+  let afterForComparison = after;
+  let normalizedAfterBindings = after.bindings;
+  if (isRecord(afterUnknown)) {
+    const normalized = normalizeStableDurableObjectNamespaceIds(
+      before.bindings,
+      after.bindings,
+      afterUnknown.bindings,
+    );
+    afterForComparison = { ...after, bindings: normalized.after };
+    afterUnknown = { ...afterUnknown, bindings: normalized.unknown };
+    normalizedAfterBindings = normalized.after;
+  }
+  const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, normalizedAfterBindings)
+    || isPermittedBindingRetirement(before.bindings, normalizedAfterBindings)
+    || isResumeTunerEnablement(before.bindings, normalizedAfterBindings)
+    || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, normalizedAfterBindings));
   // The ingestion Worker exhausted its 10,000-subrequest invocation budget
   // while finishing a bounded GitHub source slice. Permit only this reviewed
   // increase; all other Worker limits remain protected.
@@ -448,7 +474,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
 
   let beforeForComparison = {
     ...before,
-    ...(permittedBindingChanged ? { bindings: after.bindings } : {}),
+    ...(permittedBindingChanged ? { bindings: normalizedAfterBindings } : {}),
     ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
     ...(permittedControllerMigration ? { migrations: after.migrations } : {}),
     ...(permittedControllerMigrationTagTransition ? { migrations: after.migrations } : {}),
@@ -456,21 +482,6 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     ...(permittedResumeMigrationBootstrap ? { migrations: after.migrations } : {}),
     ...(permittedAppliedMigrationRetirement ? { migrations: after.migrations } : {}),
   };
-
-  let afterUnknown = change.after_unknown;
-  let afterForComparison = after;
-  if (isRecord(afterUnknown)) {
-    const normalized = normalizeStableDurableObjectNamespaceIds(
-      before.bindings,
-      after.bindings,
-      afterUnknown.bindings,
-    );
-    afterForComparison = { ...after, bindings: normalized.after };
-    afterUnknown = { ...afterUnknown, bindings: normalized.unknown };
-    if (permittedBindingChanged) {
-      beforeForComparison = { ...beforeForComparison, bindings: normalized.after };
-    }
-  }
   if (permittedControllerMigration && isRecord(afterUnknown) && Array.isArray(afterUnknown.bindings)) {
     const controllerIndex = Array.isArray(after.bindings)
       ? after.bindings.findIndex((binding) => isRecord(binding) && binding.name === 'D1_TRAFFIC_CONTROLLER')
