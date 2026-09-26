@@ -1122,6 +1122,37 @@ describe('polling', () => {
     expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(40);
   });
 
+  it('does not re-open a resolution pass for a stale trusted-community qualification with the gate off', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const rows = snapshotRows(26, sourceId);
+    await new Poller([new SnapshotAdapter(sourceId, rows)], store).poll();
+
+    const occurrences = await store.getSourceOccurrences(sourceId);
+    expect(occurrences).toHaveLength(26);
+    // Simulate rows that still carry a trusted-community qualification from when
+    // the gate was on. With the gate off the hash is never maintained, so it can
+    // never match and would keep every such row in the pass forever.
+    for (const occurrence of occurrences) {
+      await store.putSourceOccurrence({
+        ...occurrence,
+        occurrence: { ...occurrence.occurrence, trustedCommunityAlertQualification: {
+          sourceMaterialHash: 'stale-hash', candidateKey: 'candidate', consecutiveCompleteSnapshots: 0,
+          status: 'pending' as const, baselineSuppressed: true,
+        } },
+      });
+    }
+    const checkpoint = (await store.getCheckpoint(sourceId))!;
+    await store.putCheckpoint({ ...checkpoint, pendingResolutionRows: [occurrences[0]!.externalId] });
+
+    const report = await new Poller([new SnapshotAdapter(sourceId, rows)], store).poll({ maxListingsPerSourceRun: 25 });
+
+    // Only the genuinely pending row is in scope; the 25 stale qualifications are
+    // not, so the pass closes instead of carrying 25 extra rows forever.
+    expect(report.pendingResolution[sourceId]).toBeUndefined();
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toBeUndefined();
+  });
+
   it('defers a failed destination queue handoff and retries only that row', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'community-list';
