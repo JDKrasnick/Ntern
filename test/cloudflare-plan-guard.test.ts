@@ -225,6 +225,7 @@ describe('Cloudflare deployment plan guard', () => {
     'AUTH_FROM_EMAIL',
     'IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED',
     'IDENTITY_CONFIRMED_COVERAGE_FLOOR',
+    'TRUSTED_COMMUNITY_CATALOG_ENABLED',
   ])('accepts the permitted %s plain-text binding update', (name) => {
     expect(validateCloudflarePlan(plan([{
       address: 'cloudflare_workers_script.application',

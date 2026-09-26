@@ -72,6 +72,10 @@ const permittedPlainTextBindings = new Set([
   'AUTH_FROM_EMAIL',
   'IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED',
   'IDENTITY_CONFIRMED_COVERAGE_FLOOR',
+  // Owner decision 2026-09-16: trust reviewed community lists for source-reported
+  // admission. The gate ships off; turning it on is a reviewed release, so the
+  // binding is reconcilable rather than protected.
+  'TRUSTED_COMMUNITY_CATALOG_ENABLED',
 ]);
 // A binding this release may remove. Durable admission (2026-09-17) made the
 // stale-evidence alert structural rather than actionable, so its threshold is

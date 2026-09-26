@@ -655,9 +655,12 @@ and no unexpected stale-eligible or quarantined incidents are recorded.
 
 `simplify-summer-2026` is the only trusted-community source. The source ID stays
 unchanged so checkpoints, occurrences, job IDs, saves, discovery times, and
-delivery history continue in place. Checked-in runtime defaults keep
-`TRUSTED_COMMUNITY_CATALOG_ENABLED=false`; do not add an alert environment flag.
-Alert behavior lives in the versioned policy in `src/sources/trust-policy.ts`.
+delivery history continue in place. The catalog gate was enabled by owner
+decision on 2026-09-26 to restore publication: with it off, community roles
+whose employer is not in the canonical mapping registry were withheld as
+`employer-unresolved`. Do not add an alert environment flag; alert behavior
+lives in the versioned policy in `src/sources/trust-policy.ts` and stays
+disabled (`alertMode: disabled`) through this step.
 
 The sanitized baseline report is
 [`trusted-community/simplify-summer-2026-baseline.json`](trusted-community/simplify-summer-2026-baseline.json).
