@@ -520,6 +520,22 @@ function isResumeWorkerUpdate(address: string, change: ResourceChange['change'])
   return !containsUnknown(protectedWorkerValue(afterUnknown, afterUnknown));
 }
 
+const customDomainAddresses = new Set(['cloudflare_workers_custom_domain.api[0]']);
+/**
+ * The API's custom domain is what lets the icon route use Cloudflare's Cache API —
+ * caching does not populate on `workers.dev`. The create is pinned to this service
+ * and hostname so a plan cannot attach an arbitrary zone or hostname, and it is
+ * additive: an existing custom domain or any update/destroy is still refused.
+ */
+function isCustomDomainCreate(address: string, change: ResourceChange['change']): boolean {
+  if (!customDomainAddresses.has(address) || change.before !== null || !isRecord(change.after)) return false;
+  const after = change.after;
+  return typeof after.account_id === 'string' && after.account_id.length > 0
+    && after.service === 'intern-notifs'
+    && after.hostname === 'api.ntern.app'
+    && typeof after.zone_id === 'string' && after.zone_id.length > 0;
+}
+
 function isResumeInfrastructureCreate(address: string, change: ResourceChange['change']): boolean {
   if (!resumeInfrastructureCreates.has(address) || change.before !== null || !isRecord(change.after)) return false;
   const after = change.after;
@@ -561,7 +577,8 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
       (change.actions[0] === 'update'
         && allowedUpdates.has(address)
         && (isSafeWorkerUpdate(address, change) || isResumeWorkerUpdate(address, change)))
-      || (change.actions[0] === 'create' && isResumeInfrastructureCreate(address, change))
+      || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
+        || isCustomDomainCreate(address, change)))
     )
   )).map(({ address, change }) => ({ address, actions: change.actions }));
 

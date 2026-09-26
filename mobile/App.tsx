@@ -400,7 +400,7 @@ function CompanyMark({ company, employerId, size = 38 }: { company: string; empl
   useEffect(() => {
     setImageUnavailable(false);
   }, [employerId]);
-  const iconUri = employerId ? `${publicConfig.apiUrl.replace(/\/$/, "")}/company-icons/${encodeURIComponent(employerId)}` : undefined;
+  const iconUri = employerId ? `${publicConfig.iconApiUrl.replace(/\/$/, "")}/company-icons/${encodeURIComponent(employerId)}` : undefined;
   const showLogo = Boolean(iconUri) && !imageUnavailable;
   // A reviewed employer keeps one tile across renames: its canonical identity
   // drives the tint, while an unprojected company falls back to its display name.

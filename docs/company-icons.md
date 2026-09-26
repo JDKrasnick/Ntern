@@ -269,9 +269,13 @@ Decision paths taken: automatic resolution, tie-break acceptance, and monogram f
 
 A key a **machine** wrote (`icon_source = 'logo-dev'` or `'platform'`) renders only once the operator has left observe mode. A reviewer's upload always renders. Without that gate a stored key would route around the observe switch, which matters precisely because the uploaded logo is stored during observe mode so the later switch is instant.
 
-The second path exists so a provider credential never reaches a client, a catalog payload, or a stored key, and provider image bytes are **not** written to R2 while Logo.dev self-hosting rights are unconfirmed — the employer's own uploaded logo is a different asset and is stored, because the employer published it on its own board. The image probe requests `fallback=404`, so Logo.dev's generated monogram tile can never be served as if it were a real logo. Responses keep `max-age=60, must-revalidate`, so a wrong-icon report takes effect within a minute.
+The second path exists so a provider credential never reaches a client, a catalog payload, or a stored key, and provider image bytes are **not** written to R2 while Logo.dev self-hosting rights are unconfirmed — the employer's own uploaded logo is a different asset and is stored, because the employer published it on its own board. The image probe requests `fallback=404`, so Logo.dev's generated monogram tile can never be served as if it were a real logo.
 
-Once the Logo.dev plan confirms self-hosting and retention, record the confirmation and the resolver will cache the icon instead:
+Responses carry `max-age=60, stale-while-revalidate=86400, stale-if-error=86400`: a reader is served a cached icon at once and the copy refreshes in the background, so a wrong-icon report still lands within about a minute without anyone waiting on the provider fetch. While retention is unlicensed the read path only ever serves those bytes through this origin; once it is licensed the first read also stores them (see below).
+
+Icons are served from the custom domain `api.ntern.app`, because Cloudflare's Cache API never populates on `workers.dev`. The Worker's icon route reads and fills that cache, so a warm colo answers without a D1 read or a provider fetch. The zone's default Browser Cache TTL would otherwise rewrite the icon's `max-age` to four hours, so a scoped cache rule (`http_request_cache_settings`, `api.ntern.app/company-icons/*`, browser and edge TTL `respect_origin`) keeps the interval honest; it is configured through the Cloudflare API, not OpenTofu, the same way the R2 lifecycle rule is. Everything except icons stays on the `workers.dev` API origin, so cookies, signed URLs, and CORS keep one origin.
+
+Once the Logo.dev plan confirms self-hosting and retention, record the confirmation and both the resolver and the read path cache the icon instead. The read path stores the first provider image it serves, so an employer resolved before the confirmation is cached the first time someone views it rather than waiting on a re-resolution:
 
 ```bash
 curl --fail-with-body --silent --show-error \

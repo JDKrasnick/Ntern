@@ -837,6 +837,16 @@ export async function documentContent(request: Request, env: Environment, userId
   return new Response(object.body, { headers });
 }
 
+/**
+ * Cloudflare's edge cache, which only populates when the request arrives on a zone
+ * hostname — it is a no-op on `workers.dev`. The icon route is safe to cache: its
+ * responses carry their own `max-age`, a miss is `no-store`, and it is public.
+ */
+interface EdgeCache { match(request: Request): Promise<Response | undefined>; put(request: Request, response: Response): Promise<void> }
+function edgeIconCache(): EdgeCache | undefined {
+  return (globalThis as { caches?: { default?: EdgeCache } }).caches?.default;
+}
+
 async function fetchHandler(request: Request, env: Environment): Promise<Response> {
   if (request.method === 'OPTIONS') return withCors(new Response(null, { status: 204 }));
   const url = new URL(request.url);
@@ -861,7 +871,12 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
         await employerIcons.markProviderIcon({ canonicalEmployerId: id, iconKey: key, now: new Date().toISOString() });
       }
       : undefined;
-    return withCors(await companyIconResponse(companyIcon[1]!, {
+    const cache = edgeIconCache();
+    if (cache) {
+      const hit = await cache.match(request).catch(() => undefined);
+      if (hit) return withCors(hit);
+    }
+    const response = await companyIconResponse(companyIcon[1]!, {
       async getCanonicalEmployer(id) {
         if (!iconState || iconState.id !== id) return undefined;
         return {
@@ -879,7 +894,11 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       ...(retainIcon ? { retainIcon } : {}),
       ...(imageToken ? { logoDevImageToken: imageToken } : {}),
       resolver: publicHostResolver,
-    }));
+    });
+    if (cache && response.status === 200) {
+      await cache.put(request, response.clone()).catch(() => undefined);
+    }
+    return withCors(response);
   }
   if (request.method === 'GET' && url.pathname === '/oauth/gmail/callback') return withCors(await gmailCallback(request, env));
   if (request.method === 'POST' && url.pathname === '/internal/refresh-catalog') {
