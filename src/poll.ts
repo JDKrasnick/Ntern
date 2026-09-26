@@ -1674,8 +1674,20 @@ export class IngestionRunner {
         admissionMigrationPending ||= lifecycleMigrationPending;
         if (admissionMigrationPending) report.continuationSources.push(connector.id);
         // An open resolution pass also holds the source open: the delivery that
-        // empties it reconciles omissions and closures in the same message.
-        if (remainingRows.length && !report.continuationSources.includes(connector.id)) {
+        // empties it reconciles omissions and closures in the same message. A
+        // delivery that does not shrink the pending set is not making progress
+        // and must not re-enqueue the same work forever; the dispatcher's own
+        // cadence retries it. The pass's first delivery starts from an empty set,
+        // so it always continues.
+        const resolutionProgressed = pendingResolutionRows.size === 0
+          || nextPendingRows.length < pendingResolutionRows.size;
+        if (nextPendingRows.length && !resolutionProgressed) {
+          console.error(JSON.stringify({ event: 'github_resolution_stalled', sourceId: connector.id,
+            pendingBefore: pendingResolutionRows.size, pendingAfter: nextPendingRows.length,
+            scope: resolutionScope.length, slice: selectedSlice.length,
+            handled: resolution.handledExternalIds.size, retryable: resolution.retryableRowExternalIds.size }));
+        }
+        if (remainingRows.length && resolutionProgressed && !report.continuationSources.includes(connector.id)) {
           report.continuationSources.push(connector.id);
         }
         if (nextPendingRows.length) report.pendingResolution[connector.id] = nextPendingRows.length;

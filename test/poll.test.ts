@@ -1104,6 +1104,24 @@ describe('polling', () => {
     expect(pending.length).toBeLessThanOrEqual(retryableUrls.length);
   });
 
+  it('stops re-enqueueing a resolution pass that makes no progress', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const urls = Array.from({ length: 40 }, (_, index) => `https://jobs.example.com/always-fails-${index}`);
+    const rows = urls.map((url, index) => ({ ...listing(url, sourceId), row: index + 1, title: `Software Engineering Intern ${index}` }));
+    const poll = () => new Poller([new Adapter(sourceId, rows)], store, undefined, undefined,
+      async () => { throw new Error('Application link timed out'); }, false).poll({ maxListingsPerSourceRun: 25 });
+
+    const first = await poll();
+    expect(first.continuationSources).toEqual([sourceId]);
+    // Every row is retryable and the frontier is larger than the slice, so the
+    // pending set cannot shrink. The pass must fall back to the dispatcher's
+    // cadence instead of re-enqueueing itself forever.
+    const second = await poll();
+    expect(second.continuationSources).toEqual([]);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(40);
+  });
+
   it('defers a failed destination queue handoff and retries only that row', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'community-list';
