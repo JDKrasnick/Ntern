@@ -377,28 +377,54 @@ function companyMarkColor(company: string) {
   return company.split("").reduce((total, character) => total + character.charCodeAt(0), 0) % companyMarkColors.length;
 }
 
+/**
+ * A company tile: the real logo on a neutral white square, or the deterministic
+ * pastel monogram when there is no logo.
+ *
+ * The white square is the point. A third of the logos we resolve arrive with their
+ * own solid background baked into the image — navy for Astranis, white for
+ * Pinterest, black for Anduril — and on the pastel monogram tint that background
+ * reads as a square fighting its tile. A neutral tile lets the logo keep its own
+ * background and makes the pastel mean one thing: no mark for this employer yet.
+ * `contain` fits a wordmark or a square mark whole instead of cropping it, and the
+ * monogram shows through until the image arrives so a slow icon is never a blank.
+ */
 function CompanyMark({ company, employerId, size = 38 }: { company: string; employerId?: string; size?: number }) {
   const [imageUnavailable, setImageUnavailable] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
   // A recycled row can keep its state; a new employer must retry its own icon.
   useEffect(() => {
     setImageUnavailable(false);
+    setImageLoaded(false);
   }, [employerId]);
   const iconUri = employerId ? `${publicConfig.apiUrl.replace(/\/$/, "")}/company-icons/${encodeURIComponent(employerId)}` : undefined;
+  const showLogo = Boolean(iconUri) && !imageUnavailable;
   // A reviewed employer keeps one tile across renames: its canonical identity
   // drives the tint, while an unprojected company falls back to its display name.
-  const backgroundColor = employerId ? companyMonogramColors[companyMonogramColorIndex(employerId)] : companyMarkColors[companyMarkColor(company)];
+  const monogramColor = employerId ? companyMonogramColors[companyMonogramColorIndex(employerId)] : companyMarkColors[companyMarkColor(company)];
   const initials = employerId ? companyMonogramInitials(company) : companyInitials(company);
   const label = `${company} logo`;
+  const onLogo = showLogo && imageLoaded;
   return (
-    <View accessibilityLabel={label} style={[styles.companyMark, { backgroundColor, borderRadius: Math.round(size * 0.29), height: size, width: size }]}>
-      {iconUri && !imageUnavailable ? (
+    <View accessibilityLabel={label} style={[styles.companyMark, {
+      backgroundColor: onLogo ? "#FFFFFF" : monogramColor,
+      borderColor: colors.border,
+      borderRadius: Math.round(size * 0.29),
+      borderWidth: onLogo ? StyleSheet.hairlineWidth : 0,
+      height: size,
+      width: size,
+    }]}>
+      {showLogo ? (
         <Image
           accessibilityLabel={label}
           onError={() => setImageUnavailable(true)}
+          onLoad={() => setImageLoaded(true)}
+          resizeMode="contain"
           source={{ uri: iconUri }}
-          style={{ height: Math.round(size * 0.66), width: Math.round(size * 0.66) }}
+          style={{ height: Math.round(size * 0.7), width: Math.round(size * 0.7) }}
         />
-      ) : <Text style={[styles.companyMarkFallback, { fontSize: Math.max(11, Math.round(size * 0.32)) }]}>{initials}</Text>}
+      ) : null}
+      {onLogo ? null : <Text style={[styles.companyMarkFallback, { fontSize: Math.max(11, Math.round(size * 0.32)) }]}>{initials}</Text>}
     </View>
   );
 }
