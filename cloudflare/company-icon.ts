@@ -64,7 +64,12 @@ export async function companyIconResponse(
       return storedIconResponse(employer.iconKey, documents);
     }
     if (dependencies.automaticDisplay && await dependencies.automaticDisplay()) {
-      return storedIconResponse(employer.iconKey, documents);
+      const stored = await storedIconResponse(employer.iconKey, documents);
+      if (stored.status !== 404) return stored;
+      // Machine-owned references can outlive an R2 object (for example after a
+      // partial cache write or asset cleanup). A valid resolved domain is still
+      // usable, so fall through to the provider path and let retention repair
+      // the stale reference instead of permanently forcing a monogram.
     }
   }
   return automaticIconResponse(employerId, dependencies);

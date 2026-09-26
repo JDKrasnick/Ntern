@@ -189,8 +189,9 @@
 - [x] Fall back to the employer's own verified site when its board publishes nothing and the provider has no icon, reading only declared assets under the same gates, and let one bounded model call pick one of them - or name another URL on that same verified domain, which is the one place a model may point at an asset.
 - [x] Rasterize the board logos that are published only as SVG, so no employer is left without an icon because of the container its mark arrived in. The document passes a strict sanitizer, is rendered by resvg WebAssembly at icon width, and only the resulting PNG is stored; the module ships as its own `resvg.wasm` Worker part on the ingestion bundle, and the deploy plan guard permits exactly that part.
 - [x] Validate the resolver read-only against two real cohorts from the live catalog — 28 employers whose application link is on their own domain and 26 platform-hosted employers — verifying every expected domain against the live site. Zero incorrect domains in any provider configuration; on its own domain a role resolves with no provider once structured data is present.
-- [ ] Hold icon resolution in observe mode for a week before enabling automatic display.
-- [ ] Enable Logo.dev R2 caching only after the selected plan's self-hosting and retention rights are confirmed.
+- [x] Harden production coverage after rollout: version and re-run stale misses, prioritize employers with active roles, report both active-employer and role-weighted rates, inherit a reviewed brand/parent icon at read time, keep reviewed canonical domains above automatic evidence, and route cross-domain corporate redirects into identity review.
+- [x] Hold icon resolution in observe mode before enabling automatic display, then move production to bounded resolve mode after reviewing outcomes.
+- [x] Enable Logo.dev R2 caching after the selected plan's self-hosting and retention rights are confirmed and recorded in resolver settings.
 - [x] Define and test Greenhouse and Lever high-confidence route detection plus the simple-field, review-only, and never-fill policy.
 - [x] Build a local-only headed, no-submit browser companion pilot for reviewed Greenhouse and Lever test forms.
 - [ ] Add the application review and verification-handoff experience.

@@ -568,6 +568,7 @@ describe('evidence fingerprint', () => {
     expect(iconEvidenceFingerprint({ ...base, provider: 'lever' })).not.toBe(fingerprint);
     expect(iconEvidenceFingerprint({ ...base, tenant: 'globex' })).not.toBe(fingerprint);
     expect(iconEvidenceFingerprint({ ...base, tenant: undefined })).not.toBe(fingerprint);
+    expect(iconEvidenceFingerprint({ ...base, resolverVersion: 2 })).not.toBe(fingerprint);
   });
 
   it('collapses an identical link that differs only by query string or a trailing slash', () => {

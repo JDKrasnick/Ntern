@@ -883,7 +883,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     // trip instead of three.
     let employerId = companyIcon[1]!;
     try { employerId = decodeURIComponent(employerId); } catch { /* the raw segment is the id */ }
-    const [iconState, settings] = await Promise.all([employerIcons.context(employerId), employerIcons.settings()]);
+    const [iconState, settings] = await Promise.all([employerIcons.renderContext(employerId), employerIcons.settings()]);
     const display = settings.mode === 'resolve';
     // Provider bytes are cached only once the operator confirms self-hosting rights.
     const retainIcon = settings.logoDevRetentionLicensedAt

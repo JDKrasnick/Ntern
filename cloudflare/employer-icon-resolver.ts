@@ -38,13 +38,15 @@ import { safeIconSvg, type IconSvgRasterizer } from '../src/svg-icon.js';
 import { safeFetchBytes, safeFetchText, type HostResolver } from '../src/employer/safe-network.js';
 import { inferOpenAIJson, shadowDefaultModelId, type OpenAIJsonRequest, type OpenAIJsonResult } from './openai-shadow-inference.js';
 import {
-  D1EmployerIconStore, employerIconTieBreakWindowMs,
+  D1EmployerIconStore, employerIconIdentityReviewPriority, employerIconTieBreakWindowMs,
   type EmployerIconContext, type EmployerIconMode, type EmployerIconSettings, type EmployerIconTask,
 } from './employer-icon-store.js';
 import type { D1Database, R2Bucket } from './types.js';
 
 /** A resolved decision is revalidated on this cadence. */
 const ICON_REVALIDATE_MS = 30 * 24 * 60 * 60 * 1_000;
+/** Bump whenever resolver semantics change so old misses can be reconsidered. */
+export const ICON_RESOLVER_VERSION = 2;
 /** A definitive no-match backs off from one day to the revalidation ceiling. */
 const ICON_UNRESOLVED_BASE_RETRY_MS = 24 * 60 * 60 * 1_000;
 /** A transient provider or network problem retries sooner, from one hour. */
@@ -197,9 +199,10 @@ export async function enqueueEmployerIconResolution(
       canonicalEmployerId: seed.canonicalEmployerId, displayName: seed.displayName,
       applicationUrl: seed.applicationUrl, provider: seed.provider,
       ...(seed.tenant ? { tenant: seed.tenant } : {}),
+      resolverVersion: ICON_RESOLVER_VERSION,
     }),
     evidenceJson: boundedIconEvidence({
-      version: 1, kind: 'seed', ...seed, enqueuedAt: at,
+      version: 1, resolverVersion: ICON_RESOLVER_VERSION, kind: 'seed', ...seed, enqueuedAt: at,
     }),
     nextRetryAt: at,
     now: at,
@@ -507,6 +510,25 @@ interface AcceptInput extends ResolveTaskInput {
 async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome> {
   const { store, task, settings, env, now, deps, context, seed, decision, gathered, providers, at } = input;
   const domain = decision.selectedDomain!;
+  const corporateRedirect = await observedCorporateRedirect(domain, deps);
+  if (corporateRedirect) {
+    await store.markUnresolved({
+      taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
+      evidenceJson: boundedIconEvidence({
+        ...evidenceRecord(seed, decision, gathered, providers, {
+          outcome: 'unresolved', reasonCode: 'corporate-redirect-review', attempt: input.attempt,
+        }),
+        corporateRedirect,
+      }),
+      nextRetryAt: new Date(now.getTime() + ICON_REVALIDATE_MS).toISOString(), now: at,
+      reviewPriority: employerIconIdentityReviewPriority,
+    });
+    console.warn(JSON.stringify({
+      event: 'company_icon_resolution_corporate_redirect', canonicalEmployerId: context.id,
+      fromDomain: corporateRedirect.fromDomain, toDomain: corporateRedirect.toDomain,
+    }));
+    return { outcome: 'unresolved', reasonCode: 'corporate-redirect-review' };
+  }
   let iconKey: string | undefined;
   let imageVerified = false;
   let assetSource: 'declared' | 'model' | undefined;
@@ -790,7 +812,7 @@ export async function judgeIconProposal(input: {
   * is the employer's own statement about itself, which is what makes a model's
   * suggestion usable rather than merely plausible.
   */
- async function verifyProposedDomain(
+async function verifyProposedDomain(
    domain: string,
    displayName: string,
    declaredName: string | undefined,
@@ -831,6 +853,31 @@ async function runIconProposal(input: {
     return await judgeIconProposal({ displayName: seed.displayName, declaredName, deps, response: result.response });
   } catch {
     return { domain: null, confidence: null, reasonCode: 'not-attempted' };
+  }
+}
+
+/**
+ * A homepage moving to another registrable domain often means a merger, rename,
+ * or portfolio-company transition. That is employer identity, not icon discovery,
+ * so automatic resolution pauses and gives the exact destination to a reviewer.
+ * Network failures fail open here because image verification remains the hard gate.
+ */
+async function observedCorporateRedirect(
+  domain: string,
+  deps: EmployerIconResolverDependencies,
+): Promise<{ fromDomain: string; toDomain: string } | undefined> {
+  try {
+    const result = await safeFetchText(`https://${domain}/`, {
+      resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch,
+      timeoutMs: ICON_LINK_TIMEOUT_MS, maxRedirects: ICON_LINK_MAX_REDIRECTS, maxBodyBytes: 8 * 1024,
+      onOversize: 'truncate', headers: ICON_PAGE_REQUEST_HEADERS,
+    });
+    if (result.status < 200 || result.status >= 400) return undefined;
+    const toDomain = registrableDomain(new URL(result.url).hostname);
+    const fromDomain = registrableDomain(domain);
+    return toDomain && fromDomain && toDomain !== fromDomain ? { fromDomain, toDomain } : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -1233,6 +1280,9 @@ function iconCandidates(
     exempt[domain] ||= employerNamesDomain(context.displayName, domain);
   };
   add(hostOf(seed.applicationUrl) ?? '', 'final-url');
+  if (context.websiteDomain && context.websiteDomainSource === 'reviewed') {
+    add(context.websiteDomain, 'reviewed-domain');
+  }
   let titleMatches = false;
   let siteMatches = false;
   let organizationNameMatches = false;
