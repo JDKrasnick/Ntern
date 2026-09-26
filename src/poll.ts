@@ -1582,6 +1582,11 @@ export class IngestionRunner {
           ? batch.processed.listings.filter((listing) => {
             const id = externalId(listing);
             if (pendingResolutionRows.has(id) || !previouslyActiveIds.has(id)) return true;
+            // The trusted-community qualification hash is only maintained while
+            // the gate is on. Reading it while the gate is off makes a row that
+            // still carries a stale qualification look changed on every poll,
+            // which re-adds it to the pass forever.
+            if (!this.trustedCommunityCatalogEnabled) return false;
             const priorMaterialHash = priorByExternalId.get(id)?.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash;
             return priorMaterialHash !== undefined && priorMaterialHash !== sourceMaterialHash(listing);
           }).sort((left, right) => (pendingOrder.get(externalId(left)) ?? Number.MAX_SAFE_INTEGER)
