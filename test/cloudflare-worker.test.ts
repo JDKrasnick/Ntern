@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider, admissionOperationalSignals } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider, admissionOperationalSignals, catalogStarvationSignal } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -1338,5 +1338,27 @@ describe('admission operational signals', () => {
     const result = admissionOperationalSignals({ newlyOpenedIncidents: 2, activeIncidents: 3085, staleEligible: 845, stale: 6050 });
     expect(result.signals).toEqual(['new-admission-incidents']);
     expect(result.details).toContain('New admission incidents (last 24h): 2');
+  });
+});
+
+describe('catalog starvation signal', () => {
+  const now = new Date('2026-09-26T18:00:00.000Z');
+
+  it('fires when eligible roles exist but the newest published role is older than the window', () => {
+    expect(catalogStarvationSignal({ newestPublishedAt: '2026-09-26T01:15:00.000Z', eligible: 1600, now }))
+      .toEqual({ starved: true, hoursSinceNewest: 16.75 });
+  });
+
+  it('stays quiet while a role has been published inside the window', () => {
+    expect(catalogStarvationSignal({ newestPublishedAt: '2026-09-26T17:30:00.000Z', eligible: 1600, now }))
+      .toEqual({ starved: false, hoursSinceNewest: 0.5 });
+  });
+
+  it('never fires on an empty catalog, which is a different failure', () => {
+    expect(catalogStarvationSignal({ eligible: 0, now })).toEqual({ starved: false });
+  });
+
+  it('treats a populated catalog with no publication timestamp as starved', () => {
+    expect(catalogStarvationSignal({ eligible: 3, now })).toEqual({ starved: true });
   });
 });
