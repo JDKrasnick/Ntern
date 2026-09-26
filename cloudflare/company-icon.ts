@@ -74,7 +74,11 @@ async function storedIconResponse(iconKey: string, documents: R2Bucket): Promise
     'Content-Security-Policy': 'sandbox',
     'X-Content-Type-Options': 'nosniff',
     // The public URL is stable even when the reviewed R2 key changes.
-    'Cache-Control': 'public, max-age=60, must-revalidate',
+    // `must-revalidate` made every load after a minute block on the provider fetch
+    // again. Stale-while-revalidate serves the cached icon at once and refreshes it
+    // in the background, so a wrong-icon report still lands within about a minute
+    // but a reader never waits for it.
+    'Cache-Control': 'public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400',
   });
   if (object.size !== undefined) headers.set('Content-Length', String(object.size));
   return new Response(object.body, { headers });
@@ -112,7 +116,11 @@ async function automaticIconResponse(employerId: string, dependencies: CompanyIc
         'Content-Type': contentType!.split(';')[0]!.trim().toLowerCase(),
         'Content-Security-Policy': 'sandbox',
         'X-Content-Type-Options': 'nosniff',
-        'Cache-Control': 'public, max-age=60, must-revalidate',
+        // `must-revalidate` made every load after a minute block on the provider fetch
+    // again. Stale-while-revalidate serves the cached icon at once and refreshes it
+    // in the background, so a wrong-icon report still lands within about a minute
+    // but a reader never waits for it.
+    'Cache-Control': 'public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400',
       },
     });
   } catch {

@@ -847,8 +847,26 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   const companyIcon = /^\/company-icons\/([^/]+)$/u.exec(url.pathname);
   if (request.method === 'GET' && companyIcon) {
     const employerIcons = new D1EmployerIconStore(env.DB);
-    return withCors(await companyIconResponse(companyIcon[1]!, new D1CatalogAdmissionStore(env.DB), env.DOCUMENTS, {
-      automaticDomain: (id) => employerIcons.automaticDomain(id),
+    // One read answers both "does this employer have an icon?" and "which domain
+    // would an automatic icon use?", so a public icon request pays one D1 round
+    // trip instead of three.
+    let employerId = companyIcon[1]!;
+    try { employerId = decodeURIComponent(employerId); } catch { /* the raw segment is the id */ }
+    const iconState = await employerIcons.context(employerId);
+    return withCors(await companyIconResponse(companyIcon[1]!, {
+      async getCanonicalEmployer(id) {
+        if (!iconState || iconState.id !== id) return undefined;
+        return {
+          id: iconState.id,
+          displayName: iconState.displayName,
+          reviewedAt: '',
+          reviewedBy: '',
+          ...(iconState.iconKey ? { iconKey: iconState.iconKey } : {}),
+          ...(iconState.iconSource ? { iconSource: iconState.iconSource } : {}),
+        };
+      },
+    }, env.DOCUMENTS, {
+      automaticDomain: async () => iconState?.resolutionStatus === 'resolved' ? iconState.websiteDomain : undefined,
       automaticDisplay: async () => (await employerIcons.settings()).mode === 'resolve',
       ...(imageToken ? { logoDevImageToken: imageToken } : {}),
       resolver: publicHostResolver,

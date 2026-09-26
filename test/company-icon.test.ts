@@ -15,7 +15,7 @@ describe('company icon route', () => {
     }, { async get(key) { return key === 'company-icons/acme/logo-v1.webp' ? object('image/webp') : null; } } as R2Bucket);
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('image/webp');
-    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, must-revalidate');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400');
     expect(response.headers.get('Content-Security-Policy')).toBe('sandbox');
     expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
   });
@@ -31,7 +31,7 @@ describe('company icon route', () => {
 
     const first = await companyIconResponse('acme', employer, documents);
     expect(await first.text()).toBe('company-icons/acme/logo-v1.webp');
-    expect(first.headers.get('Cache-Control')).toBe('public, max-age=60, must-revalidate');
+    expect(first.headers.get('Cache-Control')).toBe('public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400');
 
     iconKey = 'company-icons/acme/logo-v2.webp';
     const updated = await companyIconResponse('acme', employer, documents);
@@ -96,7 +96,7 @@ describe('automatic company icon route', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('image/webp');
-    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, must-revalidate');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60, stale-while-revalidate=86400, stale-if-error=86400');
     expect(response.headers.get('Content-Security-Policy')).toBe('sandbox');
     expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3, 4]));
