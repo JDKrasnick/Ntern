@@ -5961,6 +5961,92 @@ function ResumeReviewLoading({ caption }: { caption: string }) {
   );
 }
 
+function postingHost(url?: string): string | undefined {
+  if (!url) return undefined;
+  try { return new URL(url).host.replace(/^www\./u, ""); } catch { return url.replace(/^https?:\/\//u, "").split("/")[0]; }
+}
+
+/** Shown while Ntern fetches an employer posting. A single teal scan line sweeps
+ * the page skeleton — "reading the posting" — with an elapsed counter so a slow
+ * scrape reads as progress rather than a stall. */
+function ResumePostingFetch({ host, caption }: { host?: string; caption: string }) {
+  const motionAllowed = useContext(MotionAllowedContext);
+  const scan = useRef(new Animated.Value(0)).current;
+  const halo = useRef(new Animated.Value(0.5)).current;
+  const [size, setSize] = useState({ height: 0, width: 0 });
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setElapsed((value) => value + 1), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (!motionAllowed) { scan.setValue(0.35); halo.setValue(0.75); return undefined; }
+    const sweep = Animated.loop(Animated.sequence([
+      Animated.timing(scan, { toValue: 1, duration: 1_900, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(scan, { toValue: 0, duration: 0, useNativeDriver: true }),
+    ]));
+    const blink = Animated.loop(Animated.sequence([
+      Animated.timing(halo, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(halo, { toValue: 0.5, duration: 700, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    sweep.start(); blink.start();
+    return () => { sweep.stop(); blink.stop(); };
+  }, [halo, motionAllowed, scan]);
+  const translateY = scan.interpolate({ inputRange: [0, 1], outputRange: [0, Math.max(size.height, 1)] });
+  const widths = ["92%", "78%", "86%", "64%", "90%", "72%"] as const;
+  return (
+    <View accessibilityLabel={caption} style={styles.resumeFetch}>
+      <View style={styles.resumeFetchHead}>
+        <Ionicons color={colors.signal} name="globe-outline" size={16} />
+        <Text numberOfLines={1} style={styles.resumeFetchHost}>{host ?? "the employer’s site"}</Text>
+        <View style={styles.resumeFetchElapsed}>
+          <Animated.View style={[styles.resumeFetchDot, { opacity: halo }]} />
+          <Text style={styles.resumeFetchElapsedText}>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}</Text>
+        </View>
+      </View>
+      <View onLayout={(event) => setSize({ height: event.nativeEvent.layout.height, width: event.nativeEvent.layout.width })} style={styles.resumeFetchSkeleton}>
+        {motionAllowed && size.height ? (
+          <Animated.View pointerEvents="none" style={[styles.resumeFetchScan, { transform: [{ translateY }] }]} />
+        ) : null}
+        <View style={[styles.resumeLoadingBar, styles.resumeFetchTitle]} />
+        <View style={[styles.resumeLoadingBar, styles.resumeFetchMeta]} />
+        <View style={styles.resumeFetchLines}>
+          {widths.map((width, index) => <View key={index} style={[styles.resumeLoadingBar, styles.resumeLoadingLine, { width }]} />)}
+        </View>
+      </View>
+      <Text style={styles.resumeFetchCaption}>{caption}</Text>
+    </View>
+  );
+}
+
+/** Revealed only when the fetch fails, so it pops in rather than sitting under
+ * the animation as a permanent second option. */
+function ResumePastePrompt({ heading, message, value, onChangeText, onSubmit, busy }: {
+  heading: string; message: string; value: string;
+  onChangeText: (value: string) => void; onSubmit: () => void; busy: boolean;
+}) {
+  const motionAllowed = useContext(MotionAllowedContext);
+  const appear = useRef(new Animated.Value(motionAllowed ? 0 : 1)).current;
+  useEffect(() => {
+    if (!motionAllowed) { appear.setValue(1); return undefined; }
+    const anim = Animated.timing(appear, { toValue: 1, duration: 280, easing: Easing.out(Easing.cubic), useNativeDriver: true });
+    anim.start();
+    return () => anim.stop();
+  }, [appear, motionAllowed]);
+  const translateY = appear.interpolate({ inputRange: [0, 1], outputRange: [12, 0] });
+  return (
+    <Animated.View accessibilityLabel={heading} style={[styles.resumePastePrompt, { opacity: appear, transform: [{ translateY }] }]}>
+      <View style={styles.resumePastePromptHead}>
+        <Ionicons color={colors.danger} name="alert-circle-outline" size={16} />
+        <Text style={styles.resumePastePromptTitle}>{heading}</Text>
+      </View>
+      <Text style={styles.resumeSectionDescription}>{message} Pasted text stays in your private resume workspace.</Text>
+      <TextInput accessibilityLabel="Job description" multiline onChangeText={onChangeText} placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} value={value} />
+      <View style={styles.resumeBankComposerAction}><ActionButton disabled={!value.trim() || busy} label="Use private description" onPress={onSubmit} /></View>
+    </Animated.View>
+  );
+}
+
 function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: string; onSignIn?: () => void; onDraftingChange?: (value: boolean) => void }) {  const { width, height } = useWindowDimensions();
   const desktop = width >= 700;
   /** Fixed height so the pages scroll on the left while the panel stays put. */
@@ -5994,6 +6080,9 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
   const [manualDescription, setManualDescription] = useState("");
   const [draft, setDraft] = useState<ResumeDraftCard>();
   const [resumeBusy, setResumeBusy] = useState(false);
+  /** True only while the employer posting itself is being fetched, which is the
+   * long wait the fetch animation covers. */
+  const [fetchingPosting, setFetchingPosting] = useState(false);
   const [activeChange, setActiveChange] = useState(0);
   const [reviewMode, setReviewMode] = useState<"changes" | "preview">("changes");
   const [artifact, setArtifact] = useState<ResumeArtifactCard>();
@@ -6166,7 +6255,10 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
   useEffect(() => {
     if (jobImport?.status !== "pending") return;
     let cancelled = false;
-    void pollResumeImport(() => api<ResumeImportCard>(`/me/resume-imports/${encodeURIComponent(jobImport.importId)}`, token))
+    // The paste prompt is hidden while the fetch runs, so keep polling long
+    // enough for the backend to reach a terminal state instead of leaving the
+    // screen pending forever.
+    void pollResumeImport(() => api<ResumeImportCard>(`/me/resume-imports/${encodeURIComponent(jobImport.importId)}`, token), { attempts: 24, intervalMs: 2_000 })
       .then(async (value) => {
         if (cancelled) return;
         setJobImport(value);
@@ -6380,7 +6472,7 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
       onSignIn?.();
       return;
     }
-    setResumeBusy(true); setBankError(undefined);
+    setResumeBusy(true); setFetchingPosting(true); setBankError(undefined);
     void api<ResumeImportCard>("/me/resume-jobs/resolve", token, { method: "POST", body: JSON.stringify({ url }) })
       .then(async (value) => {
         setJobImport(value); setDraft(undefined); setActiveChange(0); setBestExistingRecommendation(undefined);
@@ -6392,7 +6484,7 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
         }
       })
       .catch((error) => setBankError(error instanceof Error ? error.message : "We couldn't import that job."))
-      .finally(() => setResumeBusy(false));
+      .finally(() => { setResumeBusy(false); setFetchingPosting(false); });
   };
   const importJob = () => importJobUrl(jobUrl);
   const [pendingImportUrl, setPendingImportUrl] = useState<string | undefined>(pendingResumeImportUrl);
@@ -6601,13 +6693,21 @@ function ResumeWorkspace({ token = "", onSignIn, onDraftingChange }: { token?: s
           </View>
           <ActionButton label={!signedIn ? "Sign in to continue" : resumeBusy ? "Checking…" : "Continue"} onPress={importJob} disabled={!jobUrl.trim() || resumeBusy} />
         </View>
-        {jobImport ? (
-          <View style={styles.resumeManualFallback}>
-            <Text style={styles.inputLabel}>Paste the job description to continue</Text>
-            <Text style={styles.resumeSectionDescription}>{jobImport.status === "pending" ? "The URL is queued for safe retrieval. You can wait here, or paste the description now." : `${resumeImportFailureMessages[jobImport.failureReason ?? ""] ?? "We couldn't read the public page."} Paste the description to continue.`} Pasted text stays in your private resume workspace.</Text>
-            <TextInput value={manualDescription} onChangeText={setManualDescription} accessibilityLabel="Job description" multiline placeholder="Paste the official job description" placeholderTextColor={colors.placeholder} selectionColor={colors.signal} style={styles.resumeBankInput} />
-            <View style={styles.resumeBankComposerAction}><ActionButton label="Use private description" onPress={saveManualDescription} disabled={!manualDescription.trim() || resumeBusy} /></View>
-          </View>
+        {fetchingPosting || jobImport?.status === "pending" ? (
+          <ResumePostingFetch
+            caption={jobImport?.status === "pending" ? "Reading the posting…" : "Fetching the posting from the employer’s site…"}
+            host={postingHost(jobImport?.canonicalUrl ?? jobUrl)}
+          />
+        ) : null}
+        {jobImport && jobImport.status !== "pending" ? (
+          <ResumePastePrompt
+            busy={resumeBusy}
+            heading="Paste the job description to continue"
+            message={`${resumeImportFailureMessages[jobImport.failureReason ?? ""] ?? "We couldn't read the public page."} Paste the description to continue.`}
+            onChangeText={setManualDescription}
+            onSubmit={saveManualDescription}
+            value={manualDescription}
+          />
         ) : null}
         </>}
         <View style={styles.resumeBaseAccessRow}>
@@ -9489,6 +9589,21 @@ const styles = StyleSheet.create({
   resumeLoadingSection: { gap: 7, marginTop: 6 },
   resumeLoadingHeading: { height: 9, width: "32%" },
   resumeLoadingLine: { height: 6 },
+  resumeFetch: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, gap: 14, marginTop: 18, padding: 18 },
+  resumeFetchHead: { alignItems: "center", flexDirection: "row", gap: 8 },
+  resumeFetchHost: { color: colors.ink, flex: 1, fontSize: 13, fontWeight: "700", minWidth: 0 },
+  resumeFetchElapsed: { alignItems: "center", flexDirection: "row", gap: 6 },
+  resumeFetchDot: { backgroundColor: colors.signal, borderRadius: 999, height: 8, width: 8 },
+  resumeFetchElapsedText: { color: colors.muted, fontSize: 12, fontWeight: "600" },
+  resumeFetchSkeleton: { gap: 7, position: "relative" },
+  resumeFetchScan: { backgroundColor: colors.signal, borderRadius: 2, height: 2, left: 0, opacity: 0.55, position: "absolute", right: 0, top: 0 },
+  resumeFetchTitle: { height: 13, width: "62%" },
+  resumeFetchMeta: { height: 7, width: "34%" },
+  resumeFetchLines: { gap: 7, marginTop: 8 },
+  resumeFetchCaption: { color: colors.body, fontSize: 13, lineHeight: 18 },
+  resumePastePrompt: { backgroundColor: colors.surface, borderColor: colors.separator, borderRadius: 14, borderWidth: 1, gap: 10, marginTop: 18, padding: 18 },
+  resumePastePromptHead: { alignItems: "center", flexDirection: "row", gap: 8 },
+  resumePastePromptTitle: { color: colors.ink, flex: 1, fontSize: 14, fontWeight: "800", minWidth: 0 },
   resumeReviewPagesRow: { flexDirection: "row", gap: 18, justifyContent: "center", width: "100%" },
   resumePageBar: { alignItems: "center", flexDirection: "row", gap: 12, justifyContent: "space-between", maxWidth: 1600, width: "100%" },
   resumePageFull: { alignItems: "center", gap: 8, width: "100%" },
