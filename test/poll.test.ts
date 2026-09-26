@@ -1078,6 +1078,32 @@ describe('polling', () => {
       .toEqual(expect.arrayContaining(failedUrls));
   });
 
+  it('advances a bounded resolution pass past a retryable prefix instead of starving it', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const retryableUrls = Array.from({ length: 30 }, (_, index) => `https://jobs.example.com/retryable-${index}`);
+    const resolvableUrls = Array.from({ length: 10 }, (_, index) => `https://jobs.example.com/resolvable-${index}`);
+    const rows = [...retryableUrls, ...resolvableUrls]
+      .map((url, index) => ({ ...listing(url, sourceId), row: index + 1, title: `Software Engineering Intern ${index}` }));
+    const poll = () => new Poller([new Adapter(sourceId, rows)], store, undefined, undefined,
+      async (url: string) => {
+        if (retryableUrls.includes(url)) throw new Error('Application link timed out');
+        return { url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+          recommendation: 'alert-eligible' as const, signals: ['source policy'] } } };
+      }, false).poll({ maxListingsPerSourceRun: 25 });
+
+    // The retryable prefix (30) is larger than the slice (25). If the pass keeps
+    // re-selecting the same board-order prefix, the resolvable tail is never
+    // attempted, the pending set never shrinks, and the source re-enqueues a
+    // continuation forever.
+    for (let attempt = 0; attempt < 4; attempt += 1) await poll();
+
+    const references = [...store.jobs.values()].flatMap((job) => job.sourceReferences.map((reference) => reference.applyUrl));
+    expect(references).toEqual(expect.arrayContaining(resolvableUrls));
+    const pending = (await store.getCheckpoint(sourceId))?.pendingResolutionRows ?? [];
+    expect(pending.length).toBeLessThanOrEqual(retryableUrls.length);
+  });
+
   it('defers a failed destination queue handoff and retries only that row', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'community-list';

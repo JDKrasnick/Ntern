@@ -1570,13 +1570,22 @@ export class IngestionRunner {
         // A pass slice comes from the whole board rather than from a concurrent
         // migration's candidates, so neither pass can close the other early.
         const previouslyActiveIds = new Set(previous?.activeExternalIds ?? []);
+        // `pendingResolutionRows` is ordered: the rows the pass has not attempted
+        // yet come before the rows already known to be retryable. Applying that
+        // order to the scope makes the slice resume where the last delivery
+        // stopped. Board order would re-select the same retryable prefix on every
+        // delivery, starving every later row and re-enqueueing a continuation
+        // forever.
+        const pendingOrder = new Map<string, number>();
+        for (const id of pendingResolutionRows) pendingOrder.set(id, pendingOrder.size);
         const resolutionScope = pendingResolutionRows.size
           ? batch.processed.listings.filter((listing) => {
             const id = externalId(listing);
             if (pendingResolutionRows.has(id) || !previouslyActiveIds.has(id)) return true;
             const priorMaterialHash = priorByExternalId.get(id)?.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash;
             return priorMaterialHash !== undefined && priorMaterialHash !== sourceMaterialHash(listing);
-          })
+          }).sort((left, right) => (pendingOrder.get(externalId(left)) ?? Number.MAX_SAFE_INTEGER)
+            - (pendingOrder.get(externalId(right)) ?? Number.MAX_SAFE_INTEGER))
           : migrationLimit === undefined ? listingsToResolve : [];
         const obligatedIds = new Set(obligatedListings.map(externalId));
         const sliceCapacity = options.maxListingsPerSourceRun === undefined
