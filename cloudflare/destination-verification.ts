@@ -19,7 +19,9 @@ import type { D1Database, MessageBatch, Queue, R2Bucket } from './types.js';
 import { enqueueShadowExtraction, type ShadowBaseline } from './shadow-extraction.js';
 import { normalizeExactPostingDescription, type ShadowExtractionOrigin } from '../src/shadow-extraction.js';
 import { safeDiagnostic } from '../src/source-health.js';
-import { recordQueueFailureBestEffort } from './dlq-operations.js';
+import { recordQueueFailureBestEffort, resolveQueueFailures } from './dlq-operations.js';
+
+const DESTINATION_VERIFICATION_QUEUE_NAME = 'intern-notifs-destination-verification';
 
 export interface DestinationVerificationMessage {
   version: 1;
@@ -467,6 +469,22 @@ export async function processDestinationVerificationBatch(
 ): Promise<void> {
   const jobs = new D1InternshipStore(env.DB);
   const operations = new D1CatalogAdmissionStore(env.DB);
+  // A delivery that failed an earlier attempt left a pending failure-ledger row.
+  // This delivery is about to settle or acknowledge, so the row is no longer
+  // pending: resolve it before the ack, exactly as the catalog lanes do. A
+  // first delivery has no row, so the guard skips the extra write. Resolution is
+  // best effort: a ledger write must never turn a settled verification into a
+  // retry, so a failure here is logged and the ack still proceeds.
+  const acknowledge = async (queued: MessageBatch<unknown>['messages'][number]) => {
+    if ((queued.attempts ?? 0) > 1) {
+      try { await resolveQueueFailures(env.DB, DESTINATION_VERIFICATION_QUEUE_NAME, queued.id); }
+      catch (error) {
+        console.error(JSON.stringify({ command: 'destination-verification-ledger-resolution',
+          messageId: queued.id, error: safeDiagnostic(error) }));
+      }
+    }
+    queued.ack();
+  };
   const settleWithoutVerification = async (
     queued: MessageBatch<unknown>['messages'][number],
     message: DestinationVerificationMessage,
@@ -477,7 +495,7 @@ export async function processDestinationVerificationBatch(
     if (message.occurrenceKey) await operations.completeScheduledVerification({ occurrenceKey: message.occurrenceKey,
       leaseToken: message.leaseToken, completedAt, classification, nextCheckAt });
     if (message.idempotencyKey) await operations.recordVerificationCompletion(message.idempotencyKey, completedAt);
-    queued.ack();
+    await acknowledge(queued);
   };
   const opened: Array<{ sourceId: string; host: string; reason: string; incidentId: string; messageType: 'incident-opened' | 'quarantine' }> = [];
   const pending: Array<{ queued: MessageBatch<unknown>['messages'][number]; message: DestinationVerificationMessage }> = [];
@@ -489,13 +507,13 @@ export async function processDestinationVerificationBatch(
     try {
       const message = parseMessage(queued.body);
       if (message.idempotencyKey && await operations.verificationCompleted(message.idempotencyKey)) {
-        queued.ack();
+        await acknowledge(queued);
         continue;
       }
       const job = await jobs.getJob(message.jobId);
-      if (!job) { queued.ack(); continue; }
+      if (!job) { await acknowledge(queued); continue; }
       const reference = job.sourceReferences.find((item) => item.sourceId === message.sourceId && item.externalId === message.externalId);
-      if (!reference) { queued.ack(); continue; }
+      if (!reference) { await acknowledge(queued); continue; }
       const candidateOnly = message.reason === 'historical-backfill' && !message.metadataBackfillToken;
       const naturalProviderShadow = message.shadowOrigin === 'provider-poll' && Boolean(message.shadowContentHash);
       if (!candidateOnly && !destinationVerificationMatchesReference(reference, message)) {
@@ -510,7 +528,7 @@ export async function processDestinationVerificationBatch(
       }
       const attemptKey = `${candidateOnly ? `backfill:${message.generationId ?? ''}:${message.occurrenceKey ?? ''}` : message.metadataBackfillToken ? `metadata:${message.metadataBackfillToken}` : 'live'}\0${message.jobId}\0${message.sourceId}\0${message.externalId}\0${message.candidateUrl}`;
       if (pendingAttemptKeys.has(attemptKey)) {
-        queued.ack(); continue;
+        await acknowledge(queued); continue;
       }
       if (!candidateOnly && !message.metadataBackfillToken && !naturalProviderShadow && metadataExtractionCurrent(reference, message)
         && await operations.hasVerificationAttemptSince(message.jobId, message.sourceId, message.candidateUrl, recentAttemptCutoff)) {
@@ -535,13 +553,13 @@ export async function processDestinationVerificationBatch(
       const attemptedAt = now().toISOString();
       try {
         if (message.idempotencyKey && await operations.verificationCompleted(message.idempotencyKey)) {
-          queued.ack();
+          await acknowledge(queued);
           continue;
         }
         const job = await jobs.getJob(message.jobId);
-        if (!job) { queued.ack(); continue; }
+        if (!job) { await acknowledge(queued); continue; }
         const reference = job.sourceReferences.find((item) => item.sourceId === message.sourceId && item.externalId === message.externalId);
-        if (!reference) { queued.ack(); continue; }
+        if (!reference) { await acknowledge(queued); continue; }
         const candidateOnly = message.reason === 'historical-backfill' && !message.metadataBackfillToken;
         const naturalProviderShadow = message.shadowOrigin === 'provider-poll' && Boolean(message.shadowContentHash);
         if (!candidateOnly && !destinationVerificationMatchesReference(reference, message)) {
@@ -583,7 +601,7 @@ export async function processDestinationVerificationBatch(
           await handoffShadowExtraction({ env, operations, message, title, description: apiAcquisition.artifact.text,
           sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false, structuredLocations: apiAcquisition.artifact.locations, method: apiAcquisition.method });
           if (message.idempotencyKey) await operations.recordVerificationCompletion(message.idempotencyKey, inspectedAt);
-          queued.ack(); continue;
+          await acknowledge(queued); continue;
         }
         // Historical collection cannot change admission, URL or notifications.
         // An identity-checked full API artifact needs no browser for that task.
@@ -594,7 +612,7 @@ export async function processDestinationVerificationBatch(
           await handoffShadowExtraction({ env, operations, message, title: apiAcquisition.artifact.title ?? reference.title,
             description: apiAcquisition.artifact.text, sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false, structuredLocations: apiAcquisition.artifact.locations,
             baseline: result.shadowBaseline, method: apiAcquisition.method });
-          queued.ack(); continue;
+          await acknowledge(queued); continue;
         }
         browser ??= await puppeteer.launch(env.DESTINATION_BROWSER);
         const page = await browser.newPage();
@@ -837,14 +855,14 @@ export async function processDestinationVerificationBatch(
         if (retryTransientFailure) queued.retry({ delaySeconds: DESTINATION_RETRY_DELAY_SECONDS });
         else {
           if (message.idempotencyKey) await operations.recordVerificationCompletion(message.idempotencyKey, inspectedAt);
-          queued.ack();
+          await acknowledge(queued);
         }
       } catch (error) {
         // The delivery never reached recordVerificationAttempt, so a failure
         // here left no server-side trace and accumulated in the dead-letter
         // queue as an unclassifiable message. Record it before the retry so a
         // systematic failure is diagnosable instead of invisible.
-        await recordQueueFailureBestEffort({ db: env.DB, queueName: 'intern-notifs-destination-verification',
+        await recordQueueFailureBestEffort({ db: env.DB, queueName: DESTINATION_VERIFICATION_QUEUE_NAME,
           messageId: queued.id, attempts: queued.attempts, timestamp: queued.timestamp, sourceId: message.sourceId,
           sourceKind: message.providerIdentity.provider, body: queued.body, error });
         console.error(JSON.stringify({ command: 'destination-verification', messageId: queued.id,

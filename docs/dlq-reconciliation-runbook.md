@@ -226,3 +226,33 @@ was unusable for this pass — the operator key did not match the deployed
 directly against the Cloudflare queue API and the audit rows were written to D1.
 Reconcile the operator key before the next reconciliation so the guarded plan
 and one-use token flow is available again.
+
+## 8. Failure-ledger resolution (2026-09-25)
+
+`queue_failure_events.resolved_at` is the pending flag: an unresolved row is a
+per-message failure no later delivery or disposition has cleared. It is not a
+queue depth and it is not the DLQ backlog. As of 2026-09-25 the table held 462
+unresolved rows (github 226, greenhouse 111, destination-verification 62,
+ashby 39, lever 24). Most are historical residue: rows written before the
+resolution paths existed, or messages that dead-lettered and were later disposed,
+whose messages are no longer anywhere. The DLQs themselves read 0-1.
+
+Two holes produced rows that will never clear on their own, and both now resolve:
+
+- **Destination verification recorded but never resolved.** The consumer's
+  per-message catch ledgered a failure and retried, but a later delivery that
+  settled or found the work already complete acked without clearing the row. It
+  had 0 resolved rows against 62 pending, growing at the transient browser
+  failure rate. It now resolves the row before every ack, guarded to retried
+  deliveries (`attempts > 1`) so a first delivery writes nothing extra.
+- **A DLQ disposition left the ledger pending.** `apply` recorded the audit row
+  and purged the message but never touched its `queue_failure_events` row, so a
+  reconciled DLQ kept its failures in the unresolved signal until the 30-day
+  cleanup. `apply` now resolves the row with the disposition.
+
+The existing residue is left untouched. It is not a live defect and it ages out
+at the 30-day cleanup (`cleanupDlqRecords`), so the unresolved count is bounded
+by the trailing 30 days of failures that are still pending. Treat a *growing*
+unresolved count for a queue, not a large absolute one, as the signal: with the
+two holes closed, growth means either a source that is genuinely still failing
+or a message still sitting in a DLQ.

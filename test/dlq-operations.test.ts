@@ -269,6 +269,22 @@ describe('protected DLQ operations', () => {
     database.close();
   });
 
+  it('resolves the failure-ledger row for a message it disposes', async () => {
+    const { database, dependencies } = subject([catalogMessage('m1')]);
+    await recordQueueFailure({ db: dependencies.db, queueName: 'intern-notifs-github', messageId: 'm1', attempts: 3,
+      sourceId: 'github-acme', sourceKind: 'markdown', body: { sourceId: 'github-acme' },
+      error: new Error('D1 DB is overloaded'), now: new Date('2026-09-04T10:00:00.000Z') });
+    const plan = await planDlq({ queue: 'github', action: 'discard', messageIds: ['m1'], expectedCount: 1,
+      reason: 'Poison message; source has been re-dispatched since' }, dependencies);
+    await applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 1 }, dependencies);
+    // The disposition is the last action anyone takes on this message, so its
+    // pending ledger row clears with it rather than lingering to the 30-day
+    // cleanup and inflating the unresolved signal.
+    expect(database.prepare('SELECT resolved_at FROM queue_failure_events WHERE message_id = ?').get('m1'))
+      .toMatchObject({ resolved_at: '2026-09-04T12:00:00.000Z' });
+    database.close();
+  });
+
   it('does not throw when failure-ledger persistence is unavailable', async () => {
     const run = vi.fn(async () => { throw new Error('D1 unavailable'); });
     const db = {

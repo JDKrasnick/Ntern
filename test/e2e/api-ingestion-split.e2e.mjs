@@ -692,6 +692,51 @@ test('reconnects D1 inside each compiled destination queue consumer before queue
   }
 });
 
+test('resolves a pending destination-verification failure row in the compiled consumer', async () => {
+  const bundleDirectory = join(repositoryRoot, 'cloudflare/dist/ingestion');
+  const ledgerRuntime = new Miniflare({ workers: [
+    await createWorkerConfig('intern-notifs-e2e-ledger', bundleDirectory, 'ingestion-worker.js', {
+      INTERNAL_SERVICE_SECRET: { type: 'text', value: internalServiceSecret },
+      OPERATIONS_SHARED_SECRET: { type: 'text', value: operationsSecret },
+      DB: { type: 'd1', id: 'intern-notifs-e2e-ledger' },
+    }),
+  ] });
+  await ledgerRuntime.ready;
+  const database = await ledgerRuntime.getD1Database('DB', 'intern-notifs-e2e-ledger');
+  await applyMigrations(database);
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+
+  // A duplicate completion settles the message without a job row, so the test
+  // isolates the failure-ledger resolution the ack now performs end to end.
+  await database.prepare('INSERT INTO destination_verification_completions (idempotency_key, completed_at) VALUES (?, ?)')
+    .bind('ledger-complete', '2026-09-25T00:00:00.000Z').run();
+  await database.prepare(`INSERT INTO queue_failure_events
+    (id, queue_name, message_id, delivery_attempt, payload_hash, category, diagnostic, first_failed_at, last_failed_at, resolved_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`)
+    .bind('failure-1', 'intern-notifs-destination-verification', 'ledger-message-1', 1, 'hash', 'transport',
+      '[url] timed out', '2026-09-25T00:00:00.000Z', '2026-09-25T00:00:00.000Z').run();
+
+  let acked = false;
+  await builtWorker.queue({ queue: 'intern-notifs-destination-verification', messages: [{
+    id: 'ledger-message-1', attempts: 2, timestamp: new Date('2026-09-25T00:00:00.000Z'),
+    body: { version: 1, jobId: 'job-1', sourceId: 'greenhouse-acme', externalId: '7654321',
+      candidateUrl: 'https://job-boards.greenhouse.io/acme/jobs/7654321',
+      providerIdentity: { provider: 'greenhouse', sourceId: 'greenhouse-acme',
+        sourceUrl: 'https://boards.greenhouse.io/acme', tenant: 'acme', postingId: '7654321' },
+      reason: 'daily-retry', queuedAt: '2026-09-25T00:00:00.000Z', idempotencyKey: 'ledger-complete' },
+    ack() { acked = true; },
+    retry() { throw new Error('a completed verification must not retry'); },
+  }] }, { DB: database });
+
+  const row = await database.prepare('SELECT resolved_at FROM queue_failure_events WHERE message_id = ?')
+    .bind('ledger-message-1').first();
+  await ledgerRuntime.dispose();
+
+  assert.equal(acked, true);
+  assert.ok(typeof row?.resolved_at === 'string' && row.resolved_at.length > 0,
+    'the pending failure-ledger row must resolve when the compiled consumer settles the message');
+});
+
 // Payload generators copied from test/fixtures/production-scale.ts. The e2e file
 // runs under bare `node --test`, which cannot import a TypeScript fixture, so the
 // generators live here byte-for-byte while the sizing constants stay documented.
