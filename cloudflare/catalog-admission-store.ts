@@ -1818,6 +1818,22 @@ export class D1CatalogAdmissionStore {
     return Number(row?.count ?? 0);
   }
 
+  /**
+   * The newest published role and how many open roles are currently catalog
+   * eligible. A stalled publication pipeline shows up here as an aging
+   * `newest` while `eligible` stays non-zero, which is the operator signal that
+   * new roles have stopped reaching the feed.
+   */
+  async catalogPublicationRecency(): Promise<{ newest?: string; eligible: number }> {
+    const row = await this.db.prepare(`SELECT count(*) AS eligible,
+        MAX(json_extract(value, '$.catalogVisibleAt')) AS newest
+      FROM catalog_items
+      WHERE kind = 'internship'
+        AND json_extract(value, '$.open') = 1
+        AND json_extract(value, '$.admission.catalogEligible') = 1`).first<{ eligible: number; newest: string | null }>();
+    return { ...(row?.newest ? { newest: row.newest } : {}), eligible: Number(row?.eligible ?? 0) };
+  }
+
   async resolveIncidents(jobId: string, sourceId: string, updatedAt: string, exceptReason?: AdmissionIncident['reasonCode']): Promise<void> {
     const condition = exceptReason ? ' AND reason_code <> ?' : '';
     await this.db.prepare(`UPDATE admission_incidents SET state = 'resolved', updated_at = ?

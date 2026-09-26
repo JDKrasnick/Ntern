@@ -1601,6 +1601,26 @@ export function admissionOperationalSignals(input: {
   };
 }
 
+/**
+ * How long the feed may go without a newly published role before the
+ * maintenance alert fires. The catalog watches active internship lists, so an
+ * eight-hour silence is a publication stall, not a quiet period.
+ */
+export const CATALOG_STARVATION_ALERT_HOURS = 8;
+
+/** True when open catalog-eligible roles exist but none was published recently.
+ * An empty catalog is a different failure and never reports through this signal. */
+export function catalogStarvationSignal(input: {
+  newestPublishedAt?: string; eligible: number; now: Date;
+}): { starved: boolean; hoursSinceNewest?: number } {
+  if (input.eligible === 0) return { starved: false };
+  const hours = input.newestPublishedAt
+    ? (input.now.getTime() - Date.parse(input.newestPublishedAt)) / 3_600_000
+    : Number.POSITIVE_INFINITY;
+  return { starved: hours >= CATALOG_STARVATION_ALERT_HOURS,
+    ...(Number.isFinite(hours) ? { hoursSinceNewest: hours } : {}) };
+}
+
 /** Markers are written only after a successful send: a send failure leaves the
  * sources unsuppressed and they are dispatched again on the next sweep, which
  * costs one idempotent poll instead of a missed interval. */
@@ -1945,15 +1965,24 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
     const queueAgeMs = queueMetrics?.oldestMessageTimestamp
       ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
+    // A stalled publication pipeline is invisible in the source-health surface:
+    // polls keep succeeding while admission withholds every new role. The age of
+    // the newest published role is the feed's own freshness.
+    const publication = await runScheduledStep('catalog_publication_recency',
+      () => new D1CatalogAdmissionStore(env.DB).catalogPublicationRecency());
+    const starvation = publication
+      ? catalogStarvationSignal({ newestPublishedAt: publication.newest, eligible: publication.eligible, now: observedAt })
+      : undefined;
     const operationalSignals = [
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),
       ...(recentOverloads ? ['d1-overloaded'] : []),
       ...(dlqGrowth && Object.keys(dlqGrowth.increases).length ? ['dlq-growth'] : []),
+      ...(starvation?.starved ? ['catalog-starvation'] : []),
     ];
     const alertSent = await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
       signals: operationalSignals, observedAt: observedAt.toISOString(),
-      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}.`,
+      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}; newest published role: ${publication?.newest ?? 'unavailable'} (${starvation?.hoursSinceNewest !== undefined ? `${starvation.hoursSinceNewest.toFixed(1)}h` : 'unknown'} ago; ${publication?.eligible ?? 'unavailable'} eligible roles).`,
     }));
     if (dlqGrowth?.changed && (!Object.keys(dlqGrowth.increases).length || alertSent)) {
       await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts));
