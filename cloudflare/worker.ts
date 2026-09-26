@@ -42,7 +42,7 @@ import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalo
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { companyIconResponse } from './company-icon.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
-import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, verifyIconDomain } from './employer-icon-resolver.js';
+import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, storeProviderIcon, verifyIconDomain } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
 import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
 import type { IconSvgRasterizer } from '../src/svg-icon.js';
@@ -859,6 +859,16 @@ export async function documentContent(request: Request, env: Environment, userId
   return new Response(object.body, { headers });
 }
 
+/**
+ * Cloudflare's edge cache, which only populates when the request arrives on a zone
+ * hostname — it is a no-op on `workers.dev`. The icon route is safe to cache: its
+ * responses carry their own `max-age`, a miss is `no-store`, and it is public.
+ */
+interface EdgeCache { match(request: Request): Promise<Response | undefined>; put(request: Request, response: Response): Promise<void> }
+function edgeIconCache(): EdgeCache | undefined {
+  return (globalThis as { caches?: { default?: EdgeCache } }).caches?.default;
+}
+
 async function fetchHandler(request: Request, env: Environment): Promise<Response> {
   if (request.method === 'OPTIONS') return withCors(new Response(null, { status: 204 }));
   const url = new URL(request.url);
@@ -869,12 +879,48 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   const companyIcon = /^\/company-icons\/([^/]+)$/u.exec(url.pathname);
   if (request.method === 'GET' && companyIcon) {
     const employerIcons = new D1EmployerIconStore(env.DB);
-    return withCors(await companyIconResponse(companyIcon[1]!, new D1CatalogAdmissionStore(env.DB), env.DOCUMENTS, {
-      automaticDomain: (id) => employerIcons.automaticDomain(id),
-      automaticDisplay: async () => (await employerIcons.settings()).mode === 'resolve',
+    // One read answers both "does this employer have an icon?" and "which domain
+    // would an automatic icon use?", so a public icon request pays one D1 round
+    // trip instead of three.
+    let employerId = companyIcon[1]!;
+    try { employerId = decodeURIComponent(employerId); } catch { /* the raw segment is the id */ }
+    const [iconState, settings] = await Promise.all([employerIcons.context(employerId), employerIcons.settings()]);
+    const display = settings.mode === 'resolve';
+    // Provider bytes are cached only once the operator confirms self-hosting rights.
+    const retainIcon = settings.logoDevRetentionLicensedAt
+      ? async (id: string, asset: { bytes: Uint8Array; contentType: string }) => {
+        const key = await storeProviderIcon(env, id, asset.bytes, asset.contentType);
+        await employerIcons.markProviderIcon({ canonicalEmployerId: id, iconKey: key, now: new Date().toISOString() });
+      }
+      : undefined;
+    const cache = edgeIconCache();
+    if (cache) {
+      const hit = await cache.match(request).catch(() => undefined);
+      if (hit) return withCors(hit);
+    }
+    const response = await companyIconResponse(companyIcon[1]!, {
+      async getCanonicalEmployer(id) {
+        if (!iconState || iconState.id !== id) return undefined;
+        return {
+          id: iconState.id,
+          displayName: iconState.displayName,
+          reviewedAt: '',
+          reviewedBy: '',
+          ...(iconState.iconKey ? { iconKey: iconState.iconKey } : {}),
+          ...(iconState.iconSource ? { iconSource: iconState.iconSource } : {}),
+        };
+      },
+    }, env.DOCUMENTS, {
+      automaticDomain: async () => iconState?.resolutionStatus === 'resolved' ? iconState.websiteDomain : undefined,
+      automaticDisplay: async () => display,
+      ...(retainIcon ? { retainIcon } : {}),
       ...(imageToken ? { logoDevImageToken: imageToken } : {}),
       resolver: publicHostResolver,
-    }));
+    });
+    if (cache && response.status === 200) {
+      await cache.put(request, response.clone()).catch(() => undefined);
+    }
+    return withCors(response);
   }
   if (request.method === 'GET' && url.pathname === '/oauth/gmail/callback') return withCors(await gmailCallback(request, env));
   if (request.method === 'POST' && url.pathname === '/internal/refresh-catalog') {

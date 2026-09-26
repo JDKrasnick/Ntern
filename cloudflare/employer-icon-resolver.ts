@@ -1670,6 +1670,20 @@ async function storeIconAsset(
   return key;
 }
 
+/**
+ * Stores a provider image the read path just fetched under the same immutable,
+ * content-addressed key the resolver uses, so a later resolution and a read-path
+ * cache land on one object rather than two.
+ */
+export async function storeProviderIcon(
+  env: EmployerIconResolverEnvironment,
+  canonicalEmployerId: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<string> {
+  return storeIconAsset(env, canonicalEmployerId, bytes, contentType, 'logo');
+}
+
 function unresolvedRetryDelay(attempt: number): number {
   return Math.min(ICON_UNRESOLVED_BASE_RETRY_MS * 2 ** Math.max(0, attempt - 1), ICON_REVALIDATE_MS);
 }

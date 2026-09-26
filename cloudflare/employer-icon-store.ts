@@ -363,6 +363,23 @@ export class D1EmployerIconStore {
   }
 
   /**
+   * Records the provider icon the read path just cached, so the next request for
+   * this employer is an R2 read instead of another provider fetch. Reached only
+   * after the operator has confirmed the provider's self-hosting rights, and it
+   * writes only when no icon exists yet, so it can never displace a reviewer's.
+   */
+  async markProviderIcon(input: {
+    canonicalEmployerId: string; iconKey: string; now: string;
+  }): Promise<void> {
+    await this.db.prepare(`UPDATE canonical_employers SET
+      icon_key = CASE WHEN icon_key IS NULL THEN ? ELSE icon_key END,
+      icon_source = CASE WHEN icon_key IS NULL THEN 'logo-dev' ELSE icon_source END,
+      icon_updated_at = CASE WHEN icon_key IS NULL THEN ? ELSE icon_updated_at END,
+      updated_at = ? WHERE id = ?`)
+      .bind(input.iconKey, input.now, input.now, input.canonicalEmployerId).run();
+  }
+
+  /**
    * Records a domain a person confirmed, after an automatic decision could not
    * reach one. It sets the same read-path fields as an automatic resolution but
    * marks the source as reviewed, so the exception queue can distinguish a human

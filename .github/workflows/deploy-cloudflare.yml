@@ -41,6 +41,8 @@ jobs:
       AWS_REGION: auto
       AWS_ENDPOINT_URL_S3: https://${{ vars.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
       TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_api_hostname: api.ntern.app
+      TF_VAR_zone_id: 404f6f4bd82cabd507e8662facfdc3b5
       TF_VAR_public_api_url: ${{ vars.PUBLIC_API_URL }}
       TF_VAR_employer_portal_enabled: ${{ vars.EMPLOYER_PORTAL_ENABLED }}
       TF_VAR_auth_from_email: ${{ secrets.AUTH_FROM_EMAIL }}

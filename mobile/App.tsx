@@ -378,26 +378,52 @@ function companyMarkColor(company: string) {
   return company.split("").reduce((total, character) => total + character.charCodeAt(0), 0) % companyMarkColors.length;
 }
 
+/**
+ * A company tile: the real logo on a neutral white square, or the deterministic
+ * pastel monogram when there is no logo.
+ *
+ * The white square is the point. A third of the logos we resolve arrive with their
+ * own solid background baked into the image — navy for Astranis, white for
+ * Pinterest, black for Anduril — and on the pastel monogram tint that background
+ * reads as a square fighting its tile. A neutral tile lets the logo keep its own
+ * background and makes the pastel mean one thing: no mark for this employer yet.
+ * `contain` fits a wordmark or a square mark whole instead of cropping it.
+ *
+ * While a logo is expected the tile is the neutral one and the monogram is *not*
+ * drawn: painting the monogram first and replacing it with the logo a frame later
+ * is the flash a refresh produces. The monogram appears only once the request has
+ * actually failed, so a logo never replaces a monogram and a monogram never
+ * replaces a logo.
+ */
 function CompanyMark({ company, employerId, size = 38 }: { company: string; employerId?: string; size?: number }) {
   const [imageUnavailable, setImageUnavailable] = useState(false);
   // A recycled row can keep its state; a new employer must retry its own icon.
   useEffect(() => {
     setImageUnavailable(false);
   }, [employerId]);
-  const iconUri = employerId ? `${publicConfig.apiUrl.replace(/\/$/, "")}/company-icons/${encodeURIComponent(employerId)}` : undefined;
+  const iconUri = employerId ? `${publicConfig.iconApiUrl.replace(/\/$/, "")}/company-icons/${encodeURIComponent(employerId)}` : undefined;
+  const showLogo = Boolean(iconUri) && !imageUnavailable;
   // A reviewed employer keeps one tile across renames: its canonical identity
   // drives the tint, while an unprojected company falls back to its display name.
-  const backgroundColor = employerId ? companyMonogramColors[companyMonogramColorIndex(employerId)] : companyMarkColors[companyMarkColor(company)];
+  const monogramColor = employerId ? companyMonogramColors[companyMonogramColorIndex(employerId)] : companyMarkColors[companyMarkColor(company)];
   const initials = employerId ? companyMonogramInitials(company) : companyInitials(company);
   const label = `${company} logo`;
   return (
-    <View accessibilityLabel={label} style={[styles.companyMark, { backgroundColor, borderRadius: Math.round(size * 0.29), height: size, width: size }]}>
-      {iconUri && !imageUnavailable ? (
+    <View accessibilityLabel={label} style={[styles.companyMark, {
+      backgroundColor: showLogo ? "#FFFFFF" : monogramColor,
+      borderColor: colors.border,
+      borderRadius: Math.round(size * 0.29),
+      borderWidth: showLogo ? StyleSheet.hairlineWidth : 0,
+      height: size,
+      width: size,
+    }]}>
+      {showLogo ? (
         <Image
           accessibilityLabel={label}
           onError={() => setImageUnavailable(true)}
+          resizeMode="contain"
           source={{ uri: iconUri }}
-          style={{ height: Math.round(size * 0.66), width: Math.round(size * 0.66) }}
+          style={{ height: Math.round(size * 0.7), width: Math.round(size * 0.7) }}
         />
       ) : <Text style={[styles.companyMarkFallback, { fontSize: Math.max(11, Math.round(size * 0.32)) }]}>{initials}</Text>}
     </View>
@@ -3110,19 +3136,29 @@ function Skeleton({ width, height = 14 }: { width: number; height?: number }) {
   );
 }
 
-function JobCardSkeleton() {
+/**
+ * The Roles feed is continuous rows — a company mark, the employer and role
+ * lines, a quiet rule — so the ghost has to be one too. A rounded card frame at
+ * a narrower measure made the feed visibly jump when the real rows arrived.
+ */
+function JobCardSkeleton({ wide = false }: { wide?: boolean }) {
   return (
-    <View style={styles.card}>
-      <Skeleton width={104} height={12} />
-      <View style={styles.skeletonGap8} />
-      <Skeleton width={236} height={18} />
+    <View style={[styles.roleRowSkeleton, wide && styles.roleRowSkeletonWide]}>
+      <View style={styles.roleRowSkeletonIdentity}>
+        <View style={styles.companyMarkSkeleton} />
+        <View style={styles.roleRowSkeletonCopy}>
+          <Skeleton width={124} height={12} />
+          <View style={styles.skeletonGap8} />
+          <Skeleton width={236} height={18} />
+        </View>
+      </View>
       <View style={styles.skeletonGap8} />
       <Skeleton width={174} height={14} />
     </View>
   );
 }
 
-function LoadingRoleCard({ index }: { index: number }) {
+function LoadingRoleCard({ index, wide = false }: { index: number; wide?: boolean }) {
   const opacity = useRef(new Animated.Value(1)).current;
   const lift = useRef(new Animated.Value(0)).current;
   const motionAllowed = useContext(MotionAllowedContext);
@@ -3148,7 +3184,7 @@ function LoadingRoleCard({ index }: { index: number }) {
 
   return (
     <Animated.View style={{ opacity, transform: [{ translateY: lift }] }}>
-      <JobCardSkeleton />
+      <JobCardSkeleton wide={wide} />
     </Animated.View>
   );
 }
@@ -3220,7 +3256,7 @@ function LaunchInbox({
       keyExtractor={(group) => group.groupId}
       contentContainerStyle={[styles.feedListContent, styles.rolesFeedListContent]}
       ListHeaderComponent={
-        <View style={styles.inboxHeader}>
+        <View style={[styles.inboxHeader, showRolesTable && styles.inboxHeaderWide]}>
           <Text accessibilityLabel={`${inbox.total} new matches`} style={styles.inboxCount}>{inbox.total}</Text>
           <Text style={styles.inboxTitle}>new matches</Text>
           <Text style={styles.inboxDescription}>Grouped by employer release and verified program details</Text>
@@ -3289,7 +3325,7 @@ function LaunchInbox({
       keyExtractor={(job) => job.jobId}
       contentContainerStyle={[styles.feedListContent, styles.rolesFeedListContent]}
       ListHeaderComponent={
-        <View style={styles.inboxHeader}>
+        <View style={[styles.inboxHeader, showRolesTable && styles.inboxHeaderWide]}>
           {isLatest ? (
             <Text accessibilityLabel={`${visibleJobs.length} latest roles`} style={styles.inboxLatestTitle}>Latest roles</Text>
           ) : (
@@ -3753,6 +3789,10 @@ function CatalogScreen({
 function AppLoadingSkeleton() {
   const { width } = useWindowDimensions();
   const usesNavigationRail = width >= 700;
+  // The boot lands on Roles, whose wide rows inset their content by 20; the ghost
+  // header and rows use the same gutter so the shell does not shift when the real
+  // feed arrives.
+  const wideRolesRow = Platform.OS === "web" && width >= 900;
   return (
     <SafeAreaView
       style={styles.screen}
@@ -3770,18 +3810,12 @@ function AppLoadingSkeleton() {
         <View style={styles.appMain}>
           <View style={styles.pageColumn}>
           <View style={styles.skeletonPage}>
-            <View style={styles.loadingTitleGroup}>
-              <Skeleton width={94} height={12} />
+            <View style={[styles.loadingTitleGroup, wideRolesRow && styles.skeletonGutter]}>
+              <Skeleton width={168} height={32} />
               <View style={styles.skeletonGap8} />
-              <Skeleton width={168} height={28} />
+              <Skeleton width={248} height={16} />
             </View>
-            <View style={styles.skeletonSearch} />
-            <View style={styles.skeletonSection}>
-              <Skeleton width={132} height={12} />
-              <View style={styles.skeletonGap8} />
-              <Skeleton width={248} height={14} />
-            </View>
-            {[0, 1, 2].map((index) => <LoadingRoleCard key={index} index={index} />)}
+            {[0, 1, 2].map((index) => <LoadingRoleCard key={index} index={index} wide={wideRolesRow} />)}
           </View>
           </View>
         </View>
@@ -9204,18 +9238,22 @@ const styles = StyleSheet.create({
   },
   skeletonPage: {
     flex: 1,
-    maxWidth: 760,
     paddingTop: 20,
     width: "100%",
   },
   loadingTitleGroup: { marginBottom: 20 },
-  skeletonSearch: {
-    height: 52,
-    backgroundColor: colors.separator,
-    borderRadius: 12,
-    marginBottom: 24,
+  // The Roles feed's wide rows inset their content by 20; the boot ghost matches.
+  skeletonGutter: { paddingHorizontal: 20 },
+  roleRowSkeleton: {
+    borderBottomColor: colors.separator,
+    borderBottomWidth: 1,
+    minHeight: 122,
+    paddingVertical: 16,
   },
-  skeletonSection: { marginBottom: 16 },
+  roleRowSkeletonWide: { paddingHorizontal: 20 },
+  roleRowSkeletonIdentity: { alignItems: "center", flexDirection: "row", gap: 11 },
+  roleRowSkeletonCopy: { flex: 1, minWidth: 0 },
+  companyMarkSkeleton: { backgroundColor: colors.separator, borderRadius: 11, height: 38, width: 38 },
   skeletonGap8: { height: 8 },
   skeletonGap12: { height: 12 },
   skeletonProfileGap: { height: 24 },
@@ -9280,6 +9318,9 @@ const styles = StyleSheet.create({
   navBadgeText: { color: colors.onDark, fontSize: 11, fontWeight: "700" },
   navBadge: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 9, justifyContent: "center", minWidth: 18, paddingHorizontal: 4, position: "absolute", right: -12, top: -6 },
   inboxHeader: { paddingTop: 28, paddingBottom: 20 },
+  // The wide Roles rows inset their content by 20, so the heading that sits above
+  // them insets by the same amount instead of hanging back at the column edge.
+  inboxHeaderWide: { paddingHorizontal: 20 },
   inboxCount: {
     color: colors.ink,
     fontSize: 76,
