@@ -274,6 +274,34 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('accepts a permitted plain-text change alongside a Durable Object namespace unknown', () => {
+    const floor = 'IDENTITY_CONFIRMED_COVERAGE_FLOOR';
+    const controller = { name: 'D1_TRAFFIC_CONTROLLER', type: 'durable_object_namespace', class_name: 'D1TrafficController' };
+    expect(validateCloudflarePlan(plan([{
+      address: 'cloudflare_workers_script.application',
+      actions: ['update'],
+      before: { ...worker, bindings: [...worker.bindings, { ...controller, namespace_id: null }, { name: floor, type: 'plain_text', text: '1' }] },
+      after: { ...worker, content_sha256: 'new-sha', bindings: [...worker.bindings, controller, { name: floor, type: 'plain_text', text: '0' }] },
+      after_unknown: { bindings: [{}, { namespace_id: true }, {}] },
+    }]))).toHaveLength(1);
+  });
+
+  it('accepts retiring the alert threshold alongside a permitted floor change with a Durable Object unknown', () => {
+    const retired = 'ADMISSION_STALE_ALERT_THRESHOLD';
+    const floor = 'IDENTITY_CONFIRMED_COVERAGE_FLOOR';
+    const controller = { name: 'D1_TRAFFIC_CONTROLLER', type: 'durable_object_namespace', class_name: 'D1TrafficController' };
+    expect(validateCloudflarePlan(plan([{
+      address: 'cloudflare_workers_script.ingestion',
+      actions: ['update'],
+      before: { ...worker, content_sha256: 'old-sha', bindings: [
+        ...worker.bindings, { ...controller, namespace_id: null },
+        { name: retired, type: 'plain_text', text: '1' }, { name: floor, type: 'plain_text', text: '1' }] },
+      after: { ...worker, content_sha256: 'new-sha', bindings: [
+        ...worker.bindings, controller, { name: floor, type: 'plain_text', text: '0' }] },
+      after_unknown: { bindings: [{}, { namespace_id: true }, {}] },
+    }]))).toHaveLength(1);
+  });
+
   it('permits only the reviewed monthly shadow headroom change and rollback', () => {
     const name = 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS';
     const change = (beforeText: string, afterText: string) => ({
