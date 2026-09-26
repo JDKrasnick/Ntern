@@ -483,13 +483,18 @@ draining).
 
 ## Remaining operational steps
 
-1. Github source delivery is the one open finding: four of its six published
-   sources miss intervals because their messages are consumed and dead-lettered
-   rather than delivered (`intern-notifs-github-dlq` depth 190). That is the
-   github source family, not dispatch cadence, and it belongs with the queue/DLQ
-   reconciliation work. Until it is fixed, expect one deduplicated
-   `github-cadence-slip` alert per day and `overduePublishedSources` of 3-4 in the
-   operations payload.
+1. Github source delivery: root-caused and fixed on 2026-09-26. The bounded
+   resolution pass selected its slice in board order, so a run of rows whose
+   application-link probes keep timing out was re-attempted on every delivery
+   and the rest of `pendingResolutionRows` was never reached.
+   `simplify-summer-2026` froze at 3,198 pending rows and re-enqueued a
+   continuation on every poll, which held the github work queue near 542 and let
+   resource-killed deliveries dead-letter without a failure-ledger row. The slice
+   now follows the pending pass order, so it resumes where the last delivery
+   stopped and advances past a retryable prefix; once only probes remain the
+   dispatcher retries them without a hot queue loop. Expect
+   `github-cadence-slip` and the `dlq-growth` github signal to clear as the
+   backlog drains.
 2. Watch the new signal rather than queue depth. `provider_dispatch_complete`
    reports `candidates`, `queued`, and `inFlightSkipped` on every sweep, so a
    fleet that stops dispatching is visible in one line, and
