@@ -472,7 +472,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     && !permittedResumeMigrationTagTransition
     && !permittedResumeMigrationBootstrap && !permittedAppliedMigrationRetirement) return false;
 
-  let beforeForComparison = {
+  const beforeForComparison = {
     ...before,
     ...(permittedBindingChanged ? { bindings: normalizedAfterBindings } : {}),
     ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
