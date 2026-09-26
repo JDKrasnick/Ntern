@@ -492,7 +492,10 @@ draining).
    resource-killed deliveries dead-letter without a failure-ledger row. The slice
    now follows the pending pass order, so it resumes where the last delivery
    stopped and advances past a retryable prefix; once only probes remain the
-   dispatcher retries them without a hot queue loop. Expect
+   dispatcher retries them without a hot queue loop. A pass that still cannot
+   shrink its pending set no longer re-enqueues itself either: it falls back to
+   the dispatcher cadence and records one scoped `github_resolution_stalled`
+   event so the non-shrinking cause stays diagnosable. Expect
    `github-cadence-slip` and the `dlq-growth` github signal to clear as the
    backlog drains.
 2. Watch the new signal rather than queue depth. `provider_dispatch_complete`
