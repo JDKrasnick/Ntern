@@ -3376,10 +3376,13 @@ function LaunchInbox({
         )}
       ListEmptyComponent={
         loading && isLatest ? (
-          <View accessibilityRole="progressbar" accessibilityLabel="Loading roles" style={styles.emptyState}>
-            <Text style={styles.eyebrow}>Latest roles</Text>
-            <Text style={styles.emptyTitle}>Loading roles…</Text>
-            <Text style={styles.emptyCopy}>Checking the public catalog.</Text>
+          // Ghost the rows the feed is about to draw. A "Loading roles…" line here
+          // flashed between the boot skeleton and the first page and read as a
+          // failure rather than as loading.
+          <View accessibilityRole="progressbar" accessibilityLabel="Loading roles">
+            {[0, 1, 2, 3, 4].map((index) => (
+              <LoadingRoleCard key={`latest-role-skeleton-${index}`} index={index} wide={showRolesTable} />
+            ))}
           </View>
         ) : error && isLatest ? (
           <View accessibilityRole="alert" style={styles.emptyState}>
