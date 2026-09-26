@@ -43,6 +43,12 @@ The detailed product tracker is [`docs/product-roadmap.md`](docs/product-roadmap
 - The owner handles Apple/App Store Connect UI and physical-device testing when required. Agents can launch EAS builds and submissions after approval.
 - After using the iPhone Simulator, shut down any booted simulator and quit the Simulator app before finishing unless the owner asks to leave it running; it consumes significant memory.
 
+## Running tests
+
+- Keep local runs memory-bounded: `vitest.config.ts` caps the forks pool at 4 workers with a 1 GB heap each. Do not raise it — the suite drives production-scale ingestion fixtures, and without the cap the pool sizes itself to the CPU count at Node's multi-gigabyte heap default.
+- Iterate with targeted `npx vitest run test/<file>.test.ts`; keep a full `npm test` for the pass you intend to finish, and redirect it to a file instead of piping it into `head` or any reader that exits early. A reader that closes the pipe kills the vitest orchestrator while its forked workers survive, reparent to `ppid=1`, and climb toward the heap ceiling until the machine swaps and compresses itself to a stall.
+- If a run is abandoned or interrupted, list strays with `ps -Ao pid,ppid,rss,command | awk '/vitest/ && $2==1'` and clear them with `pkill -9 -f vitest`.
+
 ## Read before release work
 
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md): EAS/TestFlight, release commands, and operational identifiers. Its AWS/CDK infrastructure sections are historical; production runs on Cloudflare.
