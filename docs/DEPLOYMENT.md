@@ -528,14 +528,19 @@ review-decision, or email-delivery history during rollback; roll back exposure
 by superseding reviewed rules/mappings and staging a new guarded repair.
 
 Operational alerts should cover destination-verification queue age and depth,
-any DLQ message, active/quarantined incident counts by reason, grace deadlines,
-and Resend failures. Immediate aggregate/gone quarantines, incident openings,
-and grace-deadline warnings are grouped by source, host, and reason and deduped
-through the D1 delivery ledger. The Worker also sends daily-deduplicated health
-alerts for a non-empty DLQ, a work item older than
-`ADMISSION_QUEUE_AGE_ALERT_HOURS`, stale evidence at or above
-`ADMISSION_STALE_ALERT_THRESHOLD`, and active admission incidents. These
-threshold bindings are managed consistently in Wrangler and OpenTofu.
+any DLQ message, incident openings, grace deadlines, and Resend failures.
+Immediate aggregate/gone quarantines, incident openings, and grace-deadline
+warnings are grouped by source, host, and reason and deduped through the D1
+delivery ledger. The Worker also sends daily-deduplicated health alerts for a
+non-empty DLQ, a work item older than `ADMISSION_QUEUE_AGE_ALERT_HOURS`, and an
+admission incident opened since the previous pass. The queue-age threshold is
+managed consistently in Wrangler and OpenTofu.
+
+Stale destination evidence no longer alerts. Durable admission (2026-09-17) made
+the stored decision authoritative, so nothing re-inspects an admitted
+destination and evidence past `freshUntil` is expected rather than a defect. The
+audit endpoint still reports `freshness` and the active-incident backlog for
+observability; only an incident that opened since the previous pass is a signal.
 
 Open `GET /internal/admission/health` after deployment to verify the live work
 queue and DLQ backlog, stale-evidence coverage, active incidents, scheduled
@@ -544,8 +549,8 @@ manage the destination queue, DLQ, 5-message/60-second consumer, two retries,
 and `DESTINATION_BROWSER` binding. OpenTofu retains destination work for seven
 days so a one-day delayed transient retry cannot expire before delivery, and supplies
 `DESTINATION_VERIFICATION_QUEUE_ID` to the billing-shutdown path. A non-empty
-DLQ, an oldest work item approaching the evidence deadline, any unexpectedly
-stale eligible record, or an active quarantine is an admission incident.
+DLQ, an oldest work item approaching the evidence deadline, or an admission
+incident opened since the previous pass is an admission signal.
 The audit computes catalog summaries in D1 and returns detail through bounded
 keyset pages so both the detailed audit and summary health calculation stay
 within Worker memory. Health deliberately omits the review-record and
@@ -559,10 +564,10 @@ unresolved-employer occurrences with
 `unresolvedEmployers` groups summarize the current occurrence page;
 `unresolvedEmployerOccurrences` remains the exact total across all pages.
 
-Destination evidence expires after seven days and is scheduled for recheck one
-day before expiry. A transient failed recheck pauses alerts immediately; catalog
-visibility lasts only until seven days after the last successful verification.
-Retries never restart this window. HTTP 404/410, explicit posting closure language, past structured
+Destination evidence is stored at admission and is durable: nothing re-inspects
+an admitted destination, so evidence past its seven-day freshness window neither
+withholds the role nor alerts. Inspection at admission time still applies the
+closure signals. HTTP 404/410, explicit posting closure language, past structured
 `JobPosting.validThrough`, and reviewed aggregate-board decisions bypass grace.
 Authoritative closure clears URL validation and closes only the canonical role;
 source occurrences and user history remain intact for a later verified reopen.

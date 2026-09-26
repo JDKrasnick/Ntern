@@ -129,7 +129,6 @@ export interface Environment extends AuthEnvironment {
   SHADOW_EXTRACTION_QUEUE_ID?: string;
   SHADOW_EXTRACTION_QUEUE_NAME?: string;
   ADMISSION_QUEUE_AGE_ALERT_HOURS?: string;
-  ADMISSION_STALE_ALERT_THRESHOLD?: string;
   /** Staged metadata collections per scheduled pass; 0 disables scheduled collection. */
   METADATA_SCHEDULED_COLLECTION_LIMIT?: string;
   GMAIL_ENABLED?: string;
@@ -1581,6 +1580,27 @@ async function alertCadenceSlip(
   });
 }
 
+/**
+ * Admission health signals beyond the DLQ. Durable admission (2026-09-17) made
+ * a stored destination decision authoritative: nothing re-inspects an admitted
+ * destination, so evidence past its freshness window is expected rather than a
+ * defect, and the active-incident backlog is permanent residue that can never
+ * resolve on its own. Only an incident that opened since the previous pass is
+ * actionable. The freshness and active-incident counts are still reported in
+ * the details so the operator keeps the context without a permanent alarm.
+ */
+export function admissionOperationalSignals(input: {
+  newlyOpenedIncidents: number;
+  activeIncidents: number;
+  staleEligible: number;
+  stale: number;
+}): { signals: string[]; details: string } {
+  return {
+    signals: [...(input.newlyOpenedIncidents ? ['new-admission-incidents'] : [])],
+    details: `New admission incidents (last 24h): ${input.newlyOpenedIncidents}; active admission incidents: ${input.activeIncidents}; stale eligible destination evidence: ${input.staleEligible}; total stale evidence: ${input.stale}.`,
+  };
+}
+
 /** Markers are written only after a successful send: a send failure leaves the
  * sources unsuppressed and they are dispatched again on the next sweep, which
  * costs one idempotent poll instead of a missed interval. */
@@ -1991,23 +2011,24 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     await cleanupDlqRecords(env.DB, new Date(event.scheduledTime));
     const employerMaintenance = await runEmployerMaintenance(new D1EmployerStore(env.DB), store, new Date(event.scheduledTime));
     const admissionVerificationRetries = await enqueueDueDestinationVerifications(env, new Date(event.scheduledTime));
-    const admissionAudit = await new D1CatalogAdmissionStore(env.DB).audit({
+    const admissions = new D1CatalogAdmissionStore(env.DB);
+    const admissionAudit = await admissions.audit({
       includeRecords: false,
       includeUnresolvedEmployers: false,
     });
-    const activeAdmissionIncidents = (await new D1CatalogAdmissionStore(env.DB).listActiveIncidents()).length;
-    const staleThreshold = Number(env.ADMISSION_STALE_ALERT_THRESHOLD ?? 1);
-    await sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
-      signals: [
-        ...(admissionAudit.freshness.staleEligible >= staleThreshold ? ['stale-destination-evidence'] : []),
-        ...(activeAdmissionIncidents ? ['active-admission-incidents'] : []),
-      ],
+    const activeAdmissionIncidents = (await admissions.listActiveIncidents()).length;
+    const newlyOpenedIncidents = await admissions.countIncidentsOpenedSince(
+      new Date(event.scheduledTime - 24 * 60 * 60_000).toISOString());
+    const admissionSignals = admissionOperationalSignals({ newlyOpenedIncidents, activeIncidents: activeAdmissionIncidents,
+      staleEligible: admissionAudit.freshness.staleEligible, stale: admissionAudit.freshness.stale });
+    await sendAdmissionOperationalAlert(admissions, env, {
+      signals: admissionSignals.signals,
       observedAt: new Date(event.scheduledTime).toISOString(),
-      details: `Stale eligible destination evidence: ${admissionAudit.freshness.staleEligible}; total stale evidence: ${admissionAudit.freshness.stale}; active admission incidents: ${activeAdmissionIncidents}.`,
+      details: admissionSignals.details,
     });
     console.log(JSON.stringify({ event: 'employer_maintenance_complete', ...employerMaintenance, admissionVerificationRetries,
       admissionFreshness: admissionAudit.freshness, admissionValidationCoverage: admissionAudit.validationCoverage,
-      activeAdmissionIncidents,
+      activeAdmissionIncidents, newlyOpenedIncidents,
       admissionOperations: admissionAudit.operations }));
   }
 }

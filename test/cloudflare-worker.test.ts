@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider, admissionOperationalSignals } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -1322,5 +1322,21 @@ describe('Cloudflare D1 traffic observation', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+});
+
+describe('admission operational signals', () => {
+  it('does not alert on structural staleness or the permanent active backlog', () => {
+    expect(admissionOperationalSignals({ newlyOpenedIncidents: 0, activeIncidents: 3084, staleEligible: 844, stale: 6048 }))
+      .toEqual({
+        signals: [],
+        details: 'New admission incidents (last 24h): 0; active admission incidents: 3084; stale eligible destination evidence: 844; total stale evidence: 6048.',
+      });
+  });
+
+  it('raises a signal only when an incident opened in the window', () => {
+    const result = admissionOperationalSignals({ newlyOpenedIncidents: 2, activeIncidents: 3085, staleEligible: 845, stale: 6050 });
+    expect(result.signals).toEqual(['new-admission-incidents']);
+    expect(result.details).toContain('New admission incidents (last 24h): 2');
   });
 });
