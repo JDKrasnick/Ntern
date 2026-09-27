@@ -37,7 +37,9 @@ outbox IDs, and idempotent upserts as the correctness boundary.
 
 The ingestion Worker requires the Workers Paid plan: source polls can exceed
 the free plan's CPU and subrequest ceilings. D1 has a hard 10 GB size per paid
-database, so storage growth must be monitored before public scale.
+database, so storage growth must be monitored before public scale; the daily
+catalog retention sweep bounds the append-only history (see
+[`catalog-storage-retention.md`](catalog-storage-retention.md)).
 
 ## Local verification
 

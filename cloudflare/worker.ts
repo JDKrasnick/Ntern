@@ -30,6 +30,7 @@ import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
 import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
+import { runCatalogRetention } from './catalog-retention.js';
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
 import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
@@ -2038,6 +2039,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     await cleanupExpiredUserData(env.DB);
     await new GmailStore(env.DB).cleanup(new Date(event.scheduledTime));
     await cleanupDlqRecords(env.DB, new Date(event.scheduledTime));
+    // Append-only catalog history would otherwise grow toward D1's 10 GB cap
+    // forever; each sweep is bounded so a backlog drains over several days.
+    const catalogRetention = await runScheduledStep('catalog_retention',
+      () => runCatalogRetention(env.DB, { now: new Date(event.scheduledTime), apply: true }));
     const employerMaintenance = await runEmployerMaintenance(new D1EmployerStore(env.DB), store, new Date(event.scheduledTime));
     const admissionVerificationRetries = await enqueueDueDestinationVerifications(env, new Date(event.scheduledTime));
     const admissions = new D1CatalogAdmissionStore(env.DB);
@@ -2058,7 +2063,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     console.log(JSON.stringify({ event: 'employer_maintenance_complete', ...employerMaintenance, admissionVerificationRetries,
       admissionFreshness: admissionAudit.freshness, admissionValidationCoverage: admissionAudit.validationCoverage,
       activeAdmissionIncidents, newlyOpenedIncidents,
-      admissionOperations: admissionAudit.operations }));
+      admissionOperations: admissionAudit.operations, catalogRetention }));
   }
 }
 
