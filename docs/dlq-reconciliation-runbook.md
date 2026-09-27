@@ -274,3 +274,50 @@ operations endpoint is still keyed to a secret this workstation does not hold
 (`inspect` returns 404), so the direct Cloudflare API sequence was used again;
 reconcile the operator key before the next reconciliation.
 
+## 10. Reconciliation record: 2026-09-27 (catalog admission alert)
+
+The `[InternNotifs] catalog admission health: d1-overloaded, dlq-growth` alert
+fired at 19:31Z with the GitHub DLQ at 65 and one D1 overload in the prior thirty
+minutes. The catalog itself was healthy — the newest published role was 1.6 h
+old with 3,734 eligible roles — so this was a queue-hygiene incident, not a feed
+outage.
+
+Inspection (protected `inspect`, 100-message peek) classified the visible
+messages `missing-ledger` — overwhelmingly `simplify-summer-2026`, the paused
+3,463-listing board, plus two healthy re-dispatched `speedyapply` sources. The
+diagnostic was the five-minute message deadline, i.e. the resource-killed
+deliveries `docs/240-dispatch-backlog-cadence.md` already root-caused. The
+greenhouse DLQ's five `missing-ledger` messages arrived in a four-second burst at
+08:42:27-31Z, the minute the daily maintenance cron shared with the greenhouse
+dispatch.
+
+The protected plan/apply flow could **not** stage a selection: `plan` re-peeks,
+and a non-consuming peek leases what it returns, so every client-supplied
+selection failed with `Selection drift` as the window rotated. As in §§6-7 the
+direct Cloudflare API sequence was used: peek → purge → write
+`dlq_disposition_audit` and resolve any `queue_failure_events` row.
+
+| Queue | Action | Messages | Disposition plan id |
+| --- | --- | ---: | --- |
+| github | discard | 60, then 5 | `direct-2026-09-27-github-0d0356fd`, `direct-2026-09-27-github-1b4389b7` |
+| greenhouse | discard | 5 | `direct-2026-09-27-greenhouse-3b418e1d` |
+
+Every message is an obsolete `sourceId` poll: each source has been re-dispatched
+since it was dead-lettered, and `simplify-summer-2026` is paused, so a catalog
+replay would be rejected. All five catalog DLQs read zero after the disposition;
+the gmail DLQ is untouched at one.
+
+Two code hardenings accompany this record: a forced GitHub recovery no longer
+chains `force` continuations (which had made every later resolution slice
+non-deferrable, so one large board could dead-letter a message per failed slice),
+and the daily maintenance cron moved from `42 8 * * *` to `34 8 * * *`, off the
+greenhouse dispatch minute.
+
+Operator tooling: the protected endpoint did authorize with the workstation's
+`OPERATIONS_SHARED_SECRET` (unlike §9's note), so the §9 "operator key" diagnosis
+was really a variable mismatch. `scripts/dlq-operations.ts` reads
+`OPERATIONS_API_URL` and `OPERATIONS_API_KEY`, but `.env` defines `OPERATIONS_API`
+(a stale queue id) and `OPERATIONS_SHARED_SECRET`; point the former pair at the
+API URL and the shared secret before relying on `npm run dlq`.
+
+
