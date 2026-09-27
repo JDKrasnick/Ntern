@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
-import type { CatalogAdmission, Internship, NotificationEvent, SourceCheckpoint, SourceOccurrenceState } from '../src/types.js';
+import type { CatalogAdmission, Internship, NotificationEvent, SourceCheckpoint, SourceHealth, SourceOccurrenceState } from '../src/types.js';
 
 /**
  * D1 bills a row an `UPDATE` matched, not a row whose bytes changed, so a writer
@@ -79,6 +79,29 @@ function admission(catalogEligible = true): CatalogAdmission {
 
 describe('differential catalog writes', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('does not let an in-flight poll overwrite a newer operator pause', async () => {
+    const current = subject();
+    const base: SourceHealth = {
+      sourceId: 'community-acme', provider: 'github', state: 'healthy', sourceStatus: 'active',
+      lastAttemptAt: '2026-09-04T00:00:00.000Z', lastSuccessAt: '2026-09-04T00:00:00.000Z',
+      consecutiveFailures: 0, durationMs: 100, configVersion: 1,
+    };
+    await current.jobs.putSourceHealth(base);
+    await current.jobs.putSourceHealth({ ...base, sourceStatus: 'paused', configVersion: 2 });
+
+    // This is the success record a poll that started under config version 1
+    // would otherwise write after the pause completed.
+    await current.jobs.putSourceHealth({
+      ...base, lastAttemptAt: '2026-09-04T00:01:00.000Z', durationMs: 60_000, configVersion: 1,
+    });
+    expect(await current.jobs.getSourceHealth(base.sourceId)).toMatchObject({
+      sourceStatus: 'paused', configVersion: 2, lastAttemptAt: base.lastAttemptAt,
+    });
+
+    await current.jobs.putSourceHealth({ ...base, sourceStatus: 'active', configVersion: 3 });
+    expect(await current.jobs.getSourceHealth(base.sourceId)).toMatchObject({ sourceStatus: 'active', configVersion: 3 });
+  });
 
   it('rewrites an internship row only when something in it changed', async () => {
     const current = subject();
