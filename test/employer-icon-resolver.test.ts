@@ -346,6 +346,51 @@ describe('employer icon diagnosis', () => {
     expect((await tied.icons.context('acme'))?.websiteDomain).toBeUndefined();
   });
 
+  it('prefers the provider domain named by an automatic ATS tenant over an unrelated confirmed result', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const employerId = 'ats-ashby-replit-25100893c6';
+    await admission.putCanonicalEmployer(employerRow(employerId, 'Replit'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      canonicalEmployerId: employerId,
+      displayName: 'Replit',
+      roleTitle: 'Software Engineering Intern',
+      applicationUrl: 'https://jobs.ashbyhq.com/replit/job-1',
+      provider: 'ashby',
+      tenant: 'replit',
+      sourceId: 'community-source',
+      provenance: 'reviewed-community',
+    }, NOW);
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2.bucket, {
+        LOGO_DEV_TOKEN: LOGO_TOKEN,
+        LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN,
+        BRANDFETCH_CLIENT_ID: BRANDFETCH_CLIENT,
+      }), NOW,
+      DEPENDENCIES(scriptedFetch({
+        'https://jobs.ashbyhq.com/replit/job-1': () => html('<!doctype html><html><head><title>Software Engineering Intern at Replit</title></head></html>'),
+        [logoDevSearchUrl('Replit')]: () => ok([
+          { name: 'Replit', domain: 'replit.com' },
+          { name: 'Replit', domain: 'thegot.co' },
+        ]),
+        [brandfetchSearchUrl('Replit', BRANDFETCH_CLIENT)]: () => ok([
+          { name: 'Replit', domain: 'replit.com' },
+          { name: 'Replit', domain: 'thegot.co' },
+        ]),
+        // The unrelated candidate can misleadingly name Replit, while the exact
+        // domain is temporarily unavailable. Tenant identity must still win.
+        'https://thegot.co/': () => html('<!doctype html><html><head><title>Replit</title></head></html>'),
+        'https://replit.com/': () => status(503),
+        [logoDevImageUrl('replit.com', LOGO_IMAGE_TOKEN)]: () => webp(),
+      })),
+    );
+
+    expect(result.resolved).toBe(1);
+    expect((await icons.context(employerId))?.websiteDomain).toBe('replit.com');
+  });
+
   it('publishes a below-floor tie-break only when the domain itself names the employer', async () => {
     // The real model answers correctly at 0.8 far more often than it answers at all
     // above 0.90, so a below-floor selection is verified against the domain instead of

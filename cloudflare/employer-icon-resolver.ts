@@ -46,7 +46,7 @@ import type { D1Database, R2Bucket } from './types.js';
 /** A resolved decision is revalidated on this cadence. */
 const ICON_REVALIDATE_MS = 30 * 24 * 60 * 60 * 1_000;
 /** Bump whenever resolver semantics change so old misses can be reconsidered. */
-export const ICON_RESOLVER_VERSION = 2;
+export const ICON_RESOLVER_VERSION = 3;
 /** A definitive no-match backs off from one day to the revalidation ceiling. */
 const ICON_UNRESOLVED_BASE_RETRY_MS = 24 * 60 * 60 * 1_000;
 /** A transient provider or network problem retries sooner, from one hour. */
@@ -1335,16 +1335,28 @@ function iconCandidates(
   // *which* employer is hiring, the provider establishes that employer's domain. It is
   // never attached to a host the page did not name, so it cannot vouch for an
   // unrelated domain.
-  const identityTargets = pageNamedDomain
-    ? [pageNamedDomain]
-    : [...providers.logoDev, ...providers.brandfetch];
-  const tenantCorroborates = tenantCorroboratesEmployer(seed.tenant, context.id);
+  const providerIdentityTargets = [...new Set([...providers.logoDev, ...providers.brandfetch])];
+  const identityTargets = pageNamedDomain ? [pageNamedDomain] : providerIdentityTargets;
+  // Automatic ATS identities have opaque canonical ids (`ats-<provider>-...`),
+  // so the human employer name is the identity the board slug must corroborate.
+  // Apply that corroboration only to a provider candidate whose own domain names
+  // the employer. Attaching it to every search result lets an unrelated namesake
+  // tie the exact domain and win merely because its homepage is easier to fetch.
+  const tenantCorroborates = tenantCorroboratesEmployer(seed.tenant, context.displayName);
   for (const target of identityTargets) {
+    // A page that names the employer establishes which company owns the board,
+    // not which of several provider search results is its domain. It may support
+    // the sole nomination, the domain the page explicitly named, or a candidate
+    // whose own label names the employer; it cannot support every namesake.
+    const identitySupportsTarget = Boolean(pageNamedDomain)
+      || providerIdentityTargets.length === 1
+      || employerNamesDomain(context.displayName, target);
+    if (!identitySupportsTarget) continue;
     if (titleMatches) add(target, 'page-title');
     if (siteMatches) add(target, 'opengraph');
     if (organizationNameMatches) add(target, 'jsonld-name');
     if (declaredNameMatchesEmployer) add(target, 'platform-name');
-    if (tenantCorroborates) add(target, 'ats-tenant');
+    if (tenantCorroborates && employerNamesDomain(context.displayName, target)) add(target, 'ats-tenant');
   }
   for (const domain of providers.logoDev) add(domain, 'logo-dev');
   for (const domain of providers.brandfetch) add(domain, 'brandfetch');
