@@ -709,7 +709,26 @@ export async function processDestinationVerificationBatch(
                     .filter((heading) => visible(heading) && /^(?:compensation|salary|pay range)$/iu.test(heading.innerText.trim()))
                     .flatMap((heading) => [...(heading.nextElementSibling?.matches('ul,ol') ? heading.nextElementSibling.children : [])])
                     .filter(visible).map((row) => (row as HTMLElement).innerText.trim());
-                  const fullText = (document.querySelector('main')?.innerText ?? document.body?.innerText ?? '').split(/[\r\n]+/)
+                  // Application-form controls are UI, not posting prose. Their
+                  // labels and option lists ("Bachelors / Masters/phD") would
+                  // otherwise be read as an audience statement, over-reporting
+                  // education (and polluting other fields). Hide them for the
+                  // visible-text read, then restore the page.
+                  // Controls only, never `form` itself: some ATS render the
+                  // description inside a form, and hiding the container would
+                  // drop the posting text with it.
+                  const formControls = document.querySelectorAll<HTMLElement>(
+                    'select,option,input,textarea,button,label,fieldset,legend,[role="listbox"],[role="combobox"],[role="option"],[role="radiogroup"]',
+                  );
+                  const hiddenControls: Array<[HTMLElement, string]> = [];
+                  for (const control of [...formControls].slice(0, 5_000)) {
+                    hiddenControls.push([control, control.style.display]);
+                    control.style.display = 'none';
+                  }
+                  let renderedText = '';
+                  try { renderedText = document.querySelector('main')?.innerText ?? document.body?.innerText ?? ''; }
+                  finally { for (const [control, previous] of hiddenControls) control.style.display = previous; }
+                  const fullText = renderedText.split(/[\r\n]+/)
                     .map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
                   const main = fullText.slice(0, 40_000);
                   return {
