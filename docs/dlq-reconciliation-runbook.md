@@ -256,3 +256,21 @@ by the trailing 30 days of failures that are still pending. Treat a *growing*
 unresolved count for a queue, not a large absolute one, as the signal: with the
 two holes closed, growth means either a source that is genuinely still failing
 or a message still sitting in a DLQ.
+
+## 9. Reconciliation record: 2026-09-27
+
+Applied after the trusted-community catalog gate was enabled (2026-09-26) and
+the bounded GitHub resolution pass was fixed. Both dead-letter queues drained to
+zero.
+
+| Queue | Action | Messages | Classification |
+| --- | --- | ---: | --- |
+| github | discard | 39 | Obsolete catalog dead-letters; every source has been re-dispatched since. |
+| destination-verification | replay | 7 | Admission-relevant checks (`first-sight`, `url-change`) whose work the dead-letter dropped. |
+
+Every disposed message is recorded in `dlq_disposition_audit`, and the matching
+`queue_failure_events` row is resolved in the same pass. The protected
+operations endpoint is still keyed to a secret this workstation does not hold
+(`inspect` returns 404), so the direct Cloudflare API sequence was used again;
+reconcile the operator key before the next reconciliation.
+
