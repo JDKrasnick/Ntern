@@ -42,7 +42,13 @@ export const DESTINATION_VERIFICATION_LEASE_LIMIT = 100;
 // request, not just the eventual atomic apply batch.
 export const BACKFILL_REPAIR_RECORD_LIMIT = 120;
 export const ATOMIC_REPAIR_BYTE_LIMIT = 8 * 1024 * 1024;
-export const ROLE_METADATA_REVALIDATION_MS = 30 * 24 * 60 * 60_000;
+// How long a role with extracted metadata waits before the scheduled pass reads
+// its page again. A good first pass is the normal outcome, and an employer edit
+// after posting is rare, so this is deliberately long: the recurring read exists
+// for parser rollouts and post-hoc page edits, not for freshness. The field-less
+// 24-hour retry is separate (`metadataVerificationCandidates`), so a role whose
+// acquisition produced nothing is still re-offered daily.
+export const ROLE_METADATA_REVALIDATION_MS = 180 * 24 * 60 * 60_000;
 // The catalog holds tens of thousands of internship documents (144 MB at
 // production size), so catalog-wide readers walk it in bounded keyset pages: one
 // statement over `kind = 'internship'` exceeds D1's per-query memory ceiling
@@ -1459,7 +1465,23 @@ export class D1CatalogAdmissionStore {
       .map((value) => JSON.stringify(value))
       .sort()
       .map((value) => JSON.parse(value) as T);
-    return hash(JSON.stringify({ employers: stable(employers), mappings: stable(mappings), rules: stable(rules) }));
+    // Hash only admission-relevant configuration. The background icon resolver
+    // writes `iconKey`/`iconSource`/`iconUpdatedAt` on every logo it resolves,
+    // and review-rule sampling rewrites `sampleDueAt`; neither changes how a
+    // source row is admitted, but hashing them restarted a full catalog
+    // re-grade on every icon update.
+    const admissionEmployers = employers.map((employer) => ({
+      id: employer.id, displayName: employer.displayName,
+      reviewedAt: employer.reviewedAt, reviewedBy: employer.reviewedBy,
+      ...(employer.parentEmployerId ? { parentEmployerId: employer.parentEmployerId } : {}),
+      ...(employer.brandOfEmployerId ? { brandOfEmployerId: employer.brandOfEmployerId } : {}),
+    }));
+    const admissionRules = rules.map((rule) => ({
+      id: rule.id, host: rule.host, provider: rule.provider, decision: rule.decision,
+      reviewedAt: rule.reviewedAt, reviewedBy: rule.reviewedBy,
+      ...(rule.tenant ? { tenant: rule.tenant } : {}),
+    }));
+    return hash(JSON.stringify({ employers: stable(admissionEmployers), mappings: stable(mappings), rules: stable(admissionRules) }));
   }
 
   async supersedeEmployerMapping(value: EmployerMapping): Promise<void> {
