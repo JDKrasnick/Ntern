@@ -24,6 +24,15 @@ const periods: Record<string, string> = { 'per-hour-wage': 'hour', 'per-day-wage
 const REVIEWED_ICIMS_VANITY_TENANTS: Readonly<Record<string, string>> = {
   'careers.garmin.com': 'careers-garmin',
 };
+// A few reviewed tenants publish their postings from a frame host whose label
+// differs from the stored tenant. AMD retired `amd.icims.com` (it now 302s to
+// the tenant root) and serves its student postings from `campus-amd`, which the
+// employer's own careers.amd.com page links to. Keep the provider identity's
+// tenant stable and translate only the acquisition host, so stored keys and
+// postings are never rewritten by a presentation-host rename.
+const REVIEWED_ICIMS_TENANT_HOSTS: Readonly<Record<string, string>> = {
+  amd: 'campus-amd',
+};
 
 /** Only reviewed/extracted provider identities can select a fixed public API host.
  * A company name, title, or employer-domain URL is never a tenant guess. */
@@ -80,7 +89,7 @@ export function metadataApiRoute(identity: ProviderIdentity, candidateUrl?: stri
   // description. Both host and posting id come from the reviewed identity, so the
   // route is constructed from evidence rather than from a URL guess.
   if (provider === 'icims' && /^\d+$/u.test(postingId)) return {
-    method: 'icims-page', url: `https://${tenant}.icims.com/jobs/${postingId}/job?in_iframe=1&mobile=false`,
+    method: 'icims-page', url: `https://${REVIEWED_ICIMS_TENANT_HOSTS[tenant] ?? tenant}.icims.com/jobs/${postingId}/job?in_iframe=1&mobile=false`,
   };
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(postingId)) return undefined;
   if (provider === 'lever') return { method: 'lever-api', url: `https://api.lever.co/v0/postings/${tenant}/${postingId}?mode=json` };

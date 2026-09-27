@@ -306,6 +306,21 @@ describe('identity-bound public metadata APIs', () => {
       'https://careers.amd.com/jobs/19643?icims=1',
     ]) expect(metadataApiRoute(github, candidate)).toBeUndefined();
   });
+  it('routes the AMD tenant through its live student frame host', async () => {
+    // AMD retired `amd.icims.com` (302 to the tenant root), and careers.amd.com
+    // links its student postings to `campus-amd`. The stored tenant stays `amd`;
+    // only the acquisition host is translated.
+    const amd = { ...identity('icims', '92354'), tenant: 'amd' };
+    expect(metadataApiRoute(amd)).toEqual({ method: 'icims-page',
+      url: 'https://campus-amd.icims.com/jobs/92354/job?in_iframe=1&mobile=false' });
+    const page = '<html><head><title>2027 PhD AI Systems Intern | Careers</title></head><body>'
+      + '<h1>2027 PhD AI Systems &amp; GPU Performance Engineering Intern/Co-op</h1>'
+      + '<div class="iCIMS_JobContent"><p>Currently pursuing a PhD in Computer Science.</p></div>'
+      + '<footer><a href="/jobs/92354/job">Apply</a></footer></body></html>';
+    const result = await createMetadataAcquirer(async () => new Response(page, { headers: { 'content-type': 'text/html' } }))(amd);
+    expect(result).toMatchObject({ method: 'icims-page', outcome: 'acquired' });
+    expect(educationAudienceLevels(`${result!.artifact!.title}\n${result!.artifact!.text}`)).toEqual(['doctoral']);
+  });
   it('refuses an iCIMS response that is not the requested posting', async () => {
     const icims = { ...identity('icims', '12891'), tenant: 'careers-springswindowfashions' };
     const header = { headers: { 'content-type': 'text/html' } };
