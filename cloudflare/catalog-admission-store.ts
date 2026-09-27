@@ -41,7 +41,13 @@ export const DESTINATION_VERIFICATION_LEASE_LIMIT = 100;
 // request, not just the eventual atomic apply batch.
 export const BACKFILL_REPAIR_RECORD_LIMIT = 120;
 export const ATOMIC_REPAIR_BYTE_LIMIT = 8 * 1024 * 1024;
-export const ROLE_METADATA_REVALIDATION_MS = 30 * 24 * 60 * 60_000;
+// How long a role with extracted metadata waits before the scheduled pass reads
+// its page again. A good first pass is the normal outcome, and an employer edit
+// after posting is rare, so this is deliberately long: the recurring read exists
+// for parser rollouts and post-hoc page edits, not for freshness. The field-less
+// 24-hour retry is separate (`metadataVerificationCandidates`), so a role whose
+// acquisition produced nothing is still re-offered daily.
+export const ROLE_METADATA_REVALIDATION_MS = 180 * 24 * 60 * 60_000;
 // The catalog holds tens of thousands of internship documents (144 MB at
 // production size), so catalog-wide readers walk it in bounded keyset pages: one
 // statement over `kind = 'internship'` exceeds D1's per-query memory ceiling

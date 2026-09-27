@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleCatalogAdmissionOperations } from '../cloudflare/catalog-admission-api.js';
 import { companyIconResponse } from '../cloudflare/company-icon.js';
-import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, DESTINATION_VERIFICATION_LEASE_LIMIT } from '../cloudflare/catalog-admission-store.js';
+import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, DESTINATION_VERIFICATION_LEASE_LIMIT, ROLE_METADATA_REVALIDATION_MS } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { persistDestinationAdmission, reachabilityFromHttpStatus, type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
 import { collectRoleMetadataInBackground } from '../cloudflare/worker.js';
@@ -843,7 +843,7 @@ describe('D1 catalog admission operations', () => {
       job: answered, reference: answered.sourceReferences[0]!, reachability: 'live',
       inspectedAt: '2026-08-29T00:00:00Z', browserVisible: true,
       evidence: { ...pageEvidence, contentExcerpt: `${reference.title}. The hourly rate is $40 - $50 per hour.` } });
-    expect(retryAfterFor()).toBe('2026-09-28T00:00:00.000Z');
+    expect(retryAfterFor()).toBe(new Date(Date.parse('2026-08-29T00:00:00Z') + ROLE_METADATA_REVALIDATION_MS).toISOString());
     expect(await jobs.getJob(current.jobId)).toMatchObject({ compensation: { raw: '$40–50/hour' } });
   });
 
