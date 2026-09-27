@@ -1355,7 +1355,23 @@ export class D1CatalogAdmissionStore {
       .map((value) => JSON.stringify(value))
       .sort()
       .map((value) => JSON.parse(value) as T);
-    return hash(JSON.stringify({ employers: stable(employers), mappings: stable(mappings), rules: stable(rules) }));
+    // Hash only admission-relevant configuration. The background icon resolver
+    // writes `iconKey`/`iconSource`/`iconUpdatedAt` on every logo it resolves,
+    // and review-rule sampling rewrites `sampleDueAt`; neither changes how a
+    // source row is admitted, but hashing them restarted a full catalog
+    // re-grade on every icon update.
+    const admissionEmployers = employers.map((employer) => ({
+      id: employer.id, displayName: employer.displayName,
+      reviewedAt: employer.reviewedAt, reviewedBy: employer.reviewedBy,
+      ...(employer.parentEmployerId ? { parentEmployerId: employer.parentEmployerId } : {}),
+      ...(employer.brandOfEmployerId ? { brandOfEmployerId: employer.brandOfEmployerId } : {}),
+    }));
+    const admissionRules = rules.map((rule) => ({
+      id: rule.id, host: rule.host, provider: rule.provider, decision: rule.decision,
+      reviewedAt: rule.reviewedAt, reviewedBy: rule.reviewedBy,
+      ...(rule.tenant ? { tenant: rule.tenant } : {}),
+    }));
+    return hash(JSON.stringify({ employers: stable(admissionEmployers), mappings: stable(mappings), rules: stable(admissionRules) }));
   }
 
   async supersedeEmployerMapping(value: EmployerMapping): Promise<void> {
