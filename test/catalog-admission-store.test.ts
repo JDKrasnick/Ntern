@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleCatalogAdmissionOperations } from '../cloudflare/catalog-admission-api.js';
 import { companyIconResponse } from '../cloudflare/company-icon.js';
-import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, DESTINATION_VERIFICATION_LEASE_LIMIT } from '../cloudflare/catalog-admission-store.js';
+import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, DESTINATION_VERIFICATION_LEASE_LIMIT, ROLE_METADATA_REVALIDATION_MS } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { persistDestinationAdmission, reachabilityFromHttpStatus, type DestinationVerificationMessage } from '../cloudflare/destination-verification.js';
 import { collectRoleMetadataInBackground } from '../cloudflare/worker.js';
@@ -210,6 +210,21 @@ describe('D1 catalog admission operations', () => {
     const populated = await store.configurationVersion();
     expect(populated).not.toBe(empty);
     expect(await store.configurationVersion()).toBe(populated);
+  });
+
+  it('ignores presentation-only employer changes when versioning admission configuration', async () => {
+    const { database, admission: store } = subject();
+    await store.putCanonicalEmployer({ id: 'acme', displayName: 'Acme', reviewedAt: '2026-08-26T00:00:00Z', reviewedBy: 'reviewer' }, '2026-08-26T00:00:00Z');
+    const version = await store.configurationVersion();
+
+    // The background icon resolver writes these columns. They do not change how
+    // a source row is admitted, so resolving a logo must not restart a full
+    // catalog re-grade — which is what made the re-grade deliveries heavy enough
+    // to be resource-killed into the dead-letter queue.
+    database.prepare(`UPDATE canonical_employers SET icon_key = ?, icon_source = 'logo-dev', icon_updated_at = ?, icon_resolved_at = ? WHERE id = 'acme'`)
+      .run('employers/acme.png', '2026-09-27T14:29:00Z', '2026-09-27T14:29:00Z');
+
+    expect(await store.configurationVersion()).toBe(version);
   });
 
   it('audits review records by source, destination, and prior notification history', async () => {
@@ -828,7 +843,7 @@ describe('D1 catalog admission operations', () => {
       job: answered, reference: answered.sourceReferences[0]!, reachability: 'live',
       inspectedAt: '2026-08-29T00:00:00Z', browserVisible: true,
       evidence: { ...pageEvidence, contentExcerpt: `${reference.title}. The hourly rate is $40 - $50 per hour.` } });
-    expect(retryAfterFor()).toBe('2026-09-28T00:00:00.000Z');
+    expect(retryAfterFor()).toBe(new Date(Date.parse('2026-08-29T00:00:00Z') + ROLE_METADATA_REVALIDATION_MS).toISOString());
     expect(await jobs.getJob(current.jobId)).toMatchObject({ compensation: { raw: '$40–50/hour' } });
   });
 
@@ -908,6 +923,41 @@ describe('D1 catalog admission operations', () => {
     expect(sent[0]).toMatchObject({ jobId: 'job-1', sourceId: 'workday-acme' });
     // Its lease now holds the next pass off rather than the stale deferral.
     await expect(collectRoleMetadataInBackground(env as never, new Date('2026-09-01T00:01:00Z'))).resolves.toEqual({ queued: 0 });
+  });
+
+  it('force-refreshes a complete role only when the operator asks', async () => {
+    const current = subject();
+    const workdayUrl = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Remote/Software-Intern_R12345';
+    const verified = admission(true);
+    verified.destination = { ...verified.destination, classification: 'posting-detail', provider: 'workday',
+      tenant: 'acme', expectedPostingId: 'R12345', candidateUrl: workdayUrl };
+    // A page that answered with fields, so the normal window parks it and only
+    // an explicit refresh may re-read it before the window elapses.
+    const pageEvidence = { schemaVersion: 1 as const, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, artifactHash: 'hash-2',
+      sourceClass: 'official-page' as const, sourceId: 'workday-acme', sourceUrl: workdayUrl,
+      observedAt: '2026-08-28T00:00:00Z', exactPosting: true as const,
+      compensationRanges: [{ minAmount: 30, maxAmount: 40, currency: 'USD', period: 'hourly' as const, sourceText: '$30-40/hour',
+        provenance: [{ source: 'official-page' as const, sourceId: 'workday-acme', sourceUrl: workdayUrl,
+          evidenceCode: 'compensation-range', contentHash: 'hash-2', observedAt: '2026-08-28T00:00:00Z' }] }] };
+    const reference = {
+      sourceId: 'workday-acme', provenance: 'official-ats' as const, externalId: 'R12345', document: 'R12345',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', row: 1, company: 'Acme',
+      title: 'Software Engineering Intern', location: 'Remote', locations: ['Remote'], season: 'summer-2027',
+      applyUrl: workdayUrl, compensation: { raw: '' }, state: 'open' as const, admission: verified,
+      metadataEvidence: [pageEvidence],
+    };
+    await current.jobs.putInternship({ ...job(), sourceReferences: [reference] });
+    current.database.prepare(`INSERT INTO role_metadata_evidence
+      (job_id, source_class, source_id, source_url, artifact_hash, extraction_version, evidence, observed_at, is_current)
+      VALUES ('job-1', 'official-page', 'workday-acme', ?, 'hash-2', ?, ?, '2026-08-28T00:00:00Z', 1)`)
+      .run(workdayUrl, ROLE_METADATA_EXTRACTION_VERSION, JSON.stringify(pageEvidence));
+    current.database.prepare(`INSERT INTO role_metadata_acquisition (job_id, source_id, lease_until, retry_after, observed_at, report)
+      VALUES ('job-1', 'workday-acme', '', '2026-10-20T00:00:00Z', '2026-08-28T00:00:00Z', ?)`)
+      .run(JSON.stringify({ extractionVersion: ROLE_METADATA_EXTRACTION_VERSION }));
+    const window = { observedBefore: '2026-08-01T00:00:00Z', includeUnobserved: false, requireProjectedEvidence: true } as const;
+    await expect(current.admission.metadataVerificationCandidates(10, window)).resolves.toEqual([]);
+    await expect(current.admission.metadataVerificationCandidates(10, { ...window, refresh: true, reserveAt: '2026-09-01T00:00:00Z' }))
+      .resolves.toMatchObject([{ jobId: 'job-1', sourceId: 'workday-acme', bypassDeferral: true }]);
   });
 
   it('matches collection work sent for the destination the occurrence itself verified', () => {

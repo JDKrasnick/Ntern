@@ -981,16 +981,20 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     const input = await request.json().catch(() => ({})) as {
       action?: 'collect' | 'dry-run' | 'apply'; limit?: number; collectionToken?: string; cursor?: string;
-      repairToken?: string; expectedJobs?: number; expectedOccurrences?: number;
+      repairToken?: string; expectedJobs?: number; expectedOccurrences?: number; refresh?: boolean;
     };
     const operations = new D1CatalogAdmissionStore(env.DB);
     try {
       if (input.action === 'collect') {
+        // A forced refresh ignores the revalidation window, so keep it a
+        // bounded slice rather than a whole-catalog sweep.
+        const refresh = input.refresh === true;
+        const ceiling = refresh ? 200 : 500;
         const limit = input.limit ?? 100;
-        if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('limit must be an integer from 1 to 500');
+        if (!Number.isInteger(limit) || limit < 1 || limit > ceiling) throw new Error(`limit must be an integer from 1 to ${ceiling}`);
         const collectionToken = input.collectionToken?.trim() || crypto.randomUUID();
         const candidates = await operations.metadataVerificationCandidates(limit, {
-          observedBefore: new Date(Date.now() - ROLE_METADATA_REVALIDATION_MS).toISOString(),
+          ...(refresh ? { refresh: true } : { observedBefore: new Date(Date.now() - ROLE_METADATA_REVALIDATION_MS).toISOString() }),
           after: decodeMetadataCursor(input.cursor),
           reserveAt: new Date().toISOString(),
         });
@@ -1604,10 +1608,12 @@ export function admissionOperationalSignals(input: {
 
 /**
  * How long the feed may go without a newly published role before the
- * maintenance alert fires. The catalog watches active internship lists, so an
- * eight-hour silence is a publication stall, not a quiet period.
+ * maintenance alert fires. Active internship lists publish most weekdays, but a
+ * weekend night can legitimately run quiet: the catalog went 18 hours with no
+ * new posting on 2026-09-27 while every board polled normally. A full day of
+ * silence is a stall rather than a quiet period, so the threshold is 24 hours.
  */
-export const CATALOG_STARVATION_ALERT_HOURS = 8;
+export const CATALOG_STARVATION_ALERT_HOURS = 24;
 
 /** True when open catalog-eligible roles exist but none was published recently.
  * An empty catalog is a different failure and never reports through this signal. */

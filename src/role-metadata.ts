@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { compensationLabels } from '../shared/compensation-display.js';
 import { metadataDescriptionText } from './core/metadata-text.js';
 import { boundedText, locationSummary, normalizeLocations } from './catalog-quality.js';
-import { educationAudienceLevels, mergeEducationEvidence, mergeProvenance } from './identity/enrichment.js';
+import { educationAudienceLevels, effectiveAdvancedDegreeRequired, mergeEducationEvidence, mergeProvenance } from './identity/enrichment.js';
 import type {
   ApplicationDeadline,
   Compensation,
@@ -91,7 +91,7 @@ function jsonLdIdentifier(value: unknown): string | undefined {
   return id || stringValue(value['@id']);
 }
 
-function postingIdentifierMatches(expected: string, actual: string | undefined): boolean {
+export function postingIdentifierMatches(expected: string, actual: string | undefined): boolean {
   if (!actual) return false;
   const decode = (value: string) => { try { return decodeURIComponent(value); } catch { return value; } };
   const normalizedExpected = decode(expected).trim().toLowerCase();
@@ -1131,6 +1131,15 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
     ...(result.metadata?.employerUpdatedAt ? { employerUpdatedAt: result.metadata.employerUpdatedAt.value } : {}),
   };
   if (!result.metadata) delete projected.roleMetadata;
+  // Reconcile the community advanced-degree badge with the employer's explicit
+  // audience so the two never contradict on the same role (a community cap can
+  // mark a role graduate-only that the official page opens to undergraduates).
+  const reconciledEducation = result.metadata?.education ?? structuredIdentity(projected)?.education;
+  if (projected.requirements) {
+    projected.requirements = { ...projected.requirements,
+      advancedDegreeRequired: effectiveAdvancedDegreeRequired({ levels: reconciledEducation?.levels,
+        evidenceStatus: reconciledEducation?.evidenceStatus, advancedDegreeRequired: projected.requirements.advancedDegreeRequired }) };
+  }
   if (previousMetadata?.housing && stable(previousMetadata.housing) === stable(job.housing) && !result.metadata?.housing) delete projected.housing;
   if (previousMetadata?.workMode?.value === job.workMode && !result.metadata?.workMode) delete projected.workMode;
   if (stable(previousMetadata?.applicationDeadline?.value) === stable(job.applicationDeadline) && !result.metadata?.applicationDeadline) delete projected.applicationDeadline;
