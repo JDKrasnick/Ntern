@@ -1475,18 +1475,27 @@ export class D1CatalogAdmissionStore {
     // and review-rule sampling rewrites `sampleDueAt`; neither changes how a
     // source row is admitted, but hashing them restarted a full catalog
     // re-grade on every icon update.
-    const admissionEmployers = employers.map((employer) => ({
+    // Automatic exact-ATS mappings are enrichment learned from the source rows
+    // themselves. Including them here makes every promotion invalidate every
+    // large community source, and the next promotion moves the target again
+    // before that catalog-wide migration can finish. New/changed rows still use
+    // the mapping immediately; only explicit reviewer configuration triggers a
+    // historical admission re-grade.
+    const admissionEmployers = employers
+      .filter((employer) => employer.reviewedBy !== AUTOMATIC_EMPLOYER_POLICY)
+      .map((employer) => ({
       id: employer.id, displayName: employer.displayName,
       reviewedAt: employer.reviewedAt, reviewedBy: employer.reviewedBy,
       ...(employer.parentEmployerId ? { parentEmployerId: employer.parentEmployerId } : {}),
       ...(employer.brandOfEmployerId ? { brandOfEmployerId: employer.brandOfEmployerId } : {}),
-    }));
+      }));
+    const admissionMappings = mappings.filter((mapping) => mapping.reviewedBy !== AUTOMATIC_EMPLOYER_POLICY);
     const admissionRules = rules.map((rule) => ({
       id: rule.id, host: rule.host, provider: rule.provider, decision: rule.decision,
       reviewedAt: rule.reviewedAt, reviewedBy: rule.reviewedBy,
       ...(rule.tenant ? { tenant: rule.tenant } : {}),
     }));
-    return hash(JSON.stringify({ employers: stable(admissionEmployers), mappings: stable(mappings), rules: stable(admissionRules) }));
+    return hash(JSON.stringify({ employers: stable(admissionEmployers), mappings: stable(admissionMappings), rules: stable(admissionRules) }));
   }
 
   async supersedeEmployerMapping(value: EmployerMapping): Promise<void> {

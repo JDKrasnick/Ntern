@@ -298,6 +298,20 @@ describe('D1 catalog admission operations', () => {
     expect(await store.configurationVersion()).toBe(populated);
   });
 
+  it('does not restart historical admission when automatic exact-ATS enrichment grows', async () => {
+    const { admission: store } = subject();
+    const version = await store.configurationVersion();
+
+    expect(await store.observeAutomaticEmployerIdentities([{
+      provider: 'icims', scope: 'amd', sourceId: 'community-list', fetchSequence: 1,
+      labelKey: 'amd', displayName: 'AMD', postingIds: ['92358'],
+      applicationUrl: 'https://careers.amd.com/jobs/92358?icims=1',
+      observedAt: '2026-09-27T00:00:00Z',
+    }])).toMatchObject({ promoted: 1 });
+
+    expect(await store.configurationVersion()).toBe(version);
+  });
+
   it('ignores presentation-only employer changes when versioning admission configuration', async () => {
     const { database, admission: store } = subject();
     await store.putCanonicalEmployer({ id: 'acme', displayName: 'Acme', reviewedAt: '2026-08-26T00:00:00Z', reviewedBy: 'reviewer' }, '2026-08-26T00:00:00Z');
