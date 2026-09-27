@@ -34,6 +34,9 @@ export const CLOSED_OCCURRENCE_RETENTION_DAYS = 180;
 export const CLOSED_JOB_RETENTION_DAYS = 365;
 export const CATALOG_RETENTION_ROW_BATCH = 200;
 export const CATALOG_RETENTION_JOB_BATCH = 25;
+/** The daily cron keeps draining full pages, but yields before monopolizing maintenance. */
+export const CATALOG_RETENTION_CRON_MAX_PASSES = 100;
+export const CATALOG_RETENTION_CRON_MAX_DURATION_MS = 20_000;
 
 export interface CatalogRetentionOptions {
   /** Clock for the cutoffs; defaults to now. */
@@ -45,10 +48,24 @@ export interface CatalogRetentionOptions {
   apply?: boolean;
   rowBatchSize?: number;
   jobBatchSize?: number;
+  maxPasses?: number;
+  maxDurationMs?: number;
+}
+
+export interface CatalogRetentionRemaining {
+  notificationEvents: boolean;
+  closedJobs: boolean;
+  closedOccurrences: boolean;
+  metadataEvidenceHistory: boolean;
+  metadataExtractionAttempts: boolean;
+  metadataResolvedConflicts: boolean;
 }
 
 export interface CatalogRetentionReport {
   applied: boolean;
+  passes: number;
+  timeBudgetReached: boolean;
+  remaining: CatalogRetentionRemaining;
   /** Rows eligible this run (or deleted this run when `applied`). */
   notificationEvents: number;
   closedJobs: number;
@@ -90,49 +107,29 @@ function emptyCounts(): CatalogRetentionCounts {
   };
 }
 
-type CatalogKey = { pk: string; sk: string };
-
-// D1 caps bound parameters per statement, and each catalog key binds two, so a
-// delete chunk carries at most 50 keys regardless of how many were selected.
-const CATALOG_KEY_BIND_LIMIT = 50;
-const CATALOG_ROWID_BIND_LIMIT = 100;
-
-async function deleteCatalogKeys(db: D1Database, keys: readonly CatalogKey[], batchSize: number): Promise<number> {
-  let deleted = 0;
-  const chunkSize = Math.min(batchSize, CATALOG_KEY_BIND_LIMIT);
-  for (let offset = 0; offset < keys.length; offset += chunkSize) {
-    const chunk = keys.slice(offset, offset + chunkSize);
-    const clause = chunk.map(() => '(pk = ? AND sk = ?)').join(' OR ');
-    const result = await db.prepare(`DELETE FROM catalog_items WHERE ${clause}`)
-      .bind(...chunk.flatMap((key) => [key.pk, key.sk])).run();
-    deleted += result.meta.changes;
-  }
-  return deleted;
+function positiveInteger(value: number | undefined, fallback: number): number {
+  return value === undefined || !Number.isFinite(value) ? fallback : Math.max(1, Math.floor(value));
 }
 
-/**
- * Deletes by `rowid` so a sweep over a table with a natural primary key can
- * still bound each statement. `table` is always a literal from this module.
- */
-async function deleteByRowid(db: D1Database, table: string, rowids: readonly number[], batchSize: number): Promise<number> {
-  let deleted = 0;
-  const chunkSize = Math.min(batchSize, CATALOG_ROWID_BIND_LIMIT);
-  for (let offset = 0; offset < rowids.length; offset += chunkSize) {
-    const chunk = rowids.slice(offset, offset + chunkSize);
-    const result = await db.prepare(`DELETE FROM ${table} WHERE rowid IN (${chunk.map(() => '?').join(', ')})`)
-      .bind(...chunk).run();
-    deleted += result.meta.changes;
-  }
-  return deleted;
+async function limitedCount(db: D1Database, query: string, bindings: unknown[], limit: number): Promise<number> {
+  const row = await db.prepare(`SELECT COUNT(*) AS count FROM (${query} LIMIT ?)`)
+    .bind(...bindings, limit).first<{ count: number }>();
+  return Number(row?.count ?? 0);
+}
+
+async function exists(db: D1Database, query: string, bindings: unknown[]): Promise<boolean> {
+  return Boolean(await db.prepare(`SELECT 1 AS present FROM (${query} LIMIT 1)`).bind(...bindings).first<{ present: number }>());
 }
 
 /** Notification outbox rows past the retention window (malformed rows included). */
 async function sweepNotificationEvents(db: D1Database, cutoff: string, limit: number, apply: boolean): Promise<number> {
-  const rows = await db.prepare(`SELECT pk, sk FROM catalog_items
+  const selection = `SELECT rowid FROM catalog_items
     WHERE kind = 'notification-event' AND coalesce(json_extract(value, '$.createdAt'), '') < ?
-    ORDER BY json_extract(value, '$.createdAt') LIMIT ?`).bind(cutoff, limit).all<CatalogKey>();
-  if (!apply || !rows.results.length) return rows.results.length;
-  return deleteCatalogKeys(db, rows.results, limit);
+    ORDER BY coalesce(json_extract(value, '$.createdAt'), '')`;
+  if (!apply) return limitedCount(db, selection, [cutoff], limit);
+  const result = await db.prepare(`DELETE FROM catalog_items WHERE rowid IN (${selection} LIMIT ?)`)
+    .bind(cutoff, limit).run();
+  return result.meta.changes;
 }
 
 /**
@@ -140,16 +137,20 @@ async function sweepNotificationEvents(db: D1Database, cutoff: string, limit: nu
  * a re-listing is a fresh observation, not a continuation.
  */
 async function sweepClosedOccurrences(db: D1Database, cutoff: string, limit: number, apply: boolean): Promise<number> {
-  const rows = await db.prepare(`SELECT pk, sk FROM catalog_items
+  const selection = `SELECT rowid FROM catalog_items
     WHERE kind = 'source-occurrence'
       AND json_extract(value, '$.occurrence.state') = 'closed'
       AND coalesce(json_extract(value, '$.changedAt'), '') < ?
-    ORDER BY json_extract(value, '$.changedAt') LIMIT ?`).bind(cutoff, limit).all<CatalogKey>();
-  if (!apply || !rows.results.length) return rows.results.length;
-  return deleteCatalogKeys(db, rows.results, limit);
+    ORDER BY coalesce(json_extract(value, '$.changedAt'), '')`;
+  if (!apply) return limitedCount(db, selection, [cutoff], limit);
+  // Eligibility is selected and deleted in one SQLite statement, so an
+  // occurrence that reopens or is remapped cannot be deleted from a stale page.
+  const result = await db.prepare(`DELETE FROM catalog_items WHERE rowid IN (${selection} LIMIT ?)`)
+    .bind(cutoff, limit).run();
+  return result.meta.changes;
 }
 
-type ClosedJobRow = { pk: string; sk: string; value: string };
+type ClosedJobRow = { pk: string; sk: string; value: string; catalogSortKey: string };
 
 /**
  * Closed internships past the retention window, together with every row that
@@ -162,47 +163,58 @@ async function sweepClosedJobs(
   cutoff: string,
   limit: number,
   apply: boolean,
-  statementBatch: number,
-): Promise<{ jobs: number; occurrences: number; metadataRows: number }> {
-  const page = await db.prepare(`SELECT pk, sk, value FROM catalog_items
+): Promise<{ jobs: number; occurrences: number; metadataRows: number; selected: number }> {
+  const page = await db.prepare(`SELECT pk, sk, value, catalog_sort_key AS catalogSortKey FROM catalog_items
     WHERE kind = 'internship' AND catalog_state = 'CLOSED'
       AND catalog_sort_key IS NOT NULL AND catalog_sort_key < ?
     ORDER BY catalog_sort_key LIMIT ?`).bind(cutoff, limit).all<ClosedJobRow>();
   if (!apply || !page.results.length) {
-    return { jobs: page.results.length, occurrences: 0, metadataRows: 0 };
+    return { jobs: page.results.length, occurrences: 0, metadataRows: 0, selected: page.results.length };
   }
   let jobs = 0;
   let occurrences = 0;
   let metadataRows = 0;
   for (const row of page.results) {
-    let jobId = row.pk.startsWith('JOB#') ? row.pk.slice('JOB#'.length) : row.pk;
+    const jobId = row.pk.startsWith('JOB#') ? row.pk.slice('JOB#'.length) : row.pk;
     let references: Array<{ sourceId?: unknown; externalId?: unknown }> = [];
     try {
       const parsed = JSON.parse(row.value) as { jobId?: unknown; sourceReferences?: unknown };
-      if (typeof parsed.jobId === 'string') jobId = parsed.jobId;
-      if (Array.isArray(parsed.sourceReferences)) references = parsed.sourceReferences as typeof references;
+      if (typeof parsed.jobId === 'string' && parsed.jobId !== jobId) {
+        console.error(JSON.stringify({ command: 'catalog-retention-job-id-mismatch', pk: row.pk, embeddedJobId: parsed.jobId }));
+      } else if (Array.isArray(parsed.sourceReferences)) {
+        references = parsed.sourceReferences as typeof references;
+      }
     } catch { /* A malformed row is still expired by its own key. */ }
+    const parentGuard = `EXISTS (SELECT 1 FROM catalog_items AS job
+      WHERE job.pk = ? AND job.sk = ? AND job.kind = 'internship' AND job.value = ?
+        AND job.catalog_state = 'CLOSED' AND job.catalog_sort_key = ?)`;
+    const parentBindings = [row.pk, row.sk, row.value, row.catalogSortKey];
     const statements: D1PreparedStatement[] = [];
     let occurrenceStatements = 0;
     for (const reference of references) {
       if (!reference || typeof reference.sourceId !== 'string' || typeof reference.externalId !== 'string') continue;
-      statements.push(db.prepare('DELETE FROM catalog_items WHERE pk = ? AND sk = ?')
-        .bind(`SOURCE#${reference.sourceId}`, `OCCURRENCE#${reference.externalId}`));
+      statements.push(db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND sk = ? AND kind = 'source-occurrence'
+        AND json_extract(value, '$.jobId') = ? AND json_extract(value, '$.occurrence.state') = 'closed'
+        AND ${parentGuard}`)
+        .bind(`SOURCE#${reference.sourceId}`, `OCCURRENCE#${reference.externalId}`, jobId, ...parentBindings));
       occurrenceStatements += 1;
     }
-    statements.push(db.prepare('DELETE FROM catalog_items WHERE pk = ? AND sk = ?').bind(`JOB#${jobId}`, 'META'));
-    statements.push(db.prepare('DELETE FROM role_metadata_evidence WHERE job_id = ?').bind(jobId));
-    statements.push(db.prepare('DELETE FROM role_metadata_extraction_attempts WHERE job_id = ?').bind(jobId));
-    statements.push(db.prepare('DELETE FROM role_metadata_conflicts WHERE job_id = ?').bind(jobId));
-    const results: Array<{ meta: { changes: number } }> = [];
-    for (let offset = 0; offset < statements.length; offset += statementBatch) {
-      results.push(...await db.batch(statements.slice(offset, offset + statementBatch)));
-    }
+    statements.push(db.prepare(`DELETE FROM role_metadata_evidence WHERE job_id = ? AND ${parentGuard}`).bind(jobId, ...parentBindings));
+    statements.push(db.prepare(`DELETE FROM role_metadata_extraction_attempts WHERE job_id = ? AND ${parentGuard}`).bind(jobId, ...parentBindings));
+    statements.push(db.prepare(`DELETE FROM role_metadata_conflicts WHERE job_id = ? AND ${parentGuard}`).bind(jobId, ...parentBindings));
+    // The parent delete is last. D1 batch is one transaction, and every child
+    // statement rechecks the exact selected parent, so a concurrent reopen or
+    // rewrite makes the whole selected snapshot ineligible rather than deleting
+    // live state. The selected primary key remains authoritative over JSON.
+    statements.push(db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND sk = ? AND kind = 'internship'
+      AND value = ? AND catalog_state = 'CLOSED' AND catalog_sort_key = ?`)
+      .bind(row.pk, row.sk, row.value, row.catalogSortKey));
+    const results = await db.batch(statements);
     for (let index = 0; index < occurrenceStatements; index += 1) occurrences += results[index]?.meta.changes ?? 0;
-    jobs += results[occurrenceStatements]?.meta.changes ?? 0;
-    for (let index = occurrenceStatements + 1; index < results.length; index += 1) metadataRows += results[index]?.meta.changes ?? 0;
+    for (let index = occurrenceStatements; index < results.length - 1; index += 1) metadataRows += results[index]?.meta.changes ?? 0;
+    jobs += results.at(-1)?.meta.changes ?? 0;
   }
-  return { jobs, occurrences, metadataRows };
+  return { jobs, occurrences, metadataRows, selected: page.results.length };
 }
 
 /**
@@ -216,25 +228,67 @@ async function sweepMetadataHistory(
   limit: number,
   apply: boolean,
 ): Promise<{ evidence: number; attempts: number; conflicts: number }> {
-  const evidence = await db.prepare(`SELECT rowid FROM role_metadata_evidence
-    WHERE is_current = 0 AND observed_at < ? LIMIT ?`).bind(cutoff, limit).all<{ rowid: number }>();
-  const attempts = await db.prepare(`SELECT attempt.rowid AS rowid FROM role_metadata_extraction_attempts AS attempt
+  const evidenceSelection = `SELECT rowid FROM role_metadata_evidence
+    WHERE is_current = 0 AND observed_at < ?`;
+  const attemptSelection = `SELECT attempt.rowid AS rowid FROM role_metadata_extraction_attempts AS attempt
     WHERE attempt.observed_at < ?
       AND EXISTS (SELECT 1 FROM role_metadata_extraction_attempts AS newer
         WHERE newer.job_id = attempt.job_id AND newer.source_id = attempt.source_id
           AND (newer.observed_at > attempt.observed_at
-            OR (newer.observed_at = attempt.observed_at AND newer.rowid > attempt.rowid)))
-    LIMIT ?`).bind(cutoff, limit).all<{ rowid: number }>();
-  const conflicts = await db.prepare(`SELECT rowid FROM role_metadata_conflicts
-    WHERE state = 'resolved' AND updated_at < ? LIMIT ?`).bind(cutoff, limit).all<{ rowid: number }>();
+            OR (newer.observed_at = attempt.observed_at AND newer.rowid > attempt.rowid)))`;
+  const conflictSelection = `SELECT rowid FROM role_metadata_conflicts
+    WHERE state = 'resolved' AND updated_at < ?`;
   if (!apply) {
-    return { evidence: evidence.results.length, attempts: attempts.results.length, conflicts: conflicts.results.length };
+    return {
+      evidence: await limitedCount(db, evidenceSelection, [cutoff], limit),
+      attempts: await limitedCount(db, attemptSelection, [cutoff], limit),
+      conflicts: await limitedCount(db, conflictSelection, [cutoff], limit),
+    };
   }
+  // Each statement re-evaluates eligibility while deleting. An evidence row
+  // made current or a conflict reopened before this statement begins survives.
+  const [evidence, attempts, conflicts] = await db.batch([
+    db.prepare(`DELETE FROM role_metadata_evidence WHERE rowid IN (${evidenceSelection} LIMIT ?)`).bind(cutoff, limit),
+    db.prepare(`DELETE FROM role_metadata_extraction_attempts WHERE rowid IN (${attemptSelection} LIMIT ?)`).bind(cutoff, limit),
+    db.prepare(`DELETE FROM role_metadata_conflicts WHERE rowid IN (${conflictSelection} LIMIT ?)`).bind(cutoff, limit),
+  ]);
   return {
-    evidence: await deleteByRowid(db, 'role_metadata_evidence', evidence.results.map((row) => row.rowid), limit),
-    attempts: await deleteByRowid(db, 'role_metadata_extraction_attempts', attempts.results.map((row) => row.rowid), limit),
-    conflicts: await deleteByRowid(db, 'role_metadata_conflicts', conflicts.results.map((row) => row.rowid), limit),
+    evidence: evidence?.meta.changes ?? 0,
+    attempts: attempts?.meta.changes ?? 0,
+    conflicts: conflicts?.meta.changes ?? 0,
   };
+}
+
+async function retentionRemaining(db: D1Database, cutoffs: {
+  notification: string; jobs: string; occurrences: string; metadata: string;
+}): Promise<CatalogRetentionRemaining> {
+  const remaining: CatalogRetentionRemaining = {
+    notificationEvents: await exists(db, `SELECT rowid FROM catalog_items
+      WHERE kind = 'notification-event' AND coalesce(json_extract(value, '$.createdAt'), '') < ?`, [cutoffs.notification]),
+    closedJobs: await exists(db, `SELECT rowid FROM catalog_items
+      WHERE kind = 'internship' AND catalog_state = 'CLOSED'
+        AND catalog_sort_key IS NOT NULL AND catalog_sort_key < ?`, [cutoffs.jobs]),
+    closedOccurrences: await exists(db, `SELECT rowid FROM catalog_items
+      WHERE kind = 'source-occurrence' AND json_extract(value, '$.occurrence.state') = 'closed'
+        AND coalesce(json_extract(value, '$.changedAt'), '') < ?`, [cutoffs.occurrences]),
+    metadataEvidenceHistory: false,
+    metadataExtractionAttempts: false,
+    metadataResolvedConflicts: false,
+  };
+  try {
+    remaining.metadataEvidenceHistory = await exists(db,
+      'SELECT rowid FROM role_metadata_evidence WHERE is_current = 0 AND observed_at < ?', [cutoffs.metadata]);
+    remaining.metadataExtractionAttempts = await exists(db, `SELECT attempt.rowid FROM role_metadata_extraction_attempts AS attempt
+      WHERE attempt.observed_at < ? AND EXISTS (SELECT 1 FROM role_metadata_extraction_attempts AS newer
+        WHERE newer.job_id = attempt.job_id AND newer.source_id = attempt.source_id
+          AND (newer.observed_at > attempt.observed_at
+            OR (newer.observed_at = attempt.observed_at AND newer.rowid > attempt.rowid)))`, [cutoffs.metadata]);
+    remaining.metadataResolvedConflicts = await exists(db,
+      "SELECT rowid FROM role_metadata_conflicts WHERE state = 'resolved' AND updated_at < ?", [cutoffs.metadata]);
+  } catch (error) {
+    console.error(JSON.stringify({ command: 'catalog-retention-metadata-backlog', error: error instanceof Error ? error.message : String(error) }));
+  }
+  return remaining;
 }
 
 /**
@@ -246,30 +300,52 @@ async function sweepMetadataHistory(
 export async function runCatalogRetention(db: D1Database, options: CatalogRetentionOptions = {}): Promise<CatalogRetentionReport> {
   const now = options.now ?? new Date();
   const apply = options.apply === true;
-  const rowBatch = Math.max(1, options.rowBatchSize ?? CATALOG_RETENTION_ROW_BATCH);
-  const jobBatch = Math.max(1, options.jobBatchSize ?? CATALOG_RETENTION_JOB_BATCH);
+  const rowBatch = positiveInteger(options.rowBatchSize, CATALOG_RETENTION_ROW_BATCH);
+  const jobBatch = positiveInteger(options.jobBatchSize, CATALOG_RETENTION_JOB_BATCH);
+  const maxPasses = apply ? positiveInteger(options.maxPasses, 1) : 1;
+  const maxDurationMs = positiveInteger(options.maxDurationMs, Number.MAX_SAFE_INTEGER);
+  const startedAt = Date.now();
+  const cutoffs = {
+    notification: isoDaysBefore(now, NOTIFICATION_EVENT_RETENTION_DAYS),
+    jobs: isoDaysBefore(now, CLOSED_JOB_RETENTION_DAYS),
+    occurrences: isoDaysBefore(now, CLOSED_OCCURRENCE_RETENTION_DAYS),
+    metadata: isoDaysBefore(now, METADATA_HISTORY_RETENTION_DAYS),
+  };
   const counts = emptyCounts();
+  let passes = 0;
+  let timeBudgetReached = false;
+  for (; passes < maxPasses; passes += 1) {
+    const notificationEvents = await sweepNotificationEvents(db, cutoffs.notification, rowBatch, apply);
+    counts.notificationEvents += notificationEvents;
+    // Closed jobs run before closed occurrences so a job's own occurrence rows
+    // are counted with the job that owned them; the occurrence sweep then handles
+    // rows whose job is still retained.
+    const jobs = await sweepClosedJobs(db, cutoffs.jobs, jobBatch, apply);
+    counts.closedJobs += jobs.jobs;
+    counts.closedJobOccurrences += jobs.occurrences;
+    counts.closedJobMetadataRows += jobs.metadataRows;
+    const closedOccurrences = await sweepClosedOccurrences(db, cutoffs.occurrences, rowBatch, apply);
+    counts.closedOccurrences += closedOccurrences;
 
-  counts.notificationEvents = await sweepNotificationEvents(
-    db, isoDaysBefore(now, NOTIFICATION_EVENT_RETENTION_DAYS), rowBatch, apply);
-  // Closed jobs run before closed occurrences so a job's own occurrence rows
-  // are counted with the job that owned them; the occurrence sweep then handles
-  // rows whose job is still retained.
-  const jobs = await sweepClosedJobs(db, isoDaysBefore(now, CLOSED_JOB_RETENTION_DAYS), jobBatch, apply, rowBatch);
-  counts.closedJobs = jobs.jobs;
-  counts.closedJobOccurrences = jobs.occurrences;
-  counts.closedJobMetadataRows = jobs.metadataRows;
-  counts.closedOccurrences = await sweepClosedOccurrences(
-    db, isoDaysBefore(now, CLOSED_OCCURRENCE_RETENTION_DAYS), rowBatch, apply);
-
-  try {
-    const metadata = await sweepMetadataHistory(db, isoDaysBefore(now, METADATA_HISTORY_RETENTION_DAYS), rowBatch, apply);
-    counts.metadataEvidenceHistory = metadata.evidence;
-    counts.metadataExtractionAttempts = metadata.attempts;
-    counts.metadataResolvedConflicts = metadata.conflicts;
-  } catch (error) {
-    console.error(JSON.stringify({ command: 'catalog-retention-metadata', error: error instanceof Error ? error.message : String(error) }));
+    let metadataPageFull = false;
+    try {
+      const metadata = await sweepMetadataHistory(db, cutoffs.metadata, rowBatch, apply);
+      counts.metadataEvidenceHistory += metadata.evidence;
+      counts.metadataExtractionAttempts += metadata.attempts;
+      counts.metadataResolvedConflicts += metadata.conflicts;
+      metadataPageFull = metadata.evidence >= rowBatch || metadata.attempts >= rowBatch || metadata.conflicts >= rowBatch;
+    } catch (error) {
+      console.error(JSON.stringify({ command: 'catalog-retention-metadata', error: error instanceof Error ? error.message : String(error) }));
+    }
+    const pageFull = notificationEvents >= rowBatch || jobs.selected >= jobBatch
+      || closedOccurrences >= rowBatch || metadataPageFull;
+    if (!apply || !pageFull) { passes += 1; break; }
+    if (Date.now() - startedAt >= maxDurationMs) {
+      timeBudgetReached = true;
+      passes += 1;
+      break;
+    }
   }
-
-  return { applied: apply, ...counts };
+  const remaining = await retentionRemaining(db, cutoffs);
+  return { applied: apply, passes, timeBudgetReached, remaining, ...counts };
 }

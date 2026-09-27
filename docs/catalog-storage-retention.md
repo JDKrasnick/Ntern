@@ -30,10 +30,20 @@ history:
 | Extraction attempts | 180 days | Older attempts, keeping the newest per `(job_id, source_id)` | The freshness row that coverage and candidate selection read |
 | Resolved conflicts (`role_metadata_conflicts.state = 'resolved'`) | 180 days | Settled conflicts | Open conflicts |
 
-The three catalog sweeps are bounded per run (200 rows, 25 jobs). The metadata
-sweeps are isolated behind a `try`/`catch`, so a table that a migration has not
-yet added cannot block catalog reclamation. The maintenance step runs inside
-`runScheduledStep`, so a failure is logged and the rest of the cron continues.
+Each pass is bounded (200 rows, 25 jobs). The daily cron repeats full passes for
+at most 20 seconds or 100 passes, then reports which classes still have eligible
+backlog. This lets a large initial backlog drain at the database's available
+throughput without turning one scheduled invocation into an unbounded job. The
+metadata sweeps are isolated behind a `try`/`catch`, so a table that a migration
+has not yet added cannot block catalog reclamation. The maintenance step runs
+inside `runScheduledStep`, so a failure is logged and the rest of the cron
+continues.
+
+Mutable rows are never deleted from a stale selection. Timestamp and metadata
+sweeps select and delete inside one SQLite statement. A closed job and its
+dependent rows are deleted in one D1 batch transaction; every child statement
+rechecks the exact selected parent, and the primary key remains authoritative if
+embedded JSON disagrees.
 
 Whole-row deletion is what reclaims bytes; field-level compaction was
 deliberately not used. A stored source occurrence feeds
@@ -49,10 +59,12 @@ so it never scans the whole `catalog_items` keyspace on a multi-gigabyte
 database:
 
 - `catalog_items_notification_event_created` — partial expression index on
-  `json_extract(value, '$.createdAt')` where the row is a notification event.
+  `coalesce(json_extract(value, '$.createdAt'), '')` where the row is a
+  notification event.
 - `catalog_items_source_occurrence_closed_changed` — partial expression index on
-  `json_extract(value, '$.changedAt')` where the row is a closed source
-  occurrence.
+  `coalesce(json_extract(value, '$.changedAt'), '')` where the row is a closed
+  source occurrence. The query expressions match these indexes exactly, and the
+  regression suite requires SQLite to choose range searches rather than scans.
 - `role_metadata_evidence_retention`, `role_metadata_extraction_observed`,
   `role_metadata_conflicts_resolved` — retention-leading indexes on the history
   tables.
@@ -66,7 +78,9 @@ Closed internships reuse the existing `catalog_items_state_sort`
 - Dry run: call `runCatalogRetention(db, { now })` without `apply`; it returns
   the same report without writing.
 - The cron logs the report on `employer_maintenance_complete` as
-  `catalogRetention`, with one count per sweep.
+  `catalogRetention`, with counts, pass count, time-budget state, and exact
+  remaining-backlog booleans. Any `remaining` value that stays true across runs
+  is a capacity signal, not a successful drain.
 - Narrow the batch sizes (`rowBatchSize`, `jobBatchSize`) to drain a large
   backlog more gradually; widen the retention windows only with an owner
   decision, since they bound how long a delisted role stays resolvable.
@@ -79,5 +93,7 @@ Closed internships reuse the existing `catalog_items_state_sort`
 
 `test/catalog-retention.test.ts` covers each sweep: a dry run reports without
 deleting, expired rows are removed while live and recent rows are kept, a closed
-job is removed with its occurrences and metadata, the newest attempt survives,
-and a bounded batch drains across successive calls.
+job is removed with its occurrences and metadata, concurrent reopen and embedded
+identity mismatch cases preserve live data, the newest attempt survives,
+multi-pass work stays bounded, and both timestamp predicates retain indexed
+range-search plans.

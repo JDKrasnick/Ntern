@@ -12,11 +12,11 @@
 -- existing indexes do not lead with the retention column.
 
 CREATE INDEX IF NOT EXISTS catalog_items_notification_event_created
-ON catalog_items(json_extract(value, '$.createdAt'))
+ON catalog_items(coalesce(json_extract(value, '$.createdAt'), ''))
 WHERE kind = 'notification-event';
 
 CREATE INDEX IF NOT EXISTS catalog_items_source_occurrence_closed_changed
-ON catalog_items(json_extract(value, '$.changedAt'))
+ON catalog_items(coalesce(json_extract(value, '$.changedAt'), ''))
 WHERE kind = 'source-occurrence' AND json_extract(value, '$.occurrence.state') = 'closed';
 
 CREATE INDEX IF NOT EXISTS role_metadata_evidence_retention
