@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
-import { ATOMIC_REPAIR_BYTE_LIMIT, METADATA_REPAIR_RECORD_LIMIT, D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
+import { ATOMIC_REPAIR_BYTE_LIMIT, METADATA_REPAIR_RECORD_LIMIT, ROLE_METADATA_REVALIDATION_MS, D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement, R2Bucket } from '../cloudflare/types.js';
 import { extractPostingMetadataEvidence, projectRoleMetadata, reconcileRoleMetadata } from '../src/role-metadata.js';
@@ -599,7 +599,8 @@ describe('D1 role metadata evidence and guarded repair', () => {
       artifactHash: 'no-explicit-metadata',
       extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
       outcome: 'no-explicit-metadata',
-      observedAt: '2026-07-01T12:02:00.000Z',
+      // Older than the revalidation window, so the observation is stale.
+      observedAt: new Date(Date.parse('2026-09-04T12:03:00.000Z') - ROLE_METADATA_REVALIDATION_MS - 86_400_000).toISOString(),
       backfillToken: 'collection-1',
     });
     const staleAudit = await current.operations.roleMetadataAudit(new Date('2026-09-04T12:03:00.000Z'));
@@ -960,7 +961,9 @@ describe('differential metadata evidence writes', () => {
     const current = subject();
     const original = jobWithVerifiedDestination();
     await current.jobs.putInternship(original);
-    const at = '2026-09-06T12:00:00.000Z';
+    // Older than the revalidation window, so the fieldless attempt below cannot
+    // make it look freshly verified.
+    const at = new Date(Date.parse('2026-11-01T12:00:00.000Z') - ROLE_METADATA_REVALIDATION_MS - 86_400_000).toISOString();
     const evidence = extractPostingMetadataEvidence({ artifact: { title: original.title, compensationText: 'USD $45/hour' },
       sourceClass: 'official-page', sourceId: 'community-acme', sourceUrl: original.applyUrl, observedAt: at, exactPosting: true });
     await current.operations.recordRoleMetadataEvidence(original.jobId, evidence, [], at);
@@ -968,13 +971,13 @@ describe('differential metadata evidence writes', () => {
       jobId: original.jobId, sourceId: 'community-acme', sourceUrl: original.applyUrl,
       artifactHash: evidence[0]!.artifactHash, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, outcome, observedAt });
 
-    // 44 days after the page evidence was written, only the attempt is new.
+    // Long after the page evidence was written, only the attempt is new.
     await attempt('2026-10-20T12:00:00.000Z', 'extracted');
     expect((await current.operations.roleMetadataAudit(new Date('2026-10-20T12:00:00.000Z'))).collectionCoverage)
       .toMatchObject({ eligible: 1, current: 1, pendingOrUnobserved: 0, stale: 0, complete: true, outcomes: { extracted: 1 } });
 
     // A fieldless attempt re-observed the page without re-verifying its fields,
-    // so the evidence keeps its own time and the 30-day window applies.
+    // so the evidence keeps its own time and the revalidation window applies.
     await attempt('2026-11-01T12:00:00.000Z', 'no-explicit-metadata');
     expect((await current.operations.roleMetadataAudit(new Date('2026-11-01T12:00:00.000Z'))).collectionCoverage)
       .toMatchObject({ eligible: 1, current: 0, pendingOrUnobserved: 0, stale: 1, complete: false, outcomes: { extracted: 1 } });
