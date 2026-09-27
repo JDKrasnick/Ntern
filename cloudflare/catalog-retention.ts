@@ -94,6 +94,11 @@ function isoDaysBefore(now: Date, days: number): string {
   return new Date(now.getTime() - days * DAY_MS).toISOString();
 }
 
+/** Earliest notification event the operator recovery API can still inspect. */
+export function notificationEventRetentionCutoff(now: Date): string {
+  return isoDaysBefore(now, NOTIFICATION_EVENT_RETENTION_DAYS);
+}
+
 function emptyCounts(): CatalogRetentionCounts {
   return {
     notificationEvents: 0,
@@ -306,7 +311,7 @@ export async function runCatalogRetention(db: D1Database, options: CatalogRetent
   const maxDurationMs = positiveInteger(options.maxDurationMs, Number.MAX_SAFE_INTEGER);
   const startedAt = Date.now();
   const cutoffs = {
-    notification: isoDaysBefore(now, NOTIFICATION_EVENT_RETENTION_DAYS),
+    notification: notificationEventRetentionCutoff(now),
     jobs: isoDaysBefore(now, CLOSED_JOB_RETENTION_DAYS),
     occurrences: isoDaysBefore(now, CLOSED_OCCURRENCE_RETENTION_DAYS),
     metadata: isoDaysBefore(now, METADATA_HISTORY_RETENTION_DAYS),

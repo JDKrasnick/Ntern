@@ -30,7 +30,13 @@ import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
 import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
-import { CATALOG_RETENTION_CRON_MAX_DURATION_MS, CATALOG_RETENTION_CRON_MAX_PASSES, runCatalogRetention } from './catalog-retention.js';
+import {
+  CATALOG_RETENTION_CRON_MAX_DURATION_MS,
+  CATALOG_RETENTION_CRON_MAX_PASSES,
+  NOTIFICATION_EVENT_RETENTION_DAYS,
+  notificationEventRetentionCutoff,
+  runCatalogRetention,
+} from './catalog-retention.js';
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
 import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
@@ -935,6 +941,13 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     const apply = body?.apply === true;
     if (!since || Number.isNaN(Date.parse(since)) || typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
       return withCors(Response.json({ message: 'since must be an ISO timestamp and limit must be an integer from 1 to 100' }, { status: 400 }));
+    }
+    const earliestSupportedSince = notificationEventRetentionCutoff(new Date());
+    if (Date.parse(since) < Date.parse(earliestSupportedSince)) {
+      return withCors(Response.json({
+        message: `since must be within the ${NOTIFICATION_EVENT_RETENTION_DAYS}-day notification recovery window`,
+        earliestSupportedSince,
+      }, { status: 400 }));
     }
     const expectedCandidateJobIds = body?.expectedCandidateJobIds;
     if (apply && (!Array.isArray(expectedCandidateJobIds)

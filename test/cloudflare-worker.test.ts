@@ -354,6 +354,36 @@ describe('Cloudflare DLQ route authentication', () => {
   });
 });
 
+describe('Cloudflare notification recovery window', () => {
+  it('rejects a recovery range that retention may already have deleted before running the recovery query', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    const prepare = vi.fn((query: string) => ({
+      async first() {
+        if (query.includes('system_state')) return null;
+        throw new Error('The recovery query must not run for an unsupported range');
+      },
+    }));
+    try {
+      const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/recover-notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Operations-Key': 'secret' },
+        body: JSON.stringify({ since: '2026-08-25T00:00:00.000Z', limit: 10 }),
+      }), { OPERATIONS_SHARED_SECRET: 'secret', DB: { prepare } } as unknown as Environment);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        message: 'since must be within the 30-day notification recovery window',
+        earliestSupportedSince: '2026-08-28T12:00:00.000Z',
+      });
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(prepare).toHaveBeenCalledWith(expect.stringContaining('system_state'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('resume artifact rollout boundary', () => {
   it('hides artifact content, source, and previews while resume tailoring is disabled', async () => {
     for (const suffix of ['content', 'source', 'preview/1']) {

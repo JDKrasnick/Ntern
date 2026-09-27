@@ -27,7 +27,7 @@ Every sweep keeps what a live reader needs and deletes only history:
 
 | Sweep | Retention | What it removes | What it keeps |
 | --- | --- | --- | --- |
-| Notification events (`kind = 'notification-event'`) | 30 days | Outbox rows already consumed by the notification drain and past the operator recovery look-back | Anything inside the recovery window |
+| Notification events (`kind = 'notification-event'`) | 30 days | Outbox rows already consumed by the notification drain and past the operator recovery look-back | Anything inside the recovery window; the recovery endpoint rejects an older `since` value instead of returning a silently truncated result |
 | Closed internships (`kind = 'internship'`, `catalog_state = 'CLOSED'`) | 365 days since `lastSeenAt` | The job row, its per-source occurrences (named by its own `sourceReferences`), and `role_metadata_*` rows keyed by job id | Open roles, and closed roles still inside the window; the saved-application record is untouched and renders the existing "role unavailable" state |
 | Closed source occurrences (`kind = 'source-occurrence'`, `occurrence.state = 'closed'`) | 180 days since `changedAt` | A source's own record that it dropped a posting | Occurrences the source still lists, and any occurrence inside the window |
 | Superseded evidence (`role_metadata_evidence.is_current = 0`) | 180 days | Historical evidence rows | The current evidence set |
@@ -81,6 +81,9 @@ Closed internships reuse the existing `catalog_items_state_sort`
 
 - Dry run: call `runCatalogRetention(db, { now })` without `apply`; it returns
   the same report without writing.
+- Notification recovery accepts a `since` value only inside the same 30-day
+  window. An older request returns `400` with `earliestSupportedSince`; use that
+  boundary or a newer timestamp before previewing the candidate set.
 - The cron logs the report on `employer_maintenance_complete` as
   `catalogRetention`, with counts, pass count, time-budget state, and exact
   remaining-backlog booleans. Any `remaining` value that stays true across runs

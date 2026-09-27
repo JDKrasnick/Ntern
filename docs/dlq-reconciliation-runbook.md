@@ -319,5 +319,3 @@ was really a variable mismatch. `scripts/dlq-operations.ts` reads
 `OPERATIONS_API_URL` and `OPERATIONS_API_KEY`, but `.env` defines `OPERATIONS_API`
 (a stale queue id) and `OPERATIONS_SHARED_SECRET`; point the former pair at the
 API URL and the shared secret before relying on `npm run dlq`.
-
-
