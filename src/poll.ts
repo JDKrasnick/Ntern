@@ -21,6 +21,7 @@ import { sourceProvider, sourceRegion } from './integration-registry.js';
 import { processSnapshot, SOURCE_METADATA_PROCESSING_REVISION } from './ingestion/processor.js';
 import { deriveCanonicalAdmission, evaluateCatalogAdmission } from './catalog-admission.js';
 import type { EmployerIconSeed } from './employer-icon-resolution.js';
+import { automaticEmployerIdentityCandidate, groupAutomaticEmployerIdentityCandidates } from './employer/automatic-identity.js';
 import { classifyDestination, matchingBrowserDestination, requiresBrowserVerification, type CatalogAdmissionResolver, type DestinationVerificationRequest } from './destination-verification.js';
 import { reviewedBoardIndex } from './sources/index.js';
 import { sourceQualityFailures } from './sources/quality.js';
@@ -823,6 +824,16 @@ export class IngestionRunner {
     const brokenProbeFailures: string[] = [];
     const retryableRowExternalIds = new Set<string>();
     const deferredHandoffFailures: string[] = [];
+    if (this.catalogAdmissionResolver?.observeAutomaticEmployerIdentities && completeFetchSequence) {
+      const observedAt = this.now().toISOString();
+      const observations = groupAutomaticEmployerIdentityCandidates(listings.flatMap((listing) => {
+        const candidate = automaticEmployerIdentityCandidate(listing, completeFetchSequence, observedAt);
+        return candidate ? [candidate] : [];
+      }));
+      if (observations.length) {
+        await this.catalogAdmissionResolver.observeAutomaticEmployerIdentities(observations);
+      }
+    }
     const isProbeFailure = (error: unknown, fromValidator = false) => {
       const category = sourceFailureCategory(error);
       return (category === 'transport' || category === 'link')

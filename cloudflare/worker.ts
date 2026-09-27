@@ -168,6 +168,14 @@ function catalogAdmissionResolver(env: Environment): CatalogAdmissionResolver {
       employers.set(key, pending);
       return pending;
     },
+    async observeAutomaticEmployerIdentities(observations) {
+      const result = await operations.observeAutomaticEmployerIdentities(observations);
+      // Promotion or conflict can change the active mapping for a tenant during
+      // this delivery. Do not reuse a pre-observation miss or stale mapping.
+      employers.clear();
+      console.log(JSON.stringify({ event: 'automatic_employer_identity_observed', ...result }));
+      return result;
+    },
     resolveDestinationRule(identity, candidateUrl) {
       let host: string;
       try { host = new URL(candidateUrl).hostname.toLowerCase(); } catch { host = candidateUrl; }

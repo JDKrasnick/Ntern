@@ -4,6 +4,7 @@ import type { CanonicalEmployer, DestinationEvidence, DestinationReviewRule, Int
 import type { Reachability } from './core/application-verification.js';
 import { evidenceHash } from './catalog-admission.js';
 import type { ShadowExtractionOrigin } from './shadow-extraction.js';
+import type { AutomaticEmployerIdentityObservation, AutomaticEmployerIdentityObservationResult } from './employer/automatic-identity.js';
 
 export const DESTINATION_EVIDENCE_TTL_MS = 7 * 86_400_000;
 export const DESTINATION_RECHECK_LEAD_MS = 24 * 60 * 60_000;
@@ -30,6 +31,7 @@ export interface DestinationVerificationRequest {
 
 export interface CatalogAdmissionResolver {
   resolveCanonicalEmployer(identity: ProviderIdentity): Promise<Pick<CanonicalEmployer, 'id' | 'displayName'> | undefined>;
+  observeAutomaticEmployerIdentities?(observations: readonly AutomaticEmployerIdentityObservation[]): Promise<AutomaticEmployerIdentityObservationResult>;
   resolveDestinationRule(identity: ProviderIdentity, candidateUrl: string): Promise<DestinationReviewRule | undefined>;
   configurationVersion?(): Promise<string>;
 }

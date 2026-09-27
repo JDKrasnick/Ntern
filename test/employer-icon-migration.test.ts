@@ -14,17 +14,12 @@ const migrationV2 = readFileSync(new URL(
   '../cloudflare/migrations/0038_employer_icon_resolution_v2.sql',
   import.meta.url,
 ), 'utf8');
-const reviewedIcimsEmployers = readFileSync(new URL(
-  '../cloudflare/migrations/0039_reviewed_icims_employers.sql',
-  import.meta.url,
-), 'utf8');
 
 function migrated(): DatabaseSync {
   const database = new DatabaseSync(':memory:');
   database.exec(admission);
   database.exec(migration);
   database.exec(migrationV2);
-  database.exec(reviewedIcimsEmployers);
   database.prepare(`INSERT INTO canonical_employers
     (id, display_name, reviewed_at, reviewed_by, created_at, updated_at)
     VALUES ('acme', 'Acme', '2026-09-01T00:00:00Z', 'review', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`).run();
@@ -44,25 +39,6 @@ function indexColumns(database: DatabaseSync, index: string): string[] {
 }
 
 describe('employer icon resolution migration', () => {
-  it('seeds reviewed employer-specific iCIMS mappings with reviewed domains', () => {
-    const database = migrated();
-    const rows = database.prepare(`SELECT mapping.provider, mapping.scope,
-        mapping.canonical_employer_id AS employerId, employer.website_domain AS domain,
-        employer.website_domain_source AS domainSource
-      FROM employer_mappings AS mapping
-      JOIN canonical_employers AS employer ON employer.id = mapping.canonical_employer_id
-      WHERE mapping.id LIKE 'icon-coverage-2026-09-27-%'
-      ORDER BY mapping.scope`).all();
-
-    expect(rows).toEqual([
-      { provider: 'icims', scope: 'amd', employerId: 'amd', domain: 'amd.com', domainSource: 'reviewed' },
-      { provider: 'icims', scope: 'garmin', employerId: 'garmin', domain: 'garmin.com', domainSource: 'reviewed' },
-      { provider: 'icims', scope: 'keysight', employerId: 'keysight-technologies', domain: 'keysight.com', domainSource: 'reviewed' },
-      { provider: 'icims', scope: 'principal', employerId: 'principal-financial-group', domain: 'principal.com', domainSource: 'reviewed' },
-    ]);
-    database.close();
-  });
-
   it('adds the resolver bookkeeping columns to canonical_employers and round-trips them', () => {
     const database = migrated();
     const columns = (database.prepare(`SELECT name FROM pragma_table_info('canonical_employers')`).all() as { name: string }[])

@@ -22,6 +22,7 @@ import type {
 } from '../src/types.js';
 import { projectRoleMetadata, reconcileRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceContent, roleMetadataEvidenceHasFields, roleMetadataReviewFingerprint, ROLE_METADATA_EXTRACTION_VERSION, unsupportedMetadataCurrencies, unsupportedMetadataPeriods, withoutObservationTimestamps } from '../src/role-metadata.js';
 import { metadataApiRoute } from '../src/metadata-acquisition.js';
+import type { AutomaticEmployerIdentityObservation, AutomaticEmployerIdentityObservationResult } from '../src/employer/automatic-identity.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 
 export const ATOMIC_REPAIR_RECORD_LIMIT = 900;
@@ -98,6 +99,13 @@ export interface AdmissionBackfillGeneration {
 
 function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+const AUTOMATIC_EMPLOYER_POLICY = 'automatic-exact-ats-v1';
+
+function automaticEmployerId(provider: string, scope: string): string {
+  const slug = scope.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 36) || 'scope';
+  return `ats-${provider}-${slug}-${hash(`${provider}\0${scope}`).slice(0, 10)}`;
 }
 
 function roleMetadataEvidenceDigest(row: { job_id: string; evidence: string }): string {
@@ -1320,6 +1328,102 @@ export class D1CatalogAdmissionStore {
       ...(row.supersedes_mapping_id ? { supersedesMappingId: row.supersedes_mapping_id as string } : {}),
       ...(row.superseded_at ? { supersededAt: row.superseded_at as string } : {}),
     }));
+  }
+
+  async observeAutomaticEmployerIdentities(
+    observations: readonly AutomaticEmployerIdentityObservation[],
+  ): Promise<AutomaticEmployerIdentityObservationResult> {
+    const result: AutomaticEmployerIdentityObservationResult = {
+      observed: 0, promoted: 0, conflicted: 0, disabled: 0,
+    };
+    const grouped = new Map<string, AutomaticEmployerIdentityObservation[]>();
+    for (const observation of observations) {
+      const key = `${observation.provider}\0${observation.scope}`;
+      const group = grouped.get(key) ?? [];
+      group.push(observation);
+      grouped.set(key, group);
+    }
+
+    for (const group of grouped.values()) {
+      const sample = group[0]!;
+      const active = await this.db.prepare(`SELECT mapping.id, mapping.reviewed_by, employer.display_name
+        FROM employer_mappings AS mapping
+        JOIN canonical_employers AS employer ON employer.id = mapping.canonical_employer_id
+        WHERE mapping.provider = ? AND mapping.scope = ? AND mapping.superseded_at IS NULL`)
+        .bind(sample.provider, sample.scope).first<{ id: string; reviewed_by: string; display_name: string }>();
+      // Hand-reviewed mappings are authoritative and never rewritten by the
+      // automatic observer.
+      if (active && active.reviewed_by !== AUTOMATIC_EMPLOYER_POLICY) continue;
+
+      await this.db.batch(group.map((observation) => this.db.prepare(`INSERT INTO automatic_employer_identity_observations
+        (provider, scope, source_id, fetch_sequence, label_key, display_name,
+         posting_ids_json, posting_count, sample_application_url, observed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, scope, source_id, fetch_sequence, label_key) DO UPDATE SET
+          display_name=excluded.display_name,
+          posting_ids_json=excluded.posting_ids_json,
+          posting_count=excluded.posting_count,
+          sample_application_url=excluded.sample_application_url,
+          observed_at=excluded.observed_at`)
+        .bind(observation.provider, observation.scope, observation.sourceId, observation.fetchSequence,
+          observation.labelKey, observation.displayName, JSON.stringify(observation.postingIds),
+          observation.postingIds.length, observation.applicationUrl, observation.observedAt)));
+      result.observed += group.length;
+
+      const evidence = await this.db.prepare(`SELECT
+          COUNT(DISTINCT source_id || ':' || fetch_sequence) AS snapshot_count,
+          COUNT(DISTINCT label_key) AS label_count,
+          COUNT(DISTINCT posting.value) AS posting_count
+        FROM automatic_employer_identity_observations AS observation,
+          json_each(observation.posting_ids_json) AS posting
+        WHERE provider = ? AND scope = ?`)
+        .bind(sample.provider, sample.scope)
+        .first<{ snapshot_count: number; label_count: number; posting_count: number }>();
+      const labelCount = Number(evidence?.label_count ?? 0);
+      if (labelCount !== 1) {
+        result.conflicted += 1;
+        if (active) {
+          await this.db.prepare('UPDATE employer_mappings SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL')
+            .bind(sample.observedAt, active.id).run();
+          result.disabled += 1;
+        }
+        continue;
+      }
+      const postingCount = Number(evidence?.posting_count ?? 0);
+      const scopeMatchesLabel = canonicalCompanyKey(sample.scope) === sample.labelKey;
+      // An exact normalized tenant/label match is independent corroboration for
+      // a single immutable posting. Otherwise require two distinct postings;
+      // they may arrive together in one complete source snapshot.
+      if (active || postingCount < (scopeMatchesLabel ? 1 : 2)) continue;
+
+      const label = await this.db.prepare(`SELECT display_name FROM automatic_employer_identity_observations
+        WHERE provider = ? AND scope = ? ORDER BY observed_at DESC LIMIT 1`)
+        .bind(sample.provider, sample.scope).first<{ display_name: string }>();
+      if (!label || canonicalCompanyKey(label.display_name) !== sample.labelKey) continue;
+      const employerId = automaticEmployerId(sample.provider, sample.scope);
+      const mappingId = `${AUTOMATIC_EMPLOYER_POLICY}-${hash(`${sample.provider}\0${sample.scope}`).slice(0, 24)}`;
+      await this.db.batch([
+        this.db.prepare(`INSERT INTO canonical_employers
+          (id, display_name, reviewed_at, reviewed_by, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`)
+          .bind(employerId, label.display_name, sample.observedAt, AUTOMATIC_EMPLOYER_POLICY,
+            sample.observedAt, sample.observedAt),
+        // Ignore either a deterministic-id collision or a concurrently-created
+        // active mapping for this scope. The subsequent lookup is authoritative.
+        this.db.prepare(`INSERT OR IGNORE INTO employer_mappings
+          (id, provider, scope, canonical_employer_id, reviewed_at, reviewed_by, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .bind(mappingId, sample.provider, sample.scope, employerId, sample.observedAt,
+            AUTOMATIC_EMPLOYER_POLICY, sample.observedAt),
+      ]);
+      const promoted = await this.db.prepare(`SELECT id, reviewed_by FROM employer_mappings
+        WHERE provider = ? AND scope = ? AND superseded_at IS NULL`)
+        .bind(sample.provider, sample.scope).first<{ id: string; reviewed_by: string }>();
+      if (promoted?.id === mappingId && promoted.reviewed_by === AUTOMATIC_EMPLOYER_POLICY) {
+        result.promoted += 1;
+      }
+    }
+    return result;
   }
 
   async resolveCanonicalEmployer(identity: ProviderIdentity): Promise<Pick<CanonicalEmployer, 'id' | 'displayName'> | undefined> {

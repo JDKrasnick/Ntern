@@ -233,8 +233,13 @@ describe('trusted community source policy', () => {
         checkpoint: { sourceId: row.sourceId, successfulFetches: (previous?.successfulFetches ?? 0) + 1, lastRowCount: 1 } };
     } };
     const resolvedIdentities: NonNullable<ProcessedListing['providerIdentity']>[] = [];
+    const automaticObservations: Array<{ provider: string; scope: string; postingIds: string[] }> = [];
     const resolver = {
       async configurationVersion() { return 'registry-v1'; },
+      async observeAutomaticEmployerIdentities(observations: readonly { provider: string; scope: string; postingIds: string[] }[]) {
+        automaticObservations.push(...observations);
+        return { observed: observations.length, promoted: 0, conflicted: 0, disabled: 0 };
+      },
       async resolveCanonicalEmployer(identity: NonNullable<ProcessedListing['providerIdentity']>) {
         resolvedIdentities.push(identity);
         return identity.provider === 'workday' && identity.tenant === 'acme'
@@ -253,6 +258,9 @@ describe('trusted community source policy', () => {
       expect.objectContaining({ provider: 'github' }),
       expect.objectContaining({ provider: 'workday', tenant: 'acme', postingId: 'req-123' }),
     ]));
+    expect(automaticObservations).toEqual([
+      expect.objectContaining({ provider: 'workday', scope: 'acme', postingIds: ['req-123'] }),
+    ]);
     const [job] = [...store.jobs.values()];
     expect(job?.admission).toMatchObject({ employerResolution: 'resolved', canonicalEmployer: { id: 'acme' } });
     expect(icons).toHaveBeenCalledOnce();
