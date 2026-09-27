@@ -239,11 +239,12 @@ export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 25;
  * Listings one delivery may re-grade after an admission policy change. The
  * bounded-migration gate suppresses newly admitted rows of a trusted list until
  * its migration drains, so this bound also sets how fast those rows publish;
- * 20 rows per delivery left migrated rows hidden for hours, while 100 converges
- * in a manageable number of deliveries and keeps the migration inside the same
- * message budget as the resolution slice above.
+ * This cannot exceed the 25-row resolution budget: migration rows are obligated
+ * work in the same delivery, and a 100-row migration slice both starved the
+ * resolution frontier and exceeded memory on the 3,000+ row community boards.
+ * Continuations make the smaller slice resumable without reopening settled rows.
  */
-export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 100;
+export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 25;
 
 /**
  * Bounded worker pool that always drains: the first error is rethrown only once

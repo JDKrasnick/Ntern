@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
-import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY, IngestionRunner } from '../src/poll.js';
+import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY, IngestionRunner } from '../src/poll.js';
 import { GitHubMarkdownAdapter } from '../src/sources/github.js';
 import { SourceFetchError } from '../src/sources/source-error.js';
 import type { SourceOccurrenceState } from '../src/types.js';
@@ -173,6 +173,10 @@ function productionAdapter(id: string, documents: Record<string, string>) {
 }
 
 describe('ingestion resource budgets', () => {
+  it('keeps the admission migration within the shared GitHub delivery budget', () => {
+    expect(GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY).toBeLessThanOrEqual(GITHUB_RESOLUTION_ROWS_PER_DELIVERY);
+  });
+
   it('fetches every current community feed and the growth case at its measured raw, eligible, and byte shape', async () => {
     for (const [name, feed] of Object.entries(PRODUCTION_GITHUB_FEEDS)) {
       const documents = productionDocuments(feed);
