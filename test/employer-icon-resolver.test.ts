@@ -2102,6 +2102,25 @@ describe('employers needing resolution', () => {
 });
 
 describe('employer icon coverage v2', () => {
+  it('claims corrective retries before the ordinary coverage backlog', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('ordinary', 'Ordinary'), NOW.toISOString());
+    await admission.putCanonicalEmployer(employerRow('corrective', 'Corrective'), NOW.toISOString());
+    await icons.enqueue({
+      id: 'task-ordinary', canonicalEmployerId: 'ordinary', evidenceFingerprint: 'ordinary-fingerprint',
+      evidenceJson: JSON.stringify({ applicationUrl: 'https://ordinary.example/jobs/1' }),
+      nextRetryAt: NOW.toISOString(), now: '2026-09-24T11:00:00.000Z',
+    });
+    await icons.enqueue({
+      id: 'task-corrective', canonicalEmployerId: 'corrective', evidenceFingerprint: 'corrective-fingerprint',
+      evidenceJson: JSON.stringify({ applicationUrl: 'https://corrective.example/jobs/1' }),
+      nextRetryAt: NOW.toISOString(), now: '2026-09-24T11:01:00.000Z',
+    });
+    database.prepare("UPDATE employer_icon_resolutions SET review_priority = 100 WHERE id = 'task-corrective'").run();
+
+    expect((await icons.claimDue(NOW.toISOString(), 1, 60_000))[0]?.canonicalEmployerId).toBe('corrective');
+  });
+
   it('claims employers with active posting evidence before seedless registry work', async () => {
     const { admission, icons } = subject();
     await admission.putCanonicalEmployer(employerRow('seedless', 'Seedless'), NOW.toISOString());

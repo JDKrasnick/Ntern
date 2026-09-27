@@ -178,7 +178,8 @@ export class D1EmployerIconStore {
         AND task.status IN ('retryable', 'unresolved')
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS blocked
           WHERE blocked.canonical_employer_id = task.canonical_employer_id AND blocked.status = 'invalidated')
-      ORDER BY CASE WHEN COALESCE(json_extract(task.evidence_json, '$.applicationUrl'), '') <> '' THEN 0 ELSE 1 END,
+      ORDER BY task.review_priority DESC,
+        CASE WHEN COALESCE(json_extract(task.evidence_json, '$.applicationUrl'), '') <> '' THEN 0 ELSE 1 END,
         task.next_retry_at, task.created_at LIMIT ?`).bind(now, now, limit).all<Row>();
     const claimed: EmployerIconTask[] = [];
     for (const row of due.results) {
