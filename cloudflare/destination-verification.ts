@@ -259,9 +259,12 @@ export async function persistDestinationAdmission(input: {
   // Partial snapshots cannot withdraw previously supported fields. Retain
   // their diagnostic excerpts but wait for complete acquisition before replay.
   const extracted = pageComplete ? pageExtracted : [];
+  // A JSON-LD page fallback is the employer's own structured data, not an API
+  // response; keep its authority below an exact provider API snapshot.
   const apiEvidence = input.apiAcquisition?.artifact ? extractPostingMetadataEvidence({
-    artifact: input.apiAcquisition.artifact, sourceClass: 'official-api', sourceId: message.sourceId,
-    sourceUrl: input.apiAcquisition.sourceUrl, observedAt: inspectedAt, exactPosting: true,
+    artifact: input.apiAcquisition.artifact,
+    sourceClass: input.apiAcquisition.method === 'json-ld-page' ? 'official-json-ld' : 'official-api',
+    sourceId: message.sourceId, sourceUrl: input.apiAcquisition.sourceUrl, observedAt: inspectedAt, exactPosting: true,
   }) : [];
   extracted.push(...apiEvidence);
   const metadataEvidence = pageComplete
