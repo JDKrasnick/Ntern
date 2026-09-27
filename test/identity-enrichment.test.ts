@@ -4,6 +4,7 @@ import {
   educationAudienceLevels,
   educationAudienceLabel,
   educationAudienceMatches,
+  effectiveAdvancedDegreeRequired,
   deriveTitleFields,
   mergeEducationEvidence,
   mergeProvenancedValues,
@@ -69,6 +70,19 @@ describe('provider-neutral field enrichment', () => {
     // A real sentence next to a form mention is still read.
     expect(educationAudienceLevels("Please indicate your degree of study\nCurrently pursuing a Master's degree in Computer Science."))
       .toEqual(['masters']);
+  });
+
+  it('clears a community advanced-degree badge the employer\u2019s explicit audience contradicts', () => {
+    // SpaceX-style: a community cap says graduate-only, the official page admits
+    // undergraduates. The explicit audience wins.
+    expect(effectiveAdvancedDegreeRequired({ levels: ['undergraduate'], evidenceStatus: 'explicit', advancedDegreeRequired: true })).toBe(false);
+    expect(effectiveAdvancedDegreeRequired({ levels: ['doctoral', 'masters', 'undergraduate'], evidenceStatus: 'explicit', advancedDegreeRequired: true })).toBe(false);
+    // Graduate-only explicit levels keep (and can assert) the requirement.
+    expect(effectiveAdvancedDegreeRequired({ levels: ['masters'], evidenceStatus: 'explicit', advancedDegreeRequired: false })).toBe(true);
+    expect(effectiveAdvancedDegreeRequired({ levels: ['doctoral'], evidenceStatus: 'explicit' })).toBe(true);
+    // Silence leaves the stored badge untouched.
+    expect(effectiveAdvancedDegreeRequired({ levels: [], evidenceStatus: 'unspecified', advancedDegreeRequired: true })).toBe(true);
+    expect(effectiveAdvancedDegreeRequired({ advancedDegreeRequired: true })).toBe(true);
   });
 
   it('never turns a stated preference or a waived requirement into an audience', () => {

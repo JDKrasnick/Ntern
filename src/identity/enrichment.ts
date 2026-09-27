@@ -93,6 +93,24 @@ export function educationAudienceLabel(audience: EducationAudience): string {
   return audience.levels.join(', ');
 }
 
+/**
+ * The advanced-degree requirement a reader should see. A community badge can
+ * claim one while the employer's own explicit education admits undergraduates;
+ * the explicit audience wins, because a role that accepts a lower level cannot
+ * require an advanced degree. Without explicit levels the stored badge stands.
+ */
+export function effectiveAdvancedDegreeRequired(input: {
+  levels?: readonly string[];
+  evidenceStatus?: string;
+  advancedDegreeRequired?: boolean;
+}): boolean {
+  if (input.evidenceStatus === 'explicit' && input.levels?.length) {
+    return !input.levels.includes('undergraduate')
+      && input.levels.some((level) => level === 'masters' || level === 'doctoral' || level === 'mba');
+  }
+  return Boolean(input.advancedDegreeRequired);
+}
+
 /** The stated audience a filter needs; every field is validated before it is read. */
 export interface StatedEducationAudience {
   levels: string[];
