@@ -321,6 +321,48 @@ describe('identity-bound public metadata APIs', () => {
     expect(result).toMatchObject({ method: 'icims-page', outcome: 'acquired' });
     expect(educationAudienceLevels(`${result!.artifact!.title}\n${result!.artifact!.text}`)).toEqual(['doctoral']);
   });
+  it('falls back to the employer page JSON-LD when a frame host no longer serves the posting', async () => {
+    const amd = { ...identity('icims', '92354'), tenant: 'campus-amd' };
+    const candidate = 'https://careers.amd.com/jobs/92354?icims=1&utm_source=Simplify&ref=Simplify';
+    const jsonLd = JSON.stringify({ '@context': 'https://schema.org', '@type': 'JobPosting',
+      url: 'https://careers.amd.com/careers-home/jobs/92354?icims=1',
+      title: '2027 PhD AI Systems & GPU Performance Engineering Intern/Co-op',
+      description: '<p>Currently pursuing a PhD in Computer Science.</p>' });
+    const page = `<html><head><title>2027 PhD AI Systems Intern</title><script type="application/ld+json">${jsonLd}</script></head>`
+      + '<body><main>Careers</main></body></html>';
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('campus-amd.icims.com')) return new Response(null, { status: 302, headers: { location: 'https://campus-amd.icims.com/' } });
+      if (url === candidate) return new Response(page, { headers: { 'content-type': 'text/html' } });
+      return new Response('not found', { status: 404 });
+    });
+    const result = await createMetadataAcquirer(fetchImpl)(amd, candidate);
+    expect(result).toMatchObject({ method: 'json-ld-page', outcome: 'acquired', sourceUrl: candidate });
+    expect(result?.artifact?.title).toBe('2027 PhD AI Systems & GPU Performance Engineering Intern/Co-op');
+    expect(educationAudienceLevels(`${result!.artifact!.title}\n${result!.artifact!.text}`)).toEqual(['doctoral']);
+  });
+  it('rejects an employer-page fallback that redirects off the requested host', async () => {
+    const amd = { ...identity('icims', '92354'), tenant: 'campus-amd' };
+    const candidate = 'https://careers.amd.com/jobs/92354?icims=1';
+    const crossHost = new Response('<html><body>no posting</body></html>', { headers: { 'content-type': 'text/html' } });
+    Object.defineProperty(crossHost, 'url', { value: 'https://evil.example/careers-home/jobs/92354' });
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input).includes('campus-amd.icims.com')
+      ? new Response(null, { status: 302, headers: { location: 'https://campus-amd.icims.com/' } })
+      : crossHost);
+    expect(await createMetadataAcquirer(fetchImpl)(amd, candidate))
+      .toMatchObject({ method: 'icims-page', outcome: 'failed', status: 302 });
+  });
+  it('keeps a transient frame failure on the provider route instead of a page fallback', async () => {
+    const amd = { ...identity('icims', '92354'), tenant: 'campus-amd' };
+    const candidate = 'https://careers.amd.com/jobs/92354?icims=1';
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('campus-amd.icims.com')) return new Response('busy', { status: 503 });
+      throw new Error('the fallback page must not be fetched for a retryable failure');
+    });
+    expect(await createMetadataAcquirer(fetchImpl)(amd, candidate))
+      .toMatchObject({ method: 'icims-page', outcome: 'failed', status: 503 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
   it('refuses an iCIMS response that is not the requested posting', async () => {
     const icims = { ...identity('icims', '12891'), tenant: 'careers-springswindowfashions' };
     const header = { headers: { 'content-type': 'text/html' } };

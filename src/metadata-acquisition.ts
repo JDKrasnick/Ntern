@@ -1,10 +1,10 @@
 import { htmlToText } from './core/early-career.js';
 import { metadataDescriptionText } from './core/metadata-text.js';
 import type { ProviderIdentity } from './types.js';
-import type { RoleMetadataArtifact } from './role-metadata.js';
+import { applicationMetadataArtifactsFromJsonDocuments, postingIdentifierMatches, type RoleMetadataArtifact } from './role-metadata.js';
 
 export type MetadataAcquisition = {
-  method: 'greenhouse-api' | 'lever-api' | 'ashby-api' | 'workday-api' | 'smartrecruiters-api' | 'icims-page';
+  method: 'greenhouse-api' | 'lever-api' | 'ashby-api' | 'workday-api' | 'smartrecruiters-api' | 'icims-page' | 'json-ld-page';
   sourceUrl: string;
   outcome: 'acquired' | 'failed' | 'identity-mismatch' | 'incomplete';
   artifact?: RoleMetadataArtifact;
@@ -159,6 +159,33 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
     const title = text(/<h1[^>]*>([\s\S]*?)<\/h1>/iu.exec(payload)?.[1]) || text(/<title[^>]*>([\s\S]*?)<\/title>/iu.exec(payload)?.[1]);
     if (!title || !content) return undefined;
     return { title, text: content };
+  }
+  // The employer's own page carries the posting as JobPosting JSON-LD. This is
+  // only a fallback for a frame host that no longer serves the role, so it must
+  // prove the requested posting id rather than trust whatever page it landed on.
+  if (method === 'json-ld-page') {
+    if (typeof payload !== 'string' || !identity.postingId) return undefined;
+    const documents = [...payload.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/giu)].map((match) => match[1]!);
+    const artifacts = applicationMetadataArtifactsFromJsonDocuments(documents);
+    const expected = identity.postingId.toLowerCase();
+    const matching = artifacts.filter((artifact) => postingIdentifierMatches(expected, artifact.identifier));
+    const escaped = expected.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const idPresent = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'iu').test(payload);
+    // A page commonly omits `identifier` but names the posting in its URL or
+    // body; accept a sole posting that still carries the requested id.
+    const selected = matching.length === 1 ? matching[0]
+      : !matching.length && artifacts.length === 1 && !artifacts[0]!.identifier && idPresent ? artifacts[0] : undefined;
+    if (!selected || !selected.title) return undefined;
+    return {
+      title: selected.title,
+      ...(selected.text ? { text: selected.text } : {}),
+      ...(selected.compensationText ? { compensationText: selected.compensationText } : {}),
+      ...(selected.locations?.length ? { locations: selected.locations } : {}),
+      ...(selected.workMode ? { workMode: selected.workMode } : {}),
+      ...(selected.publishedAt ? { publishedAt: selected.publishedAt } : {}),
+      ...(selected.updatedAt ? { updatedAt: selected.updatedAt } : {}),
+      ...(selected.deadline ? { deadline: selected.deadline } : {}),
+    };
   }
   if (!record(payload)) return undefined;
   const expected = identity.postingId;
@@ -360,13 +387,37 @@ async function findAshbyJob(board: AshbyBoard, expected: string | undefined, acc
   }
 }
 
+/** The employer page a dead HTML frame host should fall back to, if any. Only a
+ * redirect, a gone posting, or a frame that answered without the posting counts:
+ * a 429/5xx/network failure keeps its own retry and is never patched over. The
+ * fallback stays on the destination's own reviewed https host and never
+ * re-fetches the frame host it just failed on. */
+function jsonLdPageFallback(
+  identity: ProviderIdentity,
+  candidateUrl: string | undefined,
+  route: { method: MetadataAcquisition['method']; url: string },
+  result: { outcome: MetadataAcquisition['outcome']; status?: number },
+): string | undefined {
+  if (route.method !== 'icims-page' || !candidateUrl || !identity.postingId) return undefined;
+  const replaced = result.outcome === 'identity-mismatch'
+    || result.outcome === 'failed' && result.status !== undefined
+      && [301, 302, 303, 307, 308, 404, 410].includes(result.status);
+  if (!replaced) return undefined;
+  let candidate: URL;
+  try { candidate = new URL(candidateUrl); } catch { return undefined; }
+  if (candidate.protocol !== 'https:' || candidate.username || candidate.password || candidate.port) return undefined;
+  if (candidate.hostname === new URL(route.url).hostname) return undefined;
+  return candidate.toString();
+}
+
 /** A request/batch-scoped cache, not isolate-global I/O state. Hosts, redirects,
  * content type, timeout and streamed byte budget are checked before parsing. */
 export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
   canRequest?: (host: string) => Promise<boolean>;
   deferHost?: (host: string, retryAfter: string) => Promise<void>;
 } = {}) {
-  const requests = new Map<string, Promise<{ payload?: unknown; status?: number; bytes?: number; outcome: MetadataAcquisition['outcome'] }>>();
+  type RequestResult = { payload?: unknown; status?: number; bytes?: number; outcome: MetadataAcquisition['outcome'] };
+  const requests = new Map<string, Promise<RequestResult>>();
   const boards = new Map<string, AshbyBoard>();
   const boardTails = new Map<string, Promise<unknown>>();
   /** Serializes work per board so concurrent identities do not race the reader. */
@@ -377,53 +428,67 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
     return next;
   };
   const throttled = new Set<string>();
+  const unavailable = async (host: string): Promise<boolean> =>
+    throttled.has(host) || Boolean(hooks.canRequest && !await hooks.canRequest(host));
+  const defer = async (host: string, response: Response): Promise<void> => {
+    throttled.add(host);
+    const header = response.headers.get('retry-after');
+    const parsed = header && /^\d+$/u.test(header) ? Date.now() + Number(header) * 1000 : Date.parse(header ?? '');
+    const until = new Date(Number.isFinite(parsed) ? Math.max(Date.now() + 60_000, Math.min(parsed, Date.now() + 86_400_000)) : Date.now() + 3_600_000).toISOString();
+    await hooks.deferHost?.(host, until);
+  };
+  /** One reviewed, timed and bounded document fetch. Provider routes do not
+   * follow redirects; the employer-page fallback may, within its own host.
+   * iCIMS and that fallback accept HTML, every other route is JSON-only, and
+   * `keepBoard` leaves an Ashby board's reader open for the whole batch. */
+  const fetchDocument = async (url: string, html: boolean, keepBoard = false, follow = false): Promise<RequestResult> => {
+    const host = new URL(url).hostname;
+    if (await unavailable(host)) return { outcome: 'failed', status: 429 };
+    try {
+      // workerd rejects redirect:'error' before issuing the request. Manual
+      // mode plus the non-2xx check below rejects redirects without following.
+      // The employer-page fallback may follow a redirect, but only one that
+      // lands on the same https host it asked for.
+      const response = await fetchImpl(url, { headers: { Accept: html ? 'text/html' : 'application/json' }, redirect: follow ? 'follow' : 'manual', signal: AbortSignal.timeout(12_000) });
+      if (response.status === 429) await defer(host, response);
+      const expectedType = html ? /\btext\/html\b/iu : /\bapplication\/json\b/iu;
+      if (!response.ok || !expectedType.test(response.headers.get('content-type') ?? '')) {
+        await response.body?.cancel(); return { outcome: 'failed', status: response.status };
+      }
+      if (follow) {
+        let landed: URL;
+        try { landed = new URL(response.url || url); } catch { await response.body?.cancel(); return { outcome: 'failed', status: response.status }; }
+        if (landed.protocol !== 'https:' || landed.hostname !== host) {
+          await response.body?.cancel(); return { outcome: 'failed', status: response.status };
+        }
+      }
+      const reader = response.body?.getReader();
+      if (!reader) return { outcome: 'incomplete', status: response.status };
+      // An Ashby board is read lazily across the batch's postings, so its
+      // reader stays open here instead of being released with the others.
+      if (keepBoard) {
+        boards.set(url, { reader, decoder: new TextDecoder(), text: '', bytes: 0, done: false, truncated: false });
+        return { outcome: 'acquired', status: response.status };
+      }
+      try {
+        const decoder = new TextDecoder(); let body = ''; let bytes = 0;
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          bytes += chunk.value.byteLength;
+          if (bytes > 2_000_000) { await reader.cancel(); return { outcome: 'incomplete', status: response.status, bytes }; }
+          body += decoder.decode(chunk.value, { stream: true });
+        }
+        body += decoder.decode();
+        return { outcome: 'acquired', payload: html ? body : JSON.parse(body) as unknown, bytes, status: response.status };
+      } finally { reader.releaseLock(); }
+    } catch { return { outcome: 'failed' }; }
+  };
   return async (identity: ProviderIdentity, candidateUrl?: string): Promise<MetadataAcquisition | undefined> => {
     const route = metadataApiRoute(identity, candidateUrl);
     if (!route) return undefined;
-    if (!requests.has(route.url)) requests.set(route.url, (async () => {
-      try {
-        const host = new URL(route.url).hostname;
-        if (throttled.has(host) || (hooks.canRequest && !await hooks.canRequest(host))) return { outcome: 'failed' as const, status: 429 };
-        // iCIMS publishes its description only as HTML, so this one route accepts
-        // that type. Every other route keeps the JSON-only gate, and the response
-        // is still a fixed reviewed host, non-redirected, timed out and bounded.
-        const html = route.method === 'icims-page';
-        // workerd rejects redirect:'error' before issuing the request. Manual
-        // mode plus the non-2xx check below rejects redirects without following.
-        const response = await fetchImpl(route.url, { headers: { Accept: html ? 'text/html' : 'application/json' }, redirect: 'manual', signal: AbortSignal.timeout(12_000) });
-        if (response.status === 429) {
-          throttled.add(host);
-          const header = response.headers.get('retry-after');
-          const parsed = header && /^\d+$/u.test(header) ? Date.now() + Number(header) * 1000 : Date.parse(header ?? '');
-          const until = new Date(Number.isFinite(parsed) ? Math.max(Date.now() + 60_000, Math.min(parsed, Date.now() + 86_400_000)) : Date.now() + 3_600_000).toISOString();
-          await hooks.deferHost?.(host, until);
-        }
-        const expectedType = html ? /\btext\/html\b/iu : /\bapplication\/json\b/iu;
-        if (!response.ok || !expectedType.test(response.headers.get('content-type') ?? '')) {
-          await response.body?.cancel(); return { outcome: 'failed' as const, status: response.status };
-        }
-        const reader = response.body?.getReader();
-        if (!reader) return { outcome: 'incomplete' as const, status: response.status };
-        // An Ashby board is read lazily across the batch's postings, so its
-        // reader stays open here instead of being released with the others.
-        if (route.method === 'ashby-api') {
-          boards.set(route.url, { reader, decoder: new TextDecoder(), text: '', bytes: 0, done: false, truncated: false });
-          return { outcome: 'acquired' as const, status: response.status };
-        }
-        try {
-          const decoder = new TextDecoder(); let body = ''; let bytes = 0;
-          for (;;) {
-            const chunk = await reader.read();
-            if (chunk.done) break;
-            bytes += chunk.value.byteLength;
-            if (bytes > 2_000_000) { await reader.cancel(); return { outcome: 'incomplete' as const, status: response.status, bytes }; }
-            body += decoder.decode(chunk.value, { stream: true });
-          }
-          body += decoder.decode();
-          return { outcome: 'acquired' as const, payload: html ? body : JSON.parse(body) as unknown, bytes, status: response.status };
-        } finally { reader.releaseLock(); }
-      } catch { return { outcome: 'failed' as const }; }
-    })());
+    if (!requests.has(route.url)) requests.set(route.url,
+      fetchDocument(route.url, route.method === 'icims-page', route.method === 'ashby-api'));
     const result = await requests.get(route.url)!;
     // The board route is shared by every posting on the board, so each identity
     // scans the one fetched board rather than fetching it again. Reads are
@@ -442,7 +507,19 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
       } catch { return { method: route.method, sourceUrl: route.url, outcome: 'failed' as const, status: result.status }; }
     }
     const artifact = result.payload ? parseMetadataApiResponse(route.identity ?? identity, route.method, result.payload, route.url) : undefined;
-    return { method: route.method, sourceUrl: route.url, status: result.status, bytes: result.bytes,
+    const acquisition: MetadataAcquisition = { method: route.method, sourceUrl: route.url, status: result.status, bytes: result.bytes,
       outcome: result.outcome === 'acquired' && !artifact ? 'identity-mismatch' : result.outcome, ...(artifact ? { artifact } : {}) };
+    if (artifact) return acquisition;
+    // A dead or replaced HTML frame host must not strand a description the
+    // posting's own page still publishes. Retry the employer page the
+    // destination already points at and read its JobPosting JSON-LD. JSON APIs
+    // are excluded: they fail because the posting is gone, which this cannot fix.
+    const fallback = jsonLdPageFallback(identity, candidateUrl, route, result);
+    if (!fallback) return acquisition;
+    const page = await fetchDocument(fallback, true, false, true);
+    const pageArtifact = page.payload ? parseMetadataApiResponse(identity, 'json-ld-page', page.payload, fallback) : undefined;
+    return pageArtifact
+      ? { method: 'json-ld-page', sourceUrl: fallback, status: page.status, bytes: page.bytes, outcome: 'acquired', artifact: pageArtifact }
+      : acquisition;
   };
 }

@@ -91,7 +91,7 @@ function jsonLdIdentifier(value: unknown): string | undefined {
   return id || stringValue(value['@id']);
 }
 
-function postingIdentifierMatches(expected: string, actual: string | undefined): boolean {
+export function postingIdentifierMatches(expected: string, actual: string | undefined): boolean {
   if (!actual) return false;
   const decode = (value: string) => { try { return decodeURIComponent(value); } catch { return value; } };
   const normalizedExpected = decode(expected).trim().toLowerCase();
