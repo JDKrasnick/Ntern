@@ -37,6 +37,16 @@ function job(overrides: Partial<Internship> = {}): Internship {
 }
 
 describe('provider-neutral role metadata', () => {
+  it('drops a community advanced-degree badge the official audience contradicts', () => {
+    const undergraduate = { levels: ['undergraduate'] as EducationLevel[], evidenceStatus: 'explicit' as const, provenance: [field] };
+    const graduate = { levels: ['masters'] as EducationLevel[], evidenceStatus: 'explicit' as const, provenance: [field] };
+    const requirements = { requiresUsCitizenship: false, advancedDegreeRequired: true };
+    expect(projectRoleMetadata(job({ requirements }), [evidence({ sourceClass: 'official-page', education: undergraduate })])
+      .job.requirements?.advancedDegreeRequired).toBe(false);
+    expect(projectRoleMetadata(job({ requirements }), [evidence({ sourceClass: 'official-page', education: graduate })])
+      .job.requirements?.advancedDegreeRequired).toBe(true);
+  });
+
   it('retains explicit housing cadence without inventing an amount or borrowing salary cadence', () => {
     expect(extractHousingDetails('Monthly housing stipend', { provenance: field })).toEqual([
       { kind: 'stipend', period: 'monthly', sourceText: 'Monthly housing stipend', provenance: [field] },

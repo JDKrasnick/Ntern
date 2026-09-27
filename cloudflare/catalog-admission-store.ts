@@ -687,6 +687,10 @@ export class D1CatalogAdmissionStore {
     requireProjectedEvidence?: boolean;
     after?: string;
     reserveAt?: string;
+    /** Operator-forced refresh: disregard the normal revalidation window and
+     * deferral so a bounded slice can be re-read on demand. A live lease still
+     * wins, and the caller bounds the slice. */
+    refresh?: boolean;
   } = {}): Promise<Array<{
     jobId: string; sourceId: string; externalId: string; candidateUrl: string; providerIdentity: ProviderIdentity;
     metadataArtifactHash?: string;
@@ -730,13 +734,14 @@ export class D1CatalogAdmissionStore {
           const deferred = Boolean(reservation && reservation.retry_after > now
             && (reservation.version === null || reservation.version >= ROLE_METADATA_EXTRACTION_VERSION));
           const bypassDeferral = deferred && providerApiUnused && Boolean(observation && observation.observedAt <= providerApiRetryBefore);
-          if (deferred && !bypassDeferral) continue;
-          if (!bypassDeferral && observation && (!options.observedBefore || observation.observedAt > options.observedBefore)) continue;
+          const bypass = options.refresh === true || bypassDeferral;
+          if (deferred && !bypass) continue;
+          if (!bypass && observation && (!options.observedBefore || observation.observedAt > options.observedBefore)) continue;
           candidates.push({
             jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId,
             ...target,
             ...(observation ? { metadataArtifactHash: observation.artifactHash } : {}),
-            ...(bypassDeferral ? { bypassDeferral: true as const } : {}),
+            ...(bypass ? { bypassDeferral: true as const } : {}),
           });
         }
       }

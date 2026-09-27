@@ -93,6 +93,24 @@ export function educationAudienceLabel(audience: EducationAudience): string {
   return audience.levels.join(', ');
 }
 
+/**
+ * The advanced-degree requirement a reader should see. A community badge can
+ * claim one while the employer's own explicit education admits undergraduates;
+ * the explicit audience wins, because a role that accepts a lower level cannot
+ * require an advanced degree. Without explicit levels the stored badge stands.
+ */
+export function effectiveAdvancedDegreeRequired(input: {
+  levels?: readonly string[];
+  evidenceStatus?: string;
+  advancedDegreeRequired?: boolean;
+}): boolean {
+  if (input.evidenceStatus === 'explicit' && input.levels?.length) {
+    return !input.levels.includes('undergraduate')
+      && input.levels.some((level) => level === 'masters' || level === 'doctoral' || level === 'mba');
+  }
+  return Boolean(input.advancedDegreeRequired);
+}
+
 /** The stated audience a filter needs; every field is validated before it is read. */
 export interface StatedEducationAudience {
   levels: string[];
@@ -220,6 +238,13 @@ const DEGREE_PREFERRED_ONLY = /\b(?:preferred|preferably|a plus|nice to have|des
 const DEGREE_WAIVED = /\b(?:not required|need not|no\s+(?:[\w’'-]+\s+){0,3}degree\s+(?:is\s+)?required)\b/iu;
 /** Evidence that a bare degree word states an audience rather than an action. */
 const DEGREE_CONTEXT = /\b(?:degrees?|program(?:me)?s?|students?|candidates?|studies|thesis|course(?:work)?|standing|education|qualifications?|pursuing|enrolled|enrolment|enrollment|open to|eligible|eligibility|requirements?|required|must|class of|applicants?)\b/iu;
+/**
+ * Application-form controls are UI, not an audience statement. "Please indicate
+ * your degree of study Bachelors / Masters/phD" lists a control's options;
+ * reading them as levels over-reports the audience. Page captures also exclude
+ * form controls, so this only catches a form sentence that reached the text.
+ */
+const APPLICATION_FORM_CONTROL = /\bplease\s+(?:select|indicate|choose|enter)\b|\bselect\s*\.{2,}|\.{2,}\s*select\b|\bdegree\s+of\s+study\b/iu;
 
 // Case matters for the two-letter forms: "5 ms latency" is not a Master's, and
 // "our MA office" is not a degree. A lowercase form only counts with degree
@@ -227,7 +252,7 @@ const DEGREE_CONTEXT = /\b(?:degrees?|program(?:me)?s?|students?|candidates?|stu
 const DEGREE_NOUN = String.raw`degrees?|program(?:me)?s?|students?|candidates?|studies|thesis|course(?:work)?|level`;
 const EDUCATION_AUDIENCE_PATTERNS: Record<EducationLevel, readonly RegExp[]> = {
   undergraduate: [
-    /\b(?:undergrad(?:uate)?s?|bachelor(?:['’]s|s)?(?:\s+degree)?|college students?|university students?|four[ -]?year degree|4[ -]?year degree)\b/iu,
+    /\b(?:undergrad(?:uate)?s?|bachelor(?:['’]s|s)?(?:\s+degree)?|college students?|university students?|(?:four|4)[ -]?year(?: college| university)? degree)\b/iu,
     /(?<![\w.])(?:BSc|BS|B\.S\.|BA|B\.A\.)(?![\w.])/u,
     new RegExp(String.raw`(?<![\w.])(?:bsc|bs|ba)(?![\w.])\s+(?:${DEGREE_NOUN}|in\s+\w+)`, 'iu'),
   ],
@@ -272,7 +297,7 @@ export function educationAudienceLevels(value: string): EducationLevel[] {
   if (!value) return [];
   const levels = new Set<EducationLevel>();
   for (const sentence of value.split(EDUCATION_SENTENCE_SPLIT)) {
-    if (!sentence.trim()) continue;
+    if (!sentence.trim() || APPLICATION_FORM_CONTROL.test(sentence)) continue;
     const sentenceHasContext = DEGREE_CONTEXT.test(sentence);
     for (const segment of sentence.split(EDUCATION_SEGMENT_SPLIT)) {
       if (!segment.trim() || DEGREE_PREFERRED_ONLY.test(segment) || DEGREE_WAIVED.test(segment)) continue;

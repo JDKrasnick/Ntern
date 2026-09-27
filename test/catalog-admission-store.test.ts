@@ -925,6 +925,41 @@ describe('D1 catalog admission operations', () => {
     await expect(collectRoleMetadataInBackground(env as never, new Date('2026-09-01T00:01:00Z'))).resolves.toEqual({ queued: 0 });
   });
 
+  it('force-refreshes a complete role only when the operator asks', async () => {
+    const current = subject();
+    const workdayUrl = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Remote/Software-Intern_R12345';
+    const verified = admission(true);
+    verified.destination = { ...verified.destination, classification: 'posting-detail', provider: 'workday',
+      tenant: 'acme', expectedPostingId: 'R12345', candidateUrl: workdayUrl };
+    // A page that answered with fields, so the normal window parks it and only
+    // an explicit refresh may re-read it before the window elapses.
+    const pageEvidence = { schemaVersion: 1 as const, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, artifactHash: 'hash-2',
+      sourceClass: 'official-page' as const, sourceId: 'workday-acme', sourceUrl: workdayUrl,
+      observedAt: '2026-08-28T00:00:00Z', exactPosting: true as const,
+      compensationRanges: [{ minAmount: 30, maxAmount: 40, currency: 'USD', period: 'hourly' as const, sourceText: '$30-40/hour',
+        provenance: [{ source: 'official-page' as const, sourceId: 'workday-acme', sourceUrl: workdayUrl,
+          evidenceCode: 'compensation-range', contentHash: 'hash-2', observedAt: '2026-08-28T00:00:00Z' }] }] };
+    const reference = {
+      sourceId: 'workday-acme', provenance: 'official-ats' as const, externalId: 'R12345', document: 'R12345',
+      sourceUrl: 'https://acme.wd1.myworkdayjobs.com/Acme_Careers', row: 1, company: 'Acme',
+      title: 'Software Engineering Intern', location: 'Remote', locations: ['Remote'], season: 'summer-2027',
+      applyUrl: workdayUrl, compensation: { raw: '' }, state: 'open' as const, admission: verified,
+      metadataEvidence: [pageEvidence],
+    };
+    await current.jobs.putInternship({ ...job(), sourceReferences: [reference] });
+    current.database.prepare(`INSERT INTO role_metadata_evidence
+      (job_id, source_class, source_id, source_url, artifact_hash, extraction_version, evidence, observed_at, is_current)
+      VALUES ('job-1', 'official-page', 'workday-acme', ?, 'hash-2', ?, ?, '2026-08-28T00:00:00Z', 1)`)
+      .run(workdayUrl, ROLE_METADATA_EXTRACTION_VERSION, JSON.stringify(pageEvidence));
+    current.database.prepare(`INSERT INTO role_metadata_acquisition (job_id, source_id, lease_until, retry_after, observed_at, report)
+      VALUES ('job-1', 'workday-acme', '', '2026-10-20T00:00:00Z', '2026-08-28T00:00:00Z', ?)`)
+      .run(JSON.stringify({ extractionVersion: ROLE_METADATA_EXTRACTION_VERSION }));
+    const window = { observedBefore: '2026-08-01T00:00:00Z', includeUnobserved: false, requireProjectedEvidence: true } as const;
+    await expect(current.admission.metadataVerificationCandidates(10, window)).resolves.toEqual([]);
+    await expect(current.admission.metadataVerificationCandidates(10, { ...window, refresh: true, reserveAt: '2026-09-01T00:00:00Z' }))
+      .resolves.toMatchObject([{ jobId: 'job-1', sourceId: 'workday-acme', bypassDeferral: true }]);
+  });
+
   it('matches collection work sent for the destination the occurrence itself verified', () => {
     const canonical = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Remote/Software-Intern_R12345';
     const redirect = 'https://acme.wd1.myworkdayjobs.com/en-US/Acme_Careers/job/Remote/Software-Intern_R12345';
