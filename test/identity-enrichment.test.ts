@@ -54,6 +54,21 @@ describe('provider-neutral field enrichment', () => {
     expect(educationAudienceLevels("2027 Leadership Development Program Intern (Master's)")).toEqual(['masters']);
     // A latency measurement is not a degree.
     expect(educationAudienceLevels('Latency under 5 ms.')).toEqual([]);
+    // "4-year college degree" is the same audience as "four-year degree".
+    expect(educationAudienceLevels('Experience with C/C++ 4-year college degree or higher.')).toEqual(['undergraduate']);
+    expect(educationAudienceLevels('A 4 year university degree in Physics is required.')).toEqual(['undergraduate']);
+  });
+
+  it('does not read an application form\u2019s degree options as an audience', () => {
+    // A rendered Greenhouse page with its application form: the "degree of
+    // study" dropdown lists Bachelors and Masters/phD, but the role is a
+    // Masters posting. The form is UI, not a requirement.
+    expect(educationAudienceLevels('Please indicate your degree of study Bachelors Masters/phD Please select and confirm your anticipated graduation date'))
+      .toEqual([]);
+    expect(educationAudienceLevels('Degree of study Bachelors Masters/phD')).toEqual([]);
+    // A real sentence next to a form mention is still read.
+    expect(educationAudienceLevels("Please indicate your degree of study\nCurrently pursuing a Master's degree in Computer Science."))
+      .toEqual(['masters']);
   });
 
   it('never turns a stated preference or a waived requirement into an audience', () => {
