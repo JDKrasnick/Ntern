@@ -1344,12 +1344,17 @@ describe('admission operational signals', () => {
 describe('catalog starvation signal', () => {
   const now = new Date('2026-09-26T18:00:00.000Z');
 
-  it('fires when eligible roles exist but the newest published role is older than the window', () => {
-    expect(catalogStarvationSignal({ newestPublishedAt: '2026-09-26T01:15:00.000Z', eligible: 1600, now }))
-      .toEqual({ starved: true, hoursSinceNewest: 16.75 });
+  it('fires when eligible roles exist but the newest published role is older than a full day', () => {
+    expect(catalogStarvationSignal({ newestPublishedAt: '2026-09-25T12:00:00.000Z', eligible: 1600, now }))
+      .toEqual({ starved: true, hoursSinceNewest: 30 });
   });
 
-  it('stays quiet while a role has been published inside the window', () => {
+  it('stays quiet through a weekend quiet period shorter than the window', () => {
+    expect(catalogStarvationSignal({ newestPublishedAt: '2026-09-25T23:45:00.000Z', eligible: 1600, now }))
+      .toEqual({ starved: false, hoursSinceNewest: 18.25 });
+  });
+
+  it('stays quiet while a role has been published recently', () => {
     expect(catalogStarvationSignal({ newestPublishedAt: '2026-09-26T17:30:00.000Z', eligible: 1600, now }))
       .toEqual({ starved: false, hoursSinceNewest: 0.5 });
   });
