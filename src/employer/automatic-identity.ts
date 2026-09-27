@@ -89,3 +89,26 @@ export function groupAutomaticEmployerIdentityCandidates(
   }
   return [...grouped.values()].map((value) => ({ ...value, postingIds: [...value.postingIds].sort() }));
 }
+
+/**
+ * Identity promotion is enrichment, not part of the ingestion critical path.
+ * Large community boards can contain hundreds of distinct ATS tenants, and a
+ * complete promotion check performs several D1 statements per tenant. Rotate a
+ * small deterministic window on every successful fetch so coverage converges
+ * without allowing enrichment to exhaust a queue delivery's D1 CPU budget.
+ */
+export const automaticEmployerIdentityObservationsPerDelivery = 5;
+
+export function automaticEmployerIdentityObservationSlice(
+  observations: readonly AutomaticEmployerIdentityObservation[],
+  fetchSequence: number,
+  limit = automaticEmployerIdentityObservationsPerDelivery,
+): AutomaticEmployerIdentityObservation[] {
+  if (limit <= 0 || observations.length === 0) return [];
+  const ordered = [...observations].sort((left, right) =>
+    [left.provider, left.scope, left.sourceId, left.labelKey].join('\0')
+      .localeCompare([right.provider, right.scope, right.sourceId, right.labelKey].join('\0')));
+  if (ordered.length <= limit) return ordered;
+  const start = ((Math.max(1, fetchSequence) - 1) * limit) % ordered.length;
+  return Array.from({ length: limit }, (_, offset) => ordered[(start + offset) % ordered.length]!);
+}

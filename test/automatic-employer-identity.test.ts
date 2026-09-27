@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { automaticEmployerIdentityCandidate, groupAutomaticEmployerIdentityCandidates } from '../src/employer/automatic-identity.js';
+import { automaticEmployerIdentityCandidate, automaticEmployerIdentityObservationSlice, groupAutomaticEmployerIdentityCandidates } from '../src/employer/automatic-identity.js';
 import type { ProcessedListing } from '../src/types.js';
 
 function listing(overrides: Partial<ProcessedListing> = {}): ProcessedListing {
@@ -41,5 +41,20 @@ describe('automatic employer identity evidence', () => {
     expect(groupAutomaticEmployerIdentityCandidates([first, first, second])).toEqual([
       expect.objectContaining({ provider: 'icims', scope: 'amd', labelKey: 'amd', postingIds: ['92358', '92359'] }),
     ]);
+  });
+
+  it('rotates a bounded identity-enrichment window across successful fetches', () => {
+    const observations = Array.from({ length: 8 }, (_, index) => ({
+      provider: 'ashby' as const, scope: `tenant-${index}`, sourceId: 'community', fetchSequence: 1,
+      labelKey: `company-${index}`, displayName: `Company ${index}`, postingIds: [`posting-${index}`],
+      applicationUrl: `https://jobs.ashbyhq.com/tenant-${index}/posting-${index}`,
+      observedAt: '2026-09-27T01:00:00Z',
+    }));
+
+    const first = automaticEmployerIdentityObservationSlice(observations, 1);
+    const second = automaticEmployerIdentityObservationSlice(observations, 2);
+    expect(first).toHaveLength(5);
+    expect(second).toHaveLength(5);
+    expect(new Set([...first, ...second].map((observation) => observation.scope)).size).toBe(8);
   });
 });
