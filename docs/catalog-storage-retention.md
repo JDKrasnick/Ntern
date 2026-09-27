@@ -16,10 +16,14 @@ projection freezes.
 
 ## Policy
 
-The daily `42 8 * * *` maintenance cron runs `runCatalogRetention`
+The daily `34 8 * * *` maintenance cron runs `runCatalogRetention`
 ([`cloudflare/catalog-retention.ts`](../cloudflare/catalog-retention.ts)) with
-`apply: true`. Every sweep keeps what a live reader needs and deletes only
-history:
+`apply: true`. The minute deliberately avoids every provider dispatch cron
+(`2,32` Ashby, `12,42` Greenhouse, `22,52` Lever, and the `*/5`/`7-57/10`/`9-59/10`
+cadences): the retention pass is write-heavy, and running it on the same minute as
+a greenhouse dispatch overloaded D1 and dead-lettered that dispatch's polls.
+
+Every sweep keeps what a live reader needs and deletes only history:
 
 | Sweep | Retention | What it removes | What it keeps |
 | --- | --- | --- | --- |

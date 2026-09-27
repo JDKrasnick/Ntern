@@ -1167,8 +1167,8 @@ describe('Cloudflare GitHub queue continuation', () => {
     expect(handled).toEqual(['retry']);
   });
 
-  it('keeps forced recovery on every continuation while the source remains paused', async () => {
-    const { sent, handled } = await deliver({
+  it('does not chain a forced recovery into an unbounded resolution pass', async () => {
+    const { sent, handled, sliceEvents } = await deliver({
       continuationSources: [reviewedGithub.id],
       pendingResolution: { [reviewedGithub.id]: 4 },
       failures: [],
@@ -1178,8 +1178,14 @@ describe('Cloudflare GitHub queue continuation', () => {
         sourceStatus: 'paused', consecutiveFailures: 2, lastAttemptAt: '2026-09-20T18:12:45.125Z', durationMs: 1 },
     });
 
-    expect(sent).toEqual([{ sourceId: reviewedGithub.id, force: true }]);
+    // A recovery validates one slice. Chaining a forced continuation would carry
+    // the non-deferrable flag into every later slice, so one large board could
+    // dead-letter a message per failed slice. The pending pass is durable in the
+    // checkpoint and resumes from the scheduled dispatcher once the source is
+    // resumed.
+    expect(sent).toEqual([]);
     expect(handled).toEqual(['ack']);
+    expect(sliceEvents).toEqual([expect.objectContaining({ continuation: true, resolutionPending: 4 })]);
   });
 
   it('acks a delivery that resolved its whole slice without re-enqueueing it', async () => {

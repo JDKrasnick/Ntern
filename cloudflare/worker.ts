@@ -2034,7 +2034,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     });
     return;
   }
-  if (event.cron === '42 8 * * *') {
+  if (event.cron === '34 8 * * *') {
     await cleanupExpiredAuth(env);
     await cleanupExpiredUserData(env.DB);
     await new GmailStore(env.DB).cleanup(new Date(event.scheduledTime));
@@ -2381,12 +2381,19 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           }));
         }
         if (result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
-        if (result.poll?.continuationSources.includes(source.id)) {
+        // A forced recovery is a single validation, not the start of an unbounded
+        // resolution pass. Chaining continuations would keep `force` on every
+        // slice, and a forced failure is never deferred, so a large board could
+        // dead-letter one message per failed slice. The pending pass is durable
+        // in the source checkpoint, and it drains on the scheduled dispatcher
+        // once the operator resumes the source after this validation. Ordinary
+        // polls still continue from their own pending order.
+        if (result.poll?.continuationSources.includes(source.id) && message.force === true) {
+          console.log(JSON.stringify({ event: 'github_recovery_continuation_suppressed', sourceId: source.id,
+            pendingResolution: result.poll.pendingResolution[source.id] ?? 0 }));
+        } else if (result.poll?.continuationSources.includes(source.id)) {
           try {
-            await sendQueueMessageWithin(env.GITHUB_QUEUE, {
-              sourceId: source.id,
-              ...(message.force === true ? { force: true } : {}),
-            });
+            await sendQueueMessageWithin(env.GITHUB_QUEUE, { sourceId: source.id });
           } catch (error) {
             // The poll committed its checkpoint before requesting continuation.
             // The scheduled dispatcher will pick up the pending source; retrying

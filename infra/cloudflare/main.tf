@@ -243,7 +243,7 @@ resource "cloudflare_workers_cron_trigger" "ingestion" {
   schedules = [
     { cron = "*/5 * * * *" }, { cron = "7-57/10 * * * *" }, { cron = "9-59/10 * * * *" },
     { cron = "12,42 * * * *" }, { cron = "22,52 * * * *" }, { cron = "2,32 * * * *" },
-    { cron = "0 * * * *" }, { cron = "42 8 * * *" }, { cron = "17 9 * * *" },
+    { cron = "0 * * * *" }, { cron = "34 8 * * *" }, { cron = "17 9 * * *" },
   ]
 }
 

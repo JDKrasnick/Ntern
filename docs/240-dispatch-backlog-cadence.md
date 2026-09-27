@@ -498,6 +498,18 @@ draining).
    event so the non-shrinking cause stays diagnosable. Expect
    `github-cadence-slip` and the `dlq-growth` github signal to clear as the
    backlog drains.
+   The signal recurred on 2026-09-27 while `simplify-summer-2026` was paused and
+   the `dlq-growth` github signal was still climbing, so two further guards
+   landed. A forced recovery no longer chains continuations
+   (`github_recovery_continuation_suppressed`): chaining carried the
+   non-deferrable `force` flag into every later slice, so one large board could
+   dead-letter a message per failed slice. The pending pass is durable in the
+   checkpoint and drains from the scheduled dispatcher once the operator resumes
+   the source, matching the recovery contract (one validation, then `resume`).
+   Separately, the daily maintenance cron moved from `42 8 * * *` to
+   `34 8 * * *`: it now runs the write-heavy retention pass, and sharing the
+   minute with the greenhouse dispatch (`12,42 * * * *`) overloaded D1 and
+   dead-lettered a burst of healthy greenhouse polls at 08:42.
 2. Watch the new signal rather than queue depth. `provider_dispatch_complete`
    reports `candidates`, `queued`, and `inFlightSkipped` on every sweep, so a
    fleet that stops dispatching is visible in one line, and
