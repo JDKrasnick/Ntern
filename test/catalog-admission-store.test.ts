@@ -212,6 +212,21 @@ describe('D1 catalog admission operations', () => {
     expect(await store.configurationVersion()).toBe(populated);
   });
 
+  it('ignores presentation-only employer changes when versioning admission configuration', async () => {
+    const { database, admission: store } = subject();
+    await store.putCanonicalEmployer({ id: 'acme', displayName: 'Acme', reviewedAt: '2026-08-26T00:00:00Z', reviewedBy: 'reviewer' }, '2026-08-26T00:00:00Z');
+    const version = await store.configurationVersion();
+
+    // The background icon resolver writes these columns. They do not change how
+    // a source row is admitted, so resolving a logo must not restart a full
+    // catalog re-grade — which is what made the re-grade deliveries heavy enough
+    // to be resource-killed into the dead-letter queue.
+    database.prepare(`UPDATE canonical_employers SET icon_key = ?, icon_source = 'logo-dev', icon_updated_at = ?, icon_resolved_at = ? WHERE id = 'acme'`)
+      .run('employers/acme.png', '2026-09-27T14:29:00Z', '2026-09-27T14:29:00Z');
+
+    expect(await store.configurationVersion()).toBe(version);
+  });
+
   it('audits review records by source, destination, and prior notification history', async () => {
     const { admission: store, jobs } = subject();
     const current = job();
