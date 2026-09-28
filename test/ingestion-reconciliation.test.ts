@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IngestionRunner } from '../src/poll.js';
+import { CatalogReconciler } from '../src/ingestion/catalog-reconciler.js';
 import { GitHubMarkdownAdapter } from '../src/sources/github.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import { buildInternshipIdentity } from '../src/identity/enrichment.js';
@@ -140,6 +141,56 @@ describe('snapshot reconciliation', () => {
     expect([...store.jobs.values()][0]?.compensation).toMatchObject({ minHourlyUSD: 40, maxHourlyUSD: 40 });
   });
 
+  it('does not persist an occurrence or rewrite the job when only observation clocks move', () => {
+    const reconciler = new CatalogReconciler();
+    const evidence = (observedAt: string) => extractPostingMetadataEvidence({
+      artifact: { title: 'Software Engineering Intern', compensationText: 'USD $40/hour' },
+      sourceClass: 'official-ats', sourceId: 'source-a',
+      sourceUrl: 'https://source.example.test/source-a', observedAt, exactPosting: true,
+    });
+    const admission = (evaluatedAt: string): CatalogAdmission => {
+      const base = officialAdmission('acme');
+      return { ...base, evaluatedAt, evidenceObservedAt: evaluatedAt,
+        destination: { ...base.destination!, inspectedAt: evaluatedAt,
+          freshUntil: new Date(Date.parse(evaluatedAt) + 7 * 86_400_000).toISOString(),
+          nextCheckAt: new Date(Date.parse(evaluatedAt) + 6 * 86_400_000).toISOString() } };
+    };
+    const input = (now: string, resolvedJobs: Map<string, Internship>, overrides: Partial<ProcessedListing> = {}) => ({
+      sourceId: 'source-a', snapshotHash: 'snapshot-1', activeExternalIds: new Set(['role-1']),
+      listings: [listing('source-a', { fetchedAt: now, metadataEvidence: evidence(now),
+        admission: admission(now), ...overrides })],
+      resolvedJobs, now, baseline: false,
+    });
+    const first = reconciler.reconcile({ ...input('2026-07-29T12:00:00.000Z', new Map()), priorOccurrences: [] });
+    expect(first.occurrences).toHaveLength(1);
+    const firstJob = first.jobs[0]!;
+
+    // Same board an hour later: every observation clock moved, nothing else did.
+    const second = reconciler.reconcile({
+      ...input('2026-07-29T13:00:00.000Z', new Map([['role-1', firstJob]])),
+      priorOccurrences: first.occurrences,
+    });
+    expect(second.occurrences).toHaveLength(0);
+    // Byte-identical to the stored row, so the guarded D1 upsert bills nothing.
+    expect(second.jobs[0]).toEqual(firstJob);
+
+    // A day later the display clock advances; the content still does not change.
+    const third = reconciler.reconcile({
+      ...input('2026-07-30T13:00:00.000Z', new Map([['role-1', second.jobs[0]!]])),
+      priorOccurrences: first.occurrences,
+    });
+    expect(third.occurrences).toHaveLength(0);
+    expect(third.jobs[0]?.lastSeenAt).toBe('2026-07-30T13:00:00.000Z');
+
+    // A real content change still persists.
+    const fourth = reconciler.reconcile({
+      ...input('2026-07-30T14:00:00.000Z', new Map([['role-1', third.jobs[0]!]]),
+        { compensation: { raw: 'USD $45/hour', minHourlyUSD: 45, maxHourlyUSD: 45 } }),
+      priorOccurrences: first.occurrences,
+    });
+    expect(fourth.occurrences).toHaveLength(1);
+  });
+
   it('reprojects changed source metadata without creating a second new-role event', async () => {
     const store = new MemoryInternshipStore();
     await store.putCheckpoint({ sourceId: 'source-a', successfulFetches: 1, lastRowCount: 1 });
@@ -183,6 +234,9 @@ describe('snapshot reconciliation', () => {
     adapter.unchanged = true;
     await new IngestionRunner([adapter], store).run();
     expect([...store.jobs.values()][0]).toMatchObject({ open: false });
+    expect((await store.getSourceOccurrences('source-a'))[0]).toMatchObject({ present: false, consecutiveOmissions: 2 });
+
+    await new IngestionRunner([adapter], store).run();
     expect((await store.getSourceOccurrences('source-a'))[0]).toMatchObject({ present: false, consecutiveOmissions: 2 });
   });
 

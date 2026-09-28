@@ -19,9 +19,9 @@ import {
 import { runRuntimeCommand } from '../src/runtime.js';
 import { catalogGroupDetails, compareCatalogProjectionGroups, groupCatalogJobs } from '../src/catalog-groups.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
-import type { reviewedAshbySources } from '../src/sources/ashby-config.js';
-import type { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
-import type { reviewedLeverSources } from '../src/sources/lever-config.js';
+import { reviewedAshbySources } from '../src/sources/ashby-config.js';
+import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
+import { reviewedLeverSources } from '../src/sources/lever-config.js';
 import { defaultSources } from '../src/sources/index.js';
 import type { SourceCheckpoint, SourceHealth } from '../src/types.js';
 import { authenticatedInstallation, authenticatedUser, cleanupExpiredAuth, consumeAuthRateLimit, createInstallation, deleteAuthUser, handleAuthRequest, type AuthEnvironment } from './auth.js';
@@ -30,6 +30,13 @@ import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
 import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
+import {
+  CATALOG_RETENTION_CRON_MAX_DURATION_MS,
+  CATALOG_RETENTION_CRON_MAX_PASSES,
+  NOTIFICATION_EVENT_RETENTION_DAYS,
+  notificationEventRetentionCutoff,
+  runCatalogRetention,
+} from './catalog-retention.js';
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
 import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
@@ -942,6 +949,13 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     const apply = body?.apply === true;
     if (!since || Number.isNaN(Date.parse(since)) || typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
       return withCors(Response.json({ message: 'since must be an ISO timestamp and limit must be an integer from 1 to 100' }, { status: 400 }));
+    }
+    const earliestSupportedSince = notificationEventRetentionCutoff(new Date());
+    if (Date.parse(since) < Date.parse(earliestSupportedSince)) {
+      return withCors(Response.json({
+        message: `since must be within the ${NOTIFICATION_EVENT_RETENTION_DAYS}-day notification recovery window`,
+        earliestSupportedSince,
+      }, { status: 400 }));
     }
     const expectedCandidateJobIds = body?.expectedCandidateJobIds;
     if (apply && (!Array.isArray(expectedCandidateJobIds)
@@ -2047,11 +2061,17 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     });
     return;
   }
-  if (event.cron === '42 8 * * *') {
+  if (event.cron === '34 8 * * *') {
     await cleanupExpiredAuth(env);
     await cleanupExpiredUserData(env.DB);
     await new GmailStore(env.DB).cleanup(new Date(event.scheduledTime));
     await cleanupDlqRecords(env.DB, new Date(event.scheduledTime));
+    // Append-only catalog history would otherwise grow toward D1's 10 GB cap
+    // forever; full pages repeat inside a wall-clock budget and report whether
+    // eligible backlog remains for the next daily pass.
+    const catalogRetention = await runScheduledStep('catalog_retention',
+      () => runCatalogRetention(env.DB, { now: new Date(event.scheduledTime), apply: true,
+        maxPasses: CATALOG_RETENTION_CRON_MAX_PASSES, maxDurationMs: CATALOG_RETENTION_CRON_MAX_DURATION_MS }));
     const employerMaintenance = await runEmployerMaintenance(new D1EmployerStore(env.DB), store, new Date(event.scheduledTime));
     const admissionVerificationRetries = await enqueueDueDestinationVerifications(env, new Date(event.scheduledTime));
     const admissions = new D1CatalogAdmissionStore(env.DB);
@@ -2072,7 +2092,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     console.log(JSON.stringify({ event: 'employer_maintenance_complete', ...employerMaintenance, admissionVerificationRetries,
       admissionFreshness: admissionAudit.freshness, admissionValidationCoverage: admissionAudit.validationCoverage,
       activeAdmissionIncidents, newlyOpenedIncidents,
-      admissionOperations: admissionAudit.operations }));
+      admissionOperations: admissionAudit.operations, catalogRetention }));
   }
 }
 
@@ -2107,6 +2127,68 @@ async function browserResumeJobText(canonicalUrl: string, env: Environment): Pro
   } finally { await browser.close(); }
 }
 
+interface CatalogBoundaryMessage {
+  sourceId?: unknown;
+  sourceKind?: unknown;
+  force?: unknown;
+  version?: unknown;
+  scheduledAt?: unknown;
+  runId?: unknown;
+}
+
+const reviewedBoundarySourceIds: Record<Exclude<CatalogProviderId, 'github'>, ReadonlySet<string>> = {
+  greenhouse: new Set(reviewedGreenhouseSources.map(({ id }) => id)),
+  lever: new Set(reviewedLeverSources.map(({ id }) => id)),
+  ashby: new Set(reviewedAshbySources.map(({ id }) => id)),
+};
+const reviewedGithubBoundarySourceIds = new Set(defaultSources.map(({ id }) => id));
+
+function parseCatalogBoundaryMessage(body: unknown): CatalogBoundaryMessage | undefined {
+  try {
+    const parsed = JSON.parse(typeof body === 'string' ? body : JSON.stringify(body)) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as CatalogBoundaryMessage
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The billing guard runs before the D1-backed provider registries are available,
+ * so only checked-in messages can be proven to have a scheduler reissue path at
+ * this boundary. Dynamic, stale, unknown, and malformed work stays on the
+ * platform retry/DLQ path instead of being acknowledged on an assumption.
+ */
+function catalogBoundaryDispatcherCanReissue(
+  provider: CatalogProviderId,
+  message: CatalogBoundaryMessage | undefined,
+): boolean {
+  if (!message || typeof message.sourceId !== 'string'
+    || (message.force !== undefined && typeof message.force !== 'boolean')) return false;
+  if (provider === 'github') {
+    return message.force !== true && message.sourceKind === undefined
+      && reviewedGithubBoundarySourceIds.has(message.sourceId);
+  }
+  return message.version === 1
+    && typeof message.scheduledAt === 'string'
+    && Number.isFinite(Date.parse(message.scheduledAt))
+    && (message.runId === undefined || typeof message.runId === 'string')
+    && reviewedBoundarySourceIds[provider].has(message.sourceId);
+}
+
+async function resolveDeferredQueueFailure(
+  db: D1Database,
+  queueName: string,
+  messageId: string,
+  command = 'catalog-deferred-ledger-resolution',
+): Promise<void> {
+  try { await resolveQueueFailures(db, queueName, messageId); }
+  catch (error) {
+    console.error(JSON.stringify({ command, messageId, error: safeDiagnostic(error) }));
+  }
+}
+
 async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Promise<void> {
   const catalogProvider = providerForQueueName(batch.queue);
   const trafficWorkload = d1TrafficWorkloadForQueue(batch.queue);
@@ -2121,7 +2203,43 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   // scarce queue retries. Destination and shadow queues otherwise DLQ valid
   // work after only two failed deliveries.
   if (resilientQueue) env = { ...env, DB: resilientD1(env.DB) };
-  if (await isShutdown(env)) {
+  let shutdown: boolean;
+  try {
+    shutdown = await isShutdown(env);
+  } catch (error) {
+    // Catalog messages reach this guard before provider-specific setup and
+    // per-record handling. If its D1 read still fails after resilient retries,
+    // apply the same final-delivery contract here instead of throwing the whole
+    // batch without a ledger row. Ordinary source work is re-owned by the
+    // scheduled dispatcher; malformed work and forced GitHub recovery are not.
+    if (!catalogProvider) throw error;
+    for (const queued of batch.messages) {
+      const parsed = parseCatalogBoundaryMessage(queued.body);
+      const sourceId = typeof parsed?.sourceId === 'string' ? parsed.sourceId : undefined;
+      const sourceKind = typeof parsed?.sourceKind === 'string' ? parsed.sourceKind : undefined;
+      await recordQueueFailureBestEffort({
+        db: env.DB, queueName: batch.queue, messageId: queued.id, attempts: queued.attempts,
+        timestamp: queued.timestamp, sourceId, sourceKind,
+        body: queued.body, error,
+      });
+      const deferred = catalogDeliveryIsDeferred(error, sourceId, queued.attempts, {
+        dispatcherCanReissue: catalogBoundaryDispatcherCanReissue(catalogProvider, parsed),
+      });
+      console.error(JSON.stringify({ command: 'catalog-poll-boundary', phase: 'billing-shutdown',
+        provider: catalogProvider, sourceId, messageId: queued.id,
+        attempts: queued.attempts, deferred, error: safeDiagnostic(error) }));
+      if (deferred) {
+        await resolveDeferredQueueFailure(env.DB, batch.queue, queued.id);
+        queued.ack();
+      }
+      else {
+        const delay = d1QueueRetryDelay(error, queued.attempts);
+        queued.retry(delay ? { delaySeconds: delay } : undefined);
+      }
+    }
+    return;
+  }
+  if (shutdown) {
     for (const message of batch.messages) message.ack();
     return;
   }
@@ -2141,10 +2259,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   // inflate the operator "unresolved" signal. Resolve it here: the source health
   // row and the dispatcher's own cadence are the durable retry state.
   const resolveDeferredFailure = async (messageId: string) => {
-    try { await resolveQueueFailures(env.DB, batch.queue, messageId); }
-    catch (error) {
-      console.error(JSON.stringify({ command: 'catalog-deferred-ledger-resolution', messageId, error: safeDiagnostic(error) }));
-    }
+    await resolveDeferredQueueFailure(env.DB, batch.queue, messageId);
   };
   if (batch.queue.includes('destination-verification')) {
     await observeQueueBatch(batch, trafficObservations, (observed) => processDestinationVerificationBatch(observed, env));
@@ -2344,7 +2459,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           continue;
         }
         if (!source) throw new Error(`Unknown reviewed source ${JSON.stringify(sourceId)}`);
-        const priorHealth = await new D1InternshipStore(env.DB).getSourceHealth(source.id);
+        const sourceStore = new D1InternshipStore(env.DB);
+        const priorHealth = await sourceStore.getSourceHealth(source.id);
         if (githubSourceRunBlocked(priorHealth, message.force)) {
           console.log(JSON.stringify({ event: 'source_poll_skipped', command: 'github-poll', sourceId: source.id,
             reason: priorHealth?.state === 'quarantined' ? 'quarantined' : priorHealth?.sourceStatus === 'paused' ? 'paused' : 'backoff' }));
@@ -2356,7 +2472,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           continue;
         }
         const result = await withinMessageDeadline(runRuntimeCommand('poll', {
-          store: new D1InternshipStore(env.DB),
+          store: sourceStore,
           userStore: new D1UserStore(env.DB),
           sources: [source],
           validateCatalogOnPoll: false,
@@ -2388,12 +2504,39 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           }));
         }
         if (result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
-        if (result.poll?.continuationSources.includes(source.id)) {
+        // A forced recovery is a single validation, not the start of an unbounded
+        // resolution pass. Chaining continuations would keep `force` on every
+        // slice, and a forced failure is never deferred, so a large board could
+        // dead-letter one message per failed slice. The pending pass is durable
+        // in the source checkpoint, and it drains on the scheduled dispatcher
+        // once the operator resumes the source after this validation. Ordinary
+        // polls still continue from their own pending order.
+        if (result.poll?.continuationSources.includes(source.id) && message.force === true) {
+          console.log(JSON.stringify({ event: 'github_recovery_continuation_suppressed', sourceId: source.id,
+            pendingResolution: result.poll.pendingResolution[source.id] ?? 0 }));
+        } else if (result.poll?.continuationSources.includes(source.id)) {
           try {
-            await sendQueueMessageWithin(env.GITHUB_QUEUE, {
-              sourceId: source.id,
-              ...(message.force === true ? { force: true } : {}),
-            });
+            await sendQueueMessageWithin(env.GITHUB_QUEUE, { sourceId: source.id });
+            // The continuation is now this source's in-flight scheduled work.
+            // Refresh its lease after the send so the ten-minute dispatcher
+            // cannot enqueue a second copy while the bounded pass is still
+            // draining. The next continuation refreshes it again; the final
+            // slice writes health after the last marker and releases the source
+            // for its next ordinary scheduled poll.
+            try {
+              await sourceStore.putSourceDispatches([{
+                sourceId: source.id,
+                provider: 'github',
+                dispatchedAt: new Date().toISOString(),
+              }]);
+            } catch (error) {
+              // The continuation already exists, so retrying this completed
+              // delivery would create the duplicate we are preventing. Leave
+              // the durable checkpoint and queued continuation to recover, and
+              // keep the lease-write failure visible.
+              console.error(JSON.stringify({ event: 'github_continuation_dispatch_marker_failed', sourceId: source.id,
+                pendingResolution: result.poll.pendingResolution[source.id] ?? 0, error: safeDiagnostic(error) }));
+            }
           } catch (error) {
             // The poll committed its checkpoint before requesting continuation.
             // The scheduled dispatcher will pick up the pending source; retrying

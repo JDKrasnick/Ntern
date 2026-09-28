@@ -9,6 +9,22 @@ export type { EducationLevel };
 export type ApplicationStatus =
   | 'saved' | 'applied' | 'assessment' | 'interview' | 'offer' | 'rejected' | 'withdrawn';
 
+/** Compact role presentation retained with an application after catalog expiry. */
+export interface ApplicationJobSnapshot {
+  jobId: string;
+  company: string;
+  title: string;
+  location: string;
+  season: string;
+  postingIdentityStatus?: 'confirmed' | 'unconfirmed';
+  sourceReferences: Array<{
+    sourceId: string;
+    sourceUrl: string;
+    provenance?: OccurrenceProvenance;
+    state?: 'open' | 'closed';
+  }>;
+}
+
 export interface ApplicationRecord {
   applicationId: string;
   jobId: string;
@@ -24,6 +40,8 @@ export interface ApplicationRecord {
   notes?: string;
   /** `partner` is only set after an employer has granted direct-submit access. */
   applyMode?: 'official-form' | 'partner';
+  /** Presentation-only fallback; never contains an application URL. */
+  jobSnapshot?: ApplicationJobSnapshot;
 }
 
 export type AlertDelivery = 'immediate' | 'daily-digest';
@@ -514,6 +532,19 @@ export interface CatalogAdmission {
   /** Last successful verification of this exact role's official destination. Public during temporary unreadability. */
   lastVerifiedAt?: string;
   graceDeadline?: string;
+}
+
+/** Compact occurrence fields needed to evaluate trusted-community source health
+ * without hydrating the retained occurrence body. */
+export interface TrustedCommunityOccurrenceHealth {
+  externalId: string;
+  admissionConfigurationVersion?: string;
+  sourceMaterialHash?: string;
+  admission?: {
+    reasonCodes: CatalogAdmissionReason[];
+    destination: Pick<DestinationEvidence, 'classification' | 'browserVisible'>;
+  };
+  trustedCommunityAlertQualification?: Pick<TrustedCommunityAlertQualification, 'status'>;
 }
 
 export interface AdmissionIncident {

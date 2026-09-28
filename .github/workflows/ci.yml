@@ -5,6 +5,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
+      ingestion: ${{ steps.filter.outputs.ingestion }}
       source_pipeline: ${{ steps.filter.outputs.source_pipeline }}
       web: ${{ steps.filter.outputs.web }}
     steps:
@@ -13,6 +14,26 @@ jobs:
         id: filter
         with:
           filters: |
+            ingestion:
+              - '.github/workflows/ci.yml'
+              - 'cloudflare/d1-store.ts'
+              - 'cloudflare/ingestion-worker.ts'
+              - 'cloudflare/migrations/**'
+              - 'package.json'
+              - 'src/ingestion/**'
+              - 'src/*-dispatch.ts'
+              - 'src/*-worker.ts'
+              - 'src/destination-verification.ts'
+              - 'src/poll.ts'
+              - 'src/store.ts'
+              - 'src/types.ts'
+              - 'src/sources/**'
+              - 'test/**/*ingestion*'
+              - 'test/e2e/api-ingestion-split.e2e.mjs'
+              - 'test/poll.test.ts'
+              - 'test/source-occurrence-pagination.test.ts'
+              - 'wrangler.ingestion.jsonc'
+              - 'wrangler.dev.ingestion.jsonc'
             source_pipeline:
               - 'src/sources/**'
               - 'src/core/markdown.ts'
@@ -41,7 +62,9 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm test
+      # GitHub's two-core hosted runner can starve Vitest's four local forks long
+      # enough for its worker RPC to time out after every test has passed.
+      - run: npm test -- --maxWorkers=2
 
   ingestion-traffic-contracts:
     name: Ingestion traffic contracts
@@ -53,6 +76,19 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npx vitest run test/d1-traffic-controller.test.ts test/d1-traffic-observation.test.ts test/cloudflare-worker.test.ts
+
+  ingestion-smoke:
+    name: Ingestion smoke
+    needs: changes
+    if: needs.changes.outputs.ingestion == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run test:ingestion:ci
 
   ingestion-resource-budget:
     name: Ingestion resource budget

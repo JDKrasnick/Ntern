@@ -211,6 +211,19 @@ export function roleMetadataArtifactHash(artifact: RoleMetadataArtifact): string
 }
 
 /**
+ * Observation clocks move on every poll: the fetch time (`observedAt`), the
+ * admission evaluation (`evaluatedAt`/`evidenceObservedAt`) and the destination
+ * inspection/freshness schedule (`inspectedAt`/`freshUntil`/`nextCheckAt`). They
+ * are not durable content, so two observations of an unchanged artifact — or of
+ * one artifact at different times — must compare equal. Provider and employer
+ * timestamps (`postedAt`, `providerTimestamp`, `employerPublishedAt`,
+ * `employerUpdatedAt`, `validThrough`, …) are facts and stay in the comparison.
+ */
+const OBSERVATION_TIMESTAMP_KEYS = new Set([
+  'observedAt', 'evaluatedAt', 'evidenceObservedAt', 'inspectedAt', 'freshUntil', 'nextCheckAt',
+]);
+
+/**
  * JSON with observation timestamps removed at every depth, including nested
  * provenance. Two observations of one unchanged artifact — or of one artifact
  * at different times — are equal under this projection, which is what lets an
@@ -218,14 +231,23 @@ export function roleMetadataArtifactHash(artifact: RoleMetadataArtifact): string
  */
 export function withoutObservationTimestamps(value: unknown): unknown {
   const strip = (node: unknown): unknown => Array.isArray(node) ? node.map(strip)
-    : record(node) ? Object.fromEntries(Object.entries(node).filter(([key]) => key !== 'observedAt')
+    : record(node) ? Object.fromEntries(Object.entries(node).filter(([key]) => !OBSERVATION_TIMESTAMP_KEYS.has(key))
       .map(([key, child]) => [key, strip(child)])) : node;
   return strip(value);
 }
 
+/**
+ * Stable, observation-clock-free content of any value. Used to decide whether a
+ * re-observation changed anything that is not just the passage of time, so a
+ * durable row is not rewritten (and billed) for a clock that moved.
+ */
+export function observationClockFreeContent(value: unknown): string {
+  return stable(withoutObservationTimestamps(value));
+}
+
 /** Semantic evidence content: the evidence itself without any observation time. */
 export function roleMetadataEvidenceContent(value: RoleMetadataEvidence): string {
-  return stable(withoutObservationTimestamps(value));
+  return observationClockFreeContent(value);
 }
 
 /** Re-observing identical evidence keeps a review; any content/version change expires it. */

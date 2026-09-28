@@ -1493,27 +1493,36 @@ export class IngestionRunner {
         let revocationOccurrences: SourceOccurrenceState[] | undefined;
         if (!this.trustedCommunityCatalogEnabled && sourceAdmissionPolicy(connector.id).trust === 'trusted-community') {
           failureCategory = 'persistence';
-          // The sweep and the reconciliation below read the same rows, so one
-          // read serves both: each rewritten occurrence replaces its entry in
-          // this array, keeping it identical to a second read of the source.
-          const occurrences = await this.store.getSourceOccurrences(connector.id);
-          revocationOccurrences = occurrences;
-          const revocationIndexes: number[] = [];
-          occurrences.forEach((item, index) => {
-            if (item.occurrence.admission?.evidenceCodes?.includes('trusted-community-source')) revocationIndexes.push(index);
-          });
-          if (revocationIndexes.length) await this.store.putCheckpoint({
+          // The disabled gate used to hydrate every retained occurrence merely
+          // to discover that no old admission remained. Large GitHub sources
+          // retain years of closed roles, so query only the bounded rows that
+          // still need revocation. Unbounded callers retain the legacy full read
+          // and can reuse it during reconciliation below.
+          const revocationLimit = remainingMigrationLimit ?? options.maxListingsPerSourceRun;
+          const boundedRevocation = revocationLimit !== undefined;
+          const occurrences = boundedRevocation
+            ? await this.store.getSourceOccurrencesRequiringTrustedCommunityRevocation(
+              connector.id, revocationLimit + 1)
+            : await this.store.getSourceOccurrences(connector.id);
+          if (!boundedRevocation) revocationOccurrences = occurrences;
+          const revocations = occurrences.filter((item) =>
+            item.occurrence.admission?.evidenceCodes?.includes('trusted-community-source'));
+          if (revocations.length) await this.store.putCheckpoint({
             sourceId: connector.id, successfulFetches: 0, ...previous,
             pendingAdmissionConfigurationVersion: admissionConfigurationVersion ?? 'standard-v1',
           });
-          const selectedIndexes = remainingMigrationLimit === undefined
-            ? revocationIndexes : revocationIndexes.slice(0, remainingMigrationLimit);
-          for (const index of selectedIndexes) {
-            occurrences[index] = await this.revokeTrustedCommunityAdmission(
-              occurrences[index]!, admissionConfigurationVersion, this.now().toISOString());
+          const selectedRevocations = revocationLimit === undefined
+            ? revocations : revocations.slice(0, revocationLimit);
+          for (const occurrence of selectedRevocations) {
+            const revoked = await this.revokeTrustedCommunityAdmission(
+              occurrence, admissionConfigurationVersion, this.now().toISOString());
+            if (revocationOccurrences) {
+              const index = revocationOccurrences.findIndex((item) => item.externalId === revoked.externalId);
+              if (index >= 0) revocationOccurrences[index] = revoked;
+            }
           }
-          if (remainingMigrationLimit !== undefined) remainingMigrationLimit -= selectedIndexes.length;
-          if (selectedIndexes.length < revocationIndexes.length) {
+          if (remainingMigrationLimit !== undefined) remainingMigrationLimit -= selectedRevocations.length;
+          if (selectedRevocations.length < revocations.length) {
             report.continuationSources.push(connector.id);
             continue;
           }
@@ -1553,7 +1562,12 @@ export class IngestionRunner {
         if (baseline) report.baselineSources.push(connector.id);
         report.processedListings += batch.processed.counts.eligible;
         const now = this.now().toISOString();
-        const priorOccurrences = revocationOccurrences ?? await this.store.getSourceOccurrences(connector.id);
+        const boundedGithubHydration = providerFor(connector.id) === 'github'
+          && options.maxListingsPerSourceRun !== undefined
+          && !admissionConfigurationChanged
+          && !metadataVersionChanged;
+        let priorOccurrences = revocationOccurrences
+          ?? (boundedGithubHydration ? [] : await this.store.getSourceOccurrences(connector.id));
         // An unchanged snapshot repeats postings the checkpoint already trusts, so
         // only omission progress is reconciled; re-resolving every row would cost a
         // full catalog rewrite on every poll for byte-identical source content.
@@ -1565,7 +1579,7 @@ export class IngestionRunner {
         const migrationLimit = (admissionConfigurationChanged || boundedMetadataRefresh) && githubAdmissionConfigurationVersion
           ? remainingMigrationLimit
           : undefined;
-        const priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
+        let priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
         const requiredMigrationCandidates = migrationLimit === undefined ? [] : batch.processed.listings.filter((sourceListing) => {
           const prior = priorByExternalId.get(externalId(sourceListing));
           // The per-occurrence stamp is the durable migration cursor. Stored
@@ -1672,6 +1686,13 @@ export class IngestionRunner {
         // forever.
         const pendingOrder = new Map<string, number>();
         for (const id of pendingResolutionRows) pendingOrder.set(id, pendingOrder.size);
+        const trustedOccurrenceHealth = boundedGithubHydration && this.trustedCommunityCatalogEnabled
+          ? await this.store.listSourceOccurrenceTrustedCommunityHealth(connector.id)
+          : [];
+        const trustedMaterialHashes = pendingResolutionRows.size > 0
+          ? new Map(trustedOccurrenceHealth.flatMap((row) => row.sourceMaterialHash
+            ? [[row.externalId, row.sourceMaterialHash] as const] : []))
+          : new Map<string, string>();
         const resolutionScope = pendingResolutionRows.size
           ? batch.processed.listings.filter((listing) => {
             const id = externalId(listing);
@@ -1681,11 +1702,21 @@ export class IngestionRunner {
             // still carries a stale qualification look changed on every poll,
             // which re-adds it to the pass forever.
             if (!this.trustedCommunityCatalogEnabled) return false;
-            const priorMaterialHash = priorByExternalId.get(id)?.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash;
+            const priorMaterialHash = priorByExternalId.get(id)?.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash
+              ?? trustedMaterialHashes.get(id);
             return priorMaterialHash !== undefined && priorMaterialHash !== sourceMaterialHash(listing);
-          }).sort((left, right) => (pendingOrder.get(externalId(left)) ?? Number.MAX_SAFE_INTEGER)
-            - (pendingOrder.get(externalId(right)) ?? Number.MAX_SAFE_INTEGER))
-          : migrationLimit === undefined ? listingsToResolve : [];
+          }).sort((left, right) => {
+            const leftNew = !previouslyActiveIds.has(externalId(left));
+            const rightNew = !previouslyActiveIds.has(externalId(right));
+            if (leftNew !== rightNew) return leftNew ? -1 : 1;
+            return (pendingOrder.get(externalId(left)) ?? Number.MAX_SAFE_INTEGER)
+              - (pendingOrder.get(externalId(right)) ?? Number.MAX_SAFE_INTEGER);
+          })
+          : migrationLimit === undefined ? [...listingsToResolve].sort((left, right) => {
+            const leftNew = !previouslyActiveIds.has(externalId(left));
+            const rightNew = !previouslyActiveIds.has(externalId(right));
+            return leftNew === rightNew ? 0 : leftNew ? -1 : 1;
+          }) : [];
         const obligatedIds = new Set(obligatedListings.map(externalId));
         const sliceCapacity = options.maxListingsPerSourceRun === undefined
           ? undefined
@@ -1699,6 +1730,20 @@ export class IngestionRunner {
         const remainingRows = resolutionFullBody
           ? resolutionScope.slice(sliceCapacity ?? resolutionScope.length).map(externalId)
           : [];
+        if (boundedGithubHydration) {
+          // A bounded GitHub delivery needs full occurrence JSON only for the
+          // selected slice. Omission candidates join that set only on the final
+          // slice, after the complete board has been observed. Historical closed
+          // rows remain stored in D1 and are never mistaken for missing coverage.
+          const selectedIds = resolvedListings.map(externalId);
+          const omissionIds = remainingRows.length === 0
+            ? (await this.store.listSourceOccurrenceIdsPendingReconciliation(connector.id))
+              .filter((id) => !batch.activeExternalIds.has(id))
+            : [];
+          priorOccurrences = await this.store.getSourceOccurrencesByExternalIds(
+            connector.id, [...new Set([...selectedIds, ...omissionIds])]);
+          priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
+        }
         const resolution = await this.resolveListings(
           resolvedListings,
           report,
@@ -1808,6 +1853,7 @@ export class IngestionRunner {
             eligibleRows: batch.processed.counts.eligible,
             listings: resolution.accepted,
             priorOccurrences,
+            ...(boundedGithubHydration ? { priorOccurrenceHealth: trustedOccurrenceHealth } : {}),
             eligibleExternalIds: new Set(batch.processed.listings
               .filter((listing) => listing.technical !== false)
               .map(externalId)),
@@ -1895,8 +1941,10 @@ export class IngestionRunner {
         // closure work to the delivery that completes them, so no non-sliced
         // row is closed while its own slice is still pending. Non-sliced active
         // rows are still confirmed against the whole-board id set above.
-        const partialMigration = nextPendingRows.length > 0 || (migrationLimit !== undefined && admissionMigrationPending);
-        const closureScope = boundedMetadataRefresh ? selectedClosures : partialMigration ? [] : missingOccurrences;
+        const lifecycleReconciliationDeferred = remainingRows.length > 0
+          || (migrationLimit !== undefined && admissionMigrationPending);
+        const closureScope = boundedMetadataRefresh ? selectedClosures
+          : lifecycleReconciliationDeferred ? [] : missingOccurrences;
         const closureCandidates = closureScope.filter((prior) => !resolution.resolved.has(prior.externalId) && prior.consecutiveOmissions >= 1);
         await forEachBounded(closureCandidates, async (prior) => {
           resolution.resolved.set(prior.externalId, await this.store.getJob(prior.jobId));
@@ -1906,7 +1954,12 @@ export class IngestionRunner {
             const prior = priorByExternalId.get(externalId(listing));
             return prior ? [prior] : [];
           }), ...selectedClosures]
-          : priorOccurrences;
+          : lifecycleReconciliationDeferred
+            ? resolvedListings.flatMap((listing) => {
+              const prior = priorByExternalId.get(externalId(listing));
+              return prior ? [prior] : [];
+            })
+            : priorOccurrences;
         const plan = this.reconciler.reconcile({
           sourceId: connector.id,
           snapshotHash: batch.snapshotHash,
@@ -1919,6 +1972,11 @@ export class IngestionRunner {
           filter: this.filter,
           validatedAt: resolution.validatedAt,
           metadataValidated: resolution.metadataValidated,
+          // A bounded metadata refresh must commit each sliced row so the
+          // checkpoint cursor can certify it and retry a failed evidence write.
+          forcePersistExternalIds: boundedMetadataRefresh
+            ? new Set(selectedMetadataMigrations.map((listing) => externalId(listing)))
+            : undefined,
           alertEligible: resolution.alertEligible,
           publishUnconfirmedIdentities: this.publishUnconfirmedIdentities,
           trustedCommunityAlertsEnabled: trustedPolicy?.alertMode === 'exact-identity-or-two-complete-snapshots',

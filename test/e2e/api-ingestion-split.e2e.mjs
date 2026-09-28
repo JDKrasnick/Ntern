@@ -1269,6 +1269,58 @@ async function readOccurrenceExternalIds(database, sourceId) {
   return new Set(rows.results.map((row) => JSON.parse(row.value).externalId));
 }
 
+async function readOccurrence(database, sourceId, externalId) {
+  const row = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = ? AND kind = 'source-occurrence'")
+    .bind(`SOURCE#${sourceId}`, `OCCURRENCE#${externalId}`).first();
+  return row ? JSON.parse(row.value) : undefined;
+}
+
+test('runs regular and hard GitHub days through the compiled queue consumer and converges', async () => {
+  const { runtime, database, builtWorker } = await createHandoffRuntime('intern-notifs-e2e-day-cycle');
+  const documents = handoffDocumentsMap();
+  const failing = new Set();
+  const harness = handoffHarness(database);
+
+  try {
+    // Regular day: drain a board larger than one queue delivery.
+    await withHandoffFetch(documents, failing, async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('regular-1', handoffScheduledAt));
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('regular-2', handoffScheduledAt));
+    });
+    assert.equal((await readCheckpoint(database, handoffSourceId)).pendingResolutionRows, undefined);
+    assert.equal((await readOccurrenceExternalIds(database, handoffSourceId)).size, 30);
+
+    // Hard day: one new row times out while an old row disappears. The complete
+    // snapshot still advances lifecycle reconciliation, then the retry drains.
+    const addedUrl = handoffBoardUrl(20);
+    const removedExternalId = handoffExternalId(109);
+    documents.set(handoffDocumentUrl('README.md'), handoffMarkdown({ rows: 21, offset: 0, format: 'gfm' }));
+    documents.set(handoffDocumentUrl('OFFSEASON_README.md'), handoffMarkdown({ rows: 9, offset: 100, format: 'html' }));
+    failing.add(addedUrl);
+    await withHandoffFetch(documents, failing, async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('hard-1', handoffScheduledAt));
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('hard-2', handoffScheduledAt));
+    });
+
+    assert.deepEqual((await readCheckpoint(database, handoffSourceId)).pendingResolutionRows, [handoffExternalId(20)]);
+    const removed = await readOccurrence(database, handoffSourceId, removedExternalId);
+    assert.equal(removed.present, false);
+    assert.equal(removed.consecutiveOmissions, 1);
+
+    failing.clear();
+    await withHandoffFetch(documents, failing, async () => {
+      await deliverGithubMessage(builtWorker, harness.environment, harness.message('recovery-1', handoffScheduledAt));
+    });
+    assert.equal((await readCheckpoint(database, handoffSourceId)).pendingResolutionRows, undefined);
+    assert.equal((await readOccurrence(database, handoffSourceId, handoffExternalId(20))).present, true);
+    assert.deepEqual(harness.retries, []);
+    assert.deepEqual(harness.deadLetter, []);
+    assert.deepEqual(harness.acks, ['regular-1', 'regular-2', 'hard-1', 'hard-2', 'recovery-1']);
+  } finally {
+    await runtime.dispose();
+  }
+});
+
 test('retains timed-out link probes in the durable checkpoint and resolves them without dead-lettering', async () => {
   const { runtime, database, builtWorker } = await createHandoffRuntime('intern-notifs-e2e-handoff');
   const documents = handoffDocumentsMap();
