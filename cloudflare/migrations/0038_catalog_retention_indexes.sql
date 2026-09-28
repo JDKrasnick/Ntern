@@ -19,11 +19,6 @@ CREATE INDEX IF NOT EXISTS catalog_items_source_occurrence_closed_changed
 ON catalog_items(coalesce(json_extract(value, '$.changedAt'), ''))
 WHERE kind = 'source-occurrence' AND json_extract(value, '$.occurrence.state') = 'closed';
 
--- Snapshot lookup for applications whose catalog parent is about to expire.
-CREATE INDEX IF NOT EXISTS user_items_application_job
-ON user_items(json_extract(value, '$.jobId'))
-WHERE kind = 'application';
-
 CREATE INDEX IF NOT EXISTS role_metadata_evidence_retention
 ON role_metadata_evidence(is_current, observed_at);
 

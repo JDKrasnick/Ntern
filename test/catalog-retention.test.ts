@@ -106,6 +106,18 @@ const apiEvent = (userId: string, method: string, rawPath: string) => ({
 });
 
 describe('catalog retention', () => {
+  it('ships the saved-application lookup as a forward migration', () => {
+    const appliedRetentionMigration = readFileSync(
+      new URL('../cloudflare/migrations/0038_catalog_retention_indexes.sql', import.meta.url), 'utf8',
+    );
+    const savedApplicationMigration = readFileSync(
+      new URL('../cloudflare/migrations/0043_saved_application_job_index.sql', import.meta.url), 'utf8',
+    );
+
+    expect(appliedRetentionMigration).not.toContain('user_items_application_job');
+    expect(savedApplicationMigration).toContain('CREATE INDEX IF NOT EXISTS user_items_application_job');
+  });
+
   it('reports eligible history without deleting on a dry run', async () => {
     const { database, db } = subject();
     insertCatalog(database, { pk: 'OUTBOX#old', sk: 'EVENT', kind: 'notification-event',
