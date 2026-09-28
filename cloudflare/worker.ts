@@ -2133,7 +2133,41 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   // scarce queue retries. Destination and shadow queues otherwise DLQ valid
   // work after only two failed deliveries.
   if (resilientQueue) env = { ...env, DB: resilientD1(env.DB) };
-  if (await isShutdown(env)) {
+  let shutdown: boolean;
+  try {
+    shutdown = await isShutdown(env);
+  } catch (error) {
+    // Catalog messages reach this guard before provider-specific setup and
+    // per-record handling. If its D1 read still fails after resilient retries,
+    // apply the same final-delivery contract here instead of throwing the whole
+    // batch without a ledger row. Ordinary source work is re-owned by the
+    // scheduled dispatcher; malformed work and forced GitHub recovery are not.
+    if (!catalogProvider) throw error;
+    for (const queued of batch.messages) {
+      const parsed = (() => {
+        try { return JSON.parse(typeof queued.body === 'string' ? queued.body : JSON.stringify(queued.body)) as { sourceId?: string; sourceKind?: string; force?: boolean }; }
+        catch { return undefined; }
+      })();
+      await recordQueueFailureBestEffort({
+        db: env.DB, queueName: batch.queue, messageId: queued.id, attempts: queued.attempts,
+        timestamp: queued.timestamp, sourceId: parsed?.sourceId, sourceKind: parsed?.sourceKind,
+        body: queued.body, error,
+      });
+      const deferred = catalogDeliveryIsDeferred(error, parsed?.sourceId, queued.attempts, {
+        dispatcherCanReissue: !(catalogProvider === 'github' && parsed?.force === true),
+      });
+      console.error(JSON.stringify({ command: 'catalog-poll-boundary', phase: 'billing-shutdown',
+        provider: catalogProvider, sourceId: parsed?.sourceId, messageId: queued.id,
+        attempts: queued.attempts, deferred, error: safeDiagnostic(error) }));
+      if (deferred) queued.ack();
+      else {
+        const delay = d1QueueRetryDelay(error, queued.attempts);
+        queued.retry(delay ? { delaySeconds: delay } : undefined);
+      }
+    }
+    return;
+  }
+  if (shutdown) {
     for (const message of batch.messages) message.ack();
     return;
   }

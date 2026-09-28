@@ -319,3 +319,23 @@ was really a variable mismatch. `scripts/dlq-operations.ts` reads
 `OPERATIONS_API_URL` and `OPERATIONS_API_KEY`, but `.env` defines `OPERATIONS_API`
 (a stale queue id) and `OPERATIONS_SHARED_SECRET`; point the former pair at the
 API URL and the shared secret before relying on `npm run dlq`.
+
+## 11. Reconciliation record: 2026-09-28 (post-retention deployment)
+
+Seven minutes after the retention deployment, the catalog-admission alert
+reported GitHub DLQ growth of two. A live inspection found three messages: two
+for `simplify-summer-2026` and one for `speedyapply-2027-ai`, all
+`missing-ledger`. Both sources had already been re-issued by the scheduler and
+their later runs succeeded. The destination queue remained below its alert-age
+threshold, the catalog was within its freshness threshold, D1 overload failures
+were zero in the alert window, and the DLQ remained stable at three during the
+observation period. No replay or purge was performed.
+
+Worker invocation telemetry identified four `scriptThrewException` ingestion
+invocations at 04:51:54-55Z, the exact second the messages dead-lettered. The
+billing-shutdown query was the only catalog D1 operation before the
+provider-specific failure boundary, so an exhausted read could throw the batch
+without writing `queue_failure_events`. That boundary now records the failure
+best-effort and applies the standard final-delivery rule: acknowledge ordinary
+source-scoped work that the scheduler re-owns, but retain platform retries for
+malformed work and forced GitHub recovery.

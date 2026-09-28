@@ -722,6 +722,70 @@ describe('Catalog queue setup failures', () => {
     expect(message.retry).not.toHaveBeenCalled();
   });
 
+  it('defers ordinary catalog work when the shutdown guard fails on the final delivery', async () => {
+    const prepare = vi.fn(() => ({
+      async first() { throw new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'); },
+      bind: () => ({
+        async run() { throw new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'); },
+      }),
+    }));
+    const message = { id: 'first', body: { sourceId: defaultSources[0]!.id },
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS, ack: vi.fn(), retry: vi.fn() };
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((value) => errors.push(String(value)));
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [message] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(message.retry).not.toHaveBeenCalled();
+    expect(errors.some((entry) => entry.includes('queue-failure-ledger'))).toBe(true);
+    expect(errors.some((entry) => entry.includes('catalog-poll-boundary')
+      && entry.includes('"deferred":true'))).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it('retries ordinary catalog work when the shutdown guard fails before the final delivery', async () => {
+    const prepare = vi.fn(() => ({
+      async first() { throw new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'); },
+      bind: () => ({
+        async run() { throw new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'); },
+      }),
+    }));
+    const message = { id: 'first', body: { sourceId: 'greenhouse-acme' },
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS - 1, ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-greenhouse', messages: [message] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 300 });
+    expect(message.ack).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps forced GitHub recovery on the retry path when the shutdown guard fails', async () => {
+    const prepare = vi.fn(() => ({
+      async first() { throw new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'); },
+      bind: () => ({
+        async run() { throw new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'); },
+      }),
+    }));
+    const message = { id: 'first', body: { sourceId: defaultSources[0]!.id, force: true },
+      attempts: CATALOG_DELIVERY_MAX_ATTEMPTS, ack: vi.fn(), retry: vi.fn() };
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await cloudflareWorker.queue({ queue: 'intern-notifs-github', messages: [message] }, {
+      DB: { prepare, async batch() { return []; } },
+    } as unknown as Environment);
+
+    expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 300 });
+    expect(message.ack).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
   it('ledgers and retries every Greenhouse message when the reviewed-source registry is unavailable', async () => {
     const failureRows: unknown[][] = [];
     const prepare = vi.fn((query: string) => {
