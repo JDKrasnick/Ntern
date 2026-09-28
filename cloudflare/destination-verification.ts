@@ -651,7 +651,11 @@ export async function processDestinationVerificationBatch(
           apiVerified = ['posting-detail', 'application-form'].includes(probe.destination.classification);
         }
         const renderKey = JSON.stringify([message.providerIdentity.postingId ?? '', message.candidateUrl, reference.title]);
-        const cachedRender = renderedCandidates.get(renderKey);
+        // An exact provider artifact makes this delivery independent of browser
+        // state. Another occurrence for the same candidate may have needed the
+        // browser for attribution and cached a timeout or contradictory page
+        // evidence earlier in the batch; neither can override this API result.
+        const cachedRender = apiVerified ? undefined : renderedCandidates.get(renderKey);
         let reachability: Reachability = cachedRender?.reachability ?? 'live';
         let evidence: ApplicationPageEvidence | undefined = cachedRender?.evidence;
         let collisionJobIds: string[] = [];
