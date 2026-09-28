@@ -8,7 +8,7 @@ import { isPastSeason } from '../core/early-career.js';
 import { deriveCanonicalAdmission } from '../catalog-admission.js';
 import { providerPostingKey, providerPostingReference } from '../identity/posting.js';
 import { stableSourceOccurrenceJobId } from '../identity/registry.js';
-import { projectRoleMetadata } from '../role-metadata.js';
+import { projectRoleMetadata, withoutObservationTimestamps } from '../role-metadata.js';
 import { mergeSourceOccurrence } from '../identity/source-occurrence.js';
 import type {
   Internship,
@@ -33,6 +33,13 @@ export interface ReconciliationInput {
   alertEligible?: Set<string>;
   /** Rollout gate: classified rows remain durable while publication is shadowed. */
   publishUnconfirmedIdentities?: boolean;
+  /**
+   * Rows in a bounded metadata-refresh slice must persist even when nothing but
+   * observation clocks moved: the checkpoint cursor only certifies a row once
+   * its occurrence commit succeeds, and a failed metadata-evidence write is
+   * retried through that commit.
+   */
+  forcePersistExternalIds?: ReadonlySet<string>;
   /** Enabled only by the active trusted source's reviewed alert policy. */
   trustedCommunityAlertsEnabled?: boolean;
   /** Reviewed withdrawn postings as exact provider keys. A retired posting must
@@ -113,13 +120,19 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
-/** A confirmed, unchanged occurrence needs no write; presence lives in the checkpoint. */
+/**
+ * A confirmed, unchanged occurrence needs no write; presence lives in the
+ * checkpoint. Observation clocks (fetch time, admission evaluation, destination
+ * inspection) are refreshed on every poll, so they are compared without their
+ * timestamps: otherwise every still-present row looks changed on every poll and
+ * D1 bills a rewrite for the whole board, at $1 per million rows.
+ */
 function occurrenceChanged(prior: SourceOccurrenceState | undefined, next: SourceOccurrenceState): boolean {
   return !prior
     || prior.present !== next.present
     || prior.consecutiveOmissions !== next.consecutiveOmissions
     || prior.jobId !== next.jobId
-    || stableJson(prior.occurrence) !== stableJson(next.occurrence);
+    || stableJson(withoutObservationTimestamps(prior.occurrence)) !== stableJson(withoutObservationTimestamps(next.occurrence));
 }
 
 function genericLocation(value: string | undefined) {
@@ -341,6 +354,8 @@ export class CatalogReconciler {
     const filteredJobs: Internship[] = [];
     const includedIds = new Set<string>();
     const priorById = new Map(input.priorOccurrences.map((prior) => [prior.externalId, prior]));
+    const shouldPersist = (prior: SourceOccurrenceState | undefined, next: SourceOccurrenceState): boolean =>
+      input.forcePersistExternalIds?.has(next.externalId) === true || occurrenceChanged(prior, next);
     // One snapshot can list one exact posting twice, across documents or through
     // reviewed provider URL variants. Only exact identity or URL evidence may
     // converge them; title/location fingerprints can collide across requisitions.
@@ -427,14 +442,14 @@ export class CatalogReconciler {
           ? { firstObservedAtPrecision: prior.firstObservedAtPrecision }
           : {}),
       };
-      if (occurrenceChanged(priorById.get(externalId), next)) occurrences.push(next);
+      if (shouldPersist(priorById.get(externalId), next)) occurrences.push(next);
     }
 
     for (const prior of input.priorOccurrences) {
       if (includedIds.has(prior.externalId)) continue;
       if (input.activeExternalIds.has(prior.externalId)) {
         const confirmed = { ...prior, present: true, consecutiveOmissions: 0, changedSnapshotHash: input.snapshotHash, changedAt: input.now };
-        if (occurrenceChanged(prior, confirmed)) occurrences.push(confirmed);
+        if (shouldPersist(prior, confirmed)) occurrences.push(confirmed);
         continue;
       }
       const consecutiveOmissions = prior.consecutiveOmissions + 1;

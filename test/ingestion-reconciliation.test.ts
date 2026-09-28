@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IngestionRunner } from '../src/poll.js';
+import { CatalogReconciler } from '../src/ingestion/catalog-reconciler.js';
 import { GitHubMarkdownAdapter } from '../src/sources/github.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import { buildInternshipIdentity } from '../src/identity/enrichment.js';
@@ -138,6 +139,38 @@ describe('snapshot reconciliation', () => {
 
     expect(commits).not.toHaveBeenCalled();
     expect([...store.jobs.values()][0]?.compensation).toMatchObject({ minHourlyUSD: 40, maxHourlyUSD: 40 });
+  });
+
+  it('does not persist an occurrence when only observation clocks move', () => {
+    const reconciler = new CatalogReconciler();
+    const evidence = (observedAt: string) => extractPostingMetadataEvidence({
+      artifact: { title: 'Software Engineering Intern', compensationText: 'USD $40/hour' },
+      sourceClass: 'official-ats', sourceId: 'source-a',
+      sourceUrl: 'https://source.example.test/source-a', observedAt, exactPosting: true,
+    });
+    const admission = (evaluatedAt: string): CatalogAdmission => {
+      const base = officialAdmission('acme');
+      return { ...base, evaluatedAt, evidenceObservedAt: evaluatedAt,
+        destination: { ...base.destination!, inspectedAt: evaluatedAt } };
+    };
+    const input = (now: string, overrides: Partial<ProcessedListing> = {}) => ({
+      sourceId: 'source-a', snapshotHash: 'snapshot-1', activeExternalIds: new Set(['role-1']),
+      listings: [listing('source-a', { fetchedAt: now, metadataEvidence: evidence(now),
+        admission: admission(now), ...overrides })],
+      resolvedJobs: new Map(), now, baseline: false,
+    });
+    const first = reconciler.reconcile({ ...input('2026-07-29T12:00:00.000Z'), priorOccurrences: [] });
+    expect(first.occurrences).toHaveLength(1);
+
+    // Same board, later fetch: every observation clock moved, nothing else did.
+    const second = reconciler.reconcile({ ...input('2026-07-30T12:00:00.000Z'), priorOccurrences: first.occurrences });
+    expect(second.occurrences).toHaveLength(0);
+
+    // A real content change still persists.
+    const third = reconciler.reconcile({ ...input('2026-07-31T12:00:00.000Z',
+      { compensation: { raw: 'USD $45/hour', minHourlyUSD: 45, maxHourlyUSD: 45 } }),
+    priorOccurrences: first.occurrences });
+    expect(third.occurrences).toHaveLength(1);
   });
 
   it('reprojects changed source metadata without creating a second new-role event', async () => {

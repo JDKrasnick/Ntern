@@ -211,6 +211,17 @@ export function roleMetadataArtifactHash(artifact: RoleMetadataArtifact): string
 }
 
 /**
+ * Observation clocks move on every poll: the fetch time (`observedAt`), the
+ * admission evaluation (`evaluatedAt`/`evidenceObservedAt`) and the destination
+ * inspection (`inspectedAt`). They are not durable content, so two observations
+ * of an unchanged artifact — or of one artifact at different times — must
+ * compare equal. Provider and employer timestamps (`postedAt`,
+ * `employerPublishedAt`, `employerUpdatedAt`, `freshUntil`, …) are facts, not
+ * observation times, and stay in the comparison.
+ */
+const OBSERVATION_TIMESTAMP_KEYS = new Set(['observedAt', 'evaluatedAt', 'evidenceObservedAt', 'inspectedAt']);
+
+/**
  * JSON with observation timestamps removed at every depth, including nested
  * provenance. Two observations of one unchanged artifact — or of one artifact
  * at different times — are equal under this projection, which is what lets an
@@ -218,7 +229,7 @@ export function roleMetadataArtifactHash(artifact: RoleMetadataArtifact): string
  */
 export function withoutObservationTimestamps(value: unknown): unknown {
   const strip = (node: unknown): unknown => Array.isArray(node) ? node.map(strip)
-    : record(node) ? Object.fromEntries(Object.entries(node).filter(([key]) => key !== 'observedAt')
+    : record(node) ? Object.fromEntries(Object.entries(node).filter(([key]) => !OBSERVATION_TIMESTAMP_KEYS.has(key))
       .map(([key, child]) => [key, strip(child)])) : node;
   return strip(value);
 }
