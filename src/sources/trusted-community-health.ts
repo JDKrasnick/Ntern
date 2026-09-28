@@ -4,6 +4,7 @@ import type {
   ProcessedListing,
   SourceOccurrenceState,
   TrustedCommunityAlertMode,
+  TrustedCommunityOccurrenceHealth,
   TrustedCommunitySourceMetrics,
 } from '../types.js';
 
@@ -130,7 +131,9 @@ const TRUSTED_COMMUNITY_DIAGNOSTICS = new Set<CatalogAdmissionReason>([
   'posting-unattributed',
 ]);
 
-function catalogQualified(occurrence: ProcessedListing | SourceOccurrenceState['occurrence']): boolean {
+type TrustedCommunityMetricOccurrence = ProcessedListing | SourceOccurrenceState['occurrence'] | TrustedCommunityOccurrenceHealth;
+
+function catalogQualified(occurrence: TrustedCommunityMetricOccurrence): boolean {
   const admission = occurrence.admission;
   if (!admission) return false;
   const postingSpecific = admission.destination.classification === 'posting-detail'
@@ -143,13 +146,17 @@ export function trustedCommunityMetrics(input: {
   eligibleRows: number;
   listings: readonly ProcessedListing[];
   priorOccurrences: readonly SourceOccurrenceState[];
+  priorOccurrenceHealth?: readonly TrustedCommunityOccurrenceHealth[];
   eligibleExternalIds: ReadonlySet<string>;
   admissionConfigurationVersion?: string;
   rejectedAggregatorRows: number;
   survivingAggregatorRows: number;
   duplicateOccurrenceIds: number;
 }): TrustedCommunitySourceMetrics {
-  const prior = new Map(input.priorOccurrences.map((item) => [item.externalId, item.occurrence]));
+  const prior = new Map<string, TrustedCommunityMetricOccurrence>(
+    input.priorOccurrences.map((item) => [item.externalId, item.occurrence]),
+  );
+  for (const item of input.priorOccurrenceHealth ?? []) prior.set(item.externalId, item);
   const current = new Map(input.listings.map((item) => [item.externalId!, item]));
   const inspected = [...input.eligibleExternalIds].flatMap((externalId) => {
     const occurrence = current.get(externalId) ?? prior.get(externalId);

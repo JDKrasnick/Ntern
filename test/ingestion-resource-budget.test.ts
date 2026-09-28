@@ -4,13 +4,16 @@ import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
+import { SOURCE_METADATA_PROCESSING_REVISION } from '../src/ingestion/processor.js';
 import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY, IngestionRunner } from '../src/poll.js';
+import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import { GitHubMarkdownAdapter } from '../src/sources/github.js';
 import { SourceFetchError } from '../src/sources/source-error.js';
 import type { SourceOccurrenceState } from '../src/types.js';
 import {
   PRODUCTION_GITHUB_DOCUMENT,
   PRODUCTION_GITHUB_FEEDS,
+  PRODUCTION_GITHUB_OCCURRENCE_BYTES,
   PRODUCTION_GITHUB_OCCURRENCES,
   syntheticMarkdownTable,
   syntheticOccurrences,
@@ -129,11 +132,11 @@ function cpuMsSince(start: NodeJS.CpuUsage): number {
 async function seedLargestSource(store: D1InternshipStore) {
   const occurrences = syntheticOccurrences({
     rows: PRODUCTION_GITHUB_OCCURRENCES,
-    bytesPerRow: Math.ceil(24_900_000 / PRODUCTION_GITHUB_OCCURRENCES),
+    bytesPerRow: Math.ceil(PRODUCTION_GITHUB_OCCURRENCE_BYTES / PRODUCTION_GITHUB_OCCURRENCES),
     sourceId,
   });
   const occurrenceBytes = occurrences.reduce((total, row) => total + JSON.stringify(row).length, 0);
-  expect(occurrenceBytes).toBeGreaterThan(20_000_000);
+  expect(occurrenceBytes).toBeGreaterThan(PRODUCTION_GITHUB_OCCURRENCE_BYTES * 0.95);
   for (const occurrence of occurrences) {
     await store.putInternship({
       jobId: occurrence.jobId, company: 'Acme', title: 'Software Engineering Intern', location: 'Remote', season: 'summer-2027',
@@ -144,7 +147,9 @@ async function seedLargestSource(store: D1InternshipStore) {
     });
     await store.putSourceOccurrence(occurrence);
   }
-  await store.putCheckpoint({ sourceId, successfulFetches: 4, lastSuccessAt: '2026-09-09T00:00:00.000Z' });
+  await store.putCheckpoint({ sourceId, successfulFetches: 4, lastSuccessAt: '2026-09-09T00:00:00.000Z',
+    metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
+    metadataProcessingRevision: SOURCE_METADATA_PROCESSING_REVISION });
 }
 
 /** The measured source serves two documents (`README.md`, `README-Off-Season.md`). */
@@ -205,12 +210,24 @@ describe('ingestion resource budgets', () => {
   }, 120_000);
 
   it('resolves consecutive production-sized GitHub slices inside the per-message CPU, heap, and slice budgets', async () => {
-    const { store } = catalog();
+    const { database, store: seedStore } = catalog();
     const feed = PRODUCTION_GITHUB_FEEDS.simplify;
     const documents = productionDocuments(feed);
     const sourceBytes = Object.values(documents).reduce((total, document) => total + document.length, 0);
     expect(sourceBytes).toBeGreaterThan(feed.bytes * 0.9);
-    await seedLargestSource(store);
+    await seedLargestSource(seedStore);
+
+    const hydratedSlices: number[] = [];
+    class BoundedHydrationStore extends D1InternshipStore {
+      override async getSourceOccurrences(): Promise<SourceOccurrenceState[]> {
+        throw new Error('bounded GitHub delivery hydrated the complete retained history');
+      }
+      override async getSourceOccurrencesByExternalIds(source: string, externalIds: readonly string[]) {
+        hydratedSlices.push(externalIds.length);
+        return super.getSourceOccurrencesByExternalIds(source, externalIds);
+      }
+    }
+    const store = new BoundedHydrationStore(sqliteD1(database));
 
     const runner = new IngestionRunner([productionAdapter(sourceId, documents)], store, () => new Date('2026-09-16T00:00:00.000Z'), undefined, undefined, false);
     exposeGc?.();
@@ -235,6 +252,7 @@ describe('ingestion resource budgets', () => {
     }
 
     expect(deliveries.map(({ resolved }) => resolved)).toEqual([GITHUB_RESOLUTION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY]);
+    expect(hydratedSlices).toEqual([GITHUB_RESOLUTION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY]);
     for (const delivery of deliveries) {
       expect(delivery.cpuMs).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
       if (exposeGc) {

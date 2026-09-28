@@ -184,6 +184,9 @@ describe('snapshot reconciliation', () => {
     await new IngestionRunner([adapter], store).run();
     expect([...store.jobs.values()][0]).toMatchObject({ open: false });
     expect((await store.getSourceOccurrences('source-a'))[0]).toMatchObject({ present: false, consecutiveOmissions: 2 });
+
+    await new IngestionRunner([adapter], store).run();
+    expect((await store.getSourceOccurrences('source-a'))[0]).toMatchObject({ present: false, consecutiveOmissions: 2 });
   });
 
   it('keeps a catalog role open while another source occurrence remains open', async () => {

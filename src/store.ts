@@ -3,7 +3,7 @@ import { isPastSeason } from './core/early-career.js';
 import { employerCategory } from './core/employers.js';
 import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency } from './catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
-import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from './types.js';
+import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from './types.js';
 import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from './resume.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from './identity/posting.js';
 import type { ApplicationSession } from './application-automation.js';
@@ -82,6 +82,17 @@ export interface InternshipStore {
   getSourceOccurrences(sourceId: string): Promise<SourceOccurrenceState[]>;
   /** One occurrence by key, for readers that need a single row of a large source. */
   getSourceOccurrence(sourceId: string, externalId: string): Promise<SourceOccurrenceState | undefined>;
+  /** Selected occurrences by key. Large-source queue slices use this instead of
+   * hydrating the source's complete retained history. */
+  getSourceOccurrencesByExternalIds(sourceId: string, externalIds: readonly string[]): Promise<SourceOccurrenceState[]>;
+  /** Compact IDs whose presence/omission state can still change. Closed retained
+   * history is intentionally excluded. */
+  listSourceOccurrenceIdsPendingReconciliation(sourceId: string): Promise<string[]>;
+  /** Compact material hashes and admission fields used to detect changed rows
+   * and evaluate whole-source health without hydrating occurrence bodies. */
+  listSourceOccurrenceTrustedCommunityHealth(sourceId: string): Promise<TrustedCommunityOccurrenceHealth[]>;
+  /** Bounded rows that still carry the retired trusted-community admission. */
+  getSourceOccurrencesRequiringTrustedCommunityRevocation(sourceId: string, limit: number): Promise<SourceOccurrenceState[]>;
   putSourceOccurrence(occurrence: SourceOccurrenceState): Promise<void>;
   /** Reviewed withdrawn postings, as exact provider keys. A retired posting
    * stays closed even while a community list still publishes its dead URL. */
@@ -223,6 +234,55 @@ export class MemoryInternshipStore implements InternshipStore {
   async getSourceOccurrence(sourceId: string, externalId: string) {
     const value = this.occurrences.get(`${sourceId}#${externalId}`);
     return value ? structuredClone(value) : undefined;
+  }
+  async getSourceOccurrencesByExternalIds(sourceId: string, externalIds: readonly string[]) {
+    return externalIds.flatMap((externalId) => {
+      const value = this.occurrences.get(`${sourceId}#${externalId}`);
+      return value ? [structuredClone(value)] : [];
+    });
+  }
+  async listSourceOccurrenceIdsPendingReconciliation(sourceId: string) {
+    return [...this.occurrences.values()]
+      .filter((value) => value.sourceId === sourceId
+        && (value.present || value.consecutiveOmissions < 2 || value.occurrence.state !== 'closed'
+          || this.jobs.get(value.jobId)?.sourceReferences.some((reference) =>
+            reference.sourceId === sourceId && reference.externalId === value.externalId
+              && reference.state !== 'closed')))
+      .map((value) => value.externalId)
+      .sort();
+  }
+  async listSourceOccurrenceTrustedCommunityHealth(sourceId: string) {
+    return [...this.occurrences.values()]
+      .flatMap((value): TrustedCommunityOccurrenceHealth[] => {
+        const admission = value.occurrence.admission;
+        const qualification = value.occurrence.trustedCommunityAlertQualification;
+        if (value.sourceId !== sourceId || (!admission && !qualification?.sourceMaterialHash)) return [];
+        return [{
+          externalId: value.externalId,
+          ...(value.occurrence.admissionConfigurationVersion
+            ? { admissionConfigurationVersion: value.occurrence.admissionConfigurationVersion }
+            : {}),
+          ...(qualification?.sourceMaterialHash ? { sourceMaterialHash: qualification.sourceMaterialHash } : {}),
+          ...(admission ? { admission: {
+            reasonCodes: [...admission.reasonCodes],
+            destination: {
+              classification: admission.destination.classification,
+              ...(admission.destination.browserVisible === undefined
+                ? {} : { browserVisible: admission.destination.browserVisible }),
+            },
+          } } : {}),
+          ...(qualification ? { trustedCommunityAlertQualification: { status: qualification.status } } : {}),
+        }];
+      })
+      .sort((left, right) => left.externalId.localeCompare(right.externalId));
+  }
+  async getSourceOccurrencesRequiringTrustedCommunityRevocation(sourceId: string, limit: number) {
+    return [...this.occurrences.values()]
+      .filter((value) => value.sourceId === sourceId
+        && value.occurrence.admission?.evidenceCodes?.includes('trusted-community-source'))
+      .sort((left, right) => left.externalId.localeCompare(right.externalId))
+      .slice(0, limit)
+      .map((value) => structuredClone(value));
   }
   async listWithdrawnPostingKeys() { return [...this.withdrawnPostingKeys]; }
   async putSourceOccurrence(occurrence: SourceOccurrenceState) { this.occurrences.set(`${occurrence.sourceId}#${occurrence.externalId}`, structuredClone(occurrence)); }
