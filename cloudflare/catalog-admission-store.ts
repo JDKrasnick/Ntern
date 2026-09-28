@@ -1362,6 +1362,24 @@ export class D1CatalogAdmissionStore {
         JOIN canonical_employers AS employer ON employer.id = mapping.canonical_employer_id
         WHERE mapping.provider = ? AND mapping.scope = ? AND mapping.superseded_at IS NULL`)
         .bind(sample.provider, sample.scope).first<{ id: string; reviewed_by: string; display_name: string }>();
+      const authoritativeAlias = await this.db.prepare(`SELECT mapping.id
+        FROM employer_mappings AS mapping
+        WHERE mapping.provider = ? AND mapping.scope = ? AND mapping.superseded_at IS NULL
+          AND mapping.reviewed_by <> ? LIMIT 1`)
+        .bind(sample.provider, `${sample.provider}-${sample.scope}`, AUTOMATIC_EMPLOYER_POLICY)
+        .first<{ id: string }>();
+      // Reviewed provider registries historically use `<provider>-<tenant>` as
+      // their scope while posting evidence exposes the bare tenant. They are the
+      // same identity boundary. Never create a second automatic employer for
+      // the bare form, and retire one created by an older observer.
+      if (authoritativeAlias) {
+        if (active?.reviewed_by === AUTOMATIC_EMPLOYER_POLICY) {
+          await this.db.prepare('UPDATE employer_mappings SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL')
+            .bind(sample.observedAt, active.id).run();
+          result.disabled += 1;
+        }
+        continue;
+      }
       // Hand-reviewed mappings are authoritative and never rewritten by the
       // automatic observer.
       if (active && active.reviewed_by !== AUTOMATIC_EMPLOYER_POLICY) continue;

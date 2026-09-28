@@ -277,6 +277,30 @@ describe('D1 catalog admission operations', () => {
     database.close();
   });
 
+  it('treats a reviewed provider-tenant alias as authoritative over a bare automatic tenant', async () => {
+    const { database, admission: store } = subject();
+    const observation = {
+      provider: 'greenhouse' as const, scope: 'rocketlab', sourceId: 'community-list', fetchSequence: 1,
+      labelKey: 'rocket lab', displayName: 'Rocket Lab', postingIds: ['7989724003', '7989722003'],
+      applicationUrl: 'https://job-boards.greenhouse.io/rocketlab/jobs/7989724003',
+      observedAt: '2026-09-28T00:00:00Z',
+    };
+    expect(await store.observeAutomaticEmployerIdentities([observation])).toMatchObject({ promoted: 1 });
+    await store.putCanonicalEmployer({ id: 'rocket-lab', displayName: 'Rocket Lab',
+      reviewedAt: '2026-09-17T00:00:00Z', reviewedBy: 'owner' }, '2026-09-17T00:00:00Z');
+    await store.supersedeEmployerMapping({ id: 'reviewed-rocketlab', provider: 'greenhouse',
+      scope: 'greenhouse-rocketlab', canonicalEmployerId: 'rocket-lab', reviewedAt: '2026-09-17T00:00:00Z',
+      reviewedBy: 'owner' });
+
+    expect(await store.observeAutomaticEmployerIdentities([{
+      ...observation, fetchSequence: 2, observedAt: '2026-09-28T01:00:00Z',
+    }])).toEqual({ observed: 0, promoted: 0, conflicted: 0, disabled: 1 });
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM employer_mappings
+      WHERE provider = 'greenhouse' AND scope = 'rocketlab' AND superseded_at IS NULL`).get())
+      .toEqual({ count: 0 });
+    database.close();
+  });
+
   it('maps community rows by employer scope instead of the multi-employer source', async () => {
     const { admission: store } = subject();
     await store.putCanonicalEmployer({ id: 'acme', displayName: 'Acme', reviewedAt: '2026-08-26T00:00:00Z', reviewedBy: 'reviewer' }, '2026-08-26T00:00:00Z');
