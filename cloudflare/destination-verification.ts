@@ -59,6 +59,21 @@ export interface DestinationVerificationEnvironment {
 const DESTINATION_RETRY_DELAY_SECONDS = 86_400;
 const DESTINATION_RETRY_LEASE_MARGIN_MS = 60 * 60_000;
 
+/**
+ * Browser sessions bill by wall-clock time, so these are cost ceilings, not just
+ * latency ceilings. `domcontentloaded` settles in a few seconds on a healthy
+ * page; the longer bounds only cover a dead or pathological host.
+ */
+const DESTINATION_NAVIGATION_TIMEOUT_MS = 15_000;
+const DESTINATION_RECOVERY_TIMEOUT_MS = 10_000;
+const DESTINATION_DESCRIPTION_READY_TIMEOUT_MS = 4_000;
+
+type DestinationRender = {
+  reachability: Reachability;
+  evidence?: ApplicationPageEvidence;
+  browserError?: unknown;
+};
+
 function shadowBaselineStatus(outcome: MetadataAuditOutcome): ShadowBaseline[keyof ShadowBaseline] {
   if (outcome === 'extracted') return 'present';
   if (outcome === 'no-disclosure-found') return 'not-stated';
@@ -503,6 +518,9 @@ export async function processDestinationVerificationBatch(
   const opened: Array<{ sourceId: string; host: string; reason: string; incidentId: string; messageType: 'incident-opened' | 'quarantine' }> = [];
   const pending: Array<{ queued: MessageBatch<unknown>['messages'][number]; message: DestinationVerificationMessage }> = [];
   const pendingAttemptKeys = new Set<string>();
+  // Two messages that render the same candidate for the same posting share one
+  // browser render inside a batch; each message still persists its own admission.
+  const renderedCandidates = new Map<string, DestinationRender>();
   const batchStartedAt = now();
   const recentAttemptCutoff = new Date(batchStartedAt.getTime() - 24 * 60 * 60_000).toISOString();
   const nextAttemptAfterRecentDuplicate = new Date(batchStartedAt.getTime() + 24 * 60 * 60_000).toISOString();
@@ -617,155 +635,160 @@ export async function processDestinationVerificationBatch(
             baseline: result.shadowBaseline, method: apiAcquisition.method });
           await acknowledge(queued); continue;
         }
-        browser ??= await puppeteer.launch(env.DESTINATION_BROWSER);
-        const page = await browser.newPage();
-        let reachability: Reachability = 'live';
-        let evidence: ApplicationPageEvidence | undefined;
+        const renderKey = JSON.stringify([message.providerIdentity.postingId ?? '', message.candidateUrl, reference.title]);
+        const cachedRender = renderedCandidates.get(renderKey);
+        let reachability: Reachability = cachedRender?.reachability ?? 'live';
+        let evidence: ApplicationPageEvidence | undefined = cachedRender?.evidence;
         let collisionJobIds: string[] = [];
-        let browserError: unknown;
-        try {
-          let response = await page.goto(message.candidateUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-          reachability = reachabilityFromHttpStatus(response?.status());
-          if (reachability === 'live') {
-            const readyFrames = new Set<ReturnType<typeof page.frames>[number]>();
-            // Analytics need not settle before the client-side description is ready.
-            const awaitDescription = async () => {
-              await Promise.all(page.frames().slice(0, 8).map(async (frame) => {
-                try {
-                  const ready = await frame.waitForFunction(renderedDescriptionReady, { timeout: 6_000, polling: 250 }, reference.title);
-                  readyFrames.add(frame); await ready.dispose();
-                } catch { /* A shell is reported explicitly below, never a negative disclosure. */ }
-              }));
-            };
-            await awaitDescription();
-            const recovery = exactPostingRecoveryUrl(page.url(), message.providerIdentity.postingId,
-              await page.evaluate(() => [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].slice(0, 1000).map((link) => link.href)));
-            if (recovery) {
-              readyFrames.clear();
-              response = await page.goto(recovery, { waitUntil: 'domcontentloaded', timeout: 15_000 });
-              reachability = reachabilityFromHttpStatus(response?.status());
-              if (reachability === 'live') await awaitDescription();
-            }
-            const renderedFrames: RenderedFrameSnapshot[] = [];
-            const frames = page.frames();
-            let failedFrameCount = Math.max(0, frames.length - 16);
-            for (const frame of frames.slice(0, 16)) {
-              try {
-                const snapshot = await frame.evaluate((requestedPostingId) => {
-                  const visible = (element: Element) => element.getClientRects().length > 0;
-                  const structuredPostings: Record<string, unknown>[] = [];
-                  let jobPostingCount = 0;
-                  const structuredNodes = [...document.querySelectorAll('script[type="application/ld+json"]')];
-                  for (const node of structuredNodes.slice(0, 20)) {
-                    const text = node.textContent ?? '';
-                    const matches = text.match(/["']@type["']\s*:\s*["']JobPosting["']/gi) ?? [];
-                    jobPostingCount += matches.length;
-                    if (matches.length) {
-                      try {
-                        const queue: unknown[] = [JSON.parse(text)];
-                        while (queue.length) {
-                          const value = queue.shift();
-                          if (Array.isArray(value)) { queue.push(...value); continue; }
-                          if (!value || typeof value !== 'object') continue;
-                          const record = value as Record<string, unknown>;
-                          if (record['@graph']) queue.push(record['@graph']);
-                          const types = Array.isArray(record['@type']) ? record['@type'] : [record['@type']];
-                          if (types.includes('JobPosting')) structuredPostings.push(record);
-                        }
-                      } catch { /* Malformed structured data remains ordinary visible evidence. */ }
-                    }
-                  }
-                  const pageUrl = new URL(location.href); pageUrl.hash = '';
-                  const jobRoute = /(?:^|\/)(?:careers?|jobs?|openings?|positions?|roles?|vacancies?)(?:\/|$)/i;
-                  const distinctJobLinks = new Set([...document.querySelectorAll<HTMLAnchorElement>('a[href]')]
-                    .filter(visible)
-                    .map((link) => { try { const value = new URL(link.href, location.href); value.hash = ''; return value; } catch { return undefined; } })
-                    .filter((value): value is URL => Boolean(value && ['http:', 'https:'].includes(value.protocol)
-                      && value.toString() !== pageUrl.toString() && jobRoute.test(value.pathname)))
-                    .map((value) => value.toString()));
-                  const actionableApply = [...document.querySelectorAll<HTMLElement>('a[href],button')].some((control) => {
-                    if (!visible(control) || !/^apply(?:\s+now)?$/iu.test(control.innerText.trim())) return false;
-                    if (control instanceof HTMLButtonElement) return Boolean(control.closest('form'));
-                    try {
-                      const target = new URL((control as HTMLAnchorElement).href, location.href); target.hash = '';
-                      return target.toString() !== pageUrl.toString();
-                    } catch { return false; }
-                  });
-                  const description = document.querySelector('meta[name="description"],meta[property="og:description"]')?.getAttribute('content') ?? undefined;
-                  const escapedPostingId = requestedPostingId?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                  const matching = escapedPostingId ? structuredPostings.filter((record) => new RegExp(
-                    `(?:^|[^a-z0-9])${escapedPostingId}(?:$|[^a-z0-9])`, 'i',
-                  ).test(JSON.stringify(record))) : [];
-                  const solePostingDeclaresIdentity = structuredPostings.length === 1
-                    && ['identifier', '@id', 'url', 'jobId', 'postingId', 'requisitionId']
-                      .some((key) => structuredPostings[0][key] !== undefined && structuredPostings[0][key] !== null);
-                  const selectedPosting = matching.length === 1 ? matching[0]
-                    : structuredPostings.length === 1 && (!requestedPostingId || !solePostingDeclaresIdentity)
-                      ? structuredPostings[0] : undefined;
-                  const selectedValidThrough = typeof selectedPosting?.validThrough === 'string'
-                    && !Number.isNaN(Date.parse(selectedPosting.validThrough))
-                    ? new Date(selectedPosting.validThrough).toISOString() : undefined;
-                  const compensationRows = [...document.querySelectorAll<HTMLElement>('h2,h3')]
-                    .filter((heading) => visible(heading) && /^(?:compensation|salary|pay range)$/iu.test(heading.innerText.trim()))
-                    .flatMap((heading) => [...(heading.nextElementSibling?.matches('ul,ol') ? heading.nextElementSibling.children : [])])
-                    .filter(visible).map((row) => (row as HTMLElement).innerText.trim());
-                  // Application-form controls are UI, not posting prose. Their
-                  // labels and option lists ("Bachelors / Masters/phD") would
-                  // otherwise be read as an audience statement, over-reporting
-                  // education (and polluting other fields). Hide them for the
-                  // visible-text read, then restore the page.
-                  // Controls only, never `form` itself: some ATS render the
-                  // description inside a form, and hiding the container would
-                  // drop the posting text with it.
-                  const formControls = document.querySelectorAll<HTMLElement>(
-                    'select,option,input,textarea,button,label,fieldset,legend,[role="listbox"],[role="combobox"],[role="option"],[role="radiogroup"]',
-                  );
-                  const hiddenControls: Array<[HTMLElement, string]> = [];
-                  for (const control of [...formControls].slice(0, 5_000)) {
-                    hiddenControls.push([control, control.style.display]);
-                    control.style.display = 'none';
-                  }
-                  let renderedText = '';
-                  try { renderedText = document.querySelector('main')?.innerText ?? document.body?.innerText ?? ''; }
-                  finally { for (const [control, previous] of hiddenControls) control.style.display = previous; }
-                  const fullText = renderedText.split(/[\r\n]+/)
-                    .map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
-                  const main = fullText.slice(0, 40_000);
-                  return {
-                    url: location.href, title: document.title || undefined, description,
-                    visibleText: main || undefined, structuredJobText: selectedPosting ? JSON.stringify(selectedPosting).slice(0, 40_000) : undefined,
-                    validThrough: selectedValidThrough,
-                    structuredJobDocuments: structuredNodes.slice(0, 20).map((node) => (node.textContent ?? '').slice(0, 20_000)),
-                    compensationRows: compensationRows.slice(0, 20).map((row) => row.slice(0, 1000)),
-                    inspectionTruncated: fullText.length > 40_000 || structuredNodes.length > 20 || structuredNodes.some((node) => (node.textContent?.length ?? 0) > 20_000)
-                      || compensationRows.length > 20 || compensationRows.some((row) => row.length > 1000),
-                    loadingShell: fullText.length < 500 || /^(?:loading[.…\s]*)$/i.test(fullText),
-                    jobPostingCount, distinctJobLinkCount: distinctJobLinks.size,
-                    applicationFormPresent: actionableApply || [...document.querySelectorAll<Element>(
-                      'form[action*="apply" i],form[id*="apply" i],input[type="file"],input[name="resume" i],input[name="cv" i]',
-                    )].some(visible),
-                  };
-                }, message.providerIdentity.postingId);
-                renderedFrames.push({ ...snapshot, loadingShell: snapshot.loadingShell || !readyFrames.has(frame),
-                  ...(frame.parentFrame() ? { parentUrl: frame.parentFrame()!.url() } : {}) });
-              } catch {
-                failedFrameCount += 1;
+        let browserError: unknown = cachedRender?.browserError;
+        if (!cachedRender) {
+          browser ??= await puppeteer.launch(env.DESTINATION_BROWSER);
+          const page = await browser.newPage();
+          try {
+            let response = await page.goto(message.candidateUrl, { waitUntil: 'domcontentloaded', timeout: DESTINATION_NAVIGATION_TIMEOUT_MS });
+            reachability = reachabilityFromHttpStatus(response?.status());
+            if (reachability === 'live') {
+              const readyFrames = new Set<ReturnType<typeof page.frames>[number]>();
+              // Analytics need not settle before the client-side description is ready.
+              const awaitDescription = async () => {
+                await Promise.all(page.frames().slice(0, 8).map(async (frame) => {
+                  try {
+                    const ready = await frame.waitForFunction(renderedDescriptionReady, { timeout: DESTINATION_DESCRIPTION_READY_TIMEOUT_MS, polling: 250 }, reference.title);
+                    readyFrames.add(frame); await ready.dispose();
+                  } catch { /* A shell is reported explicitly below, never a negative disclosure. */ }
+                }));
+              };
+              await awaitDescription();
+              const recovery = exactPostingRecoveryUrl(page.url(), message.providerIdentity.postingId,
+                await page.evaluate(() => [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].slice(0, 1000).map((link) => link.href)));
+              if (recovery) {
+                readyFrames.clear();
+                response = await page.goto(recovery, { waitUntil: 'domcontentloaded', timeout: DESTINATION_RECOVERY_TIMEOUT_MS });
+                reachability = reachabilityFromHttpStatus(response?.status());
+                if (reachability === 'live') await awaitDescription();
               }
+              const renderedFrames: RenderedFrameSnapshot[] = [];
+              const frames = page.frames();
+              let failedFrameCount = Math.max(0, frames.length - 16);
+              for (const frame of frames.slice(0, 16)) {
+                try {
+                  const snapshot = await frame.evaluate((requestedPostingId) => {
+                    const visible = (element: Element) => element.getClientRects().length > 0;
+                    const structuredPostings: Record<string, unknown>[] = [];
+                    let jobPostingCount = 0;
+                    const structuredNodes = [...document.querySelectorAll('script[type="application/ld+json"]')];
+                    for (const node of structuredNodes.slice(0, 20)) {
+                      const text = node.textContent ?? '';
+                      const matches = text.match(/["']@type["']\s*:\s*["']JobPosting["']/gi) ?? [];
+                      jobPostingCount += matches.length;
+                      if (matches.length) {
+                        try {
+                          const queue: unknown[] = [JSON.parse(text)];
+                          while (queue.length) {
+                            const value = queue.shift();
+                            if (Array.isArray(value)) { queue.push(...value); continue; }
+                            if (!value || typeof value !== 'object') continue;
+                            const record = value as Record<string, unknown>;
+                            if (record['@graph']) queue.push(record['@graph']);
+                            const types = Array.isArray(record['@type']) ? record['@type'] : [record['@type']];
+                            if (types.includes('JobPosting')) structuredPostings.push(record);
+                          }
+                        } catch { /* Malformed structured data remains ordinary visible evidence. */ }
+                      }
+                    }
+                    const pageUrl = new URL(location.href); pageUrl.hash = '';
+                    const jobRoute = /(?:^|\/)(?:careers?|jobs?|openings?|positions?|roles?|vacancies?)(?:\/|$)/i;
+                    const distinctJobLinks = new Set([...document.querySelectorAll<HTMLAnchorElement>('a[href]')]
+                      .filter(visible)
+                      .map((link) => { try { const value = new URL(link.href, location.href); value.hash = ''; return value; } catch { return undefined; } })
+                      .filter((value): value is URL => Boolean(value && ['http:', 'https:'].includes(value.protocol)
+                        && value.toString() !== pageUrl.toString() && jobRoute.test(value.pathname)))
+                      .map((value) => value.toString()));
+                    const actionableApply = [...document.querySelectorAll<HTMLElement>('a[href],button')].some((control) => {
+                      if (!visible(control) || !/^apply(?:\s+now)?$/iu.test(control.innerText.trim())) return false;
+                      if (control instanceof HTMLButtonElement) return Boolean(control.closest('form'));
+                      try {
+                        const target = new URL((control as HTMLAnchorElement).href, location.href); target.hash = '';
+                        return target.toString() !== pageUrl.toString();
+                      } catch { return false; }
+                    });
+                    const description = document.querySelector('meta[name="description"],meta[property="og:description"]')?.getAttribute('content') ?? undefined;
+                    const escapedPostingId = requestedPostingId?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const matching = escapedPostingId ? structuredPostings.filter((record) => new RegExp(
+                      `(?:^|[^a-z0-9])${escapedPostingId}(?:$|[^a-z0-9])`, 'i',
+                    ).test(JSON.stringify(record))) : [];
+                    const solePostingDeclaresIdentity = structuredPostings.length === 1
+                      && ['identifier', '@id', 'url', 'jobId', 'postingId', 'requisitionId']
+                        .some((key) => structuredPostings[0][key] !== undefined && structuredPostings[0][key] !== null);
+                    const selectedPosting = matching.length === 1 ? matching[0]
+                      : structuredPostings.length === 1 && (!requestedPostingId || !solePostingDeclaresIdentity)
+                        ? structuredPostings[0] : undefined;
+                    const selectedValidThrough = typeof selectedPosting?.validThrough === 'string'
+                      && !Number.isNaN(Date.parse(selectedPosting.validThrough))
+                      ? new Date(selectedPosting.validThrough).toISOString() : undefined;
+                    const compensationRows = [...document.querySelectorAll<HTMLElement>('h2,h3')]
+                      .filter((heading) => visible(heading) && /^(?:compensation|salary|pay range)$/iu.test(heading.innerText.trim()))
+                      .flatMap((heading) => [...(heading.nextElementSibling?.matches('ul,ol') ? heading.nextElementSibling.children : [])])
+                      .filter(visible).map((row) => (row as HTMLElement).innerText.trim());
+                    // Application-form controls are UI, not posting prose. Their
+                    // labels and option lists ("Bachelors / Masters/phD") would
+                    // otherwise be read as an audience statement, over-reporting
+                    // education (and polluting other fields). Hide them for the
+                    // visible-text read, then restore the page.
+                    // Controls only, never `form` itself: some ATS render the
+                    // description inside a form, and hiding the container would
+                    // drop the posting text with it.
+                    const formControls = document.querySelectorAll<HTMLElement>(
+                      'select,option,input,textarea,button,label,fieldset,legend,[role="listbox"],[role="combobox"],[role="option"],[role="radiogroup"]',
+                    );
+                    const hiddenControls: Array<[HTMLElement, string]> = [];
+                    for (const control of [...formControls].slice(0, 5_000)) {
+                      hiddenControls.push([control, control.style.display]);
+                      control.style.display = 'none';
+                    }
+                    let renderedText = '';
+                    try { renderedText = document.querySelector('main')?.innerText ?? document.body?.innerText ?? ''; }
+                    finally { for (const [control, previous] of hiddenControls) control.style.display = previous; }
+                    const fullText = renderedText.split(/[\r\n]+/)
+                      .map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
+                    const main = fullText.slice(0, 40_000);
+                    return {
+                      url: location.href, title: document.title || undefined, description,
+                      visibleText: main || undefined, structuredJobText: selectedPosting ? JSON.stringify(selectedPosting).slice(0, 40_000) : undefined,
+                      validThrough: selectedValidThrough,
+                      structuredJobDocuments: structuredNodes.slice(0, 20).map((node) => (node.textContent ?? '').slice(0, 20_000)),
+                      compensationRows: compensationRows.slice(0, 20).map((row) => row.slice(0, 1000)),
+                      inspectionTruncated: fullText.length > 40_000 || structuredNodes.length > 20 || structuredNodes.some((node) => (node.textContent?.length ?? 0) > 20_000)
+                        || compensationRows.length > 20 || compensationRows.some((row) => row.length > 1000),
+                      loadingShell: fullText.length < 500 || /^(?:loading[.…\s]*)$/i.test(fullText),
+                      jobPostingCount, distinctJobLinkCount: distinctJobLinks.size,
+                      applicationFormPresent: actionableApply || [...document.querySelectorAll<Element>(
+                        'form[action*="apply" i],form[id*="apply" i],input[type="file"],input[name="resume" i],input[name="cv" i]',
+                      )].some(visible),
+                    };
+                  }, message.providerIdentity.postingId);
+                  renderedFrames.push({ ...snapshot, loadingShell: snapshot.loadingShell || !readyFrames.has(frame),
+                    ...(frame.parentFrame() ? { parentUrl: frame.parentFrame()!.url() } : {}) });
+                } catch {
+                  failedFrameCount += 1;
+                }
+              }
+              evidence = combineRenderedFrameEvidence({ role: reference.title, expectedPostingId: message.providerIdentity.postingId,
+                frames: renderedFrames, failedFrameCount });
             }
-            evidence = combineRenderedFrameEvidence({ role: reference.title, expectedPostingId: message.providerIdentity.postingId,
-              frames: renderedFrames, failedFrameCount });
-            if (!candidateOnly && evidence?.renderedEvidenceHash && message.providerIdentity.postingId) {
-              collisionJobIds = await operations.renderedEvidenceCollisionJobIds(
-                message.jobId, evidence.renderedEvidenceHash, message.providerIdentity.postingId,
-              );
-              if (collisionJobIds.length) evidence = { ...evidence, identicalEvidenceForDifferentPosting: true };
-            }
+          } catch (error) {
+            browserError = error;
+            reachability = reachabilityFromFailure(error);
+          } finally {
+            await page.close();
           }
-        } catch (error) {
-          browserError = error;
-          reachability = reachabilityFromFailure(error);
-        } finally {
-          await page.close();
+          renderedCandidates.set(renderKey, { reachability, evidence, browserError });
+        }
+        if (!candidateOnly && evidence?.renderedEvidenceHash && message.providerIdentity.postingId) {
+          collisionJobIds = await operations.renderedEvidenceCollisionJobIds(
+            message.jobId, evidence.renderedEvidenceHash, message.providerIdentity.postingId,
+          );
+          if (collisionJobIds.length) evidence = { ...evidence, identicalEvidenceForDifferentPosting: true };
         }
         // An employer-hosted page may reveal its Greenhouse board only in a
         // rendered embed. Historical collection gets one fixed-host API attempt
