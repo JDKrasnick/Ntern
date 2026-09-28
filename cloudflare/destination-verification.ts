@@ -635,13 +635,28 @@ export async function processDestinationVerificationBatch(
             baseline: result.shadowBaseline, method: apiAcquisition.method });
           await acknowledge(queued); continue;
         }
+        // API-first: a provider's own API response for the exact posting is
+        // sufficient to classify a canonical provider route, so the browser is
+        // only used when there is no exact artifact, the route is not standard,
+        // or the occurrence is an unattributed community first sight (where the
+        // render itself supplies the attribution). The classification is probed
+        // with no browser evidence first; anything that needs rendered evidence
+        // falls through to the render below.
+        const attributionReady = reference.provenance !== 'reviewed-community'
+          || reference.admission?.postingAttribution === 'attributed';
+        let apiVerified = false;
+        if (!candidateOnly && apiAcquisition?.artifact && attributionReady) {
+          const probe = await classifyReferenceDestination({ operations, message, job, reference,
+            reachability: 'live', inspectedAt: now().toISOString() });
+          apiVerified = ['posting-detail', 'application-form'].includes(probe.destination.classification);
+        }
         const renderKey = JSON.stringify([message.providerIdentity.postingId ?? '', message.candidateUrl, reference.title]);
         const cachedRender = renderedCandidates.get(renderKey);
         let reachability: Reachability = cachedRender?.reachability ?? 'live';
         let evidence: ApplicationPageEvidence | undefined = cachedRender?.evidence;
         let collisionJobIds: string[] = [];
         let browserError: unknown = cachedRender?.browserError;
-        if (!cachedRender) {
+        if (!apiVerified && !cachedRender) {
           browser ??= await puppeteer.launch(env.DESTINATION_BROWSER);
           const page = await browser.newPage();
           try {

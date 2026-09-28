@@ -136,6 +136,75 @@ describe('destination verification queue consumer', () => {
       .toMatchObject({ candidateUrl: secondReference.applyUrl, classification: 'application-form' });
   });
 
+  it('skips the browser when the provider API returns the exact posting', async () => {
+    const { db, jobs } = subject();
+    const { job, reference } = role();
+    await jobs.putInternship(job);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+      id: Number(reference.externalId), title: reference.title,
+      content: `<p>${reference.title}</p><p>Austin</p><p>$50 - $60 per hour</p>`,
+    })));
+    const shadowQueue = { send: vi.fn(), sendBatch: vi.fn() };
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
+      candidateUrl: reference.applyUrl, providerIdentity: { provider: 'greenhouse', sourceId: reference.sourceId,
+        sourceUrl: reference.sourceUrl, tenant: 'acme', postingId: reference.externalId },
+      reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: shadowQueue,
+      SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn().mockResolvedValue(undefined) } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(launch).not.toHaveBeenCalled();
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(queued.retry).not.toHaveBeenCalled();
+    expect(shadowQueue.send).toHaveBeenCalledOnce();
+    const stored = await jobs.getJob(job.jobId);
+    expect(stored?.sourceReferences[0]?.admission?.destination.classification).toBe('posting-detail');
+  });
+
+  it('falls back to the browser when the provider API has no exact posting', async () => {
+    const { db, jobs } = subject();
+    const { job, reference } = role();
+    await jobs.putInternship(job);
+    // The provider route exists but the API answers 500, so no artifact is
+    // available and the render must run.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 500 })));
+    launch.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
+      goto: vi.fn().mockRejectedValue(new Error('timeout')), frames: () => [], close: vi.fn() }), close: vi.fn() });
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
+      candidateUrl: reference.applyUrl, providerIdentity: { provider: 'greenhouse', sourceId: reference.sourceId,
+        sourceUrl: reference.sourceUrl, tenant: 'acme', postingId: reference.externalId },
+      reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, environment(db),
+      () => new Date('2026-08-30T00:01:00Z'));
+    expect(launch).toHaveBeenCalledOnce();
+    expect(queued.retry).toHaveBeenCalled();
+  });
+
+  it('falls back to the browser for an unattributed community first sight', async () => {
+    const { db, jobs } = subject();
+    const { job, reference } = role();
+    const communityReference = { ...reference, provenance: 'reviewed-community' as const };
+    await jobs.putInternship({ ...job, sourceReferences: [communityReference] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+      id: Number(reference.externalId), title: reference.title,
+      content: `<p>${reference.title}</p><p>Austin</p><p>$50 - $60 per hour</p>`,
+    })));
+    const newPage = vi.fn().mockResolvedValue({ goto: vi.fn().mockResolvedValue({ status: () => 200 }), url: () => reference.applyUrl,
+      evaluate: vi.fn().mockResolvedValue([]), frames: () => [], close: vi.fn() });
+    launch.mockResolvedValue({ newPage, close: vi.fn() });
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: communityReference.sourceId,
+      externalId: communityReference.externalId!, candidateUrl: communityReference.applyUrl,
+      providerIdentity: { provider: 'greenhouse', sourceId: communityReference.sourceId,
+        sourceUrl: communityReference.sourceUrl, tenant: 'acme', postingId: communityReference.externalId },
+      reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: { send: vi.fn(), sendBatch: vi.fn() },
+      SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn().mockResolvedValue(undefined) } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(newPage).toHaveBeenCalledOnce();
+    expect(queued.ack).toHaveBeenCalledOnce();
+  });
+
   it('resolves the pending failure-ledger row when a retried delivery settles', async () => {
     const { database, db, operations } = subject();
     await operations.recordVerificationCompletion('already-complete', '2026-08-30T00:00:00Z');
