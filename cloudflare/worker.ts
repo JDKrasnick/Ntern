@@ -2356,7 +2356,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           continue;
         }
         if (!source) throw new Error(`Unknown reviewed source ${JSON.stringify(sourceId)}`);
-        const priorHealth = await new D1InternshipStore(env.DB).getSourceHealth(source.id);
+        const sourceStore = new D1InternshipStore(env.DB);
+        const priorHealth = await sourceStore.getSourceHealth(source.id);
         if (githubSourceRunBlocked(priorHealth, message.force)) {
           console.log(JSON.stringify({ event: 'source_poll_skipped', command: 'github-poll', sourceId: source.id,
             reason: priorHealth?.state === 'quarantined' ? 'quarantined' : priorHealth?.sourceStatus === 'paused' ? 'paused' : 'backoff' }));
@@ -2368,7 +2369,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           continue;
         }
         const result = await withinMessageDeadline(runRuntimeCommand('poll', {
-          store: new D1InternshipStore(env.DB),
+          store: sourceStore,
           userStore: new D1UserStore(env.DB),
           sources: [source],
           validateCatalogOnPoll: false,
@@ -2413,6 +2414,26 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
         } else if (result.poll?.continuationSources.includes(source.id)) {
           try {
             await sendQueueMessageWithin(env.GITHUB_QUEUE, { sourceId: source.id });
+            // The continuation is now this source's in-flight scheduled work.
+            // Refresh its lease after the send so the ten-minute dispatcher
+            // cannot enqueue a second copy while the bounded pass is still
+            // draining. The next continuation refreshes it again; the final
+            // slice writes health after the last marker and releases the source
+            // for its next ordinary scheduled poll.
+            try {
+              await sourceStore.putSourceDispatches([{
+                sourceId: source.id,
+                provider: 'github',
+                dispatchedAt: new Date().toISOString(),
+              }]);
+            } catch (error) {
+              // The continuation already exists, so retrying this completed
+              // delivery would create the duplicate we are preventing. Leave
+              // the durable checkpoint and queued continuation to recover, and
+              // keep the lease-write failure visible.
+              console.error(JSON.stringify({ event: 'github_continuation_dispatch_marker_failed', sourceId: source.id,
+                pendingResolution: result.poll.pendingResolution[source.id] ?? 0, error: safeDiagnostic(error) }));
+            }
           } catch (error) {
             // The poll committed its checkpoint before requesting continuation.
             // The scheduled dispatcher will pick up the pending source; retrying

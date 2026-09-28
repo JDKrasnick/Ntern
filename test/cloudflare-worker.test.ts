@@ -1048,7 +1048,7 @@ describe('Cloudflare GitHub queue continuation', () => {
    * structured registry is empty, so the delivery reaches the reviewed GitHub
    * branch, and the source reports no prior health so quarantine cannot block it.
    */
-  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth; sendError?: Error; attempts?: number; pollError?: Error; expectNoPoll?: boolean } = {}) => {
+  const deliver = async (report: Record<string, unknown>, options: { force?: boolean; priorHealth?: SourceHealth; sendError?: Error; markerError?: Error; attempts?: number; pollError?: Error; expectNoPoll?: boolean } = {}) => {
     const sent: unknown[] = [];
     const handled: string[] = [];
     const statements: string[] = [];
@@ -1063,6 +1063,7 @@ describe('Cloudflare GitHub queue continuation', () => {
     const logged: string[] = [];
     vi.spyOn(D1EmployerStore.prototype, 'listReviewedSources').mockResolvedValue([]);
     vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth').mockResolvedValue(options.priorHealth);
+    if (options.markerError) vi.spyOn(D1InternshipStore.prototype, 'putSourceDispatches').mockRejectedValue(options.markerError);
     runtime.runRuntimeCommand.mockImplementationOnce(async (command, dependencies) => {
       polls.push({
         command,
@@ -1114,7 +1115,7 @@ describe('Cloudflare GitHub queue continuation', () => {
   };
 
   it('re-enqueues the source once and acks while the delivery leaves a pending resolution slice', async () => {
-    const { sent, handled, sliceEvents } = await deliver({
+    const { sent, handled, statements, sliceEvents } = await deliver({
       continuationSources: [reviewedGithub.id],
       pendingResolution: { [reviewedGithub.id]: 4 },
       failures: [],
@@ -1124,17 +1125,30 @@ describe('Cloudflare GitHub queue continuation', () => {
     expect(sliceEvents).toEqual([expect.objectContaining({
       sourceId: reviewedGithub.id, continuation: true, resolutionPending: 4, failureCount: 0,
     })]);
+    expect(statements.some((query) => query.includes("VALUES (?, 'DISPATCH', 'source-dispatch', ?)"))).toBe(true);
     expect(handled).toEqual(['ack']);
   });
 
   it('acks a committed slice when its continuation send fails for the scheduled dispatcher to resume', async () => {
-    const { sent, handled, sliceEvents } = await deliver({
+    const { sent, handled, statements, sliceEvents } = await deliver({
       continuationSources: [reviewedGithub.id], pendingResolution: { [reviewedGithub.id]: 4 }, failures: [],
     }, { sendError: new Error('Queue send timed out') });
 
     expect(sent).toEqual([]);
+    expect(statements.some((query) => query.includes("VALUES (?, 'DISPATCH', 'source-dispatch', ?)"))).toBe(false);
     expect(handled).toEqual(['ack']);
     expect(sliceEvents).toEqual([expect.objectContaining({ resolutionPending: 4, failureCount: 0 })]);
+  });
+
+  it('acks a committed slice when its continuation lease write fails after the send', async () => {
+    const { sent, handled } = await deliver({
+      continuationSources: [reviewedGithub.id], pendingResolution: { [reviewedGithub.id]: 4 }, failures: [],
+    }, { markerError: new Error('D1 dispatch marker write failed') });
+
+    // The continuation is already durable in the queue. Retrying the completed
+    // delivery would create the duplicate continuation this lease prevents.
+    expect(sent).toEqual([{ sourceId: reviewedGithub.id }]);
+    expect(handled).toEqual(['ack']);
   });
 
   it('defers a source failure that survives every delivery instead of dead-lettering it', async () => {

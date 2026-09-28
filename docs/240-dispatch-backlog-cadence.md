@@ -510,6 +510,14 @@ draining).
    `34 8 * * *`: it now runs the write-heavy retention pass, and sharing the
    minute with the greenhouse dispatch (`12,42 * * * *`) overloaded D1 and
    dead-lettered a burst of healthy greenhouse polls at 08:42.
+   The 23:07 ET cadence alert exposed one remaining duplication path. A normal
+   continuation updated source health but did not refresh the source's dispatch
+   lease, so the ten-minute scheduler treated the source as finished and queued
+   another copy while its bounded pass was still draining. Duplicate chains
+   occupied both GitHub consumer slots and delayed five healthy sources. A
+   successful continuation handoff now records a fresh per-source dispatch
+   marker; a marker-write failure is logged but never retries the already
+   completed slice, because its checkpoint and queued continuation are durable.
 2. Watch the new signal rather than queue depth. `provider_dispatch_complete`
    reports `candidates`, `queued`, and `inFlightSkipped` on every sweep, so a
    fleet that stops dispatching is visible in one line, and
