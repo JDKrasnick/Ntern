@@ -46,7 +46,7 @@ import type { D1Database, R2Bucket } from './types.js';
 /** A resolved decision is revalidated on this cadence. */
 const ICON_REVALIDATE_MS = 30 * 24 * 60 * 60 * 1_000;
 /** Bump whenever resolver semantics change so old misses can be reconsidered. */
-export const ICON_RESOLVER_VERSION = 3;
+export const ICON_RESOLVER_VERSION = 4;
 /** A definitive no-match backs off from one day to the revalidation ceiling. */
 const ICON_UNRESOLVED_BASE_RETRY_MS = 24 * 60 * 60 * 1_000;
 /** A transient provider or network problem retries sooner, from one hour. */
@@ -875,7 +875,14 @@ async function observedCorporateRedirect(
     if (result.status < 200 || result.status >= 400) return undefined;
     const toDomain = registrableDomain(new URL(result.url).hostname);
     const fromDomain = registrableDomain(domain);
-    return toDomain && fromDomain && toDomain !== fromDomain ? { fromDomain, toDomain } : undefined;
+    if (!toDomain || !fromDomain || toDomain === fromDomain) return undefined;
+    // Global employers commonly localize their homepage onto a country TLD
+    // (for example intel.com -> intel.de). The registrable domains differ, but
+    // an exact registrable label still names the same brand. Preserve the
+    // corporate-transition guard for redirects whose labels actually change.
+    const fromLabel = fromDomain.split('.')[0];
+    const toLabel = toDomain.split('.')[0];
+    return fromLabel && fromLabel === toLabel ? undefined : { fromDomain, toDomain };
   } catch {
     return undefined;
   }

@@ -2195,6 +2195,29 @@ describe('employer icon coverage v2', () => {
     ]);
   });
 
+  it('accepts a same-brand redirect onto a localized country domain', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://acme.com/careers/1'), provider: 'structured', provenance: 'official-structured',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/1': () => html('<!doctype html><title>Acme careers</title>'),
+      'https://acme.com/': () => status(301, { location: 'https://acme.co.jp/' }),
+      'https://acme.co.jp/': () => html('<!doctype html><title>Acme Japan</title>'),
+      [logoDevImageUrl('acme.com', LOGO_IMAGE_TOKEN)]: () => webp(),
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+    );
+
+    expect(result.reasonCodes).toEqual(['domain-accepted']);
+    expect(await icons.context('acme')).toMatchObject({ websiteDomain: 'acme.com', resolutionStatus: 'resolved' });
+    expect(await icons.reviewQueue(10)).toEqual([]);
+  });
+
   it('reports active-employer and role-weighted coverage with inheritance', async () => {
     const { database, admission, icons } = subject();
     await admission.putCanonicalEmployer(employerRow('parent', 'Parent', 'company-icons/parent/reviewed.webp'), NOW.toISOString());
