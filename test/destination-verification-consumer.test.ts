@@ -130,6 +130,10 @@ describe('destination verification queue consumer', () => {
     expect(newPage).toHaveBeenCalledTimes(1);
     expect(first.ack).toHaveBeenCalledOnce();
     expect(second.ack).toHaveBeenCalledOnce();
+    expect((await jobs.getJob(job.jobId))?.sourceReferences[0]?.admission?.destination)
+      .toMatchObject({ candidateUrl: reference.applyUrl, classification: 'application-form' });
+    expect((await jobs.getJob(secondJob.jobId))?.sourceReferences[0]?.admission?.destination)
+      .toMatchObject({ candidateUrl: secondReference.applyUrl, classification: 'application-form' });
   });
 
   it('resolves the pending failure-ledger row when a retried delivery settles', async () => {
@@ -564,17 +568,28 @@ describe('destination verification queue consumer', () => {
     await operations.syncVerificationSchedule('2026-08-30T00:00:00Z');
     const [scheduled] = await operations.leaseDueVerifications('2026-08-30T00:00:00Z');
     expect(scheduled).toBeDefined();
-    launch.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
+    const secondReference = { ...reference, sourceId: 'community-acme', provenance: 'reviewed-community' as const };
+    const secondJob = { ...job, jobId: 'job-2', sourceReferences: [secondReference] };
+    await jobs.putInternship(secondJob);
+    const newPage = vi.fn().mockResolvedValue({
       goto: vi.fn().mockRejectedValue(new Error('timeout')), frames: () => [], close: vi.fn(),
-    }), close: vi.fn() });
+    });
+    launch.mockResolvedValue({ newPage, close: vi.fn() });
     const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId,
       externalId: reference.externalId!, candidateUrl: reference.applyUrl, providerIdentity: scheduled!.providerIdentity,
       reason: 'daily-retry', queuedAt: '2026-08-30T00:00:00Z', occurrenceKey: scheduled!.occurrenceKey,
       leaseToken: scheduled!.leaseToken, idempotencyKey: 'scheduled-generation' });
-    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, environment(db),
+    const duplicate = { ...queueMessage({ version: 1, jobId: secondJob.jobId, sourceId: secondReference.sourceId,
+      externalId: secondReference.externalId!, candidateUrl: secondReference.applyUrl,
+      providerIdentity: { ...scheduled!.providerIdentity, sourceId: secondReference.sourceId, sourceUrl: secondReference.sourceUrl },
+      reason: 'daily-retry', queuedAt: '2026-08-30T00:00:00Z' }), id: 'message-2' };
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued, duplicate] }, environment(db),
       () => new Date('2026-08-30T00:01:00Z'));
+    expect(newPage).toHaveBeenCalledOnce();
     expect(queued.retry).toHaveBeenCalledWith({ delaySeconds: 86_400 });
     expect(queued.ack).not.toHaveBeenCalled();
+    expect(duplicate.retry).toHaveBeenCalledWith({ delaySeconds: 86_400 });
+    expect(duplicate.ack).not.toHaveBeenCalled();
 
     const queue = { send: vi.fn(), sendBatch: vi.fn() };
     // Owner decision, 2026-09-17: nothing re-inspects a destination after it is
