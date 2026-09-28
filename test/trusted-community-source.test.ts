@@ -279,6 +279,10 @@ describe('trusted community source policy', () => {
           sourceUrl: 'https://github.com/example/jobs', postingId: `req-${index}` } });
     });
     const adapter: SourceAdapter = { id: 'community-list', async fetch(previous) {
+      if (previous && !previous.pendingResolutionRows?.length) {
+        return { sourceId: 'community-list', listings: [], rawRowCount: rows.length, notModified: true,
+          checkpoint: { ...previous, successfulFetches: previous.successfulFetches + 1 } };
+      }
       return { sourceId: 'community-list', listings: rows, rawRowCount: rows.length, notModified: false,
         checkpoint: { sourceId: 'community-list', successfulFetches: (previous?.successfulFetches ?? 0) + 1,
           lastRowCount: rows.length } };
@@ -303,12 +307,17 @@ describe('trusted community source policy', () => {
     const poller = new Poller([adapter], store, () => new Date(inspectedAt), undefined, validate, false,
       undefined, resolver, true, true, icons);
 
-    await poller.poll();
+    const first = await poller.poll({ maxListingsPerSourceRun: 25 });
     expect([...store.jobs.values()].filter((job) => job.admission?.canonicalEmployer)).toHaveLength(5);
-    await poller.poll();
+    expect(first.pendingResolution['community-list']).toBe(1);
+    expect(first.continuationSources).toContain('community-list');
+    const second = await poller.poll({ maxListingsPerSourceRun: 25 });
     expect([...store.jobs.values()].find((job) => job.company === 'tenant5')?.admission?.canonicalEmployer)
       .toMatchObject({ id: 'tenant5' });
+    expect(second.pendingResolution['community-list']).toBeUndefined();
     expect(icons).toHaveBeenCalledTimes(6);
+    const third = await poller.poll({ maxListingsPerSourceRun: 25 });
+    expect(third.unchangedSources).toContain('community-list');
   });
 
   it('keeps source publication nonblocking when automatic employer observation fails', async () => {

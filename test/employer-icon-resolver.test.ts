@@ -2493,6 +2493,25 @@ describe('employer declared-site precedence', () => {
 });
 
 describe('employer icon backfill', () => {
+  it('uses the newest open posting before a newer closed-history row', async () => {
+    const { database, icons } = subject();
+    const insert = database.prepare(`INSERT INTO catalog_items
+      (pk, sk, kind, value, catalog_state, catalog_sort_key)
+      VALUES (?, ?, 'internship', ?, ?, ?)`);
+    insert.run('closed-posting', 'posting', JSON.stringify({
+      normalizedUrl: 'https://example.com/closed', title: 'Closed role', lastSeenAt: '2026-09-28T12:00:00.000Z',
+      internshipIdentity: { company: { canonicalId: 'acme' } },
+    }), 'CLOSED', '2026-09-28T12:00:00.000Z');
+    insert.run('open-posting', 'posting', JSON.stringify({
+      normalizedUrl: 'https://example.com/open', title: 'Open role', lastSeenAt: '2026-09-27T12:00:00.000Z',
+      internshipIdentity: { company: { canonicalId: 'acme' } },
+    }), 'OPEN', '2026-09-27T12:00:00.000Z');
+
+    await expect(icons.latestPostingForEmployer('acme')).resolves.toMatchObject({
+      url: 'https://example.com/open', title: 'Open role',
+    });
+  });
+
   it('carries the employer’s own posting link so a backfilled employer resolves from its board', async () => {
     const { database, db, admission, icons } = subject();
     await admission.putCanonicalEmployer(employerRow('aevex', 'AEVEX'), NOW.toISOString());

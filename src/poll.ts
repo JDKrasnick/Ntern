@@ -826,12 +826,17 @@ export class IngestionRunner {
     const retryableRowExternalIds = new Set<string>();
     const deferredHandoffFailures: string[] = [];
     const automaticEmployerRefreshKeys = new Set<string>();
+    const pendingAutomaticEmployerExternalIds = new Set<string>();
     if (this.catalogAdmissionResolver?.observeAutomaticEmployerIdentities && completeFetchSequence) {
       const observedAt = this.now().toISOString();
-      const observations = automaticEmployerIdentityObservationSlice(groupAutomaticEmployerIdentityCandidates(listings.flatMap((listing) => {
+      const automaticCandidates = listings.flatMap((listing) => {
         const candidate = automaticEmployerIdentityCandidate(listing, completeFetchSequence, observedAt);
-        return candidate ? [candidate] : [];
-      })), completeFetchSequence);
+        return candidate ? [{ externalId: externalId(listing), candidate }] : [];
+      });
+      const observations = automaticEmployerIdentityObservationSlice(
+        groupAutomaticEmployerIdentityCandidates(automaticCandidates.map(({ candidate }) => candidate)),
+        completeFetchSequence,
+      );
       if (observations.length) {
         try {
           await this.catalogAdmissionResolver.observeAutomaticEmployerIdentities(observations);
@@ -845,13 +850,18 @@ export class IngestionRunner {
           }
         } catch (error) {
           // Employer discovery is enrichment. A transient D1 failure must not
-          // prevent otherwise valid source rows from being published; the
-          // rotating observation window will retry the tenant on a later fetch.
+          // prevent otherwise valid source rows from being published; retain
+          // the affected rows in the durable pass so a later slice retries them.
           console.error(JSON.stringify({
             event: 'automatic_employer_identity_observation_failed',
             sourceIds: [...new Set(observations.map((observation) => observation.sourceId))],
             error: error instanceof Error ? error.message : String(error),
           }));
+        }
+      }
+      for (const { externalId: candidateExternalId, candidate } of automaticCandidates) {
+        if (!automaticEmployerRefreshKeys.has(`${candidate.provider}\0${candidate.scope}`)) {
+          pendingAutomaticEmployerExternalIds.add(candidateExternalId);
         }
       }
     }
@@ -1396,6 +1406,7 @@ export class IngestionRunner {
       withdrawnProbeFailures,
       deferredHandoffFailures,
       retryableRowExternalIds,
+      pendingAutomaticEmployerExternalIds,
       probeFailureShare,
     };
   }
@@ -1760,11 +1771,13 @@ export class IngestionRunner {
             && migrationLimit === undefined
             ? GITHUB_RESOLUTION_WORK_CONCURRENCY : SOURCE_WORK_CONCURRENCY,
         );
-        // Keep inconclusive rows in the checkpoint without making the whole
-        // slice retry. Finish unvisited rows first; once only probes remain,
-        // the next scheduled poll retries them without a hot queue loop.
+        // Keep unobserved employer evidence and inconclusive probes in the
+        // checkpoint without retrying the whole slice. Finish unvisited rows
+        // first; once only probes remain, the scheduler retries them without a
+        // hot queue loop.
         const nextPendingRows = [...new Set([
           ...remainingRows,
+          ...resolvedListings.filter((listing) => resolution.pendingAutomaticEmployerExternalIds.has(externalId(listing))).map(externalId),
           ...resolvedListings.filter((listing) => resolution.retryableRowExternalIds.has(externalId(listing))).map(externalId),
         ])];
         // Existing catalog decisions are the durable migration obligation.
@@ -1829,9 +1842,12 @@ export class IngestionRunner {
           console.error(JSON.stringify({ event: 'github_resolution_stalled', sourceId: connector.id,
             pendingBefore: pendingResolutionRows.size, pendingAfter: nextPendingRows.length,
             scope: resolutionScope.length, slice: selectedSlice.length,
-            handled: resolution.handledExternalIds.size, retryable: resolution.retryableRowExternalIds.size }));
+            handled: resolution.handledExternalIds.size,
+            automaticEmployerPending: resolution.pendingAutomaticEmployerExternalIds.size,
+            retryable: resolution.retryableRowExternalIds.size }));
         }
-        if (remainingRows.length && resolutionProgressed && !report.continuationSources.includes(connector.id)) {
+        if ((remainingRows.length || resolution.pendingAutomaticEmployerExternalIds.size)
+          && resolutionProgressed && !report.continuationSources.includes(connector.id)) {
           report.continuationSources.push(connector.id);
         }
         if (nextPendingRows.length) report.pendingResolution[connector.id] = nextPendingRows.length;

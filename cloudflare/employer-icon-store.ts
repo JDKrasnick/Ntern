@@ -561,6 +561,10 @@ export class D1EmployerIconStore {
       FROM catalog_items
       WHERE kind = 'internship'
         AND json_extract(value, '$.internshipIdentity.company.canonicalId') = ?
+      ORDER BY CASE WHEN catalog_state = 'OPEN' THEN 0 ELSE 1 END,
+        CASE WHEN catalog_state = 'OPEN' THEN catalog_sort_key END DESC,
+        COALESCE(json_extract(value, '$.lastSeenAt'), '') DESC,
+        pk ASC
       LIMIT 1`).bind(canonicalEmployerId).first<Row>();
     if (!row || typeof row.url !== 'string' || !row.url.startsWith('http')) return undefined;
     const provenance = row.provenance;
