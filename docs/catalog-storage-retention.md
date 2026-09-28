@@ -28,7 +28,7 @@ Every sweep keeps what a live reader needs and deletes only history:
 | Sweep | Retention | What it removes | What it keeps |
 | --- | --- | --- | --- |
 | Notification events (`kind = 'notification-event'`) | 30 days | Outbox rows already consumed by the notification drain and past the operator recovery look-back | Anything inside the recovery window; the recovery endpoint rejects an older `since` value instead of returning a silently truncated result |
-| Closed internships (`kind = 'internship'`, `catalog_state = 'CLOSED'`) | 365 days since `lastSeenAt` | The job row, its per-source occurrences (named by its own `sourceReferences`), and `role_metadata_*` rows keyed by job id | Open roles, and closed roles still inside the window; the saved-application record is untouched and renders the existing "role unavailable" state |
+| Closed internships (`kind = 'internship'`, `catalog_state = 'CLOSED'`) | 365 days since `lastSeenAt` | The job row, its per-source occurrences (named by its own `sourceReferences`), and its complete job-scoped role-metadata acquisition/review/repair lifecycle | Open roles and closed roles still inside the window; each saved application receives a compact presentation snapshot before its catalog parent disappears, so company/title/location remain visible without retaining the application URL |
 | Closed source occurrences (`kind = 'source-occurrence'`, `occurrence.state = 'closed'`) | 180 days since `changedAt` | A source's own record that it dropped a posting | Occurrences the source still lists, and any occurrence inside the window |
 | Superseded evidence (`role_metadata_evidence.is_current = 0`) | 180 days | Historical evidence rows | The current evidence set |
 | Extraction attempts | 180 days | Older attempts, keeping the newest per `(job_id, source_id)` | The freshness row that coverage and candidate selection read |
@@ -47,7 +47,10 @@ Mutable rows are never deleted from a stale selection. Timestamp and metadata
 sweeps select and delete inside one SQLite statement. A closed job and its
 dependent rows are deleted in one D1 batch transaction; every child statement
 rechecks the exact selected parent, and the primary key remains authoritative if
-embedded JSON disagrees.
+embedded JSON disagrees. The same transaction snapshots saved-application
+presentation first and refuses the parent delete while any referencing
+application lacks that snapshot. The per-job metadata revision is deleted after
+the parent because the catalog-delete trigger recreates it.
 
 Whole-row deletion is what reclaims bytes; field-level compaction was
 deliberately not used. A stored source occurrence feeds
@@ -69,6 +72,9 @@ database:
   `coalesce(json_extract(value, '$.changedAt'), '')` where the row is a closed
   source occurrence. The query expressions match these indexes exactly, and the
   regression suite requires SQLite to choose range searches rather than scans.
+- `user_items_application_job` — partial expression index on application
+  `jobId`, used to snapshot every saved reference without scanning private user
+  data once per expired job.
 - `role_metadata_evidence_retention`, `role_metadata_extraction_observed`,
   `role_metadata_conflicts_resolved` — retention-leading indexes on the history
   tables.
@@ -100,7 +106,8 @@ Closed internships reuse the existing `catalog_items_state_sort`
 
 `test/catalog-retention.test.ts` covers each sweep: a dry run reports without
 deleting, expired rows are removed while live and recent rows are kept, a closed
-job is removed with its occurrences and metadata, concurrent reopen and embedded
-identity mismatch cases preserve live data, the newest attempt survives,
-multi-pass work stays bounded, and both timestamp predicates retain indexed
-range-search plans.
+job is removed with its occurrences and full-schema metadata lifecycle, a legacy
+saved application is snapshotted and still renders company/title/location through
+the real D1/API path, concurrent reopen and embedded identity mismatch cases
+preserve live data, the newest attempt survives, multi-pass work stays bounded,
+and the retention predicates retain indexed query plans.

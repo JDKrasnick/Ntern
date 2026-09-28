@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isEducationLevel, jobCategories, matchesJobFilter, parseJobFilter } from './core/filters.js';
 import { type InternshipStore, type ReleaseStore, type UserStore } from './store.js';
-import { ACCOUNT_EXPORT_SCHEMA_VERSION, type AccountDataExport, type ApplicantProfile, type ApplicationRecord, type ApplicationStatus, type DeviceToken, type Internship, type OccurrenceProvenance, type UserPreferences } from './types.js';
+import { ACCOUNT_EXPORT_SCHEMA_VERSION, type AccountDataExport, type ApplicantProfile, type ApplicationJobSnapshot, type ApplicationRecord, type ApplicationStatus, type DeviceToken, type Internship, type OccurrenceProvenance, type UserPreferences } from './types.js';
 import { EmployerIntegrationRegistry } from './providers.js';
 import { assistanceAvailability } from './application-assistance.js';
 import { createApplicationSession, transitionApplicationSession, type ApplicationFieldDraft, type ApplicationSession, type ApplicationSessionEvent } from './application-automation.js';
@@ -160,35 +160,53 @@ function safeSession(session: ApplicationSession) {
   return safe;
 }
 
+function applicationJobSnapshot(job: Internship): ApplicationJobSnapshot {
+  return {
+    jobId: job.jobId,
+    company: job.company,
+    title: job.title,
+    location: job.location,
+    season: job.season,
+    ...(job.postingIdentityStatus ? { postingIdentityStatus: job.postingIdentityStatus } : {}),
+    sourceReferences: publicJob(job).sourceReferences.map(({ sourceId, sourceUrl, provenance, state }) => ({
+      sourceId, sourceUrl, provenance, state,
+    })),
+  };
+}
+
 function applicationSummary(
   application: ApplicationRecord,
   job: Awaited<ReturnType<NonNullable<InternshipStore['getJob']>>>,
   identityUnconfirmedPublicationEnabled = true,
 ) {
-  const availability = !job ? 'catalog-review' as const
+  const { jobSnapshot, ...publicApplication } = application;
+  const presentation = job ?? jobSnapshot;
+  const availability = !job ? jobSnapshot ? 'closed' as const : 'catalog-review' as const
     : !job.open ? 'closed' as const
       : catalogEligible(job) && identityPublished(job, identityUnconfirmedPublicationEnabled) ? 'available' as const : 'catalog-review' as const;
   return {
-    ...application,
-    ...(job ? {
+    ...publicApplication,
+    ...(presentation ? {
       job: {
-        jobId: job.jobId,
-        company: job.company,
-        title: job.title,
-        location: job.location,
-        season: job.season,
-        open: job.open,
-        ...(job.postingIdentityStatus ? { postingIdentityStatus: job.postingIdentityStatus } : {}),
+        jobId: presentation.jobId,
+        company: presentation.company,
+        title: presentation.title,
+        location: presentation.location,
+        season: presentation.season,
+        open: job?.open ?? false,
+        ...(presentation.postingIdentityStatus ? { postingIdentityStatus: presentation.postingIdentityStatus } : {}),
         availability,
-        ...(availability !== 'catalog-review' ? {
+        ...(job && availability !== 'catalog-review' ? {
           applyUrl: publicApplicationUrl(job.applyUrl),
           assistance: assistanceAvailability(job, application.applyMode),
-        } : {
-          unavailableReason: job.postingIdentityStatus === 'unconfirmed' && !identityUnconfirmedPublicationEnabled
+        } : availability === 'catalog-review' ? {
+          unavailableReason: job?.postingIdentityStatus === 'unconfirmed' && !identityUnconfirmedPublicationEnabled
             ? 'Ntern verified the employer and application page, but is still reviewing this listing’s exact posting identity.'
             : 'Ntern couldn’t verify the official role page and is reviewing it.',
-        }),
-        sourceReferences: publicJob(job).sourceReferences.map(({ sourceId, sourceUrl, provenance, state }) => ({ sourceId, sourceUrl, provenance, state })),
+        } : {}),
+        sourceReferences: job
+          ? publicJob(job).sourceReferences.map(({ sourceId, sourceUrl, provenance, state }) => ({ sourceId, sourceUrl, provenance, state }))
+          : jobSnapshot?.sourceReferences ?? [],
       },
     } : { availability }),
   };
@@ -1376,6 +1394,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
           ...(status === 'saved' && queued ? { queuedAt: existing?.queuedAt ?? timestamp } : {}),
           notes: typeof body.notes === 'string' ? body.notes.slice(0, 5000) : existing?.notes,
           applyMode: integrations.applyMode(job), createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp,
+          jobSnapshot: applicationJobSnapshot(job),
         };
         await dependencies.users.putApplication(userId, application);
         return reply(existing ? 200 : 201, {

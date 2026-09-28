@@ -70,6 +70,7 @@ export interface CatalogRetentionReport {
   notificationEvents: number;
   closedJobs: number;
   closedJobOccurrences: number;
+  closedJobApplicationSnapshots: number;
   closedJobMetadataRows: number;
   closedOccurrences: number;
   metadataEvidenceHistory: number;
@@ -81,6 +82,7 @@ export interface CatalogRetentionCounts {
   notificationEvents: number;
   closedJobs: number;
   closedJobOccurrences: number;
+  closedJobApplicationSnapshots: number;
   closedJobMetadataRows: number;
   closedOccurrences: number;
   metadataEvidenceHistory: number;
@@ -104,6 +106,7 @@ function emptyCounts(): CatalogRetentionCounts {
     notificationEvents: 0,
     closedJobs: 0,
     closedJobOccurrences: 0,
+    closedJobApplicationSnapshots: 0,
     closedJobMetadataRows: 0,
     closedOccurrences: 0,
     metadataEvidenceHistory: 0,
@@ -168,58 +171,135 @@ async function sweepClosedJobs(
   cutoff: string,
   limit: number,
   apply: boolean,
-): Promise<{ jobs: number; occurrences: number; metadataRows: number; selected: number }> {
+): Promise<{ jobs: number; occurrences: number; applicationSnapshots: number; metadataRows: number; selected: number }> {
   const page = await db.prepare(`SELECT pk, sk, value, catalog_sort_key AS catalogSortKey FROM catalog_items
     WHERE kind = 'internship' AND catalog_state = 'CLOSED'
       AND catalog_sort_key IS NOT NULL AND catalog_sort_key < ?
     ORDER BY catalog_sort_key LIMIT ?`).bind(cutoff, limit).all<ClosedJobRow>();
   if (!apply || !page.results.length) {
-    return { jobs: page.results.length, occurrences: 0, metadataRows: 0, selected: page.results.length };
+    return { jobs: page.results.length, occurrences: 0, applicationSnapshots: 0, metadataRows: 0, selected: page.results.length };
   }
   let jobs = 0;
   let occurrences = 0;
+  let applicationSnapshots = 0;
   let metadataRows = 0;
   for (const row of page.results) {
     const jobId = row.pk.startsWith('JOB#') ? row.pk.slice('JOB#'.length) : row.pk;
     let references: Array<{ sourceId?: unknown; externalId?: unknown }> = [];
+    let applicationSnapshot: Record<string, unknown> | undefined;
     try {
-      const parsed = JSON.parse(row.value) as { jobId?: unknown; sourceReferences?: unknown };
+      const parsed = JSON.parse(row.value) as {
+        jobId?: unknown; company?: unknown; title?: unknown; location?: unknown; season?: unknown;
+        postingIdentityStatus?: unknown; sourceReferences?: unknown;
+      };
       if (typeof parsed.jobId === 'string' && parsed.jobId !== jobId) {
         console.error(JSON.stringify({ command: 'catalog-retention-job-id-mismatch', pk: row.pk, embeddedJobId: parsed.jobId }));
       } else if (Array.isArray(parsed.sourceReferences)) {
         references = parsed.sourceReferences as typeof references;
       }
+      if (typeof parsed.company === 'string' && typeof parsed.title === 'string'
+        && typeof parsed.location === 'string' && typeof parsed.season === 'string') {
+        applicationSnapshot = {
+          jobId,
+          company: parsed.company,
+          title: parsed.title,
+          location: parsed.location,
+          season: parsed.season,
+          ...(['confirmed', 'unconfirmed'].includes(String(parsed.postingIdentityStatus))
+            ? { postingIdentityStatus: parsed.postingIdentityStatus }
+            : {}),
+          sourceReferences: references.flatMap((reference) => {
+            if (!reference || typeof reference.sourceId !== 'string' || typeof (reference as { sourceUrl?: unknown }).sourceUrl !== 'string') return [];
+            const source = reference as { sourceId: string; sourceUrl: string; provenance?: unknown; state?: unknown };
+            return [{ sourceId: source.sourceId, sourceUrl: source.sourceUrl,
+              ...(['official-employer', 'official-provider', 'reviewed-community'].includes(String(source.provenance)) ? { provenance: source.provenance } : {}),
+              ...(['open', 'closed'].includes(String(source.state)) ? { state: source.state } : {}) }];
+          }),
+        };
+      }
     } catch { /* A malformed row is still expired by its own key. */ }
-    const parentGuard = `EXISTS (SELECT 1 FROM catalog_items AS job
+    const selectedParentGuard = `EXISTS (SELECT 1 FROM catalog_items AS job
       WHERE job.pk = ? AND job.sk = ? AND job.kind = 'internship' AND job.value = ?
         AND job.catalog_state = 'CLOSED' AND job.catalog_sort_key = ?)`;
     const parentBindings = [row.pk, row.sk, row.value, row.catalogSortKey];
+    // Every application must hold a compact presentation before the catalog row
+    // can disappear. This check composes with the exact-parent guard so a save
+    // or parent rewrite racing the selected page cannot produce a blank role.
+    const parentGuard = `${selectedParentGuard} AND NOT EXISTS (
+      SELECT 1 FROM user_items AS saved
+      WHERE saved.kind = 'application' AND json_extract(saved.value, '$.jobId') = ?
+        AND (coalesce(json_type(saved.value, '$.jobSnapshot'), '') <> 'object'
+          OR coalesce(json_type(saved.value, '$.jobSnapshot.company'), '') <> 'text'
+          OR coalesce(json_type(saved.value, '$.jobSnapshot.title'), '') <> 'text'
+          OR coalesce(json_type(saved.value, '$.jobSnapshot.location'), '') <> 'text'
+          OR coalesce(json_type(saved.value, '$.jobSnapshot.season'), '') <> 'text'))`;
+    const guardedBindings = [...parentBindings, jobId];
     const statements: D1PreparedStatement[] = [];
-    let occurrenceStatements = 0;
+    let applicationSnapshotIndex: number | undefined;
+    const occurrenceIndexes: number[] = [];
+    const metadataIndexes: number[] = [];
+    if (applicationSnapshot) {
+      applicationSnapshotIndex = statements.length;
+      statements.push(db.prepare(`UPDATE user_items SET value = json_set(value, '$.jobSnapshot', json(?))
+        WHERE kind = 'application' AND json_extract(value, '$.jobId') = ? AND ${selectedParentGuard}`)
+        .bind(JSON.stringify(applicationSnapshot), jobId, ...parentBindings));
+    }
     for (const reference of references) {
       if (!reference || typeof reference.sourceId !== 'string' || typeof reference.externalId !== 'string') continue;
+      occurrenceIndexes.push(statements.length);
       statements.push(db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND sk = ? AND kind = 'source-occurrence'
         AND json_extract(value, '$.jobId') = ? AND json_extract(value, '$.occurrence.state') = 'closed'
         AND ${parentGuard}`)
-        .bind(`SOURCE#${reference.sourceId}`, `OCCURRENCE#${reference.externalId}`, jobId, ...parentBindings));
-      occurrenceStatements += 1;
+        .bind(`SOURCE#${reference.sourceId}`, `OCCURRENCE#${reference.externalId}`, jobId, ...guardedBindings));
     }
-    statements.push(db.prepare(`DELETE FROM role_metadata_evidence WHERE job_id = ? AND ${parentGuard}`).bind(jobId, ...parentBindings));
-    statements.push(db.prepare(`DELETE FROM role_metadata_extraction_attempts WHERE job_id = ? AND ${parentGuard}`).bind(jobId, ...parentBindings));
-    statements.push(db.prepare(`DELETE FROM role_metadata_conflicts WHERE job_id = ? AND ${parentGuard}`).bind(jobId, ...parentBindings));
-    // The parent delete is last. D1 batch is one transaction, and every child
-    // statement rechecks the exact selected parent, so a concurrent reopen or
-    // rewrite makes the whole selected snapshot ineligible rather than deleting
-    // live state. The selected primary key remains authoritative over JSON.
+    const metadataDelete = (query: string, bindings: unknown[]) => {
+      metadataIndexes.push(statements.length);
+      statements.push(db.prepare(query).bind(...bindings));
+    };
+    // A catalog-wide repair plan becomes unusable as soon as one staged job is
+    // removed. Clear the whole token before its job-keyed stage row disappears.
+    for (const table of ['role_metadata_repair_guards', 'role_metadata_repair_review_stage', 'role_metadata_repair_plans'] as const) {
+      metadataDelete(`DELETE FROM ${table} WHERE token IN (
+        SELECT token FROM role_metadata_repair_stage WHERE job_id = ?) AND ${parentGuard}`, [jobId, ...guardedBindings]);
+    }
+    metadataDelete(`DELETE FROM role_metadata_repair_stage WHERE token IN (
+      SELECT token FROM role_metadata_repair_stage WHERE job_id = ?) AND ${parentGuard}`, [jobId, ...guardedBindings]);
+    metadataDelete(`DELETE FROM role_metadata_repair_review_stage WHERE job_id = ? AND ${parentGuard}`, [jobId, ...guardedBindings]);
+    metadataDelete(`DELETE FROM role_metadata_review_guards WHERE token IN (
+      SELECT token FROM role_metadata_review_plans WHERE job_id = ?
+      UNION SELECT token FROM role_metadata_review_decisions WHERE job_id = ?) AND ${parentGuard}`,
+    [jobId, jobId, ...guardedBindings]);
+    for (const table of ['role_metadata_review_plans', 'role_metadata_review_decisions', 'role_metadata_acquisition',
+      'role_metadata_evidence', 'role_metadata_extraction_attempts', 'role_metadata_conflicts'] as const) {
+      metadataDelete(`DELETE FROM ${table} WHERE job_id = ? AND ${parentGuard}`, [jobId, ...guardedBindings]);
+    }
+    // D1 batch is one transaction, and every child delete rechecks the exact
+    // selected parent plus the saved-application snapshot contract. A concurrent
+    // reopen, rewrite, or unsnapshotted save makes the parent ineligible.
+    const parentIndex = statements.length;
     statements.push(db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND sk = ? AND kind = 'internship'
-      AND value = ? AND catalog_state = 'CLOSED' AND catalog_sort_key = ?`)
-      .bind(row.pk, row.sk, row.value, row.catalogSortKey));
+      AND value = ? AND catalog_state = 'CLOSED' AND catalog_sort_key = ?
+      AND NOT EXISTS (SELECT 1 FROM user_items AS saved
+        WHERE saved.kind = 'application' AND json_extract(saved.value, '$.jobId') = ?
+          AND (coalesce(json_type(saved.value, '$.jobSnapshot'), '') <> 'object'
+            OR coalesce(json_type(saved.value, '$.jobSnapshot.company'), '') <> 'text'
+            OR coalesce(json_type(saved.value, '$.jobSnapshot.title'), '') <> 'text'
+            OR coalesce(json_type(saved.value, '$.jobSnapshot.location'), '') <> 'text'
+            OR coalesce(json_type(saved.value, '$.jobSnapshot.season'), '') <> 'text'))`)
+      .bind(row.pk, row.sk, row.value, row.catalogSortKey, jobId));
+    // Evidence and catalog DELETE triggers both increment this row. Remove the
+    // final trigger-created revision only when the exact parent is now absent.
+    const revisionIndex = statements.length;
+    statements.push(db.prepare(`DELETE FROM role_metadata_job_revision WHERE job_id = ?
+      AND NOT EXISTS (SELECT 1 FROM catalog_items WHERE pk = ? AND sk = ? AND kind = 'internship')`)
+      .bind(jobId, row.pk, row.sk));
     const results = await db.batch(statements);
-    for (let index = 0; index < occurrenceStatements; index += 1) occurrences += results[index]?.meta.changes ?? 0;
-    for (let index = occurrenceStatements; index < results.length - 1; index += 1) metadataRows += results[index]?.meta.changes ?? 0;
-    jobs += results.at(-1)?.meta.changes ?? 0;
+    if (applicationSnapshotIndex !== undefined) applicationSnapshots += results[applicationSnapshotIndex]?.meta.changes ?? 0;
+    for (const index of occurrenceIndexes) occurrences += results[index]?.meta.changes ?? 0;
+    for (const index of [...metadataIndexes, revisionIndex]) metadataRows += results[index]?.meta.changes ?? 0;
+    jobs += results[parentIndex]?.meta.changes ?? 0;
   }
-  return { jobs, occurrences, metadataRows, selected: page.results.length };
+  return { jobs, occurrences, applicationSnapshots, metadataRows, selected: page.results.length };
 }
 
 /**
@@ -328,6 +408,7 @@ export async function runCatalogRetention(db: D1Database, options: CatalogRetent
     const jobs = await sweepClosedJobs(db, cutoffs.jobs, jobBatch, apply);
     counts.closedJobs += jobs.jobs;
     counts.closedJobOccurrences += jobs.occurrences;
+    counts.closedJobApplicationSnapshots += jobs.applicationSnapshots;
     counts.closedJobMetadataRows += jobs.metadataRows;
     const closedOccurrences = await sweepClosedOccurrences(db, cutoffs.occurrences, rowBatch, apply);
     counts.closedOccurrences += closedOccurrences;

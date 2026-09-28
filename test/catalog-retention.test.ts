@@ -1,6 +1,8 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { createApiHandler } from '../src/api.js';
+import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import {
   CLOSED_JOB_RETENTION_DAYS, CLOSED_OCCURRENCE_RETENTION_DAYS,
   METADATA_HISTORY_RETENTION_DAYS, NOTIFICATION_EVENT_RETENTION_DAYS,
@@ -34,7 +36,9 @@ function sqliteD1(database: DatabaseSync, beforeFirstBatch?: () => void): D1Data
 
 function subject(beforeFirstBatch?: (database: DatabaseSync) => void): { database: DatabaseSync; db: D1Database } {
   const database = new DatabaseSync(':memory:');
-  for (const migration of ['0001_initial.sql', '0015_role_metadata_enrichment.sql', '0038_catalog_retention_indexes.sql']) {
+  const migrations = readdirSync(new URL('../cloudflare/migrations', import.meta.url))
+    .filter((name) => name.endsWith('.sql')).sort();
+  for (const migration of migrations) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   return { database, db: sqliteD1(database, beforeFirstBatch ? () => beforeFirstBatch(database) : undefined) };
@@ -55,7 +59,8 @@ function closedJob(database: DatabaseSync, jobId: string, lastSeenAt: string, so
   insertCatalog(database, {
     pk: `JOB#${jobId}`, sk: 'META', kind: 'internship', catalogState: 'CLOSED',
     catalogSortKey: `${lastSeenAt}#${jobId}`,
-    value: { jobId, sourceReferences: [{ sourceId, externalId, document: '', sourceUrl: 'https://x.test', row: 0 }] },
+    value: { jobId, company: 'Acme', title: 'Software Intern', location: 'Remote', season: 'summer-2024', open: false,
+      sourceReferences: [{ sourceId, externalId, document: '', sourceUrl: 'https://x.test', row: 0, state: 'closed' }] },
   });
   insertCatalog(database, {
     pk: `SOURCE#${sourceId}`, sk: `OCCURRENCE#${externalId}`, kind: 'source-occurrence',
@@ -73,6 +78,32 @@ function closedJob(database: DatabaseSync, jobId: string, lastSeenAt: string, so
     (id, job_id, field, evidence_hashes, values_json, state, opened_at, updated_at)
     VALUES (?, ?, 'compensation', '[]', '[]', 'resolved', ?, ?)`).run(`c-${jobId}`, jobId, lastSeenAt, lastSeenAt);
 }
+
+function seedMetadataLifecycle(database: DatabaseSync, jobId: string) {
+  database.prepare(`INSERT INTO role_metadata_acquisition(job_id, source_id, report)
+    VALUES (?, 'gh-acme', '{}')`).run(jobId);
+  database.prepare(`INSERT INTO role_metadata_review_plans
+    (token, job_id, original_value, decision, metadata_revision, created_at)
+    VALUES ('review-old', ?, '{}', '{}', 0, ?)`).run(jobId, daysBefore(400));
+  database.prepare(`INSERT INTO role_metadata_review_decisions(job_id, token, decision, approved_at)
+    VALUES (?, 'review-old', '{}', ?)`).run(jobId, daysBefore(399));
+  database.prepare(`INSERT INTO role_metadata_review_guards(token, ok, approved_at)
+    VALUES ('review-old', 1, ?)`).run(daysBefore(399));
+  database.prepare(`INSERT INTO role_metadata_repair_plans
+    (token, expected_jobs, expected_occurrences, conflict_count, evidence_snapshot, collection_snapshot, collection_complete, created_at)
+    VALUES ('repair-old', 1, 0, 0, '{}', '{}', 1, ?)`).run(daysBefore(398));
+  database.prepare(`INSERT INTO role_metadata_repair_stage
+    (token, job_id, original_value, proposed_value, created_at)
+    VALUES ('repair-old', ?, '{}', '{}', ?)`).run(jobId, daysBefore(398));
+  database.prepare(`INSERT INTO role_metadata_repair_review_stage(token, job_id, decision_token)
+    VALUES ('repair-old', ?, 'review-old')`).run(jobId);
+  database.prepare(`INSERT INTO role_metadata_repair_guards(token, ok, applied_at)
+    VALUES ('repair-old', 1, ?)`).run(daysBefore(397));
+}
+
+const apiEvent = (userId: string, method: string, rawPath: string) => ({
+  rawPath, body: undefined, requestContext: { http: { method }, authorizer: { jwt: { claims: { sub: userId } } } },
+});
 
 describe('catalog retention', () => {
   it('reports eligible history without deleting on a dry run', async () => {
@@ -105,12 +136,13 @@ describe('catalog retention', () => {
   it('removes a closed internship with its occurrences and metadata, keeping live and recent roles', async () => {
     const { database, db } = subject();
     closedJob(database, 'old-job', daysBefore(CLOSED_JOB_RETENTION_DAYS + 10), 'gh-acme', 'ext-1');
+    seedMetadataLifecycle(database, 'old-job');
     closedJob(database, 'recent-job', daysBefore(CLOSED_OCCURRENCE_RETENTION_DAYS - 10), 'gh-beta', 'ext-2');
     insertCatalog(database, { pk: 'JOB#open-job', sk: 'META', kind: 'internship', catalogState: 'OPEN',
       catalogSortKey: `${daysBefore(1)}#open-job`, value: { jobId: 'open-job', sourceReferences: [] } });
 
     const report = await runCatalogRetention(db, { now: NOW, apply: true });
-    expect(report).toMatchObject({ closedJobs: 1, closedJobOccurrences: 1, closedJobMetadataRows: 3 });
+    expect(report).toMatchObject({ closedJobs: 1, closedJobOccurrences: 1, closedJobMetadataRows: 12 });
     expect(database.prepare("SELECT pk FROM catalog_items WHERE kind = 'internship' ORDER BY pk").all())
       .toEqual([{ pk: 'JOB#open-job' }, { pk: 'JOB#recent-job' }]);
     expect(database.prepare("SELECT pk FROM catalog_items WHERE kind = 'source-occurrence'").all())
@@ -121,6 +153,63 @@ describe('catalog retention', () => {
       .toEqual([{ job_id: 'recent-job' }]);
     expect(database.prepare('SELECT job_id FROM role_metadata_conflicts ORDER BY job_id').all())
       .toEqual([{ job_id: 'recent-job' }]);
+    for (const table of ['role_metadata_acquisition', 'role_metadata_review_plans', 'role_metadata_review_decisions',
+      'role_metadata_repair_stage', 'role_metadata_repair_review_stage', 'role_metadata_job_revision']) {
+      expect(database.prepare(`SELECT job_id FROM ${table} WHERE job_id = 'old-job'`).all(), table).toEqual([]);
+    }
+    for (const table of ['role_metadata_review_guards', 'role_metadata_repair_plans', 'role_metadata_repair_guards']) {
+      expect(database.prepare(`SELECT token FROM ${table} WHERE token LIKE '%-old'`).all(), table).toEqual([]);
+    }
+    database.close();
+  });
+
+  it('snapshots a saved role before expiry and preserves its API presentation', async () => {
+    const application = {
+      applicationId: 'saved-1', jobId: 'saved-job', status: 'saved',
+      createdAt: daysBefore(300), updatedAt: daysBefore(300),
+    };
+    // Insert after the retention page is selected but before its D1 batch starts,
+    // matching a save that races the daily sweep.
+    const { database, db } = subject((current) => {
+      current.prepare(`INSERT INTO user_items(user_id, item_key, kind, value)
+        VALUES ('student', 'APPLICATION#saved-1', 'application', ?)`).run(JSON.stringify(application));
+    });
+    closedJob(database, 'saved-job', daysBefore(CLOSED_JOB_RETENTION_DAYS + 10), 'gh-acme', 'saved-ext');
+    const users = new D1UserStore(db);
+
+    const report = await runCatalogRetention(db, { now: NOW, apply: true });
+
+    expect(report).toMatchObject({ closedJobs: 1, closedJobApplicationSnapshots: 1 });
+    expect(database.prepare("SELECT 1 FROM catalog_items WHERE pk = 'JOB#saved-job'").get()).toBeUndefined();
+    const handler = createApiHandler({ jobs: new D1InternshipStore(db), users });
+    const response = await handler(apiEvent('student', 'GET', '/me/applications'));
+    expect(JSON.parse(response.body).applications[0]).toMatchObject({
+      jobId: 'saved-job',
+      job: { jobId: 'saved-job', company: 'Acme', title: 'Software Intern', location: 'Remote', open: false, availability: 'closed' },
+    });
+    expect(JSON.parse(response.body).applications[0]).not.toHaveProperty('jobSnapshot');
+    database.close();
+  });
+
+  it('keeps an expired parent when a referenced application cannot be snapshotted safely', async () => {
+    const { database, db } = subject();
+    closedJob(database, 'malformed-job', daysBefore(CLOSED_JOB_RETENTION_DAYS + 10), 'gh-acme', 'malformed-ext');
+    const row = database.prepare("SELECT value FROM catalog_items WHERE pk = 'JOB#malformed-job'").get() as { value: string };
+    const malformed = JSON.parse(row.value) as Record<string, unknown>;
+    delete malformed.company;
+    database.prepare("UPDATE catalog_items SET value = ? WHERE pk = 'JOB#malformed-job'").run(JSON.stringify(malformed));
+    await new D1UserStore(db).putApplication('student', {
+      applicationId: 'saved-malformed', jobId: 'malformed-job', status: 'saved',
+      createdAt: daysBefore(300), updatedAt: daysBefore(300),
+    });
+
+    const report = await runCatalogRetention(db, { now: NOW, apply: true });
+
+    expect(report.closedJobs).toBe(0);
+    expect(database.prepare("SELECT 1 AS present FROM catalog_items WHERE pk = 'JOB#malformed-job'").get())
+      .toEqual({ present: 1 });
+    const saved = await new D1UserStore(db).getApplication('student', 'saved-malformed');
+    expect(saved).not.toHaveProperty('jobSnapshot');
     database.close();
   });
 
@@ -238,6 +327,10 @@ describe('catalog retention', () => {
 
   it('uses indexed range searches for timestamp retention predicates', () => {
     const { database } = subject();
+    // The complete production schema has broader catalog indexes. Populate the
+    // planner statistics D1 maintains so this checks the selected retention
+    // access path rather than SQLite's empty-database fallback.
+    database.exec('ANALYZE');
     const notificationPlan = database.prepare(`EXPLAIN QUERY PLAN SELECT rowid FROM catalog_items
       WHERE kind = 'notification-event' AND coalesce(json_extract(value, '$.createdAt'), '') < ?
       ORDER BY coalesce(json_extract(value, '$.createdAt'), '') LIMIT ?`).all('2026-01-01', 200) as Array<{ detail: string }>;
@@ -245,11 +338,15 @@ describe('catalog retention', () => {
       WHERE kind = 'source-occurrence' AND json_extract(value, '$.occurrence.state') = 'closed'
         AND coalesce(json_extract(value, '$.changedAt'), '') < ?
       ORDER BY coalesce(json_extract(value, '$.changedAt'), '') LIMIT ?`).all('2026-01-01', 200) as Array<{ detail: string }>;
+    const applicationPlan = database.prepare(`EXPLAIN QUERY PLAN SELECT rowid FROM user_items
+      WHERE kind = 'application' AND json_extract(value, '$.jobId') = ?`).all('job-1') as Array<{ detail: string }>;
 
     expect(notificationPlan.map(({ detail }) => detail).join('\n'))
       .toContain('SEARCH catalog_items USING INDEX catalog_items_notification_event_created (<expr><?)');
     expect(occurrencePlan.map(({ detail }) => detail).join('\n'))
       .toContain('SEARCH catalog_items USING INDEX catalog_items_source_occurrence_closed_changed (<expr><?)');
+    expect(applicationPlan.map(({ detail }) => detail).join('\n'))
+      .toContain('SEARCH user_items USING INDEX user_items_application_job (<expr>=?)');
     database.close();
   });
 });

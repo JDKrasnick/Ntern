@@ -9,6 +9,22 @@ export type { EducationLevel };
 export type ApplicationStatus =
   | 'saved' | 'applied' | 'assessment' | 'interview' | 'offer' | 'rejected' | 'withdrawn';
 
+/** Compact role presentation retained with an application after catalog expiry. */
+export interface ApplicationJobSnapshot {
+  jobId: string;
+  company: string;
+  title: string;
+  location: string;
+  season: string;
+  postingIdentityStatus?: 'confirmed' | 'unconfirmed';
+  sourceReferences: Array<{
+    sourceId: string;
+    sourceUrl: string;
+    provenance?: OccurrenceProvenance;
+    state?: 'open' | 'closed';
+  }>;
+}
+
 export interface ApplicationRecord {
   applicationId: string;
   jobId: string;
@@ -24,6 +40,8 @@ export interface ApplicationRecord {
   notes?: string;
   /** `partner` is only set after an employer has granted direct-submit access. */
   applyMode?: 'official-form' | 'partner';
+  /** Presentation-only fallback; never contains an application URL. */
+  jobSnapshot?: ApplicationJobSnapshot;
 }
 
 export type AlertDelivery = 'immediate' | 'daily-digest';
