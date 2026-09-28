@@ -1878,6 +1878,11 @@ export class IngestionRunner {
           filter: this.filter,
           validatedAt: resolution.validatedAt,
           metadataValidated: resolution.metadataValidated,
+          // A bounded metadata refresh must commit each sliced row so the
+          // checkpoint cursor can certify it and retry a failed evidence write.
+          forcePersistExternalIds: boundedMetadataRefresh
+            ? new Set(selectedMetadataMigrations.map((listing) => externalId(listing)))
+            : undefined,
           alertEligible: resolution.alertEligible,
           publishUnconfirmedIdentities: this.publishUnconfirmedIdentities,
           trustedCommunityAlertsEnabled: trustedPolicy?.alertMode === 'exact-identity-or-two-complete-snapshots',

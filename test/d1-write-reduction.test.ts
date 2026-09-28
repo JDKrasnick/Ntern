@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
+import { CatalogReconciler } from '../src/ingestion/catalog-reconciler.js';
+import { extractPostingMetadataEvidence } from '../src/role-metadata.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
-import type { CatalogAdmission, Internship, NotificationEvent, SourceCheckpoint, SourceOccurrenceState } from '../src/types.js';
+import type { CatalogAdmission, Internship, NotificationEvent, ProcessedListing, SourceCheckpoint, SourceOccurrenceState } from '../src/types.js';
 
 /**
  * D1 bills a row an `UPDATE` matched, not a row whose bytes changed, so a writer
@@ -118,6 +120,48 @@ describe('differential catalog writes', () => {
     expect(await current.jobs.putInternshipWithNotificationEvent(stored, event)).toBe(false);
     expect(current.rowsWritten()).toBe(afterFirst);
     expect(await current.jobs.getJob('job-1')).toMatchObject({ jobId: 'job-1' });
+  });
+
+  it('bills nothing for a re-poll whose only change is observation clocks', async () => {
+    const current = subject();
+    const reconciler = new CatalogReconciler();
+    const admission = (evaluatedAt: string): CatalogAdmission => ({
+      employerResolution: 'resolved', postingAttribution: 'attributed',
+      destination: { classification: 'posting-detail', candidateUrl: 'https://careers.acme.test/job-1',
+        provider: 'structured', inspectedAt: evaluatedAt,
+        freshUntil: new Date(Date.parse(evaluatedAt) + 7 * 86_400_000).toISOString(),
+        nextCheckAt: new Date(Date.parse(evaluatedAt) + 6 * 86_400_000).toISOString() },
+      metadata: { complete: true, title: 'complete', location: 'complete' }, catalogEligible: true, alertEligible: true,
+      reasonCodes: [], evaluatedAt, evidenceObservedAt: evaluatedAt,
+    });
+    const sourceListing = (observedAt: string): ProcessedListing => ({
+      sourceId: 'source-a', externalId: 'role-1', document: 'role-1', sourceUrl: 'https://source.example.test/source-a', row: 1,
+      company: 'Acme', title: 'Software Engineering Intern', location: 'Remote', season: 'summer-2027',
+      applyUrl: 'https://jobs.ashbyhq.com/acme/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      compensation: { raw: '' }, requirements: { requiresUsCitizenship: false, advancedDegreeRequired: false },
+      state: 'open', fetchedAt: observedAt, technical: true, admission: admission(observedAt),
+      metadataEvidence: extractPostingMetadataEvidence({
+        artifact: { title: 'Software Engineering Intern', compensationText: 'USD $40/hour' },
+        sourceClass: 'official-ats', sourceId: 'source-a',
+        sourceUrl: 'https://source.example.test/source-a', observedAt, exactPosting: true,
+      }),
+    });
+    const input = (now: string, resolvedJobs: Map<string, Internship>) => ({
+      sourceId: 'source-a', snapshotHash: 'snapshot-1', activeExternalIds: new Set(['role-1']),
+      listings: [sourceListing(now)], resolvedJobs, now, baseline: false,
+    });
+    const first = reconciler.reconcile({ ...input('2026-07-29T12:00:00.000Z', new Map()), priorOccurrences: [] });
+    const storedJob = first.jobs[0]!;
+    await current.jobs.putInternship(storedJob);
+    const afterFirst = current.rowsWritten();
+
+    const second = reconciler.reconcile({
+      ...input('2026-07-29T13:00:00.000Z', new Map([['role-1', storedJob]])),
+      priorOccurrences: first.occurrences,
+    });
+    await current.jobs.putInternship(second.jobs[0]!);
+    expect(current.rowsWritten()).toBe(afterFirst);
+    expect(await current.jobs.getJob(storedJob.jobId)).toMatchObject({ lastSeenAt: '2026-07-29T12:00:00.000Z' });
   });
 
   it('skips an unchanged source occurrence and an unchanged checkpoint', async () => {

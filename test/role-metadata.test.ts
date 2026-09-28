@@ -7,6 +7,7 @@ import {
   extractPostingMetadataEvidence,
   extractRoleMetadataEvidence,
   extractVerifiedPageMetadataEvidence,
+  observationClockFreeContent,
   projectRoleMetadata,
   reconcileRoleMetadata,
   ROLE_METADATA_EXTRACTION_VERSION,
@@ -37,6 +38,27 @@ function job(overrides: Partial<Internship> = {}): Internship {
 }
 
 describe('provider-neutral role metadata', () => {
+  it('ignores observation-derived clocks while retaining publisher timestamps', () => {
+    const content = (at: string, validThrough: string) => observationClockFreeContent({
+      observedAt: at,
+      admission: {
+        evaluatedAt: at,
+        evidenceObservedAt: at,
+        destination: {
+          inspectedAt: at,
+          freshUntil: new Date(Date.parse(at) + 7 * 86_400_000).toISOString(),
+          nextCheckAt: new Date(Date.parse(at) + 6 * 86_400_000).toISOString(),
+          validThrough,
+        },
+      },
+    });
+
+    expect(content('2026-09-04T12:00:00.000Z', '2026-10-01T00:00:00.000Z'))
+      .toBe(content('2026-09-04T13:00:00.000Z', '2026-10-01T00:00:00.000Z'));
+    expect(content('2026-09-04T12:00:00.000Z', '2026-10-01T00:00:00.000Z'))
+      .not.toBe(content('2026-09-04T13:00:00.000Z', '2026-10-02T00:00:00.000Z'));
+  });
+
   it('drops a community advanced-degree badge the official audience contradicts', () => {
     const undergraduate = { levels: ['undergraduate'] as EducationLevel[], evidenceStatus: 'explicit' as const, provenance: [field] };
     const graduate = { levels: ['masters'] as EducationLevel[], evidenceStatus: 'explicit' as const, provenance: [field] };
