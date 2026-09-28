@@ -10,12 +10,15 @@ type SqliteValue = string | number | bigint | null | Uint8Array;
 // with "Memory limit exceeded before EOF." Model that by failing any read that
 // materializes more than `maxRowsPerStatement` rows, so an unbounded per-source
 // read cannot pass and a paged read can.
-function boundedSqliteD1(database: DatabaseSync, maxRowsPerStatement: number): D1Database {
+function boundedSqliteD1(database: DatabaseSync, maxRowsPerStatement: number, maxBindingsPerStatement = Number.POSITIVE_INFINITY): D1Database {
   const prepared = (query: string, values: unknown[] = []): D1PreparedStatement => {
     const statement: StatementSync = database.prepare(query);
     const bound = values as SqliteValue[];
     return {
-      bind(...next: unknown[]) { return prepared(query, next); },
+      bind(...next: unknown[]) {
+        if (next.length > maxBindingsPerStatement) throw new Error('D1_ERROR: too many SQL variables');
+        return prepared(query, next);
+      },
       async first<T>() { return (statement.get(...bound) as T | undefined) ?? null; },
       async all<T>() {
         const results = statement.all(...bound) as T[];
@@ -77,5 +80,74 @@ describe('D1 source occurrence reads', () => {
     expect(new Set(occurrences.map((item) => item.externalId)).size).toBe(total);
     // Non-occurrence rows under the same partition must stay excluded.
     expect(occurrences.some((item) => item.externalId === 'CHECKPOINT' || item.externalId === 'HEALTH')).toBe(false);
+  });
+
+  it('hydrates selected rows and returns only lifecycle-actionable IDs', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (pk TEXT, sk TEXT, kind TEXT, value TEXT, source_id TEXT, external_id TEXT, PRIMARY KEY (pk, sk));
+    `);
+    const active = occurrence('active');
+    const oneOmission = { ...occurrence('one-omission'), present: false, consecutiveOmissions: 1 };
+    const retainedClosed = { ...occurrence('retained-closed'), present: false, consecutiveOmissions: 2,
+      occurrence: { ...occurrence('retained-closed').occurrence, state: 'closed' as const } };
+    const splitClose = { ...occurrence('split-close'), present: false, consecutiveOmissions: 2,
+      occurrence: { ...occurrence('split-close').occurrence, state: 'closed' as const } };
+    const revoked = { ...occurrence('revoked'), occurrence: { ...occurrence('revoked').occurrence,
+      admissionConfigurationVersion: 'trusted-policy-v1',
+      trustedCommunityAlertQualification: { sourceMaterialHash: 'material-v1', candidateKey: 'candidate',
+        consecutiveCompleteSnapshots: 1, status: 'pending' as const, baselineSuppressed: true },
+      admission: { catalogEligible: true, alertEligible: false, reasonCodes: [],
+        evaluatedAt: '2026-09-15T00:00:00.000Z', evidenceObservedAt: '2026-09-15T00:00:00.000Z',
+        employerResolution: 'source-reported', postingAttribution: 'attributed', metadata: {
+          complete: true, title: 'complete', location: 'complete',
+        }, destination: {
+          classification: 'posting-detail' as const, candidateUrl: 'https://example.test/apply/revoked',
+          provider: 'github' as const, reachability: 'live' as const,
+          inspectedAt: '2026-09-15T00:00:00.000Z', reasonCodes: [],
+          browserVisible: false,
+        }, evidenceCodes: ['trusted-community-source'] } } } as SourceOccurrenceState;
+    const insert = database.prepare("INSERT INTO catalog_items VALUES (?, ?, 'source-occurrence', ?, ?, ?)");
+    for (const value of [active, oneOmission, retainedClosed, splitClose, revoked]) {
+      insert.run('SOURCE#github-large', `OCCURRENCE#${value.externalId}`, JSON.stringify(value), value.sourceId, value.externalId);
+    }
+    const splitJob = {
+      jobId: splitClose.jobId,
+      sourceReferences: [{ ...splitClose.occurrence, state: 'open' }],
+    };
+    insert.run(`JOB#${splitClose.jobId}`, 'META', JSON.stringify(splitJob), null, null);
+    const store = new D1InternshipStore(boundedSqliteD1(database, 500));
+
+    expect((await store.getSourceOccurrencesByExternalIds('github-large', ['revoked', 'missing', 'active']))
+      .map((item) => item.externalId)).toEqual(['revoked', 'active']);
+    expect(await store.listSourceOccurrenceIdsPendingReconciliation('github-large'))
+      .toEqual(['active', 'one-omission', 'revoked', 'split-close']);
+    expect(await store.listSourceOccurrenceTrustedCommunityHealth('github-large')).toEqual([{
+      externalId: 'revoked',
+      admissionConfigurationVersion: 'trusted-policy-v1',
+      sourceMaterialHash: 'material-v1',
+      admission: { reasonCodes: [], destination: { classification: 'posting-detail', browserVisible: false } },
+      trustedCommunityAlertQualification: { status: 'pending' },
+    }]);
+    expect((await store.getSourceOccurrencesRequiringTrustedCommunityRevocation('github-large', 10))
+      .map((item) => item.externalId)).toEqual(['revoked']);
+  });
+
+  it('chunks a final-slice occurrence hydration below the D1 binding limit', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (pk TEXT, sk TEXT, kind TEXT, value TEXT, source_id TEXT, external_id TEXT, PRIMARY KEY (pk, sk));
+    `);
+    const ids = Array.from({ length: 205 }, (_, index) => `posting-${String(index).padStart(3, '0')}`);
+    const insert = database.prepare("INSERT INTO catalog_items VALUES (?, ?, 'source-occurrence', ?, ?, ?)");
+    for (const id of ids) {
+      insert.run('SOURCE#github-large', `OCCURRENCE#${id}`, JSON.stringify(occurrence(id)), 'github-large', id);
+    }
+
+    // One partition binding plus at most 90 occurrence keys stays below D1's
+    // 100-variable ceiling even when a final slice hydrates thousands of
+    // omission candidates.
+    const store = new D1InternshipStore(boundedSqliteD1(database, 500, 100));
+    expect((await store.getSourceOccurrencesByExternalIds('github-large', ids)).map((row) => row.externalId)).toEqual(ids);
   });
 });

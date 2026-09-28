@@ -7,7 +7,7 @@ import type { SourceOccurrenceState } from '../../src/types.js';
 /**
  * Production-scale generators for the resource-budget regression.
  *
- * Sizes are the values measured against the deployed catalog on 2026-09-16
+ * Sizes are the values measured against the deployed catalog through 2026-09-28
  * (see `docs/197-ingestion-resource-bounds.md`). Payloads are generated in
  * process — no multi-megabyte fixture is checked in — and the filler text is
  * pseudo-random so retained sizes reflect real documents rather than one shared
@@ -26,7 +26,8 @@ export const PRODUCTION_GITHUB_FEEDS = {
   growth: { rawRows: 6_000, eligibleRows: 5_100, bytes: 5_200_000 },
 } as const;
 export const PRODUCTION_GITHUB_SOURCE_ROWS = PRODUCTION_GITHUB_FEEDS.simplify.rawRows;
-export const PRODUCTION_GITHUB_OCCURRENCES = 4_194;
+export const PRODUCTION_GITHUB_OCCURRENCES = 5_337;
+export const PRODUCTION_GITHUB_OCCURRENCE_BYTES = 39_529_479;
 export const PRODUCTION_GREENHOUSE_BOARD_BYTES = { spacex: 27_849_116, anduril: 40_679_935 };
 /** Reviewed sources per provider in production, used to size the e2e cycle. */
 export const PRODUCTION_FLEET = { greenhouse: 166, lever: 6, ashby: 36, github: 6 };

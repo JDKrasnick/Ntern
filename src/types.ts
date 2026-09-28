@@ -534,6 +534,19 @@ export interface CatalogAdmission {
   graceDeadline?: string;
 }
 
+/** Compact occurrence fields needed to evaluate trusted-community source health
+ * without hydrating the retained occurrence body. */
+export interface TrustedCommunityOccurrenceHealth {
+  externalId: string;
+  admissionConfigurationVersion?: string;
+  sourceMaterialHash?: string;
+  admission?: {
+    reasonCodes: CatalogAdmissionReason[];
+    destination: Pick<DestinationEvidence, 'classification' | 'browserVisible'>;
+  };
+  trustedCommunityAlertQualification?: Pick<TrustedCommunityAlertQualification, 'status'>;
+}
+
 export interface AdmissionIncident {
   id: string;
   jobId: string;

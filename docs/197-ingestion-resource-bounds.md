@@ -6,6 +6,26 @@ The bounds are deployed and the stranded dead-letter messages are replayed by th
 guarded operations path; the post-deploy observations are recorded at the end of
 this document.
 
+## 2026-09-28 retained-history follow-up
+
+The original bound limited resolution work but still hydrated the complete source
+occurrence partition. Production growth exposed that remaining memory dependency:
+`simplify-summer-2026` now retains 5,337 occurrence rows / 39,529,479 JSON bytes,
+including 1,970 inactive rows, and its durable checkpoint is 612,516 bytes with
+2,069 pending resolution rows. `speedyapply-2027-swe` retains another 1,937 rows /
+14,214,719 bytes. Those rows are valid catalog history and are not discarded.
+
+A bounded GitHub delivery now uses the existing durable checkpoint as its cursor
+and hydrates complete occurrence JSON only for the selected slice. The final slice
+adds only compactly identified lifecycle-actionable omissions; settled closed
+history is neither loaded nor rewritten. Compact D1 projections separately find
+retired trusted-community admission and changed trusted-source material. New or
+reappeared board rows move ahead of the older retry order, while omission counts
+advance only after the complete board pass, so the memory bound preserves both
+new-role discovery and closure coverage. A frozen R2 board snapshot is unnecessary:
+refetching the current board for each durable slice is what lets newly published
+roles enter an already-open pass.
+
 ## Determination
 
 Two independent defects, one per lane:
@@ -109,9 +129,10 @@ above the ceiling is deliberately out of scope.
   `documentEtags`), not `contentHash`: the hash cannot produce a body, and
   clearing it made every resumed delivery report a spurious source change.
   `resolutionFullBody` is what keeps the pass progressing on an unchanged body.
-- The trusted-community revocation sweep and reconciliation share one occurrence
-  read per delivery; each rewritten occurrence replaces its entry in that array,
-  so the reused array is identical to the second read it replaces.
+- The original fix shared one complete occurrence read between trusted-community
+  revocation and reconciliation. The 2026-09-28 follow-up replaces that read on
+  bounded GitHub deliveries with targeted full-row hydration plus compact D1
+  projections; unbounded callers retain the shared-read behavior.
 - The Greenhouse per-job guard now measures only when `job.content` can reach the
   limit; a row whose serialized projection exceeds 512 KB while its `content`
   stays under 512 KB code units is no longer rejected. Worst case that row is
@@ -136,8 +157,9 @@ Regression coverage:
   prefix-slice expression; per-delivery CPU under `MESSAGE_CPU_BUDGET_MS = 9,000`
   and peak heap under `MESSAGE_HEAP_BUDGET_MB = 96` for the largest GitHub source
   while resolving exactly the configured `GITHUB_RESOLUTION_ROWS_PER_DELIVERY`
-  slice per delivery (and the tail); paged occurrence reads equal to
-  the unpaged scan with page count `ceil(4,194 / 250)`.
+  slice per delivery (and the tail); the 2026-09-28 shape retains 5,337 rows /
+  39.5 MB while each measured delivery hydrates exactly its 25 selected occurrence
+  bodies. Historical paged-read coverage remains based on the 4,194-row snapshot.
 - `test/fixtures/production-scale.ts` — in-process generators sized from the
   measured production values (no multi-megabyte fixture is checked in).
 - Provider ceilings and `capacity` classification in `test/greenhouse.test.ts`,

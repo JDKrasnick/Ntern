@@ -473,6 +473,19 @@ export class CatalogReconciler {
         if (shouldPersist(prior, confirmed)) occurrences.push(confirmed);
         continue;
       }
+      const existing = jobs.get(prior.jobId) ?? input.resolvedJobs.get(prior.externalId);
+      const jobReferenceClosed = existing?.sourceReferences.some((reference) =>
+        reference.sourceId === prior.sourceId
+        && (reference.externalId
+          ? reference.externalId === prior.externalId
+          : reference.document === prior.occurrence.document && reference.row === prior.occurrence.row)
+        && reference.state === 'closed');
+      // A closed, already-absent occurrence whose canonical reference is also
+      // closed is retained history, not recurring reconciliation work. If the
+      // job write previously failed, its still-open reference deliberately keeps
+      // the row actionable so a later delivery repairs the split state.
+      if (!prior.present && prior.consecutiveOmissions >= 2 && prior.occurrence.state === 'closed'
+        && (!existing || jobReferenceClosed)) continue;
       const consecutiveOmissions = prior.consecutiveOmissions + 1;
       const next = {
         ...prior,
@@ -484,7 +497,6 @@ export class CatalogReconciler {
       };
       occurrences.push(next);
       if (consecutiveOmissions < 2) continue;
-      const existing = jobs.get(prior.jobId) ?? input.resolvedJobs.get(prior.externalId);
       if (existing) jobs.set(existing.jobId, closeOccurrence(existing, next, input.now));
     }
 
