@@ -82,6 +82,20 @@ export interface InternshipStore {
   getSourceOccurrences(sourceId: string): Promise<SourceOccurrenceState[]>;
   /** One occurrence by key, for readers that need a single row of a large source. */
   getSourceOccurrence(sourceId: string, externalId: string): Promise<SourceOccurrenceState | undefined>;
+  /** Selected occurrences by key. Large-source queue slices use this instead of
+   * hydrating the source's complete retained history. */
+  getSourceOccurrencesByExternalIds(sourceId: string, externalIds: readonly string[]): Promise<SourceOccurrenceState[]>;
+  /** Compact IDs whose presence/omission state can still change. Closed retained
+   * history is intentionally excluded. */
+  listSourceOccurrenceIdsPendingReconciliation(sourceId: string): Promise<string[]>;
+  /** Compact trusted-community material hashes used to notice changed rows
+   * without hydrating every retained occurrence body. */
+  listSourceOccurrenceTrustedCommunityMaterialHashes(sourceId: string): Promise<Array<{
+    externalId: string;
+    sourceMaterialHash: string;
+  }>>;
+  /** Bounded rows that still carry the retired trusted-community admission. */
+  getSourceOccurrencesRequiringTrustedCommunityRevocation(sourceId: string, limit: number): Promise<SourceOccurrenceState[]>;
   putSourceOccurrence(occurrence: SourceOccurrenceState): Promise<void>;
   /** Reviewed withdrawn postings, as exact provider keys. A retired posting
    * stays closed even while a community list still publishes its dead URL. */
@@ -223,6 +237,40 @@ export class MemoryInternshipStore implements InternshipStore {
   async getSourceOccurrence(sourceId: string, externalId: string) {
     const value = this.occurrences.get(`${sourceId}#${externalId}`);
     return value ? structuredClone(value) : undefined;
+  }
+  async getSourceOccurrencesByExternalIds(sourceId: string, externalIds: readonly string[]) {
+    return externalIds.flatMap((externalId) => {
+      const value = this.occurrences.get(`${sourceId}#${externalId}`);
+      return value ? [structuredClone(value)] : [];
+    });
+  }
+  async listSourceOccurrenceIdsPendingReconciliation(sourceId: string) {
+    return [...this.occurrences.values()]
+      .filter((value) => value.sourceId === sourceId
+        && (value.present || value.consecutiveOmissions < 2 || value.occurrence.state !== 'closed'
+          || this.jobs.get(value.jobId)?.sourceReferences.some((reference) =>
+            reference.sourceId === sourceId && reference.externalId === value.externalId
+              && reference.state !== 'closed')))
+      .map((value) => value.externalId)
+      .sort();
+  }
+  async listSourceOccurrenceTrustedCommunityMaterialHashes(sourceId: string) {
+    return [...this.occurrences.values()]
+      .flatMap((value) => {
+        const sourceMaterialHash = value.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash;
+        return value.sourceId === sourceId && sourceMaterialHash
+          ? [{ externalId: value.externalId, sourceMaterialHash }]
+          : [];
+      })
+      .sort((left, right) => left.externalId.localeCompare(right.externalId));
+  }
+  async getSourceOccurrencesRequiringTrustedCommunityRevocation(sourceId: string, limit: number) {
+    return [...this.occurrences.values()]
+      .filter((value) => value.sourceId === sourceId
+        && value.occurrence.admission?.evidenceCodes?.includes('trusted-community-source'))
+      .sort((left, right) => left.externalId.localeCompare(right.externalId))
+      .slice(0, limit)
+      .map((value) => structuredClone(value));
   }
   async listWithdrawnPostingKeys() { return [...this.withdrawnPostingKeys]; }
   async putSourceOccurrence(occurrence: SourceOccurrenceState) { this.occurrences.set(`${occurrence.sourceId}#${occurrence.externalId}`, structuredClone(occurrence)); }

@@ -1104,6 +1104,58 @@ describe('polling', () => {
     expect(pending.length).toBeLessThanOrEqual(retryableUrls.length);
   });
 
+  it('resolves a newly seen role before an older bounded backlog', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const adapter = new SnapshotAdapter(sourceId, snapshotRows(10, sourceId));
+    const validated: string[] = [];
+    const poll = () => new Poller([adapter], store, undefined, undefined, async (url) => {
+      validated.push(url);
+      return { url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+        recommendation: 'alert-eligible' as const, signals: ['source policy'] } } };
+    }, false).poll({ maxListingsPerSourceRun: 3 });
+
+    await poll();
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(7);
+
+    validated.length = 0;
+    const newRole = snapshotRow(99, sourceId);
+    adapter.setRows([...snapshotRows(10, sourceId), newRole]);
+    await poll();
+
+    expect(validated[0]).toBe(newRole.applyUrl);
+    expect(await store.getSourceOccurrence(sourceId, newRole.externalId)).toMatchObject({ present: true });
+  });
+
+  it('keeps changed trusted-source rows in scope during a bounded backlog', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const rows = snapshotRows(26, sourceId);
+    const adapter = new SnapshotAdapter(sourceId, rows);
+    await new Poller([adapter], store).poll({ maxListingsPerSourceRun: 25 });
+
+    const changed = (await store.getSourceOccurrences(sourceId))[20]!;
+    await store.putSourceOccurrence({ ...changed, occurrence: {
+      ...changed.occurrence,
+      trustedCommunityAlertQualification: {
+        sourceMaterialHash: 'stale-hash', candidateKey: 'candidate', consecutiveCompleteSnapshots: 1,
+        status: 'pending', baselineSuppressed: true,
+      },
+    } });
+    const checkpoint = (await store.getCheckpoint(sourceId))!;
+    await store.putCheckpoint({ ...checkpoint, pendingResolutionRows: [rows[0]!.externalId] });
+
+    const validated: string[] = [];
+    await new Poller([adapter], store, undefined, undefined, async (url) => {
+      validated.push(url);
+      return { url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+        recommendation: 'alert-eligible' as const, signals: ['source policy'] } } };
+    }, false, undefined, undefined, true, true).poll({ maxListingsPerSourceRun: 25 });
+
+    expect(validated).toContain(rows[0]!.applyUrl);
+    expect(validated).toContain(rows[20]!.applyUrl);
+  });
+
   it('stops re-enqueueing a resolution pass that makes no progress', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'github-example';

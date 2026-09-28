@@ -78,4 +78,48 @@ describe('D1 source occurrence reads', () => {
     // Non-occurrence rows under the same partition must stay excluded.
     expect(occurrences.some((item) => item.externalId === 'CHECKPOINT' || item.externalId === 'HEALTH')).toBe(false);
   });
+
+  it('hydrates selected rows and returns only lifecycle-actionable IDs', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (pk TEXT, sk TEXT, kind TEXT, value TEXT, source_id TEXT, external_id TEXT, PRIMARY KEY (pk, sk));
+    `);
+    const active = occurrence('active');
+    const oneOmission = { ...occurrence('one-omission'), present: false, consecutiveOmissions: 1 };
+    const retainedClosed = { ...occurrence('retained-closed'), present: false, consecutiveOmissions: 2,
+      occurrence: { ...occurrence('retained-closed').occurrence, state: 'closed' as const } };
+    const splitClose = { ...occurrence('split-close'), present: false, consecutiveOmissions: 2,
+      occurrence: { ...occurrence('split-close').occurrence, state: 'closed' as const } };
+    const revoked = { ...occurrence('revoked'), occurrence: { ...occurrence('revoked').occurrence,
+      trustedCommunityAlertQualification: { sourceMaterialHash: 'material-v1', candidateKey: 'candidate',
+        consecutiveCompleteSnapshots: 1, status: 'pending' as const, baselineSuppressed: true },
+      admission: { catalogEligible: true, alertEligible: false, reasonCodes: [],
+        evaluatedAt: '2026-09-15T00:00:00.000Z', evidenceObservedAt: '2026-09-15T00:00:00.000Z',
+        employerResolution: 'source-reported', postingAttribution: 'attributed', metadata: {
+          complete: true, title: 'complete', location: 'complete',
+        }, destination: {
+          classification: 'posting-detail' as const, candidateUrl: 'https://example.test/apply/revoked',
+          provider: 'github' as const, reachability: 'live' as const,
+          inspectedAt: '2026-09-15T00:00:00.000Z', reasonCodes: [],
+        }, evidenceCodes: ['trusted-community-source'] } } } as SourceOccurrenceState;
+    const insert = database.prepare("INSERT INTO catalog_items VALUES (?, ?, 'source-occurrence', ?, ?, ?)");
+    for (const value of [active, oneOmission, retainedClosed, splitClose, revoked]) {
+      insert.run('SOURCE#github-large', `OCCURRENCE#${value.externalId}`, JSON.stringify(value), value.sourceId, value.externalId);
+    }
+    const splitJob = {
+      jobId: splitClose.jobId,
+      sourceReferences: [{ ...splitClose.occurrence, state: 'open' }],
+    };
+    insert.run(`JOB#${splitClose.jobId}`, 'META', JSON.stringify(splitJob), null, null);
+    const store = new D1InternshipStore(boundedSqliteD1(database, 500));
+
+    expect((await store.getSourceOccurrencesByExternalIds('github-large', ['revoked', 'missing', 'active']))
+      .map((item) => item.externalId)).toEqual(['revoked', 'active']);
+    expect(await store.listSourceOccurrenceIdsPendingReconciliation('github-large'))
+      .toEqual(['active', 'one-omission', 'revoked', 'split-close']);
+    expect(await store.listSourceOccurrenceTrustedCommunityMaterialHashes('github-large'))
+      .toEqual([{ externalId: 'revoked', sourceMaterialHash: 'material-v1' }]);
+    expect((await store.getSourceOccurrencesRequiringTrustedCommunityRevocation('github-large', 10))
+      .map((item) => item.externalId)).toEqual(['revoked']);
+  });
 });
