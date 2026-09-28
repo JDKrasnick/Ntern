@@ -8,7 +8,7 @@ import { isPastSeason } from '../core/early-career.js';
 import { deriveCanonicalAdmission } from '../catalog-admission.js';
 import { providerPostingKey, providerPostingReference } from '../identity/posting.js';
 import { stableSourceOccurrenceJobId } from '../identity/registry.js';
-import { projectRoleMetadata, withoutObservationTimestamps } from '../role-metadata.js';
+import { observationClockFreeContent, projectRoleMetadata, withoutObservationTimestamps } from '../role-metadata.js';
 import { mergeSourceOccurrence } from '../identity/source-occurrence.js';
 import type {
   Internship,
@@ -168,8 +168,21 @@ function seasonAllowsOpen(season: string, identity: Internship['internshipIdenti
   return evidence === 'explicit' && references.some((reference) => reference.state === 'open' && isOfficialOccurrence(reference));
 }
 
+/**
+ * `lastSeenAt` is display and closed-role ordering metadata; an open role's sort
+ * key uses `catalogVisibleAt`, not this. Refresh it at most daily so a
+ * byte-identical row is not rewritten (and billed) on every poll.
+ */
+const LAST_SEEN_REFRESH_MS = 24 * 60 * 60 * 1000;
+function refreshedLastSeenAt(previous: string | undefined, now: string): string {
+  if (!previous) return now;
+  const elapsed = Date.parse(now) - Date.parse(previous);
+  return Number.isFinite(elapsed) && elapsed >= LAST_SEEN_REFRESH_MS ? now : previous;
+}
+
 function merge(existing: Internship, listing: ProcessedListing, externalId: string, now: string,
   applicationUrlValidatedAt: string | undefined, metadataVersion: number | undefined, withdrawn: boolean): Internship {
+  const priorJob = existing;
   const becomingCatalogVisible = !existing.catalogVisibleAt && existing.admission?.catalogEligible === false && listing.admission?.catalogEligible === true;
   existing = normalizeInternship(existing);
   listing = normalizeListing(listing);
@@ -241,11 +254,19 @@ function merge(existing: Internship, listing: ProcessedListing, externalId: stri
       catalogVisibleAt: now,
       catalogRecency: listing.trustedCommunityAlertQualification?.baselineSuppressed ? 'baseline' as const : 'normal' as const,
     } : {}),
-    lastSeenAt: now,
-    ...(applicationUrlValidatedAt ? { applicationUrlValidatedAt } : {}),
+    lastSeenAt: refreshedLastSeenAt(existing.lastSeenAt, now),
+    // Refresh the validation clock only for a newly trusted URL; re-validating
+    // the same URL must not make the row look changed.
+    ...(applicationUrlValidatedAt && replaceStoredUrl ? { applicationUrlValidatedAt } : {}),
     ...(metadataVersion ? { applicationPageMetadataVersion: metadataVersion } : {}),
   });
-  return projectRoleMetadata(merged).job;
+  const projected = projectRoleMetadata(merged).job;
+  // If nothing but observation clocks moved, hand back the stored row so its
+  // bytes are unchanged and the guarded D1 upsert writes nothing. The clocks
+  // (fetch time, admission evaluation, inspection, validation) are not durable
+  // content; D1 bills a matched upsert at $1 per million rows whether or not the
+  // bytes changed.
+  return observationClockFreeContent(projected) === observationClockFreeContent(priorJob) ? priorJob : projected;
 }
 
 function create(listing: ProcessedListing, externalId: string, now: string, baseline: boolean,

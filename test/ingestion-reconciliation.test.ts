@@ -141,7 +141,7 @@ describe('snapshot reconciliation', () => {
     expect([...store.jobs.values()][0]?.compensation).toMatchObject({ minHourlyUSD: 40, maxHourlyUSD: 40 });
   });
 
-  it('does not persist an occurrence when only observation clocks move', () => {
+  it('does not persist an occurrence or rewrite the job when only observation clocks move', () => {
     const reconciler = new CatalogReconciler();
     const evidence = (observedAt: string) => extractPostingMetadataEvidence({
       artifact: { title: 'Software Engineering Intern', compensationText: 'USD $40/hour' },
@@ -153,24 +153,40 @@ describe('snapshot reconciliation', () => {
       return { ...base, evaluatedAt, evidenceObservedAt: evaluatedAt,
         destination: { ...base.destination!, inspectedAt: evaluatedAt } };
     };
-    const input = (now: string, overrides: Partial<ProcessedListing> = {}) => ({
+    const input = (now: string, resolvedJobs: Map<string, Internship>, overrides: Partial<ProcessedListing> = {}) => ({
       sourceId: 'source-a', snapshotHash: 'snapshot-1', activeExternalIds: new Set(['role-1']),
       listings: [listing('source-a', { fetchedAt: now, metadataEvidence: evidence(now),
         admission: admission(now), ...overrides })],
-      resolvedJobs: new Map(), now, baseline: false,
+      resolvedJobs, now, baseline: false,
     });
-    const first = reconciler.reconcile({ ...input('2026-07-29T12:00:00.000Z'), priorOccurrences: [] });
+    const first = reconciler.reconcile({ ...input('2026-07-29T12:00:00.000Z', new Map()), priorOccurrences: [] });
     expect(first.occurrences).toHaveLength(1);
+    const firstJob = first.jobs[0]!;
 
-    // Same board, later fetch: every observation clock moved, nothing else did.
-    const second = reconciler.reconcile({ ...input('2026-07-30T12:00:00.000Z'), priorOccurrences: first.occurrences });
+    // Same board an hour later: every observation clock moved, nothing else did.
+    const second = reconciler.reconcile({
+      ...input('2026-07-29T13:00:00.000Z', new Map([['role-1', firstJob]])),
+      priorOccurrences: first.occurrences,
+    });
     expect(second.occurrences).toHaveLength(0);
+    // Byte-identical to the stored row, so the guarded D1 upsert bills nothing.
+    expect(second.jobs[0]).toEqual(firstJob);
+
+    // A day later the display clock advances; the content still does not change.
+    const third = reconciler.reconcile({
+      ...input('2026-07-30T13:00:00.000Z', new Map([['role-1', second.jobs[0]!]])),
+      priorOccurrences: first.occurrences,
+    });
+    expect(third.occurrences).toHaveLength(0);
+    expect(third.jobs[0]?.lastSeenAt).toBe('2026-07-30T13:00:00.000Z');
 
     // A real content change still persists.
-    const third = reconciler.reconcile({ ...input('2026-07-31T12:00:00.000Z',
-      { compensation: { raw: 'USD $45/hour', minHourlyUSD: 45, maxHourlyUSD: 45 } }),
-    priorOccurrences: first.occurrences });
-    expect(third.occurrences).toHaveLength(1);
+    const fourth = reconciler.reconcile({
+      ...input('2026-07-30T14:00:00.000Z', new Map([['role-1', third.jobs[0]!]]),
+        { compensation: { raw: 'USD $45/hour', minHourlyUSD: 45, maxHourlyUSD: 45 } }),
+      priorOccurrences: first.occurrences,
+    });
+    expect(fourth.occurrences).toHaveLength(1);
   });
 
   it('reprojects changed source metadata without creating a second new-role event', async () => {

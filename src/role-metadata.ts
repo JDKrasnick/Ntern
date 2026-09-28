@@ -234,9 +234,18 @@ export function withoutObservationTimestamps(value: unknown): unknown {
   return strip(value);
 }
 
+/**
+ * Stable, observation-clock-free content of any value. Used to decide whether a
+ * re-observation changed anything that is not just the passage of time, so a
+ * durable row is not rewritten (and billed) for a clock that moved.
+ */
+export function observationClockFreeContent(value: unknown): string {
+  return stable(withoutObservationTimestamps(value));
+}
+
 /** Semantic evidence content: the evidence itself without any observation time. */
 export function roleMetadataEvidenceContent(value: RoleMetadataEvidence): string {
-  return stable(withoutObservationTimestamps(value));
+  return observationClockFreeContent(value);
 }
 
 /** Re-observing identical evidence keeps a review; any content/version change expires it. */
