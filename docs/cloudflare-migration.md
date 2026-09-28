@@ -37,7 +37,9 @@ outbox IDs, and idempotent upserts as the correctness boundary.
 
 The ingestion Worker requires the Workers Paid plan: source polls can exceed
 the free plan's CPU and subrequest ceilings. D1 has a hard 10 GB size per paid
-database, so storage growth must be monitored before public scale.
+database, so storage growth must be monitored before public scale; the daily
+catalog retention sweep bounds the append-only history (see
+[`catalog-storage-retention.md`](catalog-storage-retention.md)).
 
 ## Local verification
 
@@ -203,12 +205,13 @@ history, logs, and source control:
 
 ```bash
 read -s OPERATIONS_SHARED_SECRET
+RECOVERY_SINCE="$(node -p 'new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()')"
 curl --fail-with-body --silent --show-error \
   -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
   -H 'Content-Type: application/json' \
-  -d '{"since":"2026-08-25T00:00:00.000Z","limit":10}' \
+  -d "{\"since\":\"$RECOVERY_SINCE\",\"limit\":10}" \
   https://intern-notifs.jdkrasnick.workers.dev/internal/recover-notifications
-unset OPERATIONS_SHARED_SECRET
+unset OPERATIONS_SHARED_SECRET RECOVERY_SINCE
 ```
 
 The preview returns `candidates` plus the ordered `candidateJobIds` array and
@@ -219,6 +222,9 @@ open jobs that have a durable notification event and no delivery receipt for
 any device; the exact-ID guard rejects a changed candidate set even if its size
 is unchanged. Use small batches to avoid a burst of old alerts, and preview
 again before each batch until it returns zero.
+The endpoint rejects a `since` value older than the notification event's 30-day
+retention window and returns `earliestSupportedSince`; this prevents a preview
+from appearing complete after older outbox rows have already been deleted.
 
 ### Migrate legacy account-owned mobile alerts
 

@@ -553,6 +553,50 @@ function isResumeWorkerUpdate(address: string, change: ResourceChange['change'])
 }
 
 const customDomainAddresses = new Set(['cloudflare_workers_custom_domain.api[0]']);
+const priorIngestionCrons = [
+  '*/5 * * * *', '7-57/10 * * * *', '9-59/10 * * * *',
+  '12,42 * * * *', '22,52 * * * *', '2,32 * * * *',
+  '0 * * * *', '42 8 * * *', '17 9 * * *',
+];
+const currentIngestionCrons = priorIngestionCrons.map((cron) => cron === '42 8 * * *' ? '34 8 * * *' : cron);
+
+function cronValues(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const crons: string[] = [];
+  for (const schedule of value) {
+    if (!isRecord(schedule) || typeof schedule.cron !== 'string') return undefined;
+    if (Object.keys(schedule).some((key) => !['created_on', 'cron', 'modified_on'].includes(key))) return undefined;
+    if (schedule.created_on !== undefined && typeof schedule.created_on !== 'string') return undefined;
+    if (schedule.modified_on !== undefined && typeof schedule.modified_on !== 'string') return undefined;
+    crons.push(schedule.cron);
+  }
+  return crons;
+}
+
+/**
+ * The retention cron moves once, from the Greenhouse dispatch minute to 08:34.
+ * Pin both complete schedules so the release cannot add, remove, or repurpose a
+ * trigger while it reconciles that reviewed production change.
+ */
+function isCatalogRetentionCronUpdate(address: string, change: ResourceChange['change']): boolean {
+  if (address !== 'cloudflare_workers_cron_trigger.ingestion'
+    || !isRecord(change.before) || !isRecord(change.after)) return false;
+  const before = change.before;
+  const after = change.after;
+  const stableKeys = ['account_id', 'id', 'script_name'] as const;
+  if (Object.keys(before).some((key) => ![...stableKeys, 'schedules'].includes(key))
+    || Object.keys(after).some((key) => ![...stableKeys, 'schedules'].includes(key))
+    || stableKeys.some((key) => before[key] !== after[key])
+    || before.id !== 'intern-notifs-ingestion'
+    || before.script_name !== 'intern-notifs-ingestion'
+    || typeof before.account_id !== 'string' || before.account_id.length === 0
+    || !isDeepStrictEqual(cronValues(before.schedules), priorIngestionCrons)
+    || !isDeepStrictEqual(cronValues(after.schedules), currentIngestionCrons)) return false;
+  return isDeepStrictEqual(change.after_unknown, {
+    schedules: currentIngestionCrons.map(() => ({ modified_on: true })),
+  });
+}
+
 /**
  * The API's custom domain is what lets the icon route use Cloudflare's Cache API —
  * caching does not populate on `workers.dev`. The create is pinned to this service
@@ -607,8 +651,9 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
     change.actions.length !== 1
     || !(
       (change.actions[0] === 'update'
-        && allowedUpdates.has(address)
-        && (isSafeWorkerUpdate(address, change) || isResumeWorkerUpdate(address, change)))
+        && ((allowedUpdates.has(address)
+          && (isSafeWorkerUpdate(address, change) || isResumeWorkerUpdate(address, change)))
+          || isCatalogRetentionCronUpdate(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
         || isCustomDomainCreate(address, change)))
     )

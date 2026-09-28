@@ -102,13 +102,22 @@ describe('public API ownership boundary', () => {
       job: { jobId: 'job-1', company: 'Acme', title: 'Software Intern', availability: 'available' },
     });
     expect(JSON.parse((await handler(event('user-b', 'GET', '/me/applications'))).body)).toEqual({ applications: [] });
-    const applicationId = JSON.parse(created.body).applicationId as string;
+    const createdBody = JSON.parse(created.body) as { applicationId: string };
+    expect(createdBody).not.toHaveProperty('jobSnapshot');
+    const applicationId = createdBody.applicationId;
     expect((await handler(event('user-b', 'PATCH', `/me/applications/${applicationId}`, { status: 'offer' }))).statusCode).toBe(404);
     expect(JSON.parse((await handler(event('user-a', 'GET', '/me/applications'))).body).applications[0]).toMatchObject({
       jobId: 'job-1',
       applyMode: 'official-form',
       job: { jobId: 'job-1', company: 'Acme', title: 'Software Intern', open: true, sourceReferences: [{ sourceId: 'greenhouse-acme', sourceUrl: 'https://boards.greenhouse.io/acme/jobs/1' }] },
     });
+    jobs.jobs.delete(job.jobId);
+    const expired = JSON.parse((await handler(event('user-a', 'GET', '/me/applications'))).body).applications[0];
+    expect(expired).toMatchObject({
+      jobId: 'job-1',
+      job: { jobId: 'job-1', company: 'Acme', title: 'Software Intern', location: 'Remote', open: false, availability: 'closed' },
+    });
+    expect(expired).not.toHaveProperty('jobSnapshot');
   });
   it('deletes only the authenticated user application and preserves neighboring records', async () => {
     const jobs = new MemoryInternshipStore(); await jobs.putInternship(job);
