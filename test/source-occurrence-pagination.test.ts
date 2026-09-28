@@ -10,12 +10,15 @@ type SqliteValue = string | number | bigint | null | Uint8Array;
 // with "Memory limit exceeded before EOF." Model that by failing any read that
 // materializes more than `maxRowsPerStatement` rows, so an unbounded per-source
 // read cannot pass and a paged read can.
-function boundedSqliteD1(database: DatabaseSync, maxRowsPerStatement: number): D1Database {
+function boundedSqliteD1(database: DatabaseSync, maxRowsPerStatement: number, maxBindingsPerStatement = Number.POSITIVE_INFINITY): D1Database {
   const prepared = (query: string, values: unknown[] = []): D1PreparedStatement => {
     const statement: StatementSync = database.prepare(query);
     const bound = values as SqliteValue[];
     return {
-      bind(...next: unknown[]) { return prepared(query, next); },
+      bind(...next: unknown[]) {
+        if (next.length > maxBindingsPerStatement) throw new Error('D1_ERROR: too many SQL variables');
+        return prepared(query, next);
+      },
       async first<T>() { return (statement.get(...bound) as T | undefined) ?? null; },
       async all<T>() {
         const results = statement.all(...bound) as T[];
@@ -128,5 +131,23 @@ describe('D1 source occurrence reads', () => {
     }]);
     expect((await store.getSourceOccurrencesRequiringTrustedCommunityRevocation('github-large', 10))
       .map((item) => item.externalId)).toEqual(['revoked']);
+  });
+
+  it('chunks a final-slice occurrence hydration below the D1 binding limit', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE catalog_items (pk TEXT, sk TEXT, kind TEXT, value TEXT, source_id TEXT, external_id TEXT, PRIMARY KEY (pk, sk));
+    `);
+    const ids = Array.from({ length: 205 }, (_, index) => `posting-${String(index).padStart(3, '0')}`);
+    const insert = database.prepare("INSERT INTO catalog_items VALUES (?, ?, 'source-occurrence', ?, ?, ?)");
+    for (const id of ids) {
+      insert.run('SOURCE#github-large', `OCCURRENCE#${id}`, JSON.stringify(occurrence(id)), 'github-large', id);
+    }
+
+    // One partition binding plus at most 90 occurrence keys stays below D1's
+    // 100-variable ceiling even when a final slice hydrates thousands of
+    // omission candidates.
+    const store = new D1InternshipStore(boundedSqliteD1(database, 500, 100));
+    expect((await store.getSourceOccurrencesByExternalIds('github-large', ids)).map((row) => row.externalId)).toEqual(ids);
   });
 });

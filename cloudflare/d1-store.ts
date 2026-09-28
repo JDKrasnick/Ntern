@@ -40,6 +40,10 @@ const documentUploadLeaseSeconds = 15 * 60;
 // work. Page the read so no single statement streams the whole partition.
 // See issues #203 and #241.
 const sourceOccurrencePageSize = 500;
+// D1 accepts at most 100 bound variables in one statement. Selected occurrence
+// reads also bind the source partition key, so keep each IN list below the
+// remaining 99 slots. Leave a little headroom for future query predicates.
+const sourceOccurrenceExternalIdBatchSize = 90;
 
 function receiptExpiry(value: Pick<DeliveryReceipt, 'updatedAt'>): number {
   return Math.floor(new Date(value.updatedAt).getTime() / 1_000) + deliveryReceiptLifetimeSeconds;
@@ -635,8 +639,8 @@ export class D1InternshipStore implements InternshipStore {
   async getSourceOccurrencesByExternalIds(sourceId: string, externalIds: readonly string[]): Promise<SourceOccurrenceState[]> {
     if (!externalIds.length) return [];
     const byExternalId = new Map<string, SourceOccurrenceState>();
-    for (let offset = 0; offset < externalIds.length; offset += 100) {
-      const chunk = externalIds.slice(offset, offset + 100);
+    for (let offset = 0; offset < externalIds.length; offset += sourceOccurrenceExternalIdBatchSize) {
+      const chunk = externalIds.slice(offset, offset + sourceOccurrenceExternalIdBatchSize);
       const rows = await this.db.prepare(`SELECT value FROM catalog_items
         WHERE pk = ? AND sk IN (${chunk.map(() => '?').join(', ')})`)
         .bind(`SOURCE#${sourceId}`, ...chunk.map((externalId) => `OCCURRENCE#${externalId}`))
