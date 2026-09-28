@@ -136,6 +136,133 @@ describe('destination verification queue consumer', () => {
       .toMatchObject({ candidateUrl: secondReference.applyUrl, classification: 'application-form' });
   });
 
+  it('skips the browser when the provider API returns the exact posting', async () => {
+    const { db, jobs } = subject();
+    const { job, reference } = role();
+    await jobs.putInternship(job);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+      id: Number(reference.externalId), title: reference.title,
+      content: `<p>${reference.title}</p><p>Austin</p><p>$50 - $60 per hour</p>`,
+    })));
+    const shadowQueue = { send: vi.fn(), sendBatch: vi.fn() };
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
+      candidateUrl: reference.applyUrl, providerIdentity: { provider: 'greenhouse', sourceId: reference.sourceId,
+        sourceUrl: reference.sourceUrl, tenant: 'acme', postingId: reference.externalId },
+      reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: shadowQueue,
+      SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn().mockResolvedValue(undefined) } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(launch).not.toHaveBeenCalled();
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(queued.retry).not.toHaveBeenCalled();
+    expect(shadowQueue.send).toHaveBeenCalledOnce();
+    const stored = await jobs.getJob(job.jobId);
+    // Destination verification succeeds without weakening the independent
+    // canonical-employer gate for this otherwise unseen fixture.
+    expect(stored).toMatchObject({ admission: { catalogEligible: false, reasonCodes: ['employer-unresolved'] },
+      sourceReferences: [{ admission: { catalogEligible: false, reasonCodes: ['employer-unresolved'],
+        destination: { classification: 'posting-detail' } }, metadataExtraction: { outcome: 'no-explicit-metadata' } }] });
+  });
+
+  it('keeps a seen API-verified role independent of an unseen role cached browser failure', async () => {
+    const { db, jobs } = subject();
+    const { job, reference } = role();
+    const priorAdmission = {
+      canonicalEmployer: { id: 'acme', displayName: 'Acme' }, employerResolution: 'resolved' as const,
+      postingAttribution: 'attributed' as const,
+      destination: { classification: 'posting-detail' as const, candidateUrl: reference.applyUrl,
+        provider: 'greenhouse' as const, tenant: 'acme', expectedPostingId: reference.externalId,
+        inspectedAt: '2026-08-24T00:00:00Z', freshUntil: '2026-08-31T00:00:00Z', nextCheckAt: '2026-08-30T00:00:00Z' },
+      metadata: { complete: true, title: 'complete' as const, location: 'complete' as const },
+      catalogEligible: true, alertEligible: true, reasonCodes: [], evaluatedAt: '2026-08-24T00:00:00Z',
+      evidenceObservedAt: '2026-08-24T00:00:00Z',
+    };
+    const seenReference = { ...reference, admission: priorAdmission };
+    const seenJob = { ...job, admission: priorAdmission, sourceReferences: [seenReference] };
+    const unseenReference = { ...reference, sourceId: 'community-acme', provenance: 'reviewed-community' as const };
+    const unseenJob = { ...job, jobId: 'job-unseen', sourceReferences: [unseenReference] };
+    await jobs.putInternship(unseenJob);
+    await jobs.putInternship(seenJob);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+      id: Number(reference.externalId), title: reference.title,
+      content: `<p>${reference.title}</p><p>Austin</p><p>$50 - $60 per hour</p>`,
+    })));
+    const newPage = vi.fn().mockResolvedValue({
+      goto: vi.fn().mockRejectedValue(new Error('timeout')), frames: () => [], close: vi.fn(),
+    });
+    launch.mockResolvedValue({ newPage, close: vi.fn() });
+    const identity = (sourceId: string, sourceUrl: string) => ({ provider: 'greenhouse' as const, sourceId, sourceUrl,
+      tenant: 'acme', postingId: reference.externalId! });
+    const unseen = queueMessage({ version: 1, jobId: unseenJob.jobId, sourceId: unseenReference.sourceId,
+      externalId: unseenReference.externalId!, candidateUrl: unseenReference.applyUrl,
+      providerIdentity: identity(unseenReference.sourceId, unseenReference.sourceUrl),
+      reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
+    const seen = { ...queueMessage({ version: 1, jobId: seenJob.jobId, sourceId: seenReference.sourceId,
+      externalId: seenReference.externalId!, candidateUrl: seenReference.applyUrl,
+      providerIdentity: identity(seenReference.sourceId, seenReference.sourceUrl),
+      reason: 'daily-retry', queuedAt: '2026-08-30T00:00:00Z' }), id: 'message-2' };
+
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [unseen, seen] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: { send: vi.fn(), sendBatch: vi.fn() },
+      SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn().mockResolvedValue(undefined) } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+
+    expect(newPage).toHaveBeenCalledOnce();
+    expect(unseen.retry).toHaveBeenCalledOnce();
+    expect(unseen.ack).not.toHaveBeenCalled();
+    expect(seen.ack).toHaveBeenCalledOnce();
+    expect(seen.retry).not.toHaveBeenCalled();
+    expect(await jobs.getJob(seenJob.jobId)).toMatchObject({
+      applicationUrlValidatedAt: '2026-08-30T00:01:00.000Z',
+      sourceReferences: [{ admission: { catalogEligible: true, destination: { classification: 'posting-detail' } } }],
+    });
+  });
+
+  it('falls back to the browser when the provider API has no exact posting', async () => {
+    const { db, jobs } = subject();
+    const { job, reference } = role();
+    await jobs.putInternship(job);
+    // The provider route exists but the API answers 500, so no artifact is
+    // available and the render must run.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 500 })));
+    launch.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
+      goto: vi.fn().mockRejectedValue(new Error('timeout')), frames: () => [], close: vi.fn() }), close: vi.fn() });
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
+      candidateUrl: reference.applyUrl, providerIdentity: { provider: 'greenhouse', sourceId: reference.sourceId,
+        sourceUrl: reference.sourceUrl, tenant: 'acme', postingId: reference.externalId },
+      reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, environment(db),
+      () => new Date('2026-08-30T00:01:00Z'));
+    expect(launch).toHaveBeenCalledOnce();
+    expect(queued.retry).toHaveBeenCalled();
+  });
+
+  it('falls back to the browser for an unattributed community first sight', async () => {
+    const { db, jobs } = subject();
+    const { job, reference } = role();
+    const communityReference = { ...reference, provenance: 'reviewed-community' as const };
+    await jobs.putInternship({ ...job, sourceReferences: [communityReference] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+      id: Number(reference.externalId), title: reference.title,
+      content: `<p>${reference.title}</p><p>Austin</p><p>$50 - $60 per hour</p>`,
+    })));
+    const newPage = vi.fn().mockResolvedValue({ goto: vi.fn().mockResolvedValue({ status: () => 200 }), url: () => reference.applyUrl,
+      evaluate: vi.fn().mockResolvedValue([]), frames: () => [], close: vi.fn() });
+    launch.mockResolvedValue({ newPage, close: vi.fn() });
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: communityReference.sourceId,
+      externalId: communityReference.externalId!, candidateUrl: communityReference.applyUrl,
+      providerIdentity: { provider: 'greenhouse', sourceId: communityReference.sourceId,
+        sourceUrl: communityReference.sourceUrl, tenant: 'acme', postingId: communityReference.externalId },
+      reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: { send: vi.fn(), sendBatch: vi.fn() },
+      SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn().mockResolvedValue(undefined) } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(newPage).toHaveBeenCalledOnce();
+    expect(queued.ack).toHaveBeenCalledOnce();
+  });
+
   it('resolves the pending failure-ledger row when a retried delivery settles', async () => {
     const { database, db, operations } = subject();
     await operations.recordVerificationCompletion('already-complete', '2026-08-30T00:00:00Z');
