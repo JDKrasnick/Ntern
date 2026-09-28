@@ -1399,13 +1399,23 @@ export class D1CatalogAdmissionStore {
           observation.postingIds.length, observation.applicationUrl, observation.observedAt)));
       result.observed += group.length;
 
-      const evidence = await this.db.prepare(`SELECT
+      // Only recent complete snapshots vote in label consensus. A historical
+      // typo must fail closed immediately, but it must not poison an exact ATS
+      // scope forever after later source snapshots converge on one label.
+      const evidence = await this.db.prepare(`WITH ranked AS (
+          SELECT observation.*,
+            DENSE_RANK() OVER (PARTITION BY source_id ORDER BY fetch_sequence DESC) AS snapshot_rank
+          FROM automatic_employer_identity_observations AS observation
+          WHERE provider = ? AND scope = ?
+        ), recent AS (
+          SELECT * FROM ranked WHERE snapshot_rank <= 3
+        )
+        SELECT
           COUNT(DISTINCT source_id || ':' || fetch_sequence) AS snapshot_count,
           COUNT(DISTINCT label_key) AS label_count,
           COUNT(DISTINCT posting.value) AS posting_count
-        FROM automatic_employer_identity_observations AS observation,
-          json_each(observation.posting_ids_json) AS posting
-        WHERE provider = ? AND scope = ?`)
+        FROM recent AS observation,
+          json_each(observation.posting_ids_json) AS posting`)
         .bind(sample.provider, sample.scope)
         .first<{ snapshot_count: number; label_count: number; posting_count: number }>();
       const labelCount = Number(evidence?.label_count ?? 0);
@@ -1437,6 +1447,19 @@ export class D1CatalogAdmissionStore {
           VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`)
           .bind(employerId, label.display_name, sample.observedAt, AUTOMATIC_EMPLOYER_POLICY,
             sample.observedAt, sample.observedAt),
+        // A conflict supersedes the deterministic automatic mapping. Once the
+        // bounded evidence window converges again, reactivate that same mapping
+        // unless an operator-created mapping has taken ownership meanwhile.
+        this.db.prepare(`UPDATE employer_mappings
+          SET canonical_employer_id = ?, reviewed_at = ?, reviewed_by = ?, superseded_at = NULL,
+            supersedes_mapping_id = NULL
+          WHERE id = ? AND NOT EXISTS (
+            SELECT 1 FROM employer_mappings AS active
+            WHERE active.provider = ? AND active.scope = ? AND active.superseded_at IS NULL
+              AND active.id <> ?
+          )`)
+          .bind(employerId, sample.observedAt, AUTOMATIC_EMPLOYER_POLICY, mappingId,
+            sample.provider, sample.scope, mappingId),
         // Ignore either a deterministic-id collision or a concurrently-created
         // active mapping for this scope. The subsequent lookup is authoritative.
         this.db.prepare(`INSERT OR IGNORE INTO employer_mappings

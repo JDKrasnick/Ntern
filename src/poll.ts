@@ -825,6 +825,7 @@ export class IngestionRunner {
     const brokenProbeFailures: string[] = [];
     const retryableRowExternalIds = new Set<string>();
     const deferredHandoffFailures: string[] = [];
+    const automaticEmployerRefreshKeys = new Set<string>();
     if (this.catalogAdmissionResolver?.observeAutomaticEmployerIdentities && completeFetchSequence) {
       const observedAt = this.now().toISOString();
       const observations = automaticEmployerIdentityObservationSlice(groupAutomaticEmployerIdentityCandidates(listings.flatMap((listing) => {
@@ -832,7 +833,26 @@ export class IngestionRunner {
         return candidate ? [candidate] : [];
       })), completeFetchSequence);
       if (observations.length) {
-        await this.catalogAdmissionResolver.observeAutomaticEmployerIdentities(observations);
+        try {
+          await this.catalogAdmissionResolver.observeAutomaticEmployerIdentities(observations);
+          // Automatic mappings deliberately do not change the global admission
+          // configuration version: doing that regrades every community role and
+          // can exhaust a queue delivery. Revisit only the bounded tenant window
+          // whose evidence was just observed, so a new or previously active
+          // mapping is stamped onto already-published occurrences in this pass.
+          for (const observation of observations) {
+            automaticEmployerRefreshKeys.add(`${observation.provider}\0${observation.scope}`);
+          }
+        } catch (error) {
+          // Employer discovery is enrichment. A transient D1 failure must not
+          // prevent otherwise valid source rows from being published; the
+          // rotating observation window will retry the tenant on a later fetch.
+          console.error(JSON.stringify({
+            event: 'automatic_employer_identity_observation_failed',
+            sourceIds: [...new Set(observations.map((observation) => observation.sourceId))],
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
       }
     }
     const isProbeFailure = (error: unknown, fromValidator = false) => {
@@ -914,9 +934,18 @@ export class IngestionRunner {
         && priorOccurrence.occurrence.trustedCommunityAlertQualification.basis !== undefined
         && priorOccurrence.occurrence.trustedCommunityAlertQualification.catalogPublicationSuppressed !== true
         && Date.parse(priorOccurrence.occurrence.admission?.destination.nextCheckAt ?? '') > this.now().getTime();
+      const automaticEmployerCandidate = automaticEmployerIdentityCandidate(
+        sourceListing,
+        completeFetchSequence,
+        this.now().toISOString(),
+      );
+      const refreshAutomaticEmployer = Boolean(automaticEmployerCandidate
+        && automaticEmployerRefreshKeys.has(`${automaticEmployerCandidate.provider}\0${automaticEmployerCandidate.scope}`)
+        && !priorOccurrence?.occurrence.admission?.canonicalEmployer);
       if (!stampSourceMetadata && (!trustedCommunityPolicy || settledCatalogOnlyCommunityRow)
         && (reuseUnchangedOccurrences || admissionAlreadyApplied) && priorOccurrence
-        && sourceOwnedMaterial(priorOccurrence.occurrence) === sourceOwnedMaterial(listing)) {
+        && sourceOwnedMaterial(priorOccurrence.occurrence) === sourceOwnedMaterial(listing)
+        && !refreshAutomaticEmployer) {
         handledExternalIds.add(id);
         return;
       }
@@ -972,7 +1001,8 @@ export class IngestionRunner {
         && priorTrustedQualification.catalogPublicationSuppressed !== true
         && priorOccurrence.occurrence.admission
         && postingSpecificDestination(priorOccurrence.occurrence.admission.destination)
-        && sameTrustedMaterial) {
+        && sameTrustedMaterial
+        && !refreshAutomaticEmployer) {
         handledExternalIds.add(id);
         return;
       }

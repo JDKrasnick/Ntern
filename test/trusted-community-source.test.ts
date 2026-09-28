@@ -269,6 +269,78 @@ describe('trusted community source policy', () => {
     }));
   });
 
+  it('stamps a previously published unseen tenant when its rotating observation window promotes it', async () => {
+    const store = new MemoryInternshipStore();
+    const rows = Array.from({ length: 6 }, (_, index) => {
+      const tenant = `tenant${index}`;
+      const applyUrl = `https://${tenant}.wd1.myworkdayjobs.com/External/job/Remote/Software-Engineering-Intern_REQ-${index}`;
+      return listing({ sourceId: 'community-list', company: tenant, row: index + 1, applyUrl,
+        externalId: `README.md:${applyUrl}`, providerIdentity: { provider: 'github', sourceId: 'community-list',
+          sourceUrl: 'https://github.com/example/jobs', postingId: `req-${index}` } });
+    });
+    const adapter: SourceAdapter = { id: 'community-list', async fetch(previous) {
+      return { sourceId: 'community-list', listings: rows, rawRowCount: rows.length, notModified: false,
+        checkpoint: { sourceId: 'community-list', successfulFetches: (previous?.successfulFetches ?? 0) + 1,
+          lastRowCount: rows.length } };
+    } };
+    const mapped = new Set<string>();
+    const resolver = {
+      async configurationVersion() { return 'registry-v1'; },
+      async observeAutomaticEmployerIdentities(observations: readonly { scope: string }[]) {
+        for (const observation of observations) mapped.add(observation.scope);
+        return { observed: observations.length, promoted: observations.length, conflicted: 0, disabled: 0 };
+      },
+      async resolveCanonicalEmployer(identity: NonNullable<ProcessedListing['providerIdentity']>) {
+        return identity.provider === 'workday' && identity.tenant && mapped.has(identity.tenant)
+          ? { id: identity.tenant, displayName: identity.tenant } : undefined;
+      },
+      async resolveDestinationRule() { return undefined; },
+    };
+    const validate = async (url: string) => ({ url, evidence: { url, title: 'Software Engineering Intern',
+      postingIdPresent: true, confidence: { score: 100, level: 'high' as const,
+        recommendation: 'alert-eligible' as const, signals: [] } } });
+    const icons = vi.fn().mockResolvedValue(undefined);
+    const poller = new Poller([adapter], store, () => new Date(inspectedAt), undefined, validate, false,
+      undefined, resolver, true, true, icons);
+
+    await poller.poll();
+    expect([...store.jobs.values()].filter((job) => job.admission?.canonicalEmployer)).toHaveLength(5);
+    await poller.poll();
+    expect([...store.jobs.values()].find((job) => job.company === 'tenant5')?.admission?.canonicalEmployer)
+      .toMatchObject({ id: 'tenant5' });
+    expect(icons).toHaveBeenCalledTimes(6);
+  });
+
+  it('keeps source publication nonblocking when automatic employer observation fails', async () => {
+    const store = new MemoryInternshipStore();
+    const applyUrl = 'https://acme.wd1.myworkdayjobs.com/External/job/Remote/Software-Engineering-Intern_REQ-123';
+    const row = listing({ sourceId: 'community-list', applyUrl, externalId: `README.md:${applyUrl}`,
+      providerIdentity: { provider: 'github', sourceId: 'community-list',
+        sourceUrl: 'https://github.com/example/jobs', postingId: 'req-123' } });
+    const adapter: SourceAdapter = { id: row.sourceId, async fetch() {
+      return { sourceId: row.sourceId, listings: [row], rawRowCount: 1, notModified: false,
+        checkpoint: { sourceId: row.sourceId, successfulFetches: 1, lastRowCount: 1 } };
+    } };
+    const resolver = {
+      async configurationVersion() { return 'registry-v1'; },
+      async observeAutomaticEmployerIdentities() { throw new Error('simulated enrichment D1 failure'); },
+      async resolveCanonicalEmployer(identity: NonNullable<ProcessedListing['providerIdentity']>) {
+        return identity.provider === 'workday' ? { id: 'acme', displayName: 'Acme' } : undefined;
+      },
+      async resolveDestinationRule() { return undefined; },
+    };
+    const validate = async (url: string) => ({ url, evidence: { url, title: row.title, postingIdPresent: true,
+      confidence: { score: 100, level: 'high' as const, recommendation: 'alert-eligible' as const, signals: [] } } });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const report = await new Poller([adapter], store, () => new Date(inspectedAt), undefined, validate, false,
+      undefined, resolver, true, true).poll();
+
+    expect(report.sourceFailures).toEqual([]);
+    expect([...store.jobs.values()][0]?.admission?.canonicalEmployer).toMatchObject({ id: 'acme' });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('automatic_employer_identity_observation_failed'));
+    error.mockRestore();
+  });
+
   it('still blocks generic source-reported employer metadata', () => {
     const qualification = advanceTrustedCommunityQualification({ destination: destination(), postingIdentityDecision: unconfirmed(),
       alertMode: policy.alertMode, completeFetchSequence: 1 });

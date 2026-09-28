@@ -260,6 +260,34 @@ describe('D1 catalog admission operations', () => {
     database.close();
   });
 
+  it('reactivates an automatic mapping after conflicting historical labels age out', async () => {
+    const { database, admission: store } = subject();
+    const observation = (fetchSequence: number, labelKey: string, displayName: string) => ({
+      provider: 'workday' as const, scope: 'gdit', sourceId: 'community-list', fetchSequence,
+      labelKey, displayName, postingIds: [`req-${fetchSequence}`],
+      applicationUrl: `https://gdit.wd1.myworkdayjobs.com/External/job/Remote/Role_req-${fetchSequence}`,
+      observedAt: `2026-09-28T0${fetchSequence}:00:00Z`,
+    });
+    expect(await store.observeAutomaticEmployerIdentities([observation(1, 'gdit', 'GDIT')]))
+      .toMatchObject({ promoted: 1 });
+    expect(await store.observeAutomaticEmployerIdentities([
+      observation(2, 'general dynamics information technology', 'General Dynamics Information Technology'),
+    ])).toMatchObject({ conflicted: 1, disabled: 1 });
+    expect(await store.observeAutomaticEmployerIdentities([observation(3, 'gdit', 'GDIT')]))
+      .toMatchObject({ conflicted: 1, promoted: 0 });
+    expect(await store.observeAutomaticEmployerIdentities([observation(4, 'gdit', 'GDIT')]))
+      .toMatchObject({ conflicted: 1, promoted: 0 });
+    expect(await store.observeAutomaticEmployerIdentities([observation(5, 'gdit', 'GDIT')]))
+      .toMatchObject({ conflicted: 0, promoted: 1 });
+    await expect(store.resolveCanonicalEmployer({ provider: 'workday', sourceId: 'community-list',
+      tenant: 'gdit', sourceUrl: observation(5, 'gdit', 'GDIT').applicationUrl }))
+      .resolves.toMatchObject({ displayName: 'GDIT' });
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM employer_mappings
+      WHERE provider = 'workday' AND scope = 'gdit' AND superseded_at IS NULL`).get())
+      .toEqual({ count: 1 });
+    database.close();
+  });
+
   it('never lets automatic evidence replace a hand-reviewed mapping', async () => {
     const { database, admission: store } = subject();
     await store.putCanonicalEmployer({ id: 'acme', displayName: 'Acme', reviewedAt: '2026-09-26T00:00:00Z',
