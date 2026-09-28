@@ -91,6 +91,7 @@ describe('D1 source occurrence reads', () => {
     const splitClose = { ...occurrence('split-close'), present: false, consecutiveOmissions: 2,
       occurrence: { ...occurrence('split-close').occurrence, state: 'closed' as const } };
     const revoked = { ...occurrence('revoked'), occurrence: { ...occurrence('revoked').occurrence,
+      admissionConfigurationVersion: 'trusted-policy-v1',
       trustedCommunityAlertQualification: { sourceMaterialHash: 'material-v1', candidateKey: 'candidate',
         consecutiveCompleteSnapshots: 1, status: 'pending' as const, baselineSuppressed: true },
       admission: { catalogEligible: true, alertEligible: false, reasonCodes: [],
@@ -101,6 +102,7 @@ describe('D1 source occurrence reads', () => {
           classification: 'posting-detail' as const, candidateUrl: 'https://example.test/apply/revoked',
           provider: 'github' as const, reachability: 'live' as const,
           inspectedAt: '2026-09-15T00:00:00.000Z', reasonCodes: [],
+          browserVisible: false,
         }, evidenceCodes: ['trusted-community-source'] } } } as SourceOccurrenceState;
     const insert = database.prepare("INSERT INTO catalog_items VALUES (?, ?, 'source-occurrence', ?, ?, ?)");
     for (const value of [active, oneOmission, retainedClosed, splitClose, revoked]) {
@@ -117,8 +119,13 @@ describe('D1 source occurrence reads', () => {
       .map((item) => item.externalId)).toEqual(['revoked', 'active']);
     expect(await store.listSourceOccurrenceIdsPendingReconciliation('github-large'))
       .toEqual(['active', 'one-omission', 'revoked', 'split-close']);
-    expect(await store.listSourceOccurrenceTrustedCommunityMaterialHashes('github-large'))
-      .toEqual([{ externalId: 'revoked', sourceMaterialHash: 'material-v1' }]);
+    expect(await store.listSourceOccurrenceTrustedCommunityHealth('github-large')).toEqual([{
+      externalId: 'revoked',
+      admissionConfigurationVersion: 'trusted-policy-v1',
+      sourceMaterialHash: 'material-v1',
+      admission: { reasonCodes: [], destination: { classification: 'posting-detail', browserVisible: false } },
+      trustedCommunityAlertQualification: { status: 'pending' },
+    }]);
     expect((await store.getSourceOccurrencesRequiringTrustedCommunityRevocation('github-large', 10))
       .map((item) => item.externalId)).toEqual(['revoked']);
   });

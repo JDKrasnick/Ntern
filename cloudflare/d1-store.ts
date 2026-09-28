@@ -7,7 +7,7 @@ import type { ApplicationSession } from '../src/application-automation.js';
 import { preferredJobIdentityConflicts, providerPostingKey, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
-import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from '../src/types.js';
+import type { ApplicantProfile, ApplicationRecord, CatalogAdmissionReason, DeliveryReceipt, DestinationClassification, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, TrustedCommunityAlertQualification, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from '../src/types.js';
 import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
 import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
@@ -679,19 +679,58 @@ export class D1InternshipStore implements InternshipStore {
       cursor = rows.results[rows.results.length - 1]!.sk;
     }
   }
-  async listSourceOccurrenceTrustedCommunityMaterialHashes(sourceId: string): Promise<Array<{
-    externalId: string;
-    sourceMaterialHash: string;
-  }>> {
-    const rows = await this.db.prepare(`SELECT external_id,
-        json_extract(value, '$.occurrence.trustedCommunityAlertQualification.sourceMaterialHash') AS source_material_hash
-      FROM catalog_items
-      WHERE pk = ? AND sk LIKE 'OCCURRENCE#%'
-        AND json_extract(value, '$.occurrence.trustedCommunityAlertQualification.sourceMaterialHash') IS NOT NULL
-      ORDER BY sk`)
-      .bind(`SOURCE#${sourceId}`)
-      .all<{ external_id: string; source_material_hash: string }>();
-    return rows.results.map((row) => ({ externalId: row.external_id, sourceMaterialHash: row.source_material_hash }));
+  async listSourceOccurrenceTrustedCommunityHealth(sourceId: string): Promise<TrustedCommunityOccurrenceHealth[]> {
+    const health: TrustedCommunityOccurrenceHealth[] = [];
+    let cursor = 'OCCURRENCE#';
+    for (;;) {
+      const rows = await this.db.prepare(`SELECT sk,
+          COALESCE(external_id, json_extract(value, '$.externalId')) AS external_id,
+          json_extract(value, '$.occurrence.admissionConfigurationVersion') AS admission_configuration_version,
+          json_extract(value, '$.occurrence.trustedCommunityAlertQualification.sourceMaterialHash') AS source_material_hash,
+          json_extract(value, '$.occurrence.admission.reasonCodes') AS reason_codes,
+          json_extract(value, '$.occurrence.admission.destination.classification') AS destination_classification,
+          json_extract(value, '$.occurrence.admission.destination.browserVisible') AS browser_visible,
+          json_extract(value, '$.occurrence.trustedCommunityAlertQualification.status') AS qualification_status
+        FROM catalog_items
+        WHERE pk = ? AND sk > ? AND sk LIKE 'OCCURRENCE#%'
+          AND (
+            json_extract(value, '$.occurrence.admission') IS NOT NULL
+            OR json_extract(value, '$.occurrence.trustedCommunityAlertQualification.sourceMaterialHash') IS NOT NULL
+          )
+        ORDER BY sk LIMIT ?`)
+        .bind(`SOURCE#${sourceId}`, cursor, sourceOccurrencePageSize)
+        .all<{
+          sk: string;
+          external_id: string;
+          admission_configuration_version: string | null;
+          source_material_hash: string | null;
+          reason_codes: string | null;
+          destination_classification: DestinationClassification | null;
+          browser_visible: number | null;
+          qualification_status: TrustedCommunityAlertQualification['status'] | null;
+        }>();
+      for (const row of rows.results) {
+        health.push({
+          externalId: row.external_id,
+          ...(row.admission_configuration_version
+            ? { admissionConfigurationVersion: row.admission_configuration_version }
+            : {}),
+          ...(row.source_material_hash ? { sourceMaterialHash: row.source_material_hash } : {}),
+          ...(row.reason_codes && row.destination_classification ? { admission: {
+            reasonCodes: JSON.parse(row.reason_codes) as CatalogAdmissionReason[],
+            destination: {
+              classification: row.destination_classification,
+              ...(row.browser_visible === null ? {} : { browserVisible: Boolean(row.browser_visible) }),
+            },
+          } } : {}),
+          ...(row.qualification_status
+            ? { trustedCommunityAlertQualification: { status: row.qualification_status } }
+            : {}),
+        });
+      }
+      if (rows.results.length < sourceOccurrencePageSize) return health;
+      cursor = rows.results[rows.results.length - 1]!.sk;
+    }
   }
   async getSourceOccurrencesRequiringTrustedCommunityRevocation(sourceId: string, limit: number): Promise<SourceOccurrenceState[]> {
     const rows = await this.db.prepare(`SELECT value FROM catalog_items

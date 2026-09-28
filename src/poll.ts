@@ -1592,11 +1592,12 @@ export class IngestionRunner {
         // forever.
         const pendingOrder = new Map<string, number>();
         for (const id of pendingResolutionRows) pendingOrder.set(id, pendingOrder.size);
-        const trustedMaterialHashes = boundedGithubHydration
-          && pendingResolutionRows.size > 0
-          && this.trustedCommunityCatalogEnabled
-          ? new Map((await this.store.listSourceOccurrenceTrustedCommunityMaterialHashes(connector.id))
-            .map((row) => [row.externalId, row.sourceMaterialHash]))
+        const trustedOccurrenceHealth = boundedGithubHydration && this.trustedCommunityCatalogEnabled
+          ? await this.store.listSourceOccurrenceTrustedCommunityHealth(connector.id)
+          : [];
+        const trustedMaterialHashes = pendingResolutionRows.size > 0
+          ? new Map(trustedOccurrenceHealth.flatMap((row) => row.sourceMaterialHash
+            ? [[row.externalId, row.sourceMaterialHash] as const] : []))
           : new Map<string, string>();
         const resolutionScope = pendingResolutionRows.size
           ? batch.processed.listings.filter((listing) => {
@@ -1758,6 +1759,7 @@ export class IngestionRunner {
             eligibleRows: batch.processed.counts.eligible,
             listings: resolution.accepted,
             priorOccurrences,
+            ...(boundedGithubHydration ? { priorOccurrenceHealth: trustedOccurrenceHealth } : {}),
             eligibleExternalIds: new Set(batch.processed.listings
               .filter((listing) => listing.technical !== false)
               .map(externalId)),
@@ -1845,8 +1847,10 @@ export class IngestionRunner {
         // closure work to the delivery that completes them, so no non-sliced
         // row is closed while its own slice is still pending. Non-sliced active
         // rows are still confirmed against the whole-board id set above.
-        const partialMigration = nextPendingRows.length > 0 || (migrationLimit !== undefined && admissionMigrationPending);
-        const closureScope = boundedMetadataRefresh ? selectedClosures : partialMigration ? [] : missingOccurrences;
+        const lifecycleReconciliationDeferred = remainingRows.length > 0
+          || (migrationLimit !== undefined && admissionMigrationPending);
+        const closureScope = boundedMetadataRefresh ? selectedClosures
+          : lifecycleReconciliationDeferred ? [] : missingOccurrences;
         const closureCandidates = closureScope.filter((prior) => !resolution.resolved.has(prior.externalId) && prior.consecutiveOmissions >= 1);
         await forEachBounded(closureCandidates, async (prior) => {
           resolution.resolved.set(prior.externalId, await this.store.getJob(prior.jobId));
@@ -1856,7 +1860,7 @@ export class IngestionRunner {
             const prior = priorByExternalId.get(externalId(listing));
             return prior ? [prior] : [];
           }), ...selectedClosures]
-          : partialMigration
+          : lifecycleReconciliationDeferred
             ? resolvedListings.flatMap((listing) => {
               const prior = priorByExternalId.get(externalId(listing));
               return prior ? [prior] : [];

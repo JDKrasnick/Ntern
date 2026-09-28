@@ -1174,6 +1174,52 @@ describe('polling', () => {
     expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(40);
   });
 
+  it('advances omissions after the complete board is attempted when a current row remains retryable', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const rows = snapshotRows(10, sourceId);
+    const adapter = new SnapshotAdapter(sourceId, rows);
+    let failCurrentRow = false;
+    const run = () => new Poller([adapter], store, undefined, undefined, async (url) => {
+      if (failCurrentRow && url === rows[0]!.applyUrl) throw new Error('Application link timed out');
+      return { url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+        recommendation: 'alert-eligible' as const, signals: ['source policy'] } } };
+    }, false).poll({ maxListingsPerSourceRun: 25 });
+
+    await run();
+    adapter.setRows(rows.slice(0, -1));
+    failCurrentRow = true;
+    await run();
+
+    expect(await store.getSourceOccurrence(sourceId, rows.at(-1)!.externalId))
+      .toMatchObject({ present: false, consecutiveOmissions: 1 });
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toEqual([rows[0]!.externalId]);
+  });
+
+  it('keeps whole-board trusted health while occurrence bodies stay slice-bounded', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'northwestern-fintech-2027-quant';
+    const rows = snapshotRows(71, sourceId);
+    const adapter = new SnapshotAdapter(sourceId, rows);
+    const runner = () => new Poller([adapter], store, undefined, undefined, async (url) => ({
+      url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+        recommendation: 'alert-eligible' as const, signals: ['source policy'] } },
+    }), false, undefined, undefined, true, true);
+
+    await runner().poll();
+    adapter.setRows([...rows, snapshotRow(71, sourceId)]);
+    const metrics: Array<{ metrics?: { inspectedCandidates?: number; inspectionCoverage?: number } }> = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((line: unknown) => {
+      if (typeof line !== 'string' || !line.startsWith('{')) return;
+      const parsed = JSON.parse(line);
+      if (parsed.event === 'trusted_community_source_evaluated') metrics.push(parsed);
+    });
+    await runner().poll({ maxListingsPerSourceRun: 25 });
+    log.mockRestore();
+
+    expect(metrics.at(-1)?.metrics).toMatchObject({ inspectedCandidates: 72, inspectionCoverage: 1 });
+  });
+
   it('does not re-open a resolution pass for a stale trusted-community qualification with the gate off', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'github-example';

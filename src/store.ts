@@ -3,7 +3,7 @@ import { isPastSeason } from './core/early-career.js';
 import { employerCategory } from './core/employers.js';
 import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency } from './catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
-import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, UserDocument, UserPreferences } from './types.js';
+import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from './types.js';
 import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from './resume.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from './identity/posting.js';
 import type { ApplicationSession } from './application-automation.js';
@@ -88,12 +88,9 @@ export interface InternshipStore {
   /** Compact IDs whose presence/omission state can still change. Closed retained
    * history is intentionally excluded. */
   listSourceOccurrenceIdsPendingReconciliation(sourceId: string): Promise<string[]>;
-  /** Compact trusted-community material hashes used to notice changed rows
-   * without hydrating every retained occurrence body. */
-  listSourceOccurrenceTrustedCommunityMaterialHashes(sourceId: string): Promise<Array<{
-    externalId: string;
-    sourceMaterialHash: string;
-  }>>;
+  /** Compact material hashes and admission fields used to detect changed rows
+   * and evaluate whole-source health without hydrating occurrence bodies. */
+  listSourceOccurrenceTrustedCommunityHealth(sourceId: string): Promise<TrustedCommunityOccurrenceHealth[]>;
   /** Bounded rows that still carry the retired trusted-community admission. */
   getSourceOccurrencesRequiringTrustedCommunityRevocation(sourceId: string, limit: number): Promise<SourceOccurrenceState[]>;
   putSourceOccurrence(occurrence: SourceOccurrenceState): Promise<void>;
@@ -254,13 +251,28 @@ export class MemoryInternshipStore implements InternshipStore {
       .map((value) => value.externalId)
       .sort();
   }
-  async listSourceOccurrenceTrustedCommunityMaterialHashes(sourceId: string) {
+  async listSourceOccurrenceTrustedCommunityHealth(sourceId: string) {
     return [...this.occurrences.values()]
-      .flatMap((value) => {
-        const sourceMaterialHash = value.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash;
-        return value.sourceId === sourceId && sourceMaterialHash
-          ? [{ externalId: value.externalId, sourceMaterialHash }]
-          : [];
+      .flatMap((value): TrustedCommunityOccurrenceHealth[] => {
+        const admission = value.occurrence.admission;
+        const qualification = value.occurrence.trustedCommunityAlertQualification;
+        if (value.sourceId !== sourceId || (!admission && !qualification?.sourceMaterialHash)) return [];
+        return [{
+          externalId: value.externalId,
+          ...(value.occurrence.admissionConfigurationVersion
+            ? { admissionConfigurationVersion: value.occurrence.admissionConfigurationVersion }
+            : {}),
+          ...(qualification?.sourceMaterialHash ? { sourceMaterialHash: qualification.sourceMaterialHash } : {}),
+          ...(admission ? { admission: {
+            reasonCodes: [...admission.reasonCodes],
+            destination: {
+              classification: admission.destination.classification,
+              ...(admission.destination.browserVisible === undefined
+                ? {} : { browserVisible: admission.destination.browserVisible }),
+            },
+          } } : {}),
+          ...(qualification ? { trustedCommunityAlertQualification: { status: qualification.status } } : {}),
+        }];
       })
       .sort((left, right) => left.externalId.localeCompare(right.externalId));
   }
