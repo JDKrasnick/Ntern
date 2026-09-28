@@ -19,9 +19,9 @@ import {
 import { runRuntimeCommand } from '../src/runtime.js';
 import { catalogGroupDetails, compareCatalogProjectionGroups, groupCatalogJobs } from '../src/catalog-groups.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
-import type { reviewedAshbySources } from '../src/sources/ashby-config.js';
-import type { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
-import type { reviewedLeverSources } from '../src/sources/lever-config.js';
+import { reviewedAshbySources } from '../src/sources/ashby-config.js';
+import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
+import { reviewedLeverSources } from '../src/sources/lever-config.js';
 import { defaultSources } from '../src/sources/index.js';
 import type { SourceCheckpoint, SourceHealth } from '../src/types.js';
 import { authenticatedInstallation, authenticatedUser, cleanupExpiredAuth, consumeAuthRateLimit, createInstallation, deleteAuthUser, handleAuthRequest, type AuthEnvironment } from './auth.js';
@@ -2119,6 +2119,68 @@ async function browserResumeJobText(canonicalUrl: string, env: Environment): Pro
   } finally { await browser.close(); }
 }
 
+interface CatalogBoundaryMessage {
+  sourceId?: unknown;
+  sourceKind?: unknown;
+  force?: unknown;
+  version?: unknown;
+  scheduledAt?: unknown;
+  runId?: unknown;
+}
+
+const reviewedBoundarySourceIds: Record<Exclude<CatalogProviderId, 'github'>, ReadonlySet<string>> = {
+  greenhouse: new Set(reviewedGreenhouseSources.map(({ id }) => id)),
+  lever: new Set(reviewedLeverSources.map(({ id }) => id)),
+  ashby: new Set(reviewedAshbySources.map(({ id }) => id)),
+};
+const reviewedGithubBoundarySourceIds = new Set(defaultSources.map(({ id }) => id));
+
+function parseCatalogBoundaryMessage(body: unknown): CatalogBoundaryMessage | undefined {
+  try {
+    const parsed = JSON.parse(typeof body === 'string' ? body : JSON.stringify(body)) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as CatalogBoundaryMessage
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The billing guard runs before the D1-backed provider registries are available,
+ * so only checked-in messages can be proven to have a scheduler reissue path at
+ * this boundary. Dynamic, stale, unknown, and malformed work stays on the
+ * platform retry/DLQ path instead of being acknowledged on an assumption.
+ */
+function catalogBoundaryDispatcherCanReissue(
+  provider: CatalogProviderId,
+  message: CatalogBoundaryMessage | undefined,
+): boolean {
+  if (!message || typeof message.sourceId !== 'string'
+    || (message.force !== undefined && typeof message.force !== 'boolean')) return false;
+  if (provider === 'github') {
+    return message.force !== true && message.sourceKind === undefined
+      && reviewedGithubBoundarySourceIds.has(message.sourceId);
+  }
+  return message.version === 1
+    && typeof message.scheduledAt === 'string'
+    && Number.isFinite(Date.parse(message.scheduledAt))
+    && (message.runId === undefined || typeof message.runId === 'string')
+    && reviewedBoundarySourceIds[provider].has(message.sourceId);
+}
+
+async function resolveDeferredQueueFailure(
+  db: D1Database,
+  queueName: string,
+  messageId: string,
+  command = 'catalog-deferred-ledger-resolution',
+): Promise<void> {
+  try { await resolveQueueFailures(db, queueName, messageId); }
+  catch (error) {
+    console.error(JSON.stringify({ command, messageId, error: safeDiagnostic(error) }));
+  }
+}
+
 async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Promise<void> {
   const catalogProvider = providerForQueueName(batch.queue);
   const trafficWorkload = d1TrafficWorkloadForQueue(batch.queue);
@@ -2144,22 +2206,24 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     // scheduled dispatcher; malformed work and forced GitHub recovery are not.
     if (!catalogProvider) throw error;
     for (const queued of batch.messages) {
-      const parsed = (() => {
-        try { return JSON.parse(typeof queued.body === 'string' ? queued.body : JSON.stringify(queued.body)) as { sourceId?: string; sourceKind?: string; force?: boolean }; }
-        catch { return undefined; }
-      })();
+      const parsed = parseCatalogBoundaryMessage(queued.body);
+      const sourceId = typeof parsed?.sourceId === 'string' ? parsed.sourceId : undefined;
+      const sourceKind = typeof parsed?.sourceKind === 'string' ? parsed.sourceKind : undefined;
       await recordQueueFailureBestEffort({
         db: env.DB, queueName: batch.queue, messageId: queued.id, attempts: queued.attempts,
-        timestamp: queued.timestamp, sourceId: parsed?.sourceId, sourceKind: parsed?.sourceKind,
+        timestamp: queued.timestamp, sourceId, sourceKind,
         body: queued.body, error,
       });
-      const deferred = catalogDeliveryIsDeferred(error, parsed?.sourceId, queued.attempts, {
-        dispatcherCanReissue: !(catalogProvider === 'github' && parsed?.force === true),
+      const deferred = catalogDeliveryIsDeferred(error, sourceId, queued.attempts, {
+        dispatcherCanReissue: catalogBoundaryDispatcherCanReissue(catalogProvider, parsed),
       });
       console.error(JSON.stringify({ command: 'catalog-poll-boundary', phase: 'billing-shutdown',
-        provider: catalogProvider, sourceId: parsed?.sourceId, messageId: queued.id,
+        provider: catalogProvider, sourceId, messageId: queued.id,
         attempts: queued.attempts, deferred, error: safeDiagnostic(error) }));
-      if (deferred) queued.ack();
+      if (deferred) {
+        await resolveDeferredQueueFailure(env.DB, batch.queue, queued.id);
+        queued.ack();
+      }
       else {
         const delay = d1QueueRetryDelay(error, queued.attempts);
         queued.retry(delay ? { delaySeconds: delay } : undefined);
@@ -2187,10 +2251,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   // inflate the operator "unresolved" signal. Resolve it here: the source health
   // row and the dispatcher's own cadence are the durable retry state.
   const resolveDeferredFailure = async (messageId: string) => {
-    try { await resolveQueueFailures(env.DB, batch.queue, messageId); }
-    catch (error) {
-      console.error(JSON.stringify({ command: 'catalog-deferred-ledger-resolution', messageId, error: safeDiagnostic(error) }));
-    }
+    await resolveDeferredQueueFailure(env.DB, batch.queue, messageId);
   };
   if (batch.queue.includes('destination-verification')) {
     await observeQueueBatch(batch, trafficObservations, (observed) => processDestinationVerificationBatch(observed, env));
