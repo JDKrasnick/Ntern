@@ -126,18 +126,20 @@ query: 8.05M rows on 2026-09-27, over half the day's 14.09M writes. The reconcil
 decided whether to persist an occurrence by comparing the whole occurrence JSON,
 but every poll refreshes observation clocks inside it — the fetch time on metadata
 evidence, the admission evaluation (`evaluatedAt`, `evidenceObservedAt`) and the
-destination inspection (`inspectedAt`). An unchanged board therefore looked
-changed on every poll, so D1 billed a write for the whole board each tick.
+destination inspection/freshness schedule (`inspectedAt`, `freshUntil`,
+`nextCheckAt`). An unchanged board therefore looked changed on every poll, so D1
+billed a write for the whole board each tick.
 
 `occurrenceChanged` now compares through `withoutObservationTimestamps`, and the
 job path hands back the stored row (`observationClockFreeContent`) when nothing
 but clocks moved, so the guarded upsert stores identical bytes. `lastSeenAt` is
 display and closed-role ordering metadata — an open role's sort key uses
 `catalogVisibleAt` — and refreshes at most daily instead of on every poll. The
-comparison strips `observedAt`, `evaluatedAt`, `evidenceObservedAt` and
-`inspectedAt` at every depth; provider and employer timestamps (`postedAt`,
-`employerUpdatedAt`, `freshUntil`, …) are facts, not observation times, and stay
-in the comparison. A bounded metadata-refresh slice still force-persists its rows
+comparison strips `observedAt`, `evaluatedAt`, `evidenceObservedAt`,
+`inspectedAt`, `freshUntil`, and `nextCheckAt` at every depth; provider and
+employer timestamps (`postedAt`, `providerTimestamp`, `employerUpdatedAt`,
+`validThrough`, …) are facts and stay in the comparison. A bounded
+metadata-refresh slice still force-persists its rows
 (`forcePersistExternalIds`) so the checkpoint cursor can certify a row and retry a
 failed metadata-evidence write.
 

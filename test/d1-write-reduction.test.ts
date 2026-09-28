@@ -128,7 +128,9 @@ describe('differential catalog writes', () => {
     const admission = (evaluatedAt: string): CatalogAdmission => ({
       employerResolution: 'resolved', postingAttribution: 'attributed',
       destination: { classification: 'posting-detail', candidateUrl: 'https://careers.acme.test/job-1',
-        provider: 'structured', inspectedAt: evaluatedAt },
+        provider: 'structured', inspectedAt: evaluatedAt,
+        freshUntil: new Date(Date.parse(evaluatedAt) + 7 * 86_400_000).toISOString(),
+        nextCheckAt: new Date(Date.parse(evaluatedAt) + 6 * 86_400_000).toISOString() },
       metadata: { complete: true, title: 'complete', location: 'complete' }, catalogEligible: true, alertEligible: true,
       reasonCodes: [], evaluatedAt, evidenceObservedAt: evaluatedAt,
     });

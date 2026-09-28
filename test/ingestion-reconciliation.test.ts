@@ -151,7 +151,9 @@ describe('snapshot reconciliation', () => {
     const admission = (evaluatedAt: string): CatalogAdmission => {
       const base = officialAdmission('acme');
       return { ...base, evaluatedAt, evidenceObservedAt: evaluatedAt,
-        destination: { ...base.destination!, inspectedAt: evaluatedAt } };
+        destination: { ...base.destination!, inspectedAt: evaluatedAt,
+          freshUntil: new Date(Date.parse(evaluatedAt) + 7 * 86_400_000).toISOString(),
+          nextCheckAt: new Date(Date.parse(evaluatedAt) + 6 * 86_400_000).toISOString() } };
     };
     const input = (now: string, resolvedJobs: Map<string, Internship>, overrides: Partial<ProcessedListing> = {}) => ({
       sourceId: 'source-a', snapshotHash: 'snapshot-1', activeExternalIds: new Set(['role-1']),

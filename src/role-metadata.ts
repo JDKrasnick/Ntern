@@ -213,13 +213,15 @@ export function roleMetadataArtifactHash(artifact: RoleMetadataArtifact): string
 /**
  * Observation clocks move on every poll: the fetch time (`observedAt`), the
  * admission evaluation (`evaluatedAt`/`evidenceObservedAt`) and the destination
- * inspection (`inspectedAt`). They are not durable content, so two observations
- * of an unchanged artifact — or of one artifact at different times — must
- * compare equal. Provider and employer timestamps (`postedAt`,
- * `employerPublishedAt`, `employerUpdatedAt`, `freshUntil`, …) are facts, not
- * observation times, and stay in the comparison.
+ * inspection/freshness schedule (`inspectedAt`/`freshUntil`/`nextCheckAt`). They
+ * are not durable content, so two observations of an unchanged artifact — or of
+ * one artifact at different times — must compare equal. Provider and employer
+ * timestamps (`postedAt`, `providerTimestamp`, `employerPublishedAt`,
+ * `employerUpdatedAt`, `validThrough`, …) are facts and stay in the comparison.
  */
-const OBSERVATION_TIMESTAMP_KEYS = new Set(['observedAt', 'evaluatedAt', 'evidenceObservedAt', 'inspectedAt']);
+const OBSERVATION_TIMESTAMP_KEYS = new Set([
+  'observedAt', 'evaluatedAt', 'evidenceObservedAt', 'inspectedAt', 'freshUntil', 'nextCheckAt',
+]);
 
 /**
  * JSON with observation timestamps removed at every depth, including nested
