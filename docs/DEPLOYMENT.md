@@ -906,11 +906,18 @@ The dedicated `17 9 * * *` Cloudflare cron runs the same all-scope audit once
 per day and emits one aggregate `posting_identity_integrity_audit` event. The
 event contains only coverage, duplicate, conflict, quarantine, presentation,
 legacy-occurrence, projection, duplicate-reference, and recurring-unconfirmed-
-source counts. Any failed integrity gate, coverage regression, audit error, or
-three-or-more unresolved occurrences from one source sends one deduplicated
-operator email per signal set per day when the private `RESEND_API_KEY`,
-`AUTH_FROM_EMAIL`, and `ADMISSION_SUPPORT_RECIPIENT` deployment inputs are set.
-The alert never contains role URLs, role titles, or source IDs. Its
+source counts. The total recurring-source count remains inventory in every
+event. A separate durable baseline stores the sorted set of sources with at
+least three unresolved occurrences. Its first successful read seeds the
+existing cohort without paging; later runs alert only when a source newly
+crosses that threshold. When a source resolves it leaves the baseline, so a
+later re-cross alerts again. A failed integrity gate, coverage regression,
+audit error, or newly recurring source sends one deduplicated operator email
+per signal set per day when the private `RESEND_API_KEY`, `AUTH_FROM_EMAIL`, and
+`ADMISSION_SUPPORT_RECIPIENT` deployment inputs are set. The baseline advances
+past a new recurrence only after the alert is delivered, and a failed baseline
+read never overwrites the last durable cohort. The alert never contains role
+URLs, role titles, or source IDs. Its
 `IDENTITY_CONFIRMED_COVERAGE_FLOOR` is an owner-reviewed decimal from zero to
 one; a missing/invalid floor, unavailable coverage, or coverage below that
 floor is not passing evidence. The checked-in floor is `0`; the persisted
