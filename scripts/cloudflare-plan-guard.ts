@@ -600,7 +600,10 @@ function isReviewedIngestionCronUpdate(address: string, change: ResourceChange['
       && isDeepStrictEqual(afterCrons, currentIngestionCrons)) || addsIconCron;
   if (!reviewedTransition || !afterCrons) return false;
   return isDeepStrictEqual(change.after_unknown, {
-    schedules: afterCrons.map((cron) => addsIconCron && cron === '6-56/10 * * * *'
+    // The provider models schedules as an ordered list. Inserting a cron shifts
+    // every following value and associates the new element's unknown metadata
+    // with the final list slot rather than with the inserted cron value.
+    schedules: afterCrons.map((_, index) => addsIconCron && index === afterCrons.length - 1
       ? { created_on: true, modified_on: true }
       : { modified_on: true }),
   });
