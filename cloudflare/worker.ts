@@ -175,6 +175,14 @@ function catalogAdmissionResolver(env: Environment): CatalogAdmissionResolver {
       employers.set(key, pending);
       return pending;
     },
+    async observeAutomaticEmployerIdentities(observations) {
+      const result = await operations.observeAutomaticEmployerIdentities(observations);
+      // Promotion or conflict can change the active mapping for a tenant during
+      // this delivery. Do not reuse a pre-observation miss or stale mapping.
+      employers.clear();
+      console.log(JSON.stringify({ event: 'automatic_employer_identity_observed', ...result }));
+      return result;
+    },
     resolveDestinationRule(identity, candidateUrl) {
       let host: string;
       try { host = new URL(candidateUrl).hostname.toLowerCase(); } catch { host = candidateUrl; }
@@ -890,7 +898,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     // trip instead of three.
     let employerId = companyIcon[1]!;
     try { employerId = decodeURIComponent(employerId); } catch { /* the raw segment is the id */ }
-    const [iconState, settings] = await Promise.all([employerIcons.context(employerId), employerIcons.settings()]);
+    const [iconState, settings] = await Promise.all([employerIcons.renderContext(employerId), employerIcons.settings()]);
     const display = settings.mode === 'resolve';
     // Provider bytes are cached only once the operator confirms self-hosting rights.
     const retainIcon = settings.logoDevRetentionLicensedAt

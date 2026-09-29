@@ -44,6 +44,7 @@ function sqliteD1(database: DatabaseSync, budget?: QueryBudget): D1Database {
 const MIGRATIONS = [
   '0001_initial.sql', '0003_billing_shutdown.sql', '0007_catalog_admission.sql',
   '0013_canonical_employer_icons.sql', '0034_employer_icon_resolution.sql',
+  '0038_employer_icon_resolution_v2.sql',
 ];
 
 function subject() {
@@ -345,6 +346,51 @@ describe('employer icon diagnosis', () => {
     expect((await tied.icons.context('acme'))?.websiteDomain).toBeUndefined();
   });
 
+  it('prefers the provider domain named by an automatic ATS tenant over an unrelated confirmed result', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const employerId = 'ats-ashby-replit-25100893c6';
+    await admission.putCanonicalEmployer(employerRow(employerId, 'Replit'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      canonicalEmployerId: employerId,
+      displayName: 'Replit',
+      roleTitle: 'Software Engineering Intern',
+      applicationUrl: 'https://jobs.ashbyhq.com/replit/job-1',
+      provider: 'ashby',
+      tenant: 'replit',
+      sourceId: 'community-source',
+      provenance: 'reviewed-community',
+    }, NOW);
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2.bucket, {
+        LOGO_DEV_TOKEN: LOGO_TOKEN,
+        LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN,
+        BRANDFETCH_CLIENT_ID: BRANDFETCH_CLIENT,
+      }), NOW,
+      DEPENDENCIES(scriptedFetch({
+        'https://jobs.ashbyhq.com/replit/job-1': () => html('<!doctype html><html><head><title>Software Engineering Intern at Replit</title></head></html>'),
+        [logoDevSearchUrl('Replit')]: () => ok([
+          { name: 'Replit', domain: 'replit.com' },
+          { name: 'Replit', domain: 'thegot.co' },
+        ]),
+        [brandfetchSearchUrl('Replit', BRANDFETCH_CLIENT)]: () => ok([
+          { name: 'Replit', domain: 'replit.com' },
+          { name: 'Replit', domain: 'thegot.co' },
+        ]),
+        // The unrelated candidate can misleadingly name Replit, while the exact
+        // domain is temporarily unavailable. Tenant identity must still win.
+        'https://thegot.co/': () => html('<!doctype html><html><head><title>Replit</title></head></html>'),
+        'https://replit.com/': () => status(503),
+        [logoDevImageUrl('replit.com', LOGO_IMAGE_TOKEN)]: () => webp(),
+      })),
+    );
+
+    expect(result.resolved).toBe(1);
+    expect((await icons.context(employerId))?.websiteDomain).toBe('replit.com');
+  });
+
   it('publishes a below-floor tie-break only when the domain itself names the employer', async () => {
     // The real model answers correctly at 0.8 far more often than it answers at all
     // above 0.90, so a below-floor selection is verified against the domain instead of
@@ -425,7 +471,7 @@ describe('employer icon diagnosis', () => {
       .toMatchObject({ source: 'declared', format: 'image/png' });
   });
 
-  it('reads the mark the posting page itself declares, with no extra request', async () => {
+  it('reads the mark the posting page itself declares after one bounded identity check', async () => {
     const { db, admission, icons } = subject();
     const r2 = r2Stub();
     // The employer's postings live on its own domain, so the page already fetched for
@@ -451,8 +497,9 @@ describe('employer icon diagnosis', () => {
 
     expect(result.resolved).toBe(1);
     expect(r2.puts[0]?.key).toMatch(/^company-icons\/acme\/site-[0-9a-f]{16}\.png$/u);
-    // The mark came from the page already in hand, so the homepage was never requested.
-    expect(requested).toEqual([]);
+    // The mark still comes from the page in hand; the one homepage request checks
+    // whether the selected company domain moved to a different corporate identity.
+    expect(requested).toEqual(['homepage']);
     const events = vi.mocked(console.log).mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
     expect(events.find((event) => event.event === 'company_icon_domain_asset_stored'))
       .toMatchObject({ source: 'declared', url: 'https://acme.com/touch-180.png' });
@@ -2054,14 +2101,162 @@ describe('employers needing resolution', () => {
   });
 });
 
-describe('employer icon provider cache', () => {
-  it('records a cached provider icon without displacing an existing one', async () => {
+describe('employer icon coverage v2', () => {
+  it('claims corrective retries before the ordinary coverage backlog', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('ordinary', 'Ordinary'), NOW.toISOString());
+    await admission.putCanonicalEmployer(employerRow('corrective', 'Corrective'), NOW.toISOString());
+    await icons.enqueue({
+      id: 'task-ordinary', canonicalEmployerId: 'ordinary', evidenceFingerprint: 'ordinary-fingerprint',
+      evidenceJson: JSON.stringify({ applicationUrl: 'https://ordinary.example/jobs/1' }),
+      nextRetryAt: NOW.toISOString(), now: '2026-09-24T11:00:00.000Z',
+    });
+    await icons.enqueue({
+      id: 'task-corrective', canonicalEmployerId: 'corrective', evidenceFingerprint: 'corrective-fingerprint',
+      evidenceJson: JSON.stringify({ applicationUrl: 'https://corrective.example/jobs/1' }),
+      nextRetryAt: NOW.toISOString(), now: '2026-09-24T11:01:00.000Z',
+    });
+    database.prepare("UPDATE employer_icon_resolutions SET review_priority = 100 WHERE id = 'task-corrective'").run();
+
+    expect((await icons.claimDue(NOW.toISOString(), 1, 60_000))[0]?.canonicalEmployerId).toBe('corrective');
+  });
+
+  it('claims employers with active posting evidence before seedless registry work', async () => {
     const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('seedless', 'Seedless'), NOW.toISOString());
+    await admission.putCanonicalEmployer(employerRow('active', 'Active'), NOW.toISOString());
+    const enqueue = (id: string, evidenceJson: string, createdAt: string) => icons.enqueue({
+      id: `task-${id}`, canonicalEmployerId: id, evidenceFingerprint: `fingerprint-${id}`,
+      evidenceJson, nextRetryAt: NOW.toISOString(), now: createdAt,
+    });
+    await enqueue('seedless', JSON.stringify({ kind: 'seed' }), '2026-09-24T11:00:00.000Z');
+    await enqueue('active', JSON.stringify({ kind: 'seed', applicationUrl: 'https://active.example/jobs/1' }),
+      '2026-09-24T11:01:00.000Z');
+
+    expect((await icons.claimDue(NOW.toISOString(), 1, 60_000))[0]?.canonicalEmployerId).toBe('active');
+  });
+
+  it('inherits a brand icon on the read path without copying it into the child', async () => {
+    const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('optiver', 'Optiver', 'company-icons/optiver/reviewed.webp'), NOW.toISOString());
+    await admission.putCanonicalEmployer({
+      ...employerRow('icml', 'Optiver - ICML'), brandOfEmployerId: 'optiver',
+    }, NOW.toISOString());
+
+    expect(await icons.context('icml')).toMatchObject({ id: 'icml', displayName: 'Optiver - ICML' });
+    expect((await icons.context('icml'))?.iconKey).toBeUndefined();
+    expect(await icons.renderContext('icml')).toMatchObject({
+      id: 'icml', iconKey: 'company-icons/optiver/reviewed.webp', inheritedFromEmployerId: 'optiver',
+    });
+  });
+
+  it('keeps a reviewed canonical domain when a later automatic task disagrees', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.markConfirmed({
+      canonicalEmployerId: 'acme', domain: 'acme.com', evidenceJson: '{"kind":"confirmed"}',
+      revalidateAt: '2027-09-24T12:00:00.000Z', now: NOW.toISOString(),
+    });
+    database.prepare(`INSERT INTO employer_icon_resolutions
+      (id, canonical_employer_id, evidence_fingerprint, status, evidence_json, created_at, updated_at)
+      VALUES ('task-auto', 'acme', 'new-evidence', 'retryable', '{}', ?, ?)`).run(NOW.toISOString(), NOW.toISOString());
+    await icons.markResolved({
+      taskId: 'task-auto', canonicalEmployerId: 'acme', selectedDomain: 'namesake.example',
+      selectedSource: 'logo-dev', confidence: 1, evidenceJson: '{}', revalidateAt: '2027-01-01T00:00:00.000Z',
+      now: NOW.toISOString(),
+    });
+
+    expect(await icons.context('acme')).toMatchObject({
+      websiteDomain: 'acme.com', websiteDomainSource: 'reviewed',
+    });
+  });
+
+  it('routes a cross-domain corporate redirect into identity review', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://acme.com/careers/1'), provider: 'structured', provenance: 'official-structured',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/1': () => html('<!doctype html><title>Acme careers</title>'),
+      'https://acme.com/': () => status(301, { location: 'https://newco.example/' }),
+      'https://newco.example/': () => html('<!doctype html><title>NewCo</title>'),
+    });
+
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {}), NOW, DEPENDENCIES(fetchImpl));
+
+    expect(result.reasonCodes).toEqual(['corporate-redirect-review']);
+    expect(await icons.reviewQueue(10)).toEqual([
+      expect.objectContaining({
+        canonicalEmployerId: 'acme', reasonCode: 'corporate-redirect-review',
+        redirectedDomain: 'newco.example', reviewPriority: 50,
+      }),
+    ]);
+  });
+
+  it('accepts a same-brand redirect onto a localized country domain', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://acme.com/careers/1'), provider: 'structured', provenance: 'official-structured',
+    }, NOW);
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/1': () => html('<!doctype html><title>Acme careers</title>'),
+      'https://acme.com/': () => status(301, { location: 'https://acme.co.jp/' }),
+      'https://acme.co.jp/': () => html('<!doctype html><title>Acme Japan</title>'),
+      [logoDevImageUrl('acme.com', LOGO_IMAGE_TOKEN)]: () => webp(),
+    });
+
+    const result = await runEmployerIconResolutionPass(
+      environment(db, r2Stub().bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
+    );
+
+    expect(result.reasonCodes).toEqual(['domain-accepted']);
+    expect(await icons.context('acme')).toMatchObject({ websiteDomain: 'acme.com', resolutionStatus: 'resolved' });
+    expect(await icons.reviewQueue(10)).toEqual([]);
+  });
+
+  it('reports active-employer and role-weighted coverage with inheritance', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('parent', 'Parent', 'company-icons/parent/reviewed.webp'), NOW.toISOString());
+    await admission.putCanonicalEmployer({ ...employerRow('child', 'Child'), parentEmployerId: 'parent' }, NOW.toISOString());
+    await admission.putCanonicalEmployer(employerRow('missing', 'Missing'), NOW.toISOString());
+    database.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection-pointer', ?)")
+      .run(JSON.stringify({ version: 'coverage-v1' }));
+    database.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES ('CATALOG_PROJECTION#MANIFESTS', 'coverage-v1', 'catalog-projection-manifest', ?)")
+      .run(JSON.stringify({ keys: ['GROUP#child', 'GROUP#missing'] }));
+    const insert = database.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES ('CATALOG_PROJECTION#GROUPS', ?, 'catalog-projection', ?)");
+    insert.run('GROUP#child', JSON.stringify({
+      group: { roleCount: 2, featuredRole: { canonicalEmployerId: 'child' } },
+    }));
+    insert.run('GROUP#missing', JSON.stringify({
+      group: { roleCount: 1, featuredRole: { canonicalEmployerId: 'missing' } },
+    }));
+
+    expect((await icons.counts()).active).toEqual({
+      employers: 2, coveredEmployers: 1, employerCoverageRate: 0.5,
+      roles: 3, coveredRoles: 2, roleCoverageRate: 2 / 3,
+    });
+  });
+});
+
+describe('employer icon provider cache', () => {
+  it('records and repairs machine-owned cached icons without displacing a reviewed one', async () => {
+    const { database, admission, icons } = subject();
     await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
     await icons.markProviderIcon({ canonicalEmployerId: 'acme', iconKey: 'company-icons/acme/logo-abc.webp', now: NOW.toISOString() });
     const cached = await icons.context('acme');
     expect(cached?.iconKey).toBe('company-icons/acme/logo-abc.webp');
     expect(cached?.iconSource).toBe('logo-dev');
+
+    database.prepare("UPDATE canonical_employers SET icon_key = ?, icon_source = 'platform' WHERE id = 'acme'")
+      .run('company-icons/acme/platform-stale.webp');
+    await icons.markProviderIcon({ canonicalEmployerId: 'acme', iconKey: 'company-icons/acme/logo-repaired.webp', now: NOW.toISOString() });
+    const repaired = await icons.context('acme');
+    expect(repaired?.iconKey).toBe('company-icons/acme/logo-repaired.webp');
+    expect(repaired?.iconSource).toBe('logo-dev');
 
     // A reviewer's icon is the strongest answer, so a read-path cache never takes it.
     await admission.putCanonicalEmployer(employerRow('globex', 'Globex', 'company-icons/globex/reviewed.webp'), NOW.toISOString());
@@ -2298,6 +2493,25 @@ describe('employer declared-site precedence', () => {
 });
 
 describe('employer icon backfill', () => {
+  it('uses the newest open posting before a newer closed-history row', async () => {
+    const { database, icons } = subject();
+    const insert = database.prepare(`INSERT INTO catalog_items
+      (pk, sk, kind, value, catalog_state, catalog_sort_key)
+      VALUES (?, ?, 'internship', ?, ?, ?)`);
+    insert.run('closed-posting', 'posting', JSON.stringify({
+      normalizedUrl: 'https://example.com/closed', title: 'Closed role', lastSeenAt: '2026-09-28T12:00:00.000Z',
+      internshipIdentity: { company: { canonicalId: 'acme' } },
+    }), 'CLOSED', '2026-09-28T12:00:00.000Z');
+    insert.run('open-posting', 'posting', JSON.stringify({
+      normalizedUrl: 'https://example.com/open', title: 'Open role', lastSeenAt: '2026-09-27T12:00:00.000Z',
+      internshipIdentity: { company: { canonicalId: 'acme' } },
+    }), 'OPEN', '2026-09-27T12:00:00.000Z');
+
+    await expect(icons.latestPostingForEmployer('acme')).resolves.toMatchObject({
+      url: 'https://example.com/open', title: 'Open role',
+    });
+  });
+
   it('carries the employer’s own posting link so a backfilled employer resolves from its board', async () => {
     const { database, db, admission, icons } = subject();
     await admission.putCanonicalEmployer(employerRow('aevex', 'AEVEX'), NOW.toISOString());

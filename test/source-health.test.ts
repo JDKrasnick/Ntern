@@ -265,6 +265,7 @@ describe('application link probe failures', () => {
 
   it('keeps completed-probe rejections classified as link', () => {
     expect(sourceFailureCategory(new ApplicationUrlValidationError('Application link returned HTTP 404'))).toBe('link');
+    expect(sourceFailureCategory(new ApplicationUrlValidationError('Application page redirected to an explicit error destination'))).toBe('link');
     expect(sourceFailureCategory(new ApplicationUrlValidationError('Application link host jobs.example.test is not an approved source host'))).toBe('link');
     expect(sourceFailureCategory(new ApplicationLinkValidationError('GitHub', 3, 2_000, []))).toBe('link');
   });

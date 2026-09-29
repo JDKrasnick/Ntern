@@ -1,0 +1,100 @@
+import { describe, expect, it } from 'vitest';
+import { automaticEmployerIdentityCandidate, automaticEmployerIdentityObservationSlice, groupAutomaticEmployerIdentityCandidates } from '../src/employer/automatic-identity.js';
+import type { ProcessedListing } from '../src/types.js';
+
+function listing(overrides: Partial<ProcessedListing> = {}): ProcessedListing {
+  return {
+    sourceId: 'simplify-summer-2026', provenance: 'reviewed-community',
+    sourceUrl: 'https://github.com/SimplifyJobs/Summer2027-Internships', document: 'README.md', row: 1,
+    externalId: 'row-1', fetchedAt: '2026-09-27T00:00:00Z', company: '🔥 AMD',
+    title: 'Software Engineering Intern', location: 'Austin, TX', season: 'summer-2027',
+    applyUrl: 'https://careers.amd.com/jobs/92358?icims=1', compensation: { raw: '' },
+    state: 'open', employerLabelOrigin: 'explicit',
+    ...overrides,
+  };
+}
+
+describe('automatic employer identity evidence', () => {
+  it('derives a clean employer candidate from an exact employer-specific ATS route', () => {
+    expect(automaticEmployerIdentityCandidate(listing(), 8, '2026-09-27T01:00:00Z')).toEqual({
+      provider: 'icims', scope: 'amd', sourceId: 'simplify-summer-2026', fetchSequence: 8,
+      labelKey: 'amd', displayName: 'AMD', postingId: '92358',
+      applicationUrl: 'https://careers.amd.com/jobs/92358?icims=1', observedAt: '2026-09-27T01:00:00Z',
+    });
+  });
+
+  it('rejects shared ATS scopes, generic labels, and unresolved inherited labels', () => {
+    expect(automaticEmployerIdentityCandidate(listing({ company: 'ABEC',
+      applyUrl: 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4500637' }), 8,
+    '2026-09-27T01:00:00Z')).toBeUndefined();
+    expect(automaticEmployerIdentityCandidate(listing({ company: 'External Careers' }), 8,
+      '2026-09-27T01:00:00Z')).toBeUndefined();
+    expect(automaticEmployerIdentityCandidate(listing({ employerLabelOrigin: 'inherited',
+      employerInheritance: 'conflict' }), 8, '2026-09-27T01:00:00Z')).toBeUndefined();
+  });
+
+  it('groups roles by tenant and normalized label while retaining distinct posting IDs', () => {
+    const first = automaticEmployerIdentityCandidate(listing(), 8, '2026-09-27T01:00:00Z')!;
+    const second = automaticEmployerIdentityCandidate(listing({
+      externalId: 'row-2', applyUrl: 'https://careers.amd.com/jobs/92359?icims=1',
+    }), 8, '2026-09-27T01:00:00Z')!;
+    expect(groupAutomaticEmployerIdentityCandidates([first, first, second])).toEqual([
+      expect.objectContaining({ provider: 'icims', scope: 'amd', labelKey: 'amd', postingIds: ['92358', '92359'] }),
+    ]);
+  });
+
+  it('rotates a bounded identity-enrichment window across successful fetches', () => {
+    const observations = Array.from({ length: 8 }, (_, index) => ({
+      provider: 'ashby' as const, scope: `tenant-${index}`, sourceId: 'community', fetchSequence: 1,
+      labelKey: `company-${index}`, displayName: `Company ${index}`, postingIds: [`posting-${index}`],
+      applicationUrl: `https://jobs.ashbyhq.com/tenant-${index}/posting-${index}`,
+      observedAt: '2026-09-27T01:00:00Z',
+    }));
+
+    const first = automaticEmployerIdentityObservationSlice(observations, 1);
+    const second = automaticEmployerIdentityObservationSlice(observations, 2);
+    expect(first).toHaveLength(5);
+    expect(second).toHaveLength(5);
+    expect(new Set([...first, ...second].map((observation) => observation.scope)).size).toBe(8);
+  });
+
+  it('keeps every label for a selected tenant atomic at the observation boundary', () => {
+    const observation = (scope: string, labelKey: string) => ({
+      provider: 'workday' as const, scope, sourceId: 'community', fetchSequence: 1,
+      labelKey, displayName: labelKey, postingIds: [`posting-${scope}-${labelKey}`],
+      applicationUrl: `https://${scope}.wd1.myworkdayjobs.com/jobs/1`,
+      observedAt: '2026-09-27T01:00:00Z',
+    });
+    const observations = [
+      observation('tenant-a', 'company-a'),
+      observation('tenant-b', 'company-b'),
+      observation('tenant-c', 'company-c'),
+      observation('tenant-d', 'company-d'),
+      observation('tenant-e', 'company-e'),
+      observation('tenant-e', 'other-company'),
+    ];
+
+    const selected = automaticEmployerIdentityObservationSlice(observations, 1);
+
+    expect(new Set(selected.map((value) => value.scope))).toEqual(new Set([
+      'tenant-a', 'tenant-b', 'tenant-c', 'tenant-d', 'tenant-e',
+    ]));
+    expect(selected.filter((value) => value.scope === 'tenant-e').map((value) => value.labelKey))
+      .toEqual(['company-e', 'other-company']);
+  });
+
+  it('compresses an over-budget tenant to enough evidence to prove conflict', () => {
+    const observations = Array.from({ length: 1_100 }, (_, index) => ({
+      provider: 'workday' as const, scope: 'shared', sourceId: 'community', fetchSequence: 1,
+      labelKey: `company-${String(index).padStart(4, '0')}`, displayName: `Company ${index}`,
+      postingIds: [`posting-${index}`],
+      applicationUrl: `https://shared.wd1.myworkdayjobs.com/jobs/posting-${index}`,
+      observedAt: '2026-09-29T01:00:00Z',
+    }));
+
+    const selected = automaticEmployerIdentityObservationSlice(observations, 1);
+
+    expect(selected).toHaveLength(2);
+    expect(new Set(selected.map((observation) => observation.labelKey)).size).toBe(2);
+  });
+});

@@ -143,6 +143,30 @@ describe('automatic company icon route', () => {
     expect(retained).toEqual([{ id: 'acme', bytes: [9, 8, 7], contentType: 'image/webp' }]);
   });
 
+  it('falls back to the provider and repairs a missing machine-owned R2 asset', async () => {
+    const retained: Array<{ id: string; bytes: number[]; contentType: string }> = [];
+    const employer = {
+      async getCanonicalEmployer() {
+        return {
+          id: 'acme', displayName: 'Acme', reviewedAt: '', reviewedBy: '',
+          iconKey: 'company-icons/acme/platform-stale.webp', iconSource: 'platform',
+        };
+      },
+    };
+    const response = await companyIconResponse('acme', employer, emptyDocuments, {
+      automaticDomain: async () => 'acme.com',
+      automaticDisplay: async () => true,
+      logoDevImageToken: token,
+      resolver,
+      fetchImpl: providerFetch(() => image('image/webp', new Uint8Array([6, 5, 4]))),
+      retainIcon: async (id, asset) => { retained.push({ id, bytes: [...asset.bytes], contentType: asset.contentType }); },
+    });
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([6, 5, 4]));
+    expect(retained).toEqual([{ id: 'acme', bytes: [6, 5, 4], contentType: 'image/webp' }]);
+  });
+
   it('does not cache a provider response it never served', async () => {
     let calls = 0;
     const response = await automatic(() => new Response(null, { status: 404 }), {

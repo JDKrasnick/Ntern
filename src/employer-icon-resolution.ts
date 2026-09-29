@@ -38,6 +38,8 @@ export type IconEvidenceSignal =
   | 'official-application-host'
   /** The employer's own site as its ATS board declares it. */
   | 'platform-website'
+  /** A person reviewed and recorded this employer's canonical domain. */
+  | 'reviewed-domain'
   /** The employer's name as its ATS board declares it. */
   | 'platform-name'
   /** A domain a model proposed and that then verified itself against the employer. */
@@ -391,6 +393,7 @@ export function scoreIconCandidate(
     };
   }
   let score = 0;
+  if (signals.includes('reviewed-domain')) score = MAX_SCORE;
   if (signals.includes('final-url') || signals.includes('redirect-host')) score += GROUP_WEIGHTS.url;
   if (signals.includes('official-application-host')) score += GROUP_WEIGHTS.officialHost;
   if (signals.includes('jsonld-url') || signals.includes('jsonld-name') || signals.includes('platform-website')) {
@@ -451,16 +454,19 @@ export function decideIconDomain(candidates: readonly IconDomainCandidate[]): Ic
   // host deterministic instead of a coin flip the model declined. A domain that is only
   // a final URL, a provider nomination, or a page title cannot trigger this: it is
   // strictly the employer's own declaration.
-  const declared = eligible.find((candidate) =>
-    candidate.signals.includes('platform-website') || candidate.signals.includes('jsonld-url'));
+  const declared = eligible.find((candidate) => candidate.signals.includes('reviewed-domain'))
+    ?? eligible.find((candidate) =>
+      candidate.signals.includes('platform-website') || candidate.signals.includes('jsonld-url'));
   if (declared) {
     const next = eligible.find((candidate) => candidate.domain !== declared.domain);
     return {
       outcome: 'resolved', scores, selectedDomain: declared.domain, selectedScore: declared.score,
       ...(next ? { runnerUpScore: next.score } : {}),
-      reason: declared.domain === best.domain
-        ? `the employer's own declaration names ${declared.domain}`
-        : `the employer's own declaration names ${declared.domain}, not ${best.domain}`,
+      reason: declared.signals.includes('reviewed-domain')
+        ? `a reviewer confirmed ${declared.domain}`
+        : declared.domain === best.domain
+          ? `the employer's own declaration names ${declared.domain}`
+          : `the employer's own declaration names ${declared.domain}, not ${best.domain}`,
     };
   }
   const runnerUp = eligible.find((candidate) => candidate.domain !== best.domain);
@@ -731,6 +737,7 @@ export function iconEvidenceFingerprint(input: {
   applicationUrl: string;
   provider: string;
   tenant?: string;
+  resolverVersion?: number;
 }): string {
   let host = '';
   let path = '';
@@ -746,5 +753,6 @@ export function iconEvidenceFingerprint(input: {
     path,
     input.provider,
     input.tenant ?? '',
+    String(input.resolverVersion ?? 1),
   ].join('\0')).digest('hex');
 }

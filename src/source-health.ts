@@ -46,8 +46,8 @@ export function sourceFailureCategory(error: unknown): SourceFailureCategory {
   // an aggregate `N/M eligible ... links failed shadow validation` — carry no
   // transport wording and stay `link`, so link integrity still quarantines at two
   // strikes.
-  if (/application (?:link|page) (?:timed out|could not be reached)/.test(message)) return 'transport';
-  if (/application link|application host|eligible .* link/.test(message)) return 'link';
+  if (/application (?:link|page)(?: body)? (?:timed out|could not be reached)/.test(message)) return 'transport';
+  if (/application link|application page (?:returned|redirected|reports)|application host|eligible .* link/.test(message)) return 'link';
   if (/shape|schema|malformed json/.test(message)) return 'json';
   if (/quality|suspicious zero-row/.test(message)) return 'quality';
   if (/exceeded(?: cpu| memory)?|resource limit|too much cpu|out of memory|memory limit|response body too large|too many jobs/i.test(message)) return 'capacity';

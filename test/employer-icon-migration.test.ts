@@ -10,11 +10,16 @@ const migration = readFileSync(new URL(
   '../cloudflare/migrations/0034_employer_icon_resolution.sql',
   import.meta.url,
 ), 'utf8');
+const migrationV2 = readFileSync(new URL(
+  '../cloudflare/migrations/0038_employer_icon_resolution_v2.sql',
+  import.meta.url,
+), 'utf8');
 
 function migrated(): DatabaseSync {
   const database = new DatabaseSync(':memory:');
   database.exec(admission);
   database.exec(migration);
+  database.exec(migrationV2);
   database.prepare(`INSERT INTO canonical_employers
     (id, display_name, reviewed_at, reviewed_by, created_at, updated_at)
     VALUES ('acme', 'Acme', '2026-09-01T00:00:00Z', 'review', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`).run();
@@ -41,6 +46,7 @@ describe('employer icon resolution migration', () => {
     for (const column of [
       'website_domain', 'icon_source', 'icon_resolution_status', 'icon_resolved_at',
       'icon_tie_break_at', 'icon_tie_break_fingerprint', 'icon_tie_break_input_tokens', 'icon_tie_break_output_tokens',
+      'website_domain_source', 'website_domain_reviewed_at', 'website_domain_reviewed_by',
     ]) {
       expect(columns).toContain(column);
     }

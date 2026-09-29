@@ -4,7 +4,7 @@ import { assessApplicationPageForListing, canonicalApplicationUrl, type Applicat
 import { boardReference, reachabilityFromFailure, reachabilityFromSignals, verifyApplication, type AttributionBasis, type Reachability } from './core/application-verification.js';
 import { inferSeason, isPastSeason } from './core/early-career.js';
 import { normalizeUrl } from './core/normalize.js';
-import type { ProviderPostingReference } from './identity/posting.js';
+import { providerPostingReference, type ProviderPostingReference } from './identity/posting.js';
 import { resolvePostingIdentityDecision, stableSourceOccurrenceJobId } from './identity/registry.js';
 import {
   providerEvidenceForOccurrence,
@@ -21,6 +21,7 @@ import { sourceProvider, sourceRegion } from './integration-registry.js';
 import { processSnapshot, SOURCE_METADATA_PROCESSING_REVISION } from './ingestion/processor.js';
 import { deriveCanonicalAdmission, evaluateCatalogAdmission } from './catalog-admission.js';
 import type { EmployerIconSeed } from './employer-icon-resolution.js';
+import { automaticEmployerIdentityCandidate, automaticEmployerIdentityObservationSlice, groupAutomaticEmployerIdentityCandidates } from './employer/automatic-identity.js';
 import { classifyDestination, matchingBrowserDestination, requiresBrowserVerification, type CatalogAdmissionResolver, type DestinationVerificationRequest } from './destination-verification.js';
 import { reviewedBoardIndex } from './sources/index.js';
 import { sourceQualityFailures } from './sources/quality.js';
@@ -40,6 +41,7 @@ import type {
   Internship,
   ProcessedListing,
   ProcessedSnapshot,
+  ProviderIdentity,
   SourceAdapter,
   SourceCheckpoint,
   SourceFetchResult,
@@ -237,11 +239,12 @@ export const GITHUB_RESOLUTION_ROWS_PER_DELIVERY = 25;
  * Listings one delivery may re-grade after an admission policy change. The
  * bounded-migration gate suppresses newly admitted rows of a trusted list until
  * its migration drains, so this bound also sets how fast those rows publish;
- * 20 rows per delivery left migrated rows hidden for hours, while 100 converges
- * in a manageable number of deliveries and keeps the migration inside the same
- * message budget as the resolution slice above.
+ * This cannot exceed the 25-row resolution budget: migration rows are obligated
+ * work in the same delivery, and a 100-row migration slice both starved the
+ * resolution frontier and exceeded memory on the 3,000+ row community boards.
+ * Continuations make the smaller slice resumable without reopening settled rows.
  */
-export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 100;
+export const GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY = 25;
 
 /**
  * Bounded worker pool that always drains: the first error is rethrown only once
@@ -719,6 +722,56 @@ export class IngestionRunner {
     return references;
   }
 
+  private employerResolutionIdentities(
+    listing: ProcessedListing,
+    reviewedReferences: readonly ProviderPostingReference[],
+  ): ProviderIdentity[] {
+    const identities: ProviderIdentity[] = listing.providerIdentity ? [listing.providerIdentity] : [];
+    const append = (reference: ProviderPostingReference, sourceId = listing.sourceId) => {
+      if (reference.provider === 'unknown') return;
+      identities.push({
+        provider: reference.provider,
+        sourceId,
+        sourceUrl: listing.applyUrl,
+        ...(reference.tenant ? { tenant: reference.tenant } : {}),
+        ...(reference.postingId ? { postingId: reference.postingId } : {}),
+      });
+    };
+    try { append(providerPostingReference(listing.applyUrl)); } catch { /* Invalid URLs fail admission elsewhere. */ }
+    for (const reference of reviewedReferences) {
+      const sourceId = 'sourceId' in reference && typeof reference.sourceId === 'string'
+        ? reference.sourceId : listing.sourceId;
+      append(reference, sourceId);
+    }
+    const unique = new Map<string, ProviderIdentity>();
+    for (const identity of identities) {
+      const key = `${identity.provider}\0${identity.sourceId}\0${identity.tenant ?? ''}\0${identity.employerScope ?? ''}`;
+      if (!unique.has(key)) unique.set(key, identity);
+    }
+    return [...unique.values()];
+  }
+
+  private async resolveCanonicalEmployer(
+    listing: ProcessedListing,
+    reviewedReferences: readonly ProviderPostingReference[],
+  ): Promise<{ employer: { id: string; displayName: string }; identity: ProviderIdentity } | undefined> {
+    if (!this.catalogAdmissionResolver) return undefined;
+    const resolutions = await Promise.all(this.employerResolutionIdentities(listing, reviewedReferences).map(async (identity) => ({
+      identity,
+      employer: await this.catalogAdmissionResolver!.resolveCanonicalEmployer(identity),
+    })));
+    const resolved = resolutions.filter((value): value is { identity: ProviderIdentity; employer: { id: string; displayName: string } } => Boolean(value.employer));
+    const employers = new Set(resolved.map((value) => value.employer.id));
+    if (employers.size > 1) {
+      console.error(JSON.stringify({
+        event: 'catalog_employer_resolution_conflict', sourceId: listing.sourceId,
+        externalId: listing.externalId, employerIds: [...employers].sort(),
+      }));
+      return undefined;
+    }
+    return resolved[0];
+  }
+
   private async inferredEmbedAliases(listing: ProcessedListing): Promise<string[]> {
     const evidence = listing.providerEvidence;
     if (evidence?.provider !== 'greenhouse') return [];
@@ -753,6 +806,8 @@ export class IngestionRunner {
     stampSourceMetadata = false,
     providerShadowEligible = false,
     workConcurrency = SOURCE_WORK_CONCURRENCY,
+    automaticEmployerEvidenceListings: readonly ProcessedListing[] = listings,
+    forceAutomaticEmployerExternalIds: ReadonlySet<string> = new Set(),
   ) {
     const resolved = new Map<string, Internship | undefined>();
     const validatedAt = new Map<string, string>();
@@ -772,6 +827,56 @@ export class IngestionRunner {
     const brokenProbeFailures: string[] = [];
     const retryableRowExternalIds = new Set<string>();
     const deferredHandoffFailures: string[] = [];
+    const observedAutomaticEmployerKeys = new Set<string>();
+    const automaticEmployerRefreshKeys = new Set<string>();
+    const pendingAutomaticEmployerExternalIds = new Set<string>();
+    if (this.catalogAdmissionResolver?.observeAutomaticEmployerIdentities && completeFetchSequence) {
+      const observedAt = this.now().toISOString();
+      const automaticCandidates = automaticEmployerEvidenceListings.flatMap((listing) => {
+        const candidate = automaticEmployerIdentityCandidate(listing, completeFetchSequence, observedAt);
+        return candidate ? [{ externalId: externalId(listing), candidate }] : [];
+      });
+      const observations = automaticEmployerIdentityObservationSlice(
+        groupAutomaticEmployerIdentityCandidates(automaticCandidates.map(({ candidate }) => candidate)),
+        completeFetchSequence,
+      );
+      if (observations.length) {
+        try {
+          const observationResult = await this.catalogAdmissionResolver.observeAutomaticEmployerIdentities(observations);
+          // Automatic mappings deliberately do not change the global admission
+          // configuration version: doing that regrades every community role and
+          // can exhaust a queue delivery. Revisit only scopes whose active mapping
+          // changed, so promotion and invalidation both converge without a
+          // catalog-wide regrade.
+          for (const observation of observations) {
+            observedAutomaticEmployerKeys.add(`${observation.provider}\0${observation.scope}`);
+          }
+          const changedScopes = observationResult.changedScopes
+            ?? (observationResult.promoted || observationResult.disabled
+              ? observations.map(({ provider, scope }) => ({ provider, scope })) : []);
+          for (const scope of changedScopes) {
+            automaticEmployerRefreshKeys.add(`${scope.provider}\0${scope.scope}`);
+          }
+        } catch (error) {
+          // Employer discovery is enrichment. A transient D1 failure must not
+          // prevent otherwise valid source rows from being published; retain
+          // the affected rows in the durable pass so a later slice retries them.
+          console.error(JSON.stringify({
+            event: 'automatic_employer_identity_observation_failed',
+            sourceIds: [...new Set(observations.map((observation) => observation.sourceId))],
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+      }
+      const currentExternalIds = new Set(listings.map(externalId));
+      for (const { externalId: candidateExternalId, candidate } of automaticCandidates) {
+        const key = `${candidate.provider}\0${candidate.scope}`;
+        if ((currentExternalIds.has(candidateExternalId) && !observedAutomaticEmployerKeys.has(key))
+          || (!currentExternalIds.has(candidateExternalId) && automaticEmployerRefreshKeys.has(key))) {
+          pendingAutomaticEmployerExternalIds.add(candidateExternalId);
+        }
+      }
+    }
     const isProbeFailure = (error: unknown, fromValidator = false) => {
       const category = sourceFailureCategory(error);
       return (category === 'transport' || category === 'link')
@@ -851,9 +956,18 @@ export class IngestionRunner {
         && priorOccurrence.occurrence.trustedCommunityAlertQualification.basis !== undefined
         && priorOccurrence.occurrence.trustedCommunityAlertQualification.catalogPublicationSuppressed !== true
         && Date.parse(priorOccurrence.occurrence.admission?.destination.nextCheckAt ?? '') > this.now().getTime();
+      const automaticEmployerCandidate = automaticEmployerIdentityCandidate(
+        sourceListing,
+        completeFetchSequence,
+        this.now().toISOString(),
+      );
+      const refreshAutomaticEmployer = Boolean(automaticEmployerCandidate
+        && (automaticEmployerRefreshKeys.has(`${automaticEmployerCandidate.provider}\0${automaticEmployerCandidate.scope}`)
+          || forceAutomaticEmployerExternalIds.has(id)));
       if (!stampSourceMetadata && (!trustedCommunityPolicy || settledCatalogOnlyCommunityRow)
         && (reuseUnchangedOccurrences || admissionAlreadyApplied) && priorOccurrence
-        && sourceOwnedMaterial(priorOccurrence.occurrence) === sourceOwnedMaterial(listing)) {
+        && sourceOwnedMaterial(priorOccurrence.occurrence) === sourceOwnedMaterial(listing)
+        && !refreshAutomaticEmployer) {
         handledExternalIds.add(id);
         return;
       }
@@ -909,7 +1023,8 @@ export class IngestionRunner {
         && priorTrustedQualification.catalogPublicationSuppressed !== true
         && priorOccurrence.occurrence.admission
         && postingSpecificDestination(priorOccurrence.occurrence.admission.destination)
-        && sameTrustedMaterial) {
+        && sameTrustedMaterial
+        && !refreshAutomaticEmployer) {
         handledExternalIds.add(id);
         return;
       }
@@ -1006,9 +1121,10 @@ export class IngestionRunner {
           postingIdentityDecision: identityResult.decision,
           ...(identity ? { postingIdentity: identity } : {}),
         };
-        if (supportsAdmission && listing.providerIdentity && this.catalogAdmissionResolver) {
-          const canonicalEmployer = await this.catalogAdmissionResolver.resolveCanonicalEmployer(listing.providerIdentity);
-          if (canonicalEmployer) {
+        if (supportsAdmission && this.catalogAdmissionResolver) {
+          const resolvedEmployer = await this.resolveCanonicalEmployer(listing, reviewedProviderReferences);
+          if (resolvedEmployer) {
+            const { employer: canonicalEmployer, identity: employerIdentity } = resolvedEmployer;
             // The employer is known and the application link is in hand, which is
             // exactly the evidence an icon needs. Recording the task costs one
             // deduplicated insert and no network call, so publication still never
@@ -1019,8 +1135,8 @@ export class IngestionRunner {
                 displayName: canonicalEmployer.displayName,
                 roleTitle: listing.title,
                 applicationUrl: normalizedUrl,
-                provider: listing.providerIdentity.provider,
-                ...(listing.providerIdentity.tenant ? { tenant: listing.providerIdentity.tenant } : {}),
+                provider: employerIdentity.provider,
+                ...(employerIdentity.tenant ? { tenant: employerIdentity.tenant } : {}),
                 ...(listing.provenance ? { provenance: listing.provenance } : {}),
                 sourceId: listing.sourceId,
               });
@@ -1302,6 +1418,7 @@ export class IngestionRunner {
       withdrawnProbeFailures,
       deferredHandoffFailures,
       retryableRowExternalIds,
+      pendingAutomaticEmployerExternalIds,
       probeFailureShare,
     };
   }
@@ -1665,12 +1782,16 @@ export class IngestionRunner {
             && options.maxListingsPerSourceRun <= GITHUB_RESOLUTION_ROWS_PER_DELIVERY
             && migrationLimit === undefined
             ? GITHUB_RESOLUTION_WORK_CONCURRENCY : SOURCE_WORK_CONCURRENCY,
+          batch.processed.listings,
+          pendingResolutionRows,
         );
-        // Keep inconclusive rows in the checkpoint without making the whole
-        // slice retry. Finish unvisited rows first; once only probes remain,
-        // the next scheduled poll retries them without a hot queue loop.
+        // Keep unobserved employer evidence and inconclusive probes in the
+        // checkpoint without retrying the whole slice. Finish unvisited rows
+        // first; once only probes remain, the scheduler retries them without a
+        // hot queue loop.
         const nextPendingRows = [...new Set([
           ...remainingRows,
+          ...resolution.pendingAutomaticEmployerExternalIds,
           ...resolvedListings.filter((listing) => resolution.retryableRowExternalIds.has(externalId(listing))).map(externalId),
         ])];
         // Existing catalog decisions are the durable migration obligation.
@@ -1735,9 +1856,12 @@ export class IngestionRunner {
           console.error(JSON.stringify({ event: 'github_resolution_stalled', sourceId: connector.id,
             pendingBefore: pendingResolutionRows.size, pendingAfter: nextPendingRows.length,
             scope: resolutionScope.length, slice: selectedSlice.length,
-            handled: resolution.handledExternalIds.size, retryable: resolution.retryableRowExternalIds.size }));
+            handled: resolution.handledExternalIds.size,
+            automaticEmployerPending: resolution.pendingAutomaticEmployerExternalIds.size,
+            retryable: resolution.retryableRowExternalIds.size }));
         }
-        if (remainingRows.length && resolutionProgressed && !report.continuationSources.includes(connector.id)) {
+        if ((remainingRows.length || resolution.pendingAutomaticEmployerExternalIds.size)
+          && resolutionProgressed && !report.continuationSources.includes(connector.id)) {
           report.continuationSources.push(connector.id);
         }
         if (nextPendingRows.length) report.pendingResolution[connector.id] = nextPendingRows.length;

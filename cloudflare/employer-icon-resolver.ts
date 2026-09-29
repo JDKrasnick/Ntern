@@ -38,13 +38,15 @@ import { safeIconSvg, type IconSvgRasterizer } from '../src/svg-icon.js';
 import { safeFetchBytes, safeFetchText, type HostResolver } from '../src/employer/safe-network.js';
 import { inferOpenAIJson, shadowDefaultModelId, type OpenAIJsonRequest, type OpenAIJsonResult } from './openai-shadow-inference.js';
 import {
-  D1EmployerIconStore, employerIconTieBreakWindowMs,
+  D1EmployerIconStore, employerIconIdentityReviewPriority, employerIconTieBreakWindowMs,
   type EmployerIconContext, type EmployerIconMode, type EmployerIconSettings, type EmployerIconTask,
 } from './employer-icon-store.js';
 import type { D1Database, R2Bucket } from './types.js';
 
 /** A resolved decision is revalidated on this cadence. */
 const ICON_REVALIDATE_MS = 30 * 24 * 60 * 60 * 1_000;
+/** Bump whenever resolver semantics change so old misses can be reconsidered. */
+export const ICON_RESOLVER_VERSION = 4;
 /** A definitive no-match backs off from one day to the revalidation ceiling. */
 const ICON_UNRESOLVED_BASE_RETRY_MS = 24 * 60 * 60 * 1_000;
 /** A transient provider or network problem retries sooner, from one hour. */
@@ -197,9 +199,10 @@ export async function enqueueEmployerIconResolution(
       canonicalEmployerId: seed.canonicalEmployerId, displayName: seed.displayName,
       applicationUrl: seed.applicationUrl, provider: seed.provider,
       ...(seed.tenant ? { tenant: seed.tenant } : {}),
+      resolverVersion: ICON_RESOLVER_VERSION,
     }),
     evidenceJson: boundedIconEvidence({
-      version: 1, kind: 'seed', ...seed, enqueuedAt: at,
+      version: 1, resolverVersion: ICON_RESOLVER_VERSION, kind: 'seed', ...seed, enqueuedAt: at,
     }),
     nextRetryAt: at,
     now: at,
@@ -507,6 +510,25 @@ interface AcceptInput extends ResolveTaskInput {
 async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome> {
   const { store, task, settings, env, now, deps, context, seed, decision, gathered, providers, at } = input;
   const domain = decision.selectedDomain!;
+  const corporateRedirect = await observedCorporateRedirect(domain, deps);
+  if (corporateRedirect) {
+    await store.markUnresolved({
+      taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
+      evidenceJson: boundedIconEvidence({
+        ...evidenceRecord(seed, decision, gathered, providers, {
+          outcome: 'unresolved', reasonCode: 'corporate-redirect-review', attempt: input.attempt,
+        }),
+        corporateRedirect,
+      }),
+      nextRetryAt: new Date(now.getTime() + ICON_REVALIDATE_MS).toISOString(), now: at,
+      reviewPriority: employerIconIdentityReviewPriority,
+    });
+    console.warn(JSON.stringify({
+      event: 'company_icon_resolution_corporate_redirect', canonicalEmployerId: context.id,
+      fromDomain: corporateRedirect.fromDomain, toDomain: corporateRedirect.toDomain,
+    }));
+    return { outcome: 'unresolved', reasonCode: 'corporate-redirect-review' };
+  }
   let iconKey: string | undefined;
   let imageVerified = false;
   let assetSource: 'declared' | 'model' | undefined;
@@ -790,7 +812,7 @@ export async function judgeIconProposal(input: {
   * is the employer's own statement about itself, which is what makes a model's
   * suggestion usable rather than merely plausible.
   */
- async function verifyProposedDomain(
+async function verifyProposedDomain(
    domain: string,
    displayName: string,
    declaredName: string | undefined,
@@ -831,6 +853,38 @@ async function runIconProposal(input: {
     return await judgeIconProposal({ displayName: seed.displayName, declaredName, deps, response: result.response });
   } catch {
     return { domain: null, confidence: null, reasonCode: 'not-attempted' };
+  }
+}
+
+/**
+ * A homepage moving to another registrable domain often means a merger, rename,
+ * or portfolio-company transition. That is employer identity, not icon discovery,
+ * so automatic resolution pauses and gives the exact destination to a reviewer.
+ * Network failures fail open here because image verification remains the hard gate.
+ */
+async function observedCorporateRedirect(
+  domain: string,
+  deps: EmployerIconResolverDependencies,
+): Promise<{ fromDomain: string; toDomain: string } | undefined> {
+  try {
+    const result = await safeFetchText(`https://${domain}/`, {
+      resolver: deps.resolver, fetcher: deps.fetchImpl ?? fetch,
+      timeoutMs: ICON_LINK_TIMEOUT_MS, maxRedirects: ICON_LINK_MAX_REDIRECTS, maxBodyBytes: 8 * 1024,
+      onOversize: 'truncate', headers: ICON_PAGE_REQUEST_HEADERS,
+    });
+    if (result.status < 200 || result.status >= 400) return undefined;
+    const toDomain = registrableDomain(new URL(result.url).hostname);
+    const fromDomain = registrableDomain(domain);
+    if (!toDomain || !fromDomain || toDomain === fromDomain) return undefined;
+    // Global employers commonly localize their homepage onto a country TLD
+    // (for example intel.com -> intel.de). The registrable domains differ, but
+    // an exact registrable label still names the same brand. Preserve the
+    // corporate-transition guard for redirects whose labels actually change.
+    const fromLabel = fromDomain.split('.')[0];
+    const toLabel = toDomain.split('.')[0];
+    return fromLabel && fromLabel === toLabel ? undefined : { fromDomain, toDomain };
+  } catch {
+    return undefined;
   }
 }
 
@@ -1233,6 +1287,9 @@ function iconCandidates(
     exempt[domain] ||= employerNamesDomain(context.displayName, domain);
   };
   add(hostOf(seed.applicationUrl) ?? '', 'final-url');
+  if (context.websiteDomain && context.websiteDomainSource === 'reviewed') {
+    add(context.websiteDomain, 'reviewed-domain');
+  }
   let titleMatches = false;
   let siteMatches = false;
   let organizationNameMatches = false;
@@ -1285,16 +1342,28 @@ function iconCandidates(
   // *which* employer is hiring, the provider establishes that employer's domain. It is
   // never attached to a host the page did not name, so it cannot vouch for an
   // unrelated domain.
-  const identityTargets = pageNamedDomain
-    ? [pageNamedDomain]
-    : [...providers.logoDev, ...providers.brandfetch];
-  const tenantCorroborates = tenantCorroboratesEmployer(seed.tenant, context.id);
+  const providerIdentityTargets = [...new Set([...providers.logoDev, ...providers.brandfetch])];
+  const identityTargets = pageNamedDomain ? [pageNamedDomain] : providerIdentityTargets;
+  // Automatic ATS identities have opaque canonical ids (`ats-<provider>-...`),
+  // so the human employer name is the identity the board slug must corroborate.
+  // Apply that corroboration only to a provider candidate whose own domain names
+  // the employer. Attaching it to every search result lets an unrelated namesake
+  // tie the exact domain and win merely because its homepage is easier to fetch.
+  const tenantCorroborates = tenantCorroboratesEmployer(seed.tenant, context.displayName);
   for (const target of identityTargets) {
+    // A page that names the employer establishes which company owns the board,
+    // not which of several provider search results is its domain. It may support
+    // the sole nomination, the domain the page explicitly named, or a candidate
+    // whose own label names the employer; it cannot support every namesake.
+    const identitySupportsTarget = Boolean(pageNamedDomain)
+      || providerIdentityTargets.length === 1
+      || employerNamesDomain(context.displayName, target);
+    if (!identitySupportsTarget) continue;
     if (titleMatches) add(target, 'page-title');
     if (siteMatches) add(target, 'opengraph');
     if (organizationNameMatches) add(target, 'jsonld-name');
     if (declaredNameMatchesEmployer) add(target, 'platform-name');
-    if (tenantCorroborates) add(target, 'ats-tenant');
+    if (tenantCorroborates && employerNamesDomain(context.displayName, target)) add(target, 'ats-tenant');
   }
   for (const domain of providers.logoDev) add(domain, 'logo-dev');
   for (const domain of providers.brandfetch) add(domain, 'brandfetch');

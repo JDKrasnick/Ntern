@@ -319,7 +319,19 @@ export class D1InternshipStore implements InternshipStore {
     return checkpoints;
   }
   getSourceHealth(sourceId: string) { return this.get<SourceHealth>(`SOURCE#${sourceId}`, 'HEALTH'); }
-  putSourceHealth(health: SourceHealth) { return this.put(`SOURCE#${health.sourceId}`, 'HEALTH', 'source-health', health); }
+  async putSourceHealth(health: SourceHealth): Promise<void> {
+    // Source operations increment configVersion. A poll that began before a
+    // pause/resume action must not overwrite that newer control-plane state when
+    // it completes. Keep the comparison in the UPSERT itself so an operator
+    // update racing between a read and this write still wins atomically.
+    await this.db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES (?, 'HEALTH', 'source-health', ?)
+      ON CONFLICT(pk, sk) DO UPDATE SET kind = excluded.kind, value = excluded.value
+      WHERE COALESCE(CAST(json_extract(catalog_items.value, '$.configVersion') AS INTEGER), 0)
+          <= COALESCE(CAST(json_extract(excluded.value, '$.configVersion') AS INTEGER), 0)
+        AND (${catalogRowChanged([])})`)
+      .bind(`SOURCE#${health.sourceId}`, JSON.stringify(health)).run();
+  }
   async getSourceHealthMany(sourceIds: string[]): Promise<SourceHealth[]> {
     if (!sourceIds.length) return [];
     const health: SourceHealth[] = [];

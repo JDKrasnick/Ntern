@@ -265,7 +265,10 @@ Decision paths taken: automatic resolution, tie-break acceptance, and monogram f
 `GET /company-icons/:id` resolves in this order:
 
 1. an `icon_key` in `DOCUMENTS` — the employer's uploaded board logo, or a cached provider icon, or a reviewer's upload;
-2. an automatically resolved domain, fetched server-side from the provider CDN and returned with the same security headers.
+2. an automatically resolved domain, fetched server-side from the provider CDN and returned with the same security headers;
+3. when the employer has neither, the same two fields from its reviewed brand, then its reviewed parent relationship.
+
+Inheritance is read-time only: no icon or domain is copied into the child row. A child's own decision always wins, and changing the reviewed relationship changes the rendered icon immediately.
 
 A key a **machine** wrote (`icon_source = 'logo-dev'` or `'platform'`) renders only once the operator has left observe mode. A reviewer's upload always renders. Without that gate a stored key would route around the observe switch, which matters precisely because the uploaded logo is stored during observe mode so the later switch is instant.
 
@@ -292,7 +295,7 @@ All routes require the `X-Operations-Key` secret and return `Cache-Control: no-s
 
 | Route | Purpose |
 |---|---|
-| `GET /internal/admission/employer-icons` | Settings, resolution counts by status, the exception queue, and which providers are configured. |
+| `GET /internal/admission/employer-icons` | Settings, resolution counts by status, active-employer and role-weighted coverage rates, the exception queue, and which providers are configured. |
 | `PUT /internal/admission/employer-icons/settings` | `mode` (`off`, `observe`, `resolve`), `maxPerSweep`, and the retention confirmation. |
 | `POST /internal/admission/employer-icons/resolve` | Force a fresh decision for one employer, and re-arm one whose automatic decision was withdrawn. Re-arming re-uses the employer's own task, so a resolve never seeds a second one. |
 | `POST /internal/admission/employer-icons/confirm` | Settle one employer by hand with a bare hostname. Rejects an ATS or job-board host and refuses a domain with no real logo, so a person can name a domain but never vouch for a broken icon. |
@@ -302,11 +305,15 @@ A wrong-icon report is deliberately terminal for the automatic path: the sweep w
 
 A `confirm` on an employer the resolver has never swept is settled the same way: the canonical decision is written with no task row, so the backfill and any later admission skip it and a stale task seeded by an earlier deploy is dropped rather than allowed to overwrite the confirmed domain. That is different from an *automatic* resolution, which always leaves its resolved task row behind and is therefore still re-validated: after the 30-day window a fresh admission seeds a new task and the sweep decides again. `resolve` is the deliberate override for both: it clears the settled status and re-arms the rows, so a confirmed domain can be re-looked instead of being permanent.
 
+Confirmed domains carry durable `reviewed` provenance and outrank page and provider evidence; an automatic refresh cannot replace them. Resolver-version bumps re-arm unresolved/retryable rows so logic fixes reach old misses. Due work with a live application URL is claimed before seedless registry backfill, keeping the active catalog ahead of dormant employers.
+
+Before an accepted domain is published, its homepage is checked for a cross-registrable-domain redirect. A move such as a merger, rename, or holding-company transition is not guessed automatically: the row enters the exception queue as `corporate-redirect-review`, includes the destination domain, and is ranked below wrong-icon reports but above exhausted misses.
+
 `mode` is stored in `system_state`, not in Wrangler, so enabling the resolver never changes a Worker binding and the deploy plan guard stays clean.
 
 ### Staged rollout
 
-1. `npm run cloudflare:migrate:remote` — apply `0034_employer_icon_resolution.sql` **before** deploying the Worker. The resolver and the employer upsert both read the new columns.
+1. `npm run cloudflare:migrate:remote` — apply `0034_employer_icon_resolution.sql` and `0038_employer_icon_resolution_v2.sql` **before** deploying the Worker. The resolver and the employer upsert both read the new columns.
 2. Provision the secrets: `npx wrangler secret put LOGO_DEV_TOKEN --config wrangler.ingestion.jsonc` and `npx wrangler secret put BRANDFETCH_CLIENT_ID --config wrangler.ingestion.jsonc`. Both are needed to publish at scale: consensus is what clears the automatic threshold, and Logo.dev alone publishes only where the posting page independently names the employer. Set `OPENAI_KEY` if it is not already present; without it the resolver skips the tie-breaker and falls back to the monogram. Terraform keeps `secret_text` bindings, so these survive deploys and never appear in a plan.
 3. `tsx scripts/discover-employer-icon.ts --employer a,b,c` over about twenty employers spanning large companies, niche startups, quant firms, public companies, community listings, and challenge-gated sites. It is read-only and writes nothing. Record domain accuracy, the Logo.dev hit rate, the Brandfetch corroboration rate, the monogram rate, and the tie-break count.
 4. Set `mode: "observe"` and leave it there for a week. Decisions, provenance, and counters are recorded, but readers still see only reviewed icons and monograms.

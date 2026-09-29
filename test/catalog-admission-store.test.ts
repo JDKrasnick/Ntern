@@ -67,7 +67,8 @@ function subject(budget?: QueryBudget) {
     '0010_posting_identity.sql',
     '0012_destination_verification_schedule.sql',
     '0015_role_metadata_enrichment.sql', '0016_role_metadata_repair_plans.sql', '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
-    '0013_canonical_employer_icons.sql', '0034_employer_icon_resolution.sql']) {
+    '0013_canonical_employer_icons.sql', '0034_employer_icon_resolution.sql',
+    '0040_automatic_employer_identity.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   const db = sqliteD1(database, budget);
@@ -191,6 +192,166 @@ describe('D1 catalog admission operations', () => {
       .resolves.toEqual({ id: 'new-acme', displayName: 'New Acme' });
   });
 
+  it('promotes an exact tenant-label match without a manual employer mapping', async () => {
+    const { database, admission: store } = subject();
+    const observation = (fetchSequence: number) => ({
+      provider: 'icims' as const, scope: 'amd', sourceId: 'community-list', fetchSequence,
+      labelKey: 'amd', displayName: 'AMD', postingIds: ['92358'],
+      applicationUrl: 'https://careers.amd.com/jobs/92358?icims=1',
+      observedAt: `2026-09-${26 + fetchSequence}T00:00:00Z`,
+    });
+
+    expect(await store.observeAutomaticEmployerIdentities([observation(1)]))
+      .toEqual({ observed: 1, promoted: 1, conflicted: 0, disabled: 0,
+        changedScopes: [{ provider: 'icims', scope: 'amd' }] });
+    await expect(store.resolveCanonicalEmployer({ provider: 'icims', sourceId: 'community-list',
+      tenant: 'amd', sourceUrl: observation(1).applicationUrl })).resolves.toMatchObject({ displayName: 'AMD' });
+    expect(database.prepare(`SELECT reviewed_by FROM employer_mappings WHERE provider = 'icims' AND scope = 'amd'
+      AND superseded_at IS NULL`).get()).toEqual({ reviewed_by: 'automatic-exact-ats-v1' });
+    database.close();
+  });
+
+  it('requires two postings when the company label does not exactly match the ATS tenant', async () => {
+    const { database, admission: store } = subject();
+    const base = {
+      provider: 'icims' as const, scope: 'principal', sourceId: 'community-list', fetchSequence: 1,
+      labelKey: 'principal financial group', displayName: 'Principal Financial Group',
+      applicationUrl: 'https://principal.jobs/1?icims=1', observedAt: '2026-09-27T00:00:00Z',
+    };
+    expect(await store.observeAutomaticEmployerIdentities([{ ...base, postingIds: ['1'] }]))
+      .toEqual({ observed: 1, promoted: 0, conflicted: 0, disabled: 0 });
+    expect(await store.observeAutomaticEmployerIdentities([{
+      ...base, fetchSequence: 2, postingIds: ['2'], observedAt: '2026-09-27T01:00:00Z',
+    }])).toEqual({ observed: 1, promoted: 1, conflicted: 0, disabled: 0,
+      changedScopes: [{ provider: 'icims', scope: 'principal' }] });
+    database.close();
+  });
+
+  it('fails closed when one exact ATS tenant carries conflicting employer labels', async () => {
+    const { database, admission: store } = subject();
+    const base = {
+      provider: 'workday' as const, scope: 'shared', sourceId: 'community-list',
+      postingIds: ['req-1'], applicationUrl: 'https://shared.wd1.myworkdayjobs.com/jobs/req-1',
+    };
+    await store.observeAutomaticEmployerIdentities([{ ...base, fetchSequence: 1, labelKey: 'acme',
+      displayName: 'Acme', observedAt: '2026-09-26T00:00:00Z' }]);
+    expect(await store.observeAutomaticEmployerIdentities([{ ...base, fetchSequence: 2, labelKey: 'other',
+      displayName: 'Other', observedAt: '2026-09-27T00:00:00Z' }]))
+      .toEqual({ observed: 1, promoted: 0, conflicted: 1, disabled: 0 });
+    await expect(store.resolveCanonicalEmployer({ provider: 'workday', sourceId: 'community-list',
+      tenant: 'shared', sourceUrl: base.applicationUrl })).resolves.toBeUndefined();
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM employer_mappings WHERE provider = 'workday' AND scope = 'shared'`).get())
+      .toEqual({ count: 0 });
+    database.close();
+  });
+
+  it('bounds direct persistence for an over-budget conflicting ATS tenant', async () => {
+    const { database, admission: store } = subject();
+    const observations = Array.from({ length: 1_100 }, (_, index) => ({
+      provider: 'workday' as const, scope: 'shared', sourceId: 'community-list', fetchSequence: 1,
+      labelKey: `company-${String(index).padStart(4, '0')}`, displayName: `Company ${index}`,
+      postingIds: [`req-${index}`],
+      applicationUrl: `https://shared.wd1.myworkdayjobs.com/jobs/req-${index}`,
+      observedAt: '2026-09-29T01:00:00Z',
+    }));
+
+    await expect(store.observeAutomaticEmployerIdentities(observations))
+      .resolves.toEqual({ observed: 2, promoted: 0, conflicted: 1, disabled: 0 });
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM automatic_employer_identity_observations
+      WHERE provider = 'workday' AND scope = 'shared'`).get()).toEqual({ count: 2 });
+    await expect(store.resolveCanonicalEmployer({ provider: 'workday', sourceId: 'community-list',
+      tenant: 'shared', sourceUrl: observations[0]!.applicationUrl })).resolves.toBeUndefined();
+    database.close();
+  });
+
+  it('disables an automatic mapping when later evidence conflicts', async () => {
+    const { database, admission: store } = subject();
+    const base = {
+      provider: 'workday' as const, scope: 'acme', sourceId: 'community-list',
+      postingIds: ['req-1'], applicationUrl: 'https://acme.wd1.myworkdayjobs.com/jobs/req-1',
+    };
+    await store.observeAutomaticEmployerIdentities([{
+      ...base, fetchSequence: 1, labelKey: 'acme', displayName: 'Acme', observedAt: '2026-09-27T00:00:00Z',
+    }]);
+    expect(await store.observeAutomaticEmployerIdentities([{
+      ...base, fetchSequence: 2, labelKey: 'other', displayName: 'Other', observedAt: '2026-09-27T01:00:00Z',
+    }])).toEqual({ observed: 1, promoted: 0, conflicted: 1, disabled: 1,
+      changedScopes: [{ provider: 'workday', scope: 'acme' }] });
+    await expect(store.resolveCanonicalEmployer({ provider: 'workday', sourceId: 'community-list',
+      tenant: 'acme', sourceUrl: base.applicationUrl })).resolves.toBeUndefined();
+    database.close();
+  });
+
+  it('reactivates an automatic mapping after conflicting historical labels age out', async () => {
+    const { database, admission: store } = subject();
+    const observation = (fetchSequence: number, labelKey: string, displayName: string) => ({
+      provider: 'workday' as const, scope: 'gdit', sourceId: 'community-list', fetchSequence,
+      labelKey, displayName, postingIds: [`req-${fetchSequence}`],
+      applicationUrl: `https://gdit.wd1.myworkdayjobs.com/External/job/Remote/Role_req-${fetchSequence}`,
+      observedAt: `2026-09-28T0${fetchSequence}:00:00Z`,
+    });
+    expect(await store.observeAutomaticEmployerIdentities([observation(1, 'gdit', 'GDIT')]))
+      .toMatchObject({ promoted: 1 });
+    expect(await store.observeAutomaticEmployerIdentities([
+      observation(2, 'general dynamics information technology', 'General Dynamics Information Technology'),
+    ])).toMatchObject({ conflicted: 1, disabled: 1 });
+    expect(await store.observeAutomaticEmployerIdentities([observation(3, 'gdit', 'GDIT')]))
+      .toMatchObject({ conflicted: 1, promoted: 0 });
+    expect(await store.observeAutomaticEmployerIdentities([observation(4, 'gdit', 'GDIT')]))
+      .toMatchObject({ conflicted: 1, promoted: 0 });
+    expect(await store.observeAutomaticEmployerIdentities([observation(5, 'gdit', 'GDIT')]))
+      .toMatchObject({ conflicted: 0, promoted: 1 });
+    await expect(store.resolveCanonicalEmployer({ provider: 'workday', sourceId: 'community-list',
+      tenant: 'gdit', sourceUrl: observation(5, 'gdit', 'GDIT').applicationUrl }))
+      .resolves.toMatchObject({ displayName: 'GDIT' });
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM employer_mappings
+      WHERE provider = 'workday' AND scope = 'gdit' AND superseded_at IS NULL`).get())
+      .toEqual({ count: 1 });
+    database.close();
+  });
+
+  it('never lets automatic evidence replace a hand-reviewed mapping', async () => {
+    const { database, admission: store } = subject();
+    await store.putCanonicalEmployer({ id: 'acme', displayName: 'Acme', reviewedAt: '2026-09-26T00:00:00Z',
+      reviewedBy: 'operator' }, '2026-09-26T00:00:00Z');
+    await store.supersedeEmployerMapping({ id: 'manual-acme', provider: 'icims', scope: 'acme',
+      canonicalEmployerId: 'acme', reviewedAt: '2026-09-26T00:00:00Z', reviewedBy: 'operator' });
+
+    expect(await store.observeAutomaticEmployerIdentities([{
+      provider: 'icims', scope: 'acme', sourceId: 'community-list', fetchSequence: 10,
+      labelKey: 'other', displayName: 'Other', postingIds: ['1', '2'],
+      applicationUrl: 'https://acme.icims.com/jobs/1/job', observedAt: '2026-09-27T00:00:00Z',
+    }])).toEqual({ observed: 0, promoted: 0, conflicted: 0, disabled: 0 });
+    expect(database.prepare(`SELECT id, superseded_at FROM employer_mappings WHERE provider = 'icims' AND scope = 'acme'`).get())
+      .toEqual({ id: 'manual-acme', superseded_at: null });
+    database.close();
+  });
+
+  it('treats a reviewed provider-tenant alias as authoritative over a bare automatic tenant', async () => {
+    const { database, admission: store } = subject();
+    const observation = {
+      provider: 'greenhouse' as const, scope: 'rocketlab', sourceId: 'community-list', fetchSequence: 1,
+      labelKey: 'rocket lab', displayName: 'Rocket Lab', postingIds: ['7989724003', '7989722003'],
+      applicationUrl: 'https://job-boards.greenhouse.io/rocketlab/jobs/7989724003',
+      observedAt: '2026-09-28T00:00:00Z',
+    };
+    expect(await store.observeAutomaticEmployerIdentities([observation])).toMatchObject({ promoted: 1 });
+    await store.putCanonicalEmployer({ id: 'rocket-lab', displayName: 'Rocket Lab',
+      reviewedAt: '2026-09-17T00:00:00Z', reviewedBy: 'owner' }, '2026-09-17T00:00:00Z');
+    await store.supersedeEmployerMapping({ id: 'reviewed-rocketlab', provider: 'greenhouse',
+      scope: 'greenhouse-rocketlab', canonicalEmployerId: 'rocket-lab', reviewedAt: '2026-09-17T00:00:00Z',
+      reviewedBy: 'owner' });
+
+    expect(await store.observeAutomaticEmployerIdentities([{
+      ...observation, fetchSequence: 2, observedAt: '2026-09-28T01:00:00Z',
+    }])).toEqual({ observed: 0, promoted: 0, conflicted: 0, disabled: 1,
+      changedScopes: [{ provider: 'greenhouse', scope: 'rocketlab' }] });
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM employer_mappings
+      WHERE provider = 'greenhouse' AND scope = 'rocketlab' AND superseded_at IS NULL`).get())
+      .toEqual({ count: 0 });
+    database.close();
+  });
+
   it('maps community rows by employer scope instead of the multi-employer source', async () => {
     const { admission: store } = subject();
     await store.putCanonicalEmployer({ id: 'acme', displayName: 'Acme', reviewedAt: '2026-08-26T00:00:00Z', reviewedBy: 'reviewer' }, '2026-08-26T00:00:00Z');
@@ -210,6 +371,20 @@ describe('D1 catalog admission operations', () => {
     const populated = await store.configurationVersion();
     expect(populated).not.toBe(empty);
     expect(await store.configurationVersion()).toBe(populated);
+  });
+
+  it('does not restart historical admission when automatic exact-ATS enrichment grows', async () => {
+    const { admission: store } = subject();
+    const version = await store.configurationVersion();
+
+    expect(await store.observeAutomaticEmployerIdentities([{
+      provider: 'icims', scope: 'amd', sourceId: 'community-list', fetchSequence: 1,
+      labelKey: 'amd', displayName: 'AMD', postingIds: ['92358'],
+      applicationUrl: 'https://careers.amd.com/jobs/92358?icims=1',
+      observedAt: '2026-09-27T00:00:00Z',
+    }])).toMatchObject({ promoted: 1 });
+
+    expect(await store.configurationVersion()).toBe(version);
   });
 
   it('ignores presentation-only employer changes when versioning admission configuration', async () => {
