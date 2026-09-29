@@ -479,3 +479,45 @@ projection that cannot fit one isolate is not yet excluded. Streaming or chunkin
 that serialization remains the follow-up if the isolated projection cron still
 exceeds memory; the cron split is the first containment because it preserves the
 same ordering and freshness contracts while removing the accumulation.
+
+### Cron propagation and the staleness backstop (2026-09-29, post-deploy)
+
+The first production deploy of the split exposed a Cloudflare behavior the
+documentation understates. A cron trigger change is not applied atomically, and
+its propagation can take far longer than the documented "up to 15 minutes".
+Measured from the `workersInvocationsScheduled` GraphQL dataset on the day of the
+deploy:
+
+| schedule | configured | first fired | activation | removed | last fired | deactivation |
+| --- | --- | --- | --- | --- | --- | --- |
+| `8-58/10` (diagnostic) | 18:22:40 | 19:08:01 | ~45 min | 19:26:45 | 19:58:01 | ~31 min |
+| `* * * * *` (diagnostic) | 19:26:45 | 20:05:14 | ~39 min | 20:06:40 | 20:34:14 | ~28 min |
+| `1-51/10` | 17:40:33 | 20:11:14 | reset by later changes | — | active | — |
+| `6-56/10` (icon) | 15:50:43 | 15:56:34 | ~6 min | — | active | — |
+
+During the transition the scheduler ran old and new schedules at once: from about
+20:05 to 20:11 the deprecated `8-58/10` and `* * * * *` fired beside the new
+`1-51/10`. The projection pointer was frozen from `17:41:23` to `20:33:02`
+because the dedicated cron had not yet activated. The catalog kept serving its
+last good snapshot, but new admissions were not published during that window.
+
+Two lessons are recorded here:
+
+- A schedule change needs a patient observation window (at least ~45 minutes)
+  before it is declared broken. Every additional change resets the pending state,
+  so diagnostic churn extends the outage — the initially correct `1-51/10`
+  schedule only began firing after the schedule set stopped changing.
+- The provider's `Provider produced inconsistent result after apply …
+  .schedules[n].created_on` error is a cosmetic read-back bug on the ordered list
+  (the state's `created_on` values are shifted by one slot). The schedule is
+  configured even though the apply reports an error, and a second plan converges.
+
+Because the split makes the feed's freshness depend on a new cron actually
+firing, the `9-59/10` handler now refreshes the projection itself when the
+pointer is older than `CATALOG_PROJECTION_FALLBACK_STALE_MS` (25 minutes). In the
+healthy case the pointer is ~8 minutes old at each maintenance minute, so the
+backstop is a no-op and the memory-heavy work stays isolated. If a trigger fails
+to activate or fire, the feed freezes for at most a couple of maintenance cycles
+instead of hours. The `catalog_projection_fallback` step and event make the
+backstop observable, and it is the only path by which the maintenance cron
+touches `listCatalog` or `putCatalogProjection`.

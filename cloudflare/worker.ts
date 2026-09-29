@@ -1706,6 +1706,12 @@ async function runScheduledStep<T>(
   }
 }
 
+/** The dedicated `1-51/10` cron publishes the projection every ten minutes, so a
+ * pointer older than this means that cron has stopped advancing. The maintenance
+ * cron then refreshes here as a rare backstop, bounding how long the feed can
+ * silently freeze if a cron trigger fails to fire or activate. */
+const CATALOG_PROJECTION_FALLBACK_STALE_MS = 25 * 60_000;
+
 export async function runCatalogProjectionMaintenance<T>(
   publishShadow: (refreshProjection: () => Promise<T>) => Promise<unknown>,
   refreshProjection: () => Promise<T>,
@@ -2046,10 +2052,25 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const observedAt = new Date(event.scheduledTime);
     // The catalog projection moved to the `1-51/10` cron so its memory-heavy
     // build and R2 serialization cannot accumulate beside these phases. This
-    // handler owns only the independent observability, recovery, alert, budget,
-    // and notification work, and brackets each step with durable markers that
-    // outlive a memory termination. See docs/197-ingestion-resource-bounds.md.
+    // handler owns the independent observability, recovery, alert, budget, and
+    // notification work, plus a rare projection refresh when that cron's pointer
+    // has gone stale, and brackets each step with durable markers that outlive a
+    // memory termination. See docs/197-ingestion-resource-bounds.md.
     const phases = new D1MaintenancePhaseStore(env.DB, 'maintenance');
+    // The dedicated `1-51/10` cron is the feed's only scheduled publisher, and a
+    // cron trigger can take far longer than its ten-minute cadence to activate
+    // (observed tens of minutes) or can fail outright. When the pointer is stale,
+    // refresh here as a backstop so a trigger problem cannot silently freeze the
+    // feed. In the healthy case the pointer is ~8 minutes old at each maintenance
+    // minute, so this stays a no-op and the memory-heavy work stays isolated.
+    const projectionFallback = await runScheduledStep('catalog_projection_fallback', async () => {
+      const generatedAt = await store.catalogProjectionGeneratedAt();
+      const ageMs = generatedAt === undefined ? undefined : observedAt.getTime() - Date.parse(generatedAt);
+      if (ageMs !== undefined && ageMs < CATALOG_PROJECTION_FALLBACK_STALE_MS) return { refreshed: false, ageMs };
+      const projection = await refreshCatalogProjection(store, env.DOCUMENTS, phases);
+      console.warn(JSON.stringify({ event: 'catalog_projection_fallback', ageMs: ageMs ?? null, projection }));
+      return { refreshed: true, ageMs: ageMs ?? null };
+    }, phases);
     const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt), phases);
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt), phases);
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE), phases);
@@ -2101,7 +2122,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)), phases);
     await recordPhase(phases, 'maintenance_complete', 'complete', observedAt);
-    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
+    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), projectionFallback, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
   }
   if (event.cron === '*/5 * * * *') {

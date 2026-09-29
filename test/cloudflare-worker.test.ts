@@ -365,9 +365,12 @@ describe('Cloudflare maintenance cron', () => {
   it('runs the remaining maintenance phases and marks them without rebuilding the projection', async () => {
     // The projection belongs to the `1-51/10` cron now. While a failing
     // verification or alert email may abort its own step, it must not stop the
-    // rest of the maintenance phases or the completion signal.
+    // rest of the maintenance phases or the completion signal. The stubbed
+    // pointer is fresh, so the staleness backstop stays a no-op.
     const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
     const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
+    vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionGeneratedAt')
+      .mockResolvedValue('2026-09-17T17:08:00.000Z');
     const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
     const failing = vi.spyOn(D1CatalogAdmissionStore.prototype, 'listActiveIncidents').mockRejectedValue(new Error('Resend returned HTTP 422'));
     const metadata = vi.spyOn(D1CatalogAdmissionStore.prototype, 'metadataVerificationCandidates');
@@ -396,6 +399,45 @@ describe('Cloudflare maintenance cron', () => {
       expect(markers).toHaveBeenCalledWith('admission_verification_warnings', 'started');
       expect(markers).toHaveBeenCalledWith('admission_verification_warnings', 'failed');
       expect(markers).toHaveBeenCalledWith('maintenance_complete', 'complete', expect.any(Date));
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('refreshes the projection on the maintenance cron when the dedicated publisher is stale', async () => {
+    // Cloudflare can take tens of minutes to activate a changed cron trigger, so
+    // a trigger problem must not leave the Roles feed frozen until an operator
+    // notices. The pointer age is the signal, and this backstop is a no-op while
+    // the `1-51/10` cron keeps publishing.
+    const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+    const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
+    vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionGeneratedAt')
+      .mockResolvedValue('2026-09-17T16:30:00.000Z');
+    const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
+    vi.spyOn(D1CatalogAdmissionStore.prototype, 'listActiveIncidents').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'listPendingProviderShadowVerifications').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'pendingSms').mockResolvedValue([]);
+    vi.spyOn(D1UserStore.prototype, 'activeDevices').mockResolvedValue([]);
+    vi.spyOn(D1UserStore.prototype, 'activePreferences').mockResolvedValue([]);
+    vi.spyOn(D1UserStore.prototype, 'pendingReceipts').mockResolvedValue([]);
+    vi.spyOn(D1UserStore.prototype, 'retryableReceipts').mockResolvedValue([]);
+    const warns = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await cloudflareWorker.scheduled({
+        cron: '9-59/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:09:00.000Z'),
+      } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ bind: () => ({ async first() { return { count: 2 }; } }), async first() { return null; } }) },
+        DESTINATION_VERIFICATION_QUEUE: queue(undefined),
+        DESTINATION_VERIFICATION_DLQ: queue(undefined),
+      } as unknown as Environment);
+
+      expect(listCatalog).toHaveBeenCalledOnce();
+      expect(projection).toHaveBeenCalledOnce();
+      expect(warns).toHaveBeenCalledWith(expect.stringContaining('"event":"catalog_projection_fallback"'));
+      expect(markers).toHaveBeenCalledWith('catalog_projection_fallback', 'started');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'complete');
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
     } finally {
       vi.restoreAllMocks();
