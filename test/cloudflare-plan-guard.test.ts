@@ -241,7 +241,9 @@ describe('Cloudflare deployment plan guard', () => {
       schedules: schedules(beforeCrons),
     };
     const after = { ...before, schedules: schedules(afterCrons).map(({ cron, created_on }) => ({ cron, created_on })) };
-    const after_unknown = { schedules: afterCrons.map((cron) => cron === '6-56/10 * * * *'
+    // OpenTofu's ordered-list diff shifts the existing values after the
+    // insertion and places the new element's unknown metadata in the last slot.
+    const after_unknown = { schedules: afterCrons.map((_, index) => index === afterCrons.length - 1
       ? { created_on: true, modified_on: true }
       : { modified_on: true }) };
     const change = { address: 'cloudflare_workers_cron_trigger.ingestion', actions: ['update'], before, after, after_unknown };
@@ -251,7 +253,7 @@ describe('Cloudflare deployment plan guard', () => {
       { ...change, after: { ...after, script_name: 'other-worker' } },
       { ...change, after: { ...after, schedules: schedules([...afterCrons, '1 * * * *']) } },
       { ...change, after: { ...after, schedules: schedules(beforeCrons.map((cron) => cron === '34 8 * * *' ? '35 8 * * *' : cron)) } },
-      { ...change, after_unknown: { schedules: afterCrons.map((cron) => cron === '*/5 * * * *'
+      { ...change, after_unknown: { schedules: afterCrons.map((_, index) => index === 0
         ? { created_on: true, modified_on: true }
         : { modified_on: true }) } },
       { ...change, before: after, after: before },
