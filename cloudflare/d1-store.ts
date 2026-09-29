@@ -980,6 +980,16 @@ export class D1InternshipStore implements InternshipStore {
     return jobs
       .sort(compareCatalogRecency).map(withEmployerCategory);
   }
+
+  /** The published projection pointer's build time, read so a scheduler can tell
+   * a stalled publisher from a healthy one and refresh the feed itself instead
+   * of leaving readers on an old snapshot. */
+  async catalogProjectionGeneratedAt(): Promise<string | undefined> {
+    const pointer = await this.get<{ generatedAt?: unknown }>('CATALOG_PROJECTION', 'CURRENT');
+    return typeof pointer?.generatedAt === 'string' && Number.isFinite(Date.parse(pointer.generatedAt))
+      ? pointer.generatedAt : undefined;
+  }
+
   /**
    * Publishes the grouped catalog the readers serve.
    *
