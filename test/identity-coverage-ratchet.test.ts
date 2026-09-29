@@ -1,24 +1,40 @@
-import { describe, expect, it } from 'vitest';
-import { identityCoverageFloor, nextIdentityCoverageBaseline } from '../cloudflare/identity-coverage-ratchet.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  identityCoverageFloor, newRecurringIdentitySourceIds, nextIdentityCoverageBaseline,
+  recurringIdentitySourceIds,
+} from '../cloudflare/identity-coverage-ratchet.js';
 import { runScheduledPostingIdentityAudit } from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 
-/** A D1 stub holding only the baseline row: the ratchet's own read and write. */
-function baselineDb(initial?: number) {
+/** A D1 stub holding only the two identity-monitoring baseline rows. */
+function baselineDb(initial?: number, recurring?: string[]) {
   const writes: number[] = [];
-  let stored = initial === undefined ? undefined : JSON.stringify({ baseline: initial, updatedAt: '2026-09-17T00:00:00.000Z' });
+  const recurrenceWrites: string[][] = [];
+  const rows = new Map<string, string>();
+  if (initial !== undefined) rows.set('IDENTITY#COVERAGE_BASELINE', JSON.stringify({ baseline: initial, updatedAt: '2026-09-17T00:00:00.000Z' }));
+  if (recurring !== undefined) rows.set('IDENTITY#RECURRENCE_BASELINE', JSON.stringify({ sourceIds: recurring, updatedAt: '2026-09-17T00:00:00.000Z' }));
   const db = {
-    prepare() {
+    prepare(query: string) {
       return {
-        bind: (_pk: string, _sk: string, value?: string) => ({
-          async first() { return stored === undefined ? null : { value: stored }; },
-          async run() { if (typeof value === 'string') { stored = value; writes.push(JSON.parse(value).baseline); } },
+        bind: (pk: string, _skOrKind: string, value?: string) => ({
+          async first() { const stored = rows.get(pk); return stored === undefined ? null : { value: stored }; },
+          async run() {
+            if (!query.startsWith('INSERT') || typeof value !== 'string') return;
+            rows.set(pk, value);
+            const parsed = JSON.parse(value) as { baseline?: number; sourceIds?: string[] };
+            if (typeof parsed.baseline === 'number') writes.push(parsed.baseline);
+            if (parsed.sourceIds) recurrenceWrites.push(parsed.sourceIds);
+          },
         }),
       };
     },
   };
-  return { db, writes, current: () => (stored === undefined ? undefined : JSON.parse(stored).baseline as number) };
+  return {
+    db, writes, recurrenceWrites,
+    current: () => JSON.parse(rows.get('IDENTITY#COVERAGE_BASELINE') ?? '{}').baseline as number | undefined,
+    currentRecurring: () => JSON.parse(rows.get('IDENTITY#RECURRENCE_BASELINE') ?? '{}').sourceIds as string[] | undefined,
+  };
 }
 
 const passingGate = {
@@ -95,7 +111,7 @@ describe('identity coverage ratchet', () => {
     });
   });
 
-  it('reports repeated unresolved roles from one source without making them unavailable', async () => {
+  it('seeds the durable recurrence inventory without paging on the existing backlog', async () => {
     const recurring = baselineDb(0.8);
     const alerts: Array<{ signals: string[] }> = [];
     await expect(runScheduledPostingIdentityAudit({
@@ -106,10 +122,63 @@ describe('identity coverage ratchet', () => {
       ...planWithCoverage(0.8),
       unconfirmedSources: [{ sourceId: 'reviewed-community', occurrences: 3 }],
     }), log: () => undefined, alert: async (input) => { alerts.push(input); } })).resolves.toMatchObject({
-      status: 'failed', recurringUnconfirmedSources: 1,
+      status: 'passed', recurringUnconfirmedSources: 1, newRecurringUnconfirmedSources: 0,
+    });
+    expect(alerts).toEqual([]);
+    expect(recurring.currentRecurring()).toEqual(['reviewed-community']);
+  });
+
+  it('alerts only when a source newly crosses the recurrence threshold', async () => {
+    const recurring = baselineDb(0.8, ['known-community']);
+    const alerts: Array<{ signals: string[] }> = [];
+    await expect(runScheduledPostingIdentityAudit({
+      DB: recurring.db as unknown as Environment['DB'],
+      IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'false',
+      IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0',
+    }, { audit: async () => ({
+      ...planWithCoverage(0.8),
+      unconfirmedSources: [
+        { sourceId: 'known-community', occurrences: 40 },
+        { sourceId: 'new-community', occurrences: 3 },
+      ],
+    }), log: () => undefined, alert: async (input) => { alerts.push(input); } })).resolves.toMatchObject({
+      status: 'passed', recurringUnconfirmedSources: 2, newRecurringUnconfirmedSources: 1,
     });
     expect(alerts).toMatchObject([{
-      signals: ['posting-identity-integrity-failure', 'repeated-unconfirmed-identity-source'],
+      signals: ['repeated-unconfirmed-identity-source'],
     }]);
+    expect(recurring.currentRecurring()).toEqual(['known-community', 'new-community']);
+  });
+
+  it('does not advance the recurrence baseline when the alert cannot be delivered', async () => {
+    const recurring = baselineDb(0.8, ['known-community']);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(runScheduledPostingIdentityAudit({
+        DB: recurring.db as unknown as Environment['DB'],
+        IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'false',
+        IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0',
+      }, { audit: async () => ({
+        ...planWithCoverage(0.8),
+        unconfirmedSources: [
+          { sourceId: 'known-community', occurrences: 40 },
+          { sourceId: 'new-community', occurrences: 3 },
+        ],
+      }), log: () => undefined, alert: async () => { throw new Error('Resend unavailable'); } })).resolves.toMatchObject({
+        status: 'passed', newRecurringUnconfirmedSources: 1,
+      });
+      expect(recurring.currentRecurring()).toEqual(['known-community']);
+      expect(error).toHaveBeenCalledOnce();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('treats a resolved source that later recurs as a new regression', () => {
+    expect(recurringIdentitySourceIds([
+      { sourceId: 'one-off', occurrences: 2 },
+      { sourceId: 'recurring', occurrences: 3 },
+    ])).toEqual(['recurring']);
+    expect(newRecurringIdentitySourceIds(['recurring'], [])).toEqual(['recurring']);
   });
 });

@@ -14,7 +14,8 @@ import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PE
 import { runTrustedAdmissionBackfill } from '../src/trusted-admission-backfill.js';
 import {
   identityCoverageFloor, nextIdentityCoverageBaseline,
-  readIdentityCoverageBaseline, writeIdentityCoverageBaseline,
+  newRecurringIdentitySourceIds, readIdentityCoverageBaseline, readIdentityRecurrenceBaseline,
+  recurringIdentitySourceIds, writeIdentityCoverageBaseline, writeIdentityRecurrenceBaseline,
 } from './identity-coverage-ratchet.js';
 import { runRuntimeCommand } from '../src/runtime.js';
 import { catalogGroupDetails, compareCatalogProjectionGroups, groupCatalogJobs } from '../src/catalog-groups.js';
@@ -1779,6 +1780,7 @@ export type PostingIdentityAuditEvent = {
   duplicateOccurrenceReferences: number | null;
   danglingOccurrenceReferences: number | null;
   recurringUnconfirmedSources: number | null;
+  newRecurringUnconfirmedSources: number | null;
 };
 
 /** Findings shared by the single-pass repair plan and the paged audit. */
@@ -1791,6 +1793,7 @@ function postingIdentityAuditEvent(
   plan: PostingIdentityAuditFindings,
   enforcementActive: boolean,
   confirmedCoverageFloor: number,
+  newRecurringUnconfirmedSources = 0,
 ): PostingIdentityAuditEvent {
   const coverageRegression = plan.occurrenceCounts.confirmedCoverage === null
     || plan.occurrenceCounts.confirmedCoverage < confirmedCoverageFloor;
@@ -1798,7 +1801,7 @@ function postingIdentityAuditEvent(
   return {
     event: 'posting_identity_integrity_audit',
     enforcementActive,
-    status: plan.gate.passed && !coverageRegression && recurringUnconfirmedSources === 0 ? 'passed' : 'failed',
+    status: plan.gate.passed && !coverageRegression ? 'passed' : 'failed',
     confirmedOccurrences: plan.occurrenceCounts.confirmed,
     unconfirmedOccurrences: plan.occurrenceCounts.unconfirmed,
     confirmedCoverage: plan.occurrenceCounts.confirmedCoverage,
@@ -1816,12 +1819,14 @@ function postingIdentityAuditEvent(
     duplicateOccurrenceReferences: plan.gate.duplicateOccurrenceReferences,
     danglingOccurrenceReferences: plan.gate.danglingOccurrenceReferences,
     recurringUnconfirmedSources,
+    newRecurringUnconfirmedSources,
   };
 }
 
 /** Emit only aggregate integrity counts. Repair tokens, job IDs, URLs, and
- * review samples stay out of production logs. Disabled rollout reports a
- * failed gate without failing the cron; enabled publication makes it fatal. */
+ * review samples stay out of production logs. A durable recurring-source
+ * backlog stays visible without paging the operator every day; only a source
+ * newly crossing the recurrence threshold emits that signal. */
 export async function runScheduledPostingIdentityAudit(
   env: Pick<Environment, 'DB' | 'IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED' | 'IDENTITY_CONFIRMED_COVERAGE_FLOOR'
     | 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL'>,
@@ -1841,10 +1846,18 @@ export async function runScheduledPostingIdentityAudit(
   // already reached, less a small tolerance for churn, so a regression fails the
   // gate while day-to-day movement does not.
   let coverageBaseline: number | undefined;
+  let recurrenceBaseline: string[] | undefined;
+  let recurrenceBaselineReadable = true;
   try {
     coverageBaseline = await readIdentityCoverageBaseline(env.DB);
   } catch {
     coverageBaseline = undefined;
+  }
+  try {
+    recurrenceBaseline = await readIdentityRecurrenceBaseline(env.DB);
+  } catch {
+    recurrenceBaselineReadable = false;
+    recurrenceBaseline = undefined;
   }
   const confirmedCoverageFloor = configuredCoverageFloor === undefined
     ? undefined
@@ -1853,14 +1866,17 @@ export async function runScheduledPostingIdentityAudit(
   // the paged audit computes the same gate and coverage facts slice by slice.
   const audit = dependencies.audit ?? ((db: D1Database) => runPostingIdentityAudit(db));
   let event: PostingIdentityAuditEvent;
+  let currentRecurringSources: string[] | undefined;
   try {
     const plan = await audit(env.DB);
+    currentRecurringSources = recurringIdentitySourceIds(plan.unconfirmedSources);
+    const newlyRecurringSources = newRecurringIdentitySourceIds(currentRecurringSources, recurrenceBaseline);
     event = confirmedCoverageFloor === undefined
       ? {
-        ...postingIdentityAuditEvent(plan, enforcementActive, 1),
+        ...postingIdentityAuditEvent(plan, enforcementActive, 1, newlyRecurringSources.length),
         status: 'error', confirmedCoverageFloor: null, coverageRegression: null,
       }
-      : postingIdentityAuditEvent(plan, enforcementActive, confirmedCoverageFloor);
+      : postingIdentityAuditEvent(plan, enforcementActive, confirmedCoverageFloor, newlyRecurringSources.length);
   } catch {
     event = {
       event: 'posting_identity_integrity_audit', enforcementActive, status: 'error',
@@ -1869,7 +1885,7 @@ export async function runScheduledPostingIdentityAudit(
       exactDuplicateGroups: null, duplicateJobs: null, duplicateAlertGroups: null, aliasConflicts: null,
       quarantinedOccurrences: null, untrackedQuarantines: null, presentationBlockers: null,
       legacyOccurrences: null, projectionMismatches: null, duplicateOccurrenceReferences: null,
-      danglingOccurrenceReferences: null, recurringUnconfirmedSources: null,
+      danglingOccurrenceReferences: null, recurringUnconfirmedSources: null, newRecurringUnconfirmedSources: null,
     };
   }
   const nextBaseline = nextIdentityCoverageBaseline(coverageBaseline, event.confirmedCoverage);
@@ -1886,20 +1902,35 @@ export async function runScheduledPostingIdentityAudit(
   else console.error(serialized);
   const signals = [
     ...(event.status === 'failed' ? ['posting-identity-integrity-failure'] : []),
-    ...(event.recurringUnconfirmedSources ? ['repeated-unconfirmed-identity-source'] : []),
+    ...(event.newRecurringUnconfirmedSources ? ['repeated-unconfirmed-identity-source'] : []),
     ...(event.coverageRegression ? ['identity-coverage-regression'] : []),
     ...(event.status === 'error' ? ['posting-identity-audit-error'] : []),
   ];
+  let alertDelivered = signals.length === 0;
   if (signals.length) try {
     const input = {
       signals,
-      details: `Posting-identity audit status: ${event.status}; recurring unresolved sources: ${event.recurringUnconfirmedSources ?? 'unavailable'}; confirmed coverage: ${event.confirmedCoverage ?? 'unavailable'}; coverage floor: ${event.confirmedCoverageFloor ?? 'unavailable'}.`,
+      details: `Posting-identity audit status: ${event.status}; recurring unresolved sources: ${event.recurringUnconfirmedSources ?? 'unavailable'}; newly recurring sources: ${event.newRecurringUnconfirmedSources ?? 'unavailable'}; confirmed coverage: ${event.confirmedCoverage ?? 'unavailable'}; coverage floor: ${event.confirmedCoverageFloor ?? 'unavailable'}.`,
       observedAt: new Date().toISOString(),
     };
-    if (dependencies.alert) await dependencies.alert(input);
-    else await sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, input);
+    if (dependencies.alert) {
+      await dependencies.alert(input);
+      alertDelivered = true;
+    } else {
+      alertDelivered = await sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, input);
+    }
   } catch (error) {
     console.error(JSON.stringify({ event: 'posting_identity_alert_delivery_failed', diagnostic: safeDiagnostic(error) }));
+  }
+  if (recurrenceBaselineReadable
+    && currentRecurringSources !== undefined
+    && JSON.stringify(currentRecurringSources) !== JSON.stringify(recurrenceBaseline)
+    && (!event.newRecurringUnconfirmedSources || alertDelivered)) {
+    try {
+      await writeIdentityRecurrenceBaseline(env.DB, currentRecurringSources, new Date().toISOString());
+    } catch {
+      // The next audit compares against the last durable recurrence inventory.
+    }
   }
   if (enforcementActive && event.status !== 'passed') {
     throw new Error('Posting identity integrity gate failed while publication enforcement is active');

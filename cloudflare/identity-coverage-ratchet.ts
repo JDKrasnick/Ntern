@@ -25,6 +25,9 @@ export const IDENTITY_COVERAGE_RATCHET_TOLERANCE = 0.01;
 
 const BASELINE_PK = 'IDENTITY#COVERAGE_BASELINE';
 const BASELINE_KIND = 'identity-coverage-baseline';
+const RECURRENCE_PK = 'IDENTITY#RECURRENCE_BASELINE';
+const RECURRENCE_KIND = 'identity-recurrence-baseline';
+export const IDENTITY_RECURRENCE_THRESHOLD = 3;
 
 /** The floor a pass must clear: the configured backstop, raised toward the stored baseline. */
 export function identityCoverageFloor(
@@ -61,4 +64,46 @@ export async function writeIdentityCoverageBaseline(db: D1Database, baseline: nu
   await db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'BASELINE', ?, ?)
     ON CONFLICT (pk, sk) DO UPDATE SET value = excluded.value`)
     .bind(BASELINE_PK, BASELINE_KIND, JSON.stringify({ baseline, updatedAt: at })).run();
+}
+
+/** Sources whose unresolved identity backlog is large enough to investigate. */
+export function recurringIdentitySourceIds(
+  sources: Array<{ sourceId: string; occurrences: number }> | undefined,
+): string[] {
+  return (sources ?? [])
+    .filter(({ occurrences }) => occurrences >= IDENTITY_RECURRENCE_THRESHOLD)
+    .map(({ sourceId }) => sourceId)
+    .sort();
+}
+
+/** A durable backlog is inventory, not an alarm. Only a newly recurring source
+ * represents a state change; a source that resolves and later crosses the
+ * threshold again is new relative to the latest baseline. */
+export function newRecurringIdentitySourceIds(
+  current: string[],
+  baseline: string[] | undefined,
+): string[] {
+  if (baseline === undefined) return [];
+  const known = new Set(baseline);
+  return current.filter((sourceId) => !known.has(sourceId));
+}
+
+export async function readIdentityRecurrenceBaseline(db: D1Database): Promise<string[] | undefined> {
+  const row = await db.prepare('SELECT value FROM catalog_items WHERE pk = ? AND sk = ?')
+    .bind(RECURRENCE_PK, 'BASELINE').first<{ value: string }>();
+  if (!row) return undefined;
+  try {
+    const parsed = JSON.parse(row.value) as { sourceIds?: unknown };
+    return Array.isArray(parsed.sourceIds) && parsed.sourceIds.every((sourceId) => typeof sourceId === 'string')
+      ? [...new Set(parsed.sourceIds)].sort()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function writeIdentityRecurrenceBaseline(db: D1Database, sourceIds: string[], at: string): Promise<void> {
+  await db.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'BASELINE', ?, ?)
+    ON CONFLICT (pk, sk) DO UPDATE SET value = excluded.value`)
+    .bind(RECURRENCE_PK, RECURRENCE_KIND, JSON.stringify({ sourceIds: [...new Set(sourceIds)].sort(), updatedAt: at })).run();
 }
