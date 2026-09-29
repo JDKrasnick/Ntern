@@ -594,6 +594,27 @@ describe('posting identity', () => {
     expect(reviewedProviderUrlReference('https://careers.roblox.com/jobs/7116940?gh_jid=7116999')).toMatchObject({ outcome: 'conflict' });
   });
 
+  // #231 remediation batch 1: admitting the official board is what makes these
+  // reviewed community custom-host routes collision-safe exact evidence.
+  it.each([
+    ['https://www.zipline.com/open-roles/7743224003?gh_jid=7743224003', 'flyzipline', '7743224003'],
+    ['https://careers.withwaymo.com/jobs?gh_jid=8167323', 'waymo', '8167323'],
+    ['https://epicgames.com/careers/jobs/6138140004?gh_jid=6138140004', 'epicgames', '6138140004'],
+    ['https://www.akunacapital.com/careers/job/8018847/?gh_jid=8018847', 'akunacapital', '8018847'],
+    ['https://www.hudsonrivertrading.com/careers/job/?gh_jid=7964062', 'wehrtyou', '7964062'],
+    ['https://www.tower-research.com/open-positions/?gh_jid=8212179', 'towerresearchcapital', '8212179'],
+    ['https://www.samsara.com/company/careers/roles/8082091?gh_jid=8082091', 'samsara', '8082091'],
+    ['https://careers.duolingo.com/jobs/8806187002?gh_jid=8806187002', 'duolingo', '8806187002'],
+    ['https://www.rubrik.com/company/careers/departments/job.8171088?gh_jid=8171088', 'rubrik', '8171088'],
+    ['https://www.oldmissioncapital.com/careers/?gh_jid=7796180003', 'oldmissioncapital', '7796180003'],
+    ['https://www.pathai.com/careers/8843495002?gh_jid=8843495002', 'pathai', '8843495002'],
+  ])('recognizes %s as reviewed board evidence', (url, tenant, postingId) => {
+    expect(reviewedProviderUrlReference(url)).toMatchObject({
+      outcome: 'match',
+      reference: { provider: 'greenhouse', tenant, postingId, sourceId: `greenhouse-${tenant}`, customHost: true },
+    });
+  });
+
   it('quarantines aliases that cross provider tenants or providers', () => {
     const identity = buildPostingIdentity({
       applicationUrl: 'https://job-boards.greenhouse.io/figma/jobs/123',

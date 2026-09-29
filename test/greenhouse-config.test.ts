@@ -52,12 +52,37 @@ function jsonResponse(body: unknown, url: string, status = 200): Response {
 
 describe('reviewed Greenhouse registry', () => {
   it('keeps the published inventory plus reviewed shadow additions', () => {
-    expect(reviewedGreenhouseSources).toHaveLength(182);
+    expect(reviewedGreenhouseSources).toHaveLength(193);
     expect(reviewedGreenhouseSources.slice(0, 3).map((source) => source.id)).toEqual(['greenhouse-figma', 'greenhouse-datadog', 'greenhouse-cloudflare']);
-    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(163);
+    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(174);
     expect(reviewedGreenhouseSources.filter((source) => source.status === 'shadow')).toHaveLength(19);
     expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'reviewed')).toHaveLength(22);
-    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(160);
+    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(171);
+  });
+
+  it('keeps the #231 remediation probe identities and admission time exact', () => {
+    const remediationSourceIds = [
+      'greenhouse-akunacapital',
+      'greenhouse-duolingo',
+      'greenhouse-epicgames',
+      'greenhouse-flyzipline',
+      'greenhouse-oldmissioncapital',
+      'greenhouse-pathai',
+      'greenhouse-rubrik',
+      'greenhouse-samsara',
+      'greenhouse-towerresearchcapital',
+      'greenhouse-waymo',
+      'greenhouse-wehrtyou',
+    ];
+    const remediationSources = reviewedGreenhouseSources.filter((source) => remediationSourceIds.includes(source.id));
+
+    expect(remediationSources).toHaveLength(remediationSourceIds.length);
+    expect(remediationSources.every((source) => source.admittedAt === '2026-09-29T15:38:36.000Z')).toBe(true);
+    expect(remediationSources.find((source) => source.id === 'greenhouse-oldmissioncapital')).toMatchObject({
+      displayName: 'Old Mission Capital',
+      expectedBoardNames: ['Old Mission'],
+      admittedBoardName: 'Old Mission',
+    });
   });
 
   it('keeps every future reviewed entry within the admission contract', () => {

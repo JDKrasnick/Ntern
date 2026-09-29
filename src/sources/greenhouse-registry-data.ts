@@ -10,6 +10,8 @@ import type { ReviewedGreenhouseSource } from './greenhouse-config.js';
 const apiProbedBoards: Array<{
   token: string;
   name: string;
+  boardName?: string;
+  admittedAt?: string;
   initialHosts: string[];
   finalHosts: string[];
 }> = [
@@ -173,11 +175,31 @@ const apiProbedBoards: Array<{
   { token: "worldquant", name: "WorldQuant", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "xometry", name: "Xometry", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "xpengmotors", name: "XPENG", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
+  // #231 posting-identity remediation batch 1 (2026-09-29). These boards were
+  // probed against the public Greenhouse identity endpoint; every board name
+  // below is the name the API returns, and each rejected/again-closed posting
+  // keeps its provenance until retention or a reviewed lifecycle decision.
+  // Admitting the official board is the collision-safe anchor for the reviewed
+  // custom-host application routes the community lists already use
+  // (`customGreenhouseReference` in `src/identity/posting.ts`), so an exact
+  // provider route can resolve against that board's active checkpoint.
+  { token: "akunacapital", name: "Akuna Capital", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["akunacapital.com"], finalHosts: ["akunacapital.com"] },
+  { token: "duolingo", name: "Duolingo", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["careers.duolingo.com"], finalHosts: ["careers.duolingo.com"] },
+  { token: "epicgames", name: "Epic Games", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["epicgames.com"], finalHosts: ["epicgames.com"] },
+  { token: "flyzipline", name: "Zipline", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["zipline.com"], finalHosts: ["zipline.com"] },
+  { token: "oldmissioncapital", name: "Old Mission Capital", boardName: "Old Mission", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["oldmissioncapital.com"], finalHosts: ["oldmissioncapital.com"] },
+  { token: "pathai", name: "PathAI", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["pathai.com"], finalHosts: ["pathai.com"] },
+  { token: "rubrik", name: "Rubrik Job Board", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["rubrik.com"], finalHosts: ["rubrik.com"] },
+  { token: "samsara", name: "Samsara", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["samsara.com"], finalHosts: ["samsara.com"] },
+  { token: "towerresearchcapital", name: "Tower Research Capital", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["tower-research.com"], finalHosts: ["tower-research.com"] },
+  { token: "waymo", name: "Waymo", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["withwaymo.com"], finalHosts: ["withwaymo.com"] },
+  { token: "wehrtyou", name: "Hudson River Trading", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["hudsonrivertrading.com"], finalHosts: ["hudsonrivertrading.com"] },
 ];
 
 export const apiProbedGreenhouseSources: ReviewedGreenhouseSource[] = apiProbedBoards.map((board) => {
   const applicationHosts = [...new Set([...board.initialHosts, ...board.finalHosts])];
   const customHosts = applicationHosts.filter((host) => !host.endsWith('greenhouse.io'));
+  const boardName = board.boardName ?? board.name;
   return {
     id: `greenhouse-${board.token}`,
     employerId: board.token,
@@ -185,9 +207,9 @@ export const apiProbedGreenhouseSources: ReviewedGreenhouseSource[] = apiProbedB
     aliases: [board.name],
     boardToken: board.token,
     careersUrl: `https://job-boards.greenhouse.io/${board.token}`,
-    expectedBoardNames: [board.name],
-    admittedBoardName: board.name,
-    admittedAt: "2026-07-29T21:07:31.798Z",
+    expectedBoardNames: [boardName],
+    admittedBoardName: boardName,
+    admittedAt: board.admittedAt ?? "2026-07-29T21:07:31.798Z",
     allowedInitialHosts: board.initialHosts,
     allowedFinalHosts: board.finalHosts,
     status: 'published',
