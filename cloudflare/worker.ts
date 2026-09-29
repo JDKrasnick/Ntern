@@ -1680,13 +1680,10 @@ export async function runCatalogProjectionMaintenance<T>(
   publishShadow: (refreshProjection: () => Promise<T>) => Promise<unknown>,
   refreshProjection: () => Promise<T>,
 ): Promise<{ prospectiveShadowMetadata: unknown; projection: T | undefined }> {
-  let projection: T | undefined;
-  const refreshProjectionOnce = async () => {
-    projection ??= await refreshProjection();
-    return projection;
-  };
+  let projectionPromise: Promise<T> | undefined;
+  const refreshProjectionOnce = () => projectionPromise ??= refreshProjection();
   const prospectiveShadowMetadata = await runScheduledStep('prospective_shadow_metadata', () => publishShadow(refreshProjectionOnce));
-  if (!projection) projection = await runScheduledStep('catalog_projection', refreshProjectionOnce);
+  const projection = await runScheduledStep('catalog_projection', refreshProjectionOnce);
   return { prospectiveShadowMetadata, projection };
 }
 
