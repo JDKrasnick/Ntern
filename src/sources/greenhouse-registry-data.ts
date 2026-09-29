@@ -173,6 +173,25 @@ const apiProbedBoards: Array<{
   { token: "worldquant", name: "WorldQuant", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "xometry", name: "Xometry", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "xpengmotors", name: "XPENG", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
+  // #231 posting-identity remediation batch 1 (2026-09-29). These boards were
+  // probed against the public Greenhouse identity endpoint; every board name
+  // below is the name the API returns, and each rejected/again-closed posting
+  // keeps its provenance until retention or a reviewed lifecycle decision.
+  // Admitting the official board is the collision-safe anchor for the reviewed
+  // custom-host application routes the community lists already use
+  // (`customGreenhouseReference` in `src/identity/posting.ts`), so an exact
+  // provider route can resolve against that board's active checkpoint.
+  { token: "akunacapital", name: "Akuna Capital", initialHosts: ["akunacapital.com"], finalHosts: ["akunacapital.com"] },
+  { token: "duolingo", name: "Duolingo", initialHosts: ["careers.duolingo.com"], finalHosts: ["careers.duolingo.com"] },
+  { token: "epicgames", name: "Epic Games", initialHosts: ["epicgames.com"], finalHosts: ["epicgames.com"] },
+  { token: "flyzipline", name: "Zipline", initialHosts: ["zipline.com"], finalHosts: ["zipline.com"] },
+  { token: "oldmissioncapital", name: "Old Mission Capital", initialHosts: ["oldmissioncapital.com"], finalHosts: ["oldmissioncapital.com"] },
+  { token: "pathai", name: "PathAI", initialHosts: ["pathai.com"], finalHosts: ["pathai.com"] },
+  { token: "rubrik", name: "Rubrik Job Board", initialHosts: ["rubrik.com"], finalHosts: ["rubrik.com"] },
+  { token: "samsara", name: "Samsara", initialHosts: ["samsara.com"], finalHosts: ["samsara.com"] },
+  { token: "towerresearchcapital", name: "Tower Research Capital", initialHosts: ["tower-research.com"], finalHosts: ["tower-research.com"] },
+  { token: "waymo", name: "Waymo", initialHosts: ["withwaymo.com"], finalHosts: ["withwaymo.com"] },
+  { token: "wehrtyou", name: "Hudson River Trading", initialHosts: ["hudsonrivertrading.com"], finalHosts: ["hudsonrivertrading.com"] },
 ];
 
 export const apiProbedGreenhouseSources: ReviewedGreenhouseSource[] = apiProbedBoards.map((board) => {
