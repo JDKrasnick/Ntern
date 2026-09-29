@@ -13,7 +13,7 @@ change, not a catalog-policy or schema change.
 | Public catalog, filters, releases, application tracking, account/auth, installations, résumés, employer APIs, Gmail OAuth callback/API | API Worker | Existing hostname and request paths remain unchanged. |
 | `/operations/*`, `/internal/operations/*`, admission, DLQ, backfill, poll-source, catalog-quality, notification recovery, projection refresh, posting-identity repair | Ingestion Worker, forwarded by API Worker | The API checks nothing new for these routes; the existing operations key remains required by the destination handler. A second secret authenticates the API-to-ingestion hop. |
 | Billing shutdown webhook | Ingestion Worker, forwarded by API Worker | Existing webhook path and its separate webhook secret remain unchanged. |
-| All nine crons | Ingestion Worker only | `*/5`, GitHub, provider, hourly, daily maintenance, and identity-audit schedules are declared only in `wrangler.ingestion.jsonc`. |
+| Every cron | Ingestion Worker only | `*/5`, GitHub, provider, hourly, daily maintenance, identity-audit, company-icon, and catalog-projection schedules are declared only in `wrangler.ingestion.jsonc`. |
 | All seven queue consumers and DLQs | Ingestion Worker only | Greenhouse, Lever, Ashby, GitHub, Gmail, destination verification, and shadow extraction. |
 | Request-triggered Gmail checks | API Worker producer | The API retains only the Gmail producer because applying to a role can enqueue delayed checks. |
 

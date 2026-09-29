@@ -241,7 +241,8 @@ resource "cloudflare_workers_cron_trigger" "ingestion" {
   account_id  = var.cloudflare_account_id
   script_name = cloudflare_workers_script.ingestion.script_name
   schedules = [
-    { cron = "*/5 * * * *" }, { cron = "7-57/10 * * * *" }, { cron = "9-59/10 * * * *" }, { cron = "6-56/10 * * * *" },
+    { cron = "*/5 * * * *" }, { cron = "7-57/10 * * * *" }, { cron = "9-59/10 * * * *" }, { cron = "1-51/10 * * * *" },
+    { cron = "6-56/10 * * * *" },
     { cron = "12,42 * * * *" }, { cron = "22,52 * * * *" }, { cron = "2,32 * * * *" },
     { cron = "0 * * * *" }, { cron = "34 8 * * *" }, { cron = "17 9 * * *" },
   ]

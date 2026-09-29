@@ -260,6 +260,40 @@ describe('Cloudflare deployment plan guard', () => {
     ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits only the reviewed catalog-projection cron addition', () => {
+    const beforeCrons = [
+      '*/5 * * * *', '7-57/10 * * * *', '9-59/10 * * * *', '6-56/10 * * * *',
+      '12,42 * * * *', '22,52 * * * *', '2,32 * * * *',
+      '0 * * * *', '34 8 * * *', '17 9 * * *',
+    ];
+    const afterCrons = [...beforeCrons.slice(0, 3), '1-51/10 * * * *', ...beforeCrons.slice(3)];
+    const schedules = (crons: string[]) => crons.map((cron) => ({
+      cron, created_on: '2026-09-29T04:55:25.781738Z', modified_on: '2026-09-29T04:55:25.781738Z',
+    }));
+    const before = {
+      account_id: 'account', id: 'intern-notifs-ingestion', script_name: 'intern-notifs-ingestion',
+      schedules: schedules(beforeCrons),
+    };
+    const after = { ...before, schedules: schedules(afterCrons).map(({ cron, created_on }) => ({ cron, created_on })) };
+    // OpenTofu's ordered-list diff shifts the existing values after the
+    // insertion and places the new element's unknown metadata in the last slot.
+    const after_unknown = { schedules: afterCrons.map((_, index) => index === afterCrons.length - 1
+      ? { created_on: true, modified_on: true }
+      : { modified_on: true }) };
+    const change = { address: 'cloudflare_workers_cron_trigger.ingestion', actions: ['update'], before, after, after_unknown };
+
+    expect(validateCloudflarePlan(plan([change]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...change, after: { ...after, script_name: 'other-worker' } },
+      { ...change, after: { ...after, schedules: schedules([...afterCrons, '1 * * * *']) } },
+      { ...change, after: { ...after, schedules: schedules(beforeCrons.map((cron) => cron === '34 8 * * *' ? '35 8 * * *' : cron)) } },
+      { ...change, after_unknown: { schedules: afterCrons.map((_, index) => index === 0
+        ? { created_on: true, modified_on: true }
+        : { modified_on: true }) } },
+      { ...change, before: after, after: before },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('omits data reads from the actionable summary', () => {
     expect(actionableChanges(plan([{ address: 'data.cloudflare_zone.application', actions: ['read'] }]))).toEqual([]);
   });
