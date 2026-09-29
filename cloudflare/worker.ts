@@ -38,6 +38,7 @@ import {
   runCatalogRetention,
 } from './catalog-retention.js';
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
+import { D1MaintenancePhaseStore, type MaintenancePhaseRecorder } from './maintenance-phases.js';
 import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary } from './shadow-extraction.js';
@@ -1666,11 +1667,23 @@ async function recordScheduledDispatch(
 /** Runs one scheduled responsibility in isolation. Several of them share the
  * maintenance cron, and a thrown error used to abort the handler — which is how
  * one failing step held the catalog projection on a day-old snapshot. The
- * failure stays visible as an error-level event instead. */
-async function runScheduledStep<T>(step: string, run: () => Promise<T>): Promise<T | undefined> {
+ * failure stays visible as an error-level event instead.
+ *
+ * A durable marker brackets each step when a recorder is supplied. A Worker that
+ * dies on the memory limit cannot flush its console, so the marker rows are the
+ * only surviving record of which phase was entered and which one finished. */
+async function runScheduledStep<T>(
+  step: string,
+  run: () => Promise<T>,
+  phases?: MaintenancePhaseRecorder,
+): Promise<T | undefined> {
+  await phases?.record(step, 'started');
   try {
-    return await run();
+    const result = await run();
+    await phases?.record(step, 'complete');
+    return result;
   } catch (error) {
+    await phases?.record(step, 'failed');
     console.error(JSON.stringify({ event: 'scheduled_step_failed', step, error: error instanceof Error ? error.message : String(error) }));
     return undefined;
   }
@@ -1679,25 +1692,38 @@ async function runScheduledStep<T>(step: string, run: () => Promise<T>): Promise
 export async function runCatalogProjectionMaintenance<T>(
   publishShadow: (refreshProjection: () => Promise<T>) => Promise<unknown>,
   refreshProjection: () => Promise<T>,
+  phases?: MaintenancePhaseRecorder,
 ): Promise<{ prospectiveShadowMetadata: unknown; projection: T | undefined }> {
   let projectionPromise: Promise<T> | undefined;
   const refreshProjectionOnce = () => projectionPromise ??= refreshProjection();
-  const prospectiveShadowMetadata = await runScheduledStep('prospective_shadow_metadata', () => publishShadow(refreshProjectionOnce));
-  const projection = await runScheduledStep('catalog_projection', refreshProjectionOnce);
+  const prospectiveShadowMetadata = await runScheduledStep('prospective_shadow_metadata', () => publishShadow(refreshProjectionOnce), phases);
+  const projection = await runScheduledStep('catalog_projection', refreshProjectionOnce, phases);
   return { prospectiveShadowMetadata, projection };
 }
 
-async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket) {
+async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket, phases?: MaintenancePhaseRecorder) {
   // One order for both read models: the card's own `updatedAt` (with its group id
   // breaking ties) is stored on each D1 row as its sort key, and R2 pages are
   // written in the same order, so a reader of either sees the same sequence.
   const groups = groupCatalogJobs(await store.listCatalog(), { includeClosed: true })
     .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
   const generatedAt = new Date().toISOString();
-  await store.putCatalogProjection(groups, generatedAt);
+  await phases?.record('catalog_projection_d1', 'started');
+  try {
+    await store.putCatalogProjection(groups, generatedAt);
+    await phases?.record('catalog_projection_d1', 'complete');
+  } catch (error) {
+    await phases?.record('catalog_projection_d1', 'failed');
+    throw error;
+  }
   if (bucket) {
-    try { await new R2CatalogProjection(bucket).publish(groups, generatedAt); }
+    await phases?.record('catalog_projection_r2', 'started');
+    try {
+      await new R2CatalogProjection(bucket).publish(groups, generatedAt);
+      await phases?.record('catalog_projection_r2', 'complete');
+    }
     catch (error) {
+      await phases?.record('catalog_projection_r2', 'failed');
       console.error(JSON.stringify({ event: 'r2_catalog_projection_publish_failed', error: String(error) }));
       // D1 already points at the new projection. Hide an older R2 pointer so
       // readers fall back to D1 instead of serving stale admission decisions.
@@ -1976,37 +2002,53 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     console.log(JSON.stringify({ event: 'company_icon_resolution_schedule_complete', companyIconResolution }));
     return;
   }
-  if (event.cron === '9-59/10 * * * *') {
+  if (event.cron === '4-54/10 * * * *') {
     const observedAt = new Date(event.scheduledTime);
+    // The catalog projection is the Roles feed's whole source of truth, and it is
+    // the memory-heaviest scheduled work: the complete catalog is grouped, sorted,
+    // written to D1, and serialized to R2 in one invocation. It runs on its own
+    // cron so the many small observability, alert, and notification phases in the
+    // `9-59/10` handler cannot accumulate beside it and cross the 128 MB isolate
+    // limit. See docs/197-ingestion-resource-bounds.md.
+    const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection');
     // Shadow publication can change at most one role. Stage it before the catalog
     // refresh and share its callback so this invocation builds the memory-heavy
     // projection exactly once. A shadow failure remains isolated from the feed.
     const { prospectiveShadowMetadata, projection } = await runCatalogProjectionMaintenance(
       (refreshProjection) => publishProspectiveShadowMetadata(env, refreshProjection),
-      () => refreshCatalogProjection(store, env.DOCUMENTS),
+      () => refreshCatalogProjection(store, env.DOCUMENTS, phases),
+      phases,
     );
-    // The catalog projection is the Roles feed's whole source of truth. Refresh it
-    // before the remaining independent maintenance work so no later failure can
-    // hold the feed on an old snapshot.
-    // See docs/197-ingestion-resource-bounds.md.
-    const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
-    const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
-    const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
+    await phases.record('catalog_projection_complete', 'complete', observedAt);
+    console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_complete', observedAt: observedAt.toISOString(), prospectiveShadowMetadata, projection }));
+    return;
+  }
+  if (event.cron === '9-59/10 * * * *') {
+    const observedAt = new Date(event.scheduledTime);
+    // The catalog projection moved to the `4-54/10` cron so its memory-heavy
+    // build and R2 serialization cannot accumulate beside these phases. This
+    // handler owns only the independent observability, recovery, alert, budget,
+    // and notification work, and brackets each step with durable markers that
+    // outlive a memory termination. See docs/197-ingestion-resource-bounds.md.
+    const phases = new D1MaintenancePhaseStore(env.DB, 'maintenance');
+    const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt), phases);
+    const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt), phases);
+    const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE), phases);
     // Metadata collection scans the open catalog. When D1 recently refused
     // queue writes, or pressure cannot be measured, defer this background scan
     // so the public projection and source consumers keep their capacity.
     const metadataCollection = recentOverloads === 0
-      ? await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt))
+      ? await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt), phases)
       : { queued: 0, deferred: true };
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'metadata_collection_deferred', recentOverloads: recentOverloads ?? null }));
-    const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
-    const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
+    const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined, phases);
+    const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined, phases);
     const dlqGrowth = await runScheduledStep('dlq_growth_metrics', () => measureDlqGrowth(env.DB, {
       greenhouse: env.GREENHOUSE_DLQ, lever: env.LEVER_DLQ, ashby: env.ASHBY_DLQ,
       github: env.GITHUB_DLQ, gmail: env.GMAIL_DLQ,
       'destination-verification': env.DESTINATION_VERIFICATION_DLQ,
       'shadow-extraction': env.SHADOW_EXTRACTION_DLQ,
-    }));
+    }), phases);
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
     const queueAgeMs = queueMetrics?.oldestMessageTimestamp
       ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
@@ -2014,7 +2056,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // polls keep succeeding while admission withholds every new role. The age of
     // the newest published role is the feed's own freshness.
     const publication = await runScheduledStep('catalog_publication_recency',
-      () => new D1CatalogAdmissionStore(env.DB).catalogPublicationRecency());
+      () => new D1CatalogAdmissionStore(env.DB).catalogPublicationRecency(), phases);
     const starvation = publication
       ? catalogStarvationSignal({ newestPublishedAt: publication.newest, eligible: publication.eligible, now: observedAt })
       : undefined;
@@ -2028,18 +2070,19 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const alertSent = await runScheduledStep('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
       signals: operationalSignals, observedAt: observedAt.toISOString(),
       details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}; newest published role: ${publication?.newest ?? 'unavailable'} (${starvation?.hoursSinceNewest !== undefined ? `${starvation.hoursSinceNewest.toFixed(1)}h` : 'unknown'} ago; ${publication?.eligible ?? 'unavailable'} eligible roles).`,
-    }));
+    }), phases);
     if (dlqGrowth?.changed && (!Object.keys(dlqGrowth.increases).length || alertSent)) {
-      await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts));
+      await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts), phases);
     }
-    const shadowBudget = await runScheduledStep('shadow_budget_status', () => providerShadowBudgetStatus(env.DB, observedAt, env));
+    const shadowBudget = await runScheduledStep('shadow_budget_status', () => providerShadowBudgetStatus(env.DB, observedAt, env), phases);
     if (shadowBudget?.exhausted) {
       await runScheduledStep('shadow_budget_alert', () => sendShadowBudgetAlert(new D1CatalogAdmissionStore(env.DB), env, {
         ...shadowBudget, observedAt: observedAt.toISOString(),
-      }));
+      }), phases);
     }
-    const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
-    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', prospectiveShadowMetadata, projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
+    const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)), phases);
+    await phases.record('maintenance_complete', 'complete', observedAt);
+    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
   }
   if (event.cron === '*/5 * * * *') {

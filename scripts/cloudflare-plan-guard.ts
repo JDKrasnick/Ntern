@@ -562,6 +562,9 @@ const currentIngestionCrons = priorIngestionCrons.map((cron) => cron === '42 8 *
 const iconResolutionIngestionCrons = [
   ...currentIngestionCrons.slice(0, 3), '6-56/10 * * * *', ...currentIngestionCrons.slice(3),
 ];
+const projectionIsolationIngestionCrons = [
+  ...iconResolutionIngestionCrons.slice(0, 3), '4-54/10 * * * *', ...iconResolutionIngestionCrons.slice(3),
+];
 
 function cronValues(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -596,14 +599,17 @@ function isReviewedIngestionCronUpdate(address: string, change: ResourceChange['
   const afterCrons = cronValues(after.schedules);
   const addsIconCron = isDeepStrictEqual(beforeCrons, currentIngestionCrons)
     && isDeepStrictEqual(afterCrons, iconResolutionIngestionCrons);
+  const addsProjectionCron = isDeepStrictEqual(beforeCrons, iconResolutionIngestionCrons)
+    && isDeepStrictEqual(afterCrons, projectionIsolationIngestionCrons);
   const reviewedTransition = (isDeepStrictEqual(beforeCrons, priorIngestionCrons)
-      && isDeepStrictEqual(afterCrons, currentIngestionCrons)) || addsIconCron;
+      && isDeepStrictEqual(afterCrons, currentIngestionCrons)) || addsIconCron || addsProjectionCron;
   if (!reviewedTransition || !afterCrons) return false;
+  const insertsElement = addsIconCron || addsProjectionCron;
   return isDeepStrictEqual(change.after_unknown, {
     // The provider models schedules as an ordered list. Inserting a cron shifts
     // every following value and associates the new element's unknown metadata
     // with the final list slot rather than with the inserted cron value.
-    schedules: afterCrons.map((_, index) => addsIconCron && index === afterCrons.length - 1
+    schedules: afterCrons.map((_, index) => insertsElement && index === afterCrons.length - 1
       ? { created_on: true, modified_on: true }
       : { modified_on: true }),
   });

@@ -8,6 +8,7 @@ import { catalogProviderIds, integrationRegistry } from '../src/integration-regi
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import { D1EmployerStore } from '../cloudflare/employer-store.js';
+import { D1MaintenancePhaseStore } from '../cloudflare/maintenance-phases.js';
 import { CATALOG_DELIVERY_MAX_ATTEMPTS, isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
 import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
@@ -308,12 +309,59 @@ describe('Cloudflare maintenance cron', () => {
     }
   });
 
-  it('rebuilds the catalog projection even when another maintenance step fails', async () => {
-    // The projection is the Roles feed's whole source of truth: while a failing
-    // verification or alert email could abort this cron before the refresh ran,
-    // the feed served a day-old snapshot whose groups duplicated live roles.
-    vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+  it('brackets each projection step with durable phase markers', async () => {
+    const markers: Array<[string, string]> = [];
+    const phases = { async record(phase: string, status: string) { markers.push([phase, status]); } };
+    const result = await runCatalogProjectionMaintenance(async (refresh) => {
+      await refresh();
+      return { result: 'projected' };
+    }, async () => ({ generatedAt: 'refresh-1' }), phases);
+
+    expect(result).toEqual({
+      prospectiveShadowMetadata: { result: 'projected' },
+      projection: { generatedAt: 'refresh-1' },
+    });
+    expect(markers).toEqual([
+      ['prospective_shadow_metadata', 'started'],
+      ['prospective_shadow_metadata', 'complete'],
+      ['catalog_projection', 'started'],
+      ['catalog_projection', 'complete'],
+    ]);
+  });
+
+  it('refreshes the catalog projection on its dedicated cron and marks every step', async () => {
+    // The projection is the Roles feed's whole source of truth, and it is now the
+    // only memory-heavy step on this cron so the `9-59/10` phases cannot pile up
+    // beside it and cross the isolate limit.
+    const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
     const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
+    const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await cloudflareWorker.scheduled({
+        cron: '4-54/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
+      } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) },
+      } as unknown as Environment);
+
+      expect(listCatalog).toHaveBeenCalledOnce();
+      expect(projection).toHaveBeenCalledOnce();
+      expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'started');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'complete');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_complete', 'complete', expect.any(Date));
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_catalog_projection_complete"'));
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('runs the remaining maintenance phases and marks them without rebuilding the projection', async () => {
+    // The projection belongs to the `4-54/10` cron now. While a failing
+    // verification or alert email may abort its own step, it must not stop the
+    // rest of the maintenance phases or the completion signal.
+    const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+    const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
+    const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
     const failing = vi.spyOn(D1CatalogAdmissionStore.prototype, 'listActiveIncidents').mockRejectedValue(new Error('Resend returned HTTP 422'));
     const metadata = vi.spyOn(D1CatalogAdmissionStore.prototype, 'metadataVerificationCandidates');
     vi.spyOn(D1InternshipStore.prototype, 'listPendingProviderShadowVerifications').mockResolvedValue([]);
@@ -332,10 +380,15 @@ describe('Cloudflare maintenance cron', () => {
         DESTINATION_VERIFICATION_QUEUE: queue(undefined),
         DESTINATION_VERIFICATION_DLQ: queue(undefined),
       } as unknown as Environment);
+
       expect(failing).toHaveBeenCalled();
-      expect(projection).toHaveBeenCalledOnce();
       expect(metadata).not.toHaveBeenCalled();
+      expect(listCatalog).not.toHaveBeenCalled();
+      expect(projection).not.toHaveBeenCalled();
       expect(errors).toHaveBeenCalledWith(expect.stringContaining('"step":"admission_verification_warnings"'));
+      expect(markers).toHaveBeenCalledWith('admission_verification_warnings', 'started');
+      expect(markers).toHaveBeenCalledWith('admission_verification_warnings', 'failed');
+      expect(markers).toHaveBeenCalledWith('maintenance_complete', 'complete', expect.any(Date));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
     } finally {
       vi.restoreAllMocks();
