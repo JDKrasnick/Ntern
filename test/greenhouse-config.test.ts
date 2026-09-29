@@ -60,6 +60,31 @@ describe('reviewed Greenhouse registry', () => {
     expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(171);
   });
 
+  it('keeps the #231 remediation probe identities and admission time exact', () => {
+    const remediationSourceIds = [
+      'greenhouse-akunacapital',
+      'greenhouse-duolingo',
+      'greenhouse-epicgames',
+      'greenhouse-flyzipline',
+      'greenhouse-oldmissioncapital',
+      'greenhouse-pathai',
+      'greenhouse-rubrik',
+      'greenhouse-samsara',
+      'greenhouse-towerresearchcapital',
+      'greenhouse-waymo',
+      'greenhouse-wehrtyou',
+    ];
+    const remediationSources = reviewedGreenhouseSources.filter((source) => remediationSourceIds.includes(source.id));
+
+    expect(remediationSources).toHaveLength(remediationSourceIds.length);
+    expect(remediationSources.every((source) => source.admittedAt === '2026-09-29T15:38:36.000Z')).toBe(true);
+    expect(remediationSources.find((source) => source.id === 'greenhouse-oldmissioncapital')).toMatchObject({
+      displayName: 'Old Mission Capital',
+      expectedBoardNames: ['Old Mission'],
+      admittedBoardName: 'Old Mission',
+    });
+  });
+
   it('keeps every future reviewed entry within the admission contract', () => {
     const seenIds = new Set<string>();
     const seenTokens = new Set<string>();
