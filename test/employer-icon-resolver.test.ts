@@ -2041,6 +2041,45 @@ describe('employer icon tie-breaker budget', () => {
     expect(second.claimed).toBe(1);
     expect(second.reasonCodes).toEqual(['tie-break-budget-exhausted']);
   });
+
+  it('lets materially changed evidence earn a fresh call inside the window', async () => {
+    const { db, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'observe', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/role'), NOW);
+
+    const requests: OpenAIJsonRequest[] = [];
+    const infer = async (request: OpenAIJsonRequest): Promise<OpenAIJsonResult> => {
+      requests.push(request);
+      return {
+        response: { decision: 'uncertain', officialDomain: null, confidence: 0.4, evidenceIds: [], reason: 'ambiguous evidence' },
+        inputTokens: 120, outputTokens: 30, actualCostCents: 1,
+      };
+    };
+    const fetchImpl = scriptedFetch({
+      'https://acme.com/careers/role': () => html(
+        '<!doctype html><html><head><title>Careers at Acme</title></head></html>',
+      ),
+      'https://acme.com/careers/other': () => html(
+        '<!doctype html><html><head><title>Careers at Acme</title></head></html>',
+      ),
+    });
+    const env = environment(db, r2Stub().bucket, { OPENAI_KEY: 'sk-test' });
+
+    const first = await runEmployerIconResolutionPass(env, NOW, { ...DEPENDENCIES(fetchImpl), infer });
+    expect(requests).toHaveLength(1);
+    expect(first.reasonCodes).toEqual(['tie-break-rejected']);
+
+    // A new posting changes the evidence fingerprint. The employer already spent its
+    // call inside the 30-day window, but the model has never seen *this* evidence, so
+    // the changed question is asked rather than parked as budget-exhausted.
+    const later = new Date(NOW.getTime() + 60 * 60 * 1_000);
+    await enqueueEmployerIconResolution(icons, employerSeed('https://acme.com/careers/other'), later);
+    const second = await runEmployerIconResolutionPass(env, later, { ...DEPENDENCIES(fetchImpl), infer });
+    expect(second.claimed).toBe(1);
+    expect(requests).toHaveLength(2);
+    expect(second.reasonCodes).toEqual(['tie-break-rejected']);
+  });
 });
 
 describe('employers needing resolution', () => {
