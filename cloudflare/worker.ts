@@ -1676,6 +1676,20 @@ async function runScheduledStep<T>(step: string, run: () => Promise<T>): Promise
   }
 }
 
+export async function runCatalogProjectionMaintenance<T>(
+  publishShadow: (refreshProjection: () => Promise<T>) => Promise<unknown>,
+  refreshProjection: () => Promise<T>,
+): Promise<{ prospectiveShadowMetadata: unknown; projection: T | undefined }> {
+  let projection: T | undefined;
+  const refreshProjectionOnce = async () => {
+    projection ??= await refreshProjection();
+    return projection;
+  };
+  const prospectiveShadowMetadata = await runScheduledStep('prospective_shadow_metadata', () => publishShadow(refreshProjectionOnce));
+  if (!projection) projection = await runScheduledStep('catalog_projection', refreshProjectionOnce);
+  return { prospectiveShadowMetadata, projection };
+}
+
 async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket) {
   // One order for both read models: the card's own `updatedAt` (with its group id
   // breaking ties) is stored on each D1 row as its sort key, and R2 pages are
@@ -1952,17 +1966,32 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     if (overdue.length) await alertCadenceSlip(env, 'github', overdue, now);
     return;
   }
+  if (event.cron === '6-56/10 * * * *') {
+    const observedAt = new Date(event.scheduledTime);
+    const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
+    const companyIconResolution = recentOverloads === 0
+      ? await runScheduledStep('company_icon_resolution', () => runEmployerIconResolutionPass(env, observedAt, {
+        resolver: publicHostResolver,
+        ...(iconSvgRasterizer ? { rasterizeSvg: iconSvgRasterizer } : {}),
+      }))
+      : undefined;
+    if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'company_icon_resolution_deferred', recentOverloads: recentOverloads ?? null }));
+    console.log(JSON.stringify({ event: 'company_icon_resolution_schedule_complete', companyIconResolution }));
+    return;
+  }
   if (event.cron === '9-59/10 * * * *') {
     const observedAt = new Date(event.scheduledTime);
-    // This schedule owns several independent responsibilities, and publication is
-    // the only one the user sees: the catalog projection is the Roles feed's whole
-    // source of truth, so it is rebuilt first and no later step's failure may
-    // cancel it. While the refresh sat last, one failing verification email or
-    // alert held the feed on a day-old snapshot.
+    // Shadow publication can change at most one role. Stage it before the catalog
+    // refresh and share its callback so this invocation builds the memory-heavy
+    // projection exactly once. A shadow failure remains isolated from the feed.
+    const { prospectiveShadowMetadata, projection } = await runCatalogProjectionMaintenance(
+      (refreshProjection) => publishProspectiveShadowMetadata(env, refreshProjection),
+      () => refreshCatalogProjection(store, env.DOCUMENTS),
+    );
+    // The catalog projection is the Roles feed's whole source of truth. Refresh it
+    // before the remaining independent maintenance work so no later failure can
+    // hold the feed on an old snapshot.
     // See docs/197-ingestion-resource-bounds.md.
-    const projection = await runScheduledStep('catalog_projection', () => refreshCatalogProjection(store, env.DOCUMENTS));
-    await runScheduledStep('prospective_shadow_metadata', () => publishProspectiveShadowMetadata(env,
-      () => refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS)));
     const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await runScheduledStep('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await runScheduledStep('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
@@ -1973,15 +2002,6 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       ? await runScheduledStep('metadata_collection', () => collectRoleMetadataInBackground(env, observedAt))
       : { queued: 0, deferred: true };
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'metadata_collection_deferred', recentOverloads: recentOverloads ?? null }));
-    // Icon resolution is pure background work that never gates publication, so it
-    // yields to the projection on the same terms as metadata collection.
-    const companyIconResolution = recentOverloads === 0
-      ? await runScheduledStep('company_icon_resolution', () => runEmployerIconResolutionPass(env, observedAt, {
-        resolver: publicHostResolver,
-        ...(iconSvgRasterizer ? { rasterizeSvg: iconSvgRasterizer } : {}),
-      }))
-      : undefined;
-    if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'company_icon_resolution_deferred', recentOverloads: recentOverloads ?? null }));
     const queueMetrics = await runScheduledStep('destination_queue_metrics', async () => env.DESTINATION_VERIFICATION_QUEUE.metrics ? await env.DESTINATION_VERIFICATION_QUEUE.metrics() : undefined);
     const deadLetterMetrics = await runScheduledStep('destination_dlq_metrics', async () => env.DESTINATION_VERIFICATION_DLQ.metrics ? await env.DESTINATION_VERIFICATION_DLQ.metrics() : undefined);
     const dlqGrowth = await runScheduledStep('dlq_growth_metrics', () => measureDlqGrowth(env.DB, {
@@ -2022,7 +2042,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       }));
     }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)));
-    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection, companyIconResolution }));
+    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', prospectiveShadowMetadata, projection, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
   }
   if (event.cron === '*/5 * * * *') {

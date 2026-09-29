@@ -559,6 +559,9 @@ const priorIngestionCrons = [
   '0 * * * *', '42 8 * * *', '17 9 * * *',
 ];
 const currentIngestionCrons = priorIngestionCrons.map((cron) => cron === '42 8 * * *' ? '34 8 * * *' : cron);
+const iconResolutionIngestionCrons = [
+  ...currentIngestionCrons.slice(0, 3), '6-56/10 * * * *', ...currentIngestionCrons.slice(3),
+];
 
 function cronValues(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -574,11 +577,10 @@ function cronValues(value: unknown): string[] | undefined {
 }
 
 /**
- * The retention cron moves once, from the Greenhouse dispatch minute to 08:34.
- * Pin both complete schedules so the release cannot add, remove, or repurpose a
- * trigger while it reconciles that reviewed production change.
+ * Pin each reviewed cron migration as a complete before/after schedule so a
+ * release cannot add, remove, or repurpose any other production trigger.
  */
-function isCatalogRetentionCronUpdate(address: string, change: ResourceChange['change']): boolean {
+function isReviewedIngestionCronUpdate(address: string, change: ResourceChange['change']): boolean {
   if (address !== 'cloudflare_workers_cron_trigger.ingestion'
     || !isRecord(change.before) || !isRecord(change.after)) return false;
   const before = change.before;
@@ -589,11 +591,16 @@ function isCatalogRetentionCronUpdate(address: string, change: ResourceChange['c
     || stableKeys.some((key) => before[key] !== after[key])
     || before.id !== 'intern-notifs-ingestion'
     || before.script_name !== 'intern-notifs-ingestion'
-    || typeof before.account_id !== 'string' || before.account_id.length === 0
-    || !isDeepStrictEqual(cronValues(before.schedules), priorIngestionCrons)
-    || !isDeepStrictEqual(cronValues(after.schedules), currentIngestionCrons)) return false;
+    || typeof before.account_id !== 'string' || before.account_id.length === 0) return false;
+  const beforeCrons = cronValues(before.schedules);
+  const afterCrons = cronValues(after.schedules);
+  const reviewedTransition = (isDeepStrictEqual(beforeCrons, priorIngestionCrons)
+      && isDeepStrictEqual(afterCrons, currentIngestionCrons))
+    || (isDeepStrictEqual(beforeCrons, currentIngestionCrons)
+      && isDeepStrictEqual(afterCrons, iconResolutionIngestionCrons));
+  if (!reviewedTransition || !afterCrons) return false;
   return isDeepStrictEqual(change.after_unknown, {
-    schedules: currentIngestionCrons.map(() => ({ modified_on: true })),
+    schedules: afterCrons.map(() => ({ modified_on: true })),
   });
 }
 
@@ -653,7 +660,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
       (change.actions[0] === 'update'
         && ((allowedUpdates.has(address)
           && (isSafeWorkerUpdate(address, change) || isResumeWorkerUpdate(address, change)))
-          || isCatalogRetentionCronUpdate(address, change)))
+          || isReviewedIngestionCronUpdate(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
         || isCustomDomainCreate(address, change)))
     )
