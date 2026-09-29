@@ -52,12 +52,12 @@ function jsonResponse(body: unknown, url: string, status = 200): Response {
 
 describe('reviewed Greenhouse registry', () => {
   it('keeps the published inventory plus reviewed shadow additions', () => {
-    expect(reviewedGreenhouseSources).toHaveLength(193);
+    expect(reviewedGreenhouseSources).toHaveLength(208);
     expect(reviewedGreenhouseSources.slice(0, 3).map((source) => source.id)).toEqual(['greenhouse-figma', 'greenhouse-datadog', 'greenhouse-cloudflare']);
-    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(174);
+    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(189);
     expect(reviewedGreenhouseSources.filter((source) => source.status === 'shadow')).toHaveLength(19);
     expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'reviewed')).toHaveLength(22);
-    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(171);
+    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(186);
   });
 
   it('keeps the #231 remediation probe identities and admission time exact', () => {
@@ -82,6 +82,37 @@ describe('reviewed Greenhouse registry', () => {
       displayName: 'Old Mission Capital',
       expectedBoardNames: ['Old Mission'],
       admittedBoardName: 'Old Mission',
+    });
+  });
+
+  it('keeps the #231 remediation batch 2 probe identities exact', () => {
+    const batch2 = [
+      'greenhouse-aqr',
+      'greenhouse-asm',
+      'greenhouse-awardco',
+      'greenhouse-formlabs',
+      'greenhouse-healthesystems',
+      'greenhouse-helsing',
+      'greenhouse-interstates',
+      'greenhouse-kinexon',
+      'greenhouse-lyft',
+      'greenhouse-payoneer',
+      'greenhouse-symphony',
+      'greenhouse-toast',
+      'greenhouse-trillium',
+      'greenhouse-upstart',
+      'greenhouse-workato',
+    ];
+    const sources = reviewedGreenhouseSources.filter((source) => batch2.includes(source.id));
+
+    expect(sources).toHaveLength(batch2.length);
+    expect(sources.every((source) => source.admittedAt === '2026-09-29T16:46:00.000Z')).toBe(true);
+    // The Trillium board's public name is generic, so the reviewed display name
+    // and the probed board name are deliberately kept separate.
+    expect(sources.find((source) => source.id === 'greenhouse-trillium')).toMatchObject({
+      displayName: 'Trillium',
+      expectedBoardNames: ['Open Roles'],
+      admittedBoardName: 'Open Roles',
     });
   });
 
