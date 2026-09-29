@@ -969,10 +969,19 @@ async function runIconTieBreak(input: {
   };
 }
 
-/** The model earns a call only when the evidence materially changed or the window lapsed. */
+/**
+ * The model earns a call when the evidence materially changed, or once the window
+ * lapses for evidence that did not.
+ *
+ * A different fingerprint is a different question — a new posting, a corrected
+ * link, or a resolver version that reads the same link differently — so it is asked
+ * while the question is new. Only the same evidence is rate-limited to one call per
+ * employer per window; denying a changed fingerprint here parks the employer until
+ * the window lapses even though the previous call never saw the current evidence.
+ */
 function withinTieBreakBudget(context: EmployerIconContext, evidenceFingerprint: string, now: Date): boolean {
   if (!context.tieBreakAt) return true;
-  if (context.tieBreakFingerprint === evidenceFingerprint) return false;
+  if (context.tieBreakFingerprint !== evidenceFingerprint) return true;
   const elapsed = now.getTime() - Date.parse(context.tieBreakAt);
   return !Number.isFinite(elapsed) || elapsed >= employerIconTieBreakWindowMs;
 }

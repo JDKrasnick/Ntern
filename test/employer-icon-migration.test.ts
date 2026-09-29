@@ -14,6 +14,10 @@ const migrationV2 = readFileSync(new URL(
   '../cloudflare/migrations/0038_employer_icon_resolution_v2.sql',
   import.meta.url,
 ), 'utf8');
+const tieBreakRearm = readFileSync(new URL(
+  '../cloudflare/migrations/0044_rearm_icon_tie_break_changed_evidence.sql',
+  import.meta.url,
+), 'utf8');
 
 function migrated(): DatabaseSync {
   const database = new DatabaseSync(':memory:');
@@ -103,6 +107,43 @@ describe('employer icon resolution migration', () => {
       insertTask(database, `task-${status}`, `fingerprint-${status}`, status);
     }
     expect(() => insertTask(database, 'task-unknown', 'fingerprint-unknown', 'pending')).toThrow(/CHECK/u);
+    database.close();
+  });
+});
+
+describe('changed-evidence tie-break re-arm migration', () => {
+  function insertResolution(
+    database: DatabaseSync,
+    id: string,
+    fingerprint: string,
+    status: string,
+    reasonCode: string,
+  ): void {
+    database.prepare(`INSERT INTO employer_icon_resolutions
+      (id, canonical_employer_id, evidence_fingerprint, status, evidence_json, attempts, next_retry_at, created_at, updated_at)
+      VALUES (?, 'acme', ?, ?, json_object('reasonCode', ?), 2, '2026-10-29T00:00:00.000Z',
+        '2026-09-24T00:00:00.000Z', '2026-09-24T00:00:00.000Z')`)
+      .run(id, fingerprint, status, reasonCode);
+  }
+
+  it('re-arms only the parked rows whose evidence differs from the last tie-breaker', () => {
+    const database = migrated();
+    database.prepare(`UPDATE canonical_employers SET icon_tie_break_at = '2026-09-29T00:00:00.000Z',
+      icon_tie_break_fingerprint = 'fp-old' WHERE id = 'acme'`).run();
+    insertResolution(database, 'changed', 'fp-new-a', 'unresolved', 'tie-break-budget-exhausted');
+    insertResolution(database, 'same', 'fp-old', 'unresolved', 'tie-break-budget-exhausted');
+    insertResolution(database, 'other-reason', 'fp-new-b', 'unresolved', 'no-reliable-domain');
+    insertResolution(database, 'retryable', 'fp-new-c', 'retryable', 'tie-break-budget-exhausted');
+
+    database.exec(tieBreakRearm);
+
+    const rows = database.prepare(`SELECT id, next_retry_at FROM employer_icon_resolutions`)
+      .all() as { id: string; next_retry_at: string }[];
+    const nextRetry = Object.fromEntries(rows.map((row) => [row.id, row.next_retry_at]));
+    expect(nextRetry.changed).toBe('1970-01-01T00:00:00.000Z');
+    expect(nextRetry.same).toBe('2026-10-29T00:00:00.000Z');
+    expect(nextRetry['other-reason']).toBe('2026-10-29T00:00:00.000Z');
+    expect(nextRetry.retryable).toBe('2026-10-29T00:00:00.000Z');
     database.close();
   });
 });
