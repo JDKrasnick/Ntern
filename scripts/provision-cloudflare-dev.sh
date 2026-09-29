@@ -23,6 +23,8 @@ if test -z "$index"; then
     --description 'Isolated development resume bank embeddings'
   index=$(npx wrangler vectorize list --json | jq -c --arg name "$resume_index" '.[] | select(.name == $name)')
 fi
-jq -e '.config == {"dimensions":768,"metric":"cosine"}' <<<"$index" >/dev/null
+jq -e '.config.dimensions == 768
+  and .config.metric == "cosine"
+  and .config.preset == "@cf/baai/bge-base-en-v1.5"' <<<"$index" >/dev/null
 
 echo 'Cloudflare development resume resources are ready.'

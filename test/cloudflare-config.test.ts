@@ -169,6 +169,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).not.toMatch(/\bmigrations\s*=\s*\{/);
     expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "true"');
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
+    expect(deployment).toContain('.config.preset == "@cf/baai/bge-base-en-v1.5"');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.ingestion intern-notifs-ingestion');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.application intern-notifs');
     expect(deployment).not.toContain('Bootstrap Worker migrations with Wrangler');
