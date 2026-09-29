@@ -1347,6 +1347,12 @@ export class D1CatalogAdmissionStore {
     const result: AutomaticEmployerIdentityObservationResult = {
       observed: 0, promoted: 0, conflicted: 0, disabled: 0,
     };
+    const changedScopes = new Map<string, { provider: AutomaticEmployerIdentityObservation['provider']; scope: string }>();
+    const recordChangedScope = (observation: AutomaticEmployerIdentityObservation) => {
+      changedScopes.set(`${observation.provider}\0${observation.scope}`, {
+        provider: observation.provider, scope: observation.scope,
+      });
+    };
     const grouped = new Map<string, AutomaticEmployerIdentityObservation[]>();
     for (const observation of observations) {
       const key = `${observation.provider}\0${observation.scope}`;
@@ -1377,6 +1383,7 @@ export class D1CatalogAdmissionStore {
           await this.db.prepare('UPDATE employer_mappings SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL')
             .bind(sample.observedAt, active.id).run();
           result.disabled += 1;
+          recordChangedScope(sample);
         }
         continue;
       }
@@ -1425,6 +1432,7 @@ export class D1CatalogAdmissionStore {
           await this.db.prepare('UPDATE employer_mappings SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL')
             .bind(sample.observedAt, active.id).run();
           result.disabled += 1;
+          recordChangedScope(sample);
         }
         continue;
       }
@@ -1473,9 +1481,10 @@ export class D1CatalogAdmissionStore {
         .bind(sample.provider, sample.scope).first<{ id: string; reviewed_by: string }>();
       if (promoted?.id === mappingId && promoted.reviewed_by === AUTOMATIC_EMPLOYER_POLICY) {
         result.promoted += 1;
+        recordChangedScope(sample);
       }
     }
-    return result;
+    return changedScopes.size ? { ...result, changedScopes: [...changedScopes.values()] } : result;
   }
 
   async resolveCanonicalEmployer(identity: ProviderIdentity): Promise<Pick<CanonicalEmployer, 'id' | 'displayName'> | undefined> {

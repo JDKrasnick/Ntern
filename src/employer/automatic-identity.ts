@@ -32,6 +32,8 @@ export interface AutomaticEmployerIdentityObservationResult {
   promoted: number;
   conflicted: number;
   disabled: number;
+  /** Scopes whose active mapping changed and whose existing roles need restamping. */
+  changedScopes?: Array<{ provider: PostingProvider; scope: string }>;
 }
 
 function cleanDisplayName(value: string): string {
@@ -105,10 +107,22 @@ export function automaticEmployerIdentityObservationSlice(
   limit = automaticEmployerIdentityObservationsPerDelivery,
 ): AutomaticEmployerIdentityObservation[] {
   if (limit <= 0 || observations.length === 0) return [];
-  const ordered = [...observations].sort((left, right) =>
-    [left.provider, left.scope, left.sourceId, left.labelKey].join('\0')
-      .localeCompare([right.provider, right.scope, right.sourceId, right.labelKey].join('\0')));
-  if (ordered.length <= limit) return ordered;
-  const start = ((Math.max(1, fetchSequence) - 1) * limit) % ordered.length;
-  return Array.from({ length: limit }, (_, offset) => ordered[(start + offset) % ordered.length]!);
+  // The safety decision is made per exact ATS tenant, so its evidence must stay
+  // atomic here. Slicing label rows could persist one label, omit a conflicting
+  // label at the boundary, and let the incomplete tenant promote before the next
+  // delivery. `limit` therefore bounds tenant scopes, not observation rows.
+  const byScope = new Map<string, AutomaticEmployerIdentityObservation[]>();
+  for (const observation of observations) {
+    const key = `${observation.provider}\0${observation.scope}`;
+    const group = byScope.get(key) ?? [];
+    group.push(observation);
+    byScope.set(key, group);
+  }
+  const orderedScopes = [...byScope.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const start = ((Math.max(1, fetchSequence) - 1) * limit) % orderedScopes.length;
+  const selectedScopes = orderedScopes.length <= limit
+    ? orderedScopes
+    : Array.from({ length: limit }, (_, offset) => orderedScopes[(start + offset) % orderedScopes.length]!);
+  return selectedScopes.flatMap(([, group]) => [...group].sort((left, right) =>
+    [left.sourceId, left.labelKey].join('\0').localeCompare([right.sourceId, right.labelKey].join('\0'))));
 }

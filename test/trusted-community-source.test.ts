@@ -290,9 +290,15 @@ describe('trusted community source policy', () => {
     const mapped = new Set<string>();
     const resolver = {
       async configurationVersion() { return 'registry-v1'; },
-      async observeAutomaticEmployerIdentities(observations: readonly { scope: string }[]) {
-        for (const observation of observations) mapped.add(observation.scope);
-        return { observed: observations.length, promoted: observations.length, conflicted: 0, disabled: 0 };
+      async observeAutomaticEmployerIdentities(observations: readonly { provider: 'workday'; scope: string }[]) {
+        const changedScopes = [];
+        for (const observation of observations) {
+          if (mapped.has(observation.scope)) continue;
+          mapped.add(observation.scope);
+          changedScopes.push({ provider: observation.provider, scope: observation.scope });
+        }
+        return { observed: observations.length, promoted: changedScopes.length, conflicted: 0, disabled: 0,
+          changedScopes };
       },
       async resolveCanonicalEmployer(identity: NonNullable<ProcessedListing['providerIdentity']>) {
         return identity.provider === 'workday' && identity.tenant && mapped.has(identity.tenant)
@@ -318,6 +324,95 @@ describe('trusted community source policy', () => {
     expect(icons).toHaveBeenCalledTimes(6);
     const third = await poller.poll({ maxListingsPerSourceRun: 25 });
     expect(third.unchangedSources).toContain('community-list');
+  });
+
+  it('observes conflicting tenant labels atomically and removes an earlier automatic stamp', async () => {
+    const store = new MemoryInternshipStore();
+    const row = (tenant: string, company: string, postingId: string, index: number) => {
+      const applyUrl = `https://${tenant}.wd1.myworkdayjobs.com/External/job/Remote/Software-Engineering-Intern_${postingId}`;
+      return listing({ sourceId: 'community-list', company, row: index, applyUrl,
+        externalId: `README.md:${applyUrl}`, providerIdentity: { provider: 'github', sourceId: 'community-list',
+          sourceUrl: 'https://github.com/example/jobs', postingId: postingId.toLowerCase() } });
+    };
+    const stableRows = [
+      row('tenant-a', 'Company A', 'REQ-A', 1),
+      row('tenant-b', 'Company B', 'REQ-B', 2),
+      row('tenant-c', 'Company C', 'REQ-C', 3),
+      row('tenant-d', 'Company D', 'REQ-D', 4),
+      row('tenant-e', 'Company E', 'REQ-E1', 5),
+    ];
+    const conflict = row('tenant-e', 'Other Company', 'REQ-E2', 6);
+    let fetches = 0;
+    const adapter: SourceAdapter = { id: 'community-list', async fetch(previous) {
+      fetches += 1;
+      const rows = fetches === 1 ? stableRows : [...stableRows, conflict];
+      return { sourceId: 'community-list', listings: rows, rawRowCount: rows.length, notModified: false,
+        checkpoint: { sourceId: 'community-list', successfulFetches: (previous?.successfulFetches ?? 0) + 1,
+          lastRowCount: rows.length } };
+    } };
+    const mapped = new Map<string, { id: string; displayName: string }>();
+    const observedWindows: Array<Array<{ scope: string; labelKey: string }>> = [];
+    const resolver = {
+      async configurationVersion() { return 'registry-v1'; },
+      async observeAutomaticEmployerIdentities(observations: readonly {
+        scope: string; labelKey: string; displayName: string;
+      }[]) {
+        observedWindows.push(observations.map(({ scope, labelKey }) => ({ scope, labelKey })));
+        const byScope = new Map<string, typeof observations[number][]>();
+        const changedScopes: Array<{ provider: 'workday'; scope: string }> = [];
+        let promoted = 0;
+        let disabled = 0;
+        for (const observation of observations) {
+          const group = byScope.get(observation.scope) ?? [];
+          group.push(observation);
+          byScope.set(observation.scope, group);
+        }
+        for (const [scope, group] of byScope) {
+          const labels = new Set(group.map((observation) => observation.labelKey));
+          if (labels.size === 1) {
+            if (!mapped.has(scope)) {
+              mapped.set(scope, { id: scope, displayName: group[0]!.displayName });
+              changedScopes.push({ provider: 'workday', scope });
+              promoted += 1;
+            }
+          } else if (mapped.delete(scope)) {
+            changedScopes.push({ provider: 'workday', scope });
+            disabled += 1;
+          }
+        }
+        return { observed: observations.length, promoted, conflicted: 0, disabled, changedScopes };
+      },
+      async resolveCanonicalEmployer(identity: NonNullable<ProcessedListing['providerIdentity']>) {
+        return identity.provider === 'workday' && identity.tenant ? mapped.get(identity.tenant) : undefined;
+      },
+      async resolveDestinationRule() { return undefined; },
+    };
+    const validate = async (url: string) => ({ url, evidence: { url, title: 'Software Engineering Intern',
+      postingIdPresent: true, confidence: { score: 100, level: 'high' as const,
+        recommendation: 'alert-eligible' as const, signals: [] } } });
+    const icons = vi.fn().mockResolvedValue(undefined);
+    const poller = new Poller([adapter], store, () => new Date(inspectedAt), undefined, validate, false,
+      undefined, resolver, true, true, icons);
+
+    await poller.poll({ maxListingsPerSourceRun: 5 });
+    expect([...store.jobs.values()].find((job) => job.company === 'Company E')?.admission?.canonicalEmployer)
+      .toMatchObject({ id: 'tenant-e' });
+
+    const conflicted = await poller.poll({ maxListingsPerSourceRun: 5 });
+
+    expect(observedWindows[1]?.filter((observation) => observation.scope === 'tenant-e'))
+      .toEqual([{ scope: 'tenant-e', labelKey: 'company e' }, { scope: 'tenant-e', labelKey: 'other' }]);
+    expect(conflicted.pendingResolution['community-list']).toBe(1);
+    expect([...store.jobs.values()].find((job) => job.company === 'Other Company')?.admission?.canonicalEmployer)
+      .toBeUndefined();
+    expect([...store.jobs.values()].find((job) => job.company === 'Company E')?.admission?.canonicalEmployer)
+      .toMatchObject({ id: 'tenant-e' });
+
+    await poller.poll({ maxListingsPerSourceRun: 5 });
+
+    expect([...store.jobs.values()].filter((job) => ['Company E', 'Other Company'].includes(job.company))
+      .every((job) => job.admission?.canonicalEmployer === undefined)).toBe(true);
+    expect(icons.mock.calls.filter(([seed]) => seed.tenant === 'tenant-e')).toHaveLength(1);
   });
 
   it('keeps source publication nonblocking when automatic employer observation fails', async () => {

@@ -806,6 +806,8 @@ export class IngestionRunner {
     stampSourceMetadata = false,
     providerShadowEligible = false,
     workConcurrency = SOURCE_WORK_CONCURRENCY,
+    automaticEmployerEvidenceListings: readonly ProcessedListing[] = listings,
+    forceAutomaticEmployerExternalIds: ReadonlySet<string> = new Set(),
   ) {
     const resolved = new Map<string, Internship | undefined>();
     const validatedAt = new Map<string, string>();
@@ -825,11 +827,12 @@ export class IngestionRunner {
     const brokenProbeFailures: string[] = [];
     const retryableRowExternalIds = new Set<string>();
     const deferredHandoffFailures: string[] = [];
+    const observedAutomaticEmployerKeys = new Set<string>();
     const automaticEmployerRefreshKeys = new Set<string>();
     const pendingAutomaticEmployerExternalIds = new Set<string>();
     if (this.catalogAdmissionResolver?.observeAutomaticEmployerIdentities && completeFetchSequence) {
       const observedAt = this.now().toISOString();
-      const automaticCandidates = listings.flatMap((listing) => {
+      const automaticCandidates = automaticEmployerEvidenceListings.flatMap((listing) => {
         const candidate = automaticEmployerIdentityCandidate(listing, completeFetchSequence, observedAt);
         return candidate ? [{ externalId: externalId(listing), candidate }] : [];
       });
@@ -839,14 +842,20 @@ export class IngestionRunner {
       );
       if (observations.length) {
         try {
-          await this.catalogAdmissionResolver.observeAutomaticEmployerIdentities(observations);
+          const observationResult = await this.catalogAdmissionResolver.observeAutomaticEmployerIdentities(observations);
           // Automatic mappings deliberately do not change the global admission
           // configuration version: doing that regrades every community role and
-          // can exhaust a queue delivery. Revisit only the bounded tenant window
-          // whose evidence was just observed, so a new or previously active
-          // mapping is stamped onto already-published occurrences in this pass.
+          // can exhaust a queue delivery. Revisit only scopes whose active mapping
+          // changed, so promotion and invalidation both converge without a
+          // catalog-wide regrade.
           for (const observation of observations) {
-            automaticEmployerRefreshKeys.add(`${observation.provider}\0${observation.scope}`);
+            observedAutomaticEmployerKeys.add(`${observation.provider}\0${observation.scope}`);
+          }
+          const changedScopes = observationResult.changedScopes
+            ?? (observationResult.promoted || observationResult.disabled
+              ? observations.map(({ provider, scope }) => ({ provider, scope })) : []);
+          for (const scope of changedScopes) {
+            automaticEmployerRefreshKeys.add(`${scope.provider}\0${scope.scope}`);
           }
         } catch (error) {
           // Employer discovery is enrichment. A transient D1 failure must not
@@ -859,8 +868,11 @@ export class IngestionRunner {
           }));
         }
       }
+      const currentExternalIds = new Set(listings.map(externalId));
       for (const { externalId: candidateExternalId, candidate } of automaticCandidates) {
-        if (!automaticEmployerRefreshKeys.has(`${candidate.provider}\0${candidate.scope}`)) {
+        const key = `${candidate.provider}\0${candidate.scope}`;
+        if ((currentExternalIds.has(candidateExternalId) && !observedAutomaticEmployerKeys.has(key))
+          || (!currentExternalIds.has(candidateExternalId) && automaticEmployerRefreshKeys.has(key))) {
           pendingAutomaticEmployerExternalIds.add(candidateExternalId);
         }
       }
@@ -950,8 +962,8 @@ export class IngestionRunner {
         this.now().toISOString(),
       );
       const refreshAutomaticEmployer = Boolean(automaticEmployerCandidate
-        && automaticEmployerRefreshKeys.has(`${automaticEmployerCandidate.provider}\0${automaticEmployerCandidate.scope}`)
-        && !priorOccurrence?.occurrence.admission?.canonicalEmployer);
+        && (automaticEmployerRefreshKeys.has(`${automaticEmployerCandidate.provider}\0${automaticEmployerCandidate.scope}`)
+          || forceAutomaticEmployerExternalIds.has(id)));
       if (!stampSourceMetadata && (!trustedCommunityPolicy || settledCatalogOnlyCommunityRow)
         && (reuseUnchangedOccurrences || admissionAlreadyApplied) && priorOccurrence
         && sourceOwnedMaterial(priorOccurrence.occurrence) === sourceOwnedMaterial(listing)
@@ -1770,6 +1782,8 @@ export class IngestionRunner {
             && options.maxListingsPerSourceRun <= GITHUB_RESOLUTION_ROWS_PER_DELIVERY
             && migrationLimit === undefined
             ? GITHUB_RESOLUTION_WORK_CONCURRENCY : SOURCE_WORK_CONCURRENCY,
+          batch.processed.listings,
+          pendingResolutionRows,
         );
         // Keep unobserved employer evidence and inconclusive probes in the
         // checkpoint without retrying the whole slice. Finish unvisited rows
@@ -1777,7 +1791,7 @@ export class IngestionRunner {
         // hot queue loop.
         const nextPendingRows = [...new Set([
           ...remainingRows,
-          ...resolvedListings.filter((listing) => resolution.pendingAutomaticEmployerExternalIds.has(externalId(listing))).map(externalId),
+          ...resolution.pendingAutomaticEmployerExternalIds,
           ...resolvedListings.filter((listing) => resolution.retryableRowExternalIds.has(externalId(listing))).map(externalId),
         ])];
         // Existing catalog decisions are the durable migration obligation.

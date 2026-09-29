@@ -57,4 +57,29 @@ describe('automatic employer identity evidence', () => {
     expect(second).toHaveLength(5);
     expect(new Set([...first, ...second].map((observation) => observation.scope)).size).toBe(8);
   });
+
+  it('keeps every label for a selected tenant atomic at the observation boundary', () => {
+    const observation = (scope: string, labelKey: string) => ({
+      provider: 'workday' as const, scope, sourceId: 'community', fetchSequence: 1,
+      labelKey, displayName: labelKey, postingIds: [`posting-${scope}-${labelKey}`],
+      applicationUrl: `https://${scope}.wd1.myworkdayjobs.com/jobs/1`,
+      observedAt: '2026-09-27T01:00:00Z',
+    });
+    const observations = [
+      observation('tenant-a', 'company-a'),
+      observation('tenant-b', 'company-b'),
+      observation('tenant-c', 'company-c'),
+      observation('tenant-d', 'company-d'),
+      observation('tenant-e', 'company-e'),
+      observation('tenant-e', 'other-company'),
+    ];
+
+    const selected = automaticEmployerIdentityObservationSlice(observations, 1);
+
+    expect(new Set(selected.map((value) => value.scope))).toEqual(new Set([
+      'tenant-a', 'tenant-b', 'tenant-c', 'tenant-d', 'tenant-e',
+    ]));
+    expect(selected.filter((value) => value.scope === 'tenant-e').map((value) => value.labelKey))
+      .toEqual(['company-e', 'other-company']);
+  });
 });

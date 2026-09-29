@@ -202,7 +202,8 @@ describe('D1 catalog admission operations', () => {
     });
 
     expect(await store.observeAutomaticEmployerIdentities([observation(1)]))
-      .toEqual({ observed: 1, promoted: 1, conflicted: 0, disabled: 0 });
+      .toEqual({ observed: 1, promoted: 1, conflicted: 0, disabled: 0,
+        changedScopes: [{ provider: 'icims', scope: 'amd' }] });
     await expect(store.resolveCanonicalEmployer({ provider: 'icims', sourceId: 'community-list',
       tenant: 'amd', sourceUrl: observation(1).applicationUrl })).resolves.toMatchObject({ displayName: 'AMD' });
     expect(database.prepare(`SELECT reviewed_by FROM employer_mappings WHERE provider = 'icims' AND scope = 'amd'
@@ -221,7 +222,8 @@ describe('D1 catalog admission operations', () => {
       .toEqual({ observed: 1, promoted: 0, conflicted: 0, disabled: 0 });
     expect(await store.observeAutomaticEmployerIdentities([{
       ...base, fetchSequence: 2, postingIds: ['2'], observedAt: '2026-09-27T01:00:00Z',
-    }])).toEqual({ observed: 1, promoted: 1, conflicted: 0, disabled: 0 });
+    }])).toEqual({ observed: 1, promoted: 1, conflicted: 0, disabled: 0,
+      changedScopes: [{ provider: 'icims', scope: 'principal' }] });
     database.close();
   });
 
@@ -254,7 +256,8 @@ describe('D1 catalog admission operations', () => {
     }]);
     expect(await store.observeAutomaticEmployerIdentities([{
       ...base, fetchSequence: 2, labelKey: 'other', displayName: 'Other', observedAt: '2026-09-27T01:00:00Z',
-    }])).toEqual({ observed: 1, promoted: 0, conflicted: 1, disabled: 1 });
+    }])).toEqual({ observed: 1, promoted: 0, conflicted: 1, disabled: 1,
+      changedScopes: [{ provider: 'workday', scope: 'acme' }] });
     await expect(store.resolveCanonicalEmployer({ provider: 'workday', sourceId: 'community-list',
       tenant: 'acme', sourceUrl: base.applicationUrl })).resolves.toBeUndefined();
     database.close();
@@ -322,7 +325,8 @@ describe('D1 catalog admission operations', () => {
 
     expect(await store.observeAutomaticEmployerIdentities([{
       ...observation, fetchSequence: 2, observedAt: '2026-09-28T01:00:00Z',
-    }])).toEqual({ observed: 0, promoted: 0, conflicted: 0, disabled: 1 });
+    }])).toEqual({ observed: 0, promoted: 0, conflicted: 0, disabled: 1,
+      changedScopes: [{ provider: 'greenhouse', scope: 'rocketlab' }] });
     expect(database.prepare(`SELECT COUNT(*) AS count FROM employer_mappings
       WHERE provider = 'greenhouse' AND scope = 'rocketlab' AND superseded_at IS NULL`).get())
       .toEqual({ count: 0 });
