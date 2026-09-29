@@ -29,6 +29,7 @@ import type {
   CatalogAdmission,
   DestinationEvidence,
   Internship,
+  PostingProvider,
   PostingIdentityDecision,
   ProcessedListing,
   SourceOccurrenceState,
@@ -290,7 +291,9 @@ describe('trusted community source policy', () => {
     const mapped = new Set<string>();
     const resolver = {
       async configurationVersion() { return 'registry-v1'; },
-      async observeAutomaticEmployerIdentities(observations: readonly { provider: 'workday'; scope: string }[]) {
+      async observeAutomaticEmployerIdentities(observations: readonly {
+        provider: PostingProvider; scope: string;
+      }[]) {
         const changedScopes = [];
         for (const observation of observations) {
           if (mapped.has(observation.scope)) continue;
