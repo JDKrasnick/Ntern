@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider, admissionOperationalSignals, catalogStarvationSignal } from '../cloudflare/worker.js';
+import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runCatalogProjectionMaintenance, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider, admissionOperationalSignals, catalogStarvationSignal } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -277,6 +277,20 @@ describe('Cloudflare scheduled dispatch leases', () => {
 });
 
 describe('Cloudflare maintenance cron', () => {
+  it('reuses the projection refresh performed by prospective shadow publication', async () => {
+    let refreshes = 0;
+    const result = await runCatalogProjectionMaintenance(async (refresh) => {
+      await refresh();
+      return { result: 'projected' };
+    }, async () => ({ generatedAt: `refresh-${++refreshes}` }));
+
+    expect(refreshes).toBe(1);
+    expect(result).toEqual({
+      prospectiveShadowMetadata: { result: 'projected' },
+      projection: { generatedAt: 'refresh-1' },
+    });
+  });
+
   it('rebuilds the catalog projection even when another maintenance step fails', async () => {
     // The projection is the Roles feed's whole source of truth: while a failing
     // verification or alert email could abort this cron before the refresh ran,

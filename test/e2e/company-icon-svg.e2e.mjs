@@ -8,7 +8,7 @@
  *   1. it loads in the Worker runtime with its `resvg.wasm` module part resolved by
  *      name, so an import and a part name that disagree fail in CI rather than at
  *      deploy;
- *   2. the maintenance cron's icon sweep rasterizes the employer's SVG board logo and
+ *   2. the dedicated icon cron rasterizes the employer's SVG board logo and
  *      stores the PNG, in the real D1 and R2 bindings, driven through the real
  *      scheduled handler.
  *
@@ -48,7 +48,7 @@ const postingHtml = '<!doctype html><html><head><title>Software Engineering Inte
 const logoDocument = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
   + '<rect width="64" height="64" fill="#123456"/><path d="M12 12h40v40H12z" fill="#0af"/></svg>';
 const instant = '2026-09-01T00:00:00.000Z';
-const cron = '9-59/10 * * * *';
+const cron = '6-56/10 * * * *';
 const seenOutbound = [];
 const realFetch = globalThis.fetch;
 
@@ -90,7 +90,7 @@ function queueStub() {
   return { async send() {}, async sendBatch() {}, async metrics() { return { backlogCount: 0, backlogBytes: 0 }; } };
 }
 
-/** The bindings the maintenance cron touches, so no step fails for a missing one. */
+/** The bindings the icon cron touches, so no step fails for a missing one. */
 function cronEnvironment() {
   return {
     DB: database,
@@ -183,7 +183,7 @@ test('loads the compiled bundle and its wasm module part in the Worker runtime',
   assert.deepEqual(await response.json(), { role: 'ingestion', version: null });
 });
 
-test('renders the employer’s SVG board logo from the maintenance cron and stores the PNG', async () => {
+test('renders the employer’s SVG board logo from the dedicated icon cron and stores the PNG', async () => {
   const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
   globalThis.fetch = internet;
   try {
