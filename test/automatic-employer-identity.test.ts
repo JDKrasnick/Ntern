@@ -82,4 +82,19 @@ describe('automatic employer identity evidence', () => {
     expect(selected.filter((value) => value.scope === 'tenant-e').map((value) => value.labelKey))
       .toEqual(['company-e', 'other-company']);
   });
+
+  it('compresses an over-budget tenant to enough evidence to prove conflict', () => {
+    const observations = Array.from({ length: 1_100 }, (_, index) => ({
+      provider: 'workday' as const, scope: 'shared', sourceId: 'community', fetchSequence: 1,
+      labelKey: `company-${String(index).padStart(4, '0')}`, displayName: `Company ${index}`,
+      postingIds: [`posting-${index}`],
+      applicationUrl: `https://shared.wd1.myworkdayjobs.com/jobs/posting-${index}`,
+      observedAt: '2026-09-29T01:00:00Z',
+    }));
+
+    const selected = automaticEmployerIdentityObservationSlice(observations, 1);
+
+    expect(selected).toHaveLength(2);
+    expect(new Set(selected.map((observation) => observation.labelKey)).size).toBe(2);
+  });
 });

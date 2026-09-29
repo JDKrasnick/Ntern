@@ -100,6 +100,29 @@ export function groupAutomaticEmployerIdentityCandidates(
  * without allowing enrichment to exhaust a queue delivery's D1 CPU budget.
  */
 export const automaticEmployerIdentityObservationsPerDelivery = 5;
+/**
+ * One label is sufficient to represent an unambiguous scope and two distinct
+ * labels are sufficient to prove a conflict. Keeping more cannot change the
+ * safety decision, but it can turn one selected tenant into an unbounded D1
+ * batch when a source publishes many label variants for the same ATS route.
+ */
+export const automaticEmployerIdentityLabelsPerScope = 2;
+
+export function boundedAutomaticEmployerIdentityScopeEvidence(
+  observations: readonly AutomaticEmployerIdentityObservation[],
+): AutomaticEmployerIdentityObservation[] {
+  const ordered = [...observations].sort((left, right) =>
+    [left.labelKey, left.sourceId].join('\0').localeCompare([right.labelKey, right.sourceId].join('\0')));
+  const selected: AutomaticEmployerIdentityObservation[] = [];
+  const labels = new Set<string>();
+  for (const observation of ordered) {
+    if (labels.has(observation.labelKey)) continue;
+    labels.add(observation.labelKey);
+    selected.push(observation);
+    if (selected.length === automaticEmployerIdentityLabelsPerScope) break;
+  }
+  return selected;
+}
 
 export function automaticEmployerIdentityObservationSlice(
   observations: readonly AutomaticEmployerIdentityObservation[],
@@ -108,9 +131,9 @@ export function automaticEmployerIdentityObservationSlice(
 ): AutomaticEmployerIdentityObservation[] {
   if (limit <= 0 || observations.length === 0) return [];
   // The safety decision is made per exact ATS tenant, so its evidence must stay
-  // atomic here. Slicing label rows could persist one label, omit a conflicting
-  // label at the boundary, and let the incomplete tenant promote before the next
-  // delivery. `limit` therefore bounds tenant scopes, not observation rows.
+  // atomic here. Preserve one label when the scope is unambiguous and two when
+  // it conflicts: two distinct labels are sufficient to fail closed, while also
+  // keeping the selected scopes inside a fixed statement budget.
   const byScope = new Map<string, AutomaticEmployerIdentityObservation[]>();
   for (const observation of observations) {
     const key = `${observation.provider}\0${observation.scope}`;
@@ -123,6 +146,5 @@ export function automaticEmployerIdentityObservationSlice(
   const selectedScopes = orderedScopes.length <= limit
     ? orderedScopes
     : Array.from({ length: limit }, (_, offset) => orderedScopes[(start + offset) % orderedScopes.length]!);
-  return selectedScopes.flatMap(([, group]) => [...group].sort((left, right) =>
-    [left.sourceId, left.labelKey].join('\0').localeCompare([right.sourceId, right.labelKey].join('\0'))));
+  return selectedScopes.flatMap(([, group]) => boundedAutomaticEmployerIdentityScopeEvidence(group));
 }

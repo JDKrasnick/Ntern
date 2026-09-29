@@ -245,6 +245,25 @@ describe('D1 catalog admission operations', () => {
     database.close();
   });
 
+  it('bounds direct persistence for an over-budget conflicting ATS tenant', async () => {
+    const { database, admission: store } = subject();
+    const observations = Array.from({ length: 1_100 }, (_, index) => ({
+      provider: 'workday' as const, scope: 'shared', sourceId: 'community-list', fetchSequence: 1,
+      labelKey: `company-${String(index).padStart(4, '0')}`, displayName: `Company ${index}`,
+      postingIds: [`req-${index}`],
+      applicationUrl: `https://shared.wd1.myworkdayjobs.com/jobs/req-${index}`,
+      observedAt: '2026-09-29T01:00:00Z',
+    }));
+
+    await expect(store.observeAutomaticEmployerIdentities(observations))
+      .resolves.toEqual({ observed: 2, promoted: 0, conflicted: 1, disabled: 0 });
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM automatic_employer_identity_observations
+      WHERE provider = 'workday' AND scope = 'shared'`).get()).toEqual({ count: 2 });
+    await expect(store.resolveCanonicalEmployer({ provider: 'workday', sourceId: 'community-list',
+      tenant: 'shared', sourceUrl: observations[0]!.applicationUrl })).resolves.toBeUndefined();
+    database.close();
+  });
+
   it('disables an automatic mapping when later evidence conflicts', async () => {
     const { database, admission: store } = subject();
     const base = {

@@ -22,7 +22,8 @@ import type {
 } from '../src/types.js';
 import { projectRoleMetadata, reconcileRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceContent, roleMetadataEvidenceHasFields, roleMetadataReviewFingerprint, ROLE_METADATA_EXTRACTION_VERSION, unsupportedMetadataCurrencies, unsupportedMetadataPeriods, withoutObservationTimestamps } from '../src/role-metadata.js';
 import { metadataApiRoute } from '../src/metadata-acquisition.js';
-import type { AutomaticEmployerIdentityObservation, AutomaticEmployerIdentityObservationResult } from '../src/employer/automatic-identity.js';
+import { boundedAutomaticEmployerIdentityScopeEvidence,
+  type AutomaticEmployerIdentityObservation, type AutomaticEmployerIdentityObservationResult } from '../src/employer/automatic-identity.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 
 export const ATOMIC_REPAIR_RECORD_LIMIT = 900;
@@ -1361,7 +1362,10 @@ export class D1CatalogAdmissionStore {
       grouped.set(key, group);
     }
 
-    for (const group of grouped.values()) {
+    for (const unboundedGroup of grouped.values()) {
+      // The runner already applies this bound, but keep the persistence boundary
+      // safe if another caller submits a tenant with many label variants.
+      const group = boundedAutomaticEmployerIdentityScopeEvidence(unboundedGroup);
       const sample = group[0]!;
       const active = await this.db.prepare(`SELECT mapping.id, mapping.reviewed_by, employer.display_name
         FROM employer_mappings AS mapping
