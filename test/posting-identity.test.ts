@@ -615,6 +615,36 @@ describe('posting identity', () => {
     });
   });
 
+  // #231 remediation batch 2: same admission rule, plus the shared-host
+  // CareerPuck presentation that names its Greenhouse board in the path.
+  it.each([
+    ['https://careers.formlabs.com/job/8203818/apply/?gh_jid=8203818', 'formlabs', '8203818'],
+    ['https://www.interstates.com/careers/jobs?gh_jid=4056077009', 'interstates', '4056077009'],
+    ['https://careers.aqr.com/jobs?gh_jid=8077110', 'aqr', '8077110'],
+    ['https://www.trlm.com/apply/5076003007?gh_jid=5076003007', 'trillium', '5076003007'],
+    ['https://www.workato.com/careers?gh_jid=8731177002', 'workato', '8731177002'],
+    ['https://symphony.com/company/apply?gh_jid=8121110', 'symphony', '8121110'],
+    ['https://www.asm.com/open-vacancies/?gh_jid=4876722101', 'asm', '4876722101'],
+    ['https://careers.upstart.com/jobs?gh_jid=8213476', 'upstart', '8213476'],
+    ['https://helsing.ai/jobs/4941957101?gh_jid=4941957101', 'helsing', '4941957101'],
+    ['https://www.healthesystems.com/unassigned/careers-list?gh_jid=7928315003', 'healthesystems', '7928315003'],
+    ['https://award.co/position?gh_jid=4136562004', 'awardco', '4136562004'],
+    ['https://careers.toasttab.com/jobs?gh_jid=8187654', 'toast', '8187654'],
+    ['https://www.kinexon.com/jobs?gh_jid=4951324101', 'kinexon', '4951324101'],
+    ['https://www.payoneer.com/careers/position/8068946/?gh_jid=8068946', 'payoneer', '8068946'],
+    ['https://app.careerpuck.com/job-board/lyft/job/8767697002?gh_jid=8767697002', 'lyft', '8767697002'],
+  ])('recognizes %s as reviewed board evidence', (url, tenant, postingId) => {
+    expect(reviewedProviderUrlReference(url)).toMatchObject({
+      outcome: 'match',
+      reference: { provider: 'greenhouse', tenant, postingId, sourceId: `greenhouse-${tenant}`, customHost: true },
+    });
+  });
+
+  it('rejects a CareerPuck tenant that is not a reviewed board', () => {
+    expect(reviewedProviderUrlReference('https://app.careerpuck.com/job-board/not-a-board/job/123?gh_jid=123')).toEqual({ outcome: 'none' });
+    expect(reviewedProviderUrlReference('https://app.careerpuck.com/job-board/lyft/job/8767697002?gh_jid=9999999')).toMatchObject({ outcome: 'conflict' });
+  });
+
   it('quarantines aliases that cross provider tenants or providers', () => {
     const identity = buildPostingIdentity({
       applicationUrl: 'https://job-boards.greenhouse.io/figma/jobs/123',

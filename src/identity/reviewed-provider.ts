@@ -80,6 +80,25 @@ export function reviewedProviderUrlReference(input: string): ReviewedProviderUrl
   }
 
   const host = inputHost.replace(/^www\./, '');
+  // CareerPuck serves a Greenhouse board at a shared host, so the board cannot
+  // be inferred from the host. The path names the public board token and the
+  // posting id must agree between the path and `gh_jid`; only a reviewed board
+  // token resolves, and the id is still checked against that board's checkpoint
+  // by the caller. An unknown token stays `none` instead of minting a tenant.
+  if (host === 'app.careerpuck.com') {
+    const match = /^\/job-board\/([^/]+)\/job\/(\d+)\/?$/i.exec(url.pathname);
+    if (!match) return { outcome: 'none' };
+    const queryId = url.searchParams.get('gh_jid');
+    if (queryId && queryId !== match[2]) {
+      return { outcome: 'conflict', reason: 'CareerPuck URL contains disagreeing public IDs' };
+    }
+    const source = reviewedGreenhouseSources.find((candidate) => candidate.boardToken.toLowerCase() === match[1]!.toLowerCase());
+    if (!source) return { outcome: 'none' };
+    return { outcome: 'match', reference: {
+      provider: 'greenhouse', tenant: source.boardToken.toLowerCase(), postingId: match[2]!,
+      sourceId: source.id, customHost: true,
+    } };
+  }
   const sources = reviewedGreenhouseSources.filter((source) =>
     [...source.allowedInitialHosts, ...source.allowedFinalHosts]
       .filter((allowed) => !hostMatchesAllowlist(allowed, ['greenhouse.io']))

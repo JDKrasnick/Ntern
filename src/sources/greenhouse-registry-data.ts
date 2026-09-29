@@ -168,7 +168,7 @@ const apiProbedBoards: Array<{
   { token: "verkada", name: "Verkada", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "virtu", name: "Virtu Financial", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "virturecruitinghidden", name: "Virtu Careers", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
-  { token: "voloridgeinvestmentmanagement", name: "Voloridge Investment Management", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
+  { token: "voloridgeinvestmentmanagement", name: "Voloridge Investment Management", initialHosts: ["voloridge.com"], finalHosts: ["voloridge.com"] },
   { token: "walleyecapital-external-students", name: "Walleye Capital Internships", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "weave", name: "Weave", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "webflow", name: "Webflow", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
@@ -194,6 +194,26 @@ const apiProbedBoards: Array<{
   { token: "towerresearchcapital", name: "Tower Research Capital", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["tower-research.com"], finalHosts: ["tower-research.com"] },
   { token: "waymo", name: "Waymo", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["withwaymo.com"], finalHosts: ["withwaymo.com"] },
   { token: "wehrtyou", name: "Hudson River Trading", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["hudsonrivertrading.com"], finalHosts: ["hudsonrivertrading.com"] },
+  // #231 posting-identity remediation batch 2 (2026-09-29). Same probe rule as
+  // batch 1: the board name is the value the public identity endpoint returns,
+  // and each host is the apex of the board's own application URLs. Lyft's
+  // Greenhouse board presents through CareerPuck, so its reviewed route is the
+  // `/job-board/{board}/job/{id}` form handled in `reviewed-provider.ts`.
+  { token: "aqr", name: "AQR", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["aqr.com"], finalHosts: ["aqr.com"] },
+  { token: "asm", name: "ASM", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["asm.com"], finalHosts: ["asm.com"] },
+  { token: "awardco", name: "Awardco", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["award.co"], finalHosts: ["award.co"] },
+  { token: "formlabs", name: "Formlabs", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["formlabs.com"], finalHosts: ["formlabs.com"] },
+  { token: "healthesystems", name: "Healthesystems", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["healthesystems.com"], finalHosts: ["healthesystems.com"] },
+  { token: "helsing", name: "Helsing", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["helsing.ai"], finalHosts: ["helsing.ai"] },
+  { token: "interstates", name: "Interstates", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["interstates.com"], finalHosts: ["interstates.com"] },
+  { token: "kinexon", name: "KINEXON", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["kinexon.com"], finalHosts: ["kinexon.com"] },
+  { token: "lyft", name: "Lyft", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["careerpuck.com"], finalHosts: ["careerpuck.com"] },
+  { token: "payoneer", name: "Payoneer", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["payoneer.com"], finalHosts: ["payoneer.com"] },
+  { token: "symphony", name: "Symphony Communication Services", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["symphony.com"], finalHosts: ["symphony.com"] },
+  { token: "toast", name: "Toast", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["toasttab.com"], finalHosts: ["toasttab.com"] },
+  { token: "trillium", name: "Trillium", boardName: "Open Roles", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["trlm.com"], finalHosts: ["trlm.com"] },
+  { token: "upstart", name: "Upstart", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["upstart.com"], finalHosts: ["upstart.com"] },
+  { token: "workato", name: "Workato", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["workato.com"], finalHosts: ["workato.com"] },
 ];
 
 export const apiProbedGreenhouseSources: ReviewedGreenhouseSource[] = apiProbedBoards.map((board) => {
