@@ -594,13 +594,15 @@ function isReviewedIngestionCronUpdate(address: string, change: ResourceChange['
     || typeof before.account_id !== 'string' || before.account_id.length === 0) return false;
   const beforeCrons = cronValues(before.schedules);
   const afterCrons = cronValues(after.schedules);
+  const addsIconCron = isDeepStrictEqual(beforeCrons, currentIngestionCrons)
+    && isDeepStrictEqual(afterCrons, iconResolutionIngestionCrons);
   const reviewedTransition = (isDeepStrictEqual(beforeCrons, priorIngestionCrons)
-      && isDeepStrictEqual(afterCrons, currentIngestionCrons))
-    || (isDeepStrictEqual(beforeCrons, currentIngestionCrons)
-      && isDeepStrictEqual(afterCrons, iconResolutionIngestionCrons));
+      && isDeepStrictEqual(afterCrons, currentIngestionCrons)) || addsIconCron;
   if (!reviewedTransition || !afterCrons) return false;
   return isDeepStrictEqual(change.after_unknown, {
-    schedules: afterCrons.map(() => ({ modified_on: true })),
+    schedules: afterCrons.map((cron) => addsIconCron && cron === '6-56/10 * * * *'
+      ? { created_on: true, modified_on: true }
+      : { modified_on: true }),
   });
 }
 
