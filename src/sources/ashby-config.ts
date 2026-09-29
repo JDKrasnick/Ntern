@@ -189,6 +189,16 @@ const admittedAshbySources: ReviewedAshbySource[] = [
     careersUrl: 'https://www.nationgraph.com/about-us', admittedAt: '2026-08-09T23:02:24.286Z', evidenceState: 'ownership-verified',
     allowedApplicationHosts: [{ host: 'jobs.ashbyhq.com' }], status: 'shadow',
   },
+  {
+    id: 'ashby-matx', company: 'MatX', identity: { provider: 'ashby', boardKey: 'matx', apiRegion: 'global' },
+    careersUrl: 'https://www.matx.com/jobs', admittedAt: '2026-09-29T23:43:43.478Z', evidenceState: 'ownership-verified',
+    allowedApplicationHosts: [{ host: 'jobs.ashbyhq.com' }], status: 'shadow',
+  },
+  {
+    id: 'ashby-amplitude', company: 'Amplitude', identity: { provider: 'ashby', boardKey: 'amplitude', apiRegion: 'global' },
+    careersUrl: 'https://amplitude.com/careers', admittedAt: '2026-09-29T23:43:44.177Z', evidenceState: 'ownership-verified',
+    allowedApplicationHosts: [{ host: 'jobs.ashbyhq.com' }], status: 'shadow',
+  },
   ...reviewedAshbyExpansionSources as ReviewedAshbySource[],
   ...reviewedAshbyOwnerApprovedExpansionSources as ReviewedAshbySource[],
 ];
