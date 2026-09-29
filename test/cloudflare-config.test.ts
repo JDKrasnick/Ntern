@@ -65,7 +65,7 @@ describe('Cloudflare deployment configuration', () => {
     ]);
     expect(ingestion.triggers?.crons).toHaveLength(11);
     expect(ingestion.triggers?.crons).toContain('6-56/10 * * * *');
-    expect(ingestion.triggers?.crons).toContain('4-54/10 * * * *');
+    expect(ingestion.triggers?.crons).toContain('1-51/10 * * * *');
     expect(ingestion.workers_dev).toBe(false);
     expect(ingestion.preview_urls).toBe(false);
   });

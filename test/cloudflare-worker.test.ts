@@ -339,15 +339,22 @@ describe('Cloudflare maintenance cron', () => {
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       await cloudflareWorker.scheduled({
-        cron: '4-54/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
+        cron: '1-51/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:01:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         DB: { prepare: () => ({ async first() { return null; } }) },
+        // R2 publication runs so the marker brackets it too; an empty catalog has
+        // no pages, so only the pointer write reaches the bucket.
+        DOCUMENTS: {
+          async get() { return null; }, async put() { return undefined; }, async delete() { return undefined; },
+        },
       } as unknown as Environment);
 
       expect(listCatalog).toHaveBeenCalledOnce();
       expect(projection).toHaveBeenCalledOnce();
       expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'started');
       expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'complete');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_r2', 'started');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_r2', 'complete');
       expect(markers).toHaveBeenCalledWith('catalog_projection_complete', 'complete', expect.any(Date));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_catalog_projection_complete"'));
     } finally {
@@ -356,7 +363,7 @@ describe('Cloudflare maintenance cron', () => {
   });
 
   it('runs the remaining maintenance phases and marks them without rebuilding the projection', async () => {
-    // The projection belongs to the `4-54/10` cron now. While a failing
+    // The projection belongs to the `1-51/10` cron now. While a failing
     // verification or alert email may abort its own step, it must not stop the
     // rest of the maintenance phases or the completion signal.
     const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);

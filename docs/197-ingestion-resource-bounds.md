@@ -448,25 +448,31 @@ observability, alert, and notification phase.
 
 Two changes bound that invocation:
 
-1. **A dedicated catalog-projection cron.** `4-54/10 * * * *` now owns
+1. **A dedicated catalog-projection cron.** `1-51/10 * * * *` now owns
    `runCatalogProjectionMaintenance` — prospective shadow publication, the D1
    projection write, and the R2 publication — and nothing else. The `9-59/10`
    cron keeps only the remaining maintenance phases. Each expensive phase has
-   exactly one cron owner: the projection cron is the only caller of
+   exactly one cron owner: the projection cron is the only scheduled caller of
    `listCatalog`, `putCatalogProjection`, and `R2CatalogProjection.publish`, and
-   no phase is run from both schedules. The separate invocation gives the
-   projection a fresh 128 MB isolate instead of sharing one with every later
-   phase.
+   no phase is run from both schedules. Operator-triggered routes also call
+   `refreshCatalogProjection`, but they are request-scoped, not scheduled. The
+   separate invocation gives the projection a fresh 128 MB isolate instead of
+   sharing one with every later phase. The `1-51/10` slot also keeps three
+   minutes between its nearest minute (`:31`) and the daily write-heavy
+   retention cron at `34 8`.
 2. **Durable phase markers.** `cloudflare/maintenance-phases.ts` writes a small
    `system_state` row (`maintenance_phase:<scope>:<phase>`) when each phase starts
    and again when it finishes or fails. A memory termination cannot flush console
    logs, so the last `started` marker without its `complete` is what identifies the
    failing phase. Markers are best-effort: an overloaded D1 logs
    `maintenance_phase_marker_failed` rather than failing the phase. The projection
-   cron brackets `prospective_shadow_metadata`, `catalog_projection_d1`,
-   `catalog_projection_r2`, and `catalog_projection_complete`; the maintenance cron
-   brackets every step through `runScheduledStep` and records
-   `maintenance_complete` last.
+   cron brackets `prospective_shadow_metadata`, `catalog_projection`,
+   `catalog_projection_d1`, `catalog_projection_r2`, and
+   `catalog_projection_complete`; the maintenance cron brackets every step
+   through `runScheduledStep` and records `maintenance_complete` last. Markers
+   are last-write-wins: a deterministic kill repeats the stuck `started` marker
+   on every run, while an intermittent kill is only visible until a later run
+   completes that phase.
 
 R2 generation is unchanged and still serializes the complete catalog, so a
 projection that cannot fit one isolate is not yet excluded. Streaming or chunking

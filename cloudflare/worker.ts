@@ -38,7 +38,7 @@ import {
   runCatalogRetention,
 } from './catalog-retention.js';
 import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
-import { D1MaintenancePhaseStore, type MaintenancePhaseRecorder } from './maintenance-phases.js';
+import { D1MaintenancePhaseStore, type MaintenancePhaseRecorder, type MaintenancePhaseStatus } from './maintenance-phases.js';
 import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary } from './shadow-extraction.js';
@@ -1664,6 +1664,23 @@ async function recordScheduledDispatch(
     queued: dispatched.queued, inFlightSkipped: dispatched.inFlightSkipped.length, scheduledAt: now.toISOString() }));
 }
 
+/** Marker writes are observability, never a step dependency: a recorder that
+ * throws must not abort the handler or skip the work, so every write is
+ * isolated from the phase it describes. D1MaintenancePhaseStore already
+ * swallows its own failures; this keeps that guarantee for any recorder. */
+async function recordPhase(
+  phases: MaintenancePhaseRecorder | undefined,
+  phase: string,
+  status: MaintenancePhaseStatus,
+  observedAt?: Date,
+): Promise<void> {
+  try {
+    if (observedAt === undefined) await phases?.record(phase, status);
+    else await phases?.record(phase, status, observedAt);
+  }
+  catch { /* best-effort by contract; a marker failure never fails a phase */ }
+}
+
 /** Runs one scheduled responsibility in isolation. Several of them share the
  * maintenance cron, and a thrown error used to abort the handler — which is how
  * one failing step held the catalog projection on a day-old snapshot. The
@@ -1677,13 +1694,13 @@ async function runScheduledStep<T>(
   run: () => Promise<T>,
   phases?: MaintenancePhaseRecorder,
 ): Promise<T | undefined> {
-  await phases?.record(step, 'started');
+  await recordPhase(phases, step, 'started');
   try {
     const result = await run();
-    await phases?.record(step, 'complete');
+    await recordPhase(phases, step, 'complete');
     return result;
   } catch (error) {
-    await phases?.record(step, 'failed');
+    await recordPhase(phases, step, 'failed');
     console.error(JSON.stringify({ event: 'scheduled_step_failed', step, error: error instanceof Error ? error.message : String(error) }));
     return undefined;
   }
@@ -1708,22 +1725,22 @@ async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Buc
   const groups = groupCatalogJobs(await store.listCatalog(), { includeClosed: true })
     .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
   const generatedAt = new Date().toISOString();
-  await phases?.record('catalog_projection_d1', 'started');
+  await recordPhase(phases, 'catalog_projection_d1', 'started');
   try {
     await store.putCatalogProjection(groups, generatedAt);
-    await phases?.record('catalog_projection_d1', 'complete');
+    await recordPhase(phases, 'catalog_projection_d1', 'complete');
   } catch (error) {
-    await phases?.record('catalog_projection_d1', 'failed');
+    await recordPhase(phases, 'catalog_projection_d1', 'failed');
     throw error;
   }
   if (bucket) {
-    await phases?.record('catalog_projection_r2', 'started');
+    await recordPhase(phases, 'catalog_projection_r2', 'started');
     try {
       await new R2CatalogProjection(bucket).publish(groups, generatedAt);
-      await phases?.record('catalog_projection_r2', 'complete');
+      await recordPhase(phases, 'catalog_projection_r2', 'complete');
     }
     catch (error) {
-      await phases?.record('catalog_projection_r2', 'failed');
+      await recordPhase(phases, 'catalog_projection_r2', 'failed');
       console.error(JSON.stringify({ event: 'r2_catalog_projection_publish_failed', error: String(error) }));
       // D1 already points at the new projection. Hide an older R2 pointer so
       // readers fall back to D1 instead of serving stale admission decisions.
@@ -2002,14 +2019,16 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     console.log(JSON.stringify({ event: 'company_icon_resolution_schedule_complete', companyIconResolution }));
     return;
   }
-  if (event.cron === '4-54/10 * * * *') {
+  if (event.cron === '1-51/10 * * * *') {
     const observedAt = new Date(event.scheduledTime);
     // The catalog projection is the Roles feed's whole source of truth, and it is
     // the memory-heaviest scheduled work: the complete catalog is grouped, sorted,
     // written to D1, and serialized to R2 in one invocation. It runs on its own
     // cron so the many small observability, alert, and notification phases in the
     // `9-59/10` handler cannot accumulate beside it and cross the 128 MB isolate
-    // limit. See docs/197-ingestion-resource-bounds.md.
+    // limit. The `1-51/10` minute also avoids the daily retention cron at `34 8`:
+    // the nearest projection minute, `:31`, leaves three minutes before that
+    // write-heavy pass. See docs/197-ingestion-resource-bounds.md.
     const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection');
     // Shadow publication can change at most one role. Stage it before the catalog
     // refresh and share its callback so this invocation builds the memory-heavy
@@ -2019,13 +2038,13 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       () => refreshCatalogProjection(store, env.DOCUMENTS, phases),
       phases,
     );
-    await phases.record('catalog_projection_complete', 'complete', observedAt);
+    await recordPhase(phases, 'catalog_projection_complete', 'complete', observedAt);
     console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_complete', observedAt: observedAt.toISOString(), prospectiveShadowMetadata, projection }));
     return;
   }
   if (event.cron === '9-59/10 * * * *') {
     const observedAt = new Date(event.scheduledTime);
-    // The catalog projection moved to the `4-54/10` cron so its memory-heavy
+    // The catalog projection moved to the `1-51/10` cron so its memory-heavy
     // build and R2 serialization cannot accumulate beside these phases. This
     // handler owns only the independent observability, recovery, alert, budget,
     // and notification work, and brackets each step with durable markers that
@@ -2081,7 +2100,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       }), phases);
     }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)), phases);
-    await phases.record('maintenance_complete', 'complete', observedAt);
+    await recordPhase(phases, 'maintenance_complete', 'complete', observedAt);
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
   }

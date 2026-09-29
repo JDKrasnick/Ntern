@@ -563,7 +563,7 @@ const iconResolutionIngestionCrons = [
   ...currentIngestionCrons.slice(0, 3), '6-56/10 * * * *', ...currentIngestionCrons.slice(3),
 ];
 const projectionIsolationIngestionCrons = [
-  ...iconResolutionIngestionCrons.slice(0, 3), '4-54/10 * * * *', ...iconResolutionIngestionCrons.slice(3),
+  ...iconResolutionIngestionCrons.slice(0, 3), '1-51/10 * * * *', ...iconResolutionIngestionCrons.slice(3),
 ];
 
 function cronValues(value: unknown): string[] | undefined {

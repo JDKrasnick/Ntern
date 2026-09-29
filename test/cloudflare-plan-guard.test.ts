@@ -266,7 +266,7 @@ describe('Cloudflare deployment plan guard', () => {
       '12,42 * * * *', '22,52 * * * *', '2,32 * * * *',
       '0 * * * *', '34 8 * * *', '17 9 * * *',
     ];
-    const afterCrons = [...beforeCrons.slice(0, 3), '4-54/10 * * * *', ...beforeCrons.slice(3)];
+    const afterCrons = [...beforeCrons.slice(0, 3), '1-51/10 * * * *', ...beforeCrons.slice(3)];
     const schedules = (crons: string[]) => crons.map((cron) => ({
       cron, created_on: '2026-09-29T04:55:25.781738Z', modified_on: '2026-09-29T04:55:25.781738Z',
     }));
