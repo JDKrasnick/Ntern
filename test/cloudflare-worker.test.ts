@@ -291,6 +291,23 @@ describe('Cloudflare maintenance cron', () => {
     });
   });
 
+  it('does not retry a failed projection refresh in the same maintenance invocation', async () => {
+    const refresh = vi.fn().mockRejectedValue(new Error('R2 returned 10001'));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const result = await runCatalogProjectionMaintenance(async (refreshProjection) => {
+        await refreshProjection();
+      }, refresh);
+
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(result).toEqual({ prospectiveShadowMetadata: undefined, projection: undefined });
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('prospective_shadow_metadata'));
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('catalog_projection'));
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it('rebuilds the catalog projection even when another maintenance step fails', async () => {
     // The projection is the Roles feed's whole source of truth: while a failing
     // verification or alert email could abort this cron before the refresh ran,
