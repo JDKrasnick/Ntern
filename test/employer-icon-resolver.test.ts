@@ -2082,6 +2082,40 @@ describe('employer icon tie-breaker budget', () => {
   });
 });
 
+describe('employer icon claim order', () => {
+  /** The current catalog projection, listing one featured employer. */
+  function projectActiveEmployer(database: DatabaseSync, employerId: string): void {
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection', ?)`)
+      .run(JSON.stringify({ version: 'v1' }));
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION#MANIFESTS', 'v1', 'catalog-projection', ?)`)
+      .run(JSON.stringify({ keys: ['group-active'] }));
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION#GROUPS', 'group-active', 'catalog-projection', ?)`)
+      .run(JSON.stringify({ group: { featuredRole: { canonicalEmployerId: employerId }, roleCount: 1 } }));
+  }
+
+  it('claims an employer the catalog shows before an older dormant one', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('activeco', 'Active Co'), NOW.toISOString());
+    await admission.putCanonicalEmployer(employerRow('dormantco', 'Dormant Co'), NOW.toISOString());
+    // The dormant employer is queued first and due earlier, so only its absence
+    // from the catalog projection can keep it behind the active employer.
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://dormantco.com/careers/1'), canonicalEmployerId: 'dormantco', displayName: 'Dormant Co',
+    }, new Date(NOW.getTime() - 60_000));
+    await enqueueEmployerIconResolution(icons, {
+      ...employerSeed('https://activeco.com/careers/1'), canonicalEmployerId: 'activeco', displayName: 'Active Co',
+    }, NOW);
+    projectActiveEmployer(database, 'activeco');
+
+    const claimed = await icons.claimDue(NOW.toISOString(), 1, 5 * 60_000);
+    expect(claimed.map((task) => task.canonicalEmployerId)).toEqual(['activeco']);
+    database.close();
+  });
+});
+
 describe('employers needing resolution', () => {
   it('lists only employers without an icon or an outstanding task, within the limit', async () => {
     const { admission, icons } = subject();

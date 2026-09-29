@@ -33,6 +33,30 @@ export const employerIconReviewAfterAttempts = 3;
 /** One tie-breaker per employer per retry window. */
 export const employerIconTieBreakWindowMs = 30 * 24 * 60 * 60 * 1_000;
 
+/**
+ * The catalog projection's current employer groups, one row per featured employer.
+ *
+ * Shared by the coverage report and the claim ordering so both agree on which
+ * employers the catalog is currently showing: an active employer is decided before
+ * a dormant one, so a new role's employer does not queue behind the backfill.
+ */
+const activeGroupsCte = `current_projection AS (
+    SELECT json_extract(value, '$.version') AS version
+    FROM catalog_items WHERE pk = 'CATALOG_PROJECTION' AND sk = 'CURRENT'
+  ), active_groups AS (
+    SELECT json_extract(group_row.value, '$.group.featuredRole.canonicalEmployerId') AS employer_id,
+      COALESCE(json_extract(group_row.value, '$.group.roleCount'), 0) AS role_count
+    FROM catalog_items AS group_row
+    JOIN current_projection
+    JOIN catalog_items AS manifest
+      ON manifest.pk = 'CATALOG_PROJECTION#MANIFESTS'
+      AND manifest.sk = current_projection.version
+    WHERE group_row.pk = 'CATALOG_PROJECTION#GROUPS'
+      AND group_row.kind = 'catalog-projection'
+      AND EXISTS (SELECT 1 FROM json_each(manifest.value, '$.keys') WHERE value = group_row.sk)
+      AND COALESCE(json_extract(group_row.value, '$.group.featuredRole.canonicalEmployerId'), '') <> ''
+  )`;
+
 export interface EmployerIconSettings {
   mode: EmployerIconMode;
   maxPerSweep: number;
@@ -169,9 +193,14 @@ export class D1EmployerIconStore {
   /**
    * Claims due tasks best-first. Each claim is a conditional update, so two
    * overlapping sweeps can select the same row but only one can own it.
+   *
+   * An employer the catalog currently shows is claimed before a dormant one, so a
+   * newly admitted role's employer is decided ahead of the backfill backlog. The
+   * projection is read once per claim; with no projection yet every task is equal.
    */
   async claimDue(now: string, limit: number, leaseMs: number): Promise<EmployerIconTask[]> {
-    const due = await this.db.prepare(`SELECT id, canonical_employer_id, evidence_fingerprint, evidence_json, attempts
+    const due = await this.db.prepare(`WITH ${activeGroupsCte}
+      SELECT task.id, task.canonical_employer_id, task.evidence_fingerprint, task.evidence_json, task.attempts
       FROM employer_icon_resolutions AS task
       WHERE task.next_retry_at IS NOT NULL AND task.next_retry_at <= ?
         AND (task.lease_until IS NULL OR task.lease_until <= ?)
@@ -179,6 +208,7 @@ export class D1EmployerIconStore {
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS blocked
           WHERE blocked.canonical_employer_id = task.canonical_employer_id AND blocked.status = 'invalidated')
       ORDER BY task.review_priority DESC,
+        CASE WHEN task.canonical_employer_id IN (SELECT employer_id FROM active_groups) THEN 0 ELSE 1 END,
         CASE WHEN COALESCE(json_extract(task.evidence_json, '$.applicationUrl'), '') <> '' THEN 0 ELSE 1 END,
         task.next_retry_at, task.created_at LIMIT ?`).bind(now, now, limit).all<Row>();
     const claimed: EmployerIconTask[] = [];
@@ -583,22 +613,7 @@ export class D1EmployerIconStore {
     const [statuses, sources, active] = await Promise.all([
       this.db.prepare('SELECT status, COUNT(*) AS count FROM employer_icon_resolutions GROUP BY status').all<Row>(),
       this.db.prepare("SELECT COALESCE(icon_source, 'none') AS source, COUNT(*) AS count FROM canonical_employers GROUP BY source").all<Row>(),
-      this.db.prepare(`WITH current_projection AS (
-          SELECT json_extract(value, '$.version') AS version
-          FROM catalog_items WHERE pk = 'CATALOG_PROJECTION' AND sk = 'CURRENT'
-        ), active_groups AS (
-          SELECT json_extract(group_row.value, '$.group.featuredRole.canonicalEmployerId') AS employer_id,
-            COALESCE(json_extract(group_row.value, '$.group.roleCount'), 0) AS role_count
-          FROM catalog_items AS group_row
-          JOIN current_projection
-          JOIN catalog_items AS manifest
-            ON manifest.pk = 'CATALOG_PROJECTION#MANIFESTS'
-            AND manifest.sk = current_projection.version
-          WHERE group_row.pk = 'CATALOG_PROJECTION#GROUPS'
-            AND group_row.kind = 'catalog-projection'
-            AND EXISTS (SELECT 1 FROM json_each(manifest.value, '$.keys') WHERE value = group_row.sk)
-            AND COALESCE(json_extract(group_row.value, '$.group.featuredRole.canonicalEmployerId'), '') <> ''
-        ), covered AS (
+      this.db.prepare(`WITH ${activeGroupsCte}, covered AS (
           SELECT active_groups.employer_id, active_groups.role_count,
             CASE WHEN
               employer.icon_key IS NOT NULL
