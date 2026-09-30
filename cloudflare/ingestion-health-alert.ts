@@ -11,8 +11,9 @@ const INGESTION_BUG_CATEGORIES = ['json', 'identity', 'quality', 'capacity', 'li
 
 /** Work queues whose per-message failures are ingestion bugs. Destination
  * verification is excluded because its failures already alert through the DLQ
- * and admission-incident signals. */
-const INGESTION_WORK_QUEUES = [
+ * and admission-incident signals. Kept in step with the consumers in
+ * `wrangler.ingestion.jsonc` by a configuration test. */
+export const INGESTION_WORK_QUEUES = [
   'intern-notifs-github', 'intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby',
   'intern-notifs-gmail', 'intern-notifs-resume-job-import', 'intern-notifs-shadow-extraction',
 ] as const;
@@ -63,7 +64,9 @@ export async function ingestionHealthSignals(
 
   // 2. Quarantined sources, from stored source health. A disabled source keeps no
   // health row, so only a live quarantine appears here.
-  const healthRows = (await db.prepare(`SELECT pk, value FROM catalog_items WHERE sk = 'HEALTH'`).all<HealthRow>()).results;
+  // `kind` is the leading column of catalog_items_kind_pk_sk, so naming it lets
+  // SQLite use that index instead of scanning the whole catalog on every pass.
+  const healthRows = (await db.prepare(`SELECT pk, value FROM catalog_items WHERE sk = 'HEALTH' AND kind = 'source-health'`).all<HealthRow>()).results;
   const quarantined: string[] = [];
   for (const row of healthRows) {
     let health: SourceHealth | undefined;

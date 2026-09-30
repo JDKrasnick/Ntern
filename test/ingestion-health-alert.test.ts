@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
+import { recordLedgerWriteFailure } from '../cloudflare/dlq-operations.js';
 import { ingestionHealthSignals } from '../cloudflare/ingestion-health-alert.js';
 import type { D1Database } from '../cloudflare/types.js';
 
@@ -75,6 +76,21 @@ describe('ingestion health signals', () => {
       health(sql, 'gh-acme', { state: 'healthy', sourceStatus: 'active', lastChangedAt: '2026-09-25T11:30:00Z' });
 
       expect(await ingestionHealthSignals(db, observedAt)).toEqual({ signals: [], details: '' });
+    } finally { sql.close(); }
+  });
+
+  it('surfaces a ledger write that recordLedgerWriteFailure stored', async () => {
+    const { sql, db } = setup();
+    try {
+      // Exercise the writer rather than inserting the marker directly, so the
+      // two halves of the unavailable-ledger signal cannot drift apart.
+      await recordLedgerWriteFailure(db, {
+        at: '2026-09-25T11:50:00Z', queueName: 'intern-notifs-github', messageId: 'm1',
+      });
+
+      const result = await ingestionHealthSignals(db, observedAt);
+      expect(result.signals).toEqual(['failure-ledger-unavailable']);
+      expect(result.details).toContain('intern-notifs-github message m1');
     } finally { sql.close(); }
   });
 
