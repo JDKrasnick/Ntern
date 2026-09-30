@@ -5,6 +5,7 @@ import {
   catalogCardKind,
   filterGroupedCatalogPage,
   nextMatchingGroupedCatalogPage,
+  refreshCacheFirst,
 } from '../src/catalog.js';
 
 describe('mobile catalog pagination', () => {
@@ -51,5 +52,40 @@ describe('mobile catalog pagination', () => {
 
     expect(generation.current).toBe(8);
     expect(preview).toBeUndefined();
+  });
+
+  it('does not let a delayed cache response replace a fresh catalog page', async () => {
+    let resolveCache!: (value: string) => void;
+    const cache = new Promise<string>((resolve) => { resolveCache = resolve; });
+    const painted: string[] = [];
+
+    await refreshCacheFirst({
+      readCache: () => cache,
+      fetchFresh: async () => 'fresh',
+      onCached: (value) => painted.push(value),
+      onFresh: (value) => painted.push(value),
+    });
+    resolveCache('stale');
+    await Promise.resolve();
+
+    expect(painted).toEqual(['fresh']);
+  });
+
+  it('still paints a cache response that arrives before the refresh', async () => {
+    let resolveFresh!: (value: string) => void;
+    const fresh = new Promise<string>((resolve) => { resolveFresh = resolve; });
+    const painted: string[] = [];
+
+    const refresh = refreshCacheFirst({
+      readCache: async () => 'cached',
+      fetchFresh: () => fresh,
+      onCached: (value) => painted.push(value),
+      onFresh: (value) => painted.push(value),
+    });
+    await Promise.resolve();
+    resolveFresh('fresh');
+    await refresh;
+
+    expect(painted).toEqual(['cached', 'fresh']);
   });
 });

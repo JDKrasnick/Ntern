@@ -14,6 +14,29 @@ export type SearchableCatalogGroup = {
   featuredRole: { company: string; title: string };
 };
 
+/**
+ * Paint a cached response while a live refresh runs, without letting a slow
+ * cache bridge replace a fresh response that has already reached the screen.
+ */
+export function refreshCacheFirst<T>(input: {
+  readCache: () => Promise<T | undefined>;
+  fetchFresh: () => Promise<T>;
+  onCached: (value: T) => void;
+  onFresh: (value: T) => void;
+}): Promise<T> {
+  let freshApplied = false;
+  void input.readCache()
+    .then((cached) => {
+      if (!freshApplied && cached !== undefined) input.onCached(cached);
+    })
+    .catch(() => undefined);
+  return input.fetchFresh().then((fresh) => {
+    freshApplied = true;
+    input.onFresh(fresh);
+    return fresh;
+  });
+}
+
 /** Match every query term at the start of a company or role-title word. */
 export function catalogSearchPreviewMatches(group: SearchableCatalogGroup, query: string) {
   const terms = query.trim().toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);

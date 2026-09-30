@@ -35,7 +35,7 @@ import * as DocumentPicker from "expo-document-picker";
 import * as Clipboard from "expo-clipboard";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
-import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, type GroupedCatalogPage } from "./src/catalog";
+import { appendGroupedCatalogPage, beginCatalogQueryChange, catalogCardKind, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, refreshCacheFirst, type GroupedCatalogPage } from "./src/catalog";
 import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
@@ -311,6 +311,10 @@ const defaultPreference: Preference = {
   alertSettings: defaultAlertSettings,
 };
 const catalogCacheKey = "internnotifs.grouped-catalog.v4";
+// The Roles feed is deliberately unfiltered (it keeps its own public page while
+// Catalog is narrowed), so it caches under its own key instead of the Catalog
+// view's.
+const roleFeedCacheKey = "internnotifs.roles-feed.v1";
 const hiddenRolesCacheKey = "internnotifs.hidden-roles.v1";
 const nextApplicationStatuses: Record<string, Application["status"]> = {
   saved: "applied",
@@ -3964,10 +3968,25 @@ function AppContent() {
     let active = true;
     setRoleFeedLoading(true);
     setRoleFeedError(undefined);
-    void api<GroupedCatalogPage<CatalogGroupRow>>("/catalog?status=open&source=all&limit=50", "")
-      .then((page) => {
-        if (active) setRoleFeedGroups(page.groups);
-      })
+    // Paint the last successful page immediately, then refresh it. Roles is the
+    // default tab, so this is the landing surface; waiting on the network here
+    // meant a skeleton on every cold start.
+    // `source=all` narrows nothing, and the API's narrowed read has to scan the
+    // whole projection; the default ordered read returns this page directly.
+    void refreshCacheFirst({
+      readCache: () => responseCache.get<CatalogCache>(roleFeedCacheKey),
+      fetchFresh: () => api<GroupedCatalogPage<CatalogGroupRow>>("/catalog?status=open&limit=50", ""),
+      onCached: (cached) => {
+        if (active && Array.isArray(cached.groups) && cached.groups.length) {
+          setRoleFeedGroups(cached.groups);
+        }
+      },
+      onFresh: (page) => {
+        if (!active) return;
+        setRoleFeedGroups(page.groups);
+        void responseCache.set(roleFeedCacheKey, page);
+      },
+    })
       .catch((error) => {
         if (active) setRoleFeedError(error instanceof Error ? error.message : "We couldn't load roles right now.");
       })
