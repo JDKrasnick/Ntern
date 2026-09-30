@@ -410,7 +410,7 @@ function companyMarkColor(company: string) {
  * actually failed, so a logo never replaces a monogram and a monogram never
  * replaces a logo.
  */
-function CompanyMark({ company, employerId, size = 38 }: { company: string; employerId?: string; size?: number }) {
+function CompanyMark({ company, employerId, size = 32 }: { company: string; employerId?: string; size?: number }) {
   const [imageUnavailable, setImageUnavailable] = useState(false);
   const [logoAspect, setLogoAspect] = useState<number | null>(null);
   // A recycled row can keep its state; a new employer must retry its own icon.
@@ -9479,7 +9479,7 @@ const styles = StyleSheet.create({
   roleRowSkeletonWide: { paddingHorizontal: 20 },
   roleRowSkeletonIdentity: { alignItems: "center", flexDirection: "row", gap: 11 },
   roleRowSkeletonCopy: { flex: 1, minWidth: 0 },
-  companyMarkSkeleton: { backgroundColor: colors.separator, borderRadius: 11, height: 38, width: 38 },
+  companyMarkSkeleton: { backgroundColor: colors.separator, borderRadius: 9, height: 32, width: 32 },
   skeletonGap8: { height: 8 },
   skeletonGap12: { height: 12 },
   skeletonProfileGap: { height: 24 },
