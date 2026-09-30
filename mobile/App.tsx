@@ -437,7 +437,7 @@ function CompanyMark({ company, employerId, size = 38 }: { company: string; empl
     if (width && height) setLogoAspect(width / height);
   };
   const isWordmark = logoAspect !== null && (logoAspect > 1.33 || logoAspect < 0.75);
-  const logoSize = Math.round(size * (isWordmark ? 1 : 0.9));
+  const logoSize = Math.round(size * (isWordmark ? 1 : 0.94));
   // A square mark's corners round like the rest of the system; a wordmark is a
   // shallow block at the slot's full width and takes a smaller radius. A
   // transparent mark shows none of this because it has no corners to round.
@@ -683,7 +683,7 @@ function useWebKeyboardShortcuts(shortcuts: WebShortcut[]) {
   }, [shortcuts]);
 }
 
-function JobSource({ source, showIdentityUnconfirmed = false }: { source: ReturnType<typeof sourcePresentation>; showIdentityUnconfirmed?: boolean }) {
+function JobSource({ source, showIdentityUnconfirmed = false, compact = false }: { source: ReturnType<typeof sourcePresentation>; showIdentityUnconfirmed?: boolean; compact?: boolean }) {
   const icon = source.primary === "Employer submitted"
     ? "business-outline"
     : source.labels.some((label) => label === "Official ATS" || label === "Official structured source")
@@ -692,10 +692,10 @@ function JobSource({ source, showIdentityUnconfirmed = false }: { source: Return
       ? "people-outline"
       : "help-circle-outline";
   return (
-    <View style={styles.jobSourceRow}>
-      <Ionicons name={icon} size={14} color={colors.muted} />
-      <Text style={styles.jobSourceText}>{source.primary}</Text>
-      {source.corroboration ? <Text style={styles.jobSourceCorroboration}>{source.corroboration}</Text> : null}
+    <View style={[styles.jobSourceRow, compact && styles.jobSourceRowCompact]}>
+      <Ionicons name={icon} size={compact ? 13 : 14} color={colors.muted} />
+      <Text style={[styles.jobSourceText, compact && styles.jobSourceTextCompact]} numberOfLines={compact ? 1 : undefined}>{source.primary}</Text>
+      {source.corroboration && !compact ? <Text style={styles.jobSourceCorroboration}>{source.corroboration}</Text> : null}
       {showIdentityUnconfirmed ? (
         <>
           <Text style={styles.jobSourceText}>·</Text>
@@ -1376,6 +1376,8 @@ function CatalogTile({
   const display = presentCatalogRole(job);
   const compactTitle = compactCatalogTitle(display.title);
   const compactLocation = compactCatalogLocation(job.locations, job.location);
+  const employerId = job.canonicalEmployerId ?? job.admission?.canonicalEmployer?.id;
+  const pay = compactCompensationLabel(job.compensation);
   const source = sourcePresentation(job.sourceReferences);
   const timing = postingTimingPresentation(job.sourceReferences, job.firstSeenAt);
   const recencyBadge = postingRecencyBadge(isNew, timing);
@@ -1469,10 +1471,19 @@ function CatalogTile({
                 </View>
               ) : null}
             </View>
-            <Text style={[styles.catalogTileCompany, !lane && styles.catalogTileCompanyGrid]} numberOfLines={1}>{display.company}</Text>
+            <View style={styles.catalogTileIdentity}>
+              <CompanyMark company={display.company} employerId={employerId} size={lane ? 30 : 24} />
+              <Text style={[styles.catalogTileCompany, !lane && styles.catalogTileCompanyGrid]} numberOfLines={1}>{display.company}</Text>
+            </View>
             <Text style={[styles.catalogTileTitle, lane ? styles.catalogTileTitleLane : styles.catalogTileTitleGrid]} numberOfLines={2}>{compactTitle}</Text>
-            <Text style={[styles.catalogTileMeta, !lane && styles.catalogTileMetaGrid]} numberOfLines={1}>{compactLocation} · {display.season}</Text>
-            {lane ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
+            <Text style={[styles.catalogTileMeta, !lane && styles.catalogTileMetaGrid]} numberOfLines={lane ? 2 : 1}>
+              {compactLocation} · {display.season}
+              {pay ? <Text style={styles.catalogTilePay}> · {pay}</Text> : null}
+            </Text>
+            <View style={styles.catalogTileEvidence}>
+              <JobSource source={source} compact />
+              <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text>
+            </View>
             {!job.open ? <Text style={styles.closedStatus}>Closed</Text> : null}
             <View style={[styles.catalogTileFooter, !lane && styles.catalogTileFooterGrid]}>
               <View style={styles.catalogTileState}>
@@ -1563,6 +1574,7 @@ function CatalogGroupTile({
   const compactGroupTitle = compactCatalogTitle(groupTitles.join(" · "));
   const groupLocation = compactCatalogLocation(group.locations);
   const availability = catalogGroupAvailabilityLabel(group, status);
+  const source = sourcePresentation(featuredRole?.sourceReferences ?? []);
   const timing = featuredRole
     ? postingTimingPresentation(featuredRole.sourceReferences ?? [], featuredRole.firstSeenAt ?? featuredRole.visibleAt)
     : undefined;
@@ -1605,12 +1617,20 @@ function CatalogGroupTile({
                 })}
               </View>
             </View>
-            <Text style={[styles.catalogTileCompany, !lane && styles.catalogTileCompanyGrid]} numberOfLines={1}>{groupCompany}</Text>
+            <View style={styles.catalogTileIdentity}>
+              <CompanyMark company={groupCompany} employerId={featuredRole?.canonicalEmployerId} size={lane ? 30 : 24} />
+              <Text style={[styles.catalogTileCompany, !lane && styles.catalogTileCompanyGrid]} numberOfLines={1}>{groupCompany}</Text>
+            </View>
             <Text style={[styles.catalogTileTitle, lane ? styles.catalogTileTitleLane : styles.catalogTileTitleGrid]} numberOfLines={2}>{compactGroupTitle}</Text>
             <Text style={[styles.catalogTileMeta, !lane && styles.catalogTileMetaGrid]} numberOfLines={1}>
               {[groupLocation, group.seasons.map(seasonLabel).join(" · ")].filter(Boolean).join("  •  ")}
             </Text>
-            {lane && timing ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
+            {featuredRole ? (
+              <View style={styles.catalogTileEvidence}>
+                <JobSource source={source} compact />
+                {timing ? <Text style={styles.catalogTileTiming} numberOfLines={1}>{timing.summary}</Text> : null}
+              </View>
+            ) : null}
             {group.unconfirmedRoleCount ? (
               <Text style={styles.catalogTileNotice} numberOfLines={1}>
                 {group.unconfirmedRoleCount} {group.unconfirmedRoleCount === 1 ? "role" : "roles"} unconfirmed
@@ -1787,12 +1807,18 @@ function NewnessLane({
     return () => cancelAnimationFrame(frame);
   }, [autoCycles, cycleLength, laneStep]);
   // react-native-web forwards these DOM events; a native build has no pointer to
-  // rest, so the handlers are simply absent there.
+  // rest, so the handlers are simply absent there. Leaving the box hands the belt
+  // straight back: the quiet window that follows a scroll is not a hover artifact,
+  // so it is cleared too — there must be no pause to sit through once the pointer
+  // is gone.
   const laneHoverProps: { onMouseEnter?: () => void; onMouseLeave?: () => void } =
     Platform.OS === "web"
       ? {
           onMouseEnter: () => { hovering.current = true; },
-          onMouseLeave: () => { hovering.current = false; },
+          onMouseLeave: () => {
+            hovering.current = false;
+            readerScrollAt.current = 0;
+          },
         }
       : {};
   return (
@@ -9730,14 +9756,17 @@ const styles = StyleSheet.create({
   catalogTileTags: { alignItems: "center", flexDirection: "row", flexShrink: 1, gap: 6, minWidth: 0 },
   catalogTileNew: { alignItems: "center", flexDirection: "row", flexShrink: 0, gap: 3 },
   catalogTileNewText: { color: colors.signal, fontSize: 11, fontWeight: "800" },
-  catalogTileCompany: { color: colors.signal, fontSize: 15, fontWeight: "700", lineHeight: 20, marginTop: 8 },
-  catalogTileCompanyGrid: { fontSize: 13, lineHeight: 18, marginTop: 6 },
+  catalogTileIdentity: { alignItems: "center", flexDirection: "row", gap: 9, marginTop: 9 },
+  catalogTileCompany: { color: colors.signal, flexShrink: 1, fontSize: 14, fontWeight: "700", lineHeight: 19 },
+  catalogTileCompanyGrid: { fontSize: 13, lineHeight: 18 },
   catalogTileTitle: { color: colors.ink, fontSize: 18, fontWeight: "700", lineHeight: 24, marginTop: 3 },
   catalogTileTitleGrid: { fontSize: 15, lineHeight: 20 },
   catalogTileTitleLane: { fontSize: 17, lineHeight: 23 },
   catalogTileMeta: { color: colors.muted, fontSize: 14, lineHeight: 20, marginTop: 5 },
   catalogTileMetaGrid: { fontSize: 12, lineHeight: 17, marginTop: 4 },
-  catalogTileTiming: { color: colors.muted, fontSize: 12, lineHeight: 16, marginTop: 3 },
+  catalogTilePay: { color: colors.success, fontWeight: "700" },
+  catalogTileEvidence: { gap: 1, marginTop: 7 },
+  catalogTileTiming: { color: colors.muted, fontSize: 12, lineHeight: 16 },
   catalogTileNotice: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },
   catalogTileFooter: {
     alignItems: "center",
@@ -10560,7 +10589,10 @@ const styles = StyleSheet.create({
   muted: { color: colors.muted, marginTop: 4, lineHeight: 21 },
   postingTiming: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 2 },
   jobSourceRow: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 5, marginTop: 7 },
+  /** Inside a dense grid tile the evidence line drops its own top margin; the tile owns the rhythm. */
+  jobSourceRowCompact: { flexWrap: "nowrap", gap: 4, marginTop: 0 },
   jobSourceText: { color: colors.muted, flexShrink: 1, fontSize: 13, fontWeight: "600", lineHeight: 18 },
+  jobSourceTextCompact: { fontSize: 12, lineHeight: 16 },
   jobSourceCorroboration: { color: colors.signal, fontSize: 12, fontWeight: "700", lineHeight: 18 },
   pay: { color: colors.success, fontSize: 13, fontWeight: "700", marginTop: 6 },
   payInline: { color: colors.success, fontSize: 13, fontWeight: "700" },
