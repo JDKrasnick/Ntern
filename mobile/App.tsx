@@ -386,23 +386,23 @@ function companyMarkColor(company: string) {
 }
 
 /**
- * A company tile: the real logo on a neutral white square, or the deterministic
- * pastel monogram when there is no logo.
+ * A company tile: the real logo, or the deterministic pastel monogram when there
+ * is no logo.
  *
- * The white square is the point. A third of the logos we resolve arrive with their
- * own solid background baked into the image — navy for Astranis, white for
- * Pinterest, black for Anduril — and on the pastel monogram tint that background
- * reads as a square fighting its tile. A neutral tile lets the logo keep its own
- * background and makes the pastel mean one thing: no mark for this employer yet.
+ * A logo carries no tile of its own. About half the logos we resolve arrive with
+ * their own background baked into the image — navy for Astranis, black for
+ * Anduril, a bordered white square for the GM wordmark — and framing that inside
+ * a second bordered square reads as two nested boxes: a grey ring fighting the
+ * mark's own edge. Dropping the tile lets a full-bleed mark stand as its own
+ * rounded chip, a transparent mark sit quietly on the canvas, and the pastel mean
+ * one thing: no mark for this employer yet.
  *
- * A square-shaped mark nearly fills the tile so its own background reads as the
- * tile and its corners take a concentric rounding, rather than sitting inside it
- * as a sharp box in a rounded frame. The small inset keeps a transparent mark
- * from crowding the border. A wordmark keeps more breathing room and is shown
- * whole: filling a wide logo would stretch it into a band across the tile, which
- * is the same mismatch mirrored, so those keep `contain` at a deeper inset.
+ * A square-shaped mark nearly fills the slot, so its corners round like the rest
+ * of the system; a wordmark keeps more breathing room and is shown whole, since a
+ * filled wide logo would stretch into a band across the slot. `contain` fits a
+ * wordmark or a square mark whole instead of cropping it.
  *
- * While a logo is expected the tile is the neutral one and the monogram is *not*
+ * While a logo is expected the slot is left empty and the monogram is *not*
  * drawn: painting the monogram first and replacing it with the logo a frame later
  * is the flash a refresh produces. The monogram appears only once the request has
  * actually failed, so a logo never replaces a monogram and a monogram never
@@ -436,19 +436,14 @@ function CompanyMark({ company, employerId, size = 38 }: { company: string; empl
   };
   const isWordmark = logoAspect !== null && (logoAspect > 1.33 || logoAspect < 0.75);
   const logoSize = Math.round(size * (isWordmark ? 0.72 : 0.9));
-  // Square marks sit just inside the tile, so their corners round concentrically
-  // with it; a wordmark's block is deeper in and takes a proportionally smaller
-  // radius. The container clips whatever reaches the tile edge.
-  const containerRadius = Math.round(size * 0.29);
-  const logoRadius = isWordmark
-    ? Math.round(logoSize * 0.22)
-    : Math.max(0, containerRadius - Math.round((size - logoSize) / 2));
+  // A square mark's corners round like the rest of the system; a wordmark's block
+  // is deeper in and takes a proportionally smaller radius. A transparent mark
+  // shows none of this because it has no corners to round.
+  const logoRadius = Math.round(logoSize * (isWordmark ? 0.22 : 0.29));
   return (
     <View accessibilityLabel={label} style={[styles.companyMark, {
-      backgroundColor: showLogo ? "#FFFFFF" : monogramColor,
-      borderColor: colors.border,
-      borderRadius: containerRadius,
-      borderWidth: showLogo ? StyleSheet.hairlineWidth : 0,
+      backgroundColor: showLogo ? "transparent" : monogramColor,
+      borderRadius: Math.round(size * 0.29),
       height: size,
       width: size,
     }]}>
