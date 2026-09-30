@@ -398,9 +398,11 @@ function companyMarkColor(company: string) {
  * one thing: no mark for this employer yet.
  *
  * A square-shaped mark nearly fills the slot, so its corners round like the rest
- * of the system; a wordmark keeps more breathing room and is shown whole, since a
- * filled wide logo would stretch into a band across the slot. `contain` fits a
- * wordmark or a square mark whole instead of cropping it.
+ * of the system; a wordmark fills it edge to edge, because a wordmark shrunk to
+ * leave room reads as a speck. `contain` fits a wordmark or a square mark whole
+ * instead of cropping it. Marks whose source image carries its own generous
+ * padding still look small — the padding is inside the asset, not the frame —
+ * and are a candidate for trimming the stored icon on the server.
  *
  * While a logo is expected the slot is left empty and the monogram is *not*
  * drawn: painting the monogram first and replacing it with the logo a frame later
@@ -435,11 +437,11 @@ function CompanyMark({ company, employerId, size = 38 }: { company: string; empl
     if (width && height) setLogoAspect(width / height);
   };
   const isWordmark = logoAspect !== null && (logoAspect > 1.33 || logoAspect < 0.75);
-  const logoSize = Math.round(size * (isWordmark ? 0.72 : 0.9));
-  // A square mark's corners round like the rest of the system; a wordmark's block
-  // is deeper in and takes a proportionally smaller radius. A transparent mark
-  // shows none of this because it has no corners to round.
-  const logoRadius = Math.round(logoSize * (isWordmark ? 0.22 : 0.29));
+  const logoSize = Math.round(size * (isWordmark ? 1 : 0.9));
+  // A square mark's corners round like the rest of the system; a wordmark is a
+  // shallow block at the slot's full width and takes a smaller radius. A
+  // transparent mark shows none of this because it has no corners to round.
+  const logoRadius = Math.round(logoSize * (isWordmark ? 0.2 : 0.29));
   return (
     <View accessibilityLabel={label} style={[styles.companyMark, {
       backgroundColor: showLogo ? "transparent" : monogramColor,
@@ -1703,6 +1705,8 @@ function NewnessLane({
   // soon as they stop.
   const readerScrollAt = useRef(0);
   const dragging = useRef(false);
+  // A pointer resting in the lane holds it, the way a finger on the glass does.
+  const hovering = useRef(false);
   const beltWritten = useRef(0);
   const writing = useRef(false);
   const autoCycles = cycling && attentive && motionAllowed && groups.length > 1;
@@ -1767,7 +1771,7 @@ function NewnessLane({
       const now = Date.now();
       const elapsed = now - last;
       last = now;
-      if (beltYields(now, readerScrollAt.current, dragging.current)) {
+      if (beltYields(now, readerScrollAt.current, dragging.current, hovering.current)) {
         yielded = true;
       } else {
         if (yielded) {
@@ -1782,8 +1786,17 @@ function NewnessLane({
     frame = requestAnimationFrame(step);
     return () => cancelAnimationFrame(frame);
   }, [autoCycles, cycleLength, laneStep]);
+  // react-native-web forwards these DOM events; a native build has no pointer to
+  // rest, so the handlers are simply absent there.
+  const laneHoverProps: { onMouseEnter?: () => void; onMouseLeave?: () => void } =
+    Platform.OS === "web"
+      ? {
+          onMouseEnter: () => { hovering.current = true; },
+          onMouseLeave: () => { hovering.current = false; },
+        }
+      : {};
   return (
-    <View style={styles.catalogLane}>
+    <View style={styles.catalogLane} {...laneHoverProps}>
       <Text style={styles.catalogLaneTitle}>
         {since
           ? `${roleCount} new ${roleCount === 1 ? "role" : "roles"} since ${since}`
