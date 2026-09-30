@@ -52,12 +52,12 @@ function jsonResponse(body: unknown, url: string, status = 200): Response {
 
 describe('reviewed Greenhouse registry', () => {
   it('keeps the published inventory plus reviewed shadow additions', () => {
-    expect(reviewedGreenhouseSources).toHaveLength(207);
+    expect(reviewedGreenhouseSources).toHaveLength(206);
     expect(reviewedGreenhouseSources.slice(0, 3).map((source) => source.id)).toEqual(['greenhouse-figma', 'greenhouse-datadog', 'greenhouse-cloudflare']);
-    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(188);
+    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(187);
     expect(reviewedGreenhouseSources.filter((source) => source.status === 'shadow')).toHaveLength(19);
     expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'reviewed')).toHaveLength(22);
-    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(185);
+    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(184);
   });
 
   it('keeps the #231 remediation probe identities and admission time exact', () => {

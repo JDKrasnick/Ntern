@@ -199,6 +199,11 @@ const admittedAshbySources: ReviewedAshbySource[] = [
     careersUrl: 'https://amplitude.com/careers', admittedAt: '2026-09-29T23:43:44.177Z', evidenceState: 'ownership-verified',
     allowedApplicationHosts: [{ host: 'jobs.ashbyhq.com' }], status: 'shadow',
   },
+  {
+    id: 'ashby-liveview-technologies', company: 'LiveView Technologies', identity: { provider: 'ashby', boardKey: 'liveview-technologies', apiRegion: 'global' },
+    careersUrl: 'https://www.lvt.com/careers/roles', admittedAt: '2026-09-30T01:38:23.152Z', evidenceState: 'ownership-verified',
+    allowedApplicationHosts: [{ host: 'jobs.ashbyhq.com' }], status: 'shadow',
+  },
   ...reviewedAshbyExpansionSources as ReviewedAshbySource[],
   ...reviewedAshbyOwnerApprovedExpansionSources as ReviewedAshbySource[],
 ];
