@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CATALOG_DELIVERY_MAX_ATTEMPTS } from '../src/source-poll-cadence.js';
+import { INGESTION_WORK_QUEUES } from '../cloudflare/ingestion-health-alert.js';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -68,6 +69,15 @@ describe('Cloudflare deployment configuration', () => {
     expect(ingestion.triggers?.crons).toContain('1-51/10 * * * *');
     expect(ingestion.workers_dev).toBe(false);
     expect(ingestion.preview_urls).toBe(false);
+  });
+
+  it('alerts on every ingestion work queue the Worker consumes', () => {
+    // The failure-ledger signal names its work queues explicitly. Destination
+    // verification is excluded there because it already alerts through the DLQ
+    // and admission-incident signals, so compare against every other consumer.
+    const consumers = (ingestion.queues?.consumers ?? []).map(({ queue }) => queue)
+      .filter((queue) => queue !== 'intern-notifs-destination-verification');
+    expect([...INGESTION_WORK_QUEUES].sort()).toEqual([...consumers].sort());
   });
 
   it('keeps destination verification bindings and delivery settings synchronized', () => {
