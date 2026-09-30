@@ -184,7 +184,7 @@ describe('Ashby offline manifest and reverification', () => {
       'Circleback', 'Eragon', 'Modal', 'Yotta Labs', 'Anthelion Capital', 'Saronic', 'First Order Effects',
       'Junior', 'Airwallex', 'Netic', 'Retell AI', 'Quadrillion', 'Pylon', 'NationGraph',
     ]);
-    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(65);
+    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(66);
     // The clock must sit after the newest admittedAt so fresh admissions are not
     // read as future-dated; bump it alongside the next admission.
     expect(collectAshbyManifestViolations(reviewedAshbySources, { fs: nodeAshbyManifestFs(), now: new Date('2026-09-30T12:00:00Z') })).toEqual([]);

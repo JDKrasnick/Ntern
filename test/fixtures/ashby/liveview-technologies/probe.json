@@ -1,0 +1,29 @@
+{
+  "probedAt": "2026-09-30T01:38:23.152Z",
+  "retention": "metadata-only",
+  "results": [
+    {
+      "state": "ok",
+      "boardName": "liveview-technologies",
+      "endpoint": "https://api.ashbyhq.com/posting-api/job-board/liveview-technologies",
+      "apiVersion": "1",
+      "apiRegion": "global",
+      "rawRows": 39,
+      "listedRows": 39,
+      "unlistedRows": 0,
+      "malformedRows": 0,
+      "boardPathViolations": 0,
+      "technicalEarlyCareerRoles": 0,
+      "geographicCoverage": [
+        "HQ",
+        "Remote",
+        "Seattle",
+        "Spanish Fork"
+      ],
+      "applicationHostSummary": {
+        "jobs.ashbyhq.com": 39
+      },
+      "qualifyingRoleSamples": []
+    }
+  ]
+}

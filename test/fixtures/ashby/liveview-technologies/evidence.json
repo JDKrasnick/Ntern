@@ -1,0 +1,23 @@
+{
+  "provider": "ashby",
+  "boardKey": "liveview-technologies",
+  "apiRegion": "global",
+  "careersUrl": "https://www.lvt.com/careers/roles",
+  "firstPartyEvidenceUrl": "https://www.lvt.com/careers/roles",
+  "exactBoardUrl": "https://jobs.ashbyhq.com/liveview-technologies/embed?version=2",
+  "evidenceExcerpt": "<script src=\"https://jobs.ashbyhq.com/liveview-technologies/embed?version=2\"></script>",
+  "observedJobUrl": "https://jobs.ashbyhq.com/liveview-technologies/7edc07d5-f5e0-4dd8-b32f-0f56c7b020f0",
+  "verifiedAt": "2026-09-30T01:38:23.152Z",
+  "state": "ownership-verified",
+  "initialTechnicalEarlyCareerRoles": 0,
+  "initialRoleRequirementOverride": {
+    "approvedBy": "JDKrasnick",
+    "approvedAt": "2026-09-30T01:38:23.152Z",
+    "reason": "LiveView Technologies (LVT) moved its board from Greenhouse (liveviewtechnologiesinc, now 404) to Ashby. lvt.com/careers/roles embeds jobs.ashbyhq.com/liveview-technologies. Owner directed re-admission to restore the coverage the dead Greenhouse source dropped; no technical early-career role is listed today."
+  },
+  "allowedApplicationHosts": [
+    {
+      "host": "jobs.ashbyhq.com"
+    }
+  ]
+}

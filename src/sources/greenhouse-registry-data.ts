@@ -100,7 +100,6 @@ const apiProbedBoards: Array<{
   { token: "later", name: "Later", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "liberate", name: "Liberate", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "lilasciences", name: "Lila Sciences", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
-  { token: "liveviewtechnologiesinc", name: "LVT", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "lucidmotors", name: "Lucid Motors", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "mixpanel", name: "Mixpanel", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "moloco", name: "Moloco", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
