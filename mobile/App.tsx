@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -13,6 +13,8 @@ import {
   KeyboardAvoidingView,
   Linking,
   Modal,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   PanResponder,
   Platform,
   SafeAreaView,
@@ -46,6 +48,7 @@ import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
 import { advanceBelt, beltCopies, beltItems, beltYields, isReaderScroll, laneSelection, type BeltItem } from "./src/newness-belt";
 import { loadCatalogFilters, saveCatalogFilters } from "./src/catalog-filter-storage";
 import { catalogGridColumnCount } from "./src/catalog-layout";
+import { shouldPrefetchNextPage } from "./src/infinite-scroll";
 import { type EducationLevel } from "../shared/education-display";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
@@ -2915,6 +2918,38 @@ function CompanyCoverageDisclosure() {
   );
 }
 
+/**
+ * Fire `onLoadMore` once the reader has scrolled halfway through the list that
+ * is already loaded, so the next page is usually in place before the bottom
+ * edge is reached. The load-more callback owns its own in-flight guard, so a
+ * burst of scroll events can never start the same page twice.
+ */
+function useProactivePrefetch(
+  onLoadMore: (() => void) | undefined,
+  state: { loading: boolean; reachedEnd: boolean; errored: boolean },
+) {
+  const { loading, reachedEnd, errored } = state;
+  return useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      if (!onLoadMore) return;
+      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+      if (
+        shouldPrefetchNextPage({
+          contentOffsetY: contentOffset.y,
+          contentHeight: contentSize.height,
+          viewportHeight: layoutMeasurement.height,
+          loading,
+          reachedEnd,
+          errored,
+        })
+      ) {
+        onLoadMore();
+      }
+    },
+    [onLoadMore, loading, reachedEnd, errored],
+  );
+}
+
 function TabNavigation({
   active,
   onChange,
@@ -2929,9 +2964,9 @@ function TabNavigation({
   resumeEnabled?: boolean;
 }) {
   const tabs = [
-    { key: "roles", label: "Roles", icon: "briefcase-outline", activeIcon: "briefcase" },
+    { key: "roles", label: "Catalog", accessibilityLabel: "Catalog", icon: "briefcase-outline", activeIcon: "briefcase" },
     { key: "queue", label: "Queue", accessibilityLabel: "Apply queue", icon: "albums-outline", activeIcon: "albums" },
-    { key: "catalog", label: "Catalog", accessibilityLabel: "Catalog search", icon: "search-outline", activeIcon: "search" },
+    { key: "catalog", label: "Search", accessibilityLabel: "Search roles", icon: "search-outline", activeIcon: "search" },
     ...(resumeEnabled ? [{ key: "resume" as const, label: "Resume", icon: "document-text-outline" as const, activeIcon: "document-text" as const }] : []),
     { key: "profile", label: "Profile", icon: "person-outline", activeIcon: "person" },
   ] as const;
@@ -3222,6 +3257,11 @@ function LaunchInbox({
   onOpenGroup,
   queueCount,
   onOpenQueue,
+  onLoadMore,
+  loadingMore = false,
+  moreError,
+  reachedEnd = false,
+  onRetryLoadMore,
 }: {
   inbox: LaunchInbox;
   /** The Roles tab falls back to the current catalog when there is no release. */
@@ -3244,6 +3284,12 @@ function LaunchInbox({
   onOpenGroup: (group: CatalogGroupRow, details?: CatalogGroupDetails) => void;
   queueCount?: number;
   onOpenQueue?: () => void;
+  /** Proactive pagination for the browse feed; absent when the feed is bounded. */
+  onLoadMore?: () => void;
+  loadingMore?: boolean;
+  moreError?: string;
+  reachedEnd?: boolean;
+  onRetryLoadMore?: () => void;
 }) {
   const { width } = useWindowDimensions();
   const isLatest = kind === "latest";
@@ -3252,6 +3298,22 @@ function LaunchInbox({
     (job) => !hiddenJobIds.has(job.jobId) || hiddenFeedbackJob?.jobId === job.jobId,
   );
   const groupedRows = inbox.groups?.map((details) => details.group) ?? [];
+  // The browse feed keeps loading more as the reader moves, so the next page is
+  // already in place before the bottom edge is reached.
+  const prefetchOnScroll = useProactivePrefetch(onLoadMore, {
+    loading: loadingMore,
+    reachedEnd,
+    errored: Boolean(moreError),
+  });
+  const paginationFooter = onLoadMore ? (
+    <CatalogPaginationFooter
+      loading={loadingMore}
+      error={moreError}
+      reachedEnd={reachedEnd}
+      searching={false}
+      onRetry={() => onRetryLoadMore?.()}
+    />
+  ) : null;
   if (groupedRows.length) return (
     <FlatList
       style={[styles.list, styles.webScrollbarHidden]}
@@ -3259,6 +3321,10 @@ function LaunchInbox({
       extraData={[applicationStatuses, queuingJobIds]}
       keyExtractor={(group) => group.groupId}
       contentContainerStyle={[styles.feedListContent, styles.rolesFeedListContent]}
+      onScroll={prefetchOnScroll}
+      scrollEventThrottle={100}
+      onEndReached={onLoadMore}
+      onEndReachedThreshold={0.5}
       ListHeaderComponent={
         <View style={[styles.inboxHeader, showRolesTable && styles.inboxHeaderWide]}>
           <Text accessibilityLabel={`${inbox.total} new matches`} style={styles.inboxCount}>{inbox.total}</Text>
@@ -3266,7 +3332,7 @@ function LaunchInbox({
           <Text style={styles.inboxDescription}>Grouped by employer release and verified program details</Text>
           <View style={styles.inboxActions}>
             <TouchableOpacity accessibilityRole="button" onPress={onViewAll} style={[styles.inboxViewAll, styles.inboxViewAllInline]}>
-              <Text style={styles.inboxViewAllText}>Browse the catalog</Text>
+              <Text style={styles.inboxViewAllText}>Search all roles</Text>
             </TouchableOpacity>
             {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
               <QueuePillButton count={queueCount} onPress={onOpenQueue} />
@@ -3311,13 +3377,16 @@ function LaunchInbox({
         );
       }}
       ListFooterComponent={
-        <TouchableOpacity
-          accessibilityRole="button"
-          onPress={onViewAll}
-          style={[styles.inboxViewAll, styles.inboxViewAllFooter]}
-        >
-          <Text style={styles.inboxViewAllText}>Browse the catalog</Text>
-        </TouchableOpacity>
+        <View>
+          {paginationFooter}
+          <TouchableOpacity
+            accessibilityRole="button"
+            onPress={onViewAll}
+            style={[styles.inboxViewAll, styles.inboxViewAllFooter]}
+          >
+            <Text style={styles.inboxViewAllText}>Search all roles</Text>
+          </TouchableOpacity>
+        </View>
       }
     />
   );
@@ -3328,6 +3397,10 @@ function LaunchInbox({
       extraData={[applicationStatuses, queuingJobIds]}
       keyExtractor={(job) => job.jobId}
       contentContainerStyle={[styles.feedListContent, styles.rolesFeedListContent]}
+      onScroll={prefetchOnScroll}
+      scrollEventThrottle={100}
+      onEndReached={onLoadMore}
+      onEndReachedThreshold={0.5}
       ListHeaderComponent={
         <View style={[styles.inboxHeader, showRolesTable && styles.inboxHeaderWide]}>
           {isLatest ? (
@@ -3352,7 +3425,7 @@ function LaunchInbox({
               onPress={onViewAll}
               style={[styles.inboxViewAll, styles.inboxViewAllInline]}
             >
-              <Text style={styles.inboxViewAllText}>Browse the catalog</Text>
+              <Text style={styles.inboxViewAllText}>Search all roles</Text>
             </TouchableOpacity>
             {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
               <QueuePillButton count={queueCount} onPress={onOpenQueue} />
@@ -3405,15 +3478,18 @@ function LaunchInbox({
         )
       }
       ListFooterComponent={
-        visibleJobs.length ? (
-          <TouchableOpacity
-            accessibilityRole="button"
-            onPress={onViewAll}
-            style={[styles.inboxViewAll, styles.inboxViewAllFooter]}
-          >
-            <Text style={styles.inboxViewAllText}>Browse the catalog</Text>
-          </TouchableOpacity>
-        ) : null
+        <View>
+          {paginationFooter}
+          {visibleJobs.length ? (
+            <TouchableOpacity
+              accessibilityRole="button"
+              onPress={onViewAll}
+              style={[styles.inboxViewAll, styles.inboxViewAllFooter]}
+            >
+              <Text style={styles.inboxViewAllText}>Search all roles</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
       }
     />
   );
@@ -3618,6 +3694,13 @@ function CatalogScreen({
     onHideLocally,
     onRemoveFromQueue,
   };
+  // Load the next page once the reader is halfway through the grid rather than
+  // when they hit the end, so more roles are ready before they get there.
+  const prefetchOnScroll = useProactivePrefetch(onLoadMore, {
+    loading: loadingMore,
+    reachedEnd,
+    errored: Boolean(moreError),
+  });
   return (
     <View style={styles.roleWorkspace}>
       <View style={styles.roleFeedColumn}>
@@ -3716,8 +3799,10 @@ function CatalogScreen({
           extraData={[applicationStatuses, queuingJobIds, filters.jobStatus]}
           keyExtractor={(row) => row[0]?.groupId ?? "catalog-row"}
           contentContainerStyle={styles.catalogGrid}
+          onScroll={prefetchOnScroll}
+          scrollEventThrottle={100}
           onEndReached={onLoadMore}
-          onEndReachedThreshold={0.6}
+          onEndReachedThreshold={0.5}
           ListHeaderComponent={
             loading && rows.length ? (
               <CatalogTileSkeleton count={columns * 2} columns={columns} />
@@ -3938,6 +4023,11 @@ function AppContent() {
   const [roleFeedGroups, setRoleFeedGroups] = useState<CatalogGroupRow[]>([]);
   const [roleFeedLoading, setRoleFeedLoading] = useState(true);
   const [roleFeedError, setRoleFeedError] = useState<string>();
+  const [roleFeedLoadingMore, setRoleFeedLoadingMore] = useState(false);
+  const [roleFeedMoreError, setRoleFeedMoreError] = useState<string>();
+  const [roleFeedReachedEnd, setRoleFeedReachedEnd] = useState(false);
+  const roleFeedCursorRef = useRef<string | undefined>(undefined);
+  const roleFeedRequestInFlight = useRef(false);
   const [catalogError, setCatalogError] = useState<string>();
   const [catalogInitialLoading, setCatalogInitialLoading] = useState(true);
   const [catalogLoadingMore, setCatalogLoadingMore] = useState(false);
@@ -3968,6 +4058,10 @@ function AppContent() {
     let active = true;
     setRoleFeedLoading(true);
     setRoleFeedError(undefined);
+    setRoleFeedLoadingMore(false);
+    setRoleFeedMoreError(undefined);
+    roleFeedCursorRef.current = undefined;
+    setRoleFeedReachedEnd(false);
     // Paint the last successful page immediately, then refresh it. Roles is the
     // default tab, so this is the landing surface; waiting on the network here
     // meant a skeleton on every cold start.
@@ -3979,11 +4073,15 @@ function AppContent() {
       onCached: (cached) => {
         if (active && Array.isArray(cached.groups) && cached.groups.length) {
           setRoleFeedGroups(cached.groups);
+          roleFeedCursorRef.current = cached.cursor;
+          setRoleFeedReachedEnd(!cached.cursor);
         }
       },
       onFresh: (page) => {
         if (!active) return;
         setRoleFeedGroups(page.groups);
+        roleFeedCursorRef.current = page.cursor;
+        setRoleFeedReachedEnd(!page.cursor);
         void responseCache.set(roleFeedCacheKey, page);
       },
     })
@@ -4235,6 +4333,34 @@ function AppContent() {
           catalogRequestInFlight.current = false;
           setCatalogLoadingMore(false);
         }
+      });
+  };
+  /**
+   * Extend the standalone Roles feed — the app's landing surface — one page at
+   * a time. It paginates the same unfiltered public read as the first page, so
+   * the feed stays populated regardless of the search tab's live filters.
+   */
+  const loadMoreRoleFeed = (retry = false) => {
+    const cursor = roleFeedCursorRef.current;
+    if (!cursor || roleFeedRequestInFlight.current || (!retry && roleFeedMoreError)) return;
+    roleFeedRequestInFlight.current = true;
+    setRoleFeedLoadingMore(true);
+    setRoleFeedMoreError(undefined);
+    void api<GroupedCatalogPage<CatalogGroupRow>>(
+      `/catalog?status=open&limit=50&cursor=${encodeURIComponent(cursor)}`,
+      "",
+    )
+      .then((page) => {
+        roleFeedCursorRef.current = page.cursor;
+        setRoleFeedReachedEnd(!page.cursor);
+        setRoleFeedGroups((current) => appendGroupedCatalogPage(current, page));
+      })
+      .catch((error) => {
+        setRoleFeedMoreError(error instanceof Error ? error.message : "We couldn't load more roles right now.");
+      })
+      .finally(() => {
+        roleFeedRequestInFlight.current = false;
+        setRoleFeedLoadingMore(false);
       });
   };
   const acceptRefreshedToken = (requestId: number, value: string) => {
@@ -4964,6 +5090,11 @@ function AppContent() {
                 loading={roleFeedLoading}
                 error={roleFeedError}
                 onRetry={() => setCatalogRefresh((value) => value + 1)}
+                onLoadMore={loadMoreRoleFeed}
+                loadingMore={roleFeedLoadingMore}
+                moreError={roleFeedMoreError}
+                reachedEnd={roleFeedReachedEnd}
+                onRetryLoadMore={() => loadMoreRoleFeed(true)}
                 onOpen={openCatalogJob}
                 onOpenGroup={openCatalogGroup}
                 onViewAll={() => changeTab("catalog")}
@@ -5512,11 +5643,9 @@ function GuestExperience({
 }) {
   const { width } = useWindowDimensions();
   const usesNavigationRail = width >= 700;
-  const [tab, setTab] = useState<AppTab>(() =>
-    Platform.OS === "web" && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("rolesVariant")
-      ? "roles"
-      : "catalog",
-  );
+  // Browse-first: the app opens on the feed of roles for everyone, not on the
+  // search surface. The old `rolesVariant` preview switch no longer decides it.
+  const [tab, setTab] = useState<AppTab>("roles");
   const [showAccount, setShowAccount] = useState(false);
   const latestCatalogJobs = useMemo(
     () => groups.flatMap((group) => group.featuredRole ? [catalogRoleJob(group.featuredRole)] : []),
@@ -5612,6 +5741,14 @@ function GuestExperience({
                 <LaunchInbox
                   inbox={{ jobs: latestCatalogJobs, groups: [], total: latestCatalogJobs.length, hasMore: false, previousOpenedAt: null, openedAt: "" }}
                   kind="latest"
+                  loading={catalogInitialLoading}
+                  error={catalogError}
+                  onRetry={onRetryCatalog}
+                  onLoadMore={onLoadMore}
+                  loadingMore={catalogLoadingMore}
+                  moreError={catalogMoreError}
+                  reachedEnd={catalogReachedEnd}
+                  onRetryLoadMore={onRetryLoadMore}
                   onOpen={onOpenJob}
                   onOpenGroup={onOpenGroup}
                   onViewAll={() => setTab("catalog")}
