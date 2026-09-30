@@ -394,7 +394,13 @@ function companyMarkColor(company: string) {
  * Pinterest, black for Anduril — and on the pastel monogram tint that background
  * reads as a square fighting its tile. A neutral tile lets the logo keep its own
  * background and makes the pastel mean one thing: no mark for this employer yet.
- * `contain` fits a wordmark or a square mark whole instead of cropping it.
+ *
+ * A square-shaped mark nearly fills the tile so its own background reads as the
+ * tile and its corners take a concentric rounding, rather than sitting inside it
+ * as a sharp box in a rounded frame. The small inset keeps a transparent mark
+ * from crowding the border. A wordmark keeps more breathing room and is shown
+ * whole: filling a wide logo would stretch it into a band across the tile, which
+ * is the same mismatch mirrored, so those keep `contain` at a deeper inset.
  *
  * While a logo is expected the tile is the neutral one and the monogram is *not*
  * drawn: painting the monogram first and replacing it with the logo a frame later
@@ -404,9 +410,11 @@ function companyMarkColor(company: string) {
  */
 function CompanyMark({ company, employerId, size = 38 }: { company: string; employerId?: string; size?: number }) {
   const [imageUnavailable, setImageUnavailable] = useState(false);
+  const [logoAspect, setLogoAspect] = useState<number | null>(null);
   // A recycled row can keep its state; a new employer must retry its own icon.
   useEffect(() => {
     setImageUnavailable(false);
+    setLogoAspect(null);
   }, [employerId]);
   const iconUri = employerId ? `${publicConfig.iconApiUrl.replace(/\/$/, "")}/company-icons/${encodeURIComponent(employerId)}` : undefined;
   const showLogo = Boolean(iconUri) && !imageUnavailable;
@@ -415,11 +423,31 @@ function CompanyMark({ company, employerId, size = 38 }: { company: string; empl
   const monogramColor = employerId ? companyMonogramColors[companyMonogramColorIndex(employerId)] : companyMarkColors[companyMarkColor(company)];
   const initials = employerId ? companyMonogramInitials(company) : companyInitials(company);
   const label = `${company} logo`;
+  // Native reports the decoded size on `nativeEvent.source`; react-native-web
+  // hands back the load event, whose target carries the natural dimensions.
+  const handleLogoLoad = (event: NativeSyntheticEvent<{ source?: { width?: number; height?: number } }>) => {
+    const native = event?.nativeEvent as {
+      source?: { width?: number; height?: number };
+      target?: { naturalWidth?: number; naturalHeight?: number };
+    } | undefined;
+    const width = native?.source?.width ?? native?.target?.naturalWidth;
+    const height = native?.source?.height ?? native?.target?.naturalHeight;
+    if (width && height) setLogoAspect(width / height);
+  };
+  const isWordmark = logoAspect !== null && (logoAspect > 1.33 || logoAspect < 0.75);
+  const logoSize = Math.round(size * (isWordmark ? 0.72 : 0.9));
+  // Square marks sit just inside the tile, so their corners round concentrically
+  // with it; a wordmark's block is deeper in and takes a proportionally smaller
+  // radius. The container clips whatever reaches the tile edge.
+  const containerRadius = Math.round(size * 0.29);
+  const logoRadius = isWordmark
+    ? Math.round(logoSize * 0.22)
+    : Math.max(0, containerRadius - Math.round((size - logoSize) / 2));
   return (
     <View accessibilityLabel={label} style={[styles.companyMark, {
       backgroundColor: showLogo ? "#FFFFFF" : monogramColor,
       borderColor: colors.border,
-      borderRadius: Math.round(size * 0.29),
+      borderRadius: containerRadius,
       borderWidth: showLogo ? StyleSheet.hairlineWidth : 0,
       height: size,
       width: size,
@@ -428,9 +456,14 @@ function CompanyMark({ company, employerId, size = 38 }: { company: string; empl
         <Image
           accessibilityLabel={label}
           onError={() => setImageUnavailable(true)}
+          onLoad={handleLogoLoad}
           resizeMode="contain"
           source={{ uri: iconUri }}
-          style={{ height: Math.round(size * 0.7), width: Math.round(size * 0.7) }}
+          style={{
+            borderRadius: logoRadius,
+            height: logoSize,
+            width: logoSize,
+          }}
         />
       ) : <Text style={[styles.companyMarkFallback, { fontSize: Math.max(11, Math.round(size * 0.32)) }]}>{initials}</Text>}
     </View>
