@@ -1,0 +1,23 @@
+{
+  "provider": "ashby",
+  "boardKey": "matx",
+  "apiRegion": "global",
+  "careersUrl": "https://www.matx.com/jobs",
+  "firstPartyEvidenceUrl": "https://www.matx.com/jobs",
+  "exactBoardUrl": "https://jobs.ashbyhq.com/matx",
+  "evidenceExcerpt": "href=\"https://jobs.ashbyhq.com/matx\"",
+  "observedJobUrl": "https://jobs.ashbyhq.com/matx/58ee5bab-5f8c-48b3-a223-fb7183f1e895",
+  "verifiedAt": "2026-09-29T23:43:43.478Z",
+  "state": "ownership-verified",
+  "initialTechnicalEarlyCareerRoles": 0,
+  "initialRoleRequirementOverride": {
+    "approvedBy": "JDKrasnick",
+    "approvedAt": "2026-09-29T23:43:43.478Z",
+    "reason": "MatX moved its board from Greenhouse (matx, now 404) to Ashby. matx.com/jobs links jobs.ashbyhq.com/matx. Owner directed re-admission to restore the coverage the dead Greenhouse source dropped; no technical early-career role is listed today."
+  },
+  "allowedApplicationHosts": [
+    {
+      "host": "jobs.ashbyhq.com"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "probedAt": "2026-09-29T23:43:44.177Z",
+  "retention": "metadata-only",
+  "results": [
+    {
+      "state": "ok",
+      "boardName": "amplitude",
+      "endpoint": "https://api.ashbyhq.com/posting-api/job-board/amplitude",
+      "apiVersion": "1",
+      "apiRegion": "global",
+      "rawRows": 36,
+      "listedRows": 36,
+      "unlistedRows": 0,
+      "malformedRows": 0,
+      "boardPathViolations": 0,
+      "technicalEarlyCareerRoles": 0,
+      "geographicCoverage": [
+        "Brazil (Remote)",
+        "London",
+        "New York City",
+        "Remote-Germany",
+        "Remote-India (PEO)",
+        "Remote-NAMER",
+        "San Francisco"
+      ],
+      "applicationHostSummary": {
+        "jobs.ashbyhq.com": 36
+      },
+      "qualifyingRoleSamples": []
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "provider": "ashby",
+  "boardKey": "amplitude",
+  "apiRegion": "global",
+  "careersUrl": "https://amplitude.com/careers",
+  "firstPartyEvidenceUrl": "https://amplitude.com/careers",
+  "exactBoardUrl": "https://jobs.ashbyhq.com/amplitude",
+  "evidenceExcerpt": "href=\"https://jobs.ashbyhq.com/amplitude\"",
+  "observedJobUrl": "https://jobs.ashbyhq.com/amplitude/548cba17-0fb9-437f-83a8-021c4be3b664",
+  "verifiedAt": "2026-09-29T23:43:44.177Z",
+  "state": "ownership-verified",
+  "initialTechnicalEarlyCareerRoles": 0,
+  "initialRoleRequirementOverride": {
+    "approvedBy": "JDKrasnick",
+    "approvedAt": "2026-09-29T23:43:44.177Z",
+    "reason": "Amplitude moved its board from Greenhouse (amplitude, now 404) to Ashby. amplitude.com/careers links jobs.ashbyhq.com/amplitude. Owner directed re-admission to restore the coverage the dead Greenhouse source dropped; no technical early-career role is listed today."
+  },
+  "allowedApplicationHosts": [
+    {
+      "host": "jobs.ashbyhq.com"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "probedAt": "2026-09-29T23:43:43.478Z",
+  "retention": "metadata-only",
+  "results": [
+    {
+      "state": "ok",
+      "boardName": "matx",
+      "endpoint": "https://api.ashbyhq.com/posting-api/job-board/matx",
+      "apiVersion": "1",
+      "apiRegion": "global",
+      "rawRows": 43,
+      "listedRows": 43,
+      "unlistedRows": 0,
+      "malformedRows": 0,
+      "boardPathViolations": 0,
+      "technicalEarlyCareerRoles": 0,
+      "geographicCoverage": [
+        "Mountain View",
+        "Mountain View (HQ) or Remote"
+      ],
+      "applicationHostSummary": {
+        "jobs.ashbyhq.com": 43
+      },
+      "qualifyingRoleSamples": []
+    }
+  ]
+}

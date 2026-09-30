@@ -15,13 +15,15 @@ const apiProbedBoards: Array<{
   initialHosts: string[];
   finalHosts: string[];
 }> = [
+  // A board whose Greenhouse API 404s is removed here rather than retained, so a
+  // fresh seed cannot re-admit it. MatX and Amplitude moved to Ashby and were
+  // dropped; D1 owns the lifecycle state of any registry row already seeded.
   { token: "ada18", name: "Ada", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "aevexaerospace", name: "AEVEX", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "airbnb", name: "Airbnb", initialHosts: ["careers.airbnb.com"], finalHosts: ["careers.airbnb.com"] },
   { token: "algolia", name: "Algolia", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "alphagrepsecurities", name: "AlphaGrep Securities", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "amarok", name: "AMAROK", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
-  { token: "amplitude", name: "Amplitude", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "andurilindustries", name: "Anduril Industries", initialHosts: ["boards.greenhouse.io"], finalHosts: ["boards.greenhouse.io","job-boards.greenhouse.io"] },
   { token: "anthropic", name: "Anthropic", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "aperaaiinc", name: "Apera AI Inc", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
