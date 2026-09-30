@@ -126,6 +126,26 @@ describe('grouped catalog API', () => {
     expect(body<{ groups: Array<{ roleCount: number }> }>(response)).toMatchObject({ groups: [{ roleCount: 1 }] });
   });
 
+  it('treats source=all as default browse so the Roles feed reads one ordered page', async () => {
+    const jobs = new MemoryInternshipStore();
+    const role = job('one', 0);
+    await jobs.putInternship(role);
+    await jobs.putCatalogProjection(groupCatalogJobs([role]).map(catalogGroupDetails), new Date().toISOString());
+    let orderedReads = 0;
+    let filteredReads = 0;
+    const ordered = jobs.listCatalogProjection.bind(jobs);
+    jobs.listCatalogProjection = async (...args) => { orderedReads += 1; return ordered(...args); };
+    const filtered = jobs.listCatalogProjectionFiltered.bind(jobs);
+    jobs.listCatalogProjectionFiltered = async (...args) => { filteredReads += 1; return filtered(...args); };
+    const response = await createApiHandler({ jobs, users: new MemoryUserStore() })(
+      event('GET', '/catalog', { status: 'open', source: 'all', limit: '50' }),
+    );
+    expect(response.statusCode).toBe(200);
+    expect(body<{ groups: Array<{ roleCount: number }> }>(response)).toMatchObject({ groups: [{ roleCount: 1 }] });
+    expect(orderedReads).toBe(1);
+    expect(filteredReads).toBe(0);
+  });
+
   it('fills sparse filtered pages with bounded projection reads and preserves the source cursor', async () => {
     const jobs = new MemoryInternshipStore();
     const roles = Array.from({ length: 230 }, (_, index) => ({

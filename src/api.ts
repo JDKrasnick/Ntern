@@ -105,8 +105,20 @@ function eligibleProjectedGroup(details: CatalogGroupDetails, at = new Date()): 
   return filterCatalogGroupDetails([{ ...details, roles }], {})[0];
 }
 
+/**
+ * `source=all` asks for every credibility class, so it narrows nothing. Treating
+ * it as a filter sent the Roles feed down the narrowed projection reader, which
+ * has to scan every published group rather than one ordered page. Keep it on the
+ * default ordered read; the eligibility and source re-checks still run on what
+ * comes back.
+ */
+function isDefaultBrowseFilter(filter: CatalogGroupFilter) {
+  if (filter.status !== 'open') return false;
+  return Object.keys(filter).every((key) => key === 'status' || (key === 'source' && filter.source === 'all'));
+}
+
 async function projectedCatalogPage(store: InternshipStore, cursor: string | undefined, limit: number, filter: CatalogGroupFilter) {
-  const isDefaultBrowse = filter.status === 'open' && Object.keys(filter).length === 1;
+  const isDefaultBrowse = isDefaultBrowseFilter(filter);
   if (!store.listCatalogProjection) return undefined;
   if (!isDefaultBrowse && store.listCatalogProjectionFiltered) {
     // A filtered or searched request reads the matching groups in SQL instead of

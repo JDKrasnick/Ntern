@@ -7,6 +7,7 @@ import type { D1Database, R2Bucket } from './types.js';
 const prefix = 'public-catalog/v1';
 const pageSize = 100;
 const roleReadPageConcurrency = 4;
+const filterReadPageConcurrency = 4;
 const maxAgeMs = 7 * 24 * 60 * 60_000;
 const encoded = (value: unknown): ArrayBuffer => new TextEncoder().encode(JSON.stringify(value)).buffer as ArrayBuffer;
 
@@ -77,12 +78,23 @@ export class R2CatalogProjection {
     const offset = offsetOf(cursor);
     const matched: CatalogGroupDetails[] = [];
     let seen = 0;
-    for (let index = 0; index * pageSize < pointer.count && matched.length <= limit; index += 1) {
-      for (const group of await this.page(pointer, index)) {
-        const filtered = filterCatalogGroupDetails([group], filter)[0];
-        if (!filtered) continue;
-        if (seen++ < offset) continue;
-        matched.push(filtered);
+    const totalPages = Math.ceil(pointer.count / pageSize);
+    // A narrowed read has to inspect every group because the projection is
+    // ordered for breadth, not for a facet. Read the pages in bounded batches,
+    // then filter them in page order so the matched-count cursor stays exact.
+    for (let first = 0; first < totalPages && matched.length <= limit; first += filterReadPageConcurrency) {
+      const pages = await Promise.all(Array.from(
+        { length: Math.min(filterReadPageConcurrency, totalPages - first) },
+        (_, index) => this.page(pointer, first + index),
+      ));
+      for (const groups of pages) {
+        for (const group of groups) {
+          const filtered = filterCatalogGroupDetails([group], filter)[0];
+          if (!filtered) continue;
+          if (seen++ < offset) continue;
+          matched.push(filtered);
+          if (matched.length > limit) break;
+        }
         if (matched.length > limit) break;
       }
     }
