@@ -278,10 +278,15 @@ describe('ingestion resource budgets', () => {
     // community list loaded every retained occurrence body to choose its slice,
     // crossed the isolate limit, and so never completed the migration.
     let fullReads = 0;
+    const hydratedSlices: number[] = [];
     class BoundedHydrationStore extends D1InternshipStore {
       override async getSourceOccurrences(): Promise<SourceOccurrenceState[]> {
         fullReads += 1;
         throw new Error('a pending admission migration hydrated the complete retained history');
+      }
+      override async getSourceOccurrencesByExternalIds(source: string, externalIds: readonly string[]) {
+        hydratedSlices.push(externalIds.length);
+        return super.getSourceOccurrencesByExternalIds(source, externalIds);
       }
     }
     const store = new BoundedHydrationStore(sqliteD1(database));
@@ -298,7 +303,11 @@ describe('ingestion resource budgets', () => {
 
     expect(report.failures).toEqual([]);
     expect(fullReads).toBe(0);
-    if (exposeGc) expect(peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
+    expect(hydratedSlices).toEqual([GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY]);
+    if (exposeGc) {
+      expect(peakMb - baselineMb).toBeLessThan(MESSAGE_HEAP_BUDGET_MB);
+      expect(peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
+    }
   }, 300_000);
 
   it('reads one occurrence of a production-sized source by key', async () => {

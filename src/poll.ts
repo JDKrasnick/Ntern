@@ -1797,10 +1797,12 @@ export class IngestionRunner {
         if (boundedGithubHydration) {
           // A bounded GitHub delivery needs full occurrence JSON only for the
           // selected slice. Omission candidates join that set only on the final
-          // slice, after the complete board has been observed. Historical closed
-          // rows remain stored in D1 and are never mistaken for missing coverage.
+          // resolution slice, after the complete board has been observed. A
+          // migration defers lifecycle reconciliation, so its delivery never
+          // hydrates omissions. Historical closed rows remain stored in D1 and
+          // are never mistaken for missing coverage.
           const selectedIds = resolvedListings.map(externalId);
-          const omissionIds = remainingRows.length === 0
+          const omissionIds = migrationLimit === undefined && remainingRows.length === 0
             ? (await this.store.listSourceOccurrenceIdsPendingReconciliation(connector.id))
               .filter((id) => !batch.activeExternalIds.has(id))
             : [];
