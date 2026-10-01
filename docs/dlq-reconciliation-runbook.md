@@ -339,3 +339,59 @@ without writing `queue_failure_events`. That boundary now records the failure
 best-effort and applies the standard final-delivery rule: acknowledge ordinary
 source-scoped work that the scheduler re-owns, but retain platform retries for
 malformed work and forced GitHub recovery.
+
+## 12. Reconciliation record: 2026-10-01 (GitHub OOM rebound)
+
+The catalog-admission alert fired at ~2026-10-01T02:06Z with `dlq-growth` (github
++1) and two `source-failure-persistence` rows, both
+`D1 statement did not settle within 20000 ms`. The catalog was healthy (2,455
+eligible roles; newest published role 2.9 h old; D1 overload failures zero) and
+the destination-verification queue drained from 50 to 0 during triage.
+
+The ledger rows are transient `resilientD1` stalls, not defects. One
+(`speedyapply-2027-swe`) self-resolved; `simplify-summer-2026`'s stayed
+unresolved beside five excluded `transport` message-deadline rows.
+`sourceFailureCategory` now classifies the stall text as `transport` so a
+retried stall no longer trips the defect signal (see the 2026-10-01 rebound
+section of `docs/197-ingestion-resource-bounds.md`).
+
+### DLQ inspection
+
+A non-consuming sample of the GitHub DLQ recovered all 26 messages, every one
+`missing-ledger` (no matching `queue_failure_events` row, no ledger marker):
+
+| Arrival | Count | Sources |
+| --- | ---: | --- |
+| 2026-09-28 | 24 | `simplify-summer-2026`, `speedyapply-2027-swe`, `speedyapply-2027-ai` |
+| 2026-10-01 | 2 | `simplify-summer-2026` (enqueued 01:55:23Z, 02:20:30Z) |
+
+The 2026-10-01 arrivals reproduce the resource-kill signature of §11: invocation
+analytics recorded three `exceededMemory` invocations and surrounding
+`scriptThrewException` / `clientDisconnected` invocations in the window, so no
+handler reached the failure path. The underlying bound is tracked as the open
+2026-10-01 follow-up in `docs/197-ingestion-resource-bounds.md`; the DLQ will
+keep receiving these until that memory rebound is fixed.
+
+### Disposition
+
+Owner-approved drain, applied 2026-10-01 via the direct sequence because the
+guarded `plan` cannot stage a selection this size: `/messages/peek` returns only
+a rotating sample (6-16 of 26 messages even after leases lapse), so `plan`
+always fails `Selection drift`. As in §§7 and 10, the direct peek → purge →
+`dlq_disposition_audit` path is the working procedure.
+
+| Queue | Action | Messages | Disposition plan id |
+| --- | --- | ---: | --- |
+| github | discard | 20 | `direct-2026-10-01-github-7ff6cd43` |
+| github | discard | 6 | `direct-2026-10-01-github-d37a6921` |
+
+Every disposed message was audited in `dlq_disposition_audit` (canonical
+`logical_key` / `payload_hash` written to match the guarded flow) and any
+matching `queue_failure_events` row resolved (none existed). The GitHub DLQ read
+**0** after the disposition; the gmail DLQ is untouched at 1. A catalog replay
+was not used: every source has been re-dispatched since its message dead-lettered,
+so a replay would only duplicate a poll.
+
+Residual: new `missing-ledger` dead-letters are expected to recur until the 2026-10-01
+resource-bound follow-up lands; re-run this drain when the GitHub DLQ is next
+reviewed.

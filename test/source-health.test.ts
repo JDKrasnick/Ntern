@@ -270,6 +270,16 @@ describe('application link probe failures', () => {
     expect(sourceFailureCategory(new ApplicationLinkValidationError('GitHub', 3, 2_000, []))).toBe('link');
   });
 
+  it('classifies a stalled D1 statement as a transient transport failure', () => {
+    // resilientD1 abandons an attempt that outlives its ceiling and retries it
+    // in-request; the diagnostic carries no D1 error text. It must not fall
+    // through to `persistence`, which the health alert reads as an ingestion
+    // defect rather than a retried transient.
+    const error = new Error('D1 statement did not settle within 20000 ms');
+    expect(sourceFailureCategory(error)).toBe('transport');
+    expect(sourceFailureOutcome(error)).toBe('temporary_provider_error');
+  });
+
   it('does not quarantine a source for two consecutive probe timeouts', () => {
     const first = attempt(undefined, new Error('simplify-summer-2026: row 12685: Application link timed out'), '2026-09-16T08:40:00.000Z');
     expect(first).toMatchObject({ state: 'degraded', failureCategory: 'transport', consecutiveFailures: 1 });
