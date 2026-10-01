@@ -129,6 +129,15 @@ describe('the belt yielding to the reader', () => {
   it('never holds a reader who has not touched it', () => {
     expect(beltYields(60000, 0, false)).toBe(false);
   });
+
+  it('holds for as long as a pointer rests in the lane', () => {
+    // A reader who has stopped on a card should not have it slide away under the
+    // cursor, so hovering holds indefinitely rather than for the quiet window.
+    expect(beltYields(60000, 0, false, true)).toBe(true);
+    expect(beltYields(600000, 600000, false, true)).toBe(true);
+    // Lifting the pointer hands the belt back immediately.
+    expect(beltYields(60000, 0, false, false)).toBe(false);
+  });
 });
 
 describe('what the lane leads with', () => {

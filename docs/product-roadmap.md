@@ -84,6 +84,9 @@
 - [x] Add a release calendar to the Catalog tab: a month grid of the days that actually published roles, a one-tap day filter that joins the other facets, UTC days by default, and an App & account setting to read days on the device clock instead.
 - [x] Add local swipe-right hide with Undo and Profile-based restore.
 - [x] Add cursor-based endless scrolling through every role in the selected availability catalog.
+- [x] Replace the Catalog card grid with a responsive divider list: touch-first editorial rows on mobile and stable comparison columns on web, while preserving grouped roles, queue, hide, and official-role handoff.
+- [x] Fold catalog freshness into that divider list: subtly mark roles added since the previous app opening and provide compact New / Last day / Last week / All lenses instead of a horizontally scrolling carousel.
+- [x] Add a dedicated Swipe tab that walks the catalog one role at a time, newest first: a right swipe joins the apply queue, a left swipe passes, the pass list stays on this device, and a one-tap *Swipe roles* pointer sits on the Roles feed. The deck reads the public role feed directly, writes queue adds through the existing `/me/applications` backend, buffers a full page of cards ahead, and caches the last deck on the device. An App & account setting can make the deck the device's landing surface instead of the catalog.
 - [x] Let notification recipients leave grouped new-match releases for the full catalog from either the release footer or the Roles tab.
 - [x] Repair catalog index drift and add a guarded operator repair, daily full-table invariant audit, metric, and alarm for open, closed, and nontechnical jobs.
 - [x] Complete issue #50's provider-neutral posting identity, source matching, historical repair, and continuous integrity gate.

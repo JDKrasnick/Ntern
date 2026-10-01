@@ -105,13 +105,19 @@ function catalogProjectionRoleQuery(filter: CatalogGroupFilter) {
   const clauses = ["json_extract(role.value, '$.open') = ?"];
   const values: unknown[] = [filter.status === 'closed' ? 0 : 1];
   if (filter.query?.trim()) {
-    clauses.push(`lower(
+    // Each typed term must occur in the company/title candidate. The exact
+    // word-prefix contract is applied after the bounded SQL page is decoded,
+    // but splitting terms here avoids both location-only candidates and the
+    // false negative where "accenture soft eng" is not a contiguous phrase.
+    const searchableRole = `lower(
       coalesce(json_extract(role.value, '$.company'), '') || ' ' ||
-      coalesce(json_extract(role.value, '$.title'), '') || ' ' ||
-      coalesce(json_extract(role.value, '$.location'), '') || ' ' ||
-      coalesce(json_extract(role.value, '$.season'), '')
-    ) LIKE ? ESCAPE '\\'`);
-    values.push(likePattern(filter.query.trim()));
+      coalesce(json_extract(role.value, '$.title'), '')
+    )`;
+    const terms = filter.query.trim().toLocaleLowerCase('en-US').split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    for (const term of terms) {
+      clauses.push(`${searchableRole} LIKE ? ESCAPE '\\'`);
+      values.push(likePattern(term));
+    }
   }
   if (filter.source && filter.source !== 'all') {
     const credibility = filter.source === 'direct'

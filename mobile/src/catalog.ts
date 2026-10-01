@@ -74,14 +74,12 @@ export async function nextMatchingGroupedCatalogPage<T extends SearchableCatalog
   return { groups: [], ...(nextCursor ? { cursor: nextCursor } : {}) };
 }
 
-/** Invalidate every old response before deciding whether a local preview is safe. */
-export function beginCatalogQueryChange<T extends SearchableCatalogGroup>(
-  generation: { current: number },
+/** Build the immediate on-device preview while the authoritative query settles. */
+export function catalogQueryPreview<T extends SearchableCatalogGroup>(
   groups: T[],
   query: string,
   hasActiveFilters: boolean,
 ): T[] | undefined {
-  generation.current += 1;
   return hasActiveFilters ? undefined : groups.filter((group) => catalogSearchPreviewMatches(group, query));
 }
 
