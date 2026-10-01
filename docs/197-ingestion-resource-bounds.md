@@ -558,7 +558,27 @@ Ashby sources hit `D1 DB exceeded its CPU time limit` (`capacity`). Two more
 The memory-heavy steps are named in `refreshCatalogProjection`: it holds
 `groupCatalogJobs(await store.listCatalog(), { includeClosed: true })` plus a full
 `catalogGroupDetails` projection for every group in one isolate, then serializes
-each group again in `putCatalogProjection`. As retained history grows this is the
-step that crosses 128 MB. The bounded fix — stream the grouping/hydration instead
-of materializing the whole catalog and every group's roles — remains the open
-follow-up; the DLQ drains and marker clears are symptom handling.
+each group again in `putCatalogProjection`.
+
+### Bounded admission-migration selection
+
+The live trigger was `pendingAdmissionConfigurationVersion` on the large trusted
+community lists. While it was set, the GitHub lane disabled bounded hydration
+(`!admissionConfigurationChanged && !metadataVersionChanged`) and called
+`getSourceOccurrences`, which loads every retained occurrence body.
+`simplify-summer-2026` retains 5,403 occurrences (~40 MB of JSON), so the delivery
+crossed the 128 MB isolate, was killed, and never completed the migration — and
+the next delivery repeated the full load against an unchanged checkpoint.
+
+The lane keeps bounded hydration whenever `maxListingsPerSourceRun` is set and
+selects the slice from a new compact projection,
+`listSourceOccurrenceSelectionMetadata` (external id, presence, state, admission
+configuration version, material hash, publication flag — no bodies). Occurrence
+bodies are read by external id only for the chosen migration rows and closures.
+Production-scale regression coverage lives in
+`test/ingestion-resource-budget.test.ts` (a pending migration must not call
+`getSourceOccurrences`) and `test/github-ingestion-day.integration.test.ts`.
+
+The catalog-projection build above still materializes the whole catalog and every
+group's roles. If `exceededMemory` recurs at projection cron minutes
+(`1,11,21,…:01`) rather than at consumer minutes, that build is the next target.

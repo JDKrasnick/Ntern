@@ -266,6 +266,41 @@ describe('ingestion resource budgets', () => {
     }
   }, 300_000);
 
+  it('does not hydrate the complete retained history when an admission migration is pending', async () => {
+    const { database, store: seedStore } = catalog();
+    const feed = PRODUCTION_GITHUB_FEEDS.simplify;
+    const documents = productionDocuments(feed);
+    await seedLargestSource(seedStore);
+    const checkpoint = await seedStore.getCheckpoint(sourceId);
+    await seedStore.putCheckpoint({ ...checkpoint!, pendingAdmissionConfigurationVersion: 'stale' });
+
+    // The production regression: a pending admission migration on the largest
+    // community list loaded every retained occurrence body to choose its slice,
+    // crossed the isolate limit, and so never completed the migration.
+    let fullReads = 0;
+    class BoundedHydrationStore extends D1InternshipStore {
+      override async getSourceOccurrences(): Promise<SourceOccurrenceState[]> {
+        fullReads += 1;
+        throw new Error('a pending admission migration hydrated the complete retained history');
+      }
+    }
+    const store = new BoundedHydrationStore(sqliteD1(database));
+    const runner = new IngestionRunner([productionAdapter(sourceId, documents)], store, () => new Date('2026-09-16T00:00:00.000Z'), undefined, undefined, false);
+
+    exposeGc?.();
+    const baselineMb = process.memoryUsage().heapUsed / (1024 * 1024);
+    const report = await runner.run({
+      maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
+      maxAdmissionMigrationListingsPerSourceRun: GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY,
+    });
+    exposeGc?.();
+    const peakMb = process.memoryUsage().heapUsed / (1024 * 1024);
+
+    expect(report.failures).toEqual([]);
+    expect(fullReads).toBe(0);
+    if (exposeGc) expect(peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
+  }, 300_000);
+
   it('reads one occurrence of a production-sized source by key', async () => {
     const { database, store } = catalog();
     const occurrences = syntheticOccurrences({ rows: PRODUCTION_GITHUB_OCCURRENCES, bytesPerRow: 400, sourceId });

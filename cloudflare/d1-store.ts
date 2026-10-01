@@ -7,7 +7,7 @@ import type { ApplicationSession } from '../src/application-automation.js';
 import { preferredJobIdentityConflicts, providerPostingKey, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
-import type { ApplicantProfile, ApplicationRecord, CatalogAdmissionReason, DeliveryReceipt, DestinationClassification, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceState, TrustedCommunityAlertQualification, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from '../src/types.js';
+import type { ApplicantProfile, ApplicationRecord, CatalogAdmissionReason, DeliveryReceipt, DestinationClassification, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceSelectionMetadata, SourceOccurrenceState, TrustedCommunityAlertQualification, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from '../src/types.js';
 import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
 import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
@@ -752,6 +752,59 @@ export class D1InternshipStore implements InternshipStore {
       }
       if (rows.results.length < sourceOccurrencePageSize) return health;
       cursor = rows.results[rows.results.length - 1]!.sk;
+    }
+  }
+  /**
+   * Compact presence/state/admission fields for every retained occurrence. A
+   * bounded GitHub delivery reads this to choose its migration or closure slice
+   * instead of hydrating the source's complete retained history, which for a
+   * large community list is tens of megabytes of bodies and exceeds the
+   * isolate's 128 MB limit. Bodies are then read only for the chosen slice.
+   */
+  async listSourceOccurrenceSelectionMetadata(sourceId: string): Promise<SourceOccurrenceSelectionMetadata[]> {
+    const rows: SourceOccurrenceSelectionMetadata[] = [];
+    let cursor = 'OCCURRENCE#';
+    for (;;) {
+      const page = await this.db.prepare(`SELECT
+          sk,
+          COALESCE(external_id, json_extract(value, '$.externalId')) AS external_id,
+          json_extract(value, '$.jobId') AS job_id,
+          json_extract(value, '$.present') AS present,
+          json_extract(value, '$.consecutiveOmissions') AS consecutive_omissions,
+          json_extract(value, '$.occurrence.state') AS state,
+          json_extract(value, '$.occurrence.admissionConfigurationVersion') AS admission_configuration_version,
+          json_extract(value, '$.occurrence.trustedCommunityAlertQualification.sourceMaterialHash') AS source_material_hash,
+          json_extract(value, '$.occurrence.trustedCommunityAlertQualification.catalogPublicationSuppressed') AS catalog_publication_suppressed
+        FROM catalog_items
+        WHERE pk = ? AND sk > ? AND sk LIKE 'OCCURRENCE#%'
+        ORDER BY sk LIMIT ?`)
+        .bind(`SOURCE#${sourceId}`, cursor, sourceOccurrencePageSize)
+        .all<{
+          sk: string;
+          external_id: string;
+          job_id: string | null;
+          present: number | null;
+          consecutive_omissions: number | null;
+          state: SourceOccurrence['state'] | null;
+          admission_configuration_version: string | null;
+          source_material_hash: string | null;
+          catalog_publication_suppressed: number | null;
+        }>();
+      for (const row of page.results) {
+        rows.push({
+          externalId: row.external_id,
+          jobId: row.job_id ?? '',
+          present: Boolean(row.present),
+          consecutiveOmissions: row.consecutive_omissions ?? 0,
+          state: row.state ?? 'closed',
+          ...(row.admission_configuration_version ? { admissionConfigurationVersion: row.admission_configuration_version } : {}),
+          ...(row.source_material_hash ? { sourceMaterialHash: row.source_material_hash } : {}),
+          ...(row.catalog_publication_suppressed !== null
+            ? { catalogPublicationSuppressed: Boolean(row.catalog_publication_suppressed) } : {}),
+        });
+      }
+      if (page.results.length < sourceOccurrencePageSize) return rows;
+      cursor = page.results[page.results.length - 1]!.sk;
     }
   }
   async getSourceOccurrencesRequiringTrustedCommunityRevocation(sourceId: string, limit: number): Promise<SourceOccurrenceState[]> {
