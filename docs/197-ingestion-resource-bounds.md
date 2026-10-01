@@ -544,3 +544,21 @@ Acceptance criteria: no `exceededMemory` on the ingestion Worker across two full
 GitHub cadences; the GitHub DLQ holds no `missing-ledger` entry for a reviewed
 source; and `simplify-summer-2026` / `speedyapply-2027-swe` record a
 `lastAttemptAt` inside one cadence.
+
+### Post-deploy recurrence (2026-10-01T04:30Z)
+
+The rebound continued after the 03:23Z deploy of the alert-classification change
+(which does not touch memory). Invocation analytics recorded `exceededMemory` at
+03:13:37, 04:19:29, 04:23:14 and 04:23:35Z, plus `scriptThrewException` and
+`clientDisconnected` around 03:00-03:13Z. A `failure-ledger-unavailable` marker was
+written at 03:05:51.550Z for a `simplify-summer-2026` message, the same instant
+Ashby sources hit `D1 DB exceeded its CPU time limit` (`capacity`). Two more
+`missing-ledger` GitHub dead-letters followed.
+
+The memory-heavy steps are named in `refreshCatalogProjection`: it holds
+`groupCatalogJobs(await store.listCatalog(), { includeClosed: true })` plus a full
+`catalogGroupDetails` projection for every group in one isolate, then serializes
+each group again in `putCatalogProjection`. As retained history grows this is the
+step that crosses 128 MB. The bounded fix — stream the grouping/hydration instead
+of materializing the whole catalog and every group's roles — remains the open
+follow-up; the DLQ drains and marker clears are symptom handling.
