@@ -11,7 +11,7 @@ import { isLeverSourceDue, leverWorkMessages } from '../src/lever-dispatch.js';
 import { processLeverQueue } from '../src/lever-worker.js';
 import { drainPendingExpoNotifications, ExpoPushPublisher, type EmailSender } from '../src/notifications.js';
 import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
-import { runTrustedAdmissionBackfill, settleStuckTrustedAdmissionMigrations } from '../src/trusted-admission-backfill.js';
+import { runTrustedAdmissionBackfill } from '../src/trusted-admission-backfill.js';
 import {
   identityCoverageFloor, nextIdentityCoverageBaseline,
   readIdentityCoverageBaseline, writeIdentityCoverageBaseline,
@@ -1065,7 +1065,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   if (request.method === 'POST' && url.pathname === '/internal/trusted-admission-backfill') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     const input = await request.json().catch(() => ({})) as {
-      apply?: boolean; repairToken?: string; expectedChanged?: number; sourceIds?: unknown; clearCheckpoint?: boolean;
+      apply?: boolean; repairToken?: string; expectedChanged?: number; sourceIds?: unknown;
     };
     try {
       // The repair grades rows under the reviewed trusted policy, so a dormant
@@ -1080,7 +1080,6 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       const sourceIds = input.sourceIds as string[] | undefined;
       const report = await runTrustedAdmissionBackfill(env.DB, {
         apply: input.apply, repairToken: input.repairToken, expectedChanged: input.expectedChanged, sourceIds,
-        clearCheckpoint: input.clearCheckpoint === true,
       });
       if (input.apply && report.projectionRefreshRequired) {
         await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
@@ -2094,17 +2093,6 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // Beyond the DLQ: unresolved source failures by category, quarantined sources,
     // an unavailable failure ledger, and any maintenance step that threw.
     const ingestionHealth = await step('ingestion_health_signals', () => ingestionHealthSignals(env.DB, observedAt));
-    // A trusted-community admission migration can stall on permanently
-    // ungradable occurrences (retired jobs, legacy rows without trusted
-    // admission) and then hold every new role of that list suppressed. Run the
-    // offline repair for any source still holding the obligation so the fleet
-    // self-heals instead of waiting on an operator. The repair is a no-op when
-    // no source is stuck.
-    const trustedAdmissionRepair = await step('trusted_admission_repair',
-      () => settleStuckTrustedAdmissionMigrations(env.DB));
-    if (trustedAdmissionRepair?.stuck.length) {
-      console.log(JSON.stringify({ event: 'trusted_admission_repair', observedAt: observedAt.toISOString(), ...trustedAdmissionRepair }));
-    }
     const operationalSignals = [
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),
