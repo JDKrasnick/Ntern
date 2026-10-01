@@ -37,6 +37,15 @@ export const CATALOG_RETENTION_JOB_BATCH = 25;
 /** The daily cron keeps draining full pages, but yields before monopolizing maintenance. */
 export const CATALOG_RETENTION_CRON_MAX_PASSES = 100;
 export const CATALOG_RETENTION_CRON_MAX_DURATION_MS = 20_000;
+export const LEGACY_POSTING_IDENTITY_INCIDENT_BATCH = 5_000;
+const LEGACY_POSTING_IDENTITY_INCIDENT_PREFIX = 'IDENTITY_INCIDENT#';
+const LEGACY_POSTING_IDENTITY_INCIDENT_PREFIX_END = 'IDENTITY_INCIDENT$';
+
+export interface LegacyPostingIdentityIncidentDrainReport {
+  applied: boolean;
+  deleted: number;
+  remaining: boolean;
+}
 
 export interface CatalogRetentionOptions {
   /** Clock for the cutoffs; defaults to now. */
@@ -127,6 +136,25 @@ async function limitedCount(db: D1Database, query: string, bindings: unknown[], 
 
 async function exists(db: D1Database, query: string, bindings: unknown[]): Promise<boolean> {
   return Boolean(await db.prepare(`SELECT 1 AS present FROM (${query} LIMIT 1)`).bind(...bindings).first<{ present: number }>());
+}
+
+export async function drainLegacyPostingIdentityIncidents(
+  db: D1Database,
+  options: { apply?: boolean; limit?: number } = {},
+): Promise<LegacyPostingIdentityIncidentDrainReport> {
+  const apply = options.apply === true;
+  const limit = positiveInteger(options.limit, LEGACY_POSTING_IDENTITY_INCIDENT_BATCH);
+  const selection = `SELECT rowid FROM catalog_items INDEXED BY catalog_items_kind_pk_sk
+    WHERE pk >= ? AND pk < ? AND kind = 'posting-identity-incident'
+    ORDER BY pk`;
+  const deleted = apply
+    ? (await db.prepare(`DELETE FROM catalog_items WHERE rowid IN (${selection} LIMIT ?)`)
+      .bind(LEGACY_POSTING_IDENTITY_INCIDENT_PREFIX, LEGACY_POSTING_IDENTITY_INCIDENT_PREFIX_END, limit).run()).meta.changes
+    : await limitedCount(db, selection,
+      [LEGACY_POSTING_IDENTITY_INCIDENT_PREFIX, LEGACY_POSTING_IDENTITY_INCIDENT_PREFIX_END], limit);
+  const remaining = await exists(db, selection,
+    [LEGACY_POSTING_IDENTITY_INCIDENT_PREFIX, LEGACY_POSTING_IDENTITY_INCIDENT_PREFIX_END]);
+  return { applied: apply, deleted, remaining };
 }
 
 /** Notification outbox rows past the retention window (malformed rows included). */

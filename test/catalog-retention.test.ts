@@ -6,6 +6,7 @@ import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import {
   CLOSED_JOB_RETENTION_DAYS, CLOSED_OCCURRENCE_RETENTION_DAYS,
   METADATA_HISTORY_RETENTION_DAYS, NOTIFICATION_EVENT_RETENTION_DAYS,
+  drainLegacyPostingIdentityIncidents,
   runCatalogRetention,
 } from '../cloudflare/catalog-retention.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
@@ -288,6 +289,24 @@ describe('catalog retention', () => {
     database.close();
   });
 
+  it('drains legacy identity incidents without deleting v2 incidents', async () => {
+    const { database, db } = subject();
+    for (let index = 0; index < 3; index += 1) {
+      insertCatalog(database, { pk: `IDENTITY_INCIDENT#legacy-${index}`, sk: 'INCIDENT', kind: 'posting-identity-incident', value: { recordedAt: daysBefore(index) } });
+    }
+    insertCatalog(database, { pk: 'IDENTITY_INCIDENT_V2#current', sk: 'INCIDENT', kind: 'posting-identity-incident', value: { recordedAt: NOW.toISOString() } });
+
+    expect(await drainLegacyPostingIdentityIncidents(db, { limit: 2 }))
+      .toEqual({ applied: false, deleted: 2, remaining: true });
+    expect(await drainLegacyPostingIdentityIncidents(db, { apply: true, limit: 2 }))
+      .toEqual({ applied: true, deleted: 2, remaining: true });
+    expect(await drainLegacyPostingIdentityIncidents(db, { apply: true, limit: 2 }))
+      .toEqual({ applied: true, deleted: 1, remaining: false });
+    expect(database.prepare("SELECT pk FROM catalog_items WHERE kind = 'posting-identity-incident'").all())
+      .toEqual([{ pk: 'IDENTITY_INCIDENT_V2#current' }]);
+    database.close();
+  });
+
   it('keeps current evidence and the newest attempt while pruning superseded history', async () => {
     const { database, db } = subject();
     const oldAt = daysBefore(METADATA_HISTORY_RETENTION_DAYS + 5);
@@ -352,6 +371,9 @@ describe('catalog retention', () => {
       ORDER BY coalesce(json_extract(value, '$.changedAt'), '') LIMIT ?`).all('2026-01-01', 200) as Array<{ detail: string }>;
     const applicationPlan = database.prepare(`EXPLAIN QUERY PLAN SELECT rowid FROM user_items
       WHERE kind = 'application' AND json_extract(value, '$.jobId') = ?`).all('job-1') as Array<{ detail: string }>;
+    const incidentPlan = database.prepare(`EXPLAIN QUERY PLAN SELECT rowid FROM catalog_items INDEXED BY catalog_items_kind_pk_sk
+      WHERE pk >= ? AND pk < ? AND kind = 'posting-identity-incident' ORDER BY pk LIMIT ?`)
+      .all('IDENTITY_INCIDENT#', 'IDENTITY_INCIDENT$', 5_000) as Array<{ detail: string }>;
 
     expect(notificationPlan.map(({ detail }) => detail).join('\n'))
       .toContain('SEARCH catalog_items USING INDEX catalog_items_notification_event_created (<expr><?)');
@@ -359,6 +381,8 @@ describe('catalog retention', () => {
       .toContain('SEARCH catalog_items USING INDEX catalog_items_source_occurrence_closed_changed (<expr><?)');
     expect(applicationPlan.map(({ detail }) => detail).join('\n'))
       .toContain('SEARCH user_items USING INDEX user_items_application_job (<expr>=?)');
+    expect(incidentPlan.map(({ detail }) => detail).join('\n'))
+      .toContain('SEARCH catalog_items USING COVERING INDEX catalog_items_kind_pk_sk (kind=? AND pk>? AND pk<?)');
     database.close();
   });
 });

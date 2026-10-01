@@ -27,6 +27,7 @@ Every sweep keeps what a live reader needs and deletes only history:
 
 | Sweep | Retention | What it removes | What it keeps |
 | --- | --- | --- | --- |
+| Legacy posting-identity incidents (`pk = 'IDENTITY_INCIDENT#…'`) | Superseded format | Up to 5,000 v1 rows per ten-minute maintenance tick | Stable v2 incidents, deduplicated by source occurrence and conflict evidence rather than observation time |
 | Notification events (`kind = 'notification-event'`) | 30 days | Outbox rows already consumed by the notification drain and past the operator recovery look-back | Anything inside the recovery window; the recovery endpoint rejects an older `since` value instead of returning a silently truncated result |
 | Closed internships (`kind = 'internship'`, `catalog_state = 'CLOSED'`) | 365 days since `lastSeenAt` | The job row, its per-source occurrences (named by its own `sourceReferences`), and its complete job-scoped role-metadata acquisition/review/repair lifecycle | Open roles and closed roles still inside the window; each saved application receives a compact presentation snapshot before its catalog parent disappears, so company/title/location remain visible without retaining the application URL |
 | Closed source occurrences (`kind = 'source-occurrence'`, `occurrence.state = 'closed'`) | 180 days since `changedAt` | A source's own record that it dropped a posting | Occurrences the source still lists, and any occurrence inside the window |
@@ -42,6 +43,12 @@ metadata sweeps are isolated behind a `try`/`catch`, so a table that a migration
 has not yet added cannot block catalog reclamation. The maintenance step runs
 inside `runScheduledStep`, so a failure is logged and the rest of the cron
 continues.
+
+Posting-identity conflicts use a v2 incident key that excludes `observedAt` and
+normalizes contradictory evidence. Re-polling the same unresolved occurrence is
+therefore a zero-write conflict instead of a new ~2.4 KB row plus index entries.
+The ten-minute maintenance cron drains 5,000 legacy v1 rows per tick through the
+primary-key prefix until the old append-only backlog reaches zero.
 
 Mutable rows are never deleted from a stale selection. Timestamp and metadata
 sweeps select and delete inside one SQLite statement. A closed job and its

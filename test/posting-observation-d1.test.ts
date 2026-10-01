@@ -246,6 +246,28 @@ describe('D1 atomic posting observation', () => {
     expect(sqlite.prepare("SELECT count(*) AS count FROM catalog_items WHERE kind = 'posting-identity-incident'").get()).toEqual({ count: 1 });
   });
 
+  it('deduplicates a recurring identity conflict across observation times', async () => {
+    const { sqlite, store } = subject();
+    const occurrence = input().occurrence.occurrence;
+    const decision = {
+      status: 'quarantined' as const,
+      reason: 'aliases-resolve-to-different-jobs' as const,
+      contradictoryEvidence: ['job-b', 'job-a'],
+      reviewFamilyKey: 'jobs.example.test/jobs/:segment?',
+      observedAt: '2026-09-30T00:00:00.000Z',
+    };
+    await store.commitPostingObservation({ decision, sourceId: 'community', externalId: 'role-a', occurrence });
+    await store.commitPostingObservation({
+      decision: { ...decision, contradictoryEvidence: ['job-a', 'job-b'], observedAt: '2026-10-01T00:00:00.000Z' },
+      sourceId: 'community', externalId: 'role-a', occurrence: { ...occurrence, row: 2 },
+    });
+
+    expect(sqlite.prepare("SELECT count(*) AS count FROM catalog_items WHERE kind = 'posting-identity-incident'").get())
+      .toEqual({ count: 1 });
+    expect(sqlite.prepare("SELECT pk, json_extract(value, '$.recordedAt') AS recorded_at FROM catalog_items WHERE kind = 'posting-identity-incident'").get())
+      .toMatchObject({ pk: expect.stringMatching(/^IDENTITY_INCIDENT_V2#/u), recorded_at: decision.observedAt });
+  });
+
   it('makes reviewer decisions immutable', () => {
     const { sqlite } = subject();
     sqlite.prepare("INSERT INTO posting_identity_review_candidates VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
