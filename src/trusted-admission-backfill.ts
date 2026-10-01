@@ -303,6 +303,7 @@ async function scanTrustedSources(input: {
   sourceIds: string[];
   versions: Map<string, string>;
   now: string;
+  clearCheckpoint?: boolean;
   flush: (targets: Target[]) => Promise<void>;
 }): Promise<ScanResult> {
   const { db, now } = input;
@@ -409,10 +410,22 @@ async function scanTrustedSources(input: {
     // The migration's continuation obligation is a source-scoped flag. Clear it
     // only when every occurrence of this source reached a decision: an ungraded
     // row must keep the poller's obligation instead of being silently dropped.
+    // A stale row can never be graded again — its job is gone, or it never
+    // carried trusted admission — and at production scale those rows accumulate
+    // until no source can ever release the obligation. `clearCheckpoint` is the
+    // deliberate operator override for that case; the poller grades the live
+    // board regardless, so the ungraded residue is never lost, only retired.
     const checkpoint = parse<SourceCheckpoint>(checkpointRow?.value);
-    if (checkpointRow && checkpoint && checkpoint.pendingAdmissionConfigurationVersion !== undefined && !skipped) {
+    if (checkpointRow && checkpoint && checkpoint.pendingAdmissionConfigurationVersion !== undefined
+      && (!skipped || input.clearCheckpoint)) {
       const remaining = { ...checkpoint };
       delete remaining.pendingAdmissionConfigurationVersion;
+      // The poller re-arms the migration whenever the checkpoint's stored
+      // admission version differs from the one it computes, so clearing the flag
+      // alone never sticks: it would re-set `pendingAdmissionConfigurationVersion`
+      // on the next poll. Record the version this pass graded every occurrence
+      // to, which is the same version the poller derives, so the obligation ends.
+      remaining.admissionConfigurationVersion = version;
       buffer.push({
         pk: checkpointRow.pk, sk: checkpointRow.sk, label: `${sourceId}:checkpoint`,
         oldValue: checkpointRow.value, value: JSON.stringify(remaining),
@@ -505,7 +518,7 @@ async function applyTargets(db: D1Database, token: string, targets: Target[]): P
 
 export async function runTrustedAdmissionBackfill(
   db: D1Database,
-  options: { apply?: boolean; repairToken?: string; expectedChanged?: number; sourceIds?: string[] } = {},
+  options: { apply?: boolean; repairToken?: string; expectedChanged?: number; sourceIds?: string[]; clearCheckpoint?: boolean } = {},
 ): Promise<TrustedAdmissionBackfillReport> {
   const sourceIds = trustedSourceIds(options.sourceIds);
   const now = new Date().toISOString();
@@ -514,7 +527,7 @@ export async function runTrustedAdmissionBackfill(
   const resolverVersion = await new D1CatalogAdmissionStore(db).configurationVersion();
   const versions = new Map(sourceIds.map((sourceId) => [sourceId, admissionConfigurationVersion(sourceId, resolverVersion)]));
   const plan = await scanTrustedSources({
-    db, sourceIds, versions, now,
+    db, sourceIds, versions, now, clearCheckpoint: options.clearCheckpoint,
     flush: async () => { /* The plan pass only reads; the token authorizes the writes. */ },
   });
   // The guard covers the rows whose visibility changes. Gating the re-graded
@@ -542,10 +555,10 @@ export async function runTrustedAdmissionBackfill(
   if (options.repairToken !== repairToken || options.expectedChanged !== published) {
     throw new Error('Trusted admission eligibility changed after dry run; use the latest repair token and exact published-row count');
   }
-  if (!changed) return report;
+  if (!changed && !report.changes.checkpoints) return report;
   const outcome = { published: 0, regraded: 0, conflicts: [] as string[] };
   const applied = await scanTrustedSources({
-    db, sourceIds, versions, now,
+    db, sourceIds, versions, now, clearCheckpoint: options.clearCheckpoint,
     flush: async (targets) => {
       // A guard failure means a concurrent writer touched this cohort; stop
       // instead of stacking more groups on top of a catalog that moved.
@@ -566,11 +579,47 @@ export async function runTrustedAdmissionBackfill(
   report.appliedTotals = { published: outcome.published, regraded: outcome.regraded };
   report.regradedWithoutGuard = outcome.regraded > 0;
   report.projectionRefreshRequired = outcome.published + outcome.regraded > 0;
-  // The token authorized one published set: the apply pass must have seen the
+  // The token authorizes one published set: the apply pass must have seen the
   // same one, and every row it decided on must have been written.
   if (!report.conflicts.length && (catalogQualityHash(applied.published) !== repairToken
     || outcome.published + outcome.regraded !== applied.totals.published + applied.totals.regraded)) {
     report.conflicts = ['Trusted admission rows changed between planning and apply'];
   }
   return report;
+}
+
+/**
+ * Scheduled self-heal for a trusted-community admission migration that cannot
+ * finish on its own. A large list retains permanently ungradable occurrences —
+ * retired jobs, legacy rows without a trusted admission — and the plan guard
+ * otherwise holds the migration obligation forever, which suppresses every new
+ * role and leaves the source degraded. This runs the offline repair for any
+ * trusted source still holding the obligation and clears it deliberately.
+ */
+export async function settleStuckTrustedAdmissionMigrations(db: D1Database): Promise<{
+  stuck: string[]; published: number; regraded: number; clearedCheckpoints: boolean;
+}> {
+  const sourceIds = trustedSourceIds();
+  const stuck: string[] = [];
+  for (const sourceId of sourceIds) {
+    const row = await db.prepare('SELECT value FROM catalog_items WHERE pk = ? AND sk = ? LIMIT 1')
+      .bind(`SOURCE#${sourceId}`, 'CHECKPOINT').first<{ value: string }>();
+    const checkpoint = row ? parse<SourceCheckpoint>(row.value) : undefined;
+    if (checkpoint?.pendingAdmissionConfigurationVersion !== undefined) stuck.push(sourceId);
+  }
+  if (!stuck.length) return { stuck: [], published: 0, regraded: 0, clearedCheckpoints: false };
+  const plan = await runTrustedAdmissionBackfill(db, { sourceIds: stuck, clearCheckpoint: true });
+  if (!plan.totals.published && !plan.totals.regraded && !plan.changes.checkpoints) {
+    return { stuck, published: 0, regraded: 0, clearedCheckpoints: false };
+  }
+  const applied = await runTrustedAdmissionBackfill(db, {
+    apply: true, repairToken: plan.repairToken, expectedChanged: plan.expectedChanged,
+    sourceIds: stuck, clearCheckpoint: true,
+  });
+  return {
+    stuck,
+    published: applied.appliedTotals.published,
+    regraded: applied.appliedTotals.regraded,
+    clearedCheckpoints: applied.conflicts.length === 0,
+  };
 }
