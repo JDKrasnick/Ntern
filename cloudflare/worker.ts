@@ -33,6 +33,7 @@ import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore 
 import {
   CATALOG_RETENTION_CRON_MAX_DURATION_MS,
   CATALOG_RETENTION_CRON_MAX_PASSES,
+  drainLegacyPostingIdentityIncidents,
   NOTIFICATION_EVENT_RETENTION_DAYS,
   notificationEventRetentionCutoff,
   runCatalogRetention,
@@ -2061,6 +2062,11 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     // failing phase reaches the operator and not only the console.
     const maintenanceFailures: string[] = [];
     const step = <T>(name: string, run: () => Promise<T>) => runScheduledStep(name, run, phases, maintenanceFailures);
+    const legacyPostingIdentityIncidents = await step('legacy_posting_identity_incidents',
+      () => drainLegacyPostingIdentityIncidents(env.DB, { apply: true }));
+    if (legacyPostingIdentityIncidents?.deleted || legacyPostingIdentityIncidents?.remaining) {
+      console.log(JSON.stringify({ event: 'legacy_posting_identity_incident_drain', observedAt: observedAt.toISOString(), ...legacyPostingIdentityIncidents }));
+    }
     const recentOverloads = await step('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await step('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const providerShadowRecovery = await step('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
@@ -2119,7 +2125,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     }
     const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)), phases);
     await recordPhase(phases, 'maintenance_complete', 'complete', observedAt);
-    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
+    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), legacyPostingIdentityIncidents, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
   }
   if (event.cron === '*/5 * * * *') {

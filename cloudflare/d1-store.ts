@@ -14,6 +14,7 @@ import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from '../src/identity/projection.js';
 import { mergeSourceOccurrence } from '../src/identity/source-occurrence.js';
+import { POSTING_IDENTITY_INCIDENT_V2_PREFIX, postingIdentityIncidentId } from '../src/identity/incident.js';
 import { D1CatalogAdmissionStore } from './catalog-admission-store.js';
 
 type JsonRow = { value: string };
@@ -447,12 +448,12 @@ export class D1InternshipStore implements InternshipStore {
   async commitPostingObservation(input: PostingObservationCommit): Promise<PostingObservationCommitResult> {
     if ('sourceId' in input) {
       const incident: PostingIdentityIncident = {
-        incidentId: createHash('sha256').update(`identity-incident-v1:${input.sourceId}\0${input.externalId}\0${JSON.stringify(input.decision)}`).digest('hex'),
+        incidentId: postingIdentityIncidentId(input.sourceId, input.externalId, input.decision),
         sourceId: input.sourceId, externalId: input.externalId, decision: input.decision,
         occurrence: input.occurrence, recordedAt: input.decision.observedAt,
       };
       await this.db.prepare("INSERT INTO catalog_items (pk, sk, kind, value, source_id, external_id) VALUES (?, 'INCIDENT', 'posting-identity-incident', ?, ?, ?) ON CONFLICT(pk, sk) DO NOTHING")
-        .bind(`IDENTITY_INCIDENT#${incident.incidentId}`, JSON.stringify(incident), incident.sourceId, incident.externalId).run();
+        .bind(`${POSTING_IDENTITY_INCIDENT_V2_PREFIX}${incident.incidentId}`, JSON.stringify(incident), incident.sourceId, incident.externalId).run();
       return { outcome: 'quarantined', incident };
     }
     const aliases = input.identity ? [...new Set(input.identity.aliases.map((item) => item.value))].sort() : [];

@@ -13,6 +13,7 @@ import type { LeverCandidateProbeResult } from './sources/lever-probe.js';
 import { filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from './catalog-groups.js';
 import { alertEligible, catalogEligible } from './catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from './identity/projection.js';
+import { postingIdentityIncidentId } from './identity/incident.js';
 import type { DestinationVerificationRequest } from './destination-verification.js';
 import type { ResumeSubscription } from './subscription.js';
 
@@ -183,11 +184,13 @@ export class MemoryInternshipStore implements InternshipStore {
   async commitPostingObservation(input: PostingObservationCommit): Promise<PostingObservationCommitResult> {
     if ('sourceId' in input) {
       const incident: PostingIdentityIncident = {
-        incidentId: createHash('sha256').update(`identity-incident-v1:${input.sourceId}\0${input.externalId}\0${JSON.stringify(input.decision)}`).digest('hex'),
+        incidentId: postingIdentityIncidentId(input.sourceId, input.externalId, input.decision),
         sourceId: input.sourceId, externalId: input.externalId, decision: input.decision,
         occurrence: structuredClone(input.occurrence), recordedAt: input.decision.observedAt,
       };
-      this.postingIdentityIncidents.set(incident.incidentId, incident);
+      if (!this.postingIdentityIncidents.has(incident.incidentId)) {
+        this.postingIdentityIncidents.set(incident.incidentId, incident);
+      }
       return { outcome: 'quarantined', incident };
     }
     const resolution = input.identity
