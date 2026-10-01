@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { Poller } from '../src/poll.js';
-import type { SourceAdapter, SourceCheckpoint, SourceFetchResult, SourceSnapshot, SourcedPosting } from '../src/types.js';
+import type { SourceAdapter, SourceCheckpoint, SourceFetchResult, SourceOccurrenceState, SourceSnapshot, SourcedPosting } from '../src/types.js';
 
 const migrations = [
   '0001_initial.sql', '0007_catalog_admission.sql', '0008_catalog_admission_occurrence_repair.sql',
@@ -58,7 +58,7 @@ function catalog() {
   for (const migration of migrations) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
-  return new D1InternshipStore(sqliteD1(database));
+  return { database, store: new D1InternshipStore(sqliteD1(database)) };
 }
 
 const sourceId = 'vanshb03-summer-2027';
@@ -96,7 +96,7 @@ const successfulProbe = async (url: string) => ({ url, evidence: { url, confiden
 
 describe('GitHub ingestion day integration', () => {
   it('drains a regular day, records an omission, and admits a newly published role', async () => {
-    const store = catalog();
+    const { store } = catalog();
     const morning = Array.from({ length: 61 }, (_, index) => posting(index));
     const board = new Board(sourceId, morning);
     const run = () => new Poller([board], store, undefined, undefined, successfulProbe, false)
@@ -122,7 +122,7 @@ describe('GitHub ingestion day integration', () => {
   });
 
   it('converges after a hard day with a retryable prefix larger than one slice', async () => {
-    const store = catalog();
+    const { store } = catalog();
     const rows = Array.from({ length: 70 }, (_, index) => posting(index));
     const board = new Board(sourceId, rows);
     const failing = new Set(rows.slice(0, 30).map((row) => row.applyUrl));
@@ -140,5 +140,39 @@ describe('GitHub ingestion day integration', () => {
     for (let delivery = 0; delivery < 2; delivery += 1) await run();
     expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toBeUndefined();
     expect((await store.getSourceOccurrences(sourceId)).filter((row) => row.present)).toHaveLength(70);
+  });
+
+  it('bounds hydration when a large source has a pending admission migration', async () => {
+    const { database, store: seedStore } = catalog();
+    const board = new Board(sourceId, Array.from({ length: 60 }, (_, index) => posting(index)));
+    await new Poller([board], seedStore, undefined, undefined, successfulProbe, false)
+      .poll({ maxListingsPerSourceRun: 25 });
+    const checkpoint = await seedStore.getCheckpoint(sourceId);
+    expect(checkpoint).toBeDefined();
+    await seedStore.putCheckpoint({ ...checkpoint!, pendingAdmissionConfigurationVersion: 'stale' });
+
+    // The production regression: a pending admission migration used to load every
+    // retained occurrence body to choose its slice, which exceeded the isolate and
+    // left the migration unable to complete, so it re-loaded the full set forever.
+    // Selection now reads the compact projection and hydrates only the slice.
+    let fullReads = 0;
+    let selectionReads = 0;
+    class BoundedStore extends D1InternshipStore {
+      override async getSourceOccurrences(): Promise<SourceOccurrenceState[]> {
+        fullReads += 1;
+        throw new Error('a pending admission migration hydrated the complete retained history');
+      }
+      override async listSourceOccurrenceSelectionMetadata(source: string) {
+        selectionReads += 1;
+        return super.listSourceOccurrenceSelectionMetadata(source);
+      }
+    }
+    const bounded = new BoundedStore(sqliteD1(database));
+    const report = await new Poller([board], bounded, undefined, undefined, successfulProbe, false)
+      .poll({ maxListingsPerSourceRun: 25, maxAdmissionMigrationListingsPerSourceRun: 25 });
+
+    expect(report.failures).toEqual([]);
+    expect(fullReads).toBe(0);
+    expect(selectionReads).toBeGreaterThan(0);
   });
 });

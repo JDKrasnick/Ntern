@@ -3,7 +3,7 @@ import { isPastSeason } from './core/early-career.js';
 import { employerCategory } from './core/employers.js';
 import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency } from './catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
-import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceState, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from './types.js';
+import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceSelectionMetadata, SourceOccurrenceState, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from './types.js';
 import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from './resume.js';
 import { preferredJobIdentityConflicts, resolvePostingAliases, type AliasResolution } from './identity/posting.js';
 import type { ApplicationSession } from './application-automation.js';
@@ -91,6 +91,10 @@ export interface InternshipStore {
   /** Compact material hashes and admission fields used to detect changed rows
    * and evaluate whole-source health without hydrating occurrence bodies. */
   listSourceOccurrenceTrustedCommunityHealth(sourceId: string): Promise<TrustedCommunityOccurrenceHealth[]>;
+  /** Compact presence/state/admission fields for every retained occurrence, so a
+   * bounded GitHub delivery can choose its migration or closure slice without
+   * hydrating occurrence bodies. */
+  listSourceOccurrenceSelectionMetadata(sourceId: string): Promise<SourceOccurrenceSelectionMetadata[]>;
   /** Bounded rows that still carry the retired trusted-community admission. */
   getSourceOccurrencesRequiringTrustedCommunityRevocation(sourceId: string, limit: number): Promise<SourceOccurrenceState[]>;
   putSourceOccurrence(occurrence: SourceOccurrenceState): Promise<void>;
@@ -273,6 +277,23 @@ export class MemoryInternshipStore implements InternshipStore {
           } } : {}),
           ...(qualification ? { trustedCommunityAlertQualification: { status: qualification.status } } : {}),
         }];
+      })
+      .sort((left, right) => left.externalId.localeCompare(right.externalId));
+  }
+  async listSourceOccurrenceSelectionMetadata(sourceId: string) {
+    return [...this.occurrences.values()]
+      .filter((value) => value.sourceId === sourceId)
+      .map((value): SourceOccurrenceSelectionMetadata => {
+        const qualification = value.occurrence.trustedCommunityAlertQualification;
+        return {
+          externalId: value.externalId, jobId: value.jobId, present: value.present,
+          consecutiveOmissions: value.consecutiveOmissions, state: value.occurrence.state,
+          ...(value.occurrence.admissionConfigurationVersion
+            ? { admissionConfigurationVersion: value.occurrence.admissionConfigurationVersion } : {}),
+          ...(qualification?.sourceMaterialHash ? { sourceMaterialHash: qualification.sourceMaterialHash } : {}),
+          ...(qualification?.catalogPublicationSuppressed !== undefined
+            ? { catalogPublicationSuppressed: qualification.catalogPublicationSuppressed } : {}),
+        };
       })
       .sort((left, right) => left.externalId.localeCompare(right.externalId));
   }

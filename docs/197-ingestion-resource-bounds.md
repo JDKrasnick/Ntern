@@ -544,3 +544,41 @@ Acceptance criteria: no `exceededMemory` on the ingestion Worker across two full
 GitHub cadences; the GitHub DLQ holds no `missing-ledger` entry for a reviewed
 source; and `simplify-summer-2026` / `speedyapply-2027-swe` record a
 `lastAttemptAt` inside one cadence.
+
+### Post-deploy recurrence (2026-10-01T04:30Z)
+
+The rebound continued after the 03:23Z deploy of the alert-classification change
+(which does not touch memory). Invocation analytics recorded `exceededMemory` at
+03:13:37, 04:19:29, 04:23:14 and 04:23:35Z, plus `scriptThrewException` and
+`clientDisconnected` around 03:00-03:13Z. A `failure-ledger-unavailable` marker was
+written at 03:05:51.550Z for a `simplify-summer-2026` message, the same instant
+Ashby sources hit `D1 DB exceeded its CPU time limit` (`capacity`). Two more
+`missing-ledger` GitHub dead-letters followed.
+
+The memory-heavy steps are named in `refreshCatalogProjection`: it holds
+`groupCatalogJobs(await store.listCatalog(), { includeClosed: true })` plus a full
+`catalogGroupDetails` projection for every group in one isolate, then serializes
+each group again in `putCatalogProjection`.
+
+### Bounded admission-migration selection
+
+The live trigger was `pendingAdmissionConfigurationVersion` on the large trusted
+community lists. While it was set, the GitHub lane disabled bounded hydration
+(`!admissionConfigurationChanged && !metadataVersionChanged`) and called
+`getSourceOccurrences`, which loads every retained occurrence body.
+`simplify-summer-2026` retains 5,403 occurrences (~40 MB of JSON), so the delivery
+crossed the 128 MB isolate, was killed, and never completed the migration — and
+the next delivery repeated the full load against an unchanged checkpoint.
+
+The lane keeps bounded hydration whenever `maxListingsPerSourceRun` is set and
+selects the slice from a new compact projection,
+`listSourceOccurrenceSelectionMetadata` (external id, presence, state, admission
+configuration version, material hash, publication flag — no bodies). Occurrence
+bodies are read by external id only for the chosen migration rows and closures.
+Production-scale regression coverage lives in
+`test/ingestion-resource-budget.test.ts` (a pending migration must not call
+`getSourceOccurrences`) and `test/github-ingestion-day.integration.test.ts`.
+
+The catalog-projection build above still materializes the whole catalog and every
+group's roles. If `exceededMemory` recurs at projection cron minutes
+(`1,11,21,…:01`) rather than at consumer minutes, that build is the next target.

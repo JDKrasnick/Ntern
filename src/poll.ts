@@ -47,10 +47,38 @@ import type {
   SourceFetchResult,
   SourceHealth,
   SourceOccurrence,
+  SourceOccurrenceSelectionMetadata,
   SourceOccurrenceState,
   SourceSnapshot,
 } from './types.js';
 import type { InternshipStore } from './store.js';
+
+/**
+ * A bodyless stand-in used only while a bounded GitHub migration chooses its
+ * slice from `SourceOccurrenceSelectionMetadata`. It carries exactly the fields
+ * the candidate filters read; the caller replaces it with the hydrated
+ * occurrence (read by external id) before any write or reconciliation, so a
+ * large list never hydrates every retained body just to pick a 25-row slice.
+ */
+function selectionOccurrence(entry: SourceOccurrenceSelectionMetadata): SourceOccurrenceState {
+  const qualification = entry.sourceMaterialHash || entry.catalogPublicationSuppressed !== undefined
+    ? {
+        ...(entry.sourceMaterialHash ? { sourceMaterialHash: entry.sourceMaterialHash } : {}),
+        ...(entry.catalogPublicationSuppressed !== undefined
+          ? { catalogPublicationSuppressed: entry.catalogPublicationSuppressed } : {}),
+      }
+    : undefined;
+  return {
+    sourceId: '', externalId: entry.externalId, jobId: entry.jobId,
+    occurrence: {
+      state: entry.state,
+      ...(entry.admissionConfigurationVersion ? { admissionConfigurationVersion: entry.admissionConfigurationVersion } : {}),
+      ...(qualification ? { trustedCommunityAlertQualification: qualification } : {}),
+    } as unknown as SourceOccurrence,
+    present: entry.present, consecutiveOmissions: entry.consecutiveOmissions,
+    changedSnapshotHash: '', changedAt: '',
+  };
+}
 
 const applicationPageMetadataVersion = ROLE_METADATA_EXTRACTION_VERSION + 1;
 
@@ -1585,10 +1613,19 @@ export class IngestionRunner {
         if (baseline) report.baselineSources.push(connector.id);
         report.processedListings += batch.processed.counts.eligible;
         const now = this.now().toISOString();
+        // A bounded GitHub delivery never hydrates the source's complete retained
+        // history, even while an admission-configuration or metadata migration is
+        // pending. Those paths still choose a bounded slice from stored state, so
+        // they read the compact selection projection and hydrate bodies only for
+        // the chosen rows. Loading every retained occurrence body merely to pick
+        // the slice is what crossed the isolate's 128 MB limit and left a large
+        // list's migration unable to complete, so it re-fetched the full set on
+        // every delivery.
         const boundedGithubHydration = providerFor(connector.id) === 'github'
-          && options.maxListingsPerSourceRun !== undefined
-          && !admissionConfigurationChanged
-          && !metadataVersionChanged;
+          && options.maxListingsPerSourceRun !== undefined;
+        const githubSelectionMetadata = boundedGithubHydration && (admissionConfigurationChanged || metadataVersionChanged)
+          ? await this.store.listSourceOccurrenceSelectionMetadata(connector.id)
+          : undefined;
         let priorOccurrences = revocationOccurrences
           ?? (boundedGithubHydration ? [] : await this.store.getSourceOccurrences(connector.id));
         // An unchanged snapshot repeats postings the checkpoint already trusts, so
@@ -1602,7 +1639,11 @@ export class IngestionRunner {
         const migrationLimit = (admissionConfigurationChanged || boundedMetadataRefresh) && githubAdmissionConfigurationVersion
           ? remainingMigrationLimit
           : undefined;
-        let priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
+        let priorByExternalId = new Map<string, SourceOccurrenceState>(
+          githubSelectionMetadata
+            ? githubSelectionMetadata.map((entry) => [entry.externalId, selectionOccurrence(entry)])
+            : priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]),
+        );
         const requiredMigrationCandidates = migrationLimit === undefined ? [] : batch.processed.listings.filter((sourceListing) => {
           const prior = priorByExternalId.get(externalId(sourceListing));
           // The per-occurrence stamp is the durable migration cursor. Stored
@@ -1756,10 +1797,12 @@ export class IngestionRunner {
         if (boundedGithubHydration) {
           // A bounded GitHub delivery needs full occurrence JSON only for the
           // selected slice. Omission candidates join that set only on the final
-          // slice, after the complete board has been observed. Historical closed
-          // rows remain stored in D1 and are never mistaken for missing coverage.
+          // resolution slice, after the complete board has been observed. A
+          // migration defers lifecycle reconciliation, so its delivery never
+          // hydrates omissions. Historical closed rows remain stored in D1 and
+          // are never mistaken for missing coverage.
           const selectedIds = resolvedListings.map(externalId);
-          const omissionIds = remainingRows.length === 0
+          const omissionIds = migrationLimit === undefined && remainingRows.length === 0
             ? (await this.store.listSourceOccurrenceIdsPendingReconciliation(connector.id))
               .filter((id) => !batch.activeExternalIds.has(id))
             : [];
@@ -1829,18 +1872,30 @@ export class IngestionRunner {
         let admissionMigrationPending = admissionEvidencePending || metadataMigrationPending
           || publicationCandidates.length > selectedPublications.length
           || selectedPublications.some((listing) => !resolution.handledExternalIds.has(externalId(listing)));
-        const missingOccurrences = priorOccurrences.filter((prior) => !batch.activeExternalIds.has(prior.externalId));
+        // A pending migration selects omissions from the compact projection, so
+        // the missing set is the whole retained partition, not only the slice
+        // whose bodies were hydrated above.
+        const missingOccurrences = (githubSelectionMetadata ?? priorOccurrences)
+          .filter((prior) => !batch.activeExternalIds.has(prior.externalId));
         const pendingOmissionIds = new Set((previous?.pendingMetadataOmissions ?? [])
           .filter((item) => item.extractionVersion === ROLE_METADATA_EXTRACTION_VERSION
             && item.processingRevision === SOURCE_METADATA_PROCESSING_REVISION
             && !batch.activeExternalIds.has(item.externalId))
           .map((item) => item.externalId));
         const unprocessedMissingOccurrences = missingOccurrences.filter((prior) => !pendingOmissionIds.has(prior.externalId));
-        const selectedClosures = boundedMetadataRefresh && !admissionMigrationPending
+        const selectedClosureSelection = boundedMetadataRefresh && !admissionMigrationPending
           ? (metadataMigrationCandidates.length ? [] : unprocessedMissingOccurrences.slice(0, migrationLimit))
           : [];
+        // The compact projection carries no bodies, so hydrate only the closures
+        // it chose; without it these entries already are the loaded occurrences.
+        const selectedClosures: SourceOccurrenceState[] = githubSelectionMetadata
+          ? (selectedClosureSelection.length
+            ? await this.store.getSourceOccurrencesByExternalIds(connector.id,
+              [...new Set(selectedClosureSelection.map((prior) => prior.externalId))])
+            : [])
+          : selectedClosureSelection.filter((prior): prior is SourceOccurrenceState => 'occurrence' in prior);
         const lifecycleMigrationPending = boundedMetadataRefresh
-          && (unprocessedMissingOccurrences.length > selectedClosures.length
+          && (unprocessedMissingOccurrences.length > selectedClosureSelection.length
             || metadataMigrationCandidates.length > 0 && unprocessedMissingOccurrences.length > 0);
         admissionMigrationPending ||= lifecycleMigrationPending;
         if (admissionMigrationPending) report.continuationSources.push(connector.id);

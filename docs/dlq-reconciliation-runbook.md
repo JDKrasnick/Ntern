@@ -395,3 +395,49 @@ so a replay would only duplicate a poll.
 Residual: new `missing-ledger` dead-letters are expected to recur until the 2026-10-01
 resource-bound follow-up lands; re-run this drain when the GitHub DLQ is next
 reviewed.
+
+## 13. Reconciliation record: 2026-10-01 (OOM rebound continues; lost ledger write)
+
+The next maintenance alert, ~2026-10-01T04:30Z, carried `dlq-growth` (github +2)
+and `failure-ledger-unavailable`. D1 overload failures were zero and the catalog
+stayed healthy (2,440 eligible; newest published role 5.3 h old). The signals are
+both symptoms of the same open memory rebound, now after the alerting change was
+deployed at 03:23Z.
+
+### Lost ledger write
+
+The marker recorded a failed `queue_failure_events` write at
+`2026-10-01T03:05:51.550Z` for `intern-notifs-github` message
+`2763774a9dceacc9a6b67099c8b5827d` (`simplify-summer-2026`). The same instant the
+Ashby sources `ashby-beaconsoftware` and `ashby-centerfield` recorded `capacity`
+failures from `D1 DB exceeded its CPU time limit`, so the loss is a D1-pressure
+event, not a schema defect. The message's failure was nevertheless recorded on a
+later delivery (category `transport`, one row present), so no failure is actually
+invisible here and the marker only repeats a 24 h signal. The marker was cleared
+after acknowledgement; it is last-write-wins and self-heals on the next failed
+write.
+
+### Disposition
+
+Two `missing-ledger` GitHub messages had arrived (for example `185991ef…` for
+`simplify-summer-2026`, enqueued 04:28:10Z). Both were discarded via the direct
+sequence (plan `direct-2026-10-01-github-da20c81e`); the GitHub DLQ reads 0.
+
+Operator note: on this pass the drain script wrote its audit SQL to a single
+overwritten file and the second run (which found nothing) clobbered the first
+batch before it was applied. Only the visible message id was captured, so the
+batch has one audit row, not two. Persist dispositions incrementally (append per
+message, apply before the next pass) rather than regenerating one file per run.
+
+### Root cause
+
+Unchanged and still open. Worker invocation analytics show `exceededMemory` on the
+ingestion Worker at 03:13:37, 04:19:29, 04:23:14 and 04:23:35Z — after the deploy —
+alongside `scriptThrewException` and `clientDisconnected`. The GitHub aggregator
+boards and the catalog-projection pass both hydrate the full catalog into one
+128 MB isolate (`refreshCatalogProjection` runs
+`groupCatalogJobs(await store.listCatalog(), { includeClosed: true })` and keeps
+every group's roles), which is the bound tracked in
+`docs/197-ingestion-resource-bounds.md`
+(the 2026-10-01 rebound section). Draining the DLQ and clearing markers treats the
+symptoms; the memory bound is the fix.

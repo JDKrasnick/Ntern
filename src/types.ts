@@ -1004,6 +1004,24 @@ export interface SourceOccurrenceStatus extends SourceOccurrenceState {
   lastConfirmedAt?: string;
 }
 
+/**
+ * Compact per-occurrence projection for bounded selection. A large community
+ * list retains years of closed roles; loading every occurrence *body* merely to
+ * choose a 25-row migration or closure slice is what crossed the isolate's
+ * 128 MB limit. This carries only the fields the slice selection reads, so a
+ * bounded GitHub delivery never hydrates the complete retained history.
+ */
+export interface SourceOccurrenceSelectionMetadata {
+  externalId: string;
+  jobId: string;
+  present: boolean;
+  consecutiveOmissions: number;
+  state: SourceOccurrence['state'];
+  admissionConfigurationVersion?: string;
+  sourceMaterialHash?: string;
+  catalogPublicationSuppressed?: boolean;
+}
+
 export interface NotificationEvent {
   eventId: string;
   sourceId: string;
