@@ -377,25 +377,45 @@ describe('Cloudflare maintenance cron', () => {
     vi.spyOn(D1UserStore.prototype, 'activePreferences').mockResolvedValue([]);
     vi.spyOn(D1UserStore.prototype, 'pendingReceipts').mockResolvedValue([]);
     vi.spyOn(D1UserStore.prototype, 'retryableReceipts').mockResolvedValue([]);
+    const maintenanceStatements: string[] = [];
+    const legacyDrainRun = vi.fn().mockResolvedValue({ meta: { changes: 5_000 } });
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       await cloudflareWorker.scheduled({
         cron: '9-59/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:09:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
-        DB: { prepare: () => ({ bind: () => ({ async first() { return { count: 2 }; } }), async first() { return null; } }) },
+        DB: { prepare: (query: string) => {
+          maintenanceStatements.push(query);
+          const statement = {
+            bind: () => statement,
+            async first() {
+              return query.includes('SELECT 1 AS present FROM') ? { present: 1 } : { count: 2 };
+            },
+            run: query.startsWith('DELETE FROM catalog_items WHERE rowid IN')
+              ? legacyDrainRun
+              : vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
+          };
+          return statement;
+        } },
         DESTINATION_VERIFICATION_QUEUE: queue(undefined),
         DESTINATION_VERIFICATION_DLQ: queue(undefined),
       } as unknown as Environment);
 
+      expect(legacyDrainRun).toHaveBeenCalledOnce();
+      expect(maintenanceStatements).toContainEqual(expect.stringContaining('catalog_items_kind_pk_sk'));
       expect(failing).toHaveBeenCalled();
       expect(metadata).not.toHaveBeenCalled();
       expect(listCatalog).not.toHaveBeenCalled();
       expect(projection).not.toHaveBeenCalled();
       expect(errors).toHaveBeenCalledWith(expect.stringContaining('"step":"admission_verification_warnings"'));
+      expect(markers).toHaveBeenCalledWith('legacy_posting_identity_incidents', 'started');
+      expect(markers).toHaveBeenCalledWith('legacy_posting_identity_incidents', 'complete');
       expect(markers).toHaveBeenCalledWith('admission_verification_warnings', 'started');
       expect(markers).toHaveBeenCalledWith('admission_verification_warnings', 'failed');
       expect(markers).toHaveBeenCalledWith('maintenance_complete', 'complete', expect.any(Date));
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"legacy_posting_identity_incident_drain"'));
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"deleted":5000'));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
     } finally {
       vi.restoreAllMocks();
