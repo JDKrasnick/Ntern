@@ -1,6 +1,7 @@
 const args = new Set(process.argv.slice(2));
 const value = (name: string) => process.argv[process.argv.indexOf(name) + 1];
 const apply = args.has('--apply');
+const clearCheckpoint = args.has('--clear-checkpoint');
 const repairToken = args.has('--repair-token') ? value('--repair-token') : undefined;
 const expectedChanged = args.has('--expected-changed') ? Number(value('--expected-changed')) : undefined;
 const requestedSourceIds = args.has('--source-ids') ? value('--source-ids') : undefined;
@@ -17,7 +18,7 @@ if (!secret) throw new Error('OPERATIONS_SHARED_SECRET is required');
 const response = await fetch(`${baseUrl.replace(/\/$/u, '')}/internal/trusted-admission-backfill`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'X-Operations-Key': secret },
-  body: JSON.stringify({ apply, repairToken, expectedChanged, ...(sourceIds?.length ? { sourceIds } : {}) }),
+  body: JSON.stringify({ apply, repairToken, expectedChanged, ...(sourceIds?.length ? { sourceIds } : {}), ...(clearCheckpoint ? { clearCheckpoint: true } : {}) }),
 });
 const body = await response.text();
 console.log(body);
