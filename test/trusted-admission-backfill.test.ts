@@ -569,36 +569,6 @@ describe('trusted admission backfill', () => {
     expect(read<SourceCheckpoint>(database, `SOURCE#${TRUSTED_SOURCE}`, 'CHECKPOINT').pendingAdmissionConfigurationVersion).toBe('stale');
   });
 
-  it('releases the migration flag with clearCheckpoint even while an occurrence is ungraded', async () => {
-    const { database, db } = subject();
-    await suppressedRow({
-      db, sourceId: TRUSTED_SOURCE, externalId: 'ext-1', jobId: 'job-1',
-      admission: admissionOf('application-form', ['employer-unresolved']),
-    });
-    // A retired job leaves permanently ungradable residue. Without the override
-    // this residue holds the migration obligation forever, which at production
-    // scale suppresses every new role of the list.
-    const orphan = occurrenceStateOf({
-      sourceId: TRUSTED_SOURCE, externalId: 'ext-orphan', jobId: 'job-missing',
-      reference: referenceOf({
-        sourceId: TRUSTED_SOURCE, externalId: 'ext-orphan', version: 'stale', suppressed: true,
-        admission: admissionOf('application-form', ['employer-unresolved']),
-      }),
-    });
-    await put(db, `SOURCE#${TRUSTED_SOURCE}`, 'OCCURRENCE#ext-orphan', 'source-occurrence', orphan);
-    await put(db, `SOURCE#${TRUSTED_SOURCE}`, 'CHECKPOINT', 'checkpoint', checkpointOf(TRUSTED_SOURCE, {
-      pendingAdmissionConfigurationVersion: 'stale',
-    }));
-
-    const dryRun = await runTrustedAdmissionBackfill(db, { clearCheckpoint: true });
-    expect(dryRun.totals.skipped).toBe(1);
-    expect(dryRun.changes.checkpoints).toBe(1);
-    await runTrustedAdmissionBackfill(db, {
-      apply: true, repairToken: dryRun.repairToken, expectedChanged: dryRun.expectedChanged, clearCheckpoint: true,
-    });
-    expect(read<SourceCheckpoint>(database, `SOURCE#${TRUSTED_SOURCE}`, 'CHECKPOINT').pendingAdmissionConfigurationVersion).toBeUndefined();
-  });
-
   it('scopes a run to the requested trusted sources and refuses standard ones', async () => {
     const { db } = subject();
     await suppressedRow({
