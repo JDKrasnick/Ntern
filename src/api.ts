@@ -391,6 +391,17 @@ function applicationHandoff(
   return handoff;
 }
 
+function defaultTab(
+  value: unknown,
+  previous?: UserPreferences['defaultTab'],
+): NonNullable<UserPreferences['defaultTab']> {
+  const choice = value ?? previous ?? 'roles';
+  if (choice !== 'roles' && choice !== 'swipe') {
+    throw new Error('defaultTab must be roles or swipe');
+  }
+  return choice;
+}
+
 function requireProfile(value: Record<string, unknown>, userId: string): ApplicantProfile {
   const contact = value.contact as ApplicantProfile['contact'];
   if (!contact?.name || !contact.email || typeof value.location !== 'string' || typeof value.workAuthorization !== 'string' || !Array.isArray(value.education) || !value.links || !value.reusableAnswers) throw new Error('Profile needs contact name/email, location, work authorization, education, links, and reusable answers');
@@ -1308,7 +1319,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
         });
       }
       if (method === 'GET' && path === '/me/preferences') return reply(200, (await dependencies.users.getPreferences(userId)) ?? { userId, filter: {}, alertsEnabled: false, onboardingComplete: false });
-      if (method === 'PUT' && path === '/me/preferences') { const body = parseBody(event); const previous = await dependencies.users.getPreferences(userId); const filter = parseJobFilter(body.filter ?? previous?.filter ?? {}); const push = pushPreferences(body.push); const value: UserPreferences = { userId, filter: filter ?? {}, alertsEnabled: typeof body.alertsEnabled === 'boolean' ? body.alertsEnabled : previous?.alertsEnabled ?? false, emailAlertsEnabled: typeof body.emailAlertsEnabled === 'boolean' ? body.emailAlertsEnabled : previous?.emailAlertsEnabled ?? false, onboardingComplete: typeof body.onboardingComplete === 'boolean' ? body.onboardingComplete : previous?.onboardingComplete ?? false, applicationHandoff: applicationHandoff(body.applicationHandoff, previous?.applicationHandoff), alertSettings: alertSettings(body.alertSettings, previous?.alertSettings), ...(push !== undefined ? { push } : previous?.push ? { push: previous.push } : {}), ...(previous?.lastCatalogOpenedAt ? { lastCatalogOpenedAt: previous.lastCatalogOpenedAt } : {}), updatedAt: now() }; await dependencies.users.putPreferences(value); return reply(200, value); }
+      if (method === 'PUT' && path === '/me/preferences') { const body = parseBody(event); const previous = await dependencies.users.getPreferences(userId); const filter = parseJobFilter(body.filter ?? previous?.filter ?? {}); const push = pushPreferences(body.push); const value: UserPreferences = { userId, filter: filter ?? {}, alertsEnabled: typeof body.alertsEnabled === 'boolean' ? body.alertsEnabled : previous?.alertsEnabled ?? false, emailAlertsEnabled: typeof body.emailAlertsEnabled === 'boolean' ? body.emailAlertsEnabled : previous?.emailAlertsEnabled ?? false, onboardingComplete: typeof body.onboardingComplete === 'boolean' ? body.onboardingComplete : previous?.onboardingComplete ?? false, applicationHandoff: applicationHandoff(body.applicationHandoff, previous?.applicationHandoff), defaultTab: defaultTab(body.defaultTab, previous?.defaultTab), alertSettings: alertSettings(body.alertSettings, previous?.alertSettings), ...(push !== undefined ? { push } : previous?.push ? { push: previous.push } : {}), ...(previous?.lastCatalogOpenedAt ? { lastCatalogOpenedAt: previous.lastCatalogOpenedAt } : {}), updatedAt: now() }; await dependencies.users.putPreferences(value); return reply(200, value); }
       if (method === 'POST' && path === '/me/opening') {
         const openedAt = dependencies.now?.() ?? now();
         const previous = await dependencies.users.getPreferences(userId);
@@ -1320,6 +1331,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
           emailAlertsEnabled: previous?.emailAlertsEnabled ?? false,
           onboardingComplete: previous?.onboardingComplete ?? false,
           ...(previous?.applicationHandoff ? { applicationHandoff: previous.applicationHandoff } : {}),
+          ...(previous?.defaultTab ? { defaultTab: previous.defaultTab } : {}),
           ...(previous?.alertSettings ? { alertSettings: previous.alertSettings } : {}),
           ...(previous?.push ? { push: previous.push } : {}),
           lastCatalogOpenedAt: openedAt,

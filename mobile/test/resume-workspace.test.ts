@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest';
 const app = readFileSync(new URL('../App.tsx', import.meta.url).pathname, 'utf8');
 
 describe('resume workspace navigation contract', () => {
-  it('keeps Resume as the fifth authenticated navigation destination', () => {
-    expect(app).toContain('type AppTab = "roles" | "queue" | "catalog" | "resume" | "profile";');
+  it('keeps Resume as an authenticated navigation destination', () => {
+    expect(app).toContain('type AppTab = "roles" | "swipe" | "queue" | "catalog" | "resume" | "profile";');
     expect(app).toContain('resumeEnabled ? [{ key: "resume" as const, label: "Resume"');
     expect(app).toContain('resumeEnabled={publicConfig.resumeTunerEnabled}');
     expect(app).toContain('<ResumeWorkspace onSignIn={openAccount} />');

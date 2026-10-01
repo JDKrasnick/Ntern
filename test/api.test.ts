@@ -232,6 +232,7 @@ describe('public API ownership boundary', () => {
       filter: { includeCategories: ['swe'], includeKeywords: ['backend'] },
       alertsEnabled: false,
       onboardingComplete: true,
+      defaultTab: 'swipe',
       alertSettings: { delivery: 'immediate', applicationReminders: true, followUpDays: 7 }
     }));
     expect(saved.statusCode).toBe(200);
@@ -243,7 +244,11 @@ describe('public API ownership boundary', () => {
       followUpDays: 7
     });
     expect(preference?.applicationHandoff).toBe('window');
+    expect(preference?.defaultTab).toBe('swipe');
     expect(hasUndefined(preference)).toBe(false);
+    const invalidTab = await handler(event('user-a', 'PUT', '/me/preferences', { defaultTab: 'inbox' }));
+    expect(invalidTab.statusCode).toBe(400);
+    expect(JSON.parse(invalidTab.body).message).toContain('defaultTab');
   });
   it('creates a versioned, no-submit Greenhouse assistance session while keeping unknown and LinkedIn destinations manual', async () => {
     const jobs = new MemoryInternshipStore();

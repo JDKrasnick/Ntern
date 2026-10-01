@@ -66,6 +66,8 @@ export interface UserPreferences {
   onboardingComplete: boolean;
   /** Web-only preference for opening the employer's official form. */
   applicationHandoff?: ApplicationHandoff;
+  /** Which surface this device opens on. Missing means the catalog. */
+  defaultTab?: 'roles' | 'swipe';
   /**
    * The bounded timestamp used by the signed-in launch inbox. A missing value
    * means this is the user's first launch after the feature was introduced.

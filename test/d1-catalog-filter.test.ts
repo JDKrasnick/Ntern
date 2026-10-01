@@ -724,6 +724,34 @@ describe('D1 filtered catalog projection', () => {
     expect(prepared[1]!.values).toEqual(expect.arrayContaining(['%machine%', 'normal', 2, 0, 'undergraduate']));
   });
 
+  it('uses every type-ahead term to bound company-and-title candidates', async () => {
+    const prepared: Array<{ query: string; values: unknown[] }> = [];
+    const database = {
+      prepare(query: string) {
+        const call = { query, values: [] as unknown[] };
+        prepared.push(call);
+        const statement: D1PreparedStatement = {
+          bind(...values: unknown[]) { call.values = values; return statement; },
+          async first<T>() {
+            return { value: JSON.stringify({ version: 'version-a', generatedAt: new Date().toISOString(), schemaVersion: 4 }) } as T;
+          },
+          async all<T>() { return { results: [] as T[] }; },
+          async run() { return { meta: { changes: 0 } }; },
+        };
+        return statement;
+      },
+      async batch() { return []; },
+    } satisfies D1Database;
+
+    await new D1InternshipStore(database).listCatalogProjectionFiltered(undefined, 25, {
+      status: 'open', query: 'Accenture soft eng',
+    });
+
+    expect(prepared[1]!.values).toEqual(expect.arrayContaining(['%accenture%', '%soft%', '%eng%']));
+    expect(prepared[1]!.query).not.toContain("'$.location'");
+    expect(prepared[1]!.query.match(/LIKE \? ESCAPE/g)).toHaveLength(3);
+  });
+
   it('hides roles whose stated audience omits the reader level and keeps unstated ones', async () => {
     const database = new DatabaseSync(':memory:');
     database.exec(`

@@ -8,9 +8,9 @@
  */
 
 /** Points per second. Unhurried but clearly moving: a card crosses the lane in
- * about eighteen seconds, so a reader can finish reading one before the next
- * arrives. */
-export const BELT_SPEED = 18;
+ * about sixteen seconds, so a reader can finish reading one before the next
+ * arrives. Fifteen percent quicker than the original eighteen. */
+export const BELT_SPEED = 20.7;
 
 /** The longest frame a stalled belt will honour, so a backgrounded app does not
  * lurch forward by however long it was away. */
@@ -90,9 +90,20 @@ export function advanceBelt(offset: number, elapsedMs: number, cycleLength: numb
  * scrolling and picks up again once they stop, rather than for a fixed period:
  * a timer keeps the lane still after the reader has finished with it, and starts
  * moving again while their finger is still on it.
+ *
+ * A pointer resting anywhere in the lane holds it the same way a finger on the
+ * glass does — and keeps holding it, because a reader who has stopped to read a
+ * card should not have it slide out from under the cursor. That is a plain
+ * boolean, not a timer: leaving the box is the event that hands the belt back.
  */
-export function beltYields(now: number, lastReaderScrollAt: number, dragging: boolean, quietMs = BELT_QUIET_MS) {
-  if (dragging) return true;
+export function beltYields(
+  now: number,
+  lastReaderScrollAt: number,
+  dragging: boolean,
+  hovering = false,
+  quietMs = BELT_QUIET_MS,
+) {
+  if (dragging || hovering) return true;
   return now - lastReaderScrollAt < quietMs;
 }
 

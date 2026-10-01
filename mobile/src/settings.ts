@@ -62,10 +62,13 @@ export function appSettingsPayload<TPush>(draft: {
   applicationReminders: boolean;
   followUpDays: number;
   applicationHandoff: 'window' | 'tab';
+  /** The surface the app opens on. */
+  defaultTab: 'roles' | 'swipe';
   push: TPush;
 }) {
   return {
     applicationHandoff: draft.applicationHandoff,
+    defaultTab: draft.defaultTab,
     alertSettings: {
       applicationReminders: draft.applicationReminders,
       followUpDays: draft.followUpDays,

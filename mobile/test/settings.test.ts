@@ -38,6 +38,7 @@ describe("profile settings navigation", () => {
       applicationReminders: false,
       followUpDays: 10,
       applicationHandoff: "window",
+      defaultTab: "swipe",
       push: { titleTemplate: "{company}: {title}" },
     });
 
@@ -48,6 +49,7 @@ describe("profile settings navigation", () => {
     expect(appUpdate).not.toHaveProperty("filter");
     expect(appUpdate).not.toHaveProperty("alertsEnabled");
     expect(appUpdate.applicationHandoff).toBe("window");
+    expect(appUpdate.defaultTab).toBe("swipe");
     expect(appUpdate.alertSettings).not.toHaveProperty("delivery");
     expect(appUpdate.alertSettings).not.toHaveProperty("quietHours");
   });

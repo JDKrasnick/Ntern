@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendCatalogPage,
-  beginCatalogQueryChange,
+  catalogQueryPreview,
   catalogCardKind,
   filterGroupedCatalogPage,
   nextMatchingGroupedCatalogPage,
@@ -41,17 +41,27 @@ describe('mobile catalog pagination', () => {
     expect(page.cursor).toBeUndefined();
   });
 
-  it('invalidates an obsolete request even when facets prevent a local preview', () => {
-    const generation = { current: 7 };
-    const preview = beginCatalogQueryChange(
-      generation,
+  it('does not invent a local preview when facets need authoritative results', () => {
+    const preview = catalogQueryPreview(
       [group('old', 'Acme', 'Software Engineering Intern')],
       'data',
       true,
     );
 
-    expect(generation.current).toBe(8);
     expect(preview).toBeUndefined();
+  });
+
+  it('prefix-filters the cached browse page immediately while typing', () => {
+    const preview = catalogQueryPreview(
+      [
+        group('avid', 'Avid', 'AI/ML Engineering Intern'),
+        group('other', 'Priceline', 'Software Engineering Intern'),
+      ],
+      'av ai',
+      false,
+    );
+
+    expect(preview?.map((item) => item.groupId)).toEqual(['avid']);
   });
 
   it('does not let a delayed cache response replace a fresh catalog page', async () => {
