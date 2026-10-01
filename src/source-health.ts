@@ -52,6 +52,13 @@ export function sourceFailureCategory(error: unknown): SourceFailureCategory {
   if (/quality|suspicious zero-row/.test(message)) return 'quality';
   if (/exceeded(?: cpu| memory)?|resource limit|too much cpu|out of memory|memory limit|response body too large|too many jobs/i.test(message)) return 'capacity';
   if (/timeout|timed out|aborted|fetch|network|socket|econn/.test(message)) return 'transport';
+  // A statement that outlives resilientD1's per-attempt ceiling carries no D1
+  // error text at all (d1-errors.ts classifies it `stalled` and retries it
+  // in-request), so without this it falls through to `persistence` and a
+  // retried transient stall reads as an unresolved ingestion defect in the
+  // scheduled health alert. Keep it with the other transient classes, the same
+  // way a message deadline is kept out of `capacity`.
+  if (/d1 statement did not settle/i.test(message)) return 'transport';
   return 'persistence';
 }
 

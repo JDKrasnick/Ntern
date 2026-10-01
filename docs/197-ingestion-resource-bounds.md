@@ -479,3 +479,68 @@ projection that cannot fit one isolate is not yet excluded. Streaming or chunkin
 that serialization remains the follow-up if the isolated projection cron still
 exceeds memory; the cron split is the first containment because it preserves the
 same ordering and freshness contracts while removing the accumulation.
+
+## 2026-10-01 GitHub aggregator rebound
+
+Status: open follow-up. The catalog-admission alert at 2026-10-01T02:06Z reported
+`dlq-growth` (github) and `source-failure-persistence`, and the resource kill that
+`#197` bound has returned on the GitHub aggregator lane.
+
+### What the alert actually was
+
+- The catalog was healthy: 2,455 eligible roles and a newest published role 2.9 h
+  old, far inside the 24 h starvation threshold. D1 overload failures were zero
+  and the destination-verification queue drained from 50 to 0.
+- The `dlq-growth` signal was one new dead-letter: a `simplify-summer-2026` poll
+  enqueued at 2026-10-01T01:55:23Z, plus a second at 02:20:30Z while the incident
+  was being triaged. Both arrived in the GitHub DLQ with **no** matching
+  `queue_failure_events` row (`missing-ledger`) and no failure-ledger marker.
+  That is the resource-kill signature: a kill writes no health row and bypasses
+  the failure ledger, so the message retries silently and dead-letters.
+- Invocation analytics confirm it. For the 01:00-02:30Z window the ingestion
+  Worker recorded three `exceededMemory` invocations, plus `scriptThrewException`
+  and `clientDisconnected` invocations in the surrounding hours.
+- The two `persistence` failures in the alert were both
+  `D1 statement did not settle within 20000 ms` — `resilientD1`'s per-attempt
+  ceiling, which `d1-errors.ts` classifies `stalled` and retries in-request. One
+  (`speedyapply-2027-swe`) self-resolved; `simplify-summer-2026`'s remained
+  unresolved beside five `transport` message-deadline rows. These are transient
+  stalls, not ingestion defects; `sourceFailureCategory` now classifies the stall
+  text as `transport` so a retried stall no longer reads as an unresolved defect
+  (see `src/source-health.ts`).
+
+### Growth since the 2026-09-28 bound
+
+`simplify-summer-2026` retains **5,403** `source-occurrence` rows (5,337 on
+2026-09-28, per the section above). The retained partition is large enough that
+related D1 reads are themselves expensive:
+
+| Observation (2026-10-01) | Value |
+| --- | --- |
+| `simplify-summer-2026` source-occurrence rows | 5,403 |
+| A per-source occurrence count (`source_id = ? AND kind = 'source-occurrence'`) | **71.8 s**, 443,926 rows read |
+| `catalog_items` size | 8.26 GiB (8,866,451,456 bytes) against D1's ~10 GB cap |
+| An ad-hoc scan of `catalog_items` | returned `D1_ERROR … Upstream service unavailable [code: 7009]` |
+
+The 2026-09-28 fix hydrates occurrence JSON only for the selected slice, but the
+durable checkpoint (identity list for the pending pass) and the per-delivery
+projection share of the partition still scale with retained history. The largest
+board stays the outlier: `simplify-summer-2026` fetches two documents totalling
+~2.7 MB and yields 3,370 raw / 2,934 eligible rows.
+
+### Proposed follow-up (draft; profiling first)
+
+1. Re-measure the per-delivery peak heap for one bounded `simplify-summer-2026`
+   slice at current retention, using the `test:budget` harness. Record the number
+   in this section before changing a bound.
+2. If the peak scales with retained occurrence bytes rather than slice size,
+   bound the hydrated projection to the slice's own external ids and read
+   occurrence JSON lazily, instead of materializing the whole partition.
+3. Pin the per-delivery heap against a fixture with the current retained shape in
+   `test/ingestion-resource-budget.test.ts`, so a future growth spurt fails the
+   budget rather than a production delivery.
+
+Acceptance criteria: no `exceededMemory` on the ingestion Worker across two full
+GitHub cadences; the GitHub DLQ holds no `missing-ledger` entry for a reviewed
+source; and `simplify-summer-2026` / `speedyapply-2027-swe` record a
+`lastAttemptAt` inside one cadence.
