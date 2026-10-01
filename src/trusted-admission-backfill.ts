@@ -420,6 +420,12 @@ async function scanTrustedSources(input: {
       && (!skipped || input.clearCheckpoint)) {
       const remaining = { ...checkpoint };
       delete remaining.pendingAdmissionConfigurationVersion;
+      // The poller re-arms the migration whenever the checkpoint's stored
+      // admission version differs from the one it computes, so clearing the flag
+      // alone never sticks: it would re-set `pendingAdmissionConfigurationVersion`
+      // on the next poll. Record the version this pass graded every occurrence
+      // to, which is the same version the poller derives, so the obligation ends.
+      remaining.admissionConfigurationVersion = version;
       buffer.push({
         pk: checkpointRow.pk, sk: checkpointRow.sk, label: `${sourceId}:checkpoint`,
         oldValue: checkpointRow.value, value: JSON.stringify(remaining),

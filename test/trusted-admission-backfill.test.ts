@@ -249,7 +249,7 @@ describe('trusted admission backfill', () => {
     const checkpoint = read<SourceCheckpoint>(database, `SOURCE#${TRUSTED_SOURCE}`, 'CHECKPOINT');
     expect(checkpoint.pendingAdmissionConfigurationVersion).toBeUndefined();
     expect(checkpoint).toMatchObject({
-      sourceId: TRUSTED_SOURCE, successfulFetches: 3, admissionConfigurationVersion: 'stale', activeExternalIds: ['ext-1'],
+      sourceId: TRUSTED_SOURCE, successfulFetches: 3, admissionConfigurationVersion: version, activeExternalIds: ['ext-1'],
     });
 
     // The role has to be discoverable by the projection the route refreshes.
