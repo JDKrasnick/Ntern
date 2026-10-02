@@ -158,6 +158,30 @@ describe('ingestion v2 D1 repository', () => {
     });
   });
 
+  it('does not clobber queued or quarantined lane rows when they drop off the board', async () => {
+    const { repository } = subject();
+    await repository.putRows([
+      row({ externalId: 'queued', state: 'queued', decision: undefined, attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z' }),
+      row({ externalId: 'quarantined', state: 'quarantined', decision: 'blocked', attemptCount: 3, failureClass: 'destination-timeout' }),
+      row({ externalId: 'settled', state: 'settled', decision: 'admitted' }),
+    ]);
+    await repository.applyOmissions('community-example', [
+      { externalId: 'queued', consecutiveOmissions: 2, becomesAbsent: true },
+      { externalId: 'quarantined', consecutiveOmissions: 2, becomesAbsent: true },
+      { externalId: 'settled', consecutiveOmissions: 2, becomesAbsent: true },
+    ], '2026-10-02T00:00:00.000Z');
+    expect(await repository.getRow('community-example', 'queued')).toMatchObject({
+      state: 'queued', attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z', consecutiveOmissions: 0,
+    });
+    expect(await repository.getRow('community-example', 'quarantined')).toMatchObject({
+      state: 'quarantined', attemptCount: 3, failureClass: 'destination-timeout', consecutiveOmissions: 0,
+    });
+    // A discovery-owned settled row still closes to absent.
+    expect(await repository.getRow('community-example', 'settled')).toMatchObject({
+      state: 'absent', consecutiveOmissions: 2,
+    });
+  });
+
   it('reports whether a guarded lane write applied', async () => {
     const { repository } = subject();
     await repository.putRows([row({ externalId: 'a' })]);

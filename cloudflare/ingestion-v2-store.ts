@@ -273,12 +273,13 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
 
   async applyOmissions(sourceId: string, updates: readonly SnapshotOmissionUpdate[], updatedAt: string): Promise<void> {
     if (!updates.length) return;
-    // A leased (`processing`) row is owned by an in-flight delivery. Closing it
-    // here would leave an `absent` row still carrying a lease and race the
+    // A lane-owned row (pending/queued/processing/quarantined) is owned by the
+    // admission lane. Closing it here would drop pending work, erase a
+    // quarantine, or leave an `absent` row still carrying a lease and race the
     // consumer's guarded settle, so omission increments wait for it to settle.
     const statement = this.db.prepare(`
       UPDATE ingestion_rows SET consecutive_omissions = ?, state = ?, updated_at = ?
-      WHERE source_id = ? AND external_id = ? AND state <> 'processing'
+      WHERE source_id = ? AND external_id = ? AND state NOT IN (${laneOwnedSqlList})
     `);
     const statements = updates.map((update) => statement.bind(
       update.consecutiveOmissions,
