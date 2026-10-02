@@ -19,6 +19,19 @@ export interface ShadowDiscoveryDependencies {
   repository: IngestionV2Repository;
   snapshots: IngestionSnapshotObjectStore;
   features: IngestionV2FeatureConfig;
+  /**
+   * Optional admission-lane producer. When V2 admission is enabled the worker
+   * supplies it so rows whose material content, policy version, or presence
+   * changed re-enter the admission lane as dispatchable work. Absent in pure
+   * Stage 1 shadow mode, which must stay side-effect free.
+   */
+  reopenActionableRows?: (input: {
+    sourceId: string;
+    snapshotHash: string;
+    admissionVersion: string;
+    externalIds: readonly string[];
+    now: string;
+  }) => Promise<number>;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -135,6 +148,23 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
     await repository.applyOmissions(input.sourceId, diff.omissionUpdates, input.observedAt);
     await repository.activateSnapshot(input.sourceId, envelope.snapshotHash, input.observedAt);
 
+    // Re-enter the admission lane only for rows whose material, policy version,
+    // or presence changed. A due-retry row is already dispatchable, so reopening
+    // it would reset the attempt count that caps its retries.
+    let reopened = 0;
+    const reopenExternalIds = diff.rows
+      .filter((entry) => entry.actionable && entry.classification !== 'retryable')
+      .map((entry) => entry.externalId);
+    if (this.dependencies.reopenActionableRows && reopenExternalIds.length) {
+      reopened = await this.dependencies.reopenActionableRows({
+        sourceId: input.sourceId,
+        snapshotHash: envelope.snapshotHash,
+        admissionVersion: input.admissionVersion,
+        externalIds: reopenExternalIds,
+        now: input.observedAt,
+      });
+    }
+
     const legacySet = new Set(input.legacyActionableExternalIds);
     const v2Set = new Set(diff.actionableExternalIds);
     const metrics: ShadowComparisonMetrics = {
@@ -150,7 +180,7 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       v2Only: sample(difference(diff.actionableExternalIds, legacySet)),
       legacyOnly: sample(difference(input.legacyActionableExternalIds, v2Set)),
       d1RowsRead: ledger.length,
-      d1RowsWritten: rows.length + diff.omissionUpdates.length + 2,
+      d1RowsWritten: rows.length + diff.omissionUpdates.length + reopened + 2,
       r2Bytes: bytes,
       status: 'complete',
     };
@@ -170,6 +200,7 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       unchanged: diff.counts.unchanged,
       reappeared: diff.counts.reappeared,
       missing: diff.counts.missing,
+      admissionReopened: reopened,
       v2ActionableCount: metrics.v2Actionable.count,
       legacyActionableCount: metrics.legacyActionable.count,
       v2OnlyCount: metrics.v2Only.count,

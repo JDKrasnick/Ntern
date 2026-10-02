@@ -3,6 +3,7 @@ import { processAdmissionV2Message } from '../src/ingestion-v2/admission/consume
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
 import type { AcquireLeaseInput, AdmissionV2Ledger, MarkQueuedInput } from '../src/ingestion-v2/admission/ledger.js';
 import { applyAdmissionReplay, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
+import { migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import {
   AdmissionInfrastructureError,
   AdmissionRowTransientError,
@@ -547,5 +548,42 @@ describe('admission v2 guarded replay', () => {
     ledger.seedRow(ledgerRow('a', { state: 'quarantined', attemptCount: 3, snapshotHash: 'gone'.repeat(16) }));
     const preview = await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a' });
     expect(preview).toMatchObject({ eligible: false, reason: 'snapshot-not-retained' });
+  });
+});
+
+describe('admission v2 policy migration', () => {
+  it('regrades stale settled rows under the current version without touching peers', async () => {
+    const ledger = new FakeLedger();
+    ledger.seedRow(ledgerRow('stale-1', { state: 'settled', decision: 'admitted', admissionVersion: 'standard-v1', attemptCount: 1, jobId: 'JOB#1' }));
+    ledger.seedRow(ledgerRow('stale-2', { state: 'settled', decision: 'admitted', admissionVersion: 'standard-v1', attemptCount: 1 }));
+    ledger.seedRow(ledgerRow('current', { state: 'settled', decision: 'admitted', admissionVersion: 'standard-v2' }));
+    ledger.seedRow(ledgerRow('poison', { state: 'quarantined', attemptCount: 3, admissionVersion: 'standard-v1' }));
+
+    const result = await migrateAdmissionPolicy(SOURCE, 'standard-v2', { ledger });
+    expect(result.reopened).toBe(2);
+    expect(result.remaining).toBe(false);
+    expect(await ledger.getRow(SOURCE, 'stale-1')).toMatchObject({ state: 'queued', admissionVersion: 'standard-v2', attemptCount: 0 });
+    expect(await ledger.getRow(SOURCE, 'poison')).toMatchObject({ state: 'quarantined', attemptCount: 3 });
+    // A settled row already on the current version is left alone and stays visible.
+    expect(await ledger.getRow(SOURCE, 'current')).toMatchObject({ state: 'settled', decision: 'admitted' });
+    // The migration never suppresses the source or clears a job identity.
+    expect(await ledger.getRow(SOURCE, 'stale-1')).toMatchObject({ jobId: 'JOB#1' });
+  });
+
+  it('bounds each pass and lets new work dispatch while stale rows remain', async () => {
+    const ledger = new FakeLedger();
+    for (const id of ['stale-1', 'stale-2', 'stale-3']) {
+      ledger.seedRow(ledgerRow(id, { state: 'settled', decision: 'admitted', admissionVersion: 'standard-v1' }));
+    }
+    // A genuinely new row that must publish even while other rows are still stale.
+    ledger.seedSnapshot(snapshotRecord());
+    ledger.seedRow(ledgerRow('fresh', { state: 'pending', admissionVersion: 'standard-v2' }));
+
+    const first = await migrateAdmissionPolicy(SOURCE, 'standard-v2', { ledger, batchSize: 1 });
+    expect(first.reopened).toBe(1);
+    expect(first.remaining).toBe(true);
+    // The fresh row dispatches on its own without waiting for the stale backlog.
+    const plan = await planAdmissionV2Dispatch(SOURCE, { ledger });
+    expect(plan.messages.map((message) => message.externalIds).flat()).toContain('fresh');
   });
 });

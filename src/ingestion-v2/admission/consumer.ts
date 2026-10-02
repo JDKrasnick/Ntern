@@ -123,6 +123,7 @@ export async function processAdmissionV2Message(
         baseline: message.baseline,
         row: lease.row,
         posting: snapshotRow.posting,
+        firstObservationEligible: snapshotRow.firstObservationEligible,
       });
       const decision = evaluation.decision;
       const jobId = evaluation.jobId ?? (decision.kind === 'admitted' ? decision.jobId : undefined);

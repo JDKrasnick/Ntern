@@ -35,6 +35,7 @@ import { admissionSourceAllowed, processAdmissionV2Batch } from './admission-v2.
 import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
 import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState } from '../src/ingestion-v2/types.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
+import { migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import { admissionV2FeatureConfig } from '../src/ingestion-v2/admission/types.js';
 import {
@@ -188,12 +189,24 @@ export interface Environment extends AuthEnvironment {
 function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscovery | undefined {
   const features = ingestionV2FeatureConfig(env);
   if (!features.shadowDiscoveryEnabled) return undefined;
+  const repository = new D1IngestionV2Repository(env.DB);
+  // When V2 admission is enabled the discovery pass also reopens rows whose
+  // material content, policy version, or presence changed so the scheduled
+  // dispatcher can hand them to the dedicated admission queue. With admission
+  // off this stays a pure, side-effect-free Stage 1 shadow pass.
+  const admission = admissionV2FeatureConfig(env);
   return new IngestionV2ShadowDiscovery({
-    repository: new D1IngestionV2Repository(env.DB),
+    repository,
     // Reuse the existing non-public documents bucket; snapshot objects are
     // content-addressed and application-expired, never served to clients.
     snapshots: new R2IngestionSnapshotStore(env.DOCUMENTS),
     features,
+    ...(admission.admissionEnabled ? {
+      reopenActionableRows: async ({ sourceId, externalIds, admissionVersion, now }) => {
+        if (!admissionSourceAllowed(env, sourceId)) return 0;
+        return repository.reopenRows(sourceId, [...externalIds], now, { admissionVersion });
+      },
+    } : {}),
   });
 }
 
@@ -2062,21 +2075,34 @@ export async function runScheduledPostingIdentityAudit(
  * versioned messages to the dedicated admission queue. A failed send leaves the
  * rows queued with an unacknowledged handoff, so the next run reissues them.
  */
-async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promise<{ enabled: boolean; sources: number; batches: number; rows: number }> {
+async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promise<{ enabled: boolean; sources: number; migrated: number; batches: number; rows: number }> {
   const features = admissionV2FeatureConfig(env);
-  if (!features.admissionEnabled) return { enabled: false, sources: 0, batches: 0, rows: 0 };
+  if (!features.admissionEnabled) return { enabled: false, sources: 0, migrated: 0, batches: 0, rows: 0 };
   const ledger = new D1IngestionV2Repository(env.DB);
   const sourceIds = (await ledger.listActiveSourceIds(50)).filter((sourceId) => admissionSourceAllowed(env, sourceId));
+  let migrated = 0;
   let batches = 0;
   let rows = 0;
   for (const sourceId of sourceIds) {
+    // Regrade a bounded batch of active rows settled under an older policy
+    // version before dispatching their fresh work. Migration only reopens rows;
+    // it never hides a visible role or sets a source-wide suppression, so a new
+    // eligible role still publishes while stale peers are regraded.
+    const overview = await ledger.overview(sourceId);
+    if (overview.currentSnapshotHash) {
+      const snapshot = await ledger.getSnapshot(sourceId, overview.currentSnapshotHash);
+      if (snapshot?.isComplete) {
+        const migration = await migrateAdmissionPolicy(sourceId, snapshot.admissionVersion, { ledger, now: () => observedAt });
+        migrated += migration.reopened;
+      }
+    }
     const plan = await planAdmissionV2Dispatch(sourceId, { ledger, now: () => observedAt });
     if (!plan.messages.length) continue;
     await sendQueueMessages(env.ADMISSION_V2_QUEUE, plan.messages as unknown[]);
     batches += plan.messages.length;
     rows += plan.messages.reduce((sum, message) => sum + message.externalIds.length, 0);
   }
-  return { enabled: true, sources: sourceIds.length, batches, rows };
+  return { enabled: true, sources: sourceIds.length, migrated, batches, rows };
 }
 
 async function scheduledHandler(event: ScheduledController, env: Environment): Promise<void> {

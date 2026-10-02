@@ -95,6 +95,12 @@ export interface AdmissionRowContext {
   row: IngestionRowRecord;
   /** The normalized source material retained by the snapshot. */
   posting: SourcedPosting;
+  /**
+   * Whether this row may ever notify on first observation. Copied from the
+   * normalized snapshot row so the evaluator can enforce notification fencing
+   * without re-deriving it from the posting.
+   */
+  firstObservationEligible?: boolean;
 }
 
 export interface AdmissionV2RowEvaluator {

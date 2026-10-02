@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { D1IngestionV2Repository } from '../cloudflare/ingestion-v2-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
+import { migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import { applyAdmissionReplay, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import type { IngestionRowRecord, IngestionSnapshotRecord } from '../src/ingestion-v2/types.js';
 
@@ -143,6 +144,24 @@ describe('ingestion v2 admission ledger (D1)', () => {
     const overview = await repository.overview(SOURCE);
     expect(overview).toMatchObject({ sourceId: SOURCE, pending: 3, currentSnapshotHash: HASH });
     expect(overview.oldestWorkAt).toBeDefined();
+  });
+
+  it('regrades stale settled rows to the current policy version and leaves peers visible', async () => {
+    const { repository } = await seeded();
+    for (const externalId of ['a', 'b']) {
+      await repository.acquireLease({
+        sourceId: SOURCE, externalId, owner: 'owner', now: '2026-10-01T00:00:00.000Z', leaseMs: 60_000,
+        expectedSnapshotHash: HASH, expectedMaterialHash: `m-${externalId}`, expectedAdmissionVersion: ADMISSION,
+      });
+      await repository.settleRow({ sourceId: SOURCE, externalId, owner: 'owner', now: '2026-10-01T00:00:10.000Z', decision: 'admitted', ...(externalId === 'a' ? { jobId: 'JOB#A' } : {}) });
+    }
+    const result = await migrateAdmissionPolicy(SOURCE, 'standard-v2', { ledger: repository, now: () => new Date('2026-10-01T01:00:00.000Z') });
+    expect(result).toMatchObject({ reopened: 2, remaining: false });
+    // The migrated row keeps its existing job identity, so it stays visible and
+    // cannot mint a duplicate new-role notification.
+    expect(await repository.getRow(SOURCE, 'a')).toMatchObject({ state: 'queued', admissionVersion: 'standard-v2', attemptCount: 0, jobId: 'JOB#A' });
+    const dispatched = await planAdmissionV2Dispatch(SOURCE, { ledger: repository, now: () => new Date('2026-10-01T01:00:00.000Z') });
+    expect(dispatched.messages.map((message) => message.externalIds).flat().sort()).toEqual(['a', 'b', 'c']);
   });
 
   it('guards replay with a token bound to the previewed state', async () => {

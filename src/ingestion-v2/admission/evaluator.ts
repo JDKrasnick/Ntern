@@ -5,6 +5,7 @@ import { classifyDestination } from '../../destination-verification.js';
 import { stableSourceOccurrenceJobId } from '../../identity/registry.js';
 import { processPosting } from '../../ingestion/processor.js';
 import type { CatalogAdmission, ProcessedListing, SourcedPosting } from '../../types.js';
+import { admissionShouldNotify } from './migration.js';
 import type { AdmissionRowContext, AdmissionRowEvaluation, AdmissionV2RowEvaluator } from './types.js';
 
 /** Reachability and page evidence produced by a bounded destination probe. */
@@ -30,6 +31,31 @@ export interface AdmissionCatalogCommit {
   listing: ProcessedListing;
   admission: CatalogAdmission;
   jobId: string;
+  /**
+   * Whether this commit may mint a new-role notification. It is always false for
+   * baseline work and for a row that already has a catalog job (policy-migration
+   * or re-admission), so a verification/canary sink can prove zero notifications
+   * without a live catalog writer.
+   */
+  notify: boolean;
+}
+
+/**
+ * Notification fencing for one admitted row. Baseline work and work for a row
+ * that already owns a catalog job are silent; only a genuinely new post-baseline
+ * role may notify. Retries and duplicate deliveries reuse the same durable row
+ * identity, so this decision is stable across attempts.
+ */
+export function admissionRowShouldNotify(
+  context: Pick<AdmissionRowContext, 'baseline' | 'row' | 'firstObservationEligible'>,
+  options: { policyMigration?: boolean } = {},
+): boolean {
+  return admissionShouldNotify({
+    baseline: context.baseline,
+    policyMigration: options.policyMigration ?? false,
+    firstObservation: context.firstObservationEligible ?? true,
+    existingJob: Boolean(context.row.jobId),
+  });
 }
 
 export interface AdmissionV2CatalogSink {
@@ -134,6 +160,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
         listing: graded.listing,
         admission: graded.admission,
         jobId: graded.jobId,
+        notify: admissionRowShouldNotify(context),
       });
       return { decision: graded.decision, jobId: graded.jobId };
     }

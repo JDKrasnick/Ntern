@@ -88,16 +88,32 @@ interface Harness {
   snapshots: MemoryObjectStore;
   discovery: IngestionV2ShadowDiscovery;
   adapter: GitHubMarkdownAdapter;
+  reopened: string[][];
   discover: (documents: Record<string, BoardRow[]>) => Promise<void>;
   fetch: () => Promise<SourceSnapshot>;
 }
 
-function harness(initial: Record<string, BoardRow[]>): Harness {
+function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false): Harness {
   const database = new DatabaseSync(':memory:');
-  database.exec(readFileSync(new URL('../cloudflare/migrations/0045_ingestion_v2.sql', import.meta.url), 'utf8'));
+  for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql']) {
+    database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
+  }
   const repository = new D1IngestionV2Repository(sqliteD1(database));
   const snapshots = new MemoryObjectStore();
-  const discovery = new IngestionV2ShadowDiscovery({ repository, snapshots, features: { shadowDiscoveryEnabled: true }, now: () => new Date(observedAt), log: () => undefined });
+  const reopened: string[][] = [];
+  const discovery = new IngestionV2ShadowDiscovery({
+    repository,
+    snapshots,
+    features: { shadowDiscoveryEnabled: true },
+    now: () => new Date(observedAt),
+    log: () => undefined,
+    ...(admissionEnabled ? {
+      reopenActionableRows: async ({ sourceId: source, externalIds, admissionVersion, now }) => {
+        reopened.push([...externalIds]);
+        return repository.reopenRows(source, [...externalIds], now, { admissionVersion });
+      },
+    } : {}),
+  });
   let documents = initial;
   const documentsById = [
     { path: 'README.md', branch: 'main', season: 'summer-2027' },
@@ -132,7 +148,7 @@ function harness(initial: Record<string, BoardRow[]>): Harness {
       now: observedAt,
     });
   };
-  return { database, repository, snapshots, discovery, adapter, discover, fetch };
+  return { database, repository, snapshots, discovery, adapter, reopened, discover, fetch };
 }
 
 const rowA: BoardRow = { company: 'Acme', position: 'Software Engineering Intern', location: 'Remote', url: 'https://jobs.example.test/acme/1' };
@@ -237,6 +253,28 @@ describe('ingestion v2 shadow discovery integration', () => {
     expect(diff.omissionUpdates).toEqual([]);
     expect(diff.actionableExternalIds).toEqual([]);
     expect(await subject.repository.getRow(sourceId, basePostingId('README.md', rowB.url))).toMatchObject({ consecutiveOmissions: 0 });
+    subject.database.close();
+  });
+
+  it('reopens only materially changed rows for the admission lane when a producer is attached', async () => {
+    const subject = harness({ 'README.md': [rowA, rowB, rowC], 'SECOND.md': [rowS] }, true);
+    await subject.discover({ 'README.md': [rowA, rowB, rowC], 'SECOND.md': [rowS] });
+    // The first pass reopens every brand-new row as dispatchable work.
+    expect(subject.reopened[0]?.length).toBe(4);
+    subject.reopened.length = 0;
+
+    const changed: BoardRow = { ...rowC, position: 'Data Science Intern II' };
+    await subject.discover({ 'README.md': [rowA, rowB, changed], 'SECOND.md': [rowS] });
+    const changedId = basePostingId('README.md', rowC.url);
+    expect(subject.reopened).toEqual([[changedId]]);
+    const reopenedRow = await subject.repository.getRow(sourceId, changedId);
+    expect(reopenedRow?.state).toBe('queued');
+    expect(reopenedRow?.attemptCount).toBe(0);
+
+    // A repeated identical board reopens nothing.
+    subject.reopened.length = 0;
+    await subject.discover({ 'README.md': [rowA, rowB, changed], 'SECOND.md': [rowS] });
+    expect(subject.reopened).toEqual([]);
     subject.database.close();
   });
 

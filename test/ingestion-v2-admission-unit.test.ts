@@ -13,7 +13,9 @@ import {
   nextAdmissionAttempt,
 } from '../src/ingestion-v2/admission/taxonomy.js';
 import { canTransition, planRowTransition } from '../src/ingestion-v2/admission/transitions.js';
+import { admissionRowShouldNotify } from '../src/ingestion-v2/admission/evaluator.js';
 import { ADMISSION_V2_MAX_EXTERNAL_IDS, type AdmissionV2Message } from '../src/ingestion-v2/admission/types.js';
+import type { IngestionRowRecord } from '../src/ingestion-v2/types.js';
 
 function message(overrides: Partial<AdmissionV2Message> = {}): AdmissionV2Message {
   const externalIds = overrides.externalIds ?? ['a'];
@@ -121,5 +123,25 @@ describe('admission v2 notification fencing', () => {
     expect(admissionShouldNotify({ baseline: false, policyMigration: false, firstObservation: true, existingJob: false })).toBe(true);
     expect(admissionShouldNotify({ baseline: false, policyMigration: false, firstObservation: false, existingJob: false })).toBe(false);
     expect(admissionShouldNotify({ baseline: false, policyMigration: false, firstObservation: true, existingJob: true })).toBe(false);
+  });
+
+  function fencingRow(overrides: Partial<IngestionRowRecord> = {}): IngestionRowRecord {
+    return {
+      sourceId: 'community-example', externalId: 'a', snapshotHash: 's', materialHash: 'm', admissionVersion: 'v',
+      state: 'processing', attemptCount: 0, consecutiveOmissions: 0,
+      firstObservedAt: 't', lastObservedAt: 't', updatedAt: 't', ...overrides,
+    };
+  }
+
+  it('derives the commit notification decision from baseline and prior job identity', () => {
+    expect(admissionRowShouldNotify({ baseline: false, row: fencingRow(), firstObservationEligible: true })).toBe(true);
+    // Baseline work is silent even for a brand-new row.
+    expect(admissionRowShouldNotify({ baseline: true, row: fencingRow(), firstObservationEligible: true })).toBe(false);
+    // A row that already owns a catalog job (policy migration/re-admission) is silent.
+    expect(admissionRowShouldNotify({ baseline: false, row: fencingRow({ jobId: 'JOB#1' }), firstObservationEligible: true })).toBe(false);
+    // A closed/prospect row is never first-observation eligible.
+    expect(admissionRowShouldNotify({ baseline: false, row: fencingRow(), firstObservationEligible: false })).toBe(false);
+    // Policy-migration work is silent even without a recorded job.
+    expect(admissionRowShouldNotify({ baseline: false, row: fencingRow(), firstObservationEligible: true }, { policyMigration: true })).toBe(false);
   });
 });

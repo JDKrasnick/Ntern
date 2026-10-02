@@ -206,10 +206,22 @@ the live catalog.
   or contended delivery is a no-op. A systemic failure (missing R2 object, D1
   unavailability, incomplete snapshot) releases the lease, retries the delivery,
   and never consumes a row attempt or quarantines a row.
-- Policy migration reopens a bounded batch of stale settled rows under the
-  current version without hiding previously visible roles or setting a
-  source-wide suppression. Baseline and policy-migration work emit no
-  notification; only a genuinely new post-baseline role does.
+- Row reopening is change-driven. When admission is enabled the shadow pass hands
+  the diff's `new`, `changed`, `stale-policy`, and `reappeared` IDs back to the
+  lane, so a row whose material content, policy version, or presence changed
+  becomes dispatchable work. A due-retry row is left in place so reopening cannot
+  reset the attempt count that caps its retries. An authorized operator can also
+  reopen one row through the guarded replay route.
+- The scheduled dispatcher runs a bounded per-source policy migration before it
+  dispatches: stale settled rows are reopened under the active snapshot's
+  admission version in bounded batches, without hiding previously visible roles,
+  clearing a job identity, or setting a source-wide suppression. New eligible
+  rows dispatch on their own while stale peers are still being regraded.
+- Notification fencing is enforced at the effect boundary. Baseline work and any
+  row that already owns a catalog job (policy migration or re-admission) commit
+  with `notify: false`; only a genuinely new post-baseline role may mint a
+  notification. The verification sink records the decision so a canary can prove
+  zero notifications without a live catalog writer.
 - `INGESTION_V2_ADMISSION_ENABLED` (default `false`) gates admission;
   `INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST` optionally bounds rollout. The
   dispatcher only produces messages for sources on the allowlist, and the
@@ -222,16 +234,22 @@ the live catalog.
   is echoed back; it refuses an in-flight row and an ID absent from a retained
   complete snapshot. Both require `X-Operations-Key` and are otherwise a 404.
 
-### Stage 2 known gap (owned by Stage 3)
+### Stage 2 production boundary (owned by Stage 3)
 
-Stage 2 ships the queue, lease, retry, quarantine, dispatch, and replay
-machinery, but no producer yet turns Stage 1 discovery output into dispatchable
-work. Shadow discovery writes every board row `settled`, the dispatcher selects
-only `pending`/`queued`/expired-`processing`, and `migrateAdmissionPolicy` is not
-yet scheduled. Consequently a real source produces no admission messages until
-Stage 3 maps the diff's `actionableExternalIds` (or a policy-migration pass) into
-the lane. This is intentional: both flags are default off and the admission
-decisions are recorded, not published. The end-to-end suites cover the lane by
-seeding dispatchable rows directly. Two writers share `ingestion_rows`, so the
-shadow upsert preserves admission-lane state (`pending`, `queued`, `processing`,
-`quarantined`) and omission increments skip a leased `processing` row.
+Stage 2 ships the whole lane: the dedicated queue/DLQ, versioned messages, the
+durable handoff and change-driven producer, leases, retries, quarantine, guarded
+replay, bounded policy migration, and notification fencing. Two things stay out
+of scope and belong to Stage 3:
+
+- The catalog writer is still a recorded decision sink, so V2 commits ledger
+  state and the decision it *would* have published without mutating the live
+  catalog. Stage 3 swaps the sink for the reconciler-backed writer.
+- Broad production cutover. Both flags are default off; the queue, schema, and
+  Worker code deploy disabled and legacy ingestion stays authoritative.
+
+The end-to-end suite covers the lane by seeding dispatchable rows and by driving
+real deliveries through the built Worker. Two writers share `ingestion_rows`, so
+the shadow upsert preserves admission-lane state (`pending`, `queued`,
+`processing`, `quarantined`) and omission increments skip a leased `processing`
+row; the only lane mutation the shadow pass performs is the explicit reopening of
+materially or policy-changed rows described above.
