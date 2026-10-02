@@ -41,8 +41,8 @@ export interface AdmissionV2Ledger {
    * stale relative to the current row.
    */
   acquireLease(input: AcquireLeaseInput): Promise<AdmissionLeaseResult>;
-  /** Return a leased row to `queued` without consuming an attempt. */
-  releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<void>;
+  /** Return a leased row to `queued` without consuming an attempt. Reports whether the guarded update applied. */
+  releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<boolean>;
   settleRow(input: {
     sourceId: string;
     externalId: string;
@@ -51,7 +51,7 @@ export interface AdmissionV2Ledger {
     decision: IngestionDecision;
     jobId?: string;
     reason?: string;
-  }): Promise<void>;
+  }): Promise<boolean>;
   scheduleRowRetry(input: {
     sourceId: string;
     externalId: string;
@@ -60,7 +60,7 @@ export interface AdmissionV2Ledger {
     attemptCount: number;
     retryAt: string;
     failure: AdmissionFailure;
-  }): Promise<void>;
+  }): Promise<boolean>;
   quarantineRow(input: {
     sourceId: string;
     externalId: string;
@@ -68,7 +68,7 @@ export interface AdmissionV2Ledger {
     now: string;
     attemptCount: number;
     failure: AdmissionFailure;
-  }): Promise<void>;
+  }): Promise<boolean>;
   /**
    * Reopen settled/quarantined/absent rows (material, policy, or operator
    * replay). Optionally stamps a new admission version, which is how policy

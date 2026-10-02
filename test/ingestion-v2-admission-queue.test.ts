@@ -65,14 +65,16 @@ class FakeLedger implements AdmissionV2Ledger {
     return { outcome: 'acquired', row: leased };
   }
 
-  async releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<void> {
+  async releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<boolean> {
     const row = this.row(sourceId, externalId);
-    if (row && row.state === 'processing' && row.leaseOwner === owner) this.save({ ...row, state: 'queued', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: now });
+    if (!row || row.state !== 'processing' || row.leaseOwner !== owner) return false;
+    this.save({ ...row, state: 'queued', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: now });
+    return true;
   }
 
-  async settleRow(input: { sourceId: string; externalId: string; owner: string; now: string; decision: 'admitted' | 'blocked' | 'shelved'; jobId?: string; reason?: string }): Promise<void> {
+  async settleRow(input: { sourceId: string; externalId: string; owner: string; now: string; decision: 'admitted' | 'blocked' | 'shelved'; jobId?: string; reason?: string }): Promise<boolean> {
     const row = this.row(input.sourceId, input.externalId);
-    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return;
+    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return false;
     this.save({
       ...row, state: 'settled', decision: input.decision, attemptCount: row.attemptCount + 1,
       ...(input.jobId ? { jobId: input.jobId } : {}),
@@ -80,18 +82,21 @@ class FakeLedger implements AdmissionV2Ledger {
       ...(input.decision === 'shelved' ? { failureClass: 'shelved', failureDetail: input.reason } : {}),
       settledAt: input.now, updatedAt: input.now, retryAt: undefined, leaseOwner: undefined, leaseExpiresAt: undefined,
     });
+    return true;
   }
 
-  async scheduleRowRetry(input: { sourceId: string; externalId: string; owner: string; now: string; attemptCount: number; retryAt: string; failure: AdmissionFailure }): Promise<void> {
+  async scheduleRowRetry(input: { sourceId: string; externalId: string; owner: string; now: string; attemptCount: number; retryAt: string; failure: AdmissionFailure }): Promise<boolean> {
     const row = this.row(input.sourceId, input.externalId);
-    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return;
+    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return false;
     this.save({ ...row, state: 'queued', attemptCount: input.attemptCount, retryAt: input.retryAt, failureClass: input.failure.classification, failureDetail: input.failure.detail, updatedAt: input.now, leaseOwner: undefined, leaseExpiresAt: undefined });
+    return true;
   }
 
-  async quarantineRow(input: { sourceId: string; externalId: string; owner: string; now: string; attemptCount: number; failure: AdmissionFailure }): Promise<void> {
+  async quarantineRow(input: { sourceId: string; externalId: string; owner: string; now: string; attemptCount: number; failure: AdmissionFailure }): Promise<boolean> {
     const row = this.row(input.sourceId, input.externalId);
-    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return;
+    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return false;
     this.save({ ...row, state: 'quarantined', attemptCount: input.attemptCount, failureClass: input.failure.classification, failureDetail: input.failure.detail, updatedAt: input.now, retryAt: undefined, leaseOwner: undefined, leaseExpiresAt: undefined });
+    return true;
   }
 
   async reopenRows(sourceId: string, externalIds: readonly string[], now: string, options: { admissionVersion?: string } = {}): Promise<number> {
@@ -313,6 +318,25 @@ describe('admission v2 queue consumer', () => {
     expect(second.skipped).toBe(1);
     expect(second.settled).toBe(0);
     expect(evaluator.calls.get('a')).toBe(1);
+  });
+
+  it('treats a lease reclaimed mid-evaluation as skipped, not a phantom settle', async () => {
+    const { ledger, snapshots } = setup(['a']);
+    const evaluator: AdmissionV2RowEvaluator = {
+      async evaluate() {
+        // Mimic a concurrent dispatcher reclaiming the lease while the row is
+        // being evaluated, so the guarded settle can no longer apply.
+        const row = (await ledger.getRow(SOURCE, 'a'))!;
+        ledger.seedRow({ ...row, state: 'queued', leaseOwner: undefined, leaseExpiresAt: undefined });
+        return { decision: { kind: 'admitted' } };
+      },
+    };
+    const [message] = messagesFor(['a']);
+    const result = await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    expect(result.settled).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(result.acknowledged).toBe(true);
+    expect((await ledger.getRow(SOURCE, 'a'))?.state).toBe('queued');
   });
 
   it('acknowledges a stale delivery as a no-op', async () => {

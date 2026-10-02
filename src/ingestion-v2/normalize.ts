@@ -179,6 +179,12 @@ export function serializeEnvelope(envelope: NormalizedSnapshotEnvelope): string 
  * Validate an envelope read back from object storage. Both the schema version
  * and the content hash must match the recomputed value, so a truncated or
  * tampered object can never be trusted.
+ *
+ * Cost note (Stage 3): validation walks and re-hashes every row of the whole
+ * board. Because a message carries at most 25 IDs, a board of N rows does
+ * ~N/25 full-board reads and re-hashes. Integrity is deliberately strict here;
+ * Stage 3 should carry a per-batch slice (or a validated per-hash index) so the
+ * hot path stops re-validating rows it will not evaluate.
  */
 export function parseEnvelope(raw: string, expected: { sourceId: string; snapshotHash: string }): NormalizedSnapshotEnvelope {
   let parsed: unknown;

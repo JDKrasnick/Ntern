@@ -126,7 +126,7 @@ export async function processAdmissionV2Message(
       });
       const decision = evaluation.decision;
       const jobId = evaluation.jobId ?? (decision.kind === 'admitted' ? decision.jobId : undefined);
-      await dependencies.ledger.settleRow({
+      const settled = await dependencies.ledger.settleRow({
         sourceId: message.sourceId,
         externalId,
         owner,
@@ -135,6 +135,14 @@ export async function processAdmissionV2Message(
         ...(jobId ? { jobId } : {}),
         ...(decision.kind === 'admitted' ? {} : { reason: decision.reason }),
       });
+      if (!settled) {
+        // The lease lapsed and was reclaimed between evaluation and settle. The
+        // row is back in flight; the evaluator's sink commit is idempotent, so
+        // treat it as skipped rather than claiming a write that did not happen.
+        result.skipped += 1;
+        dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'settle' });
+        continue;
+      }
       result.settled += 1;
       if (decision.kind === 'admitted') result.counts.admitted += 1;
       else if (decision.kind === 'blocked') result.counts.blocked += 1;
@@ -143,7 +151,8 @@ export async function processAdmissionV2Message(
       const failure = classifyAdmissionFailure(error);
       if (failure.kind === 'infrastructure') {
         // Do not consume a row attempt or quarantine on a systemic failure.
-        await dependencies.ledger.releaseLease(message.sourceId, externalId, owner, now().toISOString());
+        const released = await dependencies.ledger.releaseLease(message.sourceId, externalId, owner, now().toISOString());
+        if (!released) dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'release' });
         result.acknowledged = false;
         result.infrastructureFailure = failure;
         dependencies.log?.({ event: 'ingestion_v2_admission_infrastructure', batchId: message.batchId, externalId, classification: failure.classification });
@@ -152,17 +161,27 @@ export async function processAdmissionV2Message(
       const failedAttempt = lease.row.attemptCount + 1;
       const next = nextAdmissionAttempt(failedAttempt, now().getTime());
       if ('exhausted' in next) {
-        await dependencies.ledger.quarantineRow({
+        const quarantined = await dependencies.ledger.quarantineRow({
           sourceId: message.sourceId, externalId, owner, now: now().toISOString(),
           attemptCount: failedAttempt, failure,
         });
+        if (!quarantined) {
+          result.skipped += 1;
+          dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'quarantine' });
+          continue;
+        }
         result.quarantined += 1;
         dependencies.log?.({ event: 'ingestion_v2_admission_quarantined', batchId: message.batchId, sourceId: message.sourceId, externalId, classification: failure.classification });
       } else {
-        await dependencies.ledger.scheduleRowRetry({
+        const retried = await dependencies.ledger.scheduleRowRetry({
           sourceId: message.sourceId, externalId, owner, now: now().toISOString(),
           attemptCount: next.attemptCount, retryAt: next.retryAt, failure,
         });
+        if (!retried) {
+          result.skipped += 1;
+          dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'retry' });
+          continue;
+        }
         result.retried += 1;
       }
     }

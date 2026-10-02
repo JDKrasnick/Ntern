@@ -26,6 +26,13 @@ export interface AdmissionV2DispatchDependencies {
  * repeated dispatcher run cannot create duplicate logical work. Every selected
  * row is committed `queued` and paired with a durable handoff before the caller
  * sends, so a failed handoff stays recoverable by the next dispatcher run.
+ *
+ * Stage 3 gap: this selects only rows already in a dispatchable lane state.
+ * Stage 1 shadow discovery writes every board row `settled`, so no row becomes
+ * `pending` until a producer maps the diff's `actionableExternalIds` (or policy
+ * migration reopens stale rows) into the lane. Until that producer lands, a real
+ * board produces no admission messages. The queue, lease, retry, and quarantine
+ * machinery below is exercised end to end by the admission suites.
  */
 export async function planAdmissionV2Dispatch(
   sourceId: string,

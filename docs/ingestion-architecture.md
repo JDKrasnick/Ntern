@@ -221,3 +221,17 @@ the live catalog.
   `{ sourceId, externalId }` and applies only when the returned `replayToken`
   is echoed back; it refuses an in-flight row and an ID absent from a retained
   complete snapshot. Both require `X-Operations-Key` and are otherwise a 404.
+
+### Stage 2 known gap (owned by Stage 3)
+
+Stage 2 ships the queue, lease, retry, quarantine, dispatch, and replay
+machinery, but no producer yet turns Stage 1 discovery output into dispatchable
+work. Shadow discovery writes every board row `settled`, the dispatcher selects
+only `pending`/`queued`/expired-`processing`, and `migrateAdmissionPolicy` is not
+yet scheduled. Consequently a real source produces no admission messages until
+Stage 3 maps the diff's `actionableExternalIds` (or a policy-migration pass) into
+the lane. This is intentional: both flags are default off and the admission
+decisions are recorded, not published. The end-to-end suites cover the lane by
+seeding dispatchable rows directly. Two writers share `ingestion_rows`, so the
+shadow upsert preserves admission-lane state (`pending`, `queued`, `processing`,
+`quarantined`) and omission increments skip a leased `processing` row.

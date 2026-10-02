@@ -110,6 +110,66 @@ describe('ingestion v2 D1 repository', () => {
     expect(await repository.getRow('community-example', 'b')).toMatchObject({ consecutiveOmissions: 2, state: 'absent' });
   });
 
+  it('never lets a shadow upsert clobber admission-lane row state', async () => {
+    const { repository } = subject();
+    await repository.putRows([
+      row({ externalId: 'leased', state: 'processing', decision: undefined, attemptCount: 2, leaseOwner: 'worker', leaseExpiresAt: '2026-10-01T01:00:00.000Z' }),
+      row({ externalId: 'queued', state: 'queued', decision: undefined, attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z' }),
+      row({ externalId: 'quarantined', state: 'quarantined', decision: 'blocked', attemptCount: 3, failureClass: 'upstream-server-error' }),
+      row({ externalId: 'settled', state: 'settled', decision: 'admitted' }),
+    ]);
+    // A shadow discovery upsert for the same board, all projected `settled`.
+    await repository.putRows([
+      row({ externalId: 'leased', state: 'settled', decision: 'admitted', attemptCount: 0, lastObservedAt: '2026-10-02T00:00:00.000Z' }),
+      row({ externalId: 'queued', state: 'settled', decision: 'admitted', attemptCount: 0, lastObservedAt: '2026-10-02T00:00:00.000Z' }),
+      row({ externalId: 'quarantined', state: 'settled', decision: 'admitted', attemptCount: 0, lastObservedAt: '2026-10-02T00:00:00.000Z' }),
+      row({ externalId: 'settled', state: 'settled', decision: 'blocked', lastObservedAt: '2026-10-02T00:00:00.000Z' }),
+    ]);
+    expect(await repository.getRow('community-example', 'leased')).toMatchObject({
+      state: 'processing', attemptCount: 2, leaseOwner: 'worker', leaseExpiresAt: '2026-10-01T01:00:00.000Z',
+    });
+    expect(await repository.getRow('community-example', 'queued')).toMatchObject({
+      state: 'queued', attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z',
+    });
+    expect(await repository.getRow('community-example', 'quarantined')).toMatchObject({
+      state: 'quarantined', decision: 'blocked', attemptCount: 3, failureClass: 'upstream-server-error',
+    });
+    // A settled row is discovery-owned: its state and decision may be refreshed.
+    expect(await repository.getRow('community-example', 'settled')).toMatchObject({
+      state: 'settled', decision: 'blocked', lastObservedAt: '2026-10-02T00:00:00.000Z',
+    });
+  });
+
+  it('leaves an in-flight row untouched when it drops off the board', async () => {
+    const { repository } = subject();
+    await repository.putRows([
+      row({ externalId: 'leased', state: 'processing', decision: undefined, leaseOwner: 'worker', leaseExpiresAt: '2026-10-01T01:00:00.000Z' }),
+      row({ externalId: 'idle' }),
+    ]);
+    await repository.applyOmissions('community-example', [
+      { externalId: 'leased', consecutiveOmissions: 1, becomesAbsent: false },
+      { externalId: 'idle', consecutiveOmissions: 1, becomesAbsent: false },
+    ], '2026-10-02T00:00:00.000Z');
+    expect(await repository.getRow('community-example', 'leased')).toMatchObject({
+      state: 'processing', consecutiveOmissions: 0, leaseOwner: 'worker',
+    });
+    expect(await repository.getRow('community-example', 'idle')).toMatchObject({
+      state: 'settled', consecutiveOmissions: 1,
+    });
+  });
+
+  it('reports whether a guarded lane write applied', async () => {
+    const { repository } = subject();
+    await repository.putRows([row({ externalId: 'a' })]);
+    // Not leased, so every guarded write is refused.
+    expect(await repository.settleRow({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', decision: 'admitted' })).toBe(false);
+    expect(await repository.scheduleRowRetry({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', attemptCount: 1, retryAt: '2026-10-01T00:01:00.000Z', failure: { kind: 'row-transient', classification: 'destination-timeout', detail: 't' } })).toBe(false);
+    expect(await repository.quarantineRow({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', attemptCount: 3, failure: { kind: 'row-transient', classification: 'upstream-server-error', detail: '5' } })).toBe(false);
+    expect(await repository.releaseLease('community-example', 'a', 'x', '2026-10-01T00:00:00.000Z')).toBe(false);
+    await repository.putRows([row({ externalId: 'b', state: 'processing', decision: undefined, leaseOwner: 'x', leaseExpiresAt: '2026-10-01T01:00:00.000Z' })]);
+    expect(await repository.releaseLease('community-example', 'b', 'x', '2026-10-01T00:00:00.000Z')).toBe(true);
+  });
+
   it('pages rows by observation order', async () => {
     const { repository } = subject();
     await repository.putRows([

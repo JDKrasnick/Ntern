@@ -148,5 +148,16 @@ export async function applyAdmissionReplay(
   }
   const now = (options.now ?? (() => new Date()))().toISOString();
   const reopened = await ledger.reopenRows(request.sourceId, [request.externalId], now);
-  return { applied: reopened > 0, state: 'queued' };
+  const applied = reopened > 0;
+  // Record the operator identity and outcome: replay is the one mutating
+  // operations action, so it must leave an auditable trace.
+  console.log(JSON.stringify({
+    event: 'ingestion_v2_admission_replay',
+    actor: options.actor ?? 'operator',
+    sourceId: request.sourceId,
+    externalId: request.externalId,
+    applied,
+    at: now,
+  }));
+  return { applied, state: 'queued' };
 }

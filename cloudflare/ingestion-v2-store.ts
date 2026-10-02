@@ -27,6 +27,12 @@ import type {
 
 const chunkSize = 50;
 
+// Rows the admission lane owns. A shadow discovery upsert must never clobber
+// their state, lease, attempt count, decision, or failure fields; it may only
+// refresh identity, material, snapshot, and observation columns.
+const ADMISSION_LANE_OWNED_STATES = ['pending', 'queued', 'processing', 'quarantined'] as const;
+const laneOwnedSqlList = ADMISSION_LANE_OWNED_STATES.map((state) => `'${state}'`).join(', ');
+
 interface SnapshotDbRow {
   source_id: string;
   snapshot_hash: string;
@@ -198,19 +204,46 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         snapshot_hash = excluded.snapshot_hash,
         material_hash = excluded.material_hash,
         admission_version = excluded.admission_version,
-        state = excluded.state,
-        decision = COALESCE(excluded.decision, ingestion_rows.decision),
-        attempt_count = excluded.attempt_count,
-        retry_at = excluded.retry_at,
-        lease_owner = excluded.lease_owner,
-        lease_expires_at = excluded.lease_expires_at,
+        state = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.state
+          ELSE excluded.state
+        END,
+        decision = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.decision
+          ELSE COALESCE(excluded.decision, ingestion_rows.decision)
+        END,
+        attempt_count = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.attempt_count
+          ELSE excluded.attempt_count
+        END,
+        retry_at = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.retry_at
+          ELSE excluded.retry_at
+        END,
+        lease_owner = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.lease_owner
+          ELSE excluded.lease_owner
+        END,
+        lease_expires_at = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.lease_expires_at
+          ELSE excluded.lease_expires_at
+        END,
         consecutive_omissions = excluded.consecutive_omissions,
         job_id = COALESCE(excluded.job_id, ingestion_rows.job_id),
-        failure_class = excluded.failure_class,
-        failure_detail = excluded.failure_detail,
+        failure_class = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.failure_class
+          ELSE excluded.failure_class
+        END,
+        failure_detail = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.failure_detail
+          ELSE excluded.failure_detail
+        END,
         last_observed_at = excluded.last_observed_at,
         updated_at = excluded.updated_at,
-        settled_at = COALESCE(excluded.settled_at, ingestion_rows.settled_at)
+        settled_at = CASE
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.settled_at
+          ELSE COALESCE(excluded.settled_at, ingestion_rows.settled_at)
+        END
     `);
     const statements = records.map((record) => statement.bind(
       record.sourceId,
@@ -240,9 +273,12 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
 
   async applyOmissions(sourceId: string, updates: readonly SnapshotOmissionUpdate[], updatedAt: string): Promise<void> {
     if (!updates.length) return;
+    // A leased (`processing`) row is owned by an in-flight delivery. Closing it
+    // here would leave an `absent` row still carrying a lease and race the
+    // consumer's guarded settle, so omission increments wait for it to settle.
     const statement = this.db.prepare(`
       UPDATE ingestion_rows SET consecutive_omissions = ?, state = ?, updated_at = ?
-      WHERE source_id = ? AND external_id = ?
+      WHERE source_id = ? AND external_id = ? AND state <> 'processing'
     `);
     const statements = updates.map((update) => statement.bind(
       update.consecutiveOmissions,
@@ -414,19 +450,20 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     return { outcome: 'no-op', reason: 'stale' };
   }
 
-  async releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<void> {
-    await this.db.prepare(`
+  async releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<boolean> {
+    const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
     `).bind(now, sourceId, externalId, owner).run();
+    return result.meta.changes > 0;
   }
 
   async settleRow(input: {
     sourceId: string; externalId: string; owner: string; now: string;
     decision: IngestionDecision; jobId?: string; reason?: string;
-  }): Promise<void> {
-    await this.db.prepare(`
+  }): Promise<boolean> {
+    const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'settled', decision = ?, job_id = COALESCE(?, job_id), settled_at = ?,
         attempt_count = attempt_count + 1, retry_at = NULL,
@@ -439,13 +476,14 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       input.reason ?? null,
       input.now, input.sourceId, input.externalId, input.owner,
     ).run();
+    return result.meta.changes > 0;
   }
 
   async scheduleRowRetry(input: {
     sourceId: string; externalId: string; owner: string; now: string;
     attemptCount: number; retryAt: string; failure: AdmissionFailure;
-  }): Promise<void> {
-    await this.db.prepare(`
+  }): Promise<boolean> {
+    const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'queued', attempt_count = ?, retry_at = ?, failure_class = ?, failure_detail = ?,
         lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
@@ -454,13 +492,14 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       input.attemptCount, input.retryAt, input.failure.classification, input.failure.detail,
       input.now, input.sourceId, input.externalId, input.owner,
     ).run();
+    return result.meta.changes > 0;
   }
 
   async quarantineRow(input: {
     sourceId: string; externalId: string; owner: string; now: string;
     attemptCount: number; failure: AdmissionFailure;
-  }): Promise<void> {
-    await this.db.prepare(`
+  }): Promise<boolean> {
+    const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'quarantined', attempt_count = ?, retry_at = NULL, failure_class = ?, failure_detail = ?,
         lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
@@ -469,6 +508,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       input.attemptCount, input.failure.classification, input.failure.detail,
       input.now, input.sourceId, input.externalId, input.owner,
     ).run();
+    return result.meta.changes > 0;
   }
 
   async reopenRows(sourceId: string, externalIds: readonly string[], now: string, options: { admissionVersion?: string } = {}): Promise<number> {

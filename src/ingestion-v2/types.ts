@@ -12,7 +12,9 @@ import type { ProcessedSnapshot, SourcedPosting } from '../types.js';
 export const INGESTION_V2_SNAPSHOT_SCHEMA_VERSION = 1;
 
 export type IngestionSnapshotState = 'staged' | 'active' | 'terminal' | 'expired';
-export type IngestionRowState = 'pending' | 'queued' | 'processing' | 'settled' | 'quarantined' | 'absent';
+/** The full row-state domain; also validated at the operations boundary. */
+export const INGESTION_ROW_STATES = ['pending', 'queued', 'processing', 'settled', 'quarantined', 'absent'] as const;
+export type IngestionRowState = (typeof INGESTION_ROW_STATES)[number];
 export type IngestionDecision = 'admitted' | 'blocked' | 'shelved';
 
 /** One canonical, provider-independent row of a normalized snapshot. */

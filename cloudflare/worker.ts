@@ -33,7 +33,7 @@ import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore 
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
 import { admissionSourceAllowed, processAdmissionV2Batch } from './admission-v2.js';
 import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
-import { ingestionV2FeatureConfig, type IngestionRowState } from '../src/ingestion-v2/types.js';
+import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState } from '../src/ingestion-v2/types.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
 import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import { admissionV2FeatureConfig } from '../src/ingestion-v2/admission/types.js';
@@ -1281,6 +1281,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!sourceId) return withCors(Response.json({ message: 'sourceId is required' }, { status: 400 }));
     const state = url.searchParams.get('state');
     const cursor = url.searchParams.get('cursor');
+    if (state && !(INGESTION_ROW_STATES as readonly string[]).includes(state)) {
+      return withCors(Response.json({ message: `state must be one of ${INGESTION_ROW_STATES.join(', ')}` }, { status: 400 }));
+    }
     const repository = new D1IngestionV2Repository(env.DB);
     const [overview, page] = await Promise.all([
       inspectAdmissionOverview(repository, sourceId),
