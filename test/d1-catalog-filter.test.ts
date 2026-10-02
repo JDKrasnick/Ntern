@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { D1InternshipStore, CATALOG_PROJECTION_BATCH_BYTES } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
+import { openCatalogSortKey } from '../src/catalog-recency.js';
 import type { EducationLevel, Internship, InternshipIdentity } from '../src/types.js';
 
 function job(jobId: string, title: string): Internship {
@@ -803,6 +804,51 @@ describe('D1 filtered catalog projection', () => {
       // The badge states a graduate requirement without naming the degree, so it
       // only ever turns an undergraduate away.
       expect(await visibleTo('masters')).toEqual(['badge', 'graduate', 'masters-only', 'unstated']);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('serves an unprojected role from D1 and reports the raw offset of the superseded cards', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`CREATE TABLE catalog_items (
+      pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL,
+      catalog_state TEXT, catalog_sort_key TEXT, PRIMARY KEY (pk, sk)
+    )`);
+    const at = (jobId: string, visibleAt: string, company = 'Acme') => ({
+      ...job(jobId, 'Software Engineering Intern'),
+      company, firstSeenAt: visibleAt, catalogVisibleAt: visibleAt, lastSeenAt: visibleAt,
+    });
+    const a = at('a', '2026-10-02T15:00:00.000Z');
+    const b = at('b', '2026-10-02T15:00:01.000Z');
+    const c = at('c', '2026-10-02T15:00:02.000Z');
+    const o2 = at('o2', '2026-10-01T15:00:01.000Z', 'Globex');
+    const o1 = at('o1', '2026-10-01T15:00:00.000Z', 'Initech');
+    const insertJob = database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value, catalog_state, catalog_sort_key)
+      VALUES (?, 'META', 'internship', ?, 'OPEN', ?)`);
+    for (const value of [a, b, c, o2, o1]) insertJob.run(`JOB#${value.jobId}`, JSON.stringify(value), openCatalogSortKey(value));
+
+    const store = new D1InternshipStore(sqliteD1(database));
+    try {
+      const watermark = [a, b, c, o2, o1].map(openCatalogSortKey).sort().at(-1)!;
+      await store.putCatalogProjection(groupCatalogJobs([a, b, c, o2, o1]).map(catalogGroupDetails), '2026-10-02T15:41:56.000Z', watermark);
+      // d turns Acme's day into a release that supersedes the three published cards.
+      const d = at('d', '2026-10-02T15:00:03.000Z');
+      insertJob.run(`JOB#${d.jobId}`, JSON.stringify(d), openCatalogSortKey(d));
+
+      const first = await store.listCatalogProjection(undefined, 2);
+      expect(first!.live!.map((details) => details.roles.map((role) => role.jobId))).toEqual([['d', 'c', 'b', 'a']]);
+      // Both raw cards on this page are superseded, so the page is empty but its
+      // raw offsets are still accounted for by the cursor.
+      expect(first!.groups).toHaveLength(0);
+      expect(first!.groupOffsets).toEqual([]);
+      expect(first!.cursor).toBe('2');
+
+      const second = await store.listCatalogProjection('2', 2);
+      // Raw page is [a, o2]; a is superseded, so o2 survives at raw offset 1.
+      expect(second!.groups.map((details) => details.roles[0]!.jobId)).toEqual(['o2']);
+      expect(second!.groupOffsets).toEqual([1]);
+      expect(second!.cursor).toBe('4');
     } finally {
       database.close();
     }

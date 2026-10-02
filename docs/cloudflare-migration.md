@@ -183,6 +183,13 @@ immutable pages in both `intern-notifs-documents` and
 current pointer is refreshed every ten minutes, while readers accept a
 complete projection for up to seven days if maintenance is interrupted.
 
+Both pointers also carry the watermark of the newest open role their publish
+observed. A role ingested since then is grouped on the read path and led ahead
+of the page (see the decisions log for 2026-10-02), so a catalog page is the
+snapshot plus that live head: an R2-served read probes the D1 delta with the
+pointer's watermark before serving, which is one indexed range query that
+returns nothing in the ordinary current state.
+
 Before changing the mobile build, verify public catalog paging, sign-up and
 verification, sign-in, account deletion, notification registration, R2 document
 upload/download, all four catalog-provider queues and DLQs, Cron events, and operations

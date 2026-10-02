@@ -62,6 +62,22 @@ export interface CatalogGroupDetails {
 export interface CatalogProjectionPage {
   groups: CatalogGroupDetails[];
   cursor?: string;
+  /**
+   * Cards for roles the last publish had not yet observed. A first page carries
+   * them ahead of `groups`, so a role ingested seconds ago is browsable without
+   * waiting for the next projection tick. A card here is authoritative for every
+   * published card it overlaps.
+   */
+  live?: CatalogGroupDetails[];
+  /** The published version's watermark; a reader with no page probes with it. */
+  liveWatermark?: string;
+  /**
+   * For each entry in `groups`, its zero-based position in the store's raw
+   * published stream. A store that drops cards from a page (superseded by the
+   * live prefix, or filtered out) must report them here so a reader can resume
+   * from a raw offset instead of the shorter visible-card count.
+   */
+  groupOffsets?: number[];
 }
 
 export interface CatalogGroupRole {
@@ -312,19 +328,26 @@ export function employerDropGroupId(job: Internship, chunk = 0, timeZone?: strin
   return key ? `employer-release-${createHash('sha256').update(chunk > 0 ? `${key}#${chunk}` : key).digest('base64url').slice(0, 20)}` : undefined;
 }
 
+/**
+ * The publication id of the program card a role belongs to, or undefined when it
+ * carries no explicit program identity. Deterministic from the role alone, so a
+ * reader can look the published card up without scanning the projection.
+ */
+export function programCatalogGroupId(job: Internship): string | undefined {
+  const key = safeProgramKey(job);
+  return key ? `program-${createHash('sha256').update(key).digest('base64url').slice(0, 20)}` : undefined;
+}
+
 function groupId(kind: CatalogGroupKind, jobs: Internship[]) {
   const chronological = [...jobs].sort((left, right) => timestamp(left) - timestamp(right));
   // A release can contain roles that also have a structured program identity.
   // Keep its namespace tied to the observed employer drop so a remaining
   // program role cannot overwrite the release in a materialized projection.
-  const programKey = kind === 'employer-release' ? undefined : safeProgramKey(chronological[0]!);
-  const stable = programKey
-    ? programKey
-    : kind === 'employer-release'
-      ? employerDropKey(chronological[0]!) ?? `${companyKey(chronological[0]!) ?? chronological[0]!.company}\u0000${catalogVisibleAt(chronological[0]!)}`
-      : chronological[0]!.jobId;
-  if (kind === 'employer-release' && !programKey) return `employer-release-${createHash('sha256').update(stable).digest('base64url').slice(0, 20)}`;
-  return `${programKey ? 'program' : kind}-${createHash('sha256').update(stable).digest('base64url').slice(0, 20)}`;
+  const programId = kind === 'employer-release' ? undefined : programCatalogGroupId(chronological[0]!);
+  const stable = programId ? undefined : kind === 'employer-release'
+    ? employerDropKey(chronological[0]!) ?? `${companyKey(chronological[0]!) ?? chronological[0]!.company}\u0000${catalogVisibleAt(chronological[0]!)}`
+    : chronological[0]!.jobId;
+  return programId ?? `${kind}-${createHash('sha256').update(stable!).digest('base64url').slice(0, 20)}`;
 }
 
 function summarize(kind: CatalogGroupKind, jobs: Internship[], stableGroupId?: string): CatalogGroupRow {
