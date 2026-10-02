@@ -11,7 +11,9 @@ const filterReadPageConcurrency = 4;
 const maxAgeMs = 7 * 24 * 60 * 60_000;
 const encoded = (value: unknown): ArrayBuffer => new TextEncoder().encode(JSON.stringify(value)).buffer as ArrayBuffer;
 
-type Pointer = { schemaVersion: 1; version: string; generatedAt: string; count: number; groupPages: Record<string, number> };
+type Pointer = { schemaVersion: 1; version: string; generatedAt: string; count: number; groupPages: Record<string, number>;
+  /** The D1 publish's open-catalog watermark, so a reader can detect an unprojected role. */
+  liveWatermark?: string };
 
 function offsetOf(cursor?: string): number {
   const value = Number(cursor ?? 0);
@@ -44,7 +46,7 @@ export class R2CatalogProjection {
     return groups;
   }
 
-  async publish(groups: CatalogGroupDetails[], generatedAt: string): Promise<void> {
+  async publish(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void> {
     const hash = createHash('sha256');
     for (const group of groups) hash.update(JSON.stringify(group)).update('\0');
     const version = hash.digest('hex').slice(0, 20);
@@ -55,7 +57,15 @@ export class R2CatalogProjection {
       }
     }
     const groupPages = Object.fromEntries(groups.map((group, index) => [group.group.groupId, Math.floor(index / pageSize)]));
-    await this.bucket.put(`${prefix}/current`, encoded({ schemaVersion: 1, version, generatedAt, count: groups.length, groupPages } satisfies Pointer));
+    await this.bucket.put(`${prefix}/current`, encoded({
+      schemaVersion: 1, version, generatedAt, count: groups.length, groupPages,
+      ...(liveWatermark ? { liveWatermark } : {}),
+    } satisfies Pointer));
+  }
+
+  /** The watermark of the published version, for a reader that holds no page. */
+  async liveWatermark(): Promise<string | undefined> {
+    return (await this.pointer())?.liveWatermark;
   }
 
   async list(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {
@@ -69,7 +79,8 @@ export class R2CatalogProjection {
       groups.push(...page.slice(index === Math.floor(offset / pageSize) ? offset % pageSize : 0));
       index += 1;
     }
-    return { groups: groups.slice(0, limit), ...(offset + limit < pointer.count ? { cursor: String(offset + limit) } : {}) };
+    return { groups: groups.slice(0, limit), ...(offset + limit < pointer.count ? { cursor: String(offset + limit) } : {}),
+      ...(pointer.liveWatermark ? { liveWatermark: pointer.liveWatermark } : {}) };
   }
 
   async listFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
@@ -98,7 +109,8 @@ export class R2CatalogProjection {
         if (matched.length > limit) break;
       }
     }
-    return { groups: matched.slice(0, limit), ...(matched.length > limit ? { cursor: String(offset + limit) } : {}) };
+    return { groups: matched.slice(0, limit), ...(matched.length > limit ? { cursor: String(offset + limit) } : {}),
+      ...(pointer.liveWatermark ? { liveWatermark: pointer.liveWatermark } : {}) };
   }
 
   async roles(filter: CatalogGroupFilter, range: { from?: string; to?: string }): Promise<CatalogGroupRole[] | undefined> {
@@ -133,7 +145,15 @@ export class R2CatalogProjection {
   }
 }
 
-/** Keep D1 authoritative when the rebuildable R2 projection is absent or damaged. */
+/**
+ * Keep D1 authoritative when the rebuildable R2 projection is absent or damaged.
+ *
+ * R2 pages are immutable, so they cannot carry a role published after the
+ * publish that wrote them. A read therefore probes the D1 delta with the
+ * watermark the page names, and hands the request to the D1 path when unprojected
+ * roles exist. The probe is one indexed range query, answers empty in the
+ * ordinary current state, and keeps the R2 fast path for every other read.
+ */
 export class R2CatalogReadStore extends D1InternshipStore {
   private readonly projection: R2CatalogProjection;
 
@@ -143,32 +163,43 @@ export class R2CatalogReadStore extends D1InternshipStore {
   }
 
   override async listCatalogProjection(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {
-    try { return await this.projection.list(cursor, limit) ?? await super.listCatalogProjection(cursor, limit); }
-    catch (error) {
+    try {
+      const page = await this.projection.list(cursor, limit);
+      if (!page) return super.listCatalogProjection(cursor, limit);
+      return (await this.liveOverlayFor(page.liveWatermark)) ? super.listCatalogProjection(cursor, limit) : page;
+    } catch (error) {
       console.error(JSON.stringify({ event: 'r2_catalog_projection_read_failed', error: String(error) }));
       return super.listCatalogProjection(cursor, limit);
     }
   }
 
   override async listCatalogProjectionFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
-    try { return await this.projection.listFiltered(cursor, limit, filter) ?? await super.listCatalogProjectionFiltered(cursor, limit, filter); }
-    catch (error) {
+    try {
+      const page = await this.projection.listFiltered(cursor, limit, filter);
+      if (!page) return super.listCatalogProjectionFiltered(cursor, limit, filter);
+      return (await this.liveOverlayFor(page.liveWatermark)) ? super.listCatalogProjectionFiltered(cursor, limit, filter) : page;
+    } catch (error) {
       console.error(JSON.stringify({ event: 'r2_catalog_projection_read_failed', error: String(error) }));
       return super.listCatalogProjectionFiltered(cursor, limit, filter);
     }
   }
 
   override async listCatalogProjectionRoles(filter: CatalogGroupFilter, range: { from?: string; to?: string }): Promise<CatalogGroupRole[] | undefined> {
-    try { return await this.projection.roles(filter, range) ?? await super.listCatalogProjectionRoles(filter, range); }
-    catch (error) {
+    try {
+      const roles = await this.projection.roles(filter, range);
+      if (!roles) return super.listCatalogProjectionRoles(filter, range);
+      return (await this.liveOverlayFor(await this.projection.liveWatermark())) ? super.listCatalogProjectionRoles(filter, range) : roles;
+    } catch (error) {
       console.error(JSON.stringify({ event: 'r2_catalog_projection_read_failed', error: String(error) }));
       return super.listCatalogProjectionRoles(filter, range);
     }
   }
 
   override async getCatalogProjectionGroup(groupId: string): Promise<CatalogGroupDetails | undefined> {
-    try { return await this.projection.group(groupId) ?? await super.getCatalogProjectionGroup(groupId); }
-    catch (error) {
+    try {
+      if (await this.liveOverlayFor(await this.projection.liveWatermark())) return super.getCatalogProjectionGroup(groupId);
+      return await this.projection.group(groupId) ?? await super.getCatalogProjectionGroup(groupId);
+    } catch (error) {
       console.error(JSON.stringify({ event: 'r2_catalog_projection_read_failed', error: String(error) }));
       return super.getCatalogProjectionGroup(groupId);
     }

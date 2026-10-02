@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isPastSeason } from './core/early-career.js';
 import { employerCategory } from './core/employers.js';
-import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency } from './catalog-recency.js';
+import { canonicalCatalogRecency, catalogRecency, catalogVisibleAt, compareCatalogRecency, openCatalogSortKey } from './catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
 import type { ApplicantProfile, ApplicationRecord, DeliveryReceipt, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, RoleMetadataEvidence, SourceCheckpoint, SourceHealth, SourceOccurrence, SourceOccurrenceSelectionMetadata, SourceOccurrenceState, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from './types.js';
 import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from './resume.js';
@@ -10,7 +10,8 @@ import type { ApplicationSession } from './application-automation.js';
 import type { ReviewedLeverSource } from './sources/lever-config.js';
 import type { LeverOwnershipEvidence } from './sources/lever-evidence.js';
 import type { LeverCandidateProbeResult } from './sources/lever-probe.js';
-import { filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from './catalog-groups.js';
+import { filterCatalogGroupDetails, employerDropDay, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from './catalog-groups.js';
+import { catalogPublishable, liveCatalogOverlayFromStore, overlaySupersedesGroup, type LiveCatalogOverlay } from './catalog-live.js';
 import { alertEligible, catalogEligible } from './catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from './identity/projection.js';
 import { postingIdentityIncidentId } from './identity/incident.js';
@@ -114,13 +115,20 @@ export interface InternshipStore {
   listOpen?(cursor?: string, limit?: number, status?: 'open' | 'closed', query?: CatalogQuery): Promise<{ jobs: Internship[]; cursor?: string }>;
   /** Complete current-season catalog used to build stable grouped rows before role-level filters are applied. */
   listCatalog?(): Promise<Internship[]>;
-  putCatalogProjection?(groups: CatalogGroupDetails[], generatedAt: string): Promise<void>;
+  putCatalogProjection?(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void>;
   listCatalogProjection?(cursor?: string, limit?: number): Promise<CatalogProjectionPage | undefined>;
   /** Uses the backing store's query engine to avoid sequential projection scans for filtered catalog pages. */
   listCatalogProjectionFiltered?(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined>;
   /** Reads only matching projected roles for release-day indexes, bounded to the requested calendar range. */
   listCatalogProjectionRoles?(filter: CatalogGroupFilter, range: { from?: string; to?: string }): Promise<CatalogGroupRole[] | undefined>;
   getCatalogProjectionGroup?(groupId: string): Promise<CatalogGroupDetails | undefined>;
+  /** Open catalog roles published after a projection watermark, newest first, bounded by `limit`. */
+  listCatalogSince?(sortKeyExclusive: string, limit: number): Promise<Internship[]>;
+  /** Every open catalog role released on one UTC day, for the closed grouping of a delta. */
+  listCatalogWindow?(day: string): Promise<Internship[]>;
+  getJobs?(jobIds: readonly string[]): Promise<Internship[]>;
+  /** Cards that describe roles the last publish had not observed, or undefined when it is current. */
+  liveCatalogOverlay?(): Promise<LiveCatalogOverlay | undefined>;
   listLeverAdmissions?(): Promise<LeverAdmission[]>;
   putLeverAdmission?(admission: LeverAdmission): Promise<void>;
   /** Normal-recency open technical roles made catalog-visible in `(after, before]`. */
@@ -145,7 +153,7 @@ export class MemoryInternshipStore implements InternshipStore {
   readonly providerShadowVerifications = new Map<string, DestinationVerificationRequest>();
   /** Reviewed withdrawn postings, as exact provider keys. */
   readonly withdrawnPostingKeys = new Set<string>();
-  catalogProjection?: { generatedAt: string; groups: CatalogGroupDetails[] };
+  catalogProjection?: { generatedAt: string; liveWatermark?: string; groups: CatalogGroupDetails[] };
   async getCheckpoint(sourceId: string) { return this.checkpoints.get(sourceId); }
   async getCheckpointsMany(sourceIds: string[]) { return sourceIds.map((id) => this.checkpoints.get(id)).filter((value): value is SourceCheckpoint => Boolean(value)); }
   async putCheckpoint(checkpoint: SourceCheckpoint) { this.checkpoints.set(checkpoint.sourceId, checkpoint); }
@@ -358,29 +366,84 @@ export class MemoryInternshipStore implements InternshipStore {
       .sort(compareCatalogRecency)
       .map(withEmployerCategory);
   }
-  async putCatalogProjection(groups: CatalogGroupDetails[], generatedAt: string) {
-    this.catalogProjection = { generatedAt, groups: structuredClone(groups) };
+  async putCatalogProjection(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string) {
+    this.catalogProjection = {
+      generatedAt,
+      liveWatermark: liveWatermark ?? this.catalogLiveWatermark(),
+      groups: structuredClone(groups),
+    };
+  }
+  /** A projection built now contains every open role published so far. */
+  private catalogLiveWatermark() {
+    return [...this.jobs.values()]
+      .filter((job) => job.open && catalogPublishable(job) && catalogRecency(job) === 'normal')
+      .reduce<string | undefined>((newest, job) => {
+        const key = openCatalogSortKey(job);
+        return !newest || key > newest ? key : newest;
+      }, undefined);
+  }
+  async listCatalogSince(sortKeyExclusive: string, limit: number) {
+    return [...this.jobs.values()]
+      .filter((job) => job.open && catalogRecency(job) === 'normal' && openCatalogSortKey(job) > sortKeyExclusive)
+      .sort(compareCatalogRecency).slice(0, limit).map(withEmployerCategory);
+  }
+  async listCatalogWindow(day: string) {
+    return [...this.jobs.values()]
+      .filter((job) => job.open && employerDropDay(job) === day)
+      .sort(compareCatalogRecency).map(withEmployerCategory);
+  }
+  async getJobs(jobIds: readonly string[]) {
+    return jobIds.map((jobId) => this.jobs.get(jobId)).filter((job): job is Internship => Boolean(job)).map(withEmployerCategory);
+  }
+  async getPublishedCatalogGroup(groupId: string) {
+    const value = this.catalogProjection?.groups.find((group) => group.group.groupId === groupId);
+    return value ? structuredClone(value) : undefined;
+  }
+  async liveCatalogOverlay() {
+    const key = this.catalogProjection?.liveWatermark;
+    return key ? liveCatalogOverlayFromStore(this, key) : undefined;
   }
   async listCatalogProjection(cursor?: string, limit = 25) {
     if (!this.catalogProjection) return undefined;
     const offset = cursor ? Number(cursor) : 0;
-    const groups = this.catalogProjection.groups.slice(offset, offset + limit);
-    return { groups: structuredClone(groups), ...(offset + groups.length < this.catalogProjection.groups.length ? { cursor: String(offset + groups.length) } : {}) };
+    const overlay = await this.liveCatalogOverlay();
+    const published = this.catalogProjection.groups.slice(offset, offset + limit);
+    const groups = overlay ? published.filter((details) => !overlaySupersedesGroup(overlay, details)) : published;
+    return {
+      groups: structuredClone(groups),
+      ...(offset + published.length < this.catalogProjection.groups.length ? { cursor: String(offset + published.length) } : {}),
+      ...(overlay && offset === 0 && overlay.groups.length ? { live: structuredClone(overlay.groups) } : {}),
+    };
   }
   async listCatalogProjectionFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter) {
     if (!this.catalogProjection) return undefined;
     const offset = cursor ? Number(cursor) : 0;
-    const matching = filterCatalogGroupDetails(this.catalogProjection.groups, filter);
+    const overlay = await this.liveCatalogOverlay();
+    const matching = filterCatalogGroupDetails(this.catalogProjection.groups, filter)
+      .filter((details) => !overlay || !overlaySupersedesGroup(overlay, details));
     const groups = matching.slice(offset, offset + limit);
-    return { groups: structuredClone(groups), ...(offset + groups.length < matching.length ? { cursor: String(offset + groups.length) } : {}) };
+    const live = overlay && offset === 0 ? filterCatalogGroupDetails(overlay.groups, filter) : [];
+    return {
+      groups: structuredClone(groups),
+      ...(offset + groups.length < matching.length ? { cursor: String(offset + groups.length) } : {}),
+      ...(live.length ? { live: structuredClone(live) } : {}),
+    };
   }
   async listCatalogProjectionRoles(filter: CatalogGroupFilter) {
     if (!this.catalogProjection) return undefined;
-    return structuredClone(filterCatalogGroupDetails(this.catalogProjection.groups, filter).flatMap((details) => details.roles));
+    const overlay = await this.liveCatalogOverlay();
+    const published = filterCatalogGroupDetails(this.catalogProjection.groups, filter)
+      .flatMap((details) => details.roles)
+      .filter((role) => !overlay?.roleIds.has(role.jobId));
+    const live = overlay ? filterCatalogGroupDetails(overlay.groups, filter).flatMap((details) => details.roles) : [];
+    return structuredClone([...published, ...live]);
   }
   async getCatalogProjectionGroup(groupId: string) {
-    const value = this.catalogProjection?.groups.find((group) => group.group.groupId === groupId);
-    return value ? structuredClone(value) : undefined;
+    const overlay = await this.liveCatalogOverlay();
+    const live = overlay?.groups.find((details) => details.group.groupId === groupId);
+    if (live) return structuredClone(live);
+    const published = await this.getPublishedCatalogGroup(groupId);
+    return published && overlay && overlaySupersedesGroup(overlay, published) ? undefined : published;
   }
   async listLeverAdmissions() { return [...this.leverAdmissions.values()].map((value) => structuredClone(value)); }
   async putLeverAdmission(admission: LeverAdmission) {

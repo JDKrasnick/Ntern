@@ -117,6 +117,14 @@ function isDefaultBrowseFilter(filter: CatalogGroupFilter) {
   return Object.keys(filter).every((key) => key === 'status' || (key === 'source' && filter.source === 'all'));
 }
 
+/** Projection cards are re-checked for admission and the active filter on every read. */
+function projectedMatches(details: CatalogGroupDetails[] | undefined, filter: CatalogGroupFilter): CatalogGroupDetails[] {
+  return (details ?? []).flatMap((candidate) => {
+    const eligible = eligibleProjectedGroup(candidate);
+    return eligible ? filterCatalogGroupDetails([eligible], filter) : [];
+  });
+}
+
 async function projectedCatalogPage(store: InternshipStore, cursor: string | undefined, limit: number, filter: CatalogGroupFilter) {
   const isDefaultBrowse = isDefaultBrowseFilter(filter);
   if (!store.listCatalogProjection) return undefined;
@@ -131,32 +139,41 @@ async function projectedCatalogPage(store: InternshipStore, cursor: string | und
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const page = await store.listCatalogProjectionFiltered(next, limit, filter);
       if (!page) return undefined;
-      const groups = page.groups.flatMap((details) => {
-        const eligible = eligibleProjectedGroup(details);
-        return eligible ? filterCatalogGroupDetails([eligible], filter) : [];
-      });
+      // The live prefix belongs to the first page only; a cursor means it was
+      // already served.
+      const groups = [...(next === undefined ? projectedMatches(page.live, filter) : []), ...projectedMatches(page.groups, filter)];
       if (groups.length || !page.cursor) return { groups, ...(page.cursor ? { cursor: page.cursor } : {}) };
       next = page.cursor;
     }
     return { groups: [] };
   }
   const scanLimit = isDefaultBrowse ? limit : Math.max(limit, 100);
-  const groups = [];
+  const groups: CatalogGroupDetails[] = [];
   let next = cursor;
   do {
     const offset = Number(next ?? 0);
     const page = await store.listCatalogProjection(next, scanLimit);
     if (!page) return undefined;
+    // Roles published after the last projection tick are newer than every
+    // published card, so their cards are a strict prefix of the feed. A prefix
+    // that already fills the page ends the read: a cursor into the projection
+    // would not have room for the cards still ahead of it.
+    if (offset === 0) {
+      groups.push(...projectedMatches(page.live, filter));
+      if (groups.length >= limit) return { groups: groups.slice(0, limit) };
+    }
     for (let index = 0; index < page.groups.length; index += 1) {
+      // A zero cursor would re-serve the live prefix forever, so a page the live
+      // prefix alone filled ends the read instead of offering a cursor.
+      if (groups.length === limit) return { groups, ...(offset + index > 0 ? { cursor: String(offset + index) } : {}) };
       const eligible = eligibleProjectedGroup(page.groups[index]!);
       const [match] = eligible ? filterCatalogGroupDetails([eligible], filter) : [];
       if (!match) continue;
       groups.push(match);
-      if (groups.length === limit) {
-        const consumed = offset + index + 1;
-        const hasMore = index + 1 < page.groups.length || page.cursor !== undefined;
-        return { groups, ...(hasMore ? { cursor: String(consumed) } : {}) };
-      }
+    }
+    if (groups.length === limit) {
+      const consumed = offset + page.groups.length;
+      return { groups, ...(page.cursor !== undefined ? { cursor: String(consumed) } : {}) };
     }
     if (!page.cursor) return { groups };
     next = page.cursor;
