@@ -582,3 +582,67 @@ Production-scale regression coverage lives in
 The catalog-projection build above still materializes the whole catalog and every
 group's roles. If `exceededMemory` recurs at projection cron minutes
 (`1,11,21,…:01`) rather than at consumer minutes, that build is the next target.
+
+## 2026-10-01 ingestion V2 Stage 1 shadow discovery
+
+Ingestion V2 Stage 1 adds a shadow discovery pass that normalizes the complete
+board, stores a content-addressed snapshot in R2, and diffs it against a compact
+`ingestion_rows` ledger. It is default-off behind
+`INGESTION_V2_SHADOW_DISCOVERY_ENABLED`.
+
+The pass is bounded by IDs, not by retained history:
+
+- The diff reads `ingestion_rows` through `listLedger`, which selects only the
+  compact columns (identity, material hash, admission version, state, retry,
+  omission count). No occurrence body, catalog JSON, or occurrence-history scan is
+  on this path.
+- The R2 snapshot is one object per complete board under
+  `ingestion-v2/snapshots/<source-id>/<snapshot-hash>.json`; an existing
+  content-addressed object is validated and reused, never rewritten.
+- Actionable work is the set of IDs classified `new`, `changed`, `stale-policy`,
+  `reappeared`, or due `retryable`. A board with five changed rows is five
+  actionable IDs regardless of how much retained history the source holds.
+
+Regression coverage lives in `test/ingestion-resource-budget.test.ts`
+(`plans shadow discovery from compact metadata without hydrating retained
+history`): a production-shaped GitHub board is diffed against a 20,000-row
+settled history with five changed rows, asserting five actionable IDs, the full
+ledger read count, no catalog/occurrence query on the path, and the per-message
+CPU/heap budget. `test/ingestion-v2-shadow.integration.test.ts` covers the
+new/changed/second-document/reappearance/two-snapshot-omission/incomplete/
+idempotent scenarios, and `test/e2e/ingestion-v2-shadow.e2e.mjs` runs the built
+ingestion Worker against local D1/R2/queues to confirm the shadow object, ledger,
+idempotent replay, and the protected operations response.
+
+## 2026-10-01 ingestion V2 Stage 2 fault-isolated admission
+
+Stage 2 adds the dedicated `intern-notifs-admission-v2` queue and DLQ and a
+leased, idempotent row consumer. It is default-off behind
+`INGESTION_V2_ADMISSION_ENABLED` and, before Stage 3 cutover, commits through a
+recorded decision sink rather than the live catalog.
+
+The admission lane is bounded in four independent ways:
+
+- One queue message carries at most 25 external IDs, so a delivery's work is
+  bounded by the message, not by the source's retained history.
+- The consumer downloads the referenced snapshot once per batch, never once per
+  row (`test/ingestion-v2-admission-queue.test.ts` asserts one read for a 25-row
+  batch).
+- Each row is leased with a bounded expiry; an expired lease is reclaimed and
+  redispatched. Two concurrent consumers race for the same row through the
+  conditional lease, so only one evaluates it
+  (`test/ingestion-v2-admission.integration.test.ts`).
+- The retry schedule is fixed (60 s, then 5 min) and a row is quarantined after
+  the third failed attempt. A systemic failure releases the lease without
+  consuming an attempt, so D1 pressure cannot manufacture quarantines.
+
+The scheduled dispatcher bounds each source to 500 candidate rows per pass and
+records a durable handoff per message; a source with no due work produces no
+messages. `test/ingestion-v2-admission-queue.test.ts` covers message validation,
+the failure taxonomy, the state machine, retries/quarantine, duplicates, stale
+deliveries, snapshot-once, and consumer contention; the integration suite covers
+the real D1 transitions and guarded replay; and
+`test/e2e/ingestion-v2-admission.e2e.mjs` runs the built ingestion Worker
+against local D1/R2/queues to settle a board, quarantine a permanently failing
+row without touching its peers, treat a duplicate and a stale delivery as
+no-ops, and exercise the guarded operations replay.

@@ -30,6 +30,13 @@ import { runPostingIdentityAudit } from '../src/posting-identity-audit.js';
 import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { runPostingIdentityRepair, type PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore } from './d1-store.js';
+import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
+import { admissionSourceAllowed, processAdmissionV2Batch } from './admission-v2.js';
+import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
+import { ingestionV2FeatureConfig, type IngestionRowState } from '../src/ingestion-v2/types.js';
+import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
+import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
+import { admissionV2FeatureConfig } from '../src/ingestion-v2/admission/types.js';
 import {
   CATALOG_RETENTION_CRON_MAX_DURATION_MS,
   CATALOG_RETENTION_CRON_MAX_PASSES,
@@ -102,6 +109,7 @@ export interface Environment extends AuthEnvironment {
   DESTINATION_VERIFICATION_QUEUE: Queue;
   SHADOW_EXTRACTION_QUEUE: Queue;
   RESUME_JOB_IMPORT_QUEUE: Queue;
+  ADMISSION_V2_QUEUE: Queue;
   RESUME_PDF_COMPILER: DurableObjectNamespace;
   D1_TRAFFIC_CONTROLLER?: DurableObjectNamespace;
   DESTINATION_BROWSER: BrowserWorker;
@@ -112,6 +120,7 @@ export interface Environment extends AuthEnvironment {
   GMAIL_DLQ: Queue;
   DESTINATION_VERIFICATION_DLQ: Queue;
   SHADOW_EXTRACTION_DLQ: Queue;
+  ADMISSION_V2_DLQ: Queue;
   PUBLIC_API_URL: string;
   CATALOG_R2_READ_ENABLED?: string;
   RESEND_API_KEY?: string;
@@ -164,6 +173,28 @@ export interface Environment extends AuthEnvironment {
   /** Brandfetch client ID; corroboration only, never persisted or fetched. */
   BRANDFETCH_CLIENT_ID?: string;
   OPENAI_KEY?: string;
+  /** Stage 1 ingestion V2 shadow discovery. Both default off. */
+  INGESTION_V2_SHADOW_DISCOVERY_ENABLED?: string;
+  INGESTION_V2_SHADOW_SOURCE_ALLOWLIST?: string;
+  /** Stage 2 ingestion V2 fault-isolated admission. Both default off. */
+  INGESTION_V2_ADMISSION_ENABLED?: string;
+  INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST?: string;
+}
+
+/**
+ * Builds the shadow discovery hook when the feature flag is on. Returns
+ * `undefined` when disabled so the runner performs no V2 work at all.
+ */
+function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscovery | undefined {
+  const features = ingestionV2FeatureConfig(env);
+  if (!features.shadowDiscoveryEnabled) return undefined;
+  return new IngestionV2ShadowDiscovery({
+    repository: new D1IngestionV2Repository(env.DB),
+    // Reuse the existing non-public documents bucket; snapshot objects are
+    // content-addressed and application-expired, never served to clients.
+    snapshots: new R2IngestionSnapshotStore(env.DOCUMENTS),
+    features,
+  });
 }
 
 function catalogAdmissionResolver(env: Environment): CatalogAdmissionResolver {
@@ -374,6 +405,7 @@ async function runStructuredSource(source: ReviewedStructuredSource, env: Enviro
     enqueueEmployerIconResolution: employerIconEnqueue(env),
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
+    shadowDiscovery: ingestionV2ShadowDiscovery(env),
     allowCompleteEmptySnapshot: true,
     config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT } });
   if ('poll' in result && result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
@@ -1233,6 +1265,57 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     return withCors(await handleShadowPublication(request, env,
       () => refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS)));
   }
+  if (request.method === 'GET' && url.pathname === '/internal/operations/ingestion-v2') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    const repository = new D1IngestionV2Repository(env.DB);
+    const sourceId = url.searchParams.get('sourceId');
+    if (sourceId) {
+      const comparison = await repository.getShadowComparison(sourceId);
+      return withCors(Response.json({ sourceId, comparison: comparison ?? null }, { headers: { 'Cache-Control': 'no-store' } }));
+    }
+    return withCors(Response.json({ comparisons: await repository.listShadowComparisons() }, { headers: { 'Cache-Control': 'no-store' } }));
+  }
+  if (request.method === 'GET' && url.pathname === '/internal/operations/ingestion/rows') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    const sourceId = url.searchParams.get('sourceId');
+    if (!sourceId) return withCors(Response.json({ message: 'sourceId is required' }, { status: 400 }));
+    const state = url.searchParams.get('state');
+    const cursor = url.searchParams.get('cursor');
+    const repository = new D1IngestionV2Repository(env.DB);
+    const [overview, page] = await Promise.all([
+      inspectAdmissionOverview(repository, sourceId),
+      inspectAdmissionRows(repository, {
+        sourceId,
+        ...(state ? { state: state as IngestionRowState } : {}),
+        ...(cursor ? { cursor } : {}),
+        limit: 100,
+      }),
+    ]);
+    return withCors(Response.json({ ...page, overview }, { headers: { 'Cache-Control': 'no-store' } }));
+  }
+  if (request.method === 'POST' && url.pathname === '/internal/operations/ingestion/rows/replay') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    let body: { sourceId?: string; externalId?: string; replayToken?: string };
+    try {
+      body = await request.json() as typeof body;
+    } catch {
+      return withCors(Response.json({ message: 'Invalid JSON body' }, { status: 400 }));
+    }
+    if (!body.sourceId || !body.externalId) {
+      return withCors(Response.json({ message: 'sourceId and externalId are required' }, { status: 400 }));
+    }
+    const repository = new D1IngestionV2Repository(env.DB);
+    if (!body.replayToken) {
+      // Preview: no mutation. The returned token must be echoed by an apply call.
+      return withCors(Response.json(await planAdmissionReplay(repository, { sourceId: body.sourceId, externalId: body.externalId })));
+    }
+    const result = await applyAdmissionReplay(
+      repository,
+      { sourceId: body.sourceId, externalId: body.externalId, replayToken: body.replayToken },
+      { actor: request.headers.get('X-Operations-Actor') ?? 'operator' },
+    );
+    return withCors(Response.json(result, { status: result.applied ? 200 : 409 }));
+  }
   if (request.method === 'POST' && url.pathname === '/internal/poll-source') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     const provider = url.searchParams.get('provider');
@@ -1970,6 +2053,29 @@ export async function runScheduledPostingIdentityAudit(
   return event;
 }
 
+/**
+ * Scheduled admission dispatcher. It finds pending rows and stale queued rows
+ * with no valid handoff receipt for every allowed source and hands bounded,
+ * versioned messages to the dedicated admission queue. A failed send leaves the
+ * rows queued with an unacknowledged handoff, so the next run reissues them.
+ */
+async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promise<{ enabled: boolean; sources: number; batches: number; rows: number }> {
+  const features = admissionV2FeatureConfig(env);
+  if (!features.admissionEnabled) return { enabled: false, sources: 0, batches: 0, rows: 0 };
+  const ledger = new D1IngestionV2Repository(env.DB);
+  const sourceIds = (await ledger.listActiveSourceIds(50)).filter((sourceId) => admissionSourceAllowed(env, sourceId));
+  let batches = 0;
+  let rows = 0;
+  for (const sourceId of sourceIds) {
+    const plan = await planAdmissionV2Dispatch(sourceId, { ledger, now: () => observedAt });
+    if (!plan.messages.length) continue;
+    await sendQueueMessages(env.ADMISSION_V2_QUEUE, plan.messages as unknown[]);
+    batches += plan.messages.length;
+    rows += plan.messages.reduce((sum, message) => sum + message.externalIds.length, 0);
+  }
+  return { enabled: true, sources: sourceIds.length, batches, rows };
+}
+
 async function scheduledHandler(event: ScheduledController, env: Environment): Promise<void> {
   if (await isShutdown(env)) return;
   const store = new D1InternshipStore(env.DB);
@@ -2070,6 +2176,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     }
     const recentOverloads = await step('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await step('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
+    const admissionV2Dispatch = await step('ingestion_v2_admission_dispatch', () => runAdmissionV2Dispatch(env, observedAt));
+    if (admissionV2Dispatch?.enabled && admissionV2Dispatch.batches > 0) {
+      console.log(JSON.stringify({ event: 'ingestion_v2_admission_dispatch', observedAt: observedAt.toISOString(), ...admissionV2Dispatch }));
+    }
     const providerShadowRecovery = await step('provider_shadow_recovery', () => recoverPendingProviderShadowHandoffs(store, env.DESTINATION_VERIFICATION_QUEUE));
     // Metadata collection scans the open catalog. When D1 recently refused
     // queue writes, or pressure cannot be measured, defer this background scan
@@ -2298,7 +2408,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   const trafficWorkload = d1TrafficWorkloadForQueue(batch.queue);
   const resilientQueue = Boolean(catalogProvider)
     || batch.queue.includes('destination-verification')
-    || batch.queue.includes('shadow-extraction');
+    || batch.queue.includes('shadow-extraction')
+    || batch.queue.includes('admission-v2');
   // Queue persistence is idempotent, so protect every D1 query in consumers
   // that persist catalog, destination, or shadow work, including the billing
   // guard that runs before queue routing.
@@ -2371,6 +2482,10 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   if (batch.queue.includes('shadow-extraction')) {
     await observeQueueBatch(batch, trafficObservations, (observed) => processShadowExtractionBatch(observed, env));
+    return;
+  }
+  if (batch.queue.includes('admission-v2')) {
+    await processAdmissionV2Batch(batch, env, { resolver: publicHostResolver });
     return;
   }
   if (batch.queue.includes('resume-job-import')) {
@@ -2585,6 +2700,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           enqueueEmployerIconResolution: employerIconEnqueue(env),
           identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
           trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
+          shadowDiscovery: ingestionV2ShadowDiscovery(env),
           // One row can perform several bounded HTTP probes, so this stays well
           // inside the five-minute message deadline while still draining a
           // whole list's admission migration in a handful of deliveries: at 20

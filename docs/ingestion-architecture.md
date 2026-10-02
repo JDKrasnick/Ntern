@@ -137,3 +137,87 @@ Provider admission and incident response remain provider-specific:
 - [Lever monitoring and recovery](lever-monitoring-plan.md)
 - [Greenhouse operations](greenhouse/README.md)
 - [Ashby discovery, admission, and adapter](ashby-onboarding.md)
+
+## Ingestion V2 foundation (Stage 1)
+
+`docs`/plans describe fault-isolated ingestion as three gated stages. Stage 1 is
+the additive foundation and side-effect-free shadow discovery; the legacy
+migration/continuation loop stays authoritative and is the only thing that can
+create a job, occurrence, notification, or admission write.
+
+- `cloudflare/migrations/0045_ingestion_v2.sql` adds `ingestion_snapshots`,
+  `ingestion_rows`, and `ingestion_v2_shadow_comparisons`. Nothing legacy is
+  altered; the migration is re-runnable.
+- `src/ingestion-v2/` holds the pure contracts: `normalize.ts` (deterministic,
+  order-independent snapshot and material hashing), `diff.ts` (full-board diff),
+  and `shadow-discovery.ts` (orchestration). The D1 repository and R2 snapshot
+  store live in `cloudflare/ingestion-v2-store.ts`.
+- The runner invokes the shadow hook at `src/poll.ts` after the legacy fetch
+  passes `sourceQualityFailures` and before any legacy admission write. The hook
+  never throws: a shadow failure is logged as `ingestion_v2_shadow_failed` and
+  the legacy delivery proceeds.
+- `INGESTION_V2_SHADOW_DISCOVERY_ENABLED` (default `false`) gates the whole
+  feature; `INGESTION_V2_SHADOW_SOURCE_ALLOWLIST` optionally bounds rollout to a
+  comma-separated set of source IDs.
+- Shadow mode writes only its own D1 state, a content-addressed R2 object under
+  `ingestion-v2/snapshots/<source-id>/<snapshot-hash>.json`, and a per-source
+  comparison. It never enqueues admission, mutates a checkpoint, or touches the
+  catalog.
+
+The full-board diff compares every normalized row against the compact ledger and
+classifies it as `new`, `changed`, `stale-policy`, `retryable`, `unchanged`,
+`reappeared`, or `missing`. New, changed, stale-policy, reappeared, and due-retry
+rows are actionable; unchanged settled rows are not. Missing rows increment
+omissions only after a complete snapshot and become `absent` on the second
+consecutive complete miss. Incomplete or failed snapshots neither activate nor
+advance omissions. A repeated identical snapshot produces an empty actionable
+set and rewrites nothing.
+
+The protected `GET /internal/operations/ingestion-v2` endpoint returns the latest
+shadow comparison per source (or one source with `?sourceId=`). It requires the
+`X-Operations-Key` header and is otherwise a 404.
+
+## Ingestion V2 fault-isolated admission (Stage 2)
+
+Stage 2 adds a dedicated `intern-notifs-admission-v2` queue and DLQ and makes
+each ledger row settle, retry, or quarantine independently. It stays
+feature-flagged and, before Stage 3 cutover, runs in verification mode: the
+catalog writer is replaced by a recorded decision sink, so admission writes
+ledger state and captures the decision it would have published without mutating
+the live catalog.
+
+- `cloudflare/migrations/0046_ingestion_v2_admission.sql` adds
+  `ingestion_admission_handoffs`, the durable dispatch receipt. The lease,
+  attempt, retry, decision, and failure columns already live on `ingestion_rows`.
+- `src/ingestion-v2/admission/` holds the pure contracts and orchestration:
+  `message.ts` (versioned message, deterministic batch ID, 25-ID limit,
+  canonical ordering), `taxonomy.ts` (business/row-transient/infrastructure
+  classification and the 60 s / 5 min retry schedule), `transitions.ts` (the row
+  state machine), `dispatcher.ts`, `consumer.ts`, `migration.ts`, `operations.ts`,
+  `evaluator.ts` (reuses `processPosting`, `classifyDestination`, and
+  `evaluateCatalogAdmission`), and `recording-sink.ts`.
+- The scheduled dispatcher finds pending rows and stale queued rows with no valid
+  handoff receipt, commits them `queued`, records a handoff, and hands bounded
+  messages to the queue. A failed send leaves the rows recoverable once the
+  handoff goes stale.
+- The consumer reads the referenced snapshot once per batch, leases each row with
+  the message's snapshot/material/policy intent, and lets each row settle,
+  schedule a retry (initial attempt plus two), or quarantine. A duplicate, stale,
+  or contended delivery is a no-op. A systemic failure (missing R2 object, D1
+  unavailability, incomplete snapshot) releases the lease, retries the delivery,
+  and never consumes a row attempt or quarantines a row.
+- Policy migration reopens a bounded batch of stale settled rows under the
+  current version without hiding previously visible roles or setting a
+  source-wide suppression. Baseline and policy-migration work emit no
+  notification; only a genuinely new post-baseline role does.
+- `INGESTION_V2_ADMISSION_ENABLED` (default `false`) gates admission;
+  `INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST` optionally bounds rollout. The
+  dispatcher only produces messages for sources on the allowlist, and the
+  consumer acknowledges anything else as a no-op.
+- `GET /internal/operations/ingestion/rows?sourceId=&state=&cursor=` returns a
+  bounded, sanitized page plus a source overview (pending/queued/processing/
+  settled/quarantined/absent, oldest work, current snapshot).
+  `POST /internal/operations/ingestion/rows/replay` previews with
+  `{ sourceId, externalId }` and applies only when the returned `replayToken`
+  is echoed back; it refuses an in-flight row and an ID absent from a retained
+  complete snapshot. Both require `X-Operations-Key` and are otherwise a 404.

@@ -645,6 +645,41 @@ describe('Cloudflare deployment plan guard', () => {
     expect(() => validateCloudflarePlan(plan([{ ...changes[0]!, after: { ...changes[0]!.after, bindings: [...worker.bindings, ...apiBindings.map((binding) => binding.name === 'RESUME_TUNER_ENABLED' ? { ...binding, text: 'true' } : binding)] } }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits only the reviewed V2 admission infrastructure rollout', () => {
+    const admissionBindings = [
+      { name: 'ADMISSION_V2_QUEUE', type: 'queue', queue_name: 'intern-notifs-admission-v2' },
+      { name: 'ADMISSION_V2_DLQ', type: 'queue', queue_name: 'intern-notifs-admission-v2-dlq' },
+      { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'false' },
+      { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+    ];
+    const changes = [
+      {
+        ...contentUpdate,
+        address: 'cloudflare_workers_script.ingestion',
+        after: { ...contentUpdate.after, bindings: [...worker.bindings, ...admissionBindings] },
+      },
+      {
+        address: 'cloudflare_queue.work["admission-v2"]', actions: ['create'], before: null,
+        after: { account_id: 'account', queue_name: 'intern-notifs-admission-v2', settings: { delivery_paused: false, message_retention_period: 86_400 } },
+      },
+      {
+        address: 'cloudflare_queue.dead_letter["admission-v2"]', actions: ['create'], before: null,
+        after: { account_id: 'account', queue_name: 'intern-notifs-admission-v2-dlq', settings: { message_retention_period: 1_209_600 } },
+      },
+      {
+        address: 'cloudflare_queue_consumer.ingestion["admission-v2"]', actions: ['create'], before: null,
+        after: { account_id: 'account', script_name: 'intern-notifs-ingestion', type: 'worker', dead_letter_queue: 'intern-notifs-admission-v2-dlq', settings: { batch_size: 1, max_concurrency: 1, max_retries: 2, max_wait_time_ms: 5_000 } },
+      },
+    ];
+
+    expect(validateCloudflarePlan(plan(changes))).toHaveLength(4);
+    expect(() => validateCloudflarePlan(plan([{ ...changes[1]!, after: { ...changes[1]!.after, queue_name: 'other' } }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{
+      ...changes[0]!,
+      after: { ...changes[0]!.after, bindings: [...worker.bindings, ...admissionBindings.map((binding) => binding.name === 'ADMISSION_V2_QUEUE' ? { ...binding, queue_name: 'other' } : binding)] },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits enabling the existing resume feature flag but not disabling it', () => {
     const disabled = { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' };
     const enabled = { ...disabled, text: 'true' };

@@ -16,6 +16,7 @@ const INGESTION_BUG_CATEGORIES = ['json', 'identity', 'quality', 'capacity', 'li
 export const INGESTION_WORK_QUEUES = [
   'intern-notifs-github', 'intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby',
   'intern-notifs-gmail', 'intern-notifs-resume-job-import', 'intern-notifs-shadow-extraction',
+  'intern-notifs-admission-v2',
 ] as const;
 
 const DEFAULT_FAILURE_WINDOW_MS = 24 * 60 * 60_000;
