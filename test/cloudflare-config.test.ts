@@ -253,8 +253,21 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain('--ingestion-expected-etag "$EXPECTED_INGESTION_ETAG"');
     expect(deployment).toContain('test "$drift" = 0');
     const localDeploy = read('scripts/deploy-cloudflare.ts');
+    expect(localDeploy).toContain('resolveDeploySha(git.stdout.trim(), process.env.DEPLOY_SHA, process.env.TF_VAR_deploy_sha)');
     expect(localDeploy).toContain('process.env.TF_VAR_deploy_sha = sha');
     expect(localDeploy).toContain('expectedDeploySha: deploySha');
+    expect(localDeploy).toContain("annotations['workers/tag'] !== deploySha");
+    expect(localDeploy).toContain('captureExpectedWorkerIdentity(workers.api, deploySha)');
+    expect(localDeploy).toContain('captureExpectedWorkerIdentity(workers.ingestion, deploySha)');
+    expect(localDeploy).toContain('auditLiveVersions(plan, {');
+    expect(localDeploy).toContain('expectedEtag: expected.api.etag');
+    expect(localDeploy).toContain('expectedEtag: expected.ingestion.etag');
+    expect(localDeploy.indexOf('const deploySha = currentDeploySha()'))
+      .toBeLessThan(localDeploy.indexOf("tofu(['init', '-reconfigure', '-input=false'])"));
+    expect(localDeploy.indexOf('captureExpectedWorkerIdentity(workers.ingestion, deploySha)'))
+      .toBeLessThan(localDeploy.indexOf('restoreOperationsSecrets(expected, deploySha)'));
+    expect(localDeploy.indexOf('auditFinalState(finalPlan, expected, converged.status)'))
+      .toBeLessThan(localDeploy.indexOf("console.log(changes.length ? 'Deployed and converged.'"));
     expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive texmf-dist-fontsrecommended');
     expect(compilerImage).not.toContain('texlive-full');
   });
