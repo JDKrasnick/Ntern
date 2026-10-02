@@ -134,6 +134,10 @@ resource "cloudflare_workers_script" "ingestion" {
   main_module    = "ingestion-worker.js"
   content_file   = local.ingestion_worker_bundle
   content_sha256 = filesha256(local.ingestion_worker_bundle)
+  annotations = {
+    workers_message = "Release ${var.deploy_sha}"
+    workers_tag     = var.deploy_sha
+  }
   files = {
     "resvg.wasm" = {
       content_type = "application/wasm"
@@ -186,6 +190,10 @@ resource "cloudflare_workers_script" "application" {
   compatibility_date  = "2026-09-08"
   compatibility_flags = ["nodejs_compat"]
   keep_bindings       = ["secret_text"]
+  annotations = {
+    workers_message = "Release ${var.deploy_sha}"
+    workers_tag     = var.deploy_sha
+  }
 
   bindings = concat(
     [

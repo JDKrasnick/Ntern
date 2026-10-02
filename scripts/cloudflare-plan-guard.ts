@@ -15,6 +15,10 @@ export type Plan = {
   resource_changes?: ResourceChange[];
 };
 
+type PlanValidationOptions = {
+  expectedDeploySha?: string;
+};
+
 const allowedUpdates = new Set([
   'cloudflare_workers_script.application',
   'cloudflare_workers_script.ingestion',
@@ -390,6 +394,20 @@ function isApiInvocationLogShutdown(before: unknown, after: unknown): boolean {
     && isDeepStrictEqual(beforeLogRest, afterLogRest);
 }
 
+function isReleaseAnnotationUpdate(address: string, after: Record<string, unknown>, expectedDeploySha: string | undefined): boolean {
+  if (!allowedUpdates.has(address)
+    || typeof expectedDeploySha !== 'string'
+    || !/^[0-9a-f]{40}$/u.test(expectedDeploySha)
+    || !isRecord(after.annotations)) return false;
+  const annotations = after.annotations;
+  return annotations.workers_tag === expectedDeploySha
+    && annotations.workers_message === `Release ${expectedDeploySha}`
+    && Object.entries(annotations).every(([key, value]) => (
+      ['workers_message', 'workers_tag'].includes(key)
+      || (key === 'workers_triggered_by' && value === null)
+    ));
+}
+
 function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after)) return false;
   const name = 'CATALOG_R2_READ_ENABLED';
@@ -433,7 +451,7 @@ function isResumeTunerEnablement(before: unknown, after: unknown): boolean {
   );
 }
 
-function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): boolean {
+function isSafeWorkerUpdate(address: string, change: ResourceChange['change'], expectedDeploySha?: string): boolean {
   if (!isRecord(change.before) || !isRecord(change.after)) return false;
   const before = change.before;
   const after = change.after;
@@ -476,6 +494,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     && isDeepStrictEqual(after.limits, { cpu_ms: 120_000, subrequests: 50_000 });
   const permittedInvocationLogShutdown = address === 'cloudflare_workers_script.application'
     && isApiInvocationLogShutdown(before.observability, after.observability);
+  const permittedReleaseAnnotation = isReleaseAnnotationUpdate(address, after, expectedDeploySha);
   const permittedControllerMigration = address === 'cloudflare_workers_script.ingestion'
     && (before.migrations === null || before.migrations === undefined)
     && isRecord(after.migrations)
@@ -495,6 +514,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   const permittedAppliedMigrationRetirement = isAppliedMigrationRetirement(address, before, after);
   if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease
     && !permittedInvocationLogShutdown
+    && !permittedReleaseAnnotation
     && !permittedControllerMigration && !permittedControllerMigrationTagTransition
     && !permittedResumeMigrationTagTransition
     && !permittedResumeMigrationBootstrap && !permittedAppliedMigrationRetirement) return false;
@@ -504,6 +524,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     ...(permittedBindingChanged ? { bindings: normalizedAfterBindings } : {}),
     ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
     ...(permittedInvocationLogShutdown ? { observability: after.observability } : {}),
+    ...(permittedReleaseAnnotation ? { annotations: after.annotations } : {}),
     ...(permittedControllerMigration ? { migrations: after.migrations } : {}),
     ...(permittedControllerMigrationTagTransition ? { migrations: after.migrations } : {}),
     ...(permittedResumeMigrationTagTransition ? { migrations: after.migrations } : {}),
@@ -520,6 +541,13 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
       ...afterUnknown,
       bindings: afterUnknown.bindings.map((binding, index) => (index === controllerIndex ? {} : binding)),
     };
+  }
+  if (permittedReleaseAnnotation && isRecord(afterUnknown) && isRecord(afterUnknown.annotations)) {
+    const annotationUnknowns = afterUnknown.annotations;
+    if (!Object.entries(annotationUnknowns).every(([key, value]) => (
+      key === 'workers_triggered_by' && value === true
+    ))) return false;
+    afterUnknown = { ...afterUnknown, annotations: {} };
   }
   if (!isDeepStrictEqual(
     protectedWorkerValue(beforeForComparison, afterUnknown),
@@ -705,7 +733,7 @@ export function actionableChanges(plan: Plan): Array<{ address: string; actions:
     .map(({ address, change }) => ({ address, actions: change.actions }));
 }
 
-export function validateCloudflarePlan(plan: Plan): Array<{ address: string; actions: string[] }> {
+export function validateCloudflarePlan(plan: Plan, options: PlanValidationOptions = {}): Array<{ address: string; actions: string[] }> {
   const resourceChanges = (plan.resource_changes ?? []).filter(({ change }) => (
     !change.actions.every((action) => action === 'no-op' || action === 'read')
   ));
@@ -714,7 +742,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
     || !(
       (change.actions[0] === 'update'
         && ((allowedUpdates.has(address)
-          && (isSafeWorkerUpdate(address, change) || isResumeWorkerUpdate(address, change)))
+          && (isSafeWorkerUpdate(address, change, options.expectedDeploySha) || isResumeWorkerUpdate(address, change)))
           || isReviewedIngestionCronUpdate(address, change)
           || isApiPreviewUrlShutdown(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
@@ -731,7 +759,7 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const plan = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as Plan;
-  const changes = validateCloudflarePlan(plan);
+  const changes = validateCloudflarePlan(plan, { expectedDeploySha: process.env.DEPLOY_SHA });
   console.log(`Safe plan: ${changes.length} reviewed infrastructure change(s).`);
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changes.length > 0}\n`);

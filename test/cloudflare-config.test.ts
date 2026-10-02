@@ -210,7 +210,10 @@ describe('Cloudflare deployment configuration', () => {
     expect(api.containers).toContainEqual({ class_name: 'ResumePdfCompilerV2', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 });
     expect(terraform).toContain('{ name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompilerV2" }');
     expect(terraform).toContain('{ name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController", script_name = cloudflare_workers_script.ingestion.script_name }');
+    expect(terraform.match(/workers_message = "Release \$\{var\.deploy_sha\}"/gu)).toHaveLength(2);
+    expect(terraform.match(/workers_tag\s+= var\.deploy_sha/gu)).toHaveLength(2);
     expect(terraform).not.toMatch(/\bmigrations\s*=\s*\{/);
+    expect(deployment).toContain('TF_VAR_deploy_sha: ${{ github.event_name == \'workflow_run\' && github.event.workflow_run.head_sha || inputs.sha }}');
     expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "true"');
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
     expect(deployment).toContain('.config.preset == "@cf/baai/bge-base-en-v1.5"');
@@ -227,9 +230,16 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain('--tag "$DEPLOY_SHA"');
     expect(deployment).toContain('--message "Container rollout for $DEPLOY_SHA"');
     expect(deployment).toContain('name: Capture expected Worker code identities');
-    expect(deployment).toContain('.annotations["workers/tag"] == $sha');
+    expect(deployment).toContain('.annotations["workers/tag"] == $sha\' "$RUNNER_TEMP/api-expected-version.json"');
+    expect(deployment).toContain('.annotations["workers/tag"] == $sha\' "$RUNNER_TEMP/ingestion-expected-version.json"');
     expect(deployment).toContain('EXPECTED_API_ETAG=');
     expect(deployment).toContain('EXPECTED_INGESTION_ETAG=');
+    expect(deployment).toContain('EXPECTED_API_VERSION=');
+    expect(deployment).toContain('EXPECTED_INGESTION_VERSION=');
+    expect(deployment).toContain('wrangler versions secret put OPERATIONS_SHARED_SECRET');
+    expect(deployment).toContain('--tag "$DEPLOY_SHA" --message "Release $DEPLOY_SHA"');
+    expect(deployment).toContain('wrangler versions deploy "${secret_version}@100%"');
+    expect(deployment).not.toContain('wrangler secret put OPERATIONS_SHARED_SECRET');
     expect(deployment).not.toContain('name: Require converged state');
     // The convergence gate must run after every Worker mutation so the audit sees
     // the tagged container rollout and any restored secret, not an earlier state.
@@ -242,6 +252,9 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain('--api-expected-etag "$EXPECTED_API_ETAG"');
     expect(deployment).toContain('--ingestion-expected-etag "$EXPECTED_INGESTION_ETAG"');
     expect(deployment).toContain('test "$drift" = 0');
+    const localDeploy = read('scripts/deploy-cloudflare.ts');
+    expect(localDeploy).toContain('process.env.TF_VAR_deploy_sha = sha');
+    expect(localDeploy).toContain('expectedDeploySha: deploySha');
     expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive texmf-dist-fontsrecommended');
     expect(compilerImage).not.toContain('texlive-full');
   });

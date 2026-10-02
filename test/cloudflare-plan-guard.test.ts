@@ -53,6 +53,46 @@ describe('Cloudflare deployment plan guard', () => {
     ]))).toHaveLength(2);
   });
 
+  it('permits only the exact release annotation on the ingestion upload', () => {
+    const priorSha = 'a'.repeat(40);
+    const deploySha = 'b'.repeat(40);
+    const annotationUpdate = {
+      address: 'cloudflare_workers_script.ingestion',
+      actions: ['update'],
+      before: {
+        ...worker,
+        annotations: { workers_message: `Release ${priorSha}`, workers_tag: priorSha, workers_triggered_by: 'upload' },
+      },
+      after: {
+        ...worker,
+        annotations: { workers_message: `Release ${deploySha}`, workers_tag: deploySha, workers_triggered_by: null },
+      },
+      after_unknown: {
+        ...contentUpdate.after_unknown,
+        annotations: { workers_triggered_by: true },
+      },
+    };
+    expect(validateCloudflarePlan(plan([annotationUpdate]), { expectedDeploySha: deploySha })).toHaveLength(1);
+    for (const unsafe of [
+      { change: annotationUpdate, options: {} },
+      { change: annotationUpdate, options: { expectedDeploySha: priorSha } },
+      { change: { ...annotationUpdate, address: 'cloudflare_workers_script.other' }, options: { expectedDeploySha: deploySha } },
+      {
+        change: {
+          ...annotationUpdate,
+          after: { ...annotationUpdate.after, annotations: { ...annotationUpdate.after.annotations, extra: 'value' } },
+        },
+        options: { expectedDeploySha: deploySha },
+      },
+    ]) {
+      expect(() => validateCloudflarePlan(plan([unsafe.change]), unsafe.options)).toThrow('Refusing unsafe Cloudflare plan');
+    }
+    expect(validateCloudflarePlan(plan([{
+      ...annotationUpdate,
+      address: 'cloudflare_workers_script.application',
+    }]), { expectedDeploySha: deploySha })).toHaveLength(1);
+  });
+
   it('permits only the reviewed API invocation-log shutdown', () => {
     const observability = {
       enabled: true,
