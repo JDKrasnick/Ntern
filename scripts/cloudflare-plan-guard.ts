@@ -411,12 +411,19 @@ function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
   );
 }
 
-// Stage 1 ingestion V2 ships behind two default-off plain-text bindings. Their
+// Stage 1/2 ingestion V2 ships behind default-off plain-text bindings. Their
 // first addition and later value toggles are reviewed, additive config changes;
-// every other binding stays protected.
-const ingestionV2ToggleBindings = new Set([
+// every other binding stays protected. The admission flags need the same
+// value-toggle path as shadow discovery, otherwise the reviewed canary that
+// flips `INGESTION_V2_ADMISSION_ENABLED` would be refused.
+const ingestionV2BooleanToggles = new Set([
   'INGESTION_V2_SHADOW_DISCOVERY_ENABLED',
+  'INGESTION_V2_ADMISSION_ENABLED',
+]);
+const ingestionV2ToggleBindings = new Set([
+  ...ingestionV2BooleanToggles,
   'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST',
+  'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST',
 ]);
 
 function isIngestionV2ToggleBinding(binding: unknown): boolean {
@@ -425,7 +432,7 @@ function isIngestionV2ToggleBinding(binding: unknown): boolean {
   if (!ingestionV2ToggleBindings.has(name)) return false;
   if (binding.type !== 'plain_text' || typeof binding.text !== 'string') return false;
   if (!Object.entries(binding).every(([key, value]) => ['name', 'type', 'text'].includes(key) || value === null)) return false;
-  return name === 'INGESTION_V2_SHADOW_DISCOVERY_ENABLED'
+  return ingestionV2BooleanToggles.has(name)
     ? binding.text === 'true' || binding.text === 'false'
     : binding.text.length <= 1000 && /^[a-z0-9._,-]*$/iu.test(binding.text);
 }

@@ -680,6 +680,30 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits reviewed V2 admission enablement and allowlist changes after creation', () => {
+    const created = [
+      { name: 'ADMISSION_V2_QUEUE', type: 'queue', queue_name: 'intern-notifs-admission-v2' },
+      { name: 'ADMISSION_V2_DLQ', type: 'queue', queue_name: 'intern-notifs-admission-v2-dlq' },
+      { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'false' },
+      { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+    ];
+    const admissionUpdate = (text: { enabled: string; allowlist: string }) => ({
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, bindings: [...worker.bindings, ...created] },
+      after: { ...contentUpdate.after, bindings: [...worker.bindings, ...created.map((binding) => binding.name === 'INGESTION_V2_ADMISSION_ENABLED'
+        ? { ...binding, text: text.enabled }
+        : binding.name === 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST' ? { ...binding, text: text.allowlist } : binding)] },
+    });
+    // The canary the rollout depends on: turn admission on and scope it.
+    expect(validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: 'vanshb03-summer-2027' })]))).toHaveLength(1);
+    // And it can be turned back off.
+    expect(validateCloudflarePlan(plan([admissionUpdate({ enabled: 'false', allowlist: '' })]))).toHaveLength(1);
+    // An invalid enablement value is still refused.
+    expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'yes', allowlist: '' })]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: 'Bad/Path' })]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits enabling the existing resume feature flag but not disabling it', () => {
     const disabled = { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' };
     const enabled = { ...disabled, text: 'true' };
