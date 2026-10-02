@@ -53,6 +53,118 @@ describe('Cloudflare deployment plan guard', () => {
     ]))).toHaveLength(2);
   });
 
+  it('permits only the exact release annotation on the ingestion upload', () => {
+    const priorSha = 'a'.repeat(40);
+    const deploySha = 'b'.repeat(40);
+    const annotationUpdate = {
+      address: 'cloudflare_workers_script.ingestion',
+      actions: ['update'],
+      before: {
+        ...worker,
+        annotations: { workers_message: `Release ${priorSha}`, workers_tag: priorSha, workers_triggered_by: 'upload' },
+      },
+      after: {
+        ...worker,
+        annotations: { workers_message: `Release ${deploySha}`, workers_tag: deploySha, workers_triggered_by: null },
+      },
+      after_unknown: {
+        ...contentUpdate.after_unknown,
+        annotations: { workers_triggered_by: true },
+      },
+    };
+    expect(validateCloudflarePlan(plan([annotationUpdate]), { expectedDeploySha: deploySha })).toHaveLength(1);
+    for (const unsafe of [
+      { change: annotationUpdate, options: {} },
+      { change: annotationUpdate, options: { expectedDeploySha: priorSha } },
+      { change: { ...annotationUpdate, address: 'cloudflare_workers_script.other' }, options: { expectedDeploySha: deploySha } },
+      {
+        change: {
+          ...annotationUpdate,
+          after: { ...annotationUpdate.after, annotations: { ...annotationUpdate.after.annotations, extra: 'value' } },
+        },
+        options: { expectedDeploySha: deploySha },
+      },
+    ]) {
+      expect(() => validateCloudflarePlan(plan([unsafe.change]), unsafe.options)).toThrow('Refusing unsafe Cloudflare plan');
+    }
+    expect(validateCloudflarePlan(plan([{
+      ...annotationUpdate,
+      address: 'cloudflare_workers_script.application',
+    }]), { expectedDeploySha: deploySha })).toHaveLength(1);
+  });
+
+  it('permits only the reviewed API invocation-log shutdown', () => {
+    const observability = {
+      enabled: true,
+      head_sampling_rate: 1,
+      logs: { enabled: true, invocation_logs: true, head_sampling_rate: 1, persist: true },
+      traces: { enabled: false, head_sampling_rate: 1, persist: true },
+    };
+    const afterObservability = {
+      ...observability,
+      logs: { ...observability.logs, invocation_logs: false },
+    };
+    // Content and bindings are unchanged, so only the reviewed logging change can
+    // make this an accepted update.
+    const shutdown = {
+      address: 'cloudflare_workers_script.application',
+      actions: ['update'],
+      before: { ...worker, observability },
+      after: { ...worker, observability: afterObservability },
+      after_unknown: contentUpdate.after_unknown,
+    };
+    expect(validateCloudflarePlan(plan([shutdown]))).toHaveLength(1);
+    // Ingestion logging stays at full sampling.
+    expect(() => validateCloudflarePlan(plan([{ ...shutdown, address: 'cloudflare_workers_script.ingestion' }])))
+      .toThrow('Refusing unsafe Cloudflare plan');
+    // Re-enabling invocation logs is refused: the reviewed change is one-way.
+    expect(() => validateCloudflarePlan(plan([{
+      ...shutdown,
+      before: { ...worker, observability: afterObservability },
+      after: { ...worker, observability },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+    // No other observability setting may move alongside it.
+    expect(() => validateCloudflarePlan(plan([{
+      ...shutdown,
+      after: { ...worker, observability: { ...afterObservability, head_sampling_rate: 0.5 } },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{
+      ...shutdown,
+      after: { ...worker, observability: { ...afterObservability, logs: { ...afterObservability.logs, persist: false } } },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
+  it('permits only the reviewed API preview-URL shutdown', () => {
+    const subdomain = {
+      account_id: 'account',
+      id: 'intern-notifs',
+      script_name: 'intern-notifs',
+      enabled: true,
+      previews_enabled: true,
+    };
+    const shutdown = {
+      address: 'cloudflare_workers_script_subdomain.application',
+      actions: ['update'],
+      before: subdomain,
+      after: { ...subdomain, previews_enabled: false },
+    };
+    expect(validateCloudflarePlan(plan([shutdown]))).toHaveLength(1);
+    for (const unsafe of [
+      // Not the API subdomain.
+      { ...shutdown, address: 'cloudflare_workers_script_subdomain.ingestion' },
+      // The public workers.dev endpoint must stay on.
+      { ...shutdown, after: { ...shutdown.after, enabled: false } },
+      // Identity must not move.
+      { ...shutdown, after: { ...shutdown.after, script_name: 'other' } },
+      { ...shutdown, after: { ...shutdown.after, id: 'other' } },
+      { ...shutdown, before: { ...subdomain, script_name: 'other' }, after: { ...shutdown.after, script_name: 'other' } },
+      // Previews may only move from on to off.
+      { ...shutdown, before: { ...subdomain, previews_enabled: false }, after: { ...subdomain } },
+    ]) {
+      expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+    }
+  });
+
   it('accepts a wasm module part and refuses anything else in it', () => {
     // The shape the provider actually plans: a relative `content_file`, a null
     // `content_base64`, and the computed hash alongside an `application/wasm` type.
