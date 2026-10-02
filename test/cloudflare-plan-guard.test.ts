@@ -680,6 +680,38 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits the combined Stage 1 and Stage 2 first rollout and pins the toggles', () => {
+    const shadowBindings = [
+      { name: 'INGESTION_V2_SHADOW_DISCOVERY_ENABLED', type: 'plain_text', text: 'false' },
+      { name: 'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+    ];
+    const admissionBindings = [
+      { name: 'ADMISSION_V2_QUEUE', type: 'queue', queue_name: 'intern-notifs-admission-v2' },
+      { name: 'ADMISSION_V2_DLQ', type: 'queue', queue_name: 'intern-notifs-admission-v2-dlq' },
+      { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'false' },
+      { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+    ];
+    const combined = (bindings: unknown[]) => ({
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      after: { ...contentUpdate.after, bindings },
+    });
+    // Stage 1 is not on main, so the first production plan introduces both
+    // stages' bindings in one update; the guard must accept the reviewed union.
+    expect(validateCloudflarePlan(plan([combined([...worker.bindings, ...shadowBindings, ...admissionBindings])]))).toHaveLength(1);
+    // A malformed accompanying shadow toggle is still refused.
+    expect(() => validateCloudflarePlan(plan([combined([
+      ...worker.bindings,
+      { ...shadowBindings[1], text: 'Bad/Path' },
+      shadowBindings[0],
+      ...admissionBindings,
+    ])]))).toThrow('Refusing unsafe Cloudflare plan');
+    // An unrelated binding added alongside is still refused.
+    expect(() => validateCloudflarePlan(plan([combined([
+      ...worker.bindings, ...shadowBindings, ...admissionBindings, { name: 'OTHER', type: 'plain_text', text: 'on' },
+    ])]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits reviewed V2 admission enablement and allowlist changes after creation', () => {
     const created = [
       { name: 'ADMISSION_V2_QUEUE', type: 'queue', queue_name: 'intern-notifs-admission-v2' },

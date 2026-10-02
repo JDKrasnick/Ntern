@@ -426,6 +426,10 @@ const ingestionV2ToggleBindings = new Set([
   'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST',
 ]);
 
+function isIngestionV2Toggle(binding: unknown): boolean {
+  return isRecord(binding) && ingestionV2ToggleBindings.has(String(binding.name));
+}
+
 function isIngestionV2ToggleBinding(binding: unknown): boolean {
   if (!isRecord(binding)) return false;
   const name = String(binding.name);
@@ -486,8 +490,14 @@ function isAdmissionV2WorkerBindingUpdate(before: unknown, after: unknown): bool
     }
     if (Object.entries(match).some(([key, value]) => (key in expected ? !isDeepStrictEqual(value, expected[key]) : value !== null))) return false;
   }
-  const stableAfter = after.filter((binding) => !isAdmission(binding));
-  return bindingsMatchByName(before, stableAfter);
+  const stableAfter = after.filter((binding) => !isAdmission(binding) && !isIngestionV2Toggle(binding));
+  const stableBefore = before.filter((binding) => !isAdmission(binding) && !isIngestionV2Toggle(binding));
+  if (!bindingsMatchByName(stableBefore, stableAfter)) return false;
+  // Stage 1's shadow toggles may arrive in the same reviewed release as the
+  // Stage 2 admission bindings, so they are excluded from the stable match.
+  // Validate every accompanying toggle's shape here so the combined first
+  // rollout is still pinned to the reviewed names and values.
+  return after.filter(isIngestionV2Toggle).every(isIngestionV2ToggleBinding);
 }
 
 function isResumeTunerEnablement(before: unknown, after: unknown): boolean {
