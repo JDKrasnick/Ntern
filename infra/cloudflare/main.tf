@@ -206,10 +206,12 @@ resource "cloudflare_workers_script" "application" {
   # The class was provisioned under v4-resume-pdf-compiler-v2. Routine code
   # updates must not replay that migration; wrangler.api.jsonc keeps its history.
   limits = { cpu_ms = 30000, subrequests = 10000 }
+  # API invocation logs are off to keep request volume out of Workers Logs;
+  # structured application and error logs remain persisted at full sampling.
   observability = {
     enabled            = true
     head_sampling_rate = 1
-    logs               = { enabled = true, invocation_logs = true, head_sampling_rate = 1, persist = true }
+    logs               = { enabled = true, invocation_logs = false, head_sampling_rate = 1, persist = true }
     traces             = { enabled = false, head_sampling_rate = 1, persist = true }
   }
 }
@@ -218,7 +220,7 @@ resource "cloudflare_workers_script_subdomain" "application" {
   account_id       = var.cloudflare_account_id
   script_name      = cloudflare_workers_script.application.script_name
   enabled          = true
-  previews_enabled = true
+  previews_enabled = false
 }
 
 resource "cloudflare_queue_consumer" "ingestion" {

@@ -20,6 +20,11 @@ type WorkerConfig = {
   containers?: Array<{ class_name: string; image: string; instance_type?: string; max_instances?: number }>;
   durable_objects?: { bindings: Array<{ name: string; class_name: string; script_name?: string }> };
   migrations?: Array<{ tag: string; new_sqlite_classes?: string[] }>;
+  observability?: {
+    enabled?: boolean;
+    head_sampling_rate?: number;
+    logs?: { enabled?: boolean; invocation_logs?: boolean; head_sampling_rate?: number; persist?: boolean };
+  };
   queues?: {
     producers?: Array<{ binding: string; queue: string }>;
     consumers?: Array<{
@@ -69,6 +74,34 @@ describe('Cloudflare deployment configuration', () => {
     expect(ingestion.triggers?.crons).toContain('1-51/10 * * * *');
     expect(ingestion.workers_dev).toBe(false);
     expect(ingestion.preview_urls).toBe(false);
+  });
+
+  it('disables API invocation logs while keeping structured logs and ingestion at full sampling', () => {
+    const expectedObservability = (invocationLogs: boolean) => ({
+      enabled: true,
+      head_sampling_rate: 1,
+      logs: { enabled: true, invocation_logs: invocationLogs, head_sampling_rate: 1, persist: true },
+    });
+    expect(api.observability).toEqual(expectedObservability(false));
+    expect(devApi.observability).toEqual(expectedObservability(false));
+    expect(ingestion.observability).toEqual(expectedObservability(true));
+    expect(devIngestion.observability).toEqual(expectedObservability(true));
+    // OpenTofu is the deployed authority; keep its observability blocks in step.
+    const terraform = read('infra/cloudflare/main.tf');
+    expect(terraform).toContain('logs               = { enabled = true, invocation_logs = false, head_sampling_rate = 1, persist = true }');
+    expect(terraform).toContain('logs               = { enabled = true, invocation_logs = true, head_sampling_rate = 1, persist = true }');
+  });
+
+  it('disables API preview URLs in production and dev while keeping the public workers.dev endpoint', () => {
+    expect(api.workers_dev).toBe(true);
+    expect(api.preview_urls).toBe(false);
+    expect(devApi.workers_dev).toBe(true);
+    expect(devApi.preview_urls).toBe(false);
+    const terraform = read('infra/cloudflare/main.tf');
+    const block = terraform.slice(terraform.indexOf('resource "cloudflare_workers_script_subdomain" "application"'));
+    const subdomain = block.slice(0, block.indexOf('}'));
+    expect(subdomain).toContain('enabled          = true');
+    expect(subdomain).toContain('previews_enabled = false');
   });
 
   it('alerts on every ingestion work queue the Worker consumes', () => {
@@ -191,7 +224,17 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment.indexOf('Apply production D1 migrations')).toBeLessThan(deployment.indexOf('Apply exact saved plan'));
     expect(deployment).toContain("jq 'del(.vars)' wrangler.api.jsonc");
     expect(deployment).toContain('npx wrangler deploy --config "$config" --keep-vars');
-    expect(deployment.indexOf('Require converged state')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));
+    expect(deployment).toContain('--tag "$DEPLOY_SHA"');
+    expect(deployment).toContain('--message "Container rollout for $DEPLOY_SHA"');
+    expect(deployment).not.toContain('name: Require converged state');
+    // The convergence gate must run after every Worker mutation so the audit sees
+    // the tagged container rollout and any restored secret, not an earlier state.
+    expect(deployment.indexOf('Apply exact saved plan')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));
+    expect(deployment.indexOf('Publish and roll out the resume PDF compiler container')).toBeLessThan(deployment.indexOf('Final convergence gate'));
+    expect(deployment.indexOf('Restore operations binding if its deployment check rejects the key')).toBeLessThan(deployment.indexOf('Final convergence gate'));
+    expect(deployment.indexOf('Final convergence gate')).toBeLessThan(deployment.indexOf('Smoke-test and monitor production'));
+    expect(deployment).toContain('scripts/cloudflare-live-audit.ts');
+    expect(deployment).toContain('test "$drift" = 0');
     expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive texmf-dist-fontsrecommended');
     expect(compilerImage).not.toContain('texlive-full');
   });

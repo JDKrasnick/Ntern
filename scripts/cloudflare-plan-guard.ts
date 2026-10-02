@@ -370,6 +370,26 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
   return addedController || plainTextUpdate;
 }
 
+/**
+ * Reviewed privacy change: the API Worker's invocation logs are turned off while
+ * its structured application and error logs stay persisted at full sampling.
+ * Only `invocation_logs` may move, and only from on to off; every other
+ * observability setting must be identical so this cannot silently alter
+ * sampling, traces, or log persistence.
+ */
+function isApiInvocationLogShutdown(before: unknown, after: unknown): boolean {
+  if (!isRecord(before) || !isRecord(after)) return false;
+  const { logs: beforeLogs, ...beforeRest } = before;
+  const { logs: afterLogs, ...afterRest } = after;
+  if (!isDeepStrictEqual(beforeRest, afterRest)) return false;
+  if (!isRecord(beforeLogs) || !isRecord(afterLogs)) return false;
+  const { invocation_logs: beforeInvocation, ...beforeLogRest } = beforeLogs;
+  const { invocation_logs: afterInvocation, ...afterLogRest } = afterLogs;
+  return beforeInvocation === true
+    && afterInvocation === false
+    && isDeepStrictEqual(beforeLogRest, afterLogRest);
+}
+
 function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after)) return false;
   const name = 'CATALOG_R2_READ_ENABLED';
@@ -454,6 +474,8 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
   const permittedSubrequestIncrease = address === 'cloudflare_workers_script.ingestion'
     && isDeepStrictEqual(before.limits, { cpu_ms: 120_000, subrequests: 10_000 })
     && isDeepStrictEqual(after.limits, { cpu_ms: 120_000, subrequests: 50_000 });
+  const permittedInvocationLogShutdown = address === 'cloudflare_workers_script.application'
+    && isApiInvocationLogShutdown(before.observability, after.observability);
   const permittedControllerMigration = address === 'cloudflare_workers_script.ingestion'
     && (before.migrations === null || before.migrations === undefined)
     && isRecord(after.migrations)
@@ -472,6 +494,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     && isExpectedResumeMigration(after.migrations, '');
   const permittedAppliedMigrationRetirement = isAppliedMigrationRetirement(address, before, after);
   if (!contentChanged && !permittedBindingChanged && !permittedSubrequestIncrease
+    && !permittedInvocationLogShutdown
     && !permittedControllerMigration && !permittedControllerMigrationTagTransition
     && !permittedResumeMigrationTagTransition
     && !permittedResumeMigrationBootstrap && !permittedAppliedMigrationRetirement) return false;
@@ -480,6 +503,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change']): 
     ...before,
     ...(permittedBindingChanged ? { bindings: normalizedAfterBindings } : {}),
     ...(permittedSubrequestIncrease ? { limits: after.limits } : {}),
+    ...(permittedInvocationLogShutdown ? { observability: after.observability } : {}),
     ...(permittedControllerMigration ? { migrations: after.migrations } : {}),
     ...(permittedControllerMigrationTagTransition ? { migrations: after.migrations } : {}),
     ...(permittedResumeMigrationTagTransition ? { migrations: after.migrations } : {}),
@@ -553,6 +577,25 @@ function isResumeWorkerUpdate(address: string, change: ResourceChange['change'])
 }
 
 const customDomainAddresses = new Set(['cloudflare_workers_custom_domain.api[0]']);
+const apiSubdomainAddress = 'cloudflare_workers_script_subdomain.application';
+
+/**
+ * Reviewed privacy change: the API Worker keeps its public `workers.dev` endpoint
+ * (`enabled = true`) but stops serving preview URLs. Identity fields and the
+ * workers.dev toggle must be untouched, and previews may only move from on to off.
+ */
+function isApiPreviewUrlShutdown(address: string, change: ResourceChange['change']): boolean {
+  if (address !== apiSubdomainAddress || !isRecord(change.before) || !isRecord(change.after)) return false;
+  const before = change.before;
+  const after = change.after;
+  const allowedKeys = new Set(['account_id', 'enabled', 'id', 'previews_enabled', 'script_name']);
+  if (Object.keys(before).some((key) => !allowedKeys.has(key))
+    || Object.keys(after).some((key) => !allowedKeys.has(key))) return false;
+  if (!isDeepStrictEqual(before.account_id, after.account_id)
+    || !isDeepStrictEqual(before.script_name, after.script_name)
+    || before.enabled !== true || after.enabled !== true) return false;
+  return before.previews_enabled === true && after.previews_enabled === false;
+}
 const priorIngestionCrons = [
   '*/5 * * * *', '7-57/10 * * * *', '9-59/10 * * * *',
   '12,42 * * * *', '22,52 * * * *', '2,32 * * * *',
@@ -671,7 +714,8 @@ export function validateCloudflarePlan(plan: Plan): Array<{ address: string; act
       (change.actions[0] === 'update'
         && ((allowedUpdates.has(address)
           && (isSafeWorkerUpdate(address, change) || isResumeWorkerUpdate(address, change)))
-          || isReviewedIngestionCronUpdate(address, change)))
+          || isReviewedIngestionCronUpdate(address, change)
+          || isApiPreviewUrlShutdown(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
         || isCustomDomainCreate(address, change)))
     )

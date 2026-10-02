@@ -172,15 +172,15 @@ jobs:
       - name: Apply exact saved plan
         if: steps.plan.outputs.changed == 'true'
         run: tofu -chdir=infra/cloudflare apply -auto-approve "$RUNNER_TEMP/cloudflare.tfplan"
-      - name: Require converged state
-        run: tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode
       - name: Publish and roll out the resume PDF compiler container
         shell: bash
         run: |
           config="$GITHUB_WORKSPACE/.wrangler.api.production.jsonc"
           trap 'rm -f "$config"' EXIT
           jq 'del(.vars)' wrangler.api.jsonc > "$config"
-          npx wrangler deploy --config "$config" --keep-vars
+          npx wrangler deploy --config "$config" --keep-vars \
+            --tag "$DEPLOY_SHA" \
+            --message "Container rollout for $DEPLOY_SHA"
       - name: Restore operations binding if its deployment check rejects the key
         shell: bash
         run: |
@@ -195,6 +195,42 @@ jobs:
                 | npx wrangler secret put OPERATIONS_SHARED_SECRET --config wrangler.api.jsonc
             fi
           fi
+      - name: Final convergence gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_name=intern-notifs
+          ingestion_name=intern-notifs-ingestion
+
+          # Confirm the active deployments and read both active versions.
+          npx wrangler deployments status --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-deployment.json"
+          npx wrangler deployments status --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-deployment.json"
+          api_version="$(jq -r '.versions[0].version_id' "$RUNNER_TEMP/api-deployment.json")"
+          ingestion_version="$(jq -r '.versions[0].version_id' "$RUNNER_TEMP/ingestion-deployment.json")"
+          npx wrangler versions view "$api_version" --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-version.json"
+          npx wrangler versions view "$ingestion_version" --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-version.json"
+
+          # Capture the post-apply plan and require that production has converged.
+          set +e
+          tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode -out="$RUNNER_TEMP/cloudflare-final.tfplan"
+          drift=$?
+          set -e
+          tofu -chdir=infra/cloudflare show -json "$RUNNER_TEMP/cloudflare-final.tfplan" > "$RUNNER_TEMP/cloudflare-final-plan.json"
+
+          # Compare every non-secret binding, compatibility setting, handler, and
+          # limit; extra secret_text bindings are permitted.
+          npx tsx scripts/cloudflare-live-audit.ts \
+            --plan "$RUNNER_TEMP/cloudflare-final-plan.json" \
+            --api-name "$api_name" \
+            --api-deployment "$RUNNER_TEMP/api-deployment.json" \
+            --api-version "$RUNNER_TEMP/api-version.json" \
+            --ingestion-name "$ingestion_name" \
+            --ingestion-deployment "$RUNNER_TEMP/ingestion-deployment.json" \
+            --ingestion-version "$RUNNER_TEMP/ingestion-version.json" \
+            --drift-exit-code "$drift"
+
+          # Any drift fails the deployment before smoke tests or success reporting.
+          test "$drift" = 0
       - name: Back up post-deploy state
         if: always() && steps.backup_before.outcome == 'success'
         shell: bash
