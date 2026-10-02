@@ -73,7 +73,7 @@ const apiVersion: LiveVersion = {
       ...liveBindings(apiBindings),
       { name: 'OPERATIONS_SHARED_SECRET', type: 'secret_text', text: 'secret-value' },
     ],
-    script: { handlers: ['fetch'] },
+    script: { etag: 'api-etag', handlers: ['fetch'] },
     script_runtime: {
       compatibility_date: '2026-09-08',
       compatibility_flags: ['nodejs_compat'],
@@ -86,7 +86,7 @@ const ingestionVersion: LiveVersion = {
   id: 'ingestion-version-1',
   resources: {
     bindings: liveBindings(ingestionBindings),
-    script: { handlers: ['queue', 'scheduled', 'fetch'] },
+    script: { etag: 'ingestion-etag', handlers: ['queue', 'scheduled', 'fetch'] },
     script_runtime: {
       compatibility_date: '2026-09-08',
       compatibility_flags: ['nodejs_compat'],
@@ -100,12 +100,14 @@ function audit(overrides: { apiVersion?: LiveVersion; apiDeployment?: LiveDeploy
     api: {
       scriptName: 'intern-notifs',
       address: 'cloudflare_workers_script.application',
+      expectedEtag: 'api-etag',
       deployment: overrides.apiDeployment ?? deployment('api-version-1'),
       version: overrides.apiVersion ?? apiVersion,
     },
     ingestion: {
       scriptName: 'intern-notifs-ingestion',
       address: 'cloudflare_workers_script.ingestion',
+      expectedEtag: 'ingestion-etag',
       deployment: deployment('ingestion-version-1'),
       version: ingestionVersion,
     },
@@ -116,8 +118,8 @@ describe('Cloudflare live version audit', () => {
   it('accepts live versions that match the post-apply plan, ignoring extra secrets', () => {
     const result = audit();
     expect(result.workers).toEqual([
-      { scriptName: 'intern-notifs', versionId: 'api-version-1', bindingCount: apiBindings.length },
-      { scriptName: 'intern-notifs-ingestion', versionId: 'ingestion-version-1', bindingCount: ingestionBindings.length },
+      { scriptName: 'intern-notifs', versionId: 'api-version-1', etag: 'api-etag', bindingCount: apiBindings.length },
+      { scriptName: 'intern-notifs-ingestion', versionId: 'ingestion-version-1', etag: 'ingestion-etag', bindingCount: ingestionBindings.length },
     ]);
     expect(auditSummaryLines(result, 0).join('\n')).toContain('Final OpenTofu plan: no drift');
   });
@@ -194,6 +196,20 @@ describe('Cloudflare live version audit', () => {
         resources: { ...(apiVersion.resources as Record<string, unknown>), script: { ...script, handlers: ['scheduled'] } },
       },
     })).toThrow('handlers drifted');
+  });
+
+  it('rejects script content drift even when configuration and handlers match', () => {
+    const wrongCode = {
+      ...apiVersion,
+      resources: {
+        ...(apiVersion.resources as Record<string, unknown>),
+        script: {
+          ...((apiVersion.resources as { script: Record<string, unknown> }).script),
+          etag: 'unexpected-etag',
+        },
+      },
+    };
+    expect(() => audit({ apiVersion: wrongCode })).toThrow('script content drifted');
   });
 
   it('fails when the post-apply plan is missing a Worker', () => {

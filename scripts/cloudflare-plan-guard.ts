@@ -592,7 +592,8 @@ function isApiPreviewUrlShutdown(address: string, change: ResourceChange['change
   if (Object.keys(before).some((key) => !allowedKeys.has(key))
     || Object.keys(after).some((key) => !allowedKeys.has(key))) return false;
   if (!isDeepStrictEqual(before.account_id, after.account_id)
-    || !isDeepStrictEqual(before.script_name, after.script_name)
+    || before.id !== 'intern-notifs' || after.id !== 'intern-notifs'
+    || before.script_name !== 'intern-notifs' || after.script_name !== 'intern-notifs'
     || before.enabled !== true || after.enabled !== true) return false;
   return before.previews_enabled === true && after.previews_enabled === false;
 }

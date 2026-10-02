@@ -43,6 +43,7 @@ export type Plan = {
 export type WorkerAuditInput = {
   scriptName: string;
   address: string;
+  expectedEtag: string;
   deployment: LiveDeployment;
   version: LiveVersion;
 };
@@ -50,6 +51,7 @@ export type WorkerAuditInput = {
 export type WorkerAuditResult = {
   scriptName: string;
   versionId: string;
+  etag: string;
   bindingCount: number;
 };
 
@@ -239,15 +241,21 @@ function auditRuntime(scriptName: string, planned: Json, live: Json): void {
 }
 
 export function auditWorkerParity(input: WorkerAuditInput, plan: Plan): WorkerAuditResult {
-  const { scriptName, address, deployment, version } = input;
+  const { scriptName, address, expectedEtag, deployment, version } = input;
   const versionId = activeVersionId(scriptName, deployment);
   if (isRecord(version) && typeof version.id === 'string' && version.id !== versionId) {
     throw new Error(`${scriptName} active version ${versionId} does not match the version read from Wrangler (${version.id})`);
   }
+  const resources = isRecord(version.resources) ? version.resources : {};
+  const script = isRecord(resources.script) ? resources.script : {};
+  const etag = script.etag;
+  if (typeof etag !== 'string' || etag.length === 0 || etag !== expectedEtag) {
+    throw new Error(`${scriptName} script content drifted: expected etag ${describe(expectedEtag)} live ${describe(etag)}`);
+  }
   const planned = plannedWorkerValues(plan, address);
   const bindingCount = bindingSetsMatch(scriptName, planned, version);
   auditRuntime(scriptName, planned, version);
-  return { scriptName, versionId, bindingCount };
+  return { scriptName, versionId, etag, bindingCount };
 }
 
 export function auditLiveVersions(plan: Plan, input: { api: WorkerAuditInput; ingestion: WorkerAuditInput }): AuditResult {
@@ -262,7 +270,7 @@ export function auditLiveVersions(plan: Plan, input: { api: WorkerAuditInput; in
 export function auditSummaryLines(result: AuditResult, driftExitCode: number): string[] {
   const lines = ['### Final convergence gate', ''];
   for (const worker of result.workers) {
-    lines.push(`- ${worker.scriptName}: active version \`${worker.versionId}\` at 100%; ${worker.bindingCount} non-secret binding(s) match the plan.`);
+    lines.push(`- ${worker.scriptName}: active version \`${worker.versionId}\` at 100%; script etag \`${worker.etag}\` and ${worker.bindingCount} non-secret binding(s) match the release.`);
   }
   lines.push('', driftExitCode === 0
     ? '- Final OpenTofu plan: no drift (exit code 0).'
@@ -274,9 +282,11 @@ export function auditSummaryLines(result: AuditResult, driftExitCode: number): s
 type CliOptions = {
   plan: string;
   apiName: string;
+  apiExpectedEtag: string;
   apiDeployment: string;
   apiVersion: string;
   ingestionName: string;
+  ingestionExpectedEtag: string;
   ingestionDeployment: string;
   ingestionVersion: string;
 };
@@ -292,9 +302,11 @@ function parseCli(argv: string[]): CliOptions {
   return {
     plan: readOption(argv, 'plan'),
     apiName: readOption(argv, 'api-name'),
+    apiExpectedEtag: readOption(argv, 'api-expected-etag'),
     apiDeployment: readOption(argv, 'api-deployment'),
     apiVersion: readOption(argv, 'api-version'),
     ingestionName: readOption(argv, 'ingestion-name'),
+    ingestionExpectedEtag: readOption(argv, 'ingestion-expected-etag'),
     ingestionDeployment: readOption(argv, 'ingestion-deployment'),
     ingestionVersion: readOption(argv, 'ingestion-version'),
   };
@@ -314,12 +326,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     api: {
       scriptName: options.apiName,
       address: apiAddress,
+      expectedEtag: options.apiExpectedEtag,
       deployment: readJson(options.apiDeployment) as LiveDeployment,
       version: readJson(options.apiVersion) as LiveVersion,
     },
     ingestion: {
       scriptName: options.ingestionName,
       address: ingestionAddress,
+      expectedEtag: options.ingestionExpectedEtag,
       deployment: readJson(options.ingestionDeployment) as LiveDeployment,
       version: readJson(options.ingestionVersion) as LiveVersion,
     },

@@ -181,6 +181,24 @@ jobs:
           npx wrangler deploy --config "$config" --keep-vars \
             --tag "$DEPLOY_SHA" \
             --message "Container rollout for $DEPLOY_SHA"
+      - name: Capture expected Worker code identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_name=intern-notifs
+          ingestion_name=intern-notifs-ingestion
+
+          npx wrangler deployments status --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-expected-deployment.json"
+          npx wrangler deployments status --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-expected-deployment.json"
+          jq -e '.versions | length == 1 and .[0].percentage == 100' "$RUNNER_TEMP/api-expected-deployment.json" >/dev/null
+          jq -e '.versions | length == 1 and .[0].percentage == 100' "$RUNNER_TEMP/ingestion-expected-deployment.json" >/dev/null
+          api_version="$(jq -er '.versions[0].version_id' "$RUNNER_TEMP/api-expected-deployment.json")"
+          ingestion_version="$(jq -er '.versions[0].version_id' "$RUNNER_TEMP/ingestion-expected-deployment.json")"
+          npx wrangler versions view "$api_version" --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-expected-version.json"
+          npx wrangler versions view "$ingestion_version" --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-expected-version.json"
+          jq -e --arg sha "$DEPLOY_SHA" '.annotations["workers/tag"] == $sha' "$RUNNER_TEMP/api-expected-version.json" >/dev/null
+          echo "EXPECTED_API_ETAG=$(jq -er '.resources.script.etag' "$RUNNER_TEMP/api-expected-version.json")" >> "$GITHUB_ENV"
+          echo "EXPECTED_INGESTION_ETAG=$(jq -er '.resources.script.etag' "$RUNNER_TEMP/ingestion-expected-version.json")" >> "$GITHUB_ENV"
       - name: Restore operations binding if its deployment check rejects the key
         shell: bash
         run: |
@@ -222,9 +240,11 @@ jobs:
           npx tsx scripts/cloudflare-live-audit.ts \
             --plan "$RUNNER_TEMP/cloudflare-final-plan.json" \
             --api-name "$api_name" \
+            --api-expected-etag "$EXPECTED_API_ETAG" \
             --api-deployment "$RUNNER_TEMP/api-deployment.json" \
             --api-version "$RUNNER_TEMP/api-version.json" \
             --ingestion-name "$ingestion_name" \
+            --ingestion-expected-etag "$EXPECTED_INGESTION_ETAG" \
             --ingestion-deployment "$RUNNER_TEMP/ingestion-deployment.json" \
             --ingestion-version "$RUNNER_TEMP/ingestion-version.json" \
             --drift-exit-code "$drift"

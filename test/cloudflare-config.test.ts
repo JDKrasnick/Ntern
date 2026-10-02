@@ -226,14 +226,21 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain('npx wrangler deploy --config "$config" --keep-vars');
     expect(deployment).toContain('--tag "$DEPLOY_SHA"');
     expect(deployment).toContain('--message "Container rollout for $DEPLOY_SHA"');
+    expect(deployment).toContain('name: Capture expected Worker code identities');
+    expect(deployment).toContain('.annotations["workers/tag"] == $sha');
+    expect(deployment).toContain('EXPECTED_API_ETAG=');
+    expect(deployment).toContain('EXPECTED_INGESTION_ETAG=');
     expect(deployment).not.toContain('name: Require converged state');
     // The convergence gate must run after every Worker mutation so the audit sees
     // the tagged container rollout and any restored secret, not an earlier state.
     expect(deployment.indexOf('Apply exact saved plan')).toBeLessThan(deployment.indexOf('Publish and roll out the resume PDF compiler container'));
-    expect(deployment.indexOf('Publish and roll out the resume PDF compiler container')).toBeLessThan(deployment.indexOf('Final convergence gate'));
+    expect(deployment.indexOf('Publish and roll out the resume PDF compiler container')).toBeLessThan(deployment.indexOf('Capture expected Worker code identities'));
+    expect(deployment.indexOf('Capture expected Worker code identities')).toBeLessThan(deployment.indexOf('Restore operations binding if its deployment check rejects the key'));
     expect(deployment.indexOf('Restore operations binding if its deployment check rejects the key')).toBeLessThan(deployment.indexOf('Final convergence gate'));
     expect(deployment.indexOf('Final convergence gate')).toBeLessThan(deployment.indexOf('Smoke-test and monitor production'));
     expect(deployment).toContain('scripts/cloudflare-live-audit.ts');
+    expect(deployment).toContain('--api-expected-etag "$EXPECTED_API_ETAG"');
+    expect(deployment).toContain('--ingestion-expected-etag "$EXPECTED_INGESTION_ETAG"');
     expect(deployment).toContain('test "$drift" = 0');
     expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive texmf-dist-fontsrecommended');
     expect(compilerImage).not.toContain('texlive-full');

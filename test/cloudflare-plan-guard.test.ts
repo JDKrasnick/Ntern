@@ -97,6 +97,7 @@ describe('Cloudflare deployment plan guard', () => {
   it('permits only the reviewed API preview-URL shutdown', () => {
     const subdomain = {
       account_id: 'account',
+      id: 'intern-notifs',
       script_name: 'intern-notifs',
       enabled: true,
       previews_enabled: true,
@@ -115,6 +116,8 @@ describe('Cloudflare deployment plan guard', () => {
       { ...shutdown, after: { ...shutdown.after, enabled: false } },
       // Identity must not move.
       { ...shutdown, after: { ...shutdown.after, script_name: 'other' } },
+      { ...shutdown, after: { ...shutdown.after, id: 'other' } },
+      { ...shutdown, before: { ...subdomain, script_name: 'other' }, after: { ...shutdown.after, script_name: 'other' } },
       // Previews may only move from on to off.
       { ...shutdown, before: { ...subdomain, previews_enabled: false }, after: { ...subdomain } },
     ]) {
