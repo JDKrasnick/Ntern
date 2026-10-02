@@ -76,10 +76,14 @@ export async function liveCatalogOverlayFromStore(
   source: LiveCatalogOverlaySource,
   watermark: string,
 ): Promise<LiveCatalogOverlay | undefined> {
-  // Newest first, and one row past the bound, so an oversized delta is refused
-  // rather than silently truncated.
-  const delta = (await source.listCatalogSince(watermark, MAX_LIVE_DELTA_ROLES + 1)).filter(catalogPublishable);
-  if (!delta.length || delta.length > MAX_LIVE_DELTA_ROLES) return undefined;
+  // Newest first, and one row past the bound. Refuse when the store returns more
+  // than the bound before publishability is applied: filtering first could accept
+  // an oversized delta while silently dropping the older publishable roles beyond
+  // the fetched window.
+  const candidates = await source.listCatalogSince(watermark, MAX_LIVE_DELTA_ROLES + 1);
+  if (candidates.length > MAX_LIVE_DELTA_ROLES) return undefined;
+  const delta = candidates.filter(catalogPublishable);
+  if (!delta.length) return undefined;
   const jobs = new Map(delta.map((job) => [job.jobId, job]));
   // A release card is one employer's UTC day, so the delta is closed by adding
   // every role of each affected employer day — and only those, so an unrelated
@@ -109,6 +113,7 @@ export async function liveCatalogOverlayFromStore(
       const missing = published.roles.map((role) => role.jobId).filter((jobId) => !jobs.has(jobId));
       if (!missing.length) continue;
       for (const loaded of await source.getJobs(missing)) if (catalogPublishable(loaded)) jobs.set(loaded.jobId, loaded);
+      if (jobs.size > MAX_LIVE_OVERLAY_ROLES) return undefined;
     }
   }
   return buildLiveCatalogOverlay([...jobs.values()]);

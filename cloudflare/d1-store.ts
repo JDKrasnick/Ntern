@@ -1269,11 +1269,20 @@ export class D1InternshipStore implements InternshipStore {
       .bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []), limit + 1, offset).all<JsonRow>();
     const published = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
     // Roles published after this pointer are newer than every card it holds, so
-    // their cards lead the feed and replace the published cards they cover.
+    // their cards lead the feed and replace the published cards they cover. The
+    // dropped card's raw position is reported so a reader can resume from the raw
+    // stream rather than repeating a card on the next page.
     const overlay = await this.liveOverlayFor(pointer.liveWatermark);
-    const groups = overlay ? published.filter((details) => !overlaySupersedesGroup(overlay, details)) : published;
+    const groups: CatalogGroupDetails[] = [];
+    const groupOffsets: number[] = [];
+    published.forEach((details, index) => {
+      if (overlay && overlaySupersedesGroup(overlay, details)) return;
+      groups.push(details);
+      groupOffsets.push(index);
+    });
     return {
       groups,
+      groupOffsets,
       ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}),
       ...(overlay && offset === 0 && overlay.groups.length ? { live: overlay.groups } : {}),
     };
@@ -1299,11 +1308,19 @@ export class D1InternshipStore implements InternshipStore {
     `).bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []), ...values, limit + 1, offset).all<JsonRow>();
     const candidates = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
     const overlay = await this.liveOverlayFor(pointer.liveWatermark);
-    const groups = filterCatalogGroupDetails(candidates, filter)
-      .filter((details) => !overlay || !overlaySupersedesGroup(overlay, details));
+    const groups: CatalogGroupDetails[] = [];
+    const groupOffsets: number[] = [];
+    candidates.forEach((details, index) => {
+      if (overlay && overlaySupersedesGroup(overlay, details)) return;
+      const [match] = filterCatalogGroupDetails([details], filter);
+      if (!match) return;
+      groups.push(match);
+      groupOffsets.push(index);
+    });
     const live = overlay && offset === 0 && overlay.groups.length ? filterCatalogGroupDetails(overlay.groups, filter) : [];
     return {
       groups,
+      groupOffsets,
       ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}),
       ...(live.length ? { live } : {}),
     };
@@ -1319,6 +1336,10 @@ export class D1InternshipStore implements InternshipStore {
     // exact IANA-zone day after parsing these small role rows.
     if (range.from) { clauses.push("json_extract(role.value, '$.releaseDay') >= date(?, '-1 day')"); values.push(range.from); }
     if (range.to) { clauses.push("json_extract(role.value, '$.releaseDay') <= date(?, '+1 day')"); values.push(range.to); }
+    // Live overlay roles bypass the SQL window, so re-apply the same expanded
+    // range in JS to keep this method bounded to the requested days.
+    const expandedFrom = range.from ? new Date(Date.parse(range.from) - 86_400_000).toISOString().slice(0, 10) : undefined;
+    const expandedTo = range.to ? new Date(Date.parse(range.to) + 86_400_000).toISOString().slice(0, 10) : undefined;
     const rows = await this.db.prepare(`
       SELECT role.value
       FROM catalog_items AS projection, json_each(projection.value, '$.roles') AS role
@@ -1332,9 +1353,14 @@ export class D1InternshipStore implements InternshipStore {
       .filter((role) => catalogProjectionRoleMatches(role, filter));
     const overlay = await this.liveOverlayFor(pointer.liveWatermark);
     if (!overlay) return published;
+    const overlayRoles = filterCatalogGroupDetails(overlay.groups, filter)
+      .flatMap((details) => details.roles)
+      .filter((role) => role.releaseDay
+        && (!expandedFrom || role.releaseDay >= expandedFrom)
+        && (!expandedTo || role.releaseDay <= expandedTo));
     return [
       ...published.filter((role) => !overlay.roleIds.has(role.jobId)),
-      ...filterCatalogGroupDetails(overlay.groups, filter).flatMap((details) => details.roles),
+      ...overlayRoles,
     ];
   }
   async getCatalogProjectionGroup(groupId: string): Promise<CatalogGroupDetails | undefined> {

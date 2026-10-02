@@ -125,6 +125,27 @@ function projectedMatches(details: CatalogGroupDetails[] | undefined, filter: Ca
   });
 }
 
+/**
+ * The live prefix is newer than every published card, so it leads the first page
+ * only. Serving it is gated on the absence of a cursor, never on offset zero: a
+ * page the prefix alone fills hands back `cursor: "0"` so the reader can continue
+ * into the published stream, and that cursor must not re-serve the prefix.
+ */
+function livePrefix(cursor: string | undefined, page: { live?: CatalogGroupDetails[] }, filter: CatalogGroupFilter): CatalogGroupDetails[] {
+  return cursor === undefined ? projectedMatches(page.live, filter) : [];
+}
+
+/**
+ * The raw stream offset a reader resumes from, given a page and the index of the
+ * next unserved visible card. A store that drops cards from a page reports their
+ * raw positions in `groupOffsets`, so the cursor never lands on a card already
+ * served (which would repeat it) or skips one (which would drop it).
+ */
+function resumeOffset(offset: number, page: { groupOffsets?: number[]; groups: CatalogGroupDetails[] }, index: number): number {
+  if (page.groupOffsets) return offset + (page.groupOffsets[index] ?? page.groupOffsets.length);
+  return offset + index;
+}
+
 async function projectedCatalogPage(store: InternshipStore, cursor: string | undefined, limit: number, filter: CatalogGroupFilter) {
   const isDefaultBrowse = isDefaultBrowseFilter(filter);
   if (!store.listCatalogProjection) return undefined;
@@ -137,12 +158,26 @@ async function projectedCatalogPage(store: InternshipStore, cursor: string | und
     // followed by at most a few more rather than ending the feed early.
     let next = cursor;
     for (let attempt = 0; attempt < 5; attempt += 1) {
+      const offset = Number(next ?? 0);
       const page = await store.listCatalogProjectionFiltered(next, limit, filter);
       if (!page) return undefined;
-      // The live prefix belongs to the first page only; a cursor means it was
-      // already served.
-      const groups = [...(next === undefined ? projectedMatches(page.live, filter) : []), ...projectedMatches(page.groups, filter)];
-      if (groups.length || !page.cursor) return { groups, ...(page.cursor ? { cursor: page.cursor } : {}) };
+      const groups = livePrefix(next, page, filter);
+      // A live prefix that already fills the page leaves the published stream
+      // untouched, so the reader resumes it from where this page started instead
+      // of dropping the published cards it never served.
+      if (groups.length >= limit) return { groups: groups.slice(0, limit), ...(page.groups.length || page.cursor ? { cursor: String(offset) } : {}) };
+      for (let index = 0; index < page.groups.length; index += 1) {
+        if (groups.length === limit) {
+          const resume = resumeOffset(offset, page, index);
+          return { groups, ...(resume > 0 ? { cursor: String(resume) } : {}) };
+        }
+        const eligible = eligibleProjectedGroup(page.groups[index]!);
+        const [match] = eligible ? filterCatalogGroupDetails([eligible], filter) : [];
+        if (!match) continue;
+        groups.push(match);
+      }
+      if (groups.length) return { groups, ...(page.cursor ? { cursor: page.cursor } : {}) };
+      if (!page.cursor) return { groups };
       next = page.cursor;
     }
     return { groups: [] };
@@ -156,24 +191,28 @@ async function projectedCatalogPage(store: InternshipStore, cursor: string | und
     if (!page) return undefined;
     // Roles published after the last projection tick are newer than every
     // published card, so their cards are a strict prefix of the feed. A prefix
-    // that already fills the page ends the read: a cursor into the projection
-    // would not have room for the cards still ahead of it.
-    if (offset === 0) {
-      groups.push(...projectedMatches(page.live, filter));
-      if (groups.length >= limit) return { groups: groups.slice(0, limit) };
+    // that already fills the page hands back the published stream's own offset
+    // so a reader can still walk the projection behind it.
+    const live = livePrefix(next, page, filter);
+    if (live.length) {
+      groups.push(...live);
+      if (groups.length >= limit) return { groups: groups.slice(0, limit), cursor: String(offset) };
     }
     for (let index = 0; index < page.groups.length; index += 1) {
-      // A zero cursor would re-serve the live prefix forever, so a page the live
-      // prefix alone filled ends the read instead of offering a cursor.
-      if (groups.length === limit) return { groups, ...(offset + index > 0 ? { cursor: String(offset + index) } : {}) };
+      if (groups.length === limit) {
+        // Resume from the next unserved card's raw position, not its position
+        // among the visible cards: a page with superseded cards removed otherwise
+        // undercounts and repeats cards on the next page.
+        const resume = resumeOffset(offset, page, index);
+        return { groups, ...(resume > 0 ? { cursor: String(resume) } : {}) };
+      }
       const eligible = eligibleProjectedGroup(page.groups[index]!);
       const [match] = eligible ? filterCatalogGroupDetails([eligible], filter) : [];
       if (!match) continue;
       groups.push(match);
     }
     if (groups.length === limit) {
-      const consumed = offset + page.groups.length;
-      return { groups, ...(page.cursor !== undefined ? { cursor: String(consumed) } : {}) };
+      return { groups, ...(page.cursor !== undefined ? { cursor: page.cursor } : {}) };
     }
     if (!page.cursor) return { groups };
     next = page.cursor;

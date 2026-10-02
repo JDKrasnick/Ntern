@@ -145,7 +145,7 @@ describe('live catalog overlay', () => {
     expect(groups).toMatchObject([{ titles: ['Software Intern base'] }]);
   });
 
-  it('caps a live prefix that fills the page instead of accumulating pages', async () => {
+  it('caps a live prefix that fills the page and resumes the published stream behind it', async () => {
     const jobs = new MemoryInternshipStore();
     await jobs.putInternship(job('base', '2026-10-01', 0, 'Software Intern base'));
     await publish(jobs, '2026-10-01T12:00:00.000Z');
@@ -153,11 +153,19 @@ describe('live catalog overlay', () => {
       await jobs.putInternship(job(id, '2026-10-02', index, `Software Intern ${id}`, `Employer ${id}`));
     }
 
+    const handler = handlerFor(jobs);
     const page = body<{ groups: Array<{ titles: string[] }>; cursor?: string }>(
-      await handlerFor(jobs)(event('GET', '/catalog', { limit: '2' })),
+      await handler(event('GET', '/catalog', { limit: '2' })),
     );
     expect(page.groups).toHaveLength(2);
-    expect(page.cursor).toBeUndefined();
+    // The prefix filled this page, so the cursor points at the start of the
+    // published stream rather than dropping the card behind the prefix.
+    expect(page.cursor).toBe('0');
+    const rest = body<{ groups: Array<{ titles: string[] }>; cursor?: string }>(
+      await handler(event('GET', '/catalog', { limit: '2', cursor: '0' })),
+    );
+    expect(rest.groups.map(({ titles }) => titles[0])).toEqual(['Software Intern base']);
+    expect(rest.cursor).toBeUndefined();
   });
 
   it('pages past the live prefix without repeating or dropping a card', async () => {
@@ -180,6 +188,70 @@ describe('live catalog overlay', () => {
     }
     expect(seen).toHaveLength(6);
     expect(new Set(seen).size).toBe(6);
+  });
+
+  it('pages past a superseding live prefix without repeating a card', async () => {
+    const jobs = new MemoryInternshipStore();
+    for (const [index, id] of ['a', 'b', 'c'].entries()) await jobs.putInternship(job(id, '2026-10-02', index, `Software Intern ${id}`));
+    await jobs.putInternship(job('o2', '2026-10-01', 1, 'Software Intern o2', 'Globex'));
+    await jobs.putInternship(job('o1', '2026-10-01', 0, 'Software Intern o1', 'Initech'));
+    await publish(jobs, '2026-10-02T15:41:56.000Z');
+    // The fourth Acme role turns the day into a release card that replaces the
+    // three published individual cards, so the first page drops cards from the
+    // raw stream. The cursor must still resume from the raw offset.
+    await jobs.putInternship(job('d', '2026-10-02', 3, 'Software Intern d'));
+
+    const handler = handlerFor(jobs);
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 6; page += 1) {
+      const query: Record<string, string> = { limit: '2', ...(cursor ? { cursor } : {}) };
+      const response = body<{ groups: Array<{ groupId: string }>; cursor?: string }>(await handler(event('GET', '/catalog', query)));
+      seen.push(...response.groups.map(({ groupId }) => groupId));
+      cursor = response.cursor;
+      if (!cursor) break;
+    }
+    expect(seen).toHaveLength(3);
+    expect(new Set(seen).size).toBe(3);
+  });
+
+  it('does not repeat a card at the default page size when a published card is superseded', async () => {
+    const jobs = new MemoryInternshipStore();
+    await jobs.putInternship({ ...job('a', '2026-10-01', 0, 'Software Intern a'), internshipIdentity: programIdentity('Software Intern a') });
+    for (let index = 0; index < 30; index += 1) {
+      await jobs.putInternship(job(`o${index}`, '2026-09-30', index % 60, `Software Intern o${index}`, `Employer ${index}`));
+    }
+    await publish(jobs, '2026-10-01T23:00:00.000Z');
+    // A program card grows and supersedes the published single-role card, one
+    // dropped card inside the default 25-card first page.
+    await jobs.putInternship({ ...job('b', '2026-10-02', 0, 'Software Intern b'), internshipIdentity: programIdentity('Software Intern b') });
+
+    const handler = handlerFor(jobs);
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 6; page += 1) {
+      const query: Record<string, string> = { ...(cursor ? { cursor } : {}) };
+      const response = body<{ groups: Array<{ groupId: string }>; cursor?: string }>(await handler(event('GET', '/catalog', query)));
+      seen.push(...response.groups.map(({ groupId }) => groupId));
+      cursor = response.cursor;
+      if (!cursor) break;
+    }
+    expect(seen).toHaveLength(31);
+    expect(new Set(seen).size).toBe(31);
+  });
+
+  it('caps a filtered search page at the requested limit', async () => {
+    const jobs = new MemoryInternshipStore();
+    await jobs.putInternship(job('base', '2026-10-01', 0, 'Base Intern'));
+    await publish(jobs, '2026-10-01T12:00:00.000Z');
+    for (let index = 0; index < 5; index += 1) {
+      await jobs.putInternship(job(`alpha-${index}`, '2026-10-02', index, `Alpha Intern ${index}`, `Employer ${index}`));
+    }
+
+    const page = body<{ groups: Array<{ titles: string[] }>; cursor?: string }>(
+      await handlerFor(jobs)(event('GET', '/catalog', { limit: '2', q: 'alpha' })),
+    );
+    expect(page.groups).toHaveLength(2);
   });
 
   it('counts an unprojected release day in the day index', async () => {

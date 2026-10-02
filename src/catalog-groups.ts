@@ -71,6 +71,13 @@ export interface CatalogProjectionPage {
   live?: CatalogGroupDetails[];
   /** The published version's watermark; a reader with no page probes with it. */
   liveWatermark?: string;
+  /**
+   * For each entry in `groups`, its zero-based position in the store's raw
+   * published stream. A store that drops cards from a page (superseded by the
+   * live prefix, or filtered out) must report them here so a reader can resume
+   * from a raw offset instead of the shorter visible-card count.
+   */
+  groupOffsets?: number[];
 }
 
 export interface CatalogGroupRole {

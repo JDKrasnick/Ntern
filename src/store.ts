@@ -408,9 +408,16 @@ export class MemoryInternshipStore implements InternshipStore {
     const offset = cursor ? Number(cursor) : 0;
     const overlay = await this.liveCatalogOverlay();
     const published = this.catalogProjection.groups.slice(offset, offset + limit);
-    const groups = overlay ? published.filter((details) => !overlaySupersedesGroup(overlay, details)) : published;
+    const groups: CatalogGroupDetails[] = [];
+    const groupOffsets: number[] = [];
+    published.forEach((details, index) => {
+      if (overlay && overlaySupersedesGroup(overlay, details)) return;
+      groups.push(details);
+      groupOffsets.push(index);
+    });
     return {
       groups: structuredClone(groups),
+      groupOffsets,
       ...(offset + published.length < this.catalogProjection.groups.length ? { cursor: String(offset + published.length) } : {}),
       ...(overlay && offset === 0 && overlay.groups.length ? { live: structuredClone(overlay.groups) } : {}),
     };
@@ -429,13 +436,20 @@ export class MemoryInternshipStore implements InternshipStore {
       ...(live.length ? { live: structuredClone(live) } : {}),
     };
   }
-  async listCatalogProjectionRoles(filter: CatalogGroupFilter) {
+  async listCatalogProjectionRoles(filter: CatalogGroupFilter, range: { from?: string; to?: string } = {}) {
     if (!this.catalogProjection) return undefined;
+    // The days index only counts roles with a release day, and its range is the
+    // same expanded-by-one-day window the D1 store applies in SQL.
+    const expandedFrom = range.from ? new Date(Date.parse(range.from) - 86_400_000).toISOString().slice(0, 10) : undefined;
+    const expandedTo = range.to ? new Date(Date.parse(range.to) + 86_400_000).toISOString().slice(0, 10) : undefined;
+    const inRange = (role: CatalogGroupRole) => Boolean(role.releaseDay)
+      && (!expandedFrom || role.releaseDay! >= expandedFrom)
+      && (!expandedTo || role.releaseDay! <= expandedTo);
     const overlay = await this.liveCatalogOverlay();
     const published = filterCatalogGroupDetails(this.catalogProjection.groups, filter)
       .flatMap((details) => details.roles)
-      .filter((role) => !overlay?.roleIds.has(role.jobId));
-    const live = overlay ? filterCatalogGroupDetails(overlay.groups, filter).flatMap((details) => details.roles) : [];
+      .filter((role) => !overlay?.roleIds.has(role.jobId) && inRange(role));
+    const live = overlay ? filterCatalogGroupDetails(overlay.groups, filter).flatMap((details) => details.roles).filter(inRange) : [];
     return structuredClone([...published, ...live]);
   }
   async getCatalogProjectionGroup(groupId: string) {
