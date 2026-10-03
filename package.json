@@ -61,7 +61,7 @@
     "build:cloudflare": "npm run build:cloudflare:api && npm run build:cloudflare:ingestion",
     "build:cloudflare:api": "wrangler deploy --config wrangler.api.jsonc --dry-run --outdir cloudflare/dist/api && node scripts/prepare-worker-modules.mjs cloudflare/dist/api",
     "build:cloudflare:ingestion": "wrangler deploy --config wrangler.ingestion.jsonc --dry-run --outdir cloudflare/dist/ingestion && node scripts/prepare-worker-modules.mjs cloudflare/dist/ingestion",
-    "types:cloudflare:ingestion": "wrangler types cloudflare/ingestion-env.d.ts --config wrangler.ingestion.jsonc --env-interface IngestionBindings --include-runtime false",
+    "types:cloudflare:ingestion": "wrangler types cloudflare/ingestion-env.d.ts --config wrangler.ingestion.jsonc --env-interface IngestionBindings --include-runtime false --env-file cloudflare/types.env",
     "types:cloudflare:ingestion:check": "npm run types:cloudflare:ingestion -- --check",
     "build:web": "npm --prefix mobile run web:export",
     "build:icons": "node mobile/scripts/generate-icons.mjs",
