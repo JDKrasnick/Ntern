@@ -1592,11 +1592,12 @@ export class IngestionRunner {
         const metadataVersionChanged = previous?.metadataExtractionVersion !== ROLE_METADATA_EXTRACTION_VERSION
           || previous?.metadataProcessingRevision !== SOURCE_METADATA_PROCESSING_REVISION;
         // A validators-only response carries no rows, so an open bounded
-        // resolution pass must re-read the whole board to make progress. Only
-        // the validators are cleared: the content hash still labels the
+        // resolution pass or a V2 shadow cadence must re-read the whole board.
+        // Only the validators are cleared: the content hash still labels the
         // re-read as unchanged instead of reporting a spurious source change.
         const resolutionPassOpen = Boolean(previous?.pendingResolutionRows?.length);
-        const fetchCheckpoint = resolutionPassOpen && previous ? {
+        const shadowFullBoardRequired = this.shadowDiscovery?.isEnabledForSource(connector.id) === true;
+        const fetchCheckpoint = (resolutionPassOpen || shadowFullBoardRequired) && previous ? {
           ...previous,
           etag: undefined,
           documentEtags: undefined,
@@ -1819,7 +1820,12 @@ export class IngestionRunner {
         // Shadow discovery observes the complete board and the legacy work
         // selection, then records only its own state. It runs after the legacy
         // quality gates and before any legacy admission write.
-        if (this.shadowDiscovery && isSourceSnapshot(result)) {
+        // A conditional 304 carries no board body. The adapter preserves the
+        // SourceSnapshot shape for legacy metrics, but its empty `postings`
+        // array is not a complete empty board and must never become a V2
+        // snapshot. A hash-unchanged full response still has a body and remains
+        // eligible for shadow comparison.
+        if (this.shadowDiscovery && isSourceSnapshot(result) && result.unchangedReason !== 'not_modified') {
           await this.shadowDiscovery.discover({
             sourceId: connector.id,
             postings: result.postings,

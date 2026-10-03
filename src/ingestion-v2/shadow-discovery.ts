@@ -75,10 +75,14 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
     this.log = dependencies.log ?? ((entry) => console.log(JSON.stringify(entry)));
   }
 
-  async discover(input: ShadowDiscoveryInput): Promise<void> {
+  isEnabledForSource(sourceId: string): boolean {
     const { features } = this.dependencies;
-    if (!features.shadowDiscoveryEnabled) return;
-    if (features.sourceAllowlist && !features.sourceAllowlist.includes(input.sourceId)) return;
+    return features.shadowDiscoveryEnabled
+      && (!features.sourceAllowlist || features.sourceAllowlist.includes(sourceId));
+  }
+
+  async discover(input: ShadowDiscoveryInput): Promise<void> {
+    if (!this.isEnabledForSource(input.sourceId)) return;
     const started = this.now().getTime();
     try {
       await this.run(input, started);

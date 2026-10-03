@@ -224,6 +224,8 @@ export interface ShadowDiscoveryInput {
 }
 
 export interface ShadowDiscoveryHook {
+  /** True when this source belongs to the current bounded shadow cohort. */
+  isEnabledForSource(sourceId: string): boolean;
   /**
    * Must never throw. Implementations swallow and record their own failures so
    * shadow mode can never fail or retry a legacy delivery.

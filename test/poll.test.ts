@@ -54,6 +54,31 @@ class SnapshotAdapter implements SourceAdapter {
   }
 }
 describe('polling', () => {
+  it('fetches a complete board for an allowlisted V2 shadow cadence while preserving unchanged identity', async () => {
+    const source = 'github-shadow';
+    const postings = snapshotRows(1, source);
+    const adapter = new SnapshotAdapter(source, postings);
+    const store = new MemoryInternshipStore();
+    await new Poller([adapter], store).poll();
+    const persisted = await store.getCheckpoint(source);
+    const comparisons: string[] = [];
+    const shadow = {
+      isEnabledForSource: (sourceId: string) => sourceId === source,
+      async discover(input: { sourceId: string; snapshotHash: string }) {
+        comparisons.push(`${input.sourceId}:${input.snapshotHash}`);
+      },
+    };
+
+    const report = await new Poller([adapter], store, undefined, undefined, undefined, undefined, undefined,
+      undefined, true, false, undefined, shadow).poll();
+
+    expect(adapter.received[1]).toMatchObject({ contentHash: persisted?.contentHash });
+    expect(adapter.received[1]?.etag).toBeUndefined();
+    expect(adapter.received[1]?.documentEtags).toBeUndefined();
+    expect(report.unchangedSources).toEqual([source]);
+    expect(comparisons).toEqual([`${source}:${persisted?.contentHash}`]);
+  });
+
   it('persists successful not-modified checkpoints for source-health visibility', async () => {
     const store = new MemoryInternshipStore();
     await store.putCheckpoint({ sourceId: 'unchanged', successfulFetches: 1, lastRowCount: 3 });
