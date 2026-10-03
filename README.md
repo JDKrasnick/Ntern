@@ -2,7 +2,7 @@
   <img src="mobile/assets/icon.png" alt="InternNotifs logo" width="144" />
 </p>
 
-<h1 align="center">InternNotifs</h1>
+<h1 align="center">Ntern</h1>
 
 <p align="center">
   <strong>A calm, open-source radar for technical internships and early-career roles.</strong>
