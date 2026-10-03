@@ -139,6 +139,52 @@ describe('ingestion v2 normalization', () => {
       .toThrow(/key mismatch/u);
   });
 
+  it('rejects admission-relevant envelope metadata that is not self-consistent', () => {
+    const envelope = normalizeSourceSnapshot({
+      sourceId: 'community-example',
+      postings: [posting({ externalId: 'a', sourceState: 'closed' })],
+      admissionVersion: 'v1',
+      observedAt: POSTING_FETCHED_AT,
+    });
+    const parse = (mutate: (candidate: typeof envelope) => void) => {
+      const candidate = structuredClone(envelope);
+      mutate(candidate);
+      return () => parseEnvelope(serializeEnvelope(candidate), {
+        sourceId: envelope.sourceId,
+        snapshotHash: envelope.snapshotHash,
+      });
+    };
+
+    expect(parse((candidate) => { candidate.rowCount = 2; })).toThrow(/row count mismatch/u);
+    expect(parse((candidate) => { candidate.documentCount = 2; })).toThrow(/document count mismatch/u);
+    expect(parse((candidate) => { candidate.rows[0]!.posting.sourceId = 'other-source'; })).toThrow(/posting source mismatch/u);
+    expect(parse((candidate) => { candidate.rows[0]!.firstObservationEligible = true; })).toThrow(/eligibility mismatch/u);
+    expect(parse((candidate) => { candidate.rows[0]!.document = 'OTHER.md'; })).toThrow(/provenance mismatch/u);
+    expect(parse((candidate) => { candidate.rows[0]!.row = 99; })).toThrow(/provenance mismatch/u);
+  });
+
+  it('rejects duplicate or noncanonical snapshot row ordering', () => {
+    const envelope = normalizeSourceSnapshot({
+      sourceId: 'community-example',
+      postings: [posting({ externalId: 'a' }), posting({ externalId: 'b' })],
+      admissionVersion: 'v1',
+      observedAt: POSTING_FETCHED_AT,
+    });
+    const reversed = structuredClone(envelope);
+    reversed.rows.reverse();
+    expect(() => parseEnvelope(serializeEnvelope(reversed), {
+      sourceId: envelope.sourceId,
+      snapshotHash: envelope.snapshotHash,
+    })).toThrow(/canonically ordered/u);
+
+    const duplicate = structuredClone(envelope);
+    duplicate.rows[1] = structuredClone(duplicate.rows[0]!);
+    expect(() => parseEnvelope(serializeEnvelope(duplicate), {
+      sourceId: envelope.sourceId,
+      snapshotHash: envelope.snapshotHash,
+    })).toThrow(/not unique/u);
+  });
+
   it('stable-stringifies object keys deterministically', () => {
     expect(stableStringify({ b: 1, a: 2 })).toBe(stableStringify({ a: 2, b: 1 }));
   });

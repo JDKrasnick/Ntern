@@ -168,8 +168,12 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         row_count = excluded.row_count,
         is_complete = excluded.is_complete,
         baseline = ingestion_snapshots.baseline OR excluded.baseline,
+        -- A discovery upsert is staged, so keep the last durable lifecycle
+        -- until activation succeeds. Explicit lifecycle records may advance a
+        -- non-terminal snapshot, while terminal/expired records never regress.
         state = CASE
           WHEN ingestion_snapshots.state IN ('terminal', 'expired') THEN ingestion_snapshots.state
+          WHEN excluded.state = 'staged' THEN ingestion_snapshots.state
           ELSE excluded.state
         END
     `).bind(
@@ -200,8 +204,9 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     const expiresAt = new Date(Date.parse(activatedAt) + SNAPSHOT_RETENTION_MS).toISOString();
     await this.db.batch([
       this.db.prepare(`
-        UPDATE ingestion_snapshots SET state = 'active', activated_at = ?
-        WHERE source_id = ? AND snapshot_hash = ? AND state = 'staged'
+        UPDATE ingestion_snapshots
+        SET state = 'active', activated_at = ?, terminal_at = NULL, expires_at = NULL
+        WHERE source_id = ? AND snapshot_hash = ? AND is_complete = 1
       `).bind(activatedAt, sourceId, snapshotHash),
       this.db.prepare(`
         UPDATE ingestion_snapshots

@@ -163,6 +163,9 @@ create a job, occurrence, notification, or admission write.
   `ingestion-v2/snapshots/<source-id>/<snapshot-hash>.json`, and a per-source
   comparison. It never enqueues admission, mutates a checkpoint, or touches the
   catalog.
+- Snapshot reads validate the envelope counts, canonical row order, unique
+  identities, posting source/provenance, first-observation eligibility, each
+  material hash, and the complete snapshot hash before any row is trusted.
 
 The full-board diff compares every normalized row against the compact ledger and
 classifies it as `new`, `changed`, `stale-policy`, `retryable`, `unchanged`,
@@ -171,7 +174,9 @@ rows are actionable; unchanged settled rows are not. Missing rows increment
 omissions only after a complete snapshot and become `absent` on the second
 consecutive complete miss. Incomplete or failed snapshots neither activate nor
 advance omissions. A repeated identical snapshot produces an empty actionable
-set and rewrites nothing.
+set and rewrites nothing. If content changes from A to B and later returns to A,
+the retained immutable A snapshot becomes active again atomically, its old
+terminal/expiry markers are cleared, and B becomes terminal.
 
 The protected `GET /internal/operations/ingestion-v2` endpoint returns the latest
 shadow comparison per source (or one source with `?sourceId=`). It requires the

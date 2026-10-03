@@ -598,7 +598,9 @@ The pass is bounded by IDs, not by retained history:
   on this path.
 - The R2 snapshot is one object per complete board under
   `ingestion-v2/snapshots/<source-id>/<snapshot-hash>.json`; an existing
-  content-addressed object is validated and reused, never rewritten.
+  content-addressed object is fully validated and reused, never rewritten. A
+  later A -> B -> A board transition reactivates the retained A object and
+  clears its terminal retention markers instead of leaving the ledger on B.
 - Actionable work is the set of IDs classified `new`, `changed`, `stale-policy`,
   `reappeared`, or due `retryable`. A board with five changed rows is five
   actionable IDs regardless of how much retained history the source holds.
@@ -610,7 +612,9 @@ settled history with five changed rows, asserting five actionable IDs, the full
 ledger read count, no catalog/occurrence query on the path, and the per-message
 CPU/heap budget. `test/ingestion-v2-shadow.integration.test.ts` covers the
 new/changed/second-document/reappearance/two-snapshot-omission/incomplete/
-idempotent scenarios, and `test/e2e/ingestion-v2-shadow.e2e.mjs` runs the built
+idempotent/content-reactivation scenarios. `test/ingestion-v2-unit.test.ts`
+rejects envelope metadata or posting provenance that disagrees with its derived
+canonical values, and `test/e2e/ingestion-v2-shadow.e2e.mjs` runs the built
 ingestion Worker against local D1/R2/queues to confirm the shadow object, ledger,
 idempotent replay, and the protected operations response.
 

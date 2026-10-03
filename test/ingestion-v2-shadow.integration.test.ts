@@ -212,6 +212,31 @@ describe('ingestion v2 shadow discovery integration', () => {
     subject.database.close();
   });
 
+  it('reactivates the original immutable snapshot when board content returns', async () => {
+    const original = { 'README.md': [rowA, rowB], 'SECOND.md': [rowS] };
+    const subject = harness(original);
+    await subject.discover(original);
+    const firstHash = (await subject.repository.overview(sourceId)).currentSnapshotHash!;
+
+    const changedRow = { ...rowB, position: 'Machine Learning Intern II' };
+    await subject.discover({ 'README.md': [rowA, changedRow], 'SECOND.md': [rowS] });
+    const secondHash = (await subject.repository.overview(sourceId)).currentSnapshotHash!;
+    expect(secondHash).not.toBe(firstHash);
+    expect(await subject.repository.getSnapshot(sourceId, firstHash)).toMatchObject({ state: 'terminal' });
+
+    await subject.discover(original);
+    expect((await subject.repository.overview(sourceId)).currentSnapshotHash).toBe(firstHash);
+    expect(await subject.repository.getSnapshot(sourceId, firstHash)).toMatchObject({ state: 'active' });
+    expect((await subject.repository.getSnapshot(sourceId, firstHash))?.terminalAt).toBeUndefined();
+    expect((await subject.repository.getSnapshot(sourceId, firstHash))?.expiresAt).toBeUndefined();
+    expect(await subject.repository.getSnapshot(sourceId, secondHash)).toMatchObject({ state: 'terminal' });
+    const active = subject.database.prepare(
+      "SELECT COUNT(*) AS count FROM ingestion_snapshots WHERE source_id = ? AND state = 'active'",
+    ).get(sourceId) as { count: number };
+    expect(active.count).toBe(1);
+    subject.database.close();
+  });
+
   it('records one omission then reappearance when a row returns', async () => {
     const subject = harness({ 'README.md': [rowA, rowB, rowC], 'SECOND.md': [rowS] });
     await subject.discover({ 'README.md': [rowA, rowB, rowC], 'SECOND.md': [rowS] });

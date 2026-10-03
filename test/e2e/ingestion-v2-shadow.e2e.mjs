@@ -233,6 +233,39 @@ test('repeats the delivery with identical durable state', async () => {
   assert.equal(comparison.run_count, 2);
 });
 
+test('reactivates an earlier content-addressed snapshot when the board returns to it', async () => {
+  installFetchStub();
+  const originalBodies = new Map(documentBodies);
+  const first = await database.prepare(
+    "SELECT snapshot_hash FROM ingestion_snapshots WHERE source_id = ? AND state = 'active'",
+  ).bind(sourceId).first();
+
+  const firstDocument = sourceDocuments[0];
+  const firstUrl = `https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/${firstDocument.branch}/${firstDocument.path}`;
+  documentBodies.set(firstUrl, markdownTable(firstDocument.rows + 1));
+  const changed = await deliver({ sourceId });
+  assert.equal(changed.settled.ack, 1, JSON.stringify(changed.settled.retries));
+  const second = await database.prepare(
+    "SELECT snapshot_hash FROM ingestion_snapshots WHERE source_id = ? AND state = 'active'",
+  ).bind(sourceId).first();
+  assert.notEqual(second.snapshot_hash, first.snapshot_hash);
+
+  for (const [url, body] of originalBodies) documentBodies.set(url, body);
+  const returned = await deliver({ sourceId });
+  assert.equal(returned.settled.ack, 1, JSON.stringify(returned.settled.retries));
+  const active = await database.prepare(
+    "SELECT snapshot_hash, terminal_at, expires_at FROM ingestion_snapshots WHERE source_id = ? AND state = 'active'",
+  ).bind(sourceId).all();
+  assert.equal(active.results.length, 1);
+  assert.equal(active.results[0].snapshot_hash, first.snapshot_hash);
+  assert.equal(active.results[0].terminal_at, null);
+  assert.equal(active.results[0].expires_at, null);
+  const replaced = await database.prepare(
+    'SELECT state FROM ingestion_snapshots WHERE source_id = ? AND snapshot_hash = ?',
+  ).bind(sourceId, second.snapshot_hash).first();
+  assert.equal(replaced.state, 'terminal');
+});
+
 test('serves shadow counts only to the authenticated operations caller', async () => {
   const denied = await ingestion.fetch('https://ingestion.example.test/internal/operations/ingestion-v2', {
     headers: { 'X-InternNotifs-Service-Key': internalServiceSecret },

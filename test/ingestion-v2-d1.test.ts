@@ -84,14 +84,44 @@ describe('ingestion v2 D1 repository', () => {
     expect(await repository.getSnapshot('community-example', 'a'.repeat(64))).toMatchObject({ state: 'terminal' });
   });
 
-  it('activates only a staged snapshot', async () => {
+  it('activates a complete snapshot idempotently', async () => {
     const { repository } = subject();
     await repository.putSnapshot(snapshot());
     await repository.activateSnapshot('community-example', 'a'.repeat(64), '2026-10-01T01:00:00.000Z');
     expect(await repository.getSnapshot('community-example', 'a'.repeat(64))).toMatchObject({ state: 'active', activatedAt: '2026-10-01T01:00:00.000Z' });
-    // A second activation is a no-op.
+    // A repeated observation keeps the same snapshot current and refreshes the
+    // activation evidence without creating another record.
     await repository.activateSnapshot('community-example', 'a'.repeat(64), '2026-10-01T02:00:00.000Z');
-    expect(await repository.getSnapshot('community-example', 'a'.repeat(64))).toMatchObject({ activatedAt: '2026-10-01T01:00:00.000Z' });
+    expect(await repository.getSnapshot('community-example', 'a'.repeat(64))).toMatchObject({ activatedAt: '2026-10-01T02:00:00.000Z' });
+  });
+
+  it('reactivates retained content when a board returns to an older hash', async () => {
+    const { database, repository } = subject();
+    const firstHash = 'a'.repeat(64);
+    const secondHash = 'b'.repeat(64);
+    await repository.putSnapshot(snapshot({ snapshotHash: firstHash }));
+    await repository.activateSnapshot('community-example', firstHash, '2026-10-01T00:00:00.000Z');
+    await repository.putSnapshot(snapshot({
+      snapshotHash: secondHash,
+      objectKey: `ingestion-v2/snapshots/community-example/${secondHash}.json`,
+      createdAt: '2026-10-02T00:00:00.000Z',
+    }));
+    await repository.activateSnapshot('community-example', secondHash, '2026-10-02T00:00:00.000Z');
+    expect(await repository.getSnapshot('community-example', firstHash)).toMatchObject({ state: 'terminal' });
+
+    await repository.putSnapshot(snapshot({ snapshotHash: firstHash, createdAt: '2026-10-03T00:00:00.000Z' }));
+    await repository.activateSnapshot('community-example', firstHash, '2026-10-03T00:00:00.000Z');
+
+    expect(await repository.getSnapshot('community-example', firstHash)).toMatchObject({
+      state: 'active', activatedAt: '2026-10-03T00:00:00.000Z',
+    });
+    expect((await repository.getSnapshot('community-example', firstHash))?.terminalAt).toBeUndefined();
+    expect((await repository.getSnapshot('community-example', firstHash))?.expiresAt).toBeUndefined();
+    expect(await repository.getSnapshot('community-example', secondHash)).toMatchObject({ state: 'terminal' });
+    const active = database.prepare(
+      "SELECT COUNT(*) AS count FROM ingestion_snapshots WHERE source_id = ? AND state = 'active'",
+    ).get('community-example') as { count: number };
+    expect(active.count).toBe(1);
   });
 
   it('terminals an older settled snapshot with seven-day retention when a replacement activates', async () => {

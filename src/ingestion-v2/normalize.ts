@@ -115,6 +115,14 @@ function firstObservationEligible(posting: SourcedPosting): boolean {
   return posting.sourceState === 'open';
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
 /**
  * Normalize one complete source board into the provider-independent snapshot
  * format. The hash is deterministic for identical normalized content and
@@ -203,17 +211,52 @@ export function parseEnvelope(raw: string, expected: { sourceId: string; snapsho
   } catch {
     throw new Error('Ingestion snapshot is not valid JSON');
   }
-  const envelope = parsed as NormalizedSnapshotEnvelope;
+  if (!isRecord(parsed)) throw new Error('Ingestion snapshot envelope is malformed');
+  const envelope = parsed as unknown as NormalizedSnapshotEnvelope;
   if (envelope.schemaVersion !== INGESTION_V2_SNAPSHOT_SCHEMA_VERSION) {
     throw new Error(`Unsupported ingestion snapshot schema ${String(envelope.schemaVersion)}`);
   }
   if (envelope.sourceId !== expected.sourceId) throw new Error('Ingestion snapshot source mismatch');
   if (envelope.snapshotHash !== expected.snapshotHash) throw new Error('Ingestion snapshot key mismatch');
+  if (typeof envelope.admissionVersion !== 'string' || !envelope.admissionVersion) {
+    throw new Error('Ingestion snapshot admission version is malformed');
+  }
+  if (!validNonNegativeInteger(envelope.documentCount) || !validNonNegativeInteger(envelope.rowCount)) {
+    throw new Error('Ingestion snapshot counts are malformed');
+  }
+  if (typeof envelope.observedAt !== 'string' || !Number.isFinite(Date.parse(envelope.observedAt))) {
+    throw new Error('Ingestion snapshot observation time is malformed');
+  }
   if (!Array.isArray(envelope.rows)) throw new Error('Ingestion snapshot rows are missing');
+  if (envelope.rowCount !== envelope.rows.length) throw new Error('Ingestion snapshot row count mismatch');
+  const externalIds = new Set<string>();
+  let previousExternalId: string | undefined;
   for (const row of envelope.rows) {
-    if (!row || typeof row.externalId !== 'string' || !row.posting) throw new Error('Ingestion snapshot row is malformed');
+    if (!isRecord(row) || typeof row.externalId !== 'string' || !row.externalId || !isRecord(row.posting)) {
+      throw new Error('Ingestion snapshot row is malformed');
+    }
+    if (externalIds.has(row.externalId)) throw new Error('Ingestion snapshot external IDs are not unique');
+    if (previousExternalId !== undefined && previousExternalId.localeCompare(row.externalId) >= 0) {
+      throw new Error('Ingestion snapshot rows are not canonically ordered');
+    }
+    externalIds.add(row.externalId);
+    previousExternalId = row.externalId;
+    if (typeof row.document !== 'string' || !row.document || !validNonNegativeInteger(row.row)) {
+      throw new Error('Ingestion snapshot row location is malformed');
+    }
+    if (!/^[a-f0-9]{64}$/u.test(row.materialHash)) throw new Error('Ingestion snapshot row material hash is malformed');
+    if (row.posting.sourceId !== envelope.sourceId) throw new Error('Ingestion snapshot posting source mismatch');
     if (row.posting.externalId !== row.externalId) throw new Error('Ingestion snapshot row identity mismatch');
+    if ((row.posting.document ?? row.externalId) !== row.document || (row.posting.row ?? 0) !== row.row) {
+      throw new Error('Ingestion snapshot row provenance mismatch');
+    }
+    if (row.firstObservationEligible !== firstObservationEligible(row.posting)) {
+      throw new Error('Ingestion snapshot first-observation eligibility mismatch');
+    }
     if (materialHashFor(row.posting) !== row.materialHash) throw new Error('Ingestion snapshot row material mismatch');
+  }
+  if (envelope.documentCount !== new Set(envelope.rows.map((row) => row.document)).size) {
+    throw new Error('Ingestion snapshot document count mismatch');
   }
   const recomputed = snapshotHashForRows(envelope.rows);
   if (recomputed !== envelope.snapshotHash) throw new Error('Ingestion snapshot hash mismatch');
