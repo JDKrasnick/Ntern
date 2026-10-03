@@ -62,6 +62,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run types:cloudflare:ingestion:check
       # GitHub's two-core hosted runner can starve Vitest's four local forks long
       # enough for its worker RPC to time out after every test has passed.
       - run: npm test -- --maxWorkers=2

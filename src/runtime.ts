@@ -6,6 +6,7 @@ import { defaultSources } from './sources/index.js';
 import type { SourceAdapter } from './types.js';
 import type { CatalogAdmissionResolver, DestinationVerificationRequest } from './destination-verification.js';
 import type { EmployerIconSeed } from './employer-icon-resolution.js';
+import type { ShadowDiscoveryHook } from './ingestion-v2/types.js';
 
 export interface RuntimeConfig {
   /** Optional personal fallback topic. Public app alerts use Expo Push Service. */
@@ -44,6 +45,8 @@ export interface RuntimeDependencies {
   catalogAdmissionResolver?: CatalogAdmissionResolver;
   /** Records a background company-icon task for an admitted employer. */
   enqueueEmployerIconResolution?: (seed: EmployerIconSeed) => Promise<void>;
+  /** Default-off V2 shadow discovery; observes only and never admits. */
+  shadowDiscovery?: ShadowDiscoveryHook;
   /** Defaults off in deployed runtimes until the compatible client is live. */
   identityUnconfirmedPublicationEnabled?: boolean;
   /** Catalog exposure gate; alert activation stays in reviewed source policy. */
@@ -64,6 +67,7 @@ export async function runRuntimeCommand(command: 'poll' | 'digest', dependencies
       dependencies.identityUnconfirmedPublicationEnabled ?? false,
       dependencies.trustedCommunityCatalogEnabled ?? false,
       dependencies.enqueueEmployerIconResolution,
+      dependencies.shadowDiscovery,
     ).poll({
       allowCompleteEmptySnapshot: dependencies.allowCompleteEmptySnapshot,
       maxAdmissionMigrationListingsPerSourceRun: dependencies.maxAdmissionMigrationListingsPerSourceRun,

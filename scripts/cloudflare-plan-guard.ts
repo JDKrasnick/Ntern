@@ -30,6 +30,22 @@ const resumeInfrastructureCreates = new Set([
   'cloudflare_queue_consumer.ingestion["resume-job-import"]',
 ]);
 
+// Stage 2 ingestion V2 adds one dedicated admission queue, its DLQ, and one
+// consumer, plus four default-off bindings on the ingestion Worker. The create
+// names, settings, and bindings are pinned so a plan cannot repurpose them.
+const admissionV2InfrastructureCreates = new Set([
+  'cloudflare_queue.work["admission-v2"]',
+  'cloudflare_queue.dead_letter["admission-v2"]',
+  'cloudflare_queue_consumer.ingestion["admission-v2"]',
+]);
+
+const admissionV2IngestionBindings: Array<Record<string, unknown>> = [
+  { name: 'ADMISSION_V2_QUEUE', type: 'queue', queue_name: 'intern-notifs-admission-v2' },
+  { name: 'ADMISSION_V2_DLQ', type: 'queue', queue_name: 'intern-notifs-admission-v2-dlq' },
+  { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'false' },
+  { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+];
+
 const resumeWorkerBindings: Record<string, Array<Record<string, unknown>>> = {
   'cloudflare_workers_script.application': [
     { name: 'AI', type: 'ai' },
@@ -433,6 +449,95 @@ function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
   );
 }
 
+// Stage 1/2 ingestion V2 ships behind default-off plain-text bindings. Their
+// first addition and later value toggles are reviewed, additive config changes;
+// every other binding stays protected. The admission flags need the same
+// value-toggle path as shadow discovery, otherwise the reviewed canary that
+// flips `INGESTION_V2_ADMISSION_ENABLED` would be refused.
+const ingestionV2BooleanToggles = new Set([
+  'INGESTION_V2_SHADOW_DISCOVERY_ENABLED',
+  'INGESTION_V2_ADMISSION_ENABLED',
+]);
+const ingestionV2ToggleBindings = new Set([
+  ...ingestionV2BooleanToggles,
+  'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST',
+  'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST',
+]);
+
+function isIngestionV2Toggle(binding: unknown): boolean {
+  return isRecord(binding) && ingestionV2ToggleBindings.has(String(binding.name));
+}
+
+function isIngestionV2ToggleBinding(binding: unknown): boolean {
+  if (!isRecord(binding)) return false;
+  const name = String(binding.name);
+  if (!ingestionV2ToggleBindings.has(name)) return false;
+  if (binding.type !== 'plain_text' || typeof binding.text !== 'string') return false;
+  if (!Object.entries(binding).every(([key, value]) => ['name', 'type', 'text'].includes(key) || value === null)) return false;
+  return ingestionV2BooleanToggles.has(name)
+    ? binding.text === 'true' || binding.text === 'false'
+    : binding.text.length <= 1000 && /^[a-z0-9._,-]*$/iu.test(binding.text);
+}
+
+function isIngestionV2BindingUpdate(before: unknown, after: unknown): boolean {
+  if (!Array.isArray(before) || !Array.isArray(after)) return false;
+  const isToggle = (binding: unknown) => isRecord(binding) && ingestionV2ToggleBindings.has(String(binding.name));
+  const beforeToggles = before.filter(isToggle);
+  const afterToggles = after.filter(isToggle);
+  if (!afterToggles.length || !afterToggles.every(isIngestionV2ToggleBinding)) return false;
+  const names = afterToggles.map((binding) => String((binding as Record<string, unknown>).name));
+  if (new Set(names).size !== names.length) return false;
+  const stableBefore = before.filter((binding) => !isToggle(binding));
+  const stableAfter = after.filter((binding) => !isToggle(binding));
+  if (!bindingsMatchByName(stableBefore, stableAfter)) return false;
+
+  if (!beforeToggles.length) {
+    // First addition: every toggle is new, so length grows by exactly that many.
+    return after.length === before.length + afterToggles.length;
+  }
+  if (beforeToggles.length !== afterToggles.length) return false;
+  const beforeByName = new Map(beforeToggles.map((binding) => [String((binding as Record<string, unknown>).name), binding]));
+  let changed = false;
+  for (const toggle of afterToggles) {
+    const prior = beforeByName.get(String((toggle as Record<string, unknown>).name));
+    if (!isRecord(prior) || !isRecord(toggle)) return false;
+    const { text: priorText, ...priorRest } = prior;
+    const { text: nextText, ...nextRest } = toggle;
+    if (!isDeepStrictEqual(priorRest, nextRest)) return false;
+    if (priorText !== nextText) changed = true;
+  }
+  return changed;
+}
+
+const admissionV2BindingNames = new Set(admissionV2IngestionBindings.map((binding) => String(binding.name)));
+
+function isAdmissionV2WorkerBindingUpdate(before: unknown, after: unknown): boolean {
+  if (!Array.isArray(before) || !Array.isArray(after)) return false;
+  const isAdmission = (binding: unknown) => isRecord(binding) && admissionV2BindingNames.has(String(binding.name));
+  if (before.some(isAdmission)) return false;
+  const added = after.filter(isAdmission);
+  if (added.length !== admissionV2IngestionBindings.length) return false;
+  for (const expected of admissionV2IngestionBindings) {
+    const matches = added.filter((binding) => isRecord(binding) && binding.name === expected.name);
+    if (matches.length !== 1 || !isRecord(matches[0])) return false;
+    const match = matches[0];
+    if (expected.type === 'queue') {
+      if (match.type !== 'queue' || match.queue_name !== expected.queue_name) return false;
+    } else if (match.type !== 'plain_text' || typeof match.text !== 'string') {
+      return false;
+    }
+    if (Object.entries(match).some(([key, value]) => (key in expected ? !isDeepStrictEqual(value, expected[key]) : value !== null))) return false;
+  }
+  const stableAfter = after.filter((binding) => !isAdmission(binding) && !isIngestionV2Toggle(binding));
+  const stableBefore = before.filter((binding) => !isAdmission(binding) && !isIngestionV2Toggle(binding));
+  if (!bindingsMatchByName(stableBefore, stableAfter)) return false;
+  // Stage 1's shadow toggles may arrive in the same reviewed release as the
+  // Stage 2 admission bindings, so they are excluded from the stable match.
+  // Validate every accompanying toggle's shape here so the combined first
+  // rollout is still pinned to the reviewed names and values.
+  return after.filter(isIngestionV2Toggle).every(isIngestionV2ToggleBinding);
+}
+
 function isResumeTunerEnablement(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return false;
   const name = 'RESUME_TUNER_ENABLED';
@@ -485,6 +590,8 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change'], e
   const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, normalizedAfterBindings)
     || isPermittedBindingRetirement(before.bindings, normalizedAfterBindings)
     || isResumeTunerEnablement(before.bindings, normalizedAfterBindings)
+    || (address === 'cloudflare_workers_script.ingestion' && isIngestionV2BindingUpdate(before.bindings, normalizedAfterBindings))
+    || (address === 'cloudflare_workers_script.ingestion' && isAdmissionV2WorkerBindingUpdate(before.bindings, normalizedAfterBindings))
     || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, normalizedAfterBindings));
   // The ingestion Worker exhausted its 10,000-subrequest invocation budget
   // while finishing a bounded GitHub source slice. Permit only this reviewed
@@ -727,6 +834,30 @@ function isResumeInfrastructureCreate(address: string, change: ResourceChange['c
     && Object.keys(after.settings).every((key) => ['batch_size', 'max_concurrency', 'max_retries', 'max_wait_time_ms'].includes(key));
 }
 
+function isAdmissionV2InfrastructureCreate(address: string, change: ResourceChange['change']): boolean {
+  if (!admissionV2InfrastructureCreates.has(address) || change.before !== null || !isRecord(change.after)) return false;
+  const after = change.after;
+  if (typeof after.account_id !== 'string' || after.account_id.length === 0) return false;
+
+  if (address === 'cloudflare_queue.work["admission-v2"]') {
+    return after.queue_name === 'intern-notifs-admission-v2'
+      && isDeepStrictEqual(after.settings, { delivery_paused: false, message_retention_period: 86_400 });
+  }
+  if (address === 'cloudflare_queue.dead_letter["admission-v2"]') {
+    return after.queue_name === 'intern-notifs-admission-v2-dlq'
+      && isDeepStrictEqual(after.settings, { message_retention_period: 1_209_600 });
+  }
+  return after.script_name === 'intern-notifs-ingestion'
+    && after.type === 'worker'
+    && after.dead_letter_queue === 'intern-notifs-admission-v2-dlq'
+    && isRecord(after.settings)
+    && after.settings.batch_size === 1
+    && after.settings.max_concurrency === 1
+    && after.settings.max_retries === 2
+    && after.settings.max_wait_time_ms === 5_000
+    && Object.keys(after.settings).every((key) => ['batch_size', 'max_concurrency', 'max_retries', 'max_wait_time_ms'].includes(key));
+}
+
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
   return (plan.resource_changes ?? [])
     .filter(({ change }) => !change.actions.every((action) => action === 'no-op' || action === 'read'))
@@ -746,6 +877,7 @@ export function validateCloudflarePlan(plan: Plan, options: PlanValidationOption
           || isReviewedIngestionCronUpdate(address, change)
           || isApiPreviewUrlShutdown(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
+        || isAdmissionV2InfrastructureCreate(address, change)
         || isCustomDomainCreate(address, change)))
     )
   )).map(({ address, change }) => ({ address, actions: change.actions }));

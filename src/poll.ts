@@ -52,6 +52,7 @@ import type {
   SourceSnapshot,
 } from './types.js';
 import type { InternshipStore } from './store.js';
+import type { ShadowDiscoveryHook } from './ingestion-v2/types.js';
 
 /**
  * A bodyless stand-in used only while a bounded GitHub migration chooses its
@@ -549,6 +550,11 @@ export class IngestionRunner {
      * binding must swallow its own failures: an icon is never worth failing a poll.
      */
     private readonly enqueueEmployerIconResolution?: (seed: EmployerIconSeed) => Promise<void>,
+    /**
+     * Read-only V2 shadow discovery. It runs after the legacy quality gates and
+     * must never enqueue admission, mutate a checkpoint, or touch the catalog.
+     */
+    private readonly shadowDiscovery?: ShadowDiscoveryHook,
   ) {}
 
   private async quarantine(job: Internship) {
@@ -1809,6 +1815,24 @@ export class IngestionRunner {
           priorOccurrences = await this.store.getSourceOccurrencesByExternalIds(
             connector.id, [...new Set([...selectedIds, ...omissionIds])]);
           priorByExternalId = new Map(priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]));
+        }
+        // Shadow discovery observes the complete board and the legacy work
+        // selection, then records only its own state. It runs after the legacy
+        // quality gates and before any legacy admission write.
+        if (this.shadowDiscovery && isSourceSnapshot(result)) {
+          await this.shadowDiscovery.discover({
+            sourceId: connector.id,
+            postings: result.postings,
+            processed: batch.processed,
+            snapshotHash: batch.snapshotHash,
+            admissionVersion: githubAdmissionConfigurationVersion ?? admissionConfigurationVersion ?? 'standard-v1',
+            baseline,
+            observedAt: now,
+            legacyActionableExternalIds: resolvedListings.map(externalId),
+            legacyActiveExternalIds: [...batch.activeExternalIds],
+            ...(options.runId ? { runId: options.runId } : {}),
+            now,
+          });
         }
         const resolution = await this.resolveListings(
           resolvedListings,

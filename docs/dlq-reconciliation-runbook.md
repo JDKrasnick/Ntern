@@ -441,3 +441,62 @@ every group's roles), which is the bound tracked in
 `docs/197-ingestion-resource-bounds.md`
 (the 2026-10-01 rebound section). Draining the DLQ and clearing markers treats the
 symptoms; the memory bound is the fix.
+
+## 14. Admission V2 queue and DLQ (`intern-notifs-admission-v2`)
+
+The fault-isolated admission lane has its own work queue and DLQ. It is a
+different failure model from the catalog queues: a message carries at most 25
+external IDs, each row settles, retries, or quarantines independently, and a row
+is **not** dead-lettered for a row-local failure. Use this procedure, not the
+catalog `npm run dlq` flow, when an `admission-v2` message dead-letters.
+
+### What a dead-letter means
+
+A message only reaches `intern-notifs-admission-v2-dlq` after the platform's two
+delivery retries are exhausted on a **systemic** failure (`snapshot-missing`,
+`snapshot-corrupt`, D1 unavailability, queue or runtime failure, or an
+unrecognized error that fails safe as infrastructure). Row-local transient
+failures never dead-letter a delivery: they settle the message and record the row
+retry. So a DLQ message is an infrastructure or configuration signal, and its
+rows are still `queued`/`processing` in `ingestion_rows`, owned by the durable
+handoff and the scheduled dispatcher, which reissues them once the handoff goes
+stale.
+
+### Inspect, then act
+
+1. Inspect the affected rows through the protected operations surface, which is
+   sanitized and never returns a raw response body:
+
+   ```bash
+   curl -s -H "X-InternNotifs-Service-Key: $INTERNAL_SERVICE_SECRET" \
+     -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
+     "https://intern-notifs-ingestion.<account>.workers.dev/internal/operations/ingestion/rows?sourceId=<sourceId>"
+   ```
+
+   The response includes a per-source overview (pending/queued/processing/settled/
+   quarantined/absent, oldest work, current snapshot) and a bounded page. A
+   `quarantined` row is a *row-local* terminal outcome, not a DLQ message.
+2. Fix the systemic cause before replaying: a missing/corrupt R2 snapshot, a
+   binding/config defect, or a D1 incident. A replay under the same broken
+   condition only re-dead-letters.
+3. Reissue rather than purge. Confirm the source is on
+   `INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST` and the dispatch flag is on; the next
+   scheduled dispatcher pass replans the rows from the durable handoff. If a
+   specific quarantined row should be reconsidered, use the guarded replay route,
+   which previews and then requires the returned token:
+
+   ```bash
+   curl -s -X POST -H "X-InternNotifs-Service-Key: $INTERNAL_SERVICE_SECRET" \
+     -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
+     -H 'Content-Type: application/json' \
+     -d '{"sourceId":"<sourceId>","externalId":"<externalId>"}' \
+     "https://intern-notifs-ingestion.<account>.workers.dev/internal/operations/ingestion/rows/replay"
+   # apply by echoing the previewed replayToken
+   ```
+4. Never purge the admission DLQ without an audited disposition. Preserve the
+   queue and DLQ on rollback; the additive schema and R2 snapshot objects stay in
+   place for diagnosis.
+
+Before Stage 3 cutover this lane runs in verification mode (the catalog writer is
+a recorded decision sink), so a drained or retained `admission-v2` DLQ cannot have
+published anything to the live catalog.

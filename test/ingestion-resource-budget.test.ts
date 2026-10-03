@@ -4,7 +4,15 @@ import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
-import { SOURCE_METADATA_PROCESSING_REVISION } from '../src/ingestion/processor.js';
+import { processSnapshot, SOURCE_METADATA_PROCESSING_REVISION } from '../src/ingestion/processor.js';
+import { D1IngestionV2Repository, R2IngestionSnapshotStore } from '../cloudflare/ingestion-v2-store.js';
+import type { R2Bucket } from '../cloudflare/types.js';
+import { processAdmissionV2Message } from '../src/ingestion-v2/admission/consumer.js';
+import { buildAdmissionV2Messages } from '../src/ingestion-v2/admission/message.js';
+import type { AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
+import { normalizeSourceSnapshot, parseEnvelope, serializeEnvelope, snapshotObjectKey } from '../src/ingestion-v2/normalize.js';
+import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
+import type { IngestionRowRecord, IngestionSnapshotObjectStore } from '../src/ingestion-v2/types.js';
 import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY, IngestionRunner } from '../src/poll.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import { GitHubMarkdownAdapter } from '../src/sources/github.js';
@@ -328,4 +336,159 @@ describe('ingestion resource budgets', () => {
     expect(await paged.getSourceOccurrence(sourceId, target.externalId)).toEqual(target);
     expect(await paged.getSourceOccurrence(sourceId, 'absent')).toBeUndefined();
   }, 120_000);
+
+  it('plans shadow discovery from compact metadata without hydrating retained history', async () => {
+    const feed = PRODUCTION_GITHUB_FEEDS.simplify;
+    const documents = productionDocuments(feed);
+    const fetched = await productionAdapter(sourceId, documents).fetch();
+    expect(fetched.postings.length).toBeGreaterThan(feed.rawRows * 0.9);
+
+    const database = new DatabaseSync(':memory:');
+    database.exec(readFileSync(new URL('../cloudflare/migrations/0045_ingestion_v2.sql', import.meta.url), 'utf8'));
+    database.exec(readFileSync(new URL('../cloudflare/migrations/0048_ingestion_v2_effect_claim.sql', import.meta.url), 'utf8'));
+    const queries: string[] = [];
+    const base = sqliteD1(database);
+    const tracked: D1Database = { prepare: (query) => { queries.push(query); return base.prepare(query); }, batch: (statements) => base.batch(statements) };
+    const repository = new D1IngestionV2Repository(tracked);
+    const snapshots = memorySnapshots();
+    const observedAt = '2026-10-01T00:00:00.000Z';
+    const discovery = new IngestionV2ShadowDiscovery({ repository, snapshots, features: { shadowDiscoveryEnabled: true }, now: () => new Date(observedAt), log: () => undefined });
+
+    const envelope = normalizeSourceSnapshot({ sourceId, postings: fetched.postings, admissionVersion: 'standard-v1', observedAt });
+    const changedIds = new Set(envelope.rows.slice(0, 5).map((row) => row.externalId));
+
+    // A steady-state ledger: every current row is settled, only five changed,
+    // plus a large retained history that is absent from this complete snapshot.
+    const historySize = 20_000;
+    const records: IngestionRowRecord[] = envelope.rows.map((row) => ({
+      sourceId, externalId: row.externalId, snapshotHash: 'seed', materialHash: changedIds.has(row.externalId) ? `changed-${row.externalId}` : row.materialHash,
+      admissionVersion: 'standard-v1', state: 'settled', decision: 'admitted', attemptCount: 0, consecutiveOmissions: 0,
+      firstObservedAt: observedAt, lastObservedAt: observedAt, updatedAt: observedAt, settledAt: observedAt,
+    }));
+    for (let index = 0; index < historySize; index += 1) {
+      records.push({
+        sourceId, externalId: `history-${index}`, snapshotHash: 'seed', materialHash: `h-${index}`,
+        admissionVersion: 'standard-v1', state: 'settled', decision: 'admitted', attemptCount: 0, consecutiveOmissions: 0,
+        firstObservedAt: observedAt, lastObservedAt: observedAt, updatedAt: observedAt, settledAt: observedAt,
+      });
+    }
+    await repository.putRows(records);
+
+    exposeGc?.();
+    const baselineMb = process.memoryUsage().heapUsed / (1024 * 1024);
+    const started = process.cpuUsage();
+    await discovery.discover({
+      sourceId, postings: fetched.postings, processed: processSnapshot(fetched),
+      snapshotHash: 'legacy-hash', admissionVersion: 'standard-v1', baseline: false, observedAt,
+      legacyActionableExternalIds: [], legacyActiveExternalIds: [], now: observedAt,
+    });
+    const cpuMs = cpuMsSince(started);
+    exposeGc?.();
+    const peakMb = process.memoryUsage().heapUsed / (1024 * 1024);
+
+    const comparison = await repository.getShadowComparison(sourceId);
+    // Actionable work is bounded by the changed IDs, not by the retained history.
+    expect(comparison?.counts.changed).toBe(changedIds.size);
+    expect(comparison?.v2Actionable.count).toBe(changedIds.size);
+    expect(comparison?.d1RowsRead).toBe(records.length);
+    // The hot path only ever touches the compact ledger tables.
+    expect(queries.some((query) => /catalog_items|OCCURRENCE/u.test(query))).toBe(false);
+    expect(cpuMs).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
+    if (exposeGc) {
+      expect(peakMb - baselineMb).toBeLessThan(MESSAGE_HEAP_BUDGET_MB);
+      expect(peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
+    }
+    database.close();
+  }, 300_000);
+
+  it('consumes a 25-row admission message from a production-shaped immutable snapshot within Worker limits', async () => {
+    const database = new DatabaseSync(':memory:');
+    for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
+      database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
+    }
+    const repository = new D1IngestionV2Repository(sqliteD1(database));
+    const objects = new Map<string, Uint8Array>();
+    const bucket = {
+      async put(key: string, body: ArrayBuffer) { objects.set(key, new Uint8Array(body)); },
+      async get(key: string) {
+        const body = objects.get(key);
+        return body ? { body: new Response(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer).body } : null;
+      },
+      async delete(key: string) { objects.delete(key); },
+    } as unknown as R2Bucket;
+    const snapshots = new R2IngestionSnapshotStore(bucket);
+    const observedAt = '2026-10-03T00:00:00.000Z';
+    const prepared = await (async () => {
+      const feed = PRODUCTION_GITHUB_FEEDS.simplify;
+      const fetched = await productionAdapter(sourceId, productionDocuments(feed)).fetch();
+      const envelope = normalizeSourceSnapshot({ sourceId, postings: fetched.postings, admissionVersion: 'standard-v1', observedAt });
+      const stored = await snapshots.putSnapshot(envelope);
+      await repository.putSnapshot({
+        sourceId, snapshotHash: envelope.snapshotHash, objectKey: stored.key, admissionVersion: envelope.admissionVersion,
+        documentCount: envelope.documentCount, rowCount: envelope.rowCount, state: 'active', isComplete: true,
+        baseline: false, createdAt: observedAt, activatedAt: observedAt,
+      });
+      await repository.putRows(envelope.rows.map((row) => ({
+        sourceId, externalId: row.externalId, snapshotHash: envelope.snapshotHash, materialHash: row.materialHash,
+        admissionVersion: envelope.admissionVersion, notificationBaseline: false, state: 'queued', attemptCount: 0,
+        consecutiveOmissions: 0, firstObservedAt: observedAt, lastObservedAt: observedAt, updatedAt: observedAt,
+      })));
+      return {
+        snapshotHash: envelope.snapshotHash,
+        objectKey: stored.key,
+        rowCount: envelope.rowCount,
+        bytes: stored.bytes,
+        externalIds: envelope.rows.slice(0, 25).map((row) => row.externalId),
+      };
+    })();
+    expect(prepared.rowCount).toBeGreaterThan(2_500);
+    expect(prepared.bytes).toBeGreaterThan(1_000_000);
+    const [message] = buildAdmissionV2Messages({
+      sourceId, snapshotHash: prepared.snapshotHash, snapshotKey: prepared.objectKey,
+      admissionVersion: 'standard-v1', baseline: false, externalIds: prepared.externalIds,
+    });
+    const evaluator: AdmissionV2RowEvaluator = { async evaluate() { return { decision: { kind: 'admitted' } }; } };
+
+    exposeGc?.();
+    const baselineMb = process.memoryUsage().heapUsed / (1024 * 1024);
+    const started = process.cpuUsage();
+    const result = await processAdmissionV2Message(message, { ledger: repository, snapshots, evaluator });
+    const cpuMs = cpuMsSince(started);
+    exposeGc?.();
+    const peakMb = process.memoryUsage().heapUsed / (1024 * 1024);
+
+    expect(result.infrastructureFailure).toBeUndefined();
+    expect(result).toMatchObject({ acknowledged: true, settled: 25, skipped: 0 });
+    expect(cpuMs).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
+    if (exposeGc) {
+      expect(peakMb - baselineMb).toBeLessThan(MESSAGE_HEAP_BUDGET_MB);
+      expect(peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
+    }
+    database.close();
+  }, 300_000);
 });
+
+function memorySnapshots(): IngestionSnapshotObjectStore {
+  const objects = new Map<string, string>();
+  return {
+    async put(key, body) { objects.set(key, body); },
+    async get(key) { return objects.get(key) ?? null; },
+    async delete(key) { objects.delete(key); },
+    async putSnapshot(envelope) {
+      const key = snapshotObjectKey(envelope.sourceId, envelope.snapshotHash);
+      const body = serializeEnvelope(envelope);
+      const existing = objects.get(key);
+      if (existing !== undefined) {
+        parseEnvelope(existing, { sourceId: envelope.sourceId, snapshotHash: envelope.snapshotHash });
+        return { key, bytes: existing.length, existed: true };
+      }
+      objects.set(key, body);
+      return { key, bytes: body.length, existed: false };
+    },
+    async getSnapshot(source, hash) {
+      const raw = objects.get(snapshotObjectKey(source, hash));
+      if (raw === undefined) throw new Error('missing');
+      return parseEnvelope(raw, { sourceId: source, snapshotHash: hash });
+    },
+  };
+}

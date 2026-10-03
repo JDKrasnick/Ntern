@@ -7,7 +7,7 @@ locals {
   ingestion_worker_module = "${path.module}/../../cloudflare/dist/ingestion/resvg.wasm"
   ingestion_worker_name   = "${var.worker_name}-ingestion"
   catalog_providers       = toset(["greenhouse", "lever", "ashby", "github"])
-  asynchronous_queues     = setunion(local.catalog_providers, toset(["gmail", "destination-verification", "shadow-extraction", "resume-job-import"]))
+  asynchronous_queues     = setunion(local.catalog_providers, toset(["gmail", "destination-verification", "shadow-extraction", "resume-job-import", "admission-v2"]))
 
   # Sized from the 2026-09-15 drain measurements: published boards per sweep x
   # per-message wall clock / cadence, doubled for the validation, notification,
@@ -27,6 +27,7 @@ locals {
     destination-verification = 1
     shadow-extraction        = 1
     resume-job-import        = 1
+    admission-v2             = 1
   }
 
   api_plain_bindings = concat(
@@ -57,6 +58,10 @@ locals {
       { name = "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED", type = "plain_text", text = tostring(var.identity_unconfirmed_publication_enabled) },
       { name = "IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED", type = "plain_text", text = tostring(var.identity_integrity_enforcement_enabled) },
       { name = "TRUSTED_COMMUNITY_CATALOG_ENABLED", type = "plain_text", text = tostring(var.trusted_community_catalog_enabled) },
+      { name = "INGESTION_V2_SHADOW_DISCOVERY_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_shadow_discovery_enabled) },
+      { name = "INGESTION_V2_SHADOW_SOURCE_ALLOWLIST", type = "plain_text", text = var.ingestion_v2_shadow_source_allowlist },
+      { name = "INGESTION_V2_ADMISSION_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_admission_enabled) },
+      { name = "INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST", type = "plain_text", text = var.ingestion_v2_admission_source_allowlist },
       { name = "IDENTITY_CONFIRMED_COVERAGE_FLOOR", type = "plain_text", text = tostring(var.identity_confirmed_coverage_floor) },
       { name = "LLM_METADATA_PUBLICATION_POLICY_JSON", type = "plain_text", text = var.llm_metadata_publication_policy_json },
       { name = "SHADOW_EXTRACTION_ENABLED", type = "plain_text", text = tostring(var.shadow_extraction_enabled) },

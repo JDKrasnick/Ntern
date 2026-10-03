@@ -67,7 +67,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(api.queues?.producers?.map(({ binding }) => binding)).toEqual(['GMAIL_QUEUE', 'RESUME_JOB_IMPORT_QUEUE']);
     expect(ingestion.queues?.consumers?.map(({ queue }) => queue)).toEqual([
       'intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby', 'intern-notifs-github', 'intern-notifs-gmail', 'intern-notifs-destination-verification',
-      'intern-notifs-shadow-extraction', 'intern-notifs-resume-job-import',
+      'intern-notifs-shadow-extraction', 'intern-notifs-resume-job-import', 'intern-notifs-admission-v2',
     ]);
     expect(ingestion.triggers?.crons).toHaveLength(11);
     expect(ingestion.triggers?.crons).toContain('6-56/10 * * * *');
@@ -157,7 +157,7 @@ describe('Cloudflare deployment configuration', () => {
       .map(([, provider, value]) => [provider, Number(value)]));
 
     expect(Object.keys(declared).sort()).toEqual([
-      'ashby', 'destination-verification', 'github', 'gmail', 'greenhouse', 'lever', 'resume-job-import', 'shadow-extraction',
+      'admission-v2', 'ashby', 'destination-verification', 'github', 'gmail', 'greenhouse', 'lever', 'resume-job-import', 'shadow-extraction',
     ]);
     for (const consumer of ingestion.queues?.consumers ?? []) {
       expect(consumer.max_concurrency).toBe(declared[consumer.queue.replace('intern-notifs-', '')]);
@@ -369,5 +369,25 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000');
     expect(terraform).toContain('retry_delay      = each.key == "shadow-extraction" ? 300 : null');
     expect(worker).toContain('env.SHADOW_EXTRACTION_QUEUE_ID');
+  });
+
+  it('keeps the V2 admission queue dedicated, bounded, and owned by ingestion', () => {
+    const terraform = read('infra/cloudflare/main.tf');
+    const worker = read('cloudflare/worker.ts');
+    const producerBindings = new Map(ingestion.queues?.producers?.map((binding) => [binding.binding, binding.queue]));
+    const consumer = ingestion.queues?.consumers?.find(({ queue }) => queue === 'intern-notifs-admission-v2');
+
+    expect(producerBindings.get('ADMISSION_V2_QUEUE')).toBe('intern-notifs-admission-v2');
+    expect(producerBindings.get('ADMISSION_V2_DLQ')).toBe('intern-notifs-admission-v2-dlq');
+    expect(consumer).toEqual({
+      queue: 'intern-notifs-admission-v2', max_batch_size: 1, max_concurrency: 1, max_retries: 2,
+      dead_letter_queue: 'intern-notifs-admission-v2-dlq',
+    });
+    expect(ingestion.vars.INGESTION_V2_ADMISSION_ENABLED).toBe('false');
+    expect(ingestion.vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST).toBe('');
+    expect(terraform).toContain('"admission-v2"');
+    expect(terraform).toContain('{ name = "INGESTION_V2_ADMISSION_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_admission_enabled) }');
+    expect(terraform).toContain('{ name = "INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST", type = "plain_text", text = var.ingestion_v2_admission_source_allowlist }');
+    expect(worker).toContain('ADMISSION_V2_QUEUE');
   });
 });

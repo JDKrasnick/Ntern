@@ -121,6 +121,30 @@ variable "trusted_community_catalog_enabled" {
   default     = false
 }
 
+variable "ingestion_v2_shadow_discovery_enabled" {
+  description = "Runs additive Ingestion V2 shadow discovery after the legacy quality gates. It records only V2 state and never creates jobs, occurrences, notifications, or admission work."
+  type        = bool
+  default     = false
+}
+
+variable "ingestion_v2_shadow_source_allowlist" {
+  description = "Comma-separated ingestion source IDs eligible for V2 shadow discovery. Empty means every source once the discovery flag is on."
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_v2_admission_enabled" {
+  description = "Runs Ingestion V2 fault-isolated admission on the dedicated admission-v2 queue. Stage 2 records decisions through a verification sink and does not mutate the live catalog."
+  type        = bool
+  default     = false
+}
+
+variable "ingestion_v2_admission_source_allowlist" {
+  description = "Comma-separated ingestion source IDs eligible for V2 admission. Empty means every source once the admission flag is on."
+  type        = string
+  default     = ""
+}
+
 variable "identity_confirmed_coverage_floor" {
   description = "Backstop for reviewed exact posting-identity coverage in the recurring integrity gate. The gate itself ratchets: it fails a pass that falls below the best coverage already reached, less a small churn tolerance, so this value only sets a floor the ratchet cannot go under."
   type        = number
