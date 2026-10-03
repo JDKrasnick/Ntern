@@ -215,6 +215,10 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).not.toMatch(/\bmigrations\s*=\s*\{/);
     expect(deployment).toContain('TF_VAR_deploy_sha: ${{ github.event_name == \'workflow_run\' && github.event.workflow_run.head_sha || inputs.sha }}');
     expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "true"');
+    expect(deployment).toContain('TF_VAR_ingestion_v2_shadow_discovery_enabled: ${{ vars.INGESTION_V2_SHADOW_DISCOVERY_ENABLED }}');
+    expect(deployment).toContain('TF_VAR_ingestion_v2_shadow_source_allowlist: ${{ vars.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST }}');
+    expect(deployment).toContain('TF_VAR_ingestion_v2_admission_enabled: ${{ vars.INGESTION_V2_ADMISSION_ENABLED }}');
+    expect(deployment).toContain('TF_VAR_ingestion_v2_admission_source_allowlist: ${{ vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST }}');
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
     expect(deployment).toContain('.config.preset == "@cf/baai/bge-base-en-v1.5"');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.ingestion intern-notifs-ingestion');
