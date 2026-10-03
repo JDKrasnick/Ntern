@@ -4,7 +4,15 @@ import type { Reachability } from '../../core/application-verification.js';
 import { classifyDestination } from '../../destination-verification.js';
 import { resolvePostingIdentityDecision, stableSourceOccurrenceJobId } from '../../identity/registry.js';
 import { processPosting } from '../../ingestion/processor.js';
-import type { CanonicalEmployer, CatalogAdmission, ProcessedListing, SourcedPosting } from '../../types.js';
+import { activeTrustedCommunityPolicy, advanceTrustedCommunityQualification } from '../../sources/trust-policy.js';
+import type {
+  CanonicalEmployer,
+  CatalogAdmission,
+  PostingIdentityDecision,
+  ProcessedListing,
+  SourcedPosting,
+  TrustedCommunityAlertQualification,
+} from '../../types.js';
 import { admissionShouldNotify } from './migration.js';
 import type { AdmissionRowContext, AdmissionRowEvaluation, AdmissionV2RowEvaluator } from './types.js';
 
@@ -25,6 +33,18 @@ export interface AdmissionDestinationProber {
 export type AdmissionCanonicalEmployerResolver = (
   listing: ProcessedListing,
 ) => Promise<Pick<CanonicalEmployer, 'id' | 'displayName'> | undefined>;
+
+/** Existing live-catalog evidence used to grade a Stage 2 canary row fairly. */
+export interface AdmissionV2PriorContext {
+  admission?: CatalogAdmission;
+  postingIdentityDecision?: PostingIdentityDecision;
+  trustedCommunityAlertQualification?: TrustedCommunityAlertQualification;
+}
+
+export type AdmissionV2PriorContextResolver = (
+  sourceId: string,
+  externalId: string,
+) => Promise<AdmissionV2PriorContext | undefined>;
 
 /** Terminal catalog effects for one admitted row. */
 export interface AdmissionCatalogCommit {
@@ -85,6 +105,9 @@ export function gradeAdmissionRow(input: {
   externalId: string;
   posting: SourcedPosting;
   canonicalEmployer?: Pick<CanonicalEmployer, 'id' | 'displayName'>;
+  prior?: AdmissionV2PriorContext;
+  trustedCommunityCatalogEnabled?: boolean;
+  baseline?: boolean;
   probe: AdmissionDestinationProbe;
   evaluatedAt: string;
 }): GradedAdmissionRow | { decision: AdmissionRowEvaluation['decision'] } {
@@ -101,6 +124,7 @@ export function gradeAdmissionRow(input: {
     applicationUrl: processed.applyUrl,
     observedAt: input.evaluatedAt,
     ...(input.posting.providerEvidence ? { providerEvidence: input.posting.providerEvidence } : {}),
+    ...(input.prior?.postingIdentityDecision ? { previousDecision: input.prior.postingIdentityDecision } : {}),
   });
   if (identity.decision.status === 'quarantined') {
     return { decision: { kind: 'blocked', reason: `posting-identity-${identity.decision.reason}` } };
@@ -128,11 +152,31 @@ export function gradeAdmissionRow(input: {
   if (destination.closureState === 'gone') {
     return { decision: { kind: 'blocked', reason: 'destination-gone' } };
   }
+  const trustedCommunityPolicy = activeTrustedCommunityPolicy(
+    input.sourceId,
+    input.trustedCommunityCatalogEnabled ?? false,
+  );
+  const trustedCommunityQualification = trustedCommunityPolicy
+    ? advanceTrustedCommunityQualification({
+      ...(input.prior?.trustedCommunityAlertQualification
+        ? { previous: input.prior.trustedCommunityAlertQualification }
+        : {}),
+      destination,
+      postingIdentityDecision: identity.decision,
+      alertMode: trustedCommunityPolicy.alertMode,
+      baselineSuppressed: trustedCommunityPolicy.alertMode === 'disabled' || input.baseline === true,
+      catalogPublicationSuppressed: false,
+    })
+    : undefined;
   const admission = evaluateCatalogAdmission({
     listing: normalized,
     destination,
     postingAttributed: true,
     evaluatedAt: input.evaluatedAt,
+    ...(input.prior?.admission ? { previous: input.prior.admission } : {}),
+    ...(trustedCommunityPolicy && trustedCommunityQualification
+      ? { trustedCommunity: { policy: trustedCommunityPolicy, qualification: trustedCommunityQualification } }
+      : {}),
   });
   const jobId = normalized.postingIdentity?.canonicalJobId
     ?? stableSourceOccurrenceJobId(input.sourceId, input.externalId);
@@ -150,6 +194,8 @@ export interface RuleBasedAdmissionEvaluatorDependencies {
   prober: AdmissionDestinationProber;
   sink: AdmissionV2CatalogSink;
   resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver;
+  resolvePriorContext?: AdmissionV2PriorContextResolver;
+  trustedCommunityCatalogEnabled?: boolean;
   now?: () => Date;
 }
 
@@ -181,6 +227,9 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       ?? (deterministic.listing && this.dependencies.resolveCanonicalEmployer
         ? await this.dependencies.resolveCanonicalEmployer(deterministic.listing)
         : undefined);
+    const prior = this.dependencies.resolvePriorContext
+      ? await this.dependencies.resolvePriorContext(context.sourceId, context.externalId)
+      : undefined;
     const probe = await this.dependencies.prober.probe({
       sourceId: context.sourceId,
       externalId: context.externalId,
@@ -192,6 +241,9 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       externalId: context.externalId,
       posting: context.posting,
       ...(canonicalEmployer ? { canonicalEmployer } : {}),
+      ...(prior ? { prior } : {}),
+      trustedCommunityCatalogEnabled: this.dependencies.trustedCommunityCatalogEnabled ?? false,
+      baseline: context.baseline,
       probe,
       evaluatedAt: observedAt,
     });
