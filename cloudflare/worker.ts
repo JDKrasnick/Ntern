@@ -18,6 +18,7 @@ import {
 } from './identity-coverage-ratchet.js';
 import { runRuntimeCommand } from '../src/runtime.js';
 import { catalogGroupDetails, compareCatalogProjectionGroups, groupCatalogJobs } from '../src/catalog-groups.js';
+import { catalogRecency, openCatalogSortKey } from '../src/catalog-recency.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
 import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
@@ -1830,12 +1831,21 @@ async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Buc
   // One order for both read models: the card's own `updatedAt` (with its group id
   // breaking ties) is stored on each D1 row as its sort key, and R2 pages are
   // written in the same order, so a reader of either sees the same sequence.
-  const groups = groupCatalogJobs(await store.listCatalog(), { includeClosed: true })
+  // The newest open role this publish can see becomes the readers' watermark: a
+  // role published after it is grouped live until the next tick, so an alert and
+  // the catalog never disagree about a role that already exists.
+  const jobs = await store.listCatalog();
+  const liveWatermark = jobs.reduce<string | undefined>((newest, job) => {
+    if (!job.open || catalogRecency(job) !== 'normal') return newest;
+    const key = openCatalogSortKey(job);
+    return !newest || key > newest ? key : newest;
+  }, undefined);
+  const groups = groupCatalogJobs(jobs, { includeClosed: true })
     .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
   const generatedAt = new Date().toISOString();
   await recordPhase(phases, 'catalog_projection_d1', 'started');
   try {
-    await store.putCatalogProjection(groups, generatedAt);
+    await store.putCatalogProjection(groups, generatedAt, liveWatermark);
     await recordPhase(phases, 'catalog_projection_d1', 'complete');
   } catch (error) {
     await recordPhase(phases, 'catalog_projection_d1', 'failed');
@@ -1844,7 +1854,7 @@ async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Buc
   if (bucket) {
     await recordPhase(phases, 'catalog_projection_r2', 'started');
     try {
-      await new R2CatalogProjection(bucket).publish(groups, generatedAt);
+      await new R2CatalogProjection(bucket).publish(groups, generatedAt, liveWatermark);
       await recordPhase(phases, 'catalog_projection_r2', 'complete');
     }
     catch (error) {

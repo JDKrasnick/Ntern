@@ -35,6 +35,7 @@ jobs:
       url: https://intern-notifs.jdkrasnick.workers.dev
     env:
       DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.sha }}
+      TF_VAR_deploy_sha: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.sha }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
@@ -84,6 +85,7 @@ jobs:
             TF_VAR_admission_support_recipient
             TF_VAR_shadow_extraction_monthly_forecast_cents
             TF_VAR_shadow_extraction_monthly_headroom_cents
+            TF_VAR_deploy_sha
           )
           for name in "${required[@]}"; do
             if test -z "${!name}"; then
@@ -172,29 +174,109 @@ jobs:
       - name: Apply exact saved plan
         if: steps.plan.outputs.changed == 'true'
         run: tofu -chdir=infra/cloudflare apply -auto-approve "$RUNNER_TEMP/cloudflare.tfplan"
-      - name: Require converged state
-        run: tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode
       - name: Publish and roll out the resume PDF compiler container
         shell: bash
         run: |
           config="$GITHUB_WORKSPACE/.wrangler.api.production.jsonc"
           trap 'rm -f "$config"' EXIT
           jq 'del(.vars)' wrangler.api.jsonc > "$config"
-          npx wrangler deploy --config "$config" --keep-vars
+          npx wrangler deploy --config "$config" --keep-vars \
+            --tag "$DEPLOY_SHA" \
+            --message "Container rollout for $DEPLOY_SHA"
+      - name: Capture expected Worker code identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_name=intern-notifs
+          ingestion_name=intern-notifs-ingestion
+
+          npx wrangler deployments status --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-expected-deployment.json"
+          npx wrangler deployments status --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-expected-deployment.json"
+          jq -e '.versions | length == 1 and .[0].percentage == 100' "$RUNNER_TEMP/api-expected-deployment.json" >/dev/null
+          jq -e '.versions | length == 1 and .[0].percentage == 100' "$RUNNER_TEMP/ingestion-expected-deployment.json" >/dev/null
+          api_version="$(jq -er '.versions[0].version_id' "$RUNNER_TEMP/api-expected-deployment.json")"
+          ingestion_version="$(jq -er '.versions[0].version_id' "$RUNNER_TEMP/ingestion-expected-deployment.json")"
+          npx wrangler versions view "$api_version" --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-expected-version.json"
+          npx wrangler versions view "$ingestion_version" --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-expected-version.json"
+          jq -e --arg sha "$DEPLOY_SHA" '.annotations["workers/tag"] == $sha' "$RUNNER_TEMP/api-expected-version.json" >/dev/null
+          jq -e --arg sha "$DEPLOY_SHA" '.annotations["workers/tag"] == $sha' "$RUNNER_TEMP/ingestion-expected-version.json" >/dev/null
+          echo "EXPECTED_API_VERSION=$api_version" >> "$GITHUB_ENV"
+          echo "EXPECTED_INGESTION_VERSION=$ingestion_version" >> "$GITHUB_ENV"
+          echo "EXPECTED_API_ETAG=$(jq -er '.resources.script.etag' "$RUNNER_TEMP/api-expected-version.json")" >> "$GITHUB_ENV"
+          echo "EXPECTED_INGESTION_ETAG=$(jq -er '.resources.script.etag' "$RUNNER_TEMP/ingestion-expected-version.json")" >> "$GITHUB_ENV"
       - name: Restore operations binding if its deployment check rejects the key
         shell: bash
         run: |
           if test -n "$OPERATIONS_SHARED_SECRET"; then
+            restore_secret() {
+              local name="$1"
+              local config="$2"
+              local expected_version="$3"
+              local latest_version
+              local secret_version
+
+              latest_version="$(npx wrangler versions list --name "$name" --config "$config" --json \
+                | jq -er 'max_by(.created_on).id')"
+              test "$latest_version" = "$expected_version"
+              printf '%s' "$OPERATIONS_SHARED_SECRET" \
+                | npx wrangler versions secret put OPERATIONS_SHARED_SECRET \
+                    --name "$name" --config "$config" \
+                    --tag "$DEPLOY_SHA" --message "Release $DEPLOY_SHA"
+              secret_version="$(npx wrangler versions list --name "$name" --config "$config" --json \
+                | jq -er --arg sha "$DEPLOY_SHA" \
+                    '[.[] | select(.annotations["workers/tag"] == $sha and .annotations["workers/message"] == ("Release " + $sha))] | max_by(.created_on).id')"
+              test "$secret_version" != "$expected_version"
+              npx wrangler versions deploy "${secret_version}@100%" \
+                --name "$name" --config "$config" --yes \
+                --message "Restore operations binding for $DEPLOY_SHA"
+            }
+
             status="$(curl -sS -o /dev/null -w '%{http_code}' \
               -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
               "$TF_VAR_public_api_url/internal/deployment")"
             if test "$status" = 404; then
-              printf '%s' "$OPERATIONS_SHARED_SECRET" \
-                | npx wrangler secret put OPERATIONS_SHARED_SECRET --config wrangler.ingestion.jsonc
-              printf '%s' "$OPERATIONS_SHARED_SECRET" \
-                | npx wrangler secret put OPERATIONS_SHARED_SECRET --config wrangler.api.jsonc
+              restore_secret intern-notifs-ingestion wrangler.ingestion.jsonc "$EXPECTED_INGESTION_VERSION"
+              restore_secret intern-notifs wrangler.api.jsonc "$EXPECTED_API_VERSION"
             fi
           fi
+      - name: Final convergence gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_name=intern-notifs
+          ingestion_name=intern-notifs-ingestion
+
+          # Confirm the active deployments and read both active versions.
+          npx wrangler deployments status --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-deployment.json"
+          npx wrangler deployments status --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-deployment.json"
+          api_version="$(jq -r '.versions[0].version_id' "$RUNNER_TEMP/api-deployment.json")"
+          ingestion_version="$(jq -r '.versions[0].version_id' "$RUNNER_TEMP/ingestion-deployment.json")"
+          npx wrangler versions view "$api_version" --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-version.json"
+          npx wrangler versions view "$ingestion_version" --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-version.json"
+
+          # Capture the post-apply plan and require that production has converged.
+          set +e
+          tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode -out="$RUNNER_TEMP/cloudflare-final.tfplan"
+          drift=$?
+          set -e
+          tofu -chdir=infra/cloudflare show -json "$RUNNER_TEMP/cloudflare-final.tfplan" > "$RUNNER_TEMP/cloudflare-final-plan.json"
+
+          # Compare every non-secret binding, compatibility setting, handler, and
+          # limit; extra secret_text bindings are permitted.
+          npx tsx scripts/cloudflare-live-audit.ts \
+            --plan "$RUNNER_TEMP/cloudflare-final-plan.json" \
+            --api-name "$api_name" \
+            --api-expected-etag "$EXPECTED_API_ETAG" \
+            --api-deployment "$RUNNER_TEMP/api-deployment.json" \
+            --api-version "$RUNNER_TEMP/api-version.json" \
+            --ingestion-name "$ingestion_name" \
+            --ingestion-expected-etag "$EXPECTED_INGESTION_ETAG" \
+            --ingestion-deployment "$RUNNER_TEMP/ingestion-deployment.json" \
+            --ingestion-version "$RUNNER_TEMP/ingestion-version.json" \
+            --drift-exit-code "$drift"
+
+          # Any drift fails the deployment before smoke tests or success reporting.
+          test "$drift" = 0
       - name: Back up post-deploy state
         if: always() && steps.backup_before.outcome == 'success'
         shell: bash

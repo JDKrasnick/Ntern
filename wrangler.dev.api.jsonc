@@ -4,6 +4,8 @@
   "main": "cloudflare/api-worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
   "durable_objects": { "bindings": [
     { "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController", "script_name": "intern-notifs-dev-ingestion" },
     { "name": "RESUME_PDF_COMPILER", "class_name": "ResumePdfCompilerV2" }
@@ -13,7 +15,11 @@
   ],
   "containers": [{ "class_name": "ResumePdfCompilerV2", "image": "./cloudflare/resume-compiler/Dockerfile", "instance_type": "basic", "max_instances": 2 }],
   "limits": { "cpu_ms": 30000, "subrequests": 10000 },
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "invocation_logs": false, "head_sampling_rate": 1, "persist": true }
+  },
   "ai": { "binding": "AI" },
   "vectorize": [{ "binding": "RESUME_EMBEDDINGS", "index_name": "intern-notifs-dev-resume-bank-v1" }],
   "d1_databases": [

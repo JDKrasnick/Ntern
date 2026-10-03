@@ -1,0 +1,39 @@
+name: Catalog live overlay watch
+
+# Verifies the read-time live overlay end to end: an open role published after
+# the last projection tick must lead the public catalog. This is a one-off
+# regression watch for that change; it stays red until the ingestion Worker has
+# published a pointer with a `liveWatermark`, then verifies, then keeps running
+# daily while the overlay is in place. Remove it once the guarantee is trusted.
+on:
+  schedule:
+    # After the overnight provider sweeps have settled.
+    - cron: '23 13 * * *'
+  workflow_dispatch:
+    inputs:
+      public_api_url:
+        description: Public catalog base URL (defaults to production)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    # CLOUDFLARE_API_TOKEN is scoped to this environment, not the repository, so
+    # the job must name it to receive the secret.
+    environment:
+      name: cloudflare-workers-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Verify the live catalog overlay
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PUBLIC_API_URL: ${{ inputs.public_api_url || 'https://intern-notifs.jdkrasnick.workers.dev' }}
+        run: npm run catalog:overlay:watch

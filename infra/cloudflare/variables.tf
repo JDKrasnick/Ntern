@@ -9,6 +9,16 @@ variable "worker_name" {
   default     = "intern-notifs"
 }
 
+variable "deploy_sha" {
+  description = "Exact Git commit attached to Worker versions created by this release."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{40}$", var.deploy_sha))
+    error_message = "deploy_sha must be a full lowercase 40-character Git commit SHA."
+  }
+}
+
 variable "public_api_url" {
   description = "Public HTTPS origin used for authenticated R2 upload and download URLs."
   type        = string

@@ -7,6 +7,7 @@ import type { ApplicationSession } from '../src/application-automation.js';
 import { preferredJobIdentityConflicts, providerPostingKey, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
 import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
+import { liveCatalogOverlayFromStore, overlaySupersedesGroup, type LiveCatalogOverlay } from '../src/catalog-live.js';
 import type { ApplicantProfile, ApplicationRecord, CatalogAdmissionReason, DeliveryReceipt, DestinationClassification, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceSelectionMetadata, SourceOccurrenceState, TrustedCommunityAlertQualification, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from '../src/types.js';
 import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
 import type { ResumeSubscription } from '../src/subscription.js';
@@ -227,12 +228,22 @@ type CatalogProjectionPointer = {
   version: string;
   generatedAt: string;
   schemaVersion: number;
+  /**
+   * The highest open-catalog sort key this publish observed. Readers group every
+   * open role published after it on the spot, so a role ingested seconds ago is
+   * browsable before the next tick. Absent on pointers written before the field
+   * existed, which simply disables the live prefix.
+   */
+  liveWatermark?: string;
   retainedVersions?: Array<{ version: string; until: string }>;
   legacyVersion?: string;
   legacyUntil?: string;
 };
 
 type CatalogProjectionManifest = { createdAt: string; keys: string[] };
+
+/** Where a published version's cards live, and how a reader must constrain them. */
+type CatalogProjectionScope = { pk: string; order: 'ASC' | 'DESC'; manifestVersion?: string };
 
 const catalogProjectionGroupRowKey = (groupId: string, digest: string): string =>
   `${CATALOG_PROJECTION_GROUP_PREFIX}${groupId}#${digest}`;
@@ -242,6 +253,12 @@ function catalogProjectionGroupRowPrefix(groupId: string): string {
 }
 
 export class D1InternshipStore implements InternshipStore {
+  /**
+   * Grouping a delta is pure and idempotent for a watermark, so one isolate
+   * serves a whole publication burst from a single build.
+   */
+  private static readonly liveOverlays = new WeakMap<D1Database, Map<string, Promise<LiveCatalogOverlay | undefined>>>();
+
   constructor(private readonly db: D1Database) {}
 
   private async get<T>(pk: string, sk: string): Promise<T | undefined> {
@@ -1058,7 +1075,7 @@ export class D1InternshipStore implements InternshipStore {
    * budgeted in payload bytes and the stored state is read as small key rows
    * rather than as card payloads. See docs/197-ingestion-resource-bounds.md.
    */
-  async putCatalogProjection(groups: CatalogGroupDetails[], generatedAt: string): Promise<void> {
+  async putCatalogProjection(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void> {
     const previousRow = await this.db.prepare("SELECT value FROM catalog_items WHERE pk = 'CATALOG_PROJECTION' AND sk = 'CURRENT'").first<JsonRow>();
     const previous = parse<CatalogProjectionPointer>(previousRow);
     const now = new Date();
@@ -1073,6 +1090,7 @@ export class D1InternshipStore implements InternshipStore {
     const digest = version.digest('hex').slice(0, 20);
     const pointer: CatalogProjectionPointer = {
       version: digest, generatedAt, schemaVersion: CATALOG_PROJECTION_SCHEMA_VERSION,
+      ...(liveWatermark ? { liveWatermark } : {}),
       retainedVersions,
       ...(previous?.legacyVersion ? { legacyVersion: previous.legacyVersion, legacyUntil: previous.legacyUntil } : {}),
     };
@@ -1227,7 +1245,7 @@ export class D1InternshipStore implements InternshipStore {
   }
 
   /** A manifest names exactly the cards published by a schema-v6 pointer. */
-  private catalogProjectionScope(pointer: CatalogProjectionPointer): { pk: string; order: 'ASC' | 'DESC'; manifestVersion?: string } {
+  private catalogProjectionScope(pointer: CatalogProjectionPointer): CatalogProjectionScope {
     return pointer.schemaVersion === CATALOG_PROJECTION_SCHEMA_VERSION
       ? { pk: CATALOG_PROJECTION_GROUPS_PK, order: 'DESC', manifestVersion: pointer.version }
       : { pk: `CATALOG_PROJECTION#${pointer.version}`, order: 'ASC' };
@@ -1249,8 +1267,25 @@ export class D1InternshipStore implements InternshipStore {
         ${this.catalogProjectionMembership(scope, 'projection')}
       ORDER BY projection.catalog_sort_key ${scope.order} LIMIT ? OFFSET ?`)
       .bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []), limit + 1, offset).all<JsonRow>();
-    const groups = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
-    return { groups, ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}) };
+    const published = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
+    // Roles published after this pointer are newer than every card it holds, so
+    // their cards lead the feed and replace the published cards they cover. The
+    // dropped card's raw position is reported so a reader can resume from the raw
+    // stream rather than repeating a card on the next page.
+    const overlay = await this.liveOverlayFor(pointer.liveWatermark);
+    const groups: CatalogGroupDetails[] = [];
+    const groupOffsets: number[] = [];
+    published.forEach((details, index) => {
+      if (overlay && overlaySupersedesGroup(overlay, details)) return;
+      groups.push(details);
+      groupOffsets.push(index);
+    });
+    return {
+      groups,
+      groupOffsets,
+      ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}),
+      ...(overlay && offset === 0 && overlay.groups.length ? { live: overlay.groups } : {}),
+    };
   }
   async listCatalogProjectionFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
     const pointer = await this.readCatalogProjectionPointer();
@@ -1272,8 +1307,23 @@ export class D1InternshipStore implements InternshipStore {
       LIMIT ? OFFSET ?
     `).bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []), ...values, limit + 1, offset).all<JsonRow>();
     const candidates = rows.results.slice(0, limit).map((row) => JSON.parse(row.value) as CatalogGroupDetails);
-    const groups = filterCatalogGroupDetails(candidates, filter);
-    return { groups, ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}) };
+    const overlay = await this.liveOverlayFor(pointer.liveWatermark);
+    const groups: CatalogGroupDetails[] = [];
+    const groupOffsets: number[] = [];
+    candidates.forEach((details, index) => {
+      if (overlay && overlaySupersedesGroup(overlay, details)) return;
+      const [match] = filterCatalogGroupDetails([details], filter);
+      if (!match) return;
+      groups.push(match);
+      groupOffsets.push(index);
+    });
+    const live = overlay && offset === 0 && overlay.groups.length ? filterCatalogGroupDetails(overlay.groups, filter) : [];
+    return {
+      groups,
+      groupOffsets,
+      ...(rows.results.length > limit ? { cursor: String(offset + limit) } : {}),
+      ...(live.length ? { live } : {}),
+    };
   }
   async listCatalogProjectionRoles(filter: CatalogGroupFilter, range: { from?: string; to?: string }): Promise<CatalogGroupRole[] | undefined> {
     const pointer = await this.readCatalogProjectionPointer();
@@ -1286,6 +1336,10 @@ export class D1InternshipStore implements InternshipStore {
     // exact IANA-zone day after parsing these small role rows.
     if (range.from) { clauses.push("json_extract(role.value, '$.releaseDay') >= date(?, '-1 day')"); values.push(range.from); }
     if (range.to) { clauses.push("json_extract(role.value, '$.releaseDay') <= date(?, '+1 day')"); values.push(range.to); }
+    // Live overlay roles bypass the SQL window, so re-apply the same expanded
+    // range in JS to keep this method bounded to the requested days.
+    const expandedFrom = range.from ? new Date(Date.parse(range.from) - 86_400_000).toISOString().slice(0, 10) : undefined;
+    const expandedTo = range.to ? new Date(Date.parse(range.to) + 86_400_000).toISOString().slice(0, 10) : undefined;
     const rows = await this.db.prepare(`
       SELECT role.value
       FROM catalog_items AS projection, json_each(projection.value, '$.roles') AS role
@@ -1294,14 +1348,33 @@ export class D1InternshipStore implements InternshipStore {
         ${this.catalogProjectionMembership(scope, 'projection')}
         AND ${clauses.join('\n        AND ')}
     `).bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []), ...values).all<JsonRow>();
-    return rows.results
+    const published = rows.results
       .map((row) => JSON.parse(row.value) as CatalogGroupRole)
       .filter((role) => catalogProjectionRoleMatches(role, filter));
+    const overlay = await this.liveOverlayFor(pointer.liveWatermark);
+    if (!overlay) return published;
+    const overlayRoles = filterCatalogGroupDetails(overlay.groups, filter)
+      .flatMap((details) => details.roles)
+      .filter((role) => role.releaseDay
+        && (!expandedFrom || role.releaseDay >= expandedFrom)
+        && (!expandedTo || role.releaseDay <= expandedTo));
+    return [
+      ...published.filter((role) => !overlay.roleIds.has(role.jobId)),
+      ...overlayRoles,
+    ];
   }
   async getCatalogProjectionGroup(groupId: string): Promise<CatalogGroupDetails | undefined> {
+    const overlay = await this.liveCatalogOverlay();
+    const live = overlay?.groups.find((details) => details.group.groupId === groupId);
+    if (live) return live;
     const pointer = await this.readCatalogProjectionPointer();
     if (!pointer) return undefined;
-    const scope = this.catalogProjectionScope(pointer);
+    const published = await this.readPublishedCatalogGroup(groupId, this.catalogProjectionScope(pointer));
+    return published && overlay && overlaySupersedesGroup(overlay, published) ? undefined : published;
+  }
+
+  /** The stored card only; an overlay-aware reader must go through the public method. */
+  private async readPublishedCatalogGroup(groupId: string, scope: CatalogProjectionScope): Promise<CatalogGroupDetails | undefined> {
     if (scope.pk !== CATALOG_PROJECTION_GROUPS_PK) return this.get<CatalogGroupDetails>(scope.pk, `GROUP#${groupId}`);
     // The group's card carries its own digest, so the lookup is a prefix read of
     // one row; a group the last refresh removed has no row.
@@ -1312,6 +1385,75 @@ export class D1InternshipStore implements InternshipStore {
       .bind(scope.pk, `${catalogProjectionGroupRowPrefix(groupId)}%`,
         ...(scope.manifestVersion ? [scope.manifestVersion] : [])).first<JsonRow>();
     return row ? JSON.parse(row.value) as CatalogGroupDetails : undefined;
+  }
+
+  /** Open catalog roles published after a projection watermark, newest first. */
+  async listCatalogSince(sortKeyExclusive: string, limit: number): Promise<Internship[]> {
+    const result = await this.db.prepare(`SELECT value FROM catalog_items
+      WHERE catalog_state = 'OPEN' AND catalog_sort_key > ? ORDER BY catalog_sort_key DESC LIMIT ?`)
+      .bind(sortKeyExclusive, limit).all<JsonRow>();
+    return result.results.map((row) => withEmployerCategory(JSON.parse(row.value) as Internship));
+  }
+
+  /** Every open catalog role released on one UTC day, half-open so midnight belongs to the next day. */
+  async listCatalogWindow(day: string): Promise<Internship[]> {
+    const nextDay = new Date(Date.parse(`${day}T00:00:00.000Z`) + 86_400_000).toISOString().slice(0, 10);
+    const result = await this.db.prepare(`SELECT value FROM catalog_items
+      WHERE catalog_state = 'OPEN' AND catalog_sort_key >= ? AND catalog_sort_key < ?
+      ORDER BY catalog_sort_key`).bind(`3#${day}`, `3#${nextDay}`).all<JsonRow>();
+    return result.results.map((row) => withEmployerCategory(JSON.parse(row.value) as Internship));
+  }
+
+  async getJobs(jobIds: readonly string[]): Promise<Internship[]> {
+    const jobs: Internship[] = [];
+    for (let index = 0; index < jobIds.length; index += 20) {
+      const batch = jobIds.slice(index, index + 20);
+      const rows = await this.db.prepare(`SELECT value FROM catalog_items
+        WHERE kind = 'internship' AND pk IN (${batch.map(() => '?').join(', ')})`)
+        .bind(...batch.map((jobId) => `JOB#${jobId}`)).all<JsonRow>();
+      for (const row of rows.results) jobs.push(withEmployerCategory(JSON.parse(row.value) as Internship));
+    }
+    return jobs;
+  }
+
+  /**
+   * Live cards for a watermark the caller already holds, so an ordinary read
+   * never pays a second pointer lookup to discover the projection is current.
+   * Cached per database and watermark so a publication burst is grouped once per
+   * isolate, and never fails a read: a broken overlay only costs the role its
+   * ten-minute wait.
+   */
+  protected async liveOverlayFor(watermark: string | undefined): Promise<LiveCatalogOverlay | undefined> {
+    if (!watermark) return undefined;
+    const perDatabase = D1InternshipStore.liveOverlays.get(this.db) ?? new Map<string, Promise<LiveCatalogOverlay | undefined>>();
+    D1InternshipStore.liveOverlays.set(this.db, perDatabase);
+    const cached = perDatabase.get(watermark);
+    if (cached) return cached;
+    while (perDatabase.size >= 4) perDatabase.delete(perDatabase.keys().next().value!);
+    const entry = this.buildLiveCatalogOverlay(watermark).catch((error) => {
+      perDatabase.delete(watermark);
+      console.error(JSON.stringify({ event: 'catalog_live_overlay_failed', watermark, error: String(error) }));
+      return undefined;
+    });
+    perDatabase.set(watermark, entry);
+    return entry;
+  }
+
+  /** Live cards against the pointer's own watermark, for callers holding no page. */
+  async liveCatalogOverlay(): Promise<LiveCatalogOverlay | undefined> {
+    return this.liveOverlayFor((await this.readCatalogProjectionPointer())?.liveWatermark);
+  }
+
+  private async buildLiveCatalogOverlay(watermark: string): Promise<LiveCatalogOverlay | undefined> {
+    const pointer = await this.readCatalogProjectionPointer();
+    if (!pointer) return undefined;
+    const scope = this.catalogProjectionScope(pointer);
+    return liveCatalogOverlayFromStore({
+      listCatalogSince: (key, limit) => this.listCatalogSince(key, limit),
+      listCatalogWindow: (day) => this.listCatalogWindow(day),
+      getJobs: (jobIds) => this.getJobs(jobIds),
+      getPublishedCatalogGroup: (groupId) => this.readPublishedCatalogGroup(groupId, scope),
+    }, watermark);
   }
 
   private async readCatalogProjectionPointer(): Promise<CatalogProjectionPointer | undefined> {
