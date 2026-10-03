@@ -94,15 +94,20 @@ describe('bounded source metadata refresh', () => {
       metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION - 1,
       metadataProcessingRevision: SOURCE_METADATA_PROCESSING_REVISION - 1 });
     const adapter: SourceAdapter = { id: sourceId, async fetch(previous) { return {
-      sourceId, listings: [], notModified: true, unchangedReason: 'not_modified',
+      sourceId, outcome: 'unchanged', complete: true, postings: [], rawCount: previous?.lastRawCount ?? 0,
+      contentHash: previous?.contentHash ?? '', listings: [], notModified: true, unchangedReason: 'not_modified',
       checkpoint: { ...previous!, sourceId, successfulFetches: 7 },
     }; } };
     const resolver = { async configurationVersion() { return 'fixture-v1'; },
       async resolveCanonicalEmployer() { return undefined; }, async resolveDestinationRule() { return undefined; } };
+    let shadowRuns = 0;
+    const shadow = { async discover() { shadowRuns += 1; } };
 
-    const report = await new Poller([adapter], store, undefined, undefined, undefined, undefined, undefined, resolver)
+    const report = await new Poller([adapter], store, undefined, undefined, undefined, undefined, undefined, resolver,
+      true, false, undefined, shadow)
       .poll({ maxAdmissionMigrationListingsPerSourceRun: 20 });
     expect(report.continuationSources).toEqual([sourceId]);
+    expect(shadowRuns).toBe(0);
     expect(await store.getCheckpoint(sourceId)).toMatchObject({
       successfulFetches: 7,
       metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION - 1,

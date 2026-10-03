@@ -1819,7 +1819,12 @@ export class IngestionRunner {
         // Shadow discovery observes the complete board and the legacy work
         // selection, then records only its own state. It runs after the legacy
         // quality gates and before any legacy admission write.
-        if (this.shadowDiscovery && isSourceSnapshot(result)) {
+        // A conditional 304 carries no board body. The adapter preserves the
+        // SourceSnapshot shape for legacy metrics, but its empty `postings`
+        // array is not a complete empty board and must never become a V2
+        // snapshot. A hash-unchanged full response still has a body and remains
+        // eligible for shadow comparison.
+        if (this.shadowDiscovery && isSourceSnapshot(result) && result.unchangedReason !== 'not_modified') {
           await this.shadowDiscovery.discover({
             sourceId: connector.id,
             postings: result.postings,
