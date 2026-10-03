@@ -6,6 +6,7 @@ import { D1RecordingAdmissionV2CatalogSink } from '../cloudflare/admission-v2-re
 import type { D1Database, D1PreparedStatement, MessageBatch, R2Bucket } from '../cloudflare/types.js';
 import type { IngestionRowRecord } from '../src/ingestion-v2/types.js';
 import { buildAdmissionV2Messages } from '../src/ingestion-v2/admission/message.js';
+import { ingestionV2AdmissionVersion } from '../src/ingestion-v2/admission/version.js';
 
 afterEach(() => vi.unstubAllGlobals());
 const observedAt = '2026-10-03T00:00:00.000Z';
@@ -30,6 +31,12 @@ function row(): IngestionRowRecord {
 }
 
 describe('Cloudflare admission v2 boundary', () => {
+  it('versions evaluator semantics independently from the legacy admission version', () => {
+    expect(ingestionV2AdmissionVersion('legacy-v1')).toHaveLength(64);
+    expect(ingestionV2AdmissionVersion('legacy-v1')).toBe(ingestionV2AdmissionVersion('legacy-v1'));
+    expect(ingestionV2AdmissionVersion('legacy-v1')).not.toBe(ingestionV2AdmissionVersion('legacy-v2'));
+  });
+
   it('persists idempotent non-publishing canary receipts in D1', async () => {
     const database = new DatabaseSync(':memory:');
     database.exec(readFileSync(new URL('../cloudflare/migrations/0047_ingestion_v2_dispatch_cursor.sql', import.meta.url), 'utf8'));
@@ -121,6 +128,43 @@ describe('Cloudflare admission v2 boundary', () => {
     expect(commits).toHaveLength(0);
     await evaluation.commitEffect?.();
     expect(commits).toHaveLength(1);
+  });
+
+  it('applies the live trusted-community policy when grading a Stage 2 canary row', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(`
+      <html><head><title>Quantitative Research Intern</title></head>
+      <body><main>${'Research markets and build quantitative models. '.repeat(10)}</main>
+      <form action="/applications"><input type="file" name="resume"></form></body></html>
+    `, { status: 200, headers: { 'Content-Type': 'text/html' } })));
+    const commits: Array<{ admission: { employerResolution: string; catalogEligible: boolean; alertEligible: boolean }; notify: boolean }> = [];
+    const evaluator = stage2AdmissionEvaluator(
+      { async resolve() { return ['93.184.216.34']; } },
+      { async commit(input) { commits.push(input); } },
+      undefined,
+      { trustedCommunityCatalogEnabled: true },
+    );
+    const evaluation = await evaluator.evaluate({
+      sourceId: 'northwestern-fintech-2027-quant', externalId: 'README.md:https://jobs.example.test/quant',
+      snapshotHash: row().snapshotHash, admissionVersion: 'trusted-v1', baseline: true,
+      row: { ...row(), sourceId: 'northwestern-fintech-2027-quant', notificationBaseline: true },
+      firstObservationEligible: false,
+      posting: {
+        sourceId: 'northwestern-fintech-2027-quant', provenance: 'reviewed-community',
+        externalId: 'README.md:https://jobs.example.test/quant', sourceUrl: 'https://example.test/board',
+        fetchedAt: observedAt, employer: { name: 'Source Reported Employer', authority: 'source-row' },
+        title: 'Quantitative Research Intern', content: [], locations: ['New York, NY'],
+        applyUrl: 'https://jobs.example.test/quant', sourceState: 'open', lifecycleAuthority: 'source',
+        seasonHint: 'summer-2027', seasonHintAuthority: 'source-default',
+      },
+    });
+    expect(evaluation).toMatchObject({ decision: { kind: 'admitted' }, commitEffect: expect.any(Function) });
+    await evaluation.commitEffect?.();
+    expect(commits).toEqual([expect.objectContaining({
+      notify: false,
+      admission: expect.objectContaining({
+        employerResolution: 'source-reported', catalogEligible: true, alertEligible: false,
+      }),
+    })]);
   });
 
   it('ledgers malformed work and retries it toward the DLQ instead of dropping it', async () => {

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { MemoryInternshipStore } from '../src/store.js';
 import { Poller } from '../src/poll.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
+import { ingestionV2AdmissionVersion } from '../src/ingestion-v2/admission/version.js';
 import type { RawListing, SourceAdapter, SourceCheckpoint, SourceFetchResult, SourceSnapshot, SourcedPosting } from '../src/types.js';
 
 const listing = (url: string, sourceId = 'one'): RawListing => ({ sourceId, document: 'README.md', sourceUrl: 'https://github.com/x', row: 5, company: 'Acme', title: 'Software Engineering Intern', location: 'NYC', season: 'summer-2027', applyUrl: url, compensation: { raw: '$40/hr', maxHourlyUSD: 40 }, state: 'open', fetchedAt: '2026-01-01T00:00:00Z' });
@@ -61,11 +62,15 @@ describe('polling', () => {
     const store = new MemoryInternshipStore();
     await new Poller([adapter], store).poll();
     const persisted = await store.getCheckpoint(source);
-    const comparisons: string[] = [];
+    const comparisons: Array<{ sourceId: string; snapshotHash: string; admissionVersion: string }> = [];
     const shadow = {
       isEnabledForSource: (sourceId: string) => sourceId === source,
-      async discover(input: { sourceId: string; snapshotHash: string }) {
-        comparisons.push(`${input.sourceId}:${input.snapshotHash}`);
+      async discover(input: { sourceId: string; snapshotHash: string; admissionVersion: string }) {
+        comparisons.push({
+          sourceId: input.sourceId,
+          snapshotHash: input.snapshotHash,
+          admissionVersion: input.admissionVersion,
+        });
       },
     };
 
@@ -76,7 +81,11 @@ describe('polling', () => {
     expect(adapter.received[1]?.etag).toBeUndefined();
     expect(adapter.received[1]?.documentEtags).toBeUndefined();
     expect(report.unchangedSources).toEqual([source]);
-    expect(comparisons).toEqual([`${source}:${persisted?.contentHash}`]);
+    expect(comparisons).toEqual([{
+      sourceId: source,
+      snapshotHash: persisted?.contentHash,
+      admissionVersion: ingestionV2AdmissionVersion('standard-v1'),
+    }]);
   });
 
   it('persists successful not-modified checkpoints for source-health visibility', async () => {

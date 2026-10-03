@@ -1,7 +1,7 @@
 import { safeFetchText } from '../src/employer/index.js';
 import { applicationPageEvidenceFromHtml, ApplicationUrlValidationError } from '../src/core/application-url.js';
 import { processAdmissionV2Message, type AdmissionV2MessageResult } from '../src/ingestion-v2/admission/consumer.js';
-import { RuleBasedAdmissionV2Evaluator, type AdmissionCanonicalEmployerResolver, type AdmissionDestinationProber, type AdmissionV2CatalogSink } from '../src/ingestion-v2/admission/evaluator.js';
+import { RuleBasedAdmissionV2Evaluator, type AdmissionCanonicalEmployerResolver, type AdmissionDestinationProber, type AdmissionV2CatalogSink, type AdmissionV2PriorContextResolver } from '../src/ingestion-v2/admission/evaluator.js';
 import { validateAdmissionV2Message } from '../src/ingestion-v2/admission/message.js';
 import { RecordingAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/recording-sink.js';
 import { AdmissionRowTransientError } from '../src/ingestion-v2/admission/taxonomy.js';
@@ -9,6 +9,7 @@ import { admissionV2FeatureConfig, type AdmissionV2RowEvaluator } from '../src/i
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
 import { D1RecordingAdmissionV2CatalogSink } from './admission-v2-recording-sink.js';
 import { D1CatalogAdmissionStore } from './catalog-admission-store.js';
+import { D1InternshipStore } from './d1-store.js';
 import { recordQueueFailureBestEffort, resolveQueueFailures } from './dlq-operations.js';
 import type { D1Database, MessageBatch, R2Bucket } from './types.js';
 
@@ -19,6 +20,7 @@ export interface AdmissionV2Environment {
   DOCUMENTS: R2Bucket;
   INGESTION_V2_ADMISSION_ENABLED?: string;
   INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST?: string;
+  TRUSTED_COMMUNITY_CATALOG_ENABLED?: string;
 }
 
 interface HostResolver {
@@ -82,11 +84,17 @@ export function stage2AdmissionEvaluator(
   resolver: HostResolver,
   sink: AdmissionV2CatalogSink = new RecordingAdmissionV2CatalogSink(),
   resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver,
+  options: {
+    resolvePriorContext?: AdmissionV2PriorContextResolver;
+    trustedCommunityCatalogEnabled?: boolean;
+  } = {},
 ): AdmissionV2RowEvaluator {
   return new RuleBasedAdmissionV2Evaluator({
     prober: cloudflareAdmissionProber(resolver),
     sink,
     ...(resolveCanonicalEmployer ? { resolveCanonicalEmployer } : {}),
+    ...(options.resolvePriorContext ? { resolvePriorContext: options.resolvePriorContext } : {}),
+    trustedCommunityCatalogEnabled: options.trustedCommunityCatalogEnabled ?? false,
   });
 }
 
@@ -117,12 +125,29 @@ export async function processAdmissionV2Batch(
   const snapshots = new R2IngestionSnapshotStore(env.DOCUMENTS);
   const now = options.now ?? (() => new Date());
   const admissionStore = new D1CatalogAdmissionStore(env.DB);
+  const internshipStore = new D1InternshipStore(env.DB);
   const evaluator = stage2AdmissionEvaluator(
     options.resolver,
     options.sink ?? new D1RecordingAdmissionV2CatalogSink(env.DB, now),
     async (listing) => listing.providerIdentity
       ? admissionStore.resolveCanonicalEmployer(listing.providerIdentity)
       : undefined,
+    {
+      trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
+      resolvePriorContext: async (sourceId, externalId) => {
+        const prior = await internshipStore.getSourceOccurrence(sourceId, externalId);
+        if (!prior) return undefined;
+        return {
+          ...(prior.occurrence.admission ? { admission: prior.occurrence.admission } : {}),
+          ...(prior.occurrence.postingIdentityDecision
+            ? { postingIdentityDecision: prior.occurrence.postingIdentityDecision }
+            : {}),
+          ...(prior.occurrence.trustedCommunityAlertQualification
+            ? { trustedCommunityAlertQualification: prior.occurrence.trustedCommunityAlertQualification }
+            : {}),
+        };
+      },
+    },
   );
   const retryDelaySeconds = options.retryDelaySeconds ?? 60;
   for (const message of batch.messages) {

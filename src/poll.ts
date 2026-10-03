@@ -19,6 +19,7 @@ import { CatalogReconciler } from './ingestion/catalog-reconciler.js';
 import { evaluateSourceFreshness } from './ingestion/monitoring.js';
 import { sourceProvider, sourceRegion } from './integration-registry.js';
 import { processSnapshot, SOURCE_METADATA_PROCESSING_REVISION } from './ingestion/processor.js';
+import { ingestionV2AdmissionVersion } from './ingestion-v2/admission/version.js';
 import { deriveCanonicalAdmission, evaluateCatalogAdmission } from './catalog-admission.js';
 import type { EmployerIconSeed } from './employer-icon-resolution.js';
 import { automaticEmployerIdentityCandidate, automaticEmployerIdentityObservationSlice, groupAutomaticEmployerIdentityCandidates } from './employer/automatic-identity.js';
@@ -1831,7 +1832,9 @@ export class IngestionRunner {
             postings: result.postings,
             processed: batch.processed,
             snapshotHash: batch.snapshotHash,
-            admissionVersion: githubAdmissionConfigurationVersion ?? admissionConfigurationVersion ?? 'standard-v1',
+            admissionVersion: ingestionV2AdmissionVersion(
+              githubAdmissionConfigurationVersion ?? admissionConfigurationVersion ?? 'standard-v1',
+            ),
             baseline,
             observedAt: now,
             legacyActionableExternalIds: resolvedListings.map(externalId),
