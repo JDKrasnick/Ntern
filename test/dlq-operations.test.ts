@@ -3,6 +3,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { describe, expect, it, vi } from 'vitest';
 import { applyDlq, cleanupDlqRecords, inspectDlq, planDlq, recordQueueFailure, recordQueueFailureBestEffort, resolveQueueFailures, type DlqDependencies, type PeekedMessage } from '../cloudflare/dlq-operations.js';
 import type { D1Database, D1PreparedStatement, Queue } from '../cloudflare/types.js';
+import { buildAdmissionV2Messages } from '../src/ingestion-v2/admission/message.js';
 
 type SqliteValue = string | number | bigint | null | Uint8Array;
 function sqliteD1(database: DatabaseSync): D1Database {
@@ -65,7 +66,10 @@ function subject(messages: PeekedMessage[], health: DlqDependencies['sourceHealt
   const queue: Queue = { send, async sendBatch() {} };
   const dependencies: DlqDependencies = {
     db: sqliteD1(database), sourceHealth: health, now: () => new Date('2026-09-04T12:00:00.000Z'),
-    workQueues: { greenhouse: queue, lever: queue, ashby: queue, github: queue, gmail: queue, 'destination-verification': queue },
+    workQueues: {
+      greenhouse: queue, lever: queue, ashby: queue, github: queue, gmail: queue,
+      'destination-verification': queue, 'admission-v2': queue,
+    },
     api: fake.api,
   };
   return { database, dependencies, send, purge: fake.api.purge, events: fake.events, fake };
@@ -85,6 +89,14 @@ const destinationMessage = (id: string, label = '42'): PeekedMessage => ({
     queuedAt: '2026-09-04T09:00:00.000Z', idempotencyKey: `idem-${label}`, metadataExtractionVersion: 7,
     metadataArtifactHash: 'artifact-hash-42', shadowOrigin: 'provider-poll',
   },
+});
+
+const admissionMessage = (id: string): PeekedMessage => ({
+  id, attempts: 3, timestampMs: Date.parse('2026-09-04T10:00:00.000Z'), ref: `private-${id}`,
+  body: buildAdmissionV2Messages({
+    sourceId: 'community-example', snapshotHash: 'a'.repeat(64), snapshotKey: 'snapshot',
+    admissionVersion: 'standard-v1', baseline: false, externalIds: ['role-1'],
+  })[0],
 });
 
 describe('protected DLQ operations', () => {
@@ -301,6 +313,17 @@ describe('protected DLQ operations', () => {
 });
 
 describe('DLQ replay from the selection the plan peeked', () => {
+  it('replays a validated admission message with its exact snapshot identity', async () => {
+    const message = admissionMessage('admission-1');
+    const { database, dependencies, send } = subject([message]);
+    const plan = await planDlq({ queue: 'admission-v2', action: 'replay', messageIds: ['admission-1'], expectedCount: 1,
+      reason: 'Snapshot was restored and verified' }, dependencies);
+    await expect(applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 1 }, dependencies))
+      .resolves.toMatchObject({ appliedCount: 1, conflicts: [] });
+    expect(send).toHaveBeenCalledWith(message.body);
+    database.close();
+  });
+
   it('applies a selection seen by the plan peek even when a later peek is disjoint', async () => {
     const { database, dependencies, send, purge, fake } = subject(
       [catalogMessage('m1'), catalogMessage('m2'), catalogMessage('m3'), catalogMessage('m4')], undefined, 2);

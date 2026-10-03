@@ -98,7 +98,8 @@ import {
   type CloudflareCatalogQueueBinding,
 } from '../src/integration-registry.js';
 
-export interface Environment extends AuthEnvironment {
+export interface Environment extends AuthEnvironment,
+  Pick<IngestionBindings, 'ADMISSION_V2_QUEUE' | 'ADMISSION_V2_DLQ'> {
   AI: WorkersAi;
   RESUME_EMBEDDINGS?: ResumeVectorIndex;
   DOCUMENTS: R2Bucket;
@@ -111,7 +112,6 @@ export interface Environment extends AuthEnvironment {
   DESTINATION_VERIFICATION_QUEUE: Queue;
   SHADOW_EXTRACTION_QUEUE: Queue;
   RESUME_JOB_IMPORT_QUEUE: Queue;
-  ADMISSION_V2_QUEUE: Queue;
   RESUME_PDF_COMPILER: DurableObjectNamespace;
   D1_TRAFFIC_CONTROLLER?: DurableObjectNamespace;
   DESTINATION_BROWSER: BrowserWorker;
@@ -122,7 +122,6 @@ export interface Environment extends AuthEnvironment {
   GMAIL_DLQ: Queue;
   DESTINATION_VERIFICATION_DLQ: Queue;
   SHADOW_EXTRACTION_DLQ: Queue;
-  ADMISSION_V2_DLQ: Queue;
   PUBLIC_API_URL: string;
   CATALOG_R2_READ_ENABLED?: string;
   RESEND_API_KEY?: string;
@@ -635,6 +634,7 @@ export function dlqDependencies(env: Environment): DlqDependencies {
     github: env.GITHUB_QUEUE,
     gmail: env.GMAIL_QUEUE,
     'destination-verification': env.DESTINATION_VERIFICATION_QUEUE,
+    'admission-v2': env.ADMISSION_V2_QUEUE,
   };
   return {
     db: env.DB,
@@ -1323,14 +1323,19 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       return withCors(Response.json({ message: 'sourceId and externalId are required' }, { status: 400 }));
     }
     const repository = new D1IngestionV2Repository(env.DB);
+    const snapshots = new R2IngestionSnapshotStore(env.DOCUMENTS);
     if (!body.replayToken) {
       // Preview: no mutation. The returned token must be echoed by an apply call.
-      return withCors(Response.json(await planAdmissionReplay(repository, { sourceId: body.sourceId, externalId: body.externalId })));
+      return withCors(Response.json(await planAdmissionReplay(
+        repository,
+        { sourceId: body.sourceId, externalId: body.externalId },
+        { snapshots },
+      )));
     }
     const result = await applyAdmissionReplay(
       repository,
       { sourceId: body.sourceId, externalId: body.externalId, replayToken: body.replayToken },
-      { actor: request.headers.get('X-Operations-Actor') ?? 'operator' },
+      { snapshots, actor: request.headers.get('X-Operations-Actor') ?? 'operator' },
     );
     return withCors(Response.json(result, { status: result.applied ? 200 : 409 }));
   }
@@ -2092,7 +2097,14 @@ async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promi
   const features = admissionV2FeatureConfig(env);
   if (!features.admissionEnabled) return { enabled: false, sources: 0, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
   const ledger = new D1IngestionV2Repository(env.DB);
-  const sourceIds = (await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT)).filter((sourceId) => admissionSourceAllowed(env, sourceId));
+  const cursor = await ledger.getDispatchSourceCursor();
+  let selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT, cursor);
+  if (!selectedSourceIds.length && cursor) selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT);
+  const nextCursor = selectedSourceIds.length === ADMISSION_V2_SOURCE_LIMIT
+    ? selectedSourceIds[selectedSourceIds.length - 1]
+    : undefined;
+  await ledger.setDispatchSourceCursor(nextCursor, observedAt.toISOString());
+  const sourceIds = selectedSourceIds.filter((sourceId) => admissionSourceAllowed(env, sourceId));
   let bootstrapped = 0;
   let migrated = 0;
   let batches = 0;

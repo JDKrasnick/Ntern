@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { processAdmissionV2Message } from '../src/ingestion-v2/admission/consumer.js';
+import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
+import { RuleBasedAdmissionV2Evaluator } from '../src/ingestion-v2/admission/evaluator.js';
 import type { AcquireLeaseInput, AdmissionV2Ledger, ExpectedAdmissionIdentity, MarkQueuedInput } from '../src/ingestion-v2/admission/ledger.js';
 import { applyAdmissionReplay, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import { migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
@@ -17,6 +19,7 @@ import type {
   AdmissionV2SourceOverview,
 } from '../src/ingestion-v2/admission/types.js';
 import { buildAdmissionV2Messages } from '../src/ingestion-v2/admission/message.js';
+import { MemoryInternshipStore } from '../src/store.js';
 import type {
   CompactIngestionRow,
   IngestionRowRecord,
@@ -106,7 +109,10 @@ class FakeLedger implements AdmissionV2Ledger {
     return true;
   }
 
-  async reopenRows(sourceId: string, externalIds: readonly string[], now: string, options: { admissionVersion?: string } = {}): Promise<number> {
+  async reopenRows(sourceId: string, externalIds: readonly string[], now: string, options: {
+    admissionVersion?: string;
+    notificationBaseline?: boolean;
+  } = {}): Promise<number> {
     let count = 0;
     for (const externalId of new Set(externalIds)) {
       const row = this.row(sourceId, externalId);
@@ -114,7 +120,9 @@ class FakeLedger implements AdmissionV2Ledger {
       this.save({
         ...row, state: 'queued', attemptCount: 0, retryAt: undefined, leaseOwner: undefined, leaseExpiresAt: undefined,
         failureClass: undefined, failureDetail: undefined, settledAt: undefined, decision: undefined,
-        admissionVersion: options.admissionVersion ?? row.admissionVersion, updatedAt: now,
+        admissionVersion: options.admissionVersion ?? row.admissionVersion,
+        notificationBaseline: options.notificationBaseline ?? row.notificationBaseline,
+        updatedAt: now,
       });
       count += 1;
     }
@@ -187,9 +195,13 @@ class FakeLedger implements AdmissionV2Ledger {
     return this.snapshots.get(this.key(sourceId, snapshotHash));
   }
 
-  async listActiveSourceIds(limit: number): Promise<string[]> {
-    return [...new Set([...this.snapshots.values()].filter((record) => record.state === 'active').map((record) => record.sourceId))].slice(0, limit);
+  async listActiveSourceIds(limit: number, afterSourceId?: string): Promise<string[]> {
+    return [...new Set([...this.snapshots.values()].filter((record) => record.state === 'active').map((record) => record.sourceId))]
+      .sort().filter((sourceId) => !afterSourceId || sourceId > afterSourceId).slice(0, limit);
   }
+  private dispatchSourceCursor?: string;
+  async getDispatchSourceCursor(): Promise<string | undefined> { return this.dispatchSourceCursor; }
+  async setDispatchSourceCursor(sourceId: string | undefined): Promise<void> { this.dispatchSourceCursor = sourceId; }
 
   async overview(sourceId: string): Promise<AdmissionV2SourceOverview> {
     const rows = [...this.rows.values()].filter((row) => row.sourceId === sourceId);
@@ -221,10 +233,18 @@ class FakeSnapshots implements IngestionSnapshotObjectStore {
   seed(envelope: NormalizedSnapshotEnvelope) { this.envelopes.set(`${envelope.sourceId}\u0000${envelope.snapshotHash}`, envelope); }
 }
 
+function postingUrl(externalId: string): string {
+  const postingId = 100_000 + ([...externalId].reduce(
+    (total, character) => Math.imul(total, 31) + character.charCodeAt(0),
+    17,
+  ) >>> 0) % 9_000_000;
+  return `https://job-boards.greenhouse.io/acme/jobs/${postingId}`;
+}
+
 function posting(externalId: string) {
   return {
     sourceId: SOURCE, externalId, document: 'board', row: 1, provenance: 'reviewed-community' as const,
-    sourceUrl: `https://example.com/${externalId}`, applyUrl: `https://boards.example.com/jobs/${externalId}`,
+    sourceUrl: `https://example.com/${externalId}`, applyUrl: postingUrl(externalId),
     employer: { id: 'acme', name: 'Acme', authority: 'source-row' as const },
     title: `Software Engineering Intern ${externalId}`, locations: ['Remote'], content: [{ kind: 'description' as const, format: 'plain' as const, value: 'Build software. Summer 2027 internship.' }],
     lifecycleAuthority: 'posting' as const, sourceState: 'open' as const, fetchedAt: '2026-10-01T00:00:00.000Z',
@@ -521,14 +541,95 @@ describe('admission v2 dispatcher', () => {
 });
 
 describe('admission v2 resource and contention', () => {
-  it('downloads the snapshot once per batch, not once per row', async () => {
+  it('publishes 24 peers once while one poison row retries and quarantines', async () => {
+    const ids = Array.from({ length: 25 }, (_, index) => index === 12 ? 'poison' : `valid-${String(index).padStart(2, '0')}`);
+    const { ledger, snapshots } = setup(ids);
+    const store = new MemoryInternshipStore();
+    const evaluator = new RuleBasedAdmissionV2Evaluator({
+      now: () => new Date('2026-10-03T12:00:00.000Z'),
+      sink: new ReconcilerAdmissionV2CatalogSink(store, () => new Date('2026-10-03T12:00:00.000Z')),
+      async resolveCanonicalEmployer() { return { id: 'acme', displayName: 'Acme' }; },
+      prober: {
+        async probe({ externalId }) {
+          if (externalId === 'poison') throw new AdmissionRowTransientError('upstream-server-error', '503');
+          return {
+            reachability: 'live' as const,
+            evidence: {
+              url: postingUrl(externalId),
+              title: `Software Engineering Intern ${externalId}`,
+              description: 'Build software. Summer 2027 internship.',
+              expectedPostingId: new URL(postingUrl(externalId)).pathname.split('/').at(-1),
+              postingIdPresent: true,
+              applicationFormPresent: true,
+              closureState: 'open' as const,
+              confidence: { score: 1, level: 'high' as const, recommendation: 'alert-eligible' as const, signals: ['role-title', 'application-form'] },
+            },
+          };
+        },
+      },
+    });
+    const [message] = messagesFor(ids);
+    const first = await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    expect(first).toMatchObject({ settled: 24, retried: 1, quarantined: 0 });
+    expect(first.counts).toEqual({ admitted: 24, blocked: 0, shelved: 0 });
+    expect(store.jobs.size).toBe(24);
+    expect(store.occurrences.size).toBe(24);
+    expect(store.notificationEvents.size).toBe(24);
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const poison = (await ledger.getRow(SOURCE, 'poison'))!;
+      ledger.seedRow({ ...poison, retryAt: '2000-01-01T00:00:00.000Z' });
+      await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    }
+    expect(await ledger.getRow(SOURCE, 'poison')).toMatchObject({ state: 'quarantined', attemptCount: 3 });
+    expect(store.jobs.size).toBe(24);
+    expect(store.occurrences.size).toBe(24);
+    expect(store.notificationEvents.size).toBe(24);
+  });
+
+  it('keeps a largest-allowed batch inside the CPU, heap, snapshot, and probe bounds', async () => {
     const ids = Array.from({ length: 25 }, (_, index) => `row-${index}`);
     const { ledger, snapshots } = setup(ids);
-    const evaluator = new CountingEvaluator(async () => ({ kind: 'admitted' }));
+    let activeProbes = 0;
+    let peakProbes = 0;
+    const evaluator = new CountingEvaluator(async () => {
+      activeProbes += 1;
+      peakProbes = Math.max(peakProbes, activeProbes);
+      await Promise.resolve();
+      activeProbes -= 1;
+      return { kind: 'admitted' };
+    });
     const [message] = messagesFor(ids);
+    const heapBefore = process.memoryUsage().heapUsed;
+    const cpuBefore = process.cpuUsage();
     await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    const cpu = process.cpuUsage(cpuBefore);
+    const cpuMs = (cpu.user + cpu.system) / 1_000;
+    const heapGrowthMb = Math.max(0, process.memoryUsage().heapUsed - heapBefore) / (1024 * 1024);
     expect(snapshots.reads).toBe(1);
     expect(evaluator.calls.size).toBe(25);
+    expect(peakProbes).toBe(1);
+    expect(cpuMs).toBeLessThan(1_000);
+    expect(heapGrowthMb).toBeLessThan(32);
+  });
+
+  it('measures a concurrency-one backlog draining in bounded 25-row deliveries', async () => {
+    const ids = Array.from({ length: 75 }, (_, index) => `row-${String(index).padStart(3, '0')}`);
+    const { ledger, snapshots } = setup(ids);
+    const evaluator = new CountingEvaluator(async () => ({ kind: 'admitted' }));
+    const messages = messagesFor(ids);
+    const startedAt = performance.now();
+    let settled = 0;
+    for (const message of messages) {
+      const result = await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+      settled += result.settled;
+    }
+    const elapsedSeconds = Math.max((performance.now() - startedAt) / 1_000, 0.001);
+    const measuredDrainRate = settled / elapsedSeconds;
+    expect(messages).toHaveLength(3);
+    expect(settled).toBe(75);
+    expect(measuredDrainRate).toBeGreaterThan(0);
+    expect(snapshots.reads).toBe(3);
   });
 
   it('lets two concurrent consumers race for the same batch without double processing', async () => {
@@ -548,35 +649,42 @@ describe('admission v2 resource and contention', () => {
 
 describe('admission v2 guarded replay', () => {
   it('previews and applies a replay for a quarantined row', async () => {
-    const { ledger } = setup(['a']);
+    const { ledger, snapshots } = setup(['a']);
     ledger.seedRow(ledgerRow('a', { state: 'quarantined', attemptCount: 3, failureClass: 'upstream-server-error' }));
-    const preview = await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a' });
+    const preview = await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a' }, { snapshots });
     expect(preview).toMatchObject({ eligible: true, expectedTransition: 'quarantined->queued' });
     expect(preview.replayToken).toBeDefined();
-    const applied = await applyAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a', replayToken: preview.replayToken! });
+    const applied = await applyAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a', replayToken: preview.replayToken! }, { snapshots });
     expect(applied.applied).toBe(true);
     expect((await ledger.getRow(SOURCE, 'a'))?.state).toBe('queued');
     // A repeated apply is a no-op.
-    const repeat = await applyAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a', replayToken: preview.replayToken! });
+    const repeat = await applyAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a', replayToken: preview.replayToken! }, { snapshots });
     expect(repeat.applied).toBe(false);
   });
 
   it('refuses to replay an in-flight row and refuses a stale token', async () => {
-    const { ledger } = setup(['a', 'b']);
+    const { ledger, snapshots } = setup(['a', 'b']);
     ledger.seedRow(ledgerRow('a', { state: 'processing', leaseOwner: 'x', leaseExpiresAt: '2999-01-01T00:00:00.000Z' }));
-    expect((await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a' })).eligible).toBe(false);
+    expect((await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a' }, { snapshots })).eligible).toBe(false);
     ledger.seedRow(ledgerRow('b', { state: 'quarantined', attemptCount: 3 }));
-    const preview = await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'b' });
-    const applied = await applyAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'b', replayToken: 'wrong' });
+    const preview = await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'b' }, { snapshots });
+    const applied = await applyAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'b', replayToken: 'wrong' }, { snapshots });
     expect(applied).toEqual({ applied: false, reason: 'stale-replay-token' });
     expect(preview.replayToken).toBeDefined();
   });
 
   it('refuses to replay an ID absent from a retained snapshot', async () => {
-    const { ledger } = setup(['a']);
+    const { ledger, snapshots } = setup(['a']);
     ledger.seedRow(ledgerRow('a', { state: 'quarantined', attemptCount: 3, snapshotHash: 'gone'.repeat(16) }));
-    const preview = await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a' });
+    const preview = await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a' }, { snapshots });
     expect(preview).toMatchObject({ eligible: false, reason: 'snapshot-not-retained' });
+  });
+
+  it('refuses a ledger row missing from the retained complete snapshot object', async () => {
+    const { ledger, snapshots } = setup(['other']);
+    ledger.seedRow(ledgerRow('a', { state: 'quarantined', attemptCount: 3 }));
+    const preview = await planAdmissionReplay(ledger, { sourceId: SOURCE, externalId: 'a' }, { snapshots });
+    expect(preview).toMatchObject({ eligible: false, reason: 'row-not-in-retained-snapshot' });
   });
 });
 
@@ -591,7 +699,10 @@ describe('admission v2 policy migration', () => {
     const result = await migrateAdmissionPolicy(SOURCE, 'standard-v2', { ledger });
     expect(result.reopened).toBe(2);
     expect(result.remaining).toBe(false);
-    expect(await ledger.getRow(SOURCE, 'stale-1')).toMatchObject({ state: 'queued', admissionVersion: 'standard-v2', attemptCount: 0 });
+    expect(await ledger.getRow(SOURCE, 'stale-1')).toMatchObject({
+      state: 'queued', admissionVersion: 'standard-v2', attemptCount: 0, notificationBaseline: true,
+    });
+    expect(await ledger.getRow(SOURCE, 'stale-2')).toMatchObject({ notificationBaseline: true });
     expect(await ledger.getRow(SOURCE, 'poison')).toMatchObject({ state: 'quarantined', attemptCount: 3 });
     // A settled row already on the current version is left alone and stays visible.
     expect(await ledger.getRow(SOURCE, 'current')).toMatchObject({ state: 'settled', decision: 'admitted' });

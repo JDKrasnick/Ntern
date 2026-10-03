@@ -84,11 +84,41 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       await this.run(input, started);
     } catch (error) {
       // Shadow mode must never fail or retry a legacy delivery.
+      const detail = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+      const empty = { count: 0, samples: [] as string[] };
+      const failed: ShadowComparisonMetrics = {
+        sourceId: input.sourceId,
+        snapshotHash: input.snapshotHash,
+        admissionVersion: input.admissionVersion,
+        complete: false,
+        observedAt: input.observedAt,
+        durationMs: this.now().getTime() - started,
+        counts: { total: input.postings.length, new: 0, changed: 0, stalePolicy: 0, retryable: 0, unchanged: 0, reappeared: 0, missing: 0 },
+        v2Actionable: empty,
+        legacyActionable: sample(input.legacyActionableExternalIds),
+        v2Only: empty,
+        legacyOnly: sample(input.legacyActionableExternalIds),
+        d1RowsRead: 0,
+        d1RowsWritten: 0,
+        r2Bytes: 0,
+        status: 'failed',
+      };
+      try {
+        await this.dependencies.repository.putShadowComparison(failed);
+      } catch (persistenceError) {
+        this.log({
+          event: 'ingestion_v2_shadow_failure_persistence_failed',
+          sourceId: input.sourceId,
+          error: persistenceError instanceof Error ? persistenceError.message.slice(0, 500) : String(persistenceError).slice(0, 500),
+        });
+      }
       this.log({
         event: 'ingestion_v2_shadow_failed',
         sourceId: input.sourceId,
         snapshotHash: input.snapshotHash,
-        error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+        durationMs: failed.durationMs,
+        status: failed.status,
+        error: detail,
       });
     }
   }

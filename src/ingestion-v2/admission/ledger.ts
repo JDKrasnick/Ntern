@@ -80,7 +80,10 @@ export interface AdmissionV2Ledger {
    * replay). Optionally stamps a new admission version, which is how policy
    * migration re-grades a row under the current policy.
    */
-  reopenRows(sourceId: string, externalIds: readonly string[], now: string, options?: { admissionVersion?: string }): Promise<number>;
+  reopenRows(sourceId: string, externalIds: readonly string[], now: string, options?: {
+    admissionVersion?: string;
+    notificationBaseline?: boolean;
+  }): Promise<number>;
   /** Reopen shadow-observed rows that have never completed V2 admission. */
   reopenUnprocessedRows(sourceId: string, snapshotHash: string, admissionVersion: string, now: string, limit: number): Promise<number>;
   /** Expired leases are reclaimable; returns the rows moved back to `queued`. */
@@ -101,6 +104,8 @@ export interface AdmissionV2Ledger {
   getSnapshot(sourceId: string, snapshotHash: string): Promise<IngestionSnapshotRecord | undefined>;
   listRowsPage(sourceId: string, options?: { state?: IngestionRowState; cursor?: string; limit?: number }): Promise<{ rows: IngestionRowRecord[]; cursor?: string }>;
   /** Sources with an active V2 snapshot, for the scheduled dispatcher. */
-  listActiveSourceIds(limit: number): Promise<string[]>;
+  listActiveSourceIds(limit: number, afterSourceId?: string): Promise<string[]>;
+  getDispatchSourceCursor(): Promise<string | undefined>;
+  setDispatchSourceCursor(sourceId: string | undefined, updatedAt: string): Promise<void>;
   overview(sourceId: string): Promise<AdmissionV2SourceOverview>;
 }

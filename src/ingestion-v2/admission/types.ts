@@ -133,6 +133,8 @@ export interface AdmissionV2SourceOverview {
   settled: number;
   quarantined: number;
   absent: number;
+  verificationDecisions?: number;
+  notificationEligibleDecisions?: number;
   oldestWorkAt?: string;
   currentSnapshotHash?: string;
 }

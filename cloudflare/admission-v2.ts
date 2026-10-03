@@ -1,12 +1,17 @@
 import { safeFetchText } from '../src/employer/index.js';
 import { processAdmissionV2Message, type AdmissionV2MessageResult } from '../src/ingestion-v2/admission/consumer.js';
-import { RuleBasedAdmissionV2Evaluator, type AdmissionDestinationProber, type AdmissionV2CatalogSink } from '../src/ingestion-v2/admission/evaluator.js';
+import { RuleBasedAdmissionV2Evaluator, type AdmissionCanonicalEmployerResolver, type AdmissionDestinationProber, type AdmissionV2CatalogSink } from '../src/ingestion-v2/admission/evaluator.js';
 import { validateAdmissionV2Message } from '../src/ingestion-v2/admission/message.js';
 import { RecordingAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/recording-sink.js';
 import { AdmissionRowTransientError } from '../src/ingestion-v2/admission/taxonomy.js';
 import { admissionV2FeatureConfig, type AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
+import { D1RecordingAdmissionV2CatalogSink } from './admission-v2-recording-sink.js';
+import { D1CatalogAdmissionStore } from './catalog-admission-store.js';
+import { recordQueueFailureBestEffort, resolveQueueFailures } from './dlq-operations.js';
 import type { D1Database, MessageBatch, R2Bucket } from './types.js';
+
+export const ADMISSION_V2_QUEUE_NAME = 'intern-notifs-admission-v2';
 
 export interface AdmissionV2Environment {
   DB: D1Database;
@@ -29,7 +34,10 @@ export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDest
           resolver,
           timeoutMs: 8_000,
           maxRedirects: 2,
-          maxBodyBytes: 256 * 1024,
+          // Admission only consumes the status. Keep a tiny bounded prefix so a
+          // large healthy careers page cannot become a false transient failure.
+          maxBodyBytes: 1024,
+          onOversize: 'truncate',
           headers: { Accept: 'text/html,application/xhtml+xml' },
         });
       } catch (error) {
@@ -51,14 +59,22 @@ export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDest
  * decision it would have published without mutating the live catalog. Stage 3
  * cutover swaps the sink for the reconciler-backed writer.
  */
-export function stage2AdmissionEvaluator(resolver: HostResolver, sink: AdmissionV2CatalogSink = new RecordingAdmissionV2CatalogSink()): AdmissionV2RowEvaluator {
-  return new RuleBasedAdmissionV2Evaluator({ prober: cloudflareAdmissionProber(resolver), sink });
+export function stage2AdmissionEvaluator(
+  resolver: HostResolver,
+  sink: AdmissionV2CatalogSink = new RecordingAdmissionV2CatalogSink(),
+  resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver,
+): AdmissionV2RowEvaluator {
+  return new RuleBasedAdmissionV2Evaluator({
+    prober: cloudflareAdmissionProber(resolver),
+    sink,
+    ...(resolveCanonicalEmployer ? { resolveCanonicalEmployer } : {}),
+  });
 }
 
 /**
  * Consume one admission delivery. Each message carries at most 25 external IDs;
  * every row settles, retries, or quarantines independently. Malformed work is
- * acknowledged (no dispatcher could reissue it); infrastructure failures are
+ * ledgered and sent through platform retries/DLQ; infrastructure failures are
  * retried without consuming a row attempt; transient/terminal results are
  * acknowledged after every peer row has committed.
  */
@@ -73,20 +89,34 @@ export async function processAdmissionV2Batch(
     for (const message of batch.messages) {
       const validated = validateAdmissionV2Message(message.body);
       if (validated.ok) await ledger.acknowledgeHandoff(validated.message.batchId, now().toISOString());
+      await resolveQueueFailures(env.DB, ADMISSION_V2_QUEUE_NAME, message.id, now());
       message.ack();
     }
     console.log(JSON.stringify({ event: 'ingestion_v2_admission_disabled_drain', messages: batch.messages.length }));
     return;
   }
   const snapshots = new R2IngestionSnapshotStore(env.DOCUMENTS);
-  const evaluator = stage2AdmissionEvaluator(options.resolver, options.sink);
   const now = options.now ?? (() => new Date());
+  const admissionStore = new D1CatalogAdmissionStore(env.DB);
+  const evaluator = stage2AdmissionEvaluator(
+    options.resolver,
+    options.sink ?? new D1RecordingAdmissionV2CatalogSink(env.DB, now),
+    async (listing) => listing.providerIdentity
+      ? admissionStore.resolveCanonicalEmployer(listing.providerIdentity)
+      : undefined,
+  );
   const retryDelaySeconds = options.retryDelaySeconds ?? 60;
   for (const message of batch.messages) {
     const validated = validateAdmissionV2Message(message.body);
     if (!validated.ok) {
       console.error(JSON.stringify({ event: 'ingestion_v2_admission_malformed', messageId: message.id, reason: validated.reason }));
-      message.ack();
+      const failure = new Error(`Malformed admission-v2 message: ${validated.reason}`);
+      await recordQueueFailureBestEffort({
+        db: env.DB, queueName: ADMISSION_V2_QUEUE_NAME, messageId: message.id,
+        attempts: message.attempts, timestamp: message.timestamp, body: message.body,
+        error: failure, now: now(),
+      });
+      message.retry({ delaySeconds: retryDelaySeconds }, failure);
       continue;
     }
     if (!admissionSourceAllowed(env, validated.message.sourceId)) {
@@ -98,11 +128,17 @@ export async function processAdmissionV2Batch(
       result = await processAdmissionV2Message(validated.message, { ledger, snapshots, evaluator, ...(options.now ? { now: options.now } : {}) });
     } catch (error) {
       console.error(JSON.stringify({ event: 'ingestion_v2_admission_retry', messageId: message.id, error: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) }));
-      message.retry({ delaySeconds: retryDelaySeconds });
+      await recordQueueFailureBestEffort({
+        db: env.DB, queueName: ADMISSION_V2_QUEUE_NAME, messageId: message.id,
+        attempts: message.attempts, timestamp: message.timestamp, sourceId: validated.message.sourceId,
+        sourceKind: 'ingestion-v2-admission', body: message.body, error, now: now(),
+      });
+      message.retry({ delaySeconds: retryDelaySeconds }, error);
       continue;
     }
     if (result.acknowledged) {
       await ledger.acknowledgeHandoff(validated.message.batchId, now().toISOString());
+      await resolveQueueFailures(env.DB, ADMISSION_V2_QUEUE_NAME, message.id, now());
       message.ack();
     } else {
       console.warn(JSON.stringify({
@@ -110,7 +146,13 @@ export async function processAdmissionV2Batch(
         messageId: message.id, batchId: validated.message.batchId,
         classification: result.infrastructureFailure?.classification,
       }));
-      message.retry({ delaySeconds: retryDelaySeconds });
+      const failure = new Error(result.infrastructureFailure?.classification ?? 'admission-v2 infrastructure failure');
+      await recordQueueFailureBestEffort({
+        db: env.DB, queueName: ADMISSION_V2_QUEUE_NAME, messageId: message.id,
+        attempts: message.attempts, timestamp: message.timestamp, sourceId: validated.message.sourceId,
+        sourceKind: 'ingestion-v2-admission', body: message.body, error: failure, now: now(),
+      });
+      message.retry({ delaySeconds: retryDelaySeconds }, failure);
     }
   }
 }

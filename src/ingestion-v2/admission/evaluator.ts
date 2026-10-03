@@ -2,9 +2,9 @@ import { evaluateCatalogAdmission } from '../../catalog-admission.js';
 import type { ApplicationPageEvidence } from '../../core/application-url.js';
 import type { Reachability } from '../../core/application-verification.js';
 import { classifyDestination } from '../../destination-verification.js';
-import { stableSourceOccurrenceJobId } from '../../identity/registry.js';
+import { resolvePostingIdentityDecision, stableSourceOccurrenceJobId } from '../../identity/registry.js';
 import { processPosting } from '../../ingestion/processor.js';
-import type { CatalogAdmission, ProcessedListing, SourcedPosting } from '../../types.js';
+import type { CanonicalEmployer, CatalogAdmission, ProcessedListing, SourcedPosting } from '../../types.js';
 import { admissionShouldNotify } from './migration.js';
 import type { AdmissionRowContext, AdmissionRowEvaluation, AdmissionV2RowEvaluator } from './types.js';
 
@@ -21,6 +21,10 @@ export interface AdmissionDestinationProber {
    */
   probe(input: { sourceId: string; externalId: string; applyUrl: string; observedAt: string }): Promise<AdmissionDestinationProbe>;
 }
+
+export type AdmissionCanonicalEmployerResolver = (
+  listing: ProcessedListing,
+) => Promise<Pick<CanonicalEmployer, 'id' | 'displayName'> | undefined>;
 
 /** Terminal catalog effects for one admitted row. */
 export interface AdmissionCatalogCommit {
@@ -80,6 +84,7 @@ export function gradeAdmissionRow(input: {
   sourceId: string;
   externalId: string;
   posting: SourcedPosting;
+  canonicalEmployer?: Pick<CanonicalEmployer, 'id' | 'displayName'>;
   probe: AdmissionDestinationProbe;
   evaluatedAt: string;
 }): GradedAdmissionRow | { decision: AdmissionRowEvaluation['decision'] } {
@@ -89,7 +94,31 @@ export function gradeAdmissionRow(input: {
     return { decision: { kind: 'blocked', reason: decision.reason } };
   }
   // `included` always carries a listing.
-  const normalized = listing!;
+  const processed = listing!;
+  const identity = resolvePostingIdentityDecision({
+    sourceId: input.sourceId,
+    externalId: input.externalId,
+    applicationUrl: processed.applyUrl,
+    observedAt: input.evaluatedAt,
+    ...(input.posting.providerEvidence ? { providerEvidence: input.posting.providerEvidence } : {}),
+  });
+  if (identity.decision.status === 'quarantined') {
+    return { decision: { kind: 'blocked', reason: `posting-identity-${identity.decision.reason}` } };
+  }
+  const normalized: ProcessedListing = {
+    ...processed,
+    postingIdentityDecision: identity.decision,
+    ...(identity.identity ? { postingIdentity: identity.identity } : {}),
+    ...(input.canonicalEmployer
+      ? { employerEvidence: { authority: input.posting.employer.authority, canonicalEmployer: input.canonicalEmployer } }
+      : input.posting.employer.authority === 'reviewed-registry' && input.posting.employer.id
+      ? {
+        employerEvidence: {
+          authority: input.posting.employer.authority,
+          canonicalEmployer: { id: input.posting.employer.id, displayName: input.posting.employer.name },
+        },
+      } : {}),
+  };
   const destination = classifyDestination({
     listing: normalized,
     reachability: input.probe.reachability,
@@ -120,6 +149,7 @@ function isGraded(row: GradedAdmissionRow | { decision: AdmissionRowEvaluation['
 export interface RuleBasedAdmissionEvaluatorDependencies {
   prober: AdmissionDestinationProber;
   sink: AdmissionV2CatalogSink;
+  resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver;
   now?: () => Date;
 }
 
@@ -138,6 +168,19 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
 
   async evaluate(context: AdmissionRowContext): Promise<AdmissionRowEvaluation> {
     const observedAt = this.now().toISOString();
+    // Deterministic posting decisions do not need network evidence. Running
+    // these first keeps invalid URLs, nontechnical roles, and policy shelves
+    // terminal instead of spending the row's transient retry budget.
+    const deterministic = processPosting(context.posting);
+    if (deterministic.decision.outcome !== 'included') {
+      return deterministic.decision.outcome === 'shelved'
+        ? { decision: { kind: 'shelved', reason: deterministic.decision.reason } }
+        : { decision: { kind: 'blocked', reason: deterministic.decision.reason } };
+    }
+    const canonicalEmployer = deterministic.listing?.employerEvidence?.canonicalEmployer
+      ?? (deterministic.listing && this.dependencies.resolveCanonicalEmployer
+        ? await this.dependencies.resolveCanonicalEmployer(deterministic.listing)
+        : undefined);
     const probe = await this.dependencies.prober.probe({
       sourceId: context.sourceId,
       externalId: context.externalId,
@@ -148,6 +191,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       sourceId: context.sourceId,
       externalId: context.externalId,
       posting: context.posting,
+      ...(canonicalEmployer ? { canonicalEmployer } : {}),
       probe,
       evaluatedAt: observedAt,
     });

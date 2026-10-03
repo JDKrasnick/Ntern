@@ -26,16 +26,17 @@ import type {
 } from '../src/ingestion-v2/types.js';
 
 const chunkSize = 50;
+const SNAPSHOT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
-// Rows the admission lane owns. A shadow discovery upsert must never clobber
-// their state, lease, attempt count, decision, or failure fields; it may only
-// refresh identity, material, snapshot, and observation columns.
+// Shadow discovery preserves admission-owned state only while the complete
+// snapshot/material/policy identity is unchanged. A new identity clears the old
+// lease, decision, retry budget, and failure so it can be reopened as fresh work.
 const ADMISSION_LANE_OWNED_STATES = ['pending', 'queued', 'processing', 'quarantined'] as const;
 const laneOwnedSqlList = ADMISSION_LANE_OWNED_STATES.map((state) => `'${state}'`).join(', ');
 const sameAdmissionIdentitySql = `ingestion_rows.snapshot_hash = excluded.snapshot_hash
   AND ingestion_rows.material_hash = excluded.material_hash
   AND ingestion_rows.admission_version = excluded.admission_version`;
-const preserveAdmissionResultSql = `ingestion_rows.state IN (${laneOwnedSqlList})
+const preserveAdmissionResultSql = `(ingestion_rows.state IN (${laneOwnedSqlList}) AND ${sameAdmissionIdentitySql})
   OR (ingestion_rows.state = 'settled' AND ingestion_rows.attempt_count > 0 AND ${sameAdmissionIdentitySql})`;
 
 interface SnapshotDbRow {
@@ -196,10 +197,29 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   }
 
   async activateSnapshot(sourceId: string, snapshotHash: string, activatedAt: string): Promise<void> {
-    await this.db.prepare(`
-      UPDATE ingestion_snapshots SET state = 'active', activated_at = ?
-      WHERE source_id = ? AND snapshot_hash = ? AND state = 'staged'
-    `).bind(activatedAt, sourceId, snapshotHash).run();
+    const expiresAt = new Date(Date.parse(activatedAt) + SNAPSHOT_RETENTION_MS).toISOString();
+    await this.db.batch([
+      this.db.prepare(`
+        UPDATE ingestion_snapshots SET state = 'active', activated_at = ?
+        WHERE source_id = ? AND snapshot_hash = ? AND state = 'staged'
+      `).bind(activatedAt, sourceId, snapshotHash),
+      this.db.prepare(`
+        UPDATE ingestion_snapshots
+        SET state = 'terminal', terminal_at = ?, expires_at = ?
+        WHERE source_id = ? AND snapshot_hash <> ? AND state = 'active'
+          AND EXISTS (
+            SELECT 1 FROM ingestion_snapshots AS activated
+            WHERE activated.source_id = ? AND activated.snapshot_hash = ?
+              AND activated.state = 'active'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM ingestion_rows
+            WHERE ingestion_rows.source_id = ingestion_snapshots.source_id
+              AND ingestion_rows.snapshot_hash = ingestion_snapshots.snapshot_hash
+              AND ingestion_rows.state IN ('pending', 'queued', 'processing')
+          )
+      `).bind(activatedAt, expiresAt, sourceId, snapshotHash, sourceId, snapshotHash),
+    ]);
   }
 
   async putRows(records: readonly IngestionRowRecord[]): Promise<void> {
@@ -216,27 +236,27 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
           ELSE excluded.notification_baseline
         END,
         state = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.state
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) AND ${sameAdmissionIdentitySql} THEN ingestion_rows.state
           ELSE excluded.state
         END,
         decision = CASE
           WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.decision
-          ELSE COALESCE(excluded.decision, ingestion_rows.decision)
+          ELSE excluded.decision
         END,
         attempt_count = CASE
           WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.attempt_count
           ELSE excluded.attempt_count
         END,
         retry_at = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.retry_at
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) AND ${sameAdmissionIdentitySql} THEN ingestion_rows.retry_at
           ELSE excluded.retry_at
         END,
         lease_owner = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.lease_owner
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) AND ${sameAdmissionIdentitySql} THEN ingestion_rows.lease_owner
           ELSE excluded.lease_owner
         END,
         lease_expires_at = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.lease_expires_at
+          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) AND ${sameAdmissionIdentitySql} THEN ingestion_rows.lease_expires_at
           ELSE excluded.lease_expires_at
         END,
         consecutive_omissions = excluded.consecutive_omissions,
@@ -253,7 +273,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         updated_at = excluded.updated_at,
         settled_at = CASE
           WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.settled_at
-          ELSE COALESCE(excluded.settled_at, ingestion_rows.settled_at)
+          ELSE excluded.settled_at
         END
     `);
     const statements = records.map((record) => statement.bind(
@@ -533,7 +553,10 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     return result.meta.changes > 0;
   }
 
-  async reopenRows(sourceId: string, externalIds: readonly string[], now: string, options: { admissionVersion?: string } = {}): Promise<number> {
+  async reopenRows(sourceId: string, externalIds: readonly string[], now: string, options: {
+    admissionVersion?: string;
+    notificationBaseline?: boolean;
+  } = {}): Promise<number> {
     const ids = [...new Set(externalIds)];
     if (!ids.length) return 0;
     const placeholders = ids.map(() => '?').join(', ');
@@ -542,9 +565,14 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       SET state = 'queued', attempt_count = 0, retry_at = NULL,
         lease_owner = NULL, lease_expires_at = NULL,
         failure_class = NULL, failure_detail = NULL, settled_at = NULL, decision = NULL,
-        admission_version = COALESCE(?, admission_version), updated_at = ?
+        admission_version = COALESCE(?, admission_version),
+        notification_baseline = COALESCE(?, notification_baseline), updated_at = ?
       WHERE source_id = ? AND external_id IN (${placeholders}) AND state IN ('settled', 'quarantined', 'absent')
-    `).bind(options.admissionVersion ?? null, now, sourceId, ...ids).run();
+    `).bind(
+      options.admissionVersion ?? null,
+      options.notificationBaseline === undefined ? null : options.notificationBaseline ? 1 : 0,
+      now, sourceId, ...ids,
+    ).run();
     return result.meta.changes;
   }
 
@@ -620,9 +648,34 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   }
 
   async acknowledgeHandoff(batchId: string, now: string): Promise<void> {
-    await this.db.prepare(
-      'UPDATE ingestion_admission_handoffs SET acknowledged_at = ? WHERE batch_id = ? AND acknowledged_at IS NULL',
-    ).bind(now, batchId).run();
+    const expiresAt = new Date(Date.parse(now) + SNAPSHOT_RETENTION_MS).toISOString();
+    await this.db.batch([
+      this.db.prepare(
+        'UPDATE ingestion_admission_handoffs SET acknowledged_at = ? WHERE batch_id = ? AND acknowledged_at IS NULL',
+      ).bind(now, batchId),
+      // An older active snapshot can stay retained while one of its rows retries.
+      // Re-check lifecycle at each completed handoff so it becomes terminal as
+      // soon as no pending, queued, or processing row still needs the object.
+      this.db.prepare(`
+        UPDATE ingestion_snapshots
+        SET state = 'terminal', terminal_at = ?, expires_at = ?
+        WHERE source_id = (
+            SELECT source_id FROM ingestion_admission_handoffs WHERE batch_id = ?
+          )
+          AND state = 'active'
+          AND snapshot_hash <> (
+            SELECT snapshot_hash FROM ingestion_snapshots AS current
+            WHERE current.source_id = ingestion_snapshots.source_id AND current.state = 'active'
+            ORDER BY activated_at DESC, snapshot_hash DESC LIMIT 1
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM ingestion_rows
+            WHERE ingestion_rows.source_id = ingestion_snapshots.source_id
+              AND ingestion_rows.snapshot_hash = ingestion_snapshots.snapshot_hash
+              AND ingestion_rows.state IN ('pending', 'queued', 'processing')
+          )
+      `).bind(now, expiresAt, batchId),
+    ]);
   }
 
   async listActiveHandoffs(sourceId: string, staleBefore: string): Promise<AdmissionV2Handoff[]> {
@@ -644,13 +697,28 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     }));
   }
 
-  async listActiveSourceIds(limit: number): Promise<string[]> {
+  async listActiveSourceIds(limit: number, afterSourceId?: string): Promise<string[]> {
     const bounded = Math.max(1, Math.min(limit, 500));
     const { results } = await this.db.prepare(`
       SELECT DISTINCT source_id FROM ingestion_snapshots
-      WHERE state = 'active' ORDER BY source_id LIMIT ?
-    `).bind(bounded).all<{ source_id: string }>();
+      WHERE state = 'active' AND (? IS NULL OR source_id > ?) ORDER BY source_id LIMIT ?
+    `).bind(afterSourceId ?? null, afterSourceId ?? null, bounded).all<{ source_id: string }>();
     return results.map((row) => row.source_id);
+  }
+
+  async getDispatchSourceCursor(): Promise<string | undefined> {
+    const row = await this.db.prepare(
+      "SELECT source_cursor FROM ingestion_v2_dispatch_state WHERE singleton = 1",
+    ).first<{ source_cursor: string | null }>();
+    return row?.source_cursor ?? undefined;
+  }
+
+  async setDispatchSourceCursor(sourceId: string | undefined, updatedAt: string): Promise<void> {
+    await this.db.prepare(`
+      INSERT INTO ingestion_v2_dispatch_state (singleton, source_cursor, updated_at)
+      VALUES (1, ?, ?)
+      ON CONFLICT(singleton) DO UPDATE SET source_cursor = excluded.source_cursor, updated_at = excluded.updated_at
+    `).bind(sourceId ?? null, updatedAt).run();
   }
 
   async overview(sourceId: string): Promise<AdmissionV2SourceOverview> {
@@ -672,8 +740,14 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       SELECT snapshot_hash FROM ingestion_snapshots
       WHERE source_id = ? AND state = 'active' ORDER BY activated_at DESC LIMIT 1
     `).bind(sourceId).first<{ snapshot_hash: string }>();
+    const verification = await this.db.prepare(`
+      SELECT COUNT(*) AS decisions, COALESCE(SUM(notify), 0) AS notifications
+      FROM ingestion_v2_admission_decisions WHERE source_id = ?
+    `).bind(sourceId).first<{ decisions: number; notifications: number }>();
     return {
       ...counts,
+      verificationDecisions: verification?.decisions ?? 0,
+      notificationEligibleDecisions: verification?.notifications ?? 0,
       ...(oldestWorkAt ? { oldestWorkAt } : {}),
       ...(active ? { currentSnapshotHash: active.snapshot_hash } : {}),
     };

@@ -277,6 +277,13 @@ test('settles a complete board through the queue and acknowledges the handoff', 
   const handoffs = await database.prepare('SELECT COUNT(*) AS count FROM ingestion_admission_handoffs WHERE source_id = ? AND acknowledged_at IS NOT NULL')
     .bind(sourceId).first();
   assert.equal(handoffs.count, 1, 'the handoff receipt must be acknowledged');
+  const canaryReceipts = await database.prepare(
+    'SELECT COUNT(*) AS count, COALESCE(SUM(notify), 0) AS notifications FROM ingestion_v2_admission_decisions WHERE source_id = ?',
+  ).bind(sourceId).first();
+  const admitted = await database.prepare("SELECT COUNT(*) AS count FROM ingestion_rows WHERE source_id = ? AND decision = 'admitted'")
+    .bind(sourceId).first();
+  assert.equal(canaryReceipts.count, admitted.count, 'every admitted row must have one durable non-publishing canary receipt');
+  assert.ok(canaryReceipts.notifications >= 0);
 });
 
 test('treats a duplicate admission delivery as a no-op', async () => {
@@ -311,6 +318,40 @@ test('quarantines only the permanently failing row after two retries', async () 
   destinationStatus.clear();
 });
 
+test('a transient destination can fail twice and settle on its third attempt', async () => {
+  await database.prepare(`UPDATE ingestion_rows SET state = 'pending', attempt_count = 0, retry_at = NULL,
+    decision = NULL, failure_class = NULL, failure_detail = NULL WHERE source_id = ?`).bind(sourceId).run();
+  destinationStatus.set('careers-b.example.test', 503);
+  const { snapshot, rows } = await boardSnapshot();
+  const messages = buildMessages(rows, snapshot.snapshot_hash, snapshot.admission_version);
+  await deliverAdmission(messages);
+  await makeRetriesDue();
+  await deliverAdmission(messages);
+  await makeRetriesDue();
+  destinationStatus.clear();
+  const recovered = await deliverAdmission(messages);
+  assert.equal(recovered.settled.ack, messages.length);
+  const failedRows = await database.prepare('SELECT COUNT(*) AS count FROM ingestion_rows WHERE source_id = ? AND state <> ?')
+    .bind(sourceId, 'settled').first();
+  assert.equal(failedRows.count, 0);
+  const recoveredAttempts = await database.prepare('SELECT MIN(attempt_count) AS minimum, MAX(attempt_count) AS maximum FROM ingestion_rows WHERE source_id = ?')
+    .bind(sourceId).first();
+  assert.ok(recoveredAttempts.maximum >= 3, JSON.stringify(recoveredAttempts));
+});
+
+test('a missing snapshot retries systemically and leaves a durable failure record', async () => {
+  const { snapshot, rows } = await boardSnapshot();
+  const missingHash = 'f'.repeat(64);
+  const [message] = buildMessages(rows, missingHash, snapshot.admission_version);
+  const delivered = await deliverAdmission([message]);
+  assert.equal(delivered.settled.ack, 0);
+  assert.equal(delivered.settled.retries.length, 1);
+  const failure = await database.prepare(`SELECT source_id, resolved_at FROM queue_failure_events
+    WHERE queue_name = 'intern-notifs-admission-v2' ORDER BY last_failed_at DESC LIMIT 1`).first();
+  assert.equal(failure.source_id, sourceId);
+  assert.equal(failure.resolved_at, null);
+});
+
 test('returns a stale delivery as a no-op', async () => {
   const { snapshot, rows } = await boardSnapshot();
   // Advance one row's material hash so the original message intent no longer matches.
@@ -323,6 +364,10 @@ test('returns a stale delivery as a no-op', async () => {
 });
 
 test('guards row inspection and replay behind the operations boundary', async () => {
+  await database.prepare(`UPDATE ingestion_rows SET state = 'quarantined', attempt_count = 3,
+    failure_class = 'upstream-server-error', failure_detail = '503'
+    WHERE source_id = ? AND external_id = (SELECT external_id FROM ingestion_rows WHERE source_id = ? ORDER BY external_id LIMIT 1)`)
+    .bind(sourceId, sourceId).run();
   const denied = await ingestion.fetch(`https://ingestion.example.test/internal/operations/ingestion/rows?sourceId=${sourceId}`, {
     headers: { 'X-InternNotifs-Service-Key': internalServiceSecret },
   });
@@ -358,4 +403,20 @@ test('guards row inspection and replay behind the operations boundary', async ()
   assert.equal(applied.applied, true);
   const reopened = await database.prepare('SELECT state FROM ingestion_rows WHERE source_id = ? AND external_id = ?').bind(sourceId, target.external_id).first();
   assert.equal(reopened.state, 'queued');
+
+  await database.prepare(`INSERT INTO ingestion_rows
+    (source_id, external_id, snapshot_hash, material_hash, admission_version, state, attempt_count,
+     consecutive_omissions, first_observed_at, last_observed_at, updated_at)
+    SELECT source_id, 'ghost-not-in-snapshot', snapshot_hash, material_hash, admission_version, 'quarantined', 3,
+      0, first_observed_at, last_observed_at, updated_at
+    FROM ingestion_rows WHERE source_id = ? LIMIT 1`).bind(sourceId).run();
+  const ghostResponse = await ingestion.fetch('https://ingestion.example.test/internal/operations/ingestion/rows/replay', {
+    method: 'POST',
+    headers: { 'X-InternNotifs-Service-Key': internalServiceSecret, 'X-Operations-Key': operationsSecret, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourceId, externalId: 'ghost-not-in-snapshot' }),
+  });
+  assert.equal(ghostResponse.status, 200);
+  const ghost = await ghostResponse.json();
+  assert.equal(ghost.eligible, false);
+  assert.equal(ghost.reason, 'row-not-in-retained-snapshot');
 });

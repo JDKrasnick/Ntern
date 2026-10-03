@@ -187,7 +187,8 @@ ledger state and captures the decision it would have published without mutating
 the live catalog.
 
 - `cloudflare/migrations/0046_ingestion_v2_admission.sql` adds
-  `ingestion_admission_handoffs`, the durable dispatch receipt. The lease,
+  `ingestion_admission_handoffs`, the durable dispatch receipt. Migration `0047`
+  adds the round-robin source cursor and sanitized non-publishing canary receipts. The lease,
   attempt, retry, decision, and failure columns already live on `ingestion_rows`.
 - `src/ingestion-v2/admission/` holds the pure contracts and orchestration:
   `message.ts` (versioned message, deterministic batch ID, 25-ID limit,
@@ -195,22 +196,31 @@ the live catalog.
   classification and the 60 s / 5 min retry schedule), `transitions.ts` (the row
   state machine), `dispatcher.ts`, `consumer.ts`, `migration.ts`, `operations.ts`,
   `evaluator.ts` (reuses `processPosting`, `classifyDestination`, and
-  `evaluateCatalogAdmission`), and `recording-sink.ts`.
+  `evaluateCatalogAdmission`), `recording-sink.ts`, and the reconciler-backed
+  catalog sink exercised by integration tests.
 - The scheduled dispatcher finds pending rows and stale queued rows with no valid
   handoff receipt, commits them `queued`, records a handoff, and hands bounded
   messages to the queue. A failed send leaves the rows recoverable once the
-  handoff goes stale.
+  handoff goes stale. A durable round-robin cursor keeps the bounded 500-source
+  scan fair when the active source set grows beyond one page.
 - The consumer reads the referenced snapshot once per batch, leases each row with
   the message's snapshot/material/policy intent, and lets each row settle,
   schedule a retry (initial attempt plus two), or quarantine. A duplicate, stale,
   or contended delivery is a no-op. A systemic failure (missing R2 object, D1
-  unavailability, incomplete snapshot) releases the lease, retries the delivery,
-  and never consumes a row attempt or quarantines a row.
+  unavailability, incomplete snapshot) releases the lease, records a sanitized
+  `queue_failure_events` row, retries the delivery, and never consumes a row
+  attempt or quarantines a row. The protected DLQ plan/apply surface accepts
+  validated admission messages for exact replay after repair.
+- Admission resolves canonical employers through the reviewed D1 mapping before
+  catalog grading. An unresolved mapping remains a deterministic business
+  decision; a D1 resolver failure retries the delivery as infrastructure.
 - Row reopening is change-driven. When admission is enabled the shadow pass hands
   the diff's `new`, `changed`, `stale-policy`, and `reappeared` IDs back to the
   lane, so a row whose material content, policy version, or presence changed
-  becomes dispatchable work. A due-retry row is left in place so reopening cannot
-  reset the attempt count that caps its retries. An authorized operator can also
+  becomes dispatchable work. A new material identity clears the old lane state,
+  lease, retry budget, decision, and failure before the fresh identity is
+  reopened; guarded terminal writes keep an old evaluator from committing over
+  it. A due retry for unchanged material keeps its attempt count. An authorized operator can also
   reopen one row through the guarded replay route.
 - A shadow-first rollout is bootstrapped explicitly. Rows observed while their
   source is outside the admission rollout retain a durable notification baseline;
@@ -224,8 +234,13 @@ the live catalog.
 - Notification fencing is enforced at the effect boundary. Baseline work and any
   row that already owns a catalog job (policy migration or re-admission) commit
   with `notify: false`; only a genuinely new post-baseline role may mint a
-  notification. The verification sink records the decision so a canary can prove
-  zero notifications without a live catalog writer.
+  notification. Policy migration persists the same baseline fence even for a
+  previously blocked or shelved row with no job ID. The D1 verification sink
+  retains one sanitized receipt per source, row, and admission version so a
+  canary can prove zero notifications without a live catalog writer.
+- Replaced snapshots remain active while pending, queued, or processing rows
+  still reference them. The final acknowledged handoff terminalizes a settled
+  superseded snapshot and assigns seven days of retention for replay/audit.
 - `INGESTION_V2_ADMISSION_ENABLED` (default `false`) gates admission;
   `INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST` optionally bounds rollout. The
   dispatcher only produces messages for sources on the allowlist. The consumer
@@ -236,8 +251,9 @@ the live catalog.
   settled/quarantined/absent, oldest work, current snapshot).
   `POST /internal/operations/ingestion/rows/replay` previews with
   `{ sourceId, externalId }` and applies only when the returned `replayToken`
-  is echoed back; it refuses an in-flight row and an ID absent from a retained
-  complete snapshot. Both require `X-Operations-Key` and are otherwise a 404.
+  is echoed back; it refuses an in-flight row and verifies the ID against the
+  immutable retained R2 snapshot before issuing a token. Both require
+  `X-Operations-Key` and are otherwise a 404.
 
 ### Stage 2 production boundary (owned by Stage 3)
 
@@ -246,15 +262,17 @@ durable handoff and change-driven producer, leases, retries, quarantine, guarded
 replay, bounded policy migration, and notification fencing. Two things stay out
 of scope and belong to Stage 3:
 
-- The catalog writer is still a recorded decision sink, so V2 commits ledger
-  state and the decision it *would* have published without mutating the live
-  catalog. Stage 3 swaps the sink for the reconciler-backed writer.
+- The deployed catalog writer is still a durable recorded decision sink, so V2
+  commits ledger state and the decision it *would* have published without
+  mutating the live catalog. Integration tests compose the reconciler-backed
+  writer with jobs, occurrences, and notification receipts; Stage 3 selects it
+  for production traffic.
 - Broad production cutover. Both flags are default off; the queue, schema, and
   Worker code deploy disabled and legacy ingestion stays authoritative.
 
 The end-to-end suite covers the lane by seeding dispatchable rows and by driving
 real deliveries through the built Worker. Two writers share `ingestion_rows`, so
 the shadow upsert preserves admission-lane state (`pending`, `queued`,
-`processing`, `quarantined`) and omission increments skip a leased `processing`
-row; the only lane mutation the shadow pass performs is the explicit reopening of
-materially or policy-changed rows described above.
+`processing`, `quarantined`) for the same admission identity and omission
+increments skip a leased `processing` row. A new identity clears the old lane
+state before the shadow callback or scheduled bootstrap reopens it.

@@ -135,8 +135,8 @@ function recorder() {
 }
 
 function deliver(body) {
-  const queues = { github: recorder(), destinationVerification: recorder() };
-  const deadLetters = { github: recorder(), destinationVerification: recorder() };
+  const queues = { github: recorder(), destinationVerification: recorder(), admission: recorder() };
+  const deadLetters = { github: recorder(), destinationVerification: recorder(), admission: recorder() };
   const settled = { ack: 0, retries: [] };
   const environment = {
     DB: database,
@@ -145,6 +145,8 @@ function deliver(body) {
     GITHUB_DLQ: deadLetters.github,
     DESTINATION_VERIFICATION_QUEUE: queues.destinationVerification,
     DESTINATION_VERIFICATION_DLQ: deadLetters.destinationVerification,
+    ADMISSION_V2_QUEUE: queues.admission,
+    ADMISSION_V2_DLQ: deadLetters.admission,
     INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true',
     IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'false',
     TRUSTED_COMMUNITY_CATALOG_ENABLED: 'false',
@@ -188,6 +190,15 @@ test('runs V2 shadow discovery for a reviewable source without enqueuing admissi
     'SELECT COUNT(*) AS count FROM ingestion_rows WHERE source_id = ?',
   ).bind(sourceId).first();
   assert.equal(rows.count, boardRows);
+
+  // The legacy path remains authoritative during shadow mode and may publish its
+  // own catalog effects. V2 proves its isolation through the dedicated queue and
+  // decision sink, neither of which may receive work from shadow discovery.
+  const admissionDecisions = await database.prepare(
+    'SELECT COUNT(*) AS count FROM ingestion_v2_admission_decisions',
+  ).first();
+  assert.equal(admissionDecisions.count, 0, 'shadow V2 must not invoke the Stage 2 decision sink');
+  assert.equal(first.queues.admission.sent.length, 0, 'shadow V2 must not enqueue admission work');
 
   // Shadow mode sends no admission message: the recorded provider sends carry no
   // batch identity or snapshot hash.

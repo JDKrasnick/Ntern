@@ -99,13 +99,24 @@ describe('ingestion v2 normalization', () => {
   });
 
   it('deduplicates rows that repeat an external id', () => {
+    const duplicate = posting({ externalId: 'a' });
     const snapshot = normalizeSourceSnapshot({
       sourceId: 'community-example',
-      postings: [posting({ externalId: 'a' }), posting({ externalId: 'a', title: 'Duplicate' })],
+      postings: [duplicate, { ...duplicate, row: 99, fetchedAt: '2026-10-02T00:00:00.000Z' }],
       admissionVersion: 'v1',
       observedAt: POSTING_FETCHED_AT,
     });
     expect(snapshot.rowCount).toBe(1);
+  });
+
+  it('rejects conflicting duplicate external ids independent of input ordering', () => {
+    const first = posting({ externalId: 'a', title: 'Software Engineering Intern' });
+    const second = posting({ externalId: 'a', title: 'Data Engineering Intern' });
+    const normalize = (postings: SourcedPosting[]) => normalizeSourceSnapshot({
+      sourceId: 'community-example', postings, admissionVersion: 'v1', observedAt: POSTING_FETCHED_AT,
+    });
+    expect(() => normalize([first, second])).toThrow(/Conflicting duplicate ingestion external ID: a/u);
+    expect(() => normalize([second, first])).toThrow(/Conflicting duplicate ingestion external ID: a/u);
   });
 
   it('validates the content-addressed key', () => {

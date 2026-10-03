@@ -32,6 +32,8 @@ function sqliteD1(database: DatabaseSync): D1Database {
 function subject(): { database: DatabaseSync; repository: D1IngestionV2Repository } {
   const database = new DatabaseSync(':memory:');
   database.exec(readFileSync(new URL('../cloudflare/migrations/0045_ingestion_v2.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0046_ingestion_v2_admission.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0047_ingestion_v2_dispatch_cursor.sql', import.meta.url), 'utf8'));
   return { database, repository: new D1IngestionV2Repository(sqliteD1(database)) };
 }
 
@@ -57,6 +59,7 @@ function row(overrides: Partial<IngestionRowRecord> & { externalId: string }): I
     snapshotHash: 'a'.repeat(64),
     materialHash: 'm',
     admissionVersion: 'standard-v1',
+    notificationBaseline: false,
     state: 'settled',
     decision: 'admitted',
     attemptCount: 0,
@@ -91,6 +94,78 @@ describe('ingestion v2 D1 repository', () => {
     expect(await repository.getSnapshot('community-example', 'a'.repeat(64))).toMatchObject({ activatedAt: '2026-10-01T01:00:00.000Z' });
   });
 
+  it('terminals an older settled snapshot with seven-day retention when a replacement activates', async () => {
+    const { repository } = subject();
+    const oldHash = 'a'.repeat(64);
+    const nextHash = 'b'.repeat(64);
+    await repository.putSnapshot(snapshot({ snapshotHash: oldHash, state: 'active', activatedAt: '2026-10-01T00:00:00.000Z' }));
+    await repository.putRows([row({ externalId: 'role-old', snapshotHash: oldHash, state: 'settled' })]);
+    await repository.putSnapshot(snapshot({ snapshotHash: nextHash, objectKey: `ingestion-v2/snapshots/community-example/${nextHash}.json` }));
+    await repository.activateSnapshot('community-example', nextHash, '2026-10-02T00:00:00.000Z');
+    expect(await repository.getSnapshot('community-example', oldHash)).toMatchObject({
+      state: 'terminal',
+      terminalAt: '2026-10-02T00:00:00.000Z',
+      expiresAt: '2026-10-09T00:00:00.000Z',
+    });
+  });
+
+  it('retains an older snapshot while admission work still references it', async () => {
+    const { database, repository } = subject();
+    const oldHash = 'a'.repeat(64);
+    const nextHash = 'b'.repeat(64);
+    await repository.putSnapshot(snapshot({ snapshotHash: oldHash, state: 'active', activatedAt: '2026-10-01T00:00:00.000Z' }));
+    await repository.putRows([row({ externalId: 'role-old', snapshotHash: oldHash, state: 'queued', decision: undefined })]);
+    await repository.putSnapshot(snapshot({ snapshotHash: nextHash, objectKey: `ingestion-v2/snapshots/community-example/${nextHash}.json` }));
+    await repository.activateSnapshot('community-example', nextHash, '2026-10-02T00:00:00.000Z');
+    expect(await repository.getSnapshot('community-example', oldHash)).toMatchObject({ state: 'active' });
+
+    database.prepare("UPDATE ingestion_rows SET state = 'settled' WHERE source_id = ? AND external_id = ?")
+      .run('community-example', 'role-old');
+    await repository.recordHandoff({
+      batchId: 'old-snapshot-complete',
+      sourceId: 'community-example',
+      snapshotHash: oldHash,
+      admissionVersion: 'standard-v1',
+      externalIds: ['role-old'],
+      baseline: false,
+      dispatchedAt: '2026-10-02T00:01:00.000Z',
+    });
+    await repository.acknowledgeHandoff('old-snapshot-complete', '2026-10-02T00:02:00.000Z');
+    expect(await repository.getSnapshot('community-example', oldHash)).toMatchObject({
+      state: 'terminal',
+      terminalAt: '2026-10-02T00:02:00.000Z',
+      expiresAt: '2026-10-09T00:02:00.000Z',
+    });
+  });
+
+  it('does not terminalize the current snapshot when the requested target is unknown', async () => {
+    const { repository } = subject();
+    const oldHash = 'a'.repeat(64);
+    await repository.putSnapshot(snapshot({ snapshotHash: oldHash, state: 'active', activatedAt: '2026-10-01T00:00:00.000Z' }));
+    await repository.activateSnapshot('community-example', 'f'.repeat(64), '2026-10-02T00:00:00.000Z');
+    expect(await repository.getSnapshot('community-example', oldHash)).toMatchObject({ state: 'active' });
+  });
+
+  it('does not let another source with the same content hash retain a settled snapshot', async () => {
+    const { repository } = subject();
+    const oldHash = 'a'.repeat(64);
+    const nextHash = 'b'.repeat(64);
+    await repository.putSnapshot(snapshot({ snapshotHash: oldHash, state: 'active', activatedAt: '2026-10-01T00:00:00.000Z' }));
+    await repository.putSnapshot(snapshot({
+      sourceId: 'other-source', snapshotHash: oldHash,
+      objectKey: `ingestion-v2/snapshots/other-source/${oldHash}.json`,
+      state: 'active', activatedAt: '2026-10-01T00:00:00.000Z',
+    }));
+    await repository.putRows([row({
+      sourceId: 'other-source', externalId: 'other-role', snapshotHash: oldHash,
+      state: 'queued', decision: undefined,
+    })]);
+    await repository.putSnapshot(snapshot({ snapshotHash: nextHash, objectKey: `ingestion-v2/snapshots/community-example/${nextHash}.json` }));
+    await repository.activateSnapshot('community-example', nextHash, '2026-10-02T00:00:00.000Z');
+    expect(await repository.getSnapshot('community-example', oldHash)).toMatchObject({ state: 'terminal' });
+    expect(await repository.getSnapshot('other-source', oldHash)).toMatchObject({ state: 'active' });
+  });
+
   it('lists every currently configured source within the dispatcher bound', async () => {
     const { repository } = subject();
     for (let index = 0; index < 54; index += 1) {
@@ -101,6 +176,19 @@ describe('ingestion v2 D1 repository', () => {
     const sourceIds = await repository.listActiveSourceIds(500);
     expect(sourceIds).toHaveLength(54);
     expect(sourceIds.at(-1)).toBe('source-53');
+  });
+
+  it('rotates the bounded source page so a tail source cannot starve', async () => {
+    const { repository } = subject();
+    for (let index = 0; index < 501; index += 1) {
+      const sourceId = `source-${String(index).padStart(3, '0')}`;
+      const snapshotHash = index.toString(16).padStart(64, '0');
+      await repository.putSnapshot(snapshot({ sourceId, snapshotHash, objectKey: `ingestion-v2/snapshots/${sourceId}/${snapshotHash}.json`, state: 'active' }));
+    }
+    const first = await repository.listActiveSourceIds(500);
+    await repository.setDispatchSourceCursor(first.at(-1), '2026-10-01T01:00:00.000Z');
+    const second = await repository.listActiveSourceIds(500, await repository.getDispatchSourceCursor());
+    expect(second).toEqual(['source-500']);
   });
 
   it('upserts rows idempotently, preserving first observation', async () => {
@@ -150,6 +238,28 @@ describe('ingestion v2 D1 repository', () => {
     expect(await repository.getRow('community-example', 'settled')).toMatchObject({
       state: 'settled', decision: 'blocked', lastObservedAt: '2026-10-02T00:00:00.000Z',
     });
+  });
+
+  it('resets and reopens queued work when it receives a new material identity', async () => {
+    const { repository } = subject();
+    await repository.putRows([row({
+      externalId: 'changed', state: 'queued', decision: undefined, attemptCount: 2,
+      retryAt: '2026-10-01T01:00:00.000Z', failureClass: 'destination-timeout', failureDetail: 'old material',
+    })]);
+    await repository.putRows([row({
+      externalId: 'changed', snapshotHash: 'b'.repeat(64), materialHash: 'new', admissionVersion: 'standard-v2',
+      state: 'settled', decision: undefined, attemptCount: 0, retryAt: undefined,
+      failureClass: undefined, failureDetail: undefined, settledAt: undefined,
+      updatedAt: '2026-10-01T00:05:00.000Z', lastObservedAt: '2026-10-01T00:05:00.000Z',
+    })]);
+    expect(await repository.getRow('community-example', 'changed')).toMatchObject({
+      state: 'settled', snapshotHash: 'b'.repeat(64), materialHash: 'new', admissionVersion: 'standard-v2', attemptCount: 0,
+    });
+    expect((await repository.getRow('community-example', 'changed'))?.retryAt).toBeUndefined();
+    expect((await repository.getRow('community-example', 'changed'))?.failureClass).toBeUndefined();
+    expect((await repository.getRow('community-example', 'changed'))?.decision).toBeUndefined();
+    await repository.reopenRows('community-example', ['changed'], '2026-10-01T00:05:01.000Z');
+    expect(await repository.getRow('community-example', 'changed')).toMatchObject({ state: 'queued', attemptCount: 0 });
   });
 
   it('leaves an in-flight row untouched when it drops off the board', async () => {

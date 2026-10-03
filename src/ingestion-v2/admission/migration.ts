@@ -61,7 +61,10 @@ export async function migrateAdmissionPolicy(
   const stale = await dependencies.ledger.listStalePolicyRows(sourceId, admissionVersion, batchSize + 1);
   const selected = stale.slice(0, batchSize);
   if (selected.length > 0) {
-    await dependencies.ledger.reopenRows(sourceId, selected.map((row) => row.externalId), now, { admissionVersion });
+    await dependencies.ledger.reopenRows(sourceId, selected.map((row) => row.externalId), now, {
+      admissionVersion,
+      notificationBaseline: true,
+    });
     dependencies.log?.({ event: 'ingestion_v2_policy_migration', sourceId, admissionVersion, reopened: selected.length });
   }
   return {

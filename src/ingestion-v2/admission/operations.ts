@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { IngestionRowRecord, IngestionRowState } from '../types.js';
+import type { IngestionRowRecord, IngestionRowState, IngestionSnapshotObjectStore } from '../types.js';
 import type { AdmissionV2Ledger } from './ledger.js';
 import type { AdmissionReplayPreview, AdmissionReplayRequest } from './types.js';
 
@@ -102,6 +102,7 @@ function replayToken(row: IngestionRowRecord): string {
 export async function planAdmissionReplay(
   ledger: AdmissionV2Ledger,
   request: AdmissionReplayRequest,
+  dependencies: { snapshots: IngestionSnapshotObjectStore },
 ): Promise<AdmissionReplayPreview & { replayToken?: string }> {
   const row = await ledger.getLedgerRow(request.sourceId, request.externalId);
   if (!row) return { sourceId: request.sourceId, externalId: request.externalId, eligible: false, reason: 'unknown-row' };
@@ -121,6 +122,14 @@ export async function planAdmissionReplay(
   if (!snapshot || !snapshot.isComplete) {
     return { ...base, eligible: false, reason: 'snapshot-not-retained' };
   }
+  try {
+    const retained = await dependencies.snapshots.getSnapshot(row.sourceId, row.snapshotHash);
+    if (!retained.rows.some((candidate) => candidate.externalId === row.externalId)) {
+      return { ...base, eligible: false, reason: 'row-not-in-retained-snapshot' };
+    }
+  } catch {
+    return { ...base, eligible: false, reason: 'snapshot-object-unavailable' };
+  }
   return { ...base, eligible: true, expectedTransition: `${row.state}->queued`, replayToken: replayToken(row) };
 }
 
@@ -139,9 +148,9 @@ export interface AdmissionReplayResult {
 export async function applyAdmissionReplay(
   ledger: AdmissionV2Ledger,
   request: AdmissionReplayRequest & { replayToken: string },
-  options: { now?: () => Date; actor?: string } = {},
+  options: { snapshots: IngestionSnapshotObjectStore; now?: () => Date; actor?: string },
 ): Promise<AdmissionReplayResult> {
-  const preview = await planAdmissionReplay(ledger, request);
+  const preview = await planAdmissionReplay(ledger, request, { snapshots: options.snapshots });
   if (!preview.eligible) return { applied: false, reason: preview.reason };
   if (!preview.replayToken || preview.replayToken !== request.replayToken) {
     return { applied: false, reason: 'stale-replay-token' };

@@ -9,3 +9,4 @@ export * from './migration.js';
 export * from './operations.js';
 export * from './evaluator.js';
 export * from './recording-sink.js';
+export * from './catalog-sink.js';

@@ -126,20 +126,30 @@ export function normalizeSourceSnapshot(input: {
   admissionVersion: string;
   observedAt: string;
 }): NormalizedSnapshotEnvelope {
-  const seen = new Set<string>();
-  const rows: NormalizedSnapshotRow[] = [];
+  const rowsByExternalId = new Map<string, { row: NormalizedSnapshotRow; canonical: string }>();
   for (const posting of input.postings) {
-    if (!posting.externalId || seen.has(posting.externalId)) continue;
-    seen.add(posting.externalId);
-    rows.push({
+    if (!posting.externalId) continue;
+    const normalized: NormalizedSnapshotRow = {
       externalId: posting.externalId,
       document: posting.document ?? posting.externalId,
       row: posting.row ?? 0,
       materialHash: materialHashFor(posting),
       posting: canonicalPosting(posting),
       firstObservationEligible: firstObservationEligible(posting),
-    });
+    };
+    const canonical = stableStringify(normalized);
+    const existing = rowsByExternalId.get(posting.externalId);
+    if (existing && existing.row.materialHash !== normalized.materialHash) {
+      throw new Error(`Conflicting duplicate ingestion external ID: ${posting.externalId}`);
+    }
+    // Exact/materially equivalent duplicates can appear in more than one source
+    // document. Pick their bytewise canonical representative so input ordering
+    // can never change the retained snapshot body or hash.
+    if (!existing || canonical < existing.canonical) {
+      rowsByExternalId.set(posting.externalId, { row: normalized, canonical });
+    }
   }
+  const rows = [...rowsByExternalId.values()].map(({ row }) => row);
   rows.sort((left, right) => left.externalId.localeCompare(right.externalId));
   return {
     schemaVersion: INGESTION_V2_SNAPSHOT_SCHEMA_VERSION,

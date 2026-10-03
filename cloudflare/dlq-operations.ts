@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { safeDiagnostic, sourceFailureCategory } from '../src/source-health.js';
 import type { SourceHealth } from '../src/types.js';
+import { validateAdmissionV2Message } from '../src/ingestion-v2/admission/message.js';
 import type { D1Database, Queue } from './types.js';
 
-export const dlqNames = ['greenhouse', 'lever', 'ashby', 'github', 'gmail', 'destination-verification'] as const;
+export const dlqNames = ['greenhouse', 'lever', 'ashby', 'github', 'gmail', 'destination-verification', 'admission-v2'] as const;
 export type DlqName = typeof dlqNames[number];
 export interface PeekedMessage {
   id: string;
@@ -76,6 +77,10 @@ function parseMessage(name: DlqName, value: unknown): ParsedMessage {
     || !body.providerIdentity || typeof body.providerIdentity !== 'object'
     || typeof body.reason !== 'string' || typeof body.queuedAt !== 'string')) {
     throw new Error('Destination verification DLQ message is invalid');
+  }
+  if (name === 'admission-v2') {
+    const validated = validateAdmissionV2Message(body);
+    if (!validated.ok) throw new Error(`Admission V2 DLQ message is invalid: ${validated.reason}`);
   }
   const logicalKey = sourceId ?? userId ?? jobId!;
   return { body, serialized, payloadHash: hash(serialized), logicalKey, ...(sourceId ? { sourceId } : {}), ...(jobId ? { jobId } : {}) };

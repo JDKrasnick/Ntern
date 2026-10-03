@@ -3,21 +3,29 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { D1IngestionV2Repository } from '../cloudflare/ingestion-v2-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
+import { processAdmissionV2Message } from '../src/ingestion-v2/admission/consumer.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
 import { migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import { applyAdmissionReplay, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
-import type { IngestionRowRecord, IngestionSnapshotRecord } from '../src/ingestion-v2/types.js';
+import type { IngestionRowRecord, IngestionSnapshotObjectStore, IngestionSnapshotRecord } from '../src/ingestion-v2/types.js';
 
-function sqliteD1(database: DatabaseSync): D1Database {
+interface D1OperationMetrics {
+  reads: number;
+  writes: number;
+  batches: number;
+}
+
+function sqliteD1(database: DatabaseSync, metrics?: D1OperationMetrics): D1Database {
   const prepared = (query: string, values: SQLInputValue[] = []): D1PreparedStatement => ({
     bind(...next: unknown[]) { return prepared(query, next as SQLInputValue[]); },
-    async first<T>() { return (database.prepare(query).get(...values) as T | undefined) ?? null; },
-    async all<T>() { return { results: database.prepare(query).all(...values) as T[] }; },
-    async run() { return { meta: { changes: Number(database.prepare(query).run(...values).changes) } }; },
+    async first<T>() { if (metrics) metrics.reads += 1; return (database.prepare(query).get(...values) as T | undefined) ?? null; },
+    async all<T>() { if (metrics) metrics.reads += 1; return { results: database.prepare(query).all(...values) as T[] }; },
+    async run() { if (metrics) metrics.writes += 1; return { meta: { changes: Number(database.prepare(query).run(...values).changes) } }; },
   });
   return {
     prepare: (query) => prepared(query),
     async batch(statements) {
+      if (metrics) metrics.batches += 1;
       database.exec('BEGIN');
       try {
         const results = [];
@@ -32,12 +40,12 @@ function sqliteD1(database: DatabaseSync): D1Database {
   };
 }
 
-function subject(): { database: DatabaseSync; repository: D1IngestionV2Repository } {
+function subject(metrics?: D1OperationMetrics): { database: DatabaseSync; repository: D1IngestionV2Repository } {
   const database = new DatabaseSync(':memory:');
-  for (const file of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql']) {
+  for (const file of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
   }
-  return { database, repository: new D1IngestionV2Repository(sqliteD1(database)) };
+  return { database, repository: new D1IngestionV2Repository(sqliteD1(database, metrics)) };
 }
 
 const SOURCE = 'community-example';
@@ -60,7 +68,7 @@ function snapshotRecord(): IngestionSnapshotRecord {
 function row(externalId: string, overrides: Partial<IngestionRowRecord> = {}): IngestionRowRecord {
   return {
     sourceId: SOURCE, externalId, snapshotHash: HASH, materialHash: `m-${externalId}`, admissionVersion: ADMISSION,
-    state: 'pending', attemptCount: 0, consecutiveOmissions: 0,
+    notificationBaseline: false, state: 'pending', attemptCount: 0, consecutiveOmissions: 0,
     firstObservedAt: '2026-10-01T00:00:00.000Z', lastObservedAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
     ...overrides,
   };
@@ -74,6 +82,66 @@ async function seeded(): Promise<{ database: DatabaseSync; repository: D1Ingesti
 }
 
 describe('ingestion v2 admission ledger (D1)', () => {
+  it('records bounded D1 reads and writes for a largest-allowed 25-row delivery', async () => {
+    const metrics: D1OperationMetrics = { reads: 0, writes: 0, batches: 0 };
+    const { repository } = subject(metrics);
+    const ids = Array.from({ length: 25 }, (_, index) => `resource-${String(index).padStart(2, '0')}`);
+    await repository.putSnapshot({ ...snapshotRecord(), rowCount: ids.length });
+    await repository.putRows(ids.map((externalId) => row(externalId, { state: 'queued' })));
+    metrics.reads = 0;
+    metrics.writes = 0;
+    metrics.batches = 0;
+    const snapshot = {
+      schemaVersion: 1 as const,
+      sourceId: SOURCE,
+      snapshotHash: HASH,
+      admissionVersion: ADMISSION,
+      documentCount: 1,
+      rowCount: ids.length,
+      observedAt: '2026-10-01T00:00:00.000Z',
+      rows: ids.map((externalId) => ({
+        externalId,
+        document: 'board',
+        row: 1,
+        materialHash: `m-${externalId}`,
+        firstObservationEligible: true,
+        posting: {
+          sourceId: SOURCE,
+          externalId,
+          document: 'board',
+          row: 1,
+          provenance: 'reviewed-community' as const,
+          sourceUrl: 'https://example.com/board',
+          applyUrl: `https://jobs.example.com/${externalId}`,
+          employer: { id: 'acme', name: 'Acme', authority: 'source-row' as const },
+          title: 'Software Engineering Intern',
+          locations: ['Remote'],
+          content: [],
+          lifecycleAuthority: 'posting' as const,
+          sourceState: 'open' as const,
+          fetchedAt: '2026-10-01T00:00:00.000Z',
+        },
+      })),
+    };
+    const [message] = (await import('../src/ingestion-v2/admission/message.js')).buildAdmissionV2Messages({
+      sourceId: SOURCE,
+      snapshotHash: HASH,
+      snapshotKey: snapshotRecord().objectKey,
+      admissionVersion: ADMISSION,
+      baseline: false,
+      externalIds: ids,
+    });
+    const result = await processAdmissionV2Message(message, {
+      ledger: repository,
+      snapshots: { async getSnapshot() { return snapshot; } } as unknown as IngestionSnapshotObjectStore,
+      evaluator: { async evaluate() { return { decision: { kind: 'admitted' as const } }; } },
+    });
+    expect(result).toMatchObject({ acknowledged: true, settled: 25 });
+    expect(metrics.reads).toBe(26);
+    expect(metrics.writes).toBe(50);
+    expect(metrics.batches).toBe(0);
+  });
+
   it('dispatches pending rows, records handoffs, and excludes fresh work', async () => {
     const { repository } = await seeded();
     const first = await planAdmissionV2Dispatch(SOURCE, { ledger: repository, now: () => new Date('2026-10-01T00:10:00.000Z') });
@@ -126,10 +194,10 @@ describe('ingestion v2 admission ledger (D1)', () => {
       ...expectedIdentity('a'), decision: 'blocked', reason: 'decision-for-old-material',
     })).toBe(false);
     expect(await repository.getRow(SOURCE, 'a')).toMatchObject({
-      snapshotHash: 'b'.repeat(64), materialHash: 'm-a-v2', admissionVersion: 'standard-v2', state: 'processing',
+      snapshotHash: 'b'.repeat(64), materialHash: 'm-a-v2', admissionVersion: 'standard-v2', state: 'settled',
     });
 
-    await repository.reclaimExpiredLeases('2026-10-01T00:02:00.000Z', 10);
+    await repository.reopenRows(SOURCE, ['a'], '2026-10-01T00:02:00.000Z');
     const reclaimed = await repository.getRow(SOURCE, 'a');
     expect(reclaimed).toMatchObject({ state: 'queued' });
     expect(reclaimed?.decision).toBeUndefined();
@@ -216,9 +284,16 @@ describe('ingestion v2 admission ledger (D1)', () => {
       ...expectedIdentity('a'),
       failure: { kind: 'row-transient', classification: 'upstream-server-error', detail: '503' },
     });
-    const preview = await planAdmissionReplay(repository, { sourceId: SOURCE, externalId: 'a' });
+    const snapshots = {
+      async getSnapshot() { return { rows: [{ externalId: 'a' }] }; },
+    } as unknown as IngestionSnapshotObjectStore;
+    const preview = await planAdmissionReplay(repository, { sourceId: SOURCE, externalId: 'a' }, { snapshots });
     expect(preview.eligible).toBe(true);
-    const applied = await applyAdmissionReplay(repository, { sourceId: SOURCE, externalId: 'a', replayToken: preview.replayToken! });
+    const applied = await applyAdmissionReplay(
+      repository,
+      { sourceId: SOURCE, externalId: 'a', replayToken: preview.replayToken! },
+      { snapshots },
+    );
     expect(applied.applied).toBe(true);
     expect((await repository.getRow(SOURCE, 'a'))?.state).toBe('queued');
     expect((await repository.overview(SOURCE)).queued).toBe(1);

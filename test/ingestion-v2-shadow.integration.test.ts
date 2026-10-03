@@ -99,7 +99,7 @@ interface Harness {
 
 function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false): Harness {
   const database = new DatabaseSync(':memory:');
-  for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql']) {
+  for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   const repository = new D1IngestionV2Repository(sqliteD1(database));
@@ -329,6 +329,52 @@ describe('ingestion v2 shadow discovery integration', () => {
       ledger: subject.repository,
       now: () => new Date('2026-10-01T00:20:00.000Z'),
     })).toBe(0);
+    subject.database.close();
+  });
+
+  it('replaces a stale successful comparison with a durable failed status', async () => {
+    const board = { 'README.md': [rowA], 'SECOND.md': [rowS] };
+    const subject = harness(board);
+    await subject.discover(board);
+    expect((await subject.repository.getShadowComparison(sourceId))?.status).toBe('complete');
+
+    const snapshot = await subject.fetch();
+    const failedDiscovery = new IngestionV2ShadowDiscovery({
+      repository: subject.repository,
+      snapshots: {
+        put: (key, body) => subject.snapshots.put(key, body),
+        get: (key) => subject.snapshots.get(key),
+        delete: (key) => subject.snapshots.delete(key),
+        async putSnapshot() { throw new Error('R2 unavailable'); },
+        getSnapshot: (source, hash) => subject.snapshots.getSnapshot(source, hash),
+      },
+      features: { shadowDiscoveryEnabled: true },
+      now: () => new Date(observedAt),
+      log: () => undefined,
+    });
+    await failedDiscovery.discover({
+      sourceId,
+      postings: snapshot.postings,
+      processed: processSnapshot(snapshot),
+      snapshotHash: snapshot.contentHash,
+      admissionVersion: 'standard-v1',
+      baseline: false,
+      observedAt,
+      legacyActionableExternalIds: [],
+      legacyActiveExternalIds: snapshot.postings.map((posting) => posting.externalId),
+      now: observedAt,
+    });
+
+    expect(await subject.repository.getShadowComparison(sourceId)).toMatchObject({
+      complete: false,
+      status: 'failed',
+      d1RowsWritten: 0,
+      r2Bytes: 0,
+    });
+    const { run_count: runCount } = subject.database.prepare(
+      'SELECT run_count FROM ingestion_v2_shadow_comparisons WHERE source_id = ?',
+    ).get(sourceId) as { run_count: number };
+    expect(runCount).toBe(2);
     subject.database.close();
   });
 

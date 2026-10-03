@@ -48,6 +48,13 @@ describe('ingestion v2 migration', () => {
       'attempt_count', 'retry_at', 'lease_owner', 'lease_expires_at', 'consecutive_omissions', 'job_id',
       'failure_class', 'failure_detail', 'first_observed_at', 'last_observed_at', 'updated_at', 'settled_at',
     ]));
+    expect(columnNames(database, 'ingestion_v2_dispatch_state')).toEqual(expect.arrayContaining([
+      'singleton', 'source_cursor', 'updated_at',
+    ]));
+    expect(columnNames(database, 'ingestion_v2_admission_decisions')).toEqual(expect.arrayContaining([
+      'source_id', 'external_id', 'admission_version', 'job_id', 'notify',
+      'catalog_eligible', 'alert_eligible', 'reason_codes', 'recorded_at',
+    ]));
     database.close();
   });
 
