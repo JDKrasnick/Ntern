@@ -53,6 +53,10 @@ jobs:
       TF_VAR_identity_unconfirmed_publication_enabled: ${{ vars.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED }}
       TF_VAR_trusted_community_catalog_enabled: ${{ vars.TRUSTED_COMMUNITY_CATALOG_ENABLED }}
       TF_VAR_identity_confirmed_coverage_floor: ${{ vars.IDENTITY_CONFIRMED_COVERAGE_FLOOR }}
+      TF_VAR_ingestion_v2_shadow_discovery_enabled: ${{ vars.INGESTION_V2_SHADOW_DISCOVERY_ENABLED }}
+      TF_VAR_ingestion_v2_shadow_source_allowlist: ${{ vars.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST }}
+      TF_VAR_ingestion_v2_admission_enabled: ${{ vars.INGESTION_V2_ADMISSION_ENABLED }}
+      TF_VAR_ingestion_v2_admission_source_allowlist: ${{ vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST }}
       TF_VAR_llm_metadata_publication_policy_json: ${{ vars.LLM_METADATA_PUBLICATION_POLICY_JSON }}
       TF_VAR_admission_support_recipient: ${{ secrets.ADMISSION_SUPPORT_RECIPIENT }}
       TF_VAR_shadow_extraction_enabled: ${{ vars.SHADOW_EXTRACTION_ENABLED }}
