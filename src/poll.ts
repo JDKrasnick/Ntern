@@ -1592,11 +1592,12 @@ export class IngestionRunner {
         const metadataVersionChanged = previous?.metadataExtractionVersion !== ROLE_METADATA_EXTRACTION_VERSION
           || previous?.metadataProcessingRevision !== SOURCE_METADATA_PROCESSING_REVISION;
         // A validators-only response carries no rows, so an open bounded
-        // resolution pass must re-read the whole board to make progress. Only
-        // the validators are cleared: the content hash still labels the
+        // resolution pass or a V2 shadow cadence must re-read the whole board.
+        // Only the validators are cleared: the content hash still labels the
         // re-read as unchanged instead of reporting a spurious source change.
         const resolutionPassOpen = Boolean(previous?.pendingResolutionRows?.length);
-        const fetchCheckpoint = resolutionPassOpen && previous ? {
+        const shadowFullBoardRequired = this.shadowDiscovery?.isEnabledForSource(connector.id) === true;
+        const fetchCheckpoint = (resolutionPassOpen || shadowFullBoardRequired) && previous ? {
           ...previous,
           etag: undefined,
           documentEtags: undefined,

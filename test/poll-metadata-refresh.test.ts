@@ -101,7 +101,7 @@ describe('bounded source metadata refresh', () => {
     const resolver = { async configurationVersion() { return 'fixture-v1'; },
       async resolveCanonicalEmployer() { return undefined; }, async resolveDestinationRule() { return undefined; } };
     let shadowRuns = 0;
-    const shadow = { async discover() { shadowRuns += 1; } };
+    const shadow = { isEnabledForSource: () => true, async discover() { shadowRuns += 1; } };
 
     const report = await new Poller([adapter], store, undefined, undefined, undefined, undefined, undefined, resolver,
       true, false, undefined, shadow)
