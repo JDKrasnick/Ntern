@@ -88,6 +88,9 @@ describe('admission v2 failure taxonomy', () => {
     expect(classifyAdmissionFailure(new Error('request timed out'))).toMatchObject({ kind: 'row-transient', classification: 'destination-timeout' });
     expect(classifyAdmissionFailure(new Error('HTTP 503 upstream'))).toMatchObject({ kind: 'row-transient', classification: 'upstream-server-error' });
     expect(classifyAdmissionFailure(new Error('D1_ERROR: connection lost'))).toMatchObject({ kind: 'infrastructure', classification: 'd1-unavailable' });
+    expect(classifyAdmissionFailure(new Error('D1_ERROR: query timed out'))).toMatchObject({ kind: 'infrastructure', classification: 'd1-unavailable' });
+    expect(classifyAdmissionFailure(new Error('database unavailable (503)'))).toMatchObject({ kind: 'infrastructure', classification: 'd1-unavailable' });
+    expect(classifyAdmissionFailure(new Error('SQL storage aborted'))).toMatchObject({ kind: 'infrastructure', classification: 'd1-unavailable' });
     expect(classifyAdmissionFailure(new Error('Ingestion snapshot object missing at key'))).toMatchObject({ kind: 'infrastructure', classification: 'snapshot-missing' });
   });
 

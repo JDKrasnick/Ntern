@@ -44,7 +44,7 @@ describe('ingestion v2 migration', () => {
       'state', 'is_complete', 'baseline', 'created_at', 'activated_at', 'terminal_at', 'expires_at',
     ]));
     expect(columnNames(database, 'ingestion_rows')).toEqual(expect.arrayContaining([
-      'source_id', 'external_id', 'snapshot_hash', 'material_hash', 'admission_version', 'notification_baseline', 'state', 'decision',
+      'source_id', 'external_id', 'snapshot_hash', 'material_hash', 'admission_version', 'notification_baseline', 'effect_claimed_at', 'state', 'decision',
       'attempt_count', 'retry_at', 'lease_owner', 'lease_expires_at', 'consecutive_omissions', 'job_id',
       'failure_class', 'failure_detail', 'first_observed_at', 'last_observed_at', 'updated_at', 'settled_at',
     ]));
@@ -123,6 +123,29 @@ describe('ingestion v2 migration', () => {
     const legacyAfter = database.prepare(`SELECT value FROM catalog_items WHERE pk = 'job#legacy'`).get() as { value: string };
     expect(legacyAfter).toEqual(legacyBefore);
     expect(columnNames(database, 'ingestion_rows')).toContain('external_id');
+    database.close();
+  });
+
+  it('upgrades a database that already recorded the original 0045 through 0047', () => {
+    const database = new DatabaseSync(':memory:');
+    for (const migration of migrationsUpTo('0047_ingestion_v2_dispatch_cursor.sql')) {
+      database.exec(readFileSync(new URL(migration, migrationsDirectory), 'utf8'));
+    }
+    expect(columnNames(database, 'ingestion_rows')).not.toContain('notification_baseline');
+    database.prepare(`
+      INSERT INTO ingestion_rows (source_id, external_id, snapshot_hash, material_hash, admission_version, state,
+        attempt_count, consecutive_omissions, first_observed_at, last_observed_at, updated_at)
+      VALUES ('source', 'row', 'snapshot', 'material', 'v1', 'settled', 0, 0, 't', 't', 't')
+    `).run();
+
+    database.exec(readFileSync(new URL('0048_ingestion_v2_effect_claim.sql', migrationsDirectory), 'utf8'));
+
+    expect(columnNames(database, 'ingestion_rows')).toEqual(expect.arrayContaining([
+      'notification_baseline', 'effect_claimed_at',
+    ]));
+    expect(database.prepare(`
+      SELECT notification_baseline, effect_claimed_at FROM ingestion_rows WHERE source_id = 'source' AND external_id = 'row'
+    `).get()).toEqual({ notification_baseline: 0, effect_claimed_at: null });
     database.close();
   });
 });

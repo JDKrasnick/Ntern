@@ -134,7 +134,7 @@ function recorder() {
   return { sent: [], async send(message) { this.sent.push(message); } };
 }
 
-function deliver(body) {
+function deliver(body, overrides = {}) {
   const queues = { github: recorder(), destinationVerification: recorder(), admission: recorder() };
   const deadLetters = { github: recorder(), destinationVerification: recorder(), admission: recorder() };
   const settled = { ack: 0, retries: [] };
@@ -151,6 +151,7 @@ function deliver(body) {
     IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'false',
     TRUSTED_COMMUNITY_CATALOG_ENABLED: 'false',
     PUBLIC_API_URL: 'https://api.example.test',
+    ...overrides,
   };
   return (async () => {
     const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
@@ -280,4 +281,24 @@ test('serves shadow counts only to the authenticated operations caller', async (
   assert.equal(body.sourceId, sourceId);
   assert.equal(body.comparison.sourceId, sourceId);
   assert.equal(body.comparison.counts.total, boardRows);
+});
+
+test('reopens a board larger than one D1 bind-limited statement', async () => {
+  installFetchStub();
+  const firstDocument = sourceDocuments[0];
+  const firstUrl = `https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/${firstDocument.branch}/${firstDocument.path}`;
+  documentBodies.set(firstUrl, markdownTable(200));
+  const result = await deliver({ sourceId }, {
+    INGESTION_V2_ADMISSION_ENABLED: 'true',
+    INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: sourceId,
+  });
+  assert.equal(result.settled.ack, 1, JSON.stringify(result.settled.retries));
+  const comparison = await database.prepare(
+    'SELECT metrics_json FROM ingestion_v2_shadow_comparisons WHERE source_id = ?',
+  ).bind(sourceId).first();
+  assert.equal(JSON.parse(comparison.metrics_json).status, 'complete');
+  const queued = await database.prepare(
+    "SELECT COUNT(*) AS count FROM ingestion_rows WHERE source_id = ? AND state = 'queued'",
+  ).bind(sourceId).first();
+  assert.ok(queued.count > 96, `expected more than one bind-limited chunk, got ${queued.count}`);
 });

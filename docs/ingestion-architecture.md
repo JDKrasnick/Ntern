@@ -193,8 +193,11 @@ the live catalog.
 
 - `cloudflare/migrations/0046_ingestion_v2_admission.sql` adds
   `ingestion_admission_handoffs`, the durable dispatch receipt. Migration `0047`
-  adds the round-robin source cursor and sanitized non-publishing canary receipts. The lease,
-  attempt, retry, decision, and failure columns already live on `ingestion_rows`.
+  adds the round-robin source cursor and sanitized non-publishing canary receipts.
+  Forward migration `0048` adds the notification baseline and durable effect-claim
+  marker to databases that already recorded the original `0045`; applied migration
+  files are never rewritten. The lease, attempt, retry, decision, and failure
+  columns already live on `ingestion_rows`.
 - `src/ingestion-v2/admission/` holds the pure contracts and orchestration:
   `message.ts` (versioned message, deterministic batch ID, 25-ID limit,
   canonical ordering), `taxonomy.ts` (business/row-transient/infrastructure
@@ -216,6 +219,16 @@ the live catalog.
   `queue_failure_events` row, retries the delivery, and never consumes a row
   attempt or quarantines a row. The protected DLQ plan/apply surface accepts
   validated admission messages for exact replay after repair.
+- Admission grading returns catalog and notification work as a deferred effect.
+  After network evaluation, the consumer atomically claims the exact leased
+  snapshot/material/policy identity in D1 and only then invokes the idempotent
+  sink. A replacement observed during evaluation makes the claim fail, so the
+  old effect is never published; a replacement after the claim is ordered after
+  that effect and remains queued for its own evaluation.
+- The Cloudflare destination probe retains and parses a bounded 128 KiB HTML
+  prefix. Standard provider routes still classify from reviewed identity, while
+  company-hosted forms receive the same title, posting, structured-data, form,
+  closure, and truncation evidence used by the existing admission rules.
 - Admission resolves canonical employers through the reviewed D1 mapping before
   catalog grading. An unresolved mapping remains a deterministic business
   decision; a D1 resolver failure retries the delivery as infrastructure.
@@ -225,8 +238,17 @@ the live catalog.
   becomes dispatchable work. A new material identity clears the old lane state,
   lease, retry budget, decision, and failure before the fresh identity is
   reopened; guarded terminal writes keep an old evaluator from committing over
-  it. A due retry for unchanged material keeps its attempt count. An authorized operator can also
+  it. Admission ownership follows material and policy identity rather than the
+  whole-board snapshot hash: an unrelated peer addition advances the row's
+  current snapshot pointer while preserving its retry, quarantine, decision,
+  lease, and notification state. An old leased message then fails its snapshot
+  fence and the current pointer is reissued after lease expiry. A due retry for
+  unchanged material keeps its attempt count. An authorized operator can also
   reopen one row through the guarded replay route.
+- Bulk reopening uses at most 96 IDs plus four fixed parameters per statement,
+  staying within D1's 100-parameter limit for discovery and 200-row migration
+  slices. Lease acquisition also enforces `retry_at`, so duplicate messages
+  before either backoff deadline are safe no-ops.
 - A shadow-first rollout is bootstrapped explicitly. Rows observed while their
   source is outside the admission rollout retain a durable notification baseline;
   the dispatcher reopens bounded batches that have never completed V2 admission,
@@ -243,6 +265,11 @@ the live catalog.
   previously blocked or shelved row with no job ID. The D1 verification sink
   retains one sanitized receipt per source, row, and admission version so a
   canary can prove zero notifications without a live catalog writer.
+- Discovery stamps that same silent baseline before replacing a stale policy
+  version, closing the race where discovery could otherwise outrun the scheduled
+  migration pass. D1/database/storage error markers are classified before
+  generic timeout or HTTP wording, so systemic faults retry the delivery without
+  consuming a row attempt.
 - Replaced snapshots remain active while pending, queued, or processing rows
   still reference them. The final acknowledged handoff terminalizes a settled
   superseded snapshot and assigns seven days of retention for replay/audit.

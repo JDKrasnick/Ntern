@@ -160,6 +160,7 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
     });
 
     const decisions = new Map(input.processed.decisions.map((decision) => [decision.externalId, decision]));
+    const classifications = new Map(diff.rows.map((row) => [row.externalId, row.classification]));
     const rows: IngestionRowRecord[] = envelope.rows.map((row) => {
       const decision = projectDecision(decisions.get(row.externalId));
       return {
@@ -168,7 +169,9 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
         snapshotHash: envelope.snapshotHash,
         materialHash: row.materialHash,
         admissionVersion: input.admissionVersion,
-        notificationBaseline: input.baseline || !admissionEnabled,
+        // Policy migration must stay silent even when discovery observes the
+        // new version before the scheduled migration pass can fence the row.
+        notificationBaseline: input.baseline || !admissionEnabled || classifications.get(row.externalId) === 'stale-policy',
         state: 'settled' as const,
         ...(decision ? { decision } : {}),
         attemptCount: 0,

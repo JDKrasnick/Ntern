@@ -61,6 +61,7 @@ class FakeLedger implements AdmissionV2Ledger {
     if (row.snapshotHash !== input.expectedSnapshotHash || row.materialHash !== input.expectedMaterialHash
       || row.admissionVersion !== input.expectedAdmissionVersion) return { outcome: 'no-op', reason: 'stale' };
     if (row.state === 'processing' && row.leaseExpiresAt && row.leaseExpiresAt > input.now) return { outcome: 'no-op', reason: 'leased' };
+    if (row.retryAt && row.retryAt > input.now) return { outcome: 'no-op', reason: 'retry-not-due' };
     const leased: IngestionRowRecord = {
       ...row, state: 'processing', leaseOwner: input.owner,
       leaseExpiresAt: new Date(Date.parse(input.now) + input.leaseMs).toISOString(), updatedAt: input.now,
@@ -80,6 +81,11 @@ class FakeLedger implements AdmissionV2Ledger {
     return row.snapshotHash === input.expectedSnapshotHash
       && row.materialHash === input.expectedMaterialHash
       && row.admissionVersion === input.expectedAdmissionVersion;
+  }
+
+  async claimRowEffect(input: ExpectedAdmissionIdentity & { sourceId: string; externalId: string; owner: string; now: string }): Promise<boolean> {
+    const row = this.row(input.sourceId, input.externalId);
+    return Boolean(row && row.state === 'processing' && row.leaseOwner === input.owner && this.identityMatches(row, input));
   }
 
   async settleRow(input: ExpectedAdmissionIdentity & { sourceId: string; externalId: string; owner: string; now: string; decision: 'admitted' | 'blocked' | 'shelved'; jobId?: string; reason?: string }): Promise<boolean> {
@@ -307,6 +313,36 @@ describe('admission v2 queue consumer', () => {
     expect((await ledger.getRow(SOURCE, 'a'))?.state).toBe('settled');
   });
 
+  it('does not commit an effect when material changes during evaluation', async () => {
+    const { ledger, snapshots } = setup(['a']);
+    let effects = 0;
+    const evaluator: AdmissionV2RowEvaluator = {
+      async evaluate() {
+        ledger.seedRow(ledgerRow('a', {
+          snapshotHash: 'b'.repeat(64),
+          materialHash: 'm-a-replacement',
+          state: 'queued',
+          leaseOwner: undefined,
+          leaseExpiresAt: undefined,
+        }));
+        return {
+          decision: { kind: 'admitted', jobId: 'JOB#A' },
+          jobId: 'JOB#A',
+          async commitEffect() { effects += 1; },
+        };
+      },
+    };
+    const [message] = messagesFor(['a']);
+
+    const result = await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+
+    expect(result).toMatchObject({ acknowledged: true, settled: 0, skipped: 1 });
+    expect(effects).toBe(0);
+    expect(await ledger.getRow(SOURCE, 'a')).toMatchObject({
+      snapshotHash: 'b'.repeat(64), materialHash: 'm-a-replacement', state: 'queued',
+    });
+  });
+
   it('retries only the transient row while peers settle, then quarantines after two retries', async () => {
     const { ledger, snapshots } = setup(['ok', 'poison', 'ok2']);
     const evaluator = new CountingEvaluator(async (externalId) => {
@@ -314,19 +350,30 @@ describe('admission v2 queue consumer', () => {
       throw new AdmissionRowTransientError('upstream-server-error', '503');
     });
     const [message] = messagesFor(['ok', 'poison', 'ok2']);
-    const first = await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    let timestamp = Date.parse('2026-10-01T00:00:00.000Z');
+    const dependencies = { ledger, snapshots, evaluator, now: () => new Date(timestamp) };
+    const first = await processAdmissionV2Message(message, dependencies);
     expect(first.acknowledged).toBe(true);
     expect(first.retried).toBe(1);
     expect(first.settled).toBe(2);
     expect((await ledger.getRow(SOURCE, 'poison'))).toMatchObject({ state: 'queued', retryAt: expect.any(String), attemptCount: 1 });
     expect(evaluator.calls.get('ok')).toBe(1);
 
-    // Second attempt is due immediately in the fake; retry again.
-    const second = await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    const earlyDuplicate = await processAdmissionV2Message(message, dependencies);
+    expect(earlyDuplicate.skipped).toBe(3);
+    expect(evaluator.calls.get('poison')).toBe(1);
+
+    timestamp += 60_000;
+    const second = await processAdmissionV2Message(message, dependencies);
     expect(second.retried).toBe(1);
     expect(evaluator.calls.get('ok')).toBe(1);
-    // Third attempt exhausts and quarantines only the poison row.
-    const third = await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    const secondEarlyDuplicate = await processAdmissionV2Message(message, dependencies);
+    expect(secondEarlyDuplicate.skipped).toBe(3);
+    expect(evaluator.calls.get('poison')).toBe(2);
+
+    // The third due attempt exhausts and quarantines only the poison row.
+    timestamp += 5 * 60_000;
+    const third = await processAdmissionV2Message(message, dependencies);
     expect(third.quarantined).toBe(1);
     expect((await ledger.getRow(SOURCE, 'poison'))?.state).toBe('quarantined');
     expect(evaluator.calls.get('ok')).toBe(1);
@@ -343,6 +390,20 @@ describe('admission v2 queue consumer', () => {
     expect(result.acknowledged).toBe(false);
     expect(result.infrastructureFailure).toMatchObject({ kind: 'infrastructure', classification: 'd1-unavailable' });
     expect((await ledger.getRow(SOURCE, 'b'))).toMatchObject({ state: 'queued', attemptCount: 0 });
+  });
+
+  it('treats D1 timeout wording as systemic without consuming a row attempt', async () => {
+    const { ledger, snapshots } = setup(['a']);
+    const evaluator = new CountingEvaluator(async () => {
+      throw new Error('D1_ERROR: query timed out while committing');
+    });
+    const [message] = messagesFor(['a']);
+    const result = await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    expect(result).toMatchObject({
+      acknowledged: false,
+      infrastructureFailure: { kind: 'infrastructure', classification: 'd1-unavailable' },
+    });
+    expect(await ledger.getRow(SOURCE, 'a')).toMatchObject({ state: 'queued', attemptCount: 0 });
   });
 
   it('treats a duplicate delivery as a no-op', async () => {

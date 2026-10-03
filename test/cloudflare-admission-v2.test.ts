@@ -61,7 +61,7 @@ describe('Cloudflare admission v2 boundary', () => {
     })).resolves.toMatchObject({ decision: { kind: 'blocked', reason: 'invalid-application-url' } });
   });
 
-  it('treats a large healthy application page as live without retaining its body', async () => {
+  it('treats a large healthy application page as live with bounded evidence', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('x'.repeat(300 * 1024), {
       status: 200,
       headers: { 'Content-Type': 'text/html' },
@@ -69,12 +69,63 @@ describe('Cloudflare admission v2 boundary', () => {
     const prober = cloudflareAdmissionProber({ async resolve() { return ['93.184.216.34']; } });
     await expect(prober.probe({
       sourceId: 'source', externalId: 'role', applyUrl: 'https://jobs.example.com/role', observedAt: '2026-10-03T00:00:00.000Z',
-    })).resolves.toEqual({ reachability: 'live' });
+    })).resolves.toMatchObject({
+      reachability: 'live',
+      evidence: { url: 'https://jobs.example.com/role', inspectionTruncated: true, inspectedBytes: 128 * 1024 },
+    });
+  });
+
+  it('passes nonstandard official-form evidence through the deployed prober boundary', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(`
+      <html><head><title>Software Engineering Intern</title></head>
+      <body><main>${'Build distributed systems and collaborate with engineers. '.repeat(10)}</main>
+      <form action="/applications"><input type="file" name="resume"></form></body></html>
+    `, { status: 200, headers: { 'Content-Type': 'text/html' } })));
+    const prober = cloudflareAdmissionProber({ async resolve() { return ['93.184.216.34']; } });
+    await expect(prober.probe({
+      sourceId: 'source', externalId: 'role', applyUrl: 'https://careers.example.com/opportunities/software-intern', observedAt,
+    })).resolves.toMatchObject({
+      reachability: 'live',
+      evidence: {
+        title: 'Software Engineering Intern',
+        applicationFormPresent: true,
+        closureState: 'open',
+        contentExcerpt: expect.stringContaining('Build distributed systems'),
+      },
+    });
+  });
+
+  it('admits a nonstandard official form through the Cloudflare prober and existing rules', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(`
+      <html><head><title>Software Engineering Intern</title></head>
+      <body><main>${'Build distributed systems and collaborate with engineers. '.repeat(10)}</main>
+      <form action="/applications"><input type="file" name="resume"></form></body></html>
+    `, { status: 200, headers: { 'Content-Type': 'text/html' } })));
+    const commits: unknown[] = [];
+    const evaluator = stage2AdmissionEvaluator(
+      { async resolve() { return ['93.184.216.34']; } },
+      { async commit(input) { commits.push(input); } },
+    );
+    const evaluation = await evaluator.evaluate({
+      sourceId: 'source', externalId: 'official-form', snapshotHash: row().snapshotHash,
+      admissionVersion: 'standard-v1', baseline: false, row: row(), firstObservationEligible: true,
+      posting: {
+        sourceId: 'source', externalId: 'official-form', sourceUrl: 'https://careers.example.com/opportunities',
+        fetchedAt: observedAt, employer: { id: 'acme', name: 'Acme', authority: 'reviewed-registry' },
+        title: 'Software Engineering Intern', content: [{ kind: 'description', format: 'plain', value: 'Build distributed systems.' }],
+        locations: ['Remote'], applyUrl: 'https://careers.example.com/opportunities/software-intern',
+        sourceState: 'open', lifecycleAuthority: 'title',
+      },
+    });
+    expect(evaluation).toMatchObject({ decision: { kind: 'admitted' }, commitEffect: expect.any(Function) });
+    expect(commits).toHaveLength(0);
+    await evaluation.commitEffect?.();
+    expect(commits).toHaveLength(1);
   });
 
   it('ledgers malformed work and retries it toward the DLQ instead of dropping it', async () => {
     const database = new DatabaseSync(':memory:');
-    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql']) {
+    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
     }
     let acked = 0;
@@ -96,7 +147,7 @@ describe('Cloudflare admission v2 boundary', () => {
 
   it('ledgers systemic delivery failure without consuming a row attempt', async () => {
     const database = new DatabaseSync(':memory:');
-    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql']) {
+    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
     }
     const [body] = buildAdmissionV2Messages({
@@ -118,7 +169,7 @@ describe('Cloudflare admission v2 boundary', () => {
 
   it('resolves a prior failure-ledger row when a disabled canary drains safely', async () => {
     const database = new DatabaseSync(':memory:');
-    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql']) {
+    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
     }
     const [body] = buildAdmissionV2Messages({

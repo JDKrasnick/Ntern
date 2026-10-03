@@ -397,6 +397,59 @@ function confidenceFor(input: { html: boolean; title?: string; description?: str
   return { score: normalized, level, recommendation: level === 'high' ? 'alert-eligible' : level === 'medium' ? 'catalog-only' : 'review', signals };
 }
 
+/** Parse bounded server-rendered HTML already fetched through a trusted network boundary. */
+export function applicationPageEvidenceFromHtml(input: {
+  requestedUrl: string | URL;
+  finalUrl?: string | URL;
+  html: string;
+  inspectedBytes: number;
+  inspectionTruncated: boolean;
+  now?: Date;
+}): ApplicationPageEvidence {
+  const requested = typeof input.requestedUrl === 'string' ? new URL(input.requestedUrl) : input.requestedUrl;
+  const destination = input.finalUrl
+    ? typeof input.finalUrl === 'string' ? new URL(input.finalUrl) : input.finalUrl
+    : requested;
+  const expectedPostingId = postingId(requested);
+  const inspection = { inspectedBytes: input.inspectedBytes, inspectionTruncated: input.inspectionTruncated };
+  const content = applicationContent(input.html, expectedPostingId, inspection);
+  const title = /<title[^>]*>\s*([^<]+?)\s*<\/title>/i.exec(input.html)?.[1]?.replace(/\s+/g, ' ').trim();
+  const description = /<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["']/i.exec(input.html)?.[1]?.replace(/\s+/g, ' ').trim();
+  const postingIdObserved = expectedPostingId ? input.html.includes(expectedPostingId) : undefined;
+  const postingIdPresent = input.inspectionTruncated && postingIdObserved === false ? undefined : postingIdObserved;
+  const jobPostingCount = [...input.html.matchAll(/["']@type["']\s*:\s*["']JobPosting["']/gi)].length;
+  const jobLinkCount = distinctJobLinkCount(input.html, destination);
+  const applicationFormPresent = /<form\b[^>]*(?:action=["'][^"']*(?:apply|application)|id=["'][^"']*(?:apply|application))|<input\b[^>]*(?:type=["']file["']|name=["'](?:resume|cv)["'])/i.test(input.html);
+  const explicitlyGone = [title, description,
+    ...(content.source !== 'json-ld' && applicationFormPresent ? [] : [content.excerpt?.slice(0, 2_000)])]
+    .some((value) => explicitDestinationClosure(value ?? ''));
+  const validThroughExpired = Boolean(content.validThrough && Date.parse(content.validThrough) < (input.now ?? new Date()).getTime());
+  if (title && /^(?:404 |page )?not found$|^(?:access denied|application error|error)$/i.test(title)) {
+    throw new ApplicationUrlValidationError(`Application page reports ${title}`);
+  }
+  return {
+    url: destination.toString(),
+    inspectionTruncated: input.inspectionTruncated,
+    inspectedBytes: input.inspectedBytes,
+    ...(postingRedirectedToGenericDestination(requested, destination) ? { redirectedToGenericDestination: true } : {}),
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+    ...(expectedPostingId ? { expectedPostingId } : {}),
+    ...(postingIdPresent !== undefined ? { postingIdPresent } : {}),
+    ...(jobPostingCount ? { jobPostingCount } : {}),
+    ...(jobLinkCount ? { distinctJobLinkCount: jobLinkCount } : {}),
+    ...(applicationFormPresent ? { applicationFormPresent: true } : {}),
+    ...(content.validThrough ? { validThrough: content.validThrough } : {}),
+    ...(validThroughExpired
+      ? { closureState: 'gone' as const, closureSignal: 'valid-through-expired' as const }
+      : explicitlyGone ? { closureState: 'gone' as const, closureSignal: 'explicit-language' as const }
+        : { closureState: 'open' as const }),
+    ...(content.excerpt ? { contentExcerpt: content.excerpt, contentHash: content.hash, contentSource: content.source } : {}),
+    ...(content.metadataArtifacts?.length ? { metadataArtifacts: content.metadataArtifacts } : {}),
+    confidence: confidenceFor({ html: true, ...(title ? { title } : {}), ...(description ? { description } : {}), ...(content.excerpt ? { contentExcerpt: content.excerpt } : {}), ...(expectedPostingId ? { expectedPostingId } : {}), ...(postingIdPresent !== undefined ? { postingIdPresent } : {}) }),
+  };
+}
+
 /**
  * Reads a compact, server-rendered evidence layer for any application page.
  * Status codes alone are insufficient because many career sites return a 200
@@ -445,42 +498,13 @@ export async function inspectApplicationPage(
     };
   }
   const inspection = await boundedResponseText(response);
-  const html = inspection.text;
-  const content = applicationContent(html, expectedPostingId, inspection);
-  const title = /<title[^>]*>\s*([^<]+?)\s*<\/title>/i.exec(html)?.[1]?.replace(/\s+/g, ' ').trim();
-  const description = /<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["']/i.exec(html)?.[1]?.replace(/\s+/g, ' ').trim();
-  const postingIdObserved = expectedPostingId ? html.includes(expectedPostingId) : undefined;
-  const postingIdPresent = inspection.inspectionTruncated && postingIdObserved === false ? undefined : postingIdObserved;
-  const jobPostingCount = [...html.matchAll(/["']@type["']\s*:\s*["']JobPosting["']/gi)].length;
-  const jobLinkCount = distinctJobLinkCount(html, destination);
-  const applicationFormPresent = /<form\b[^>]*(?:action=["'][^"']*(?:apply|application)|id=["'][^"']*(?:apply|application))|<input\b[^>]*(?:type=["']file["']|name=["'](?:resume|cv)["'])/i.test(html);
-  const explicitlyGone = [title, description,
-    ...(content.source !== 'json-ld' && applicationFormPresent ? [] : [content.excerpt?.slice(0, 2_000)])]
-    .some((value) => explicitDestinationClosure(value ?? ''));
-  const validThroughExpired = Boolean(content.validThrough && Date.parse(content.validThrough) < Date.now());
-  if (title && /^(?:404 |page )?not found$|^(?:access denied|application error|error)$/i.test(title)) {
-    throw new ApplicationUrlValidationError(`Application page reports ${title}`);
-  }
-  return {
-    url: destination.toString(),
-    inspectionTruncated: inspection.inspectionTruncated,
+  return applicationPageEvidenceFromHtml({
+    requestedUrl: url,
+    finalUrl: destination,
+    html: inspection.text,
     inspectedBytes: inspection.inspectedBytes,
-    ...(title ? { title } : {}),
-    ...(description ? { description } : {}),
-    ...(expectedPostingId ? { expectedPostingId } : {}),
-    ...(postingIdPresent !== undefined ? { postingIdPresent } : {}),
-    ...(jobPostingCount ? { jobPostingCount } : {}),
-    ...(jobLinkCount ? { distinctJobLinkCount: jobLinkCount } : {}),
-    ...(applicationFormPresent ? { applicationFormPresent: true } : {}),
-    ...(content.validThrough ? { validThrough: content.validThrough } : {}),
-    ...(validThroughExpired
-      ? { closureState: 'gone' as const, closureSignal: 'valid-through-expired' as const }
-      : explicitlyGone ? { closureState: 'gone' as const, closureSignal: 'explicit-language' as const }
-        : { closureState: 'open' as const }),
-    ...(content.excerpt ? { contentExcerpt: content.excerpt, contentHash: content.hash, contentSource: content.source } : {}),
-    ...(content.metadataArtifacts?.length ? { metadataArtifacts: content.metadataArtifacts } : {}),
-    confidence: confidenceFor({ html: true, ...(title ? { title } : {}), ...(description ? { description } : {}), ...(content.excerpt ? { contentExcerpt: content.excerpt } : {}), ...(expectedPostingId ? { expectedPostingId } : {}), ...(postingIdPresent !== undefined ? { postingIdPresent } : {}) }),
-  };
+    inspectionTruncated: inspection.inspectionTruncated,
+  });
 }
 
 /** Optional source-specific host contract enforced in addition to the generic checks. */

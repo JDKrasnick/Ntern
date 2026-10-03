@@ -92,14 +92,14 @@ interface Harness {
   discovery: IngestionV2ShadowDiscovery;
   adapter: GitHubMarkdownAdapter;
   reopened: string[][];
-  discover: (documents: Record<string, BoardRow[]>) => Promise<void>;
+  discover: (documents: Record<string, BoardRow[]>, options?: { admissionVersion?: string }) => Promise<void>;
   setAdmissionEnabled: (enabled: boolean) => void;
   fetch: () => Promise<SourceSnapshot>;
 }
 
 function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false): Harness {
   const database = new DatabaseSync(':memory:');
-  for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql']) {
+  for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   const repository = new D1IngestionV2Repository(sqliteD1(database));
@@ -136,7 +136,7 @@ function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false):
     },
   });
   const fetch = async () => await adapter.fetch() as unknown as SourceSnapshot;
-  const discover = async (next: Record<string, BoardRow[]>) => {
+  const discover: (next: Record<string, BoardRow[]>, options?: { admissionVersion?: string }) => Promise<void> = async (next, options = {}) => {
     documents = next;
     const snapshot = await fetch();
     await discovery.discover({
@@ -144,7 +144,7 @@ function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false):
       postings: snapshot.postings,
       processed: processSnapshot(snapshot),
       snapshotHash: snapshot.contentHash,
-      admissionVersion: 'standard-v1',
+      admissionVersion: options.admissionVersion ?? 'standard-v1',
       baseline: false,
       observedAt,
       legacyActionableExternalIds: [],
@@ -307,6 +307,52 @@ describe('ingestion v2 shadow discovery integration', () => {
     subject.reopened.length = 0;
     await subject.discover({ 'README.md': [rowA, rowB, changed], 'SECOND.md': [rowS] });
     expect(subject.reopened).toEqual([]);
+    subject.database.close();
+  });
+
+  it('preserves retry state across an unrelated addition and fences discovery-first policy migration', async () => {
+    const board = { 'README.md': [rowA, rowB], 'SECOND.md': [rowS] };
+    const subject = harness(board, true);
+    await subject.discover(board);
+    const rowId = basePostingId('README.md', rowA.url);
+    const initial = await subject.repository.getRow(sourceId, rowId);
+    expect(initial).toBeDefined();
+    const lease = await subject.repository.acquireLease({
+      sourceId, externalId: rowId, owner: 'retry-owner', now: '2026-10-01T00:00:00.000Z', leaseMs: 60_000,
+      expectedSnapshotHash: initial!.snapshotHash, expectedMaterialHash: initial!.materialHash, expectedAdmissionVersion: initial!.admissionVersion,
+    });
+    expect(lease.outcome).toBe('acquired');
+    expect(await subject.repository.scheduleRowRetry({
+      sourceId, externalId: rowId, owner: 'retry-owner', now: '2026-10-01T00:00:01.000Z',
+      expectedSnapshotHash: initial!.snapshotHash, expectedMaterialHash: initial!.materialHash, expectedAdmissionVersion: initial!.admissionVersion,
+      attemptCount: 1, retryAt: '2026-10-01T00:01:01.000Z',
+      failure: { kind: 'row-transient', classification: 'destination-timeout', detail: 'timed out' },
+    })).toBe(true);
+
+    await subject.discover({ 'README.md': [rowA, rowB, rowC], 'SECOND.md': [rowS] });
+    const afterPeerChange = await subject.repository.getRow(sourceId, rowId);
+    expect(afterPeerChange).toMatchObject({
+      state: 'queued', attemptCount: 1, retryAt: '2026-10-01T00:01:01.000Z', failureClass: 'destination-timeout',
+    });
+    expect(afterPeerChange?.snapshotHash).not.toBe(initial?.snapshotHash);
+
+    const policyLease = await subject.repository.acquireLease({
+      sourceId, externalId: rowId, owner: 'policy-owner', now: '2026-10-01T00:02:00.000Z', leaseMs: 60_000,
+      expectedSnapshotHash: afterPeerChange!.snapshotHash, expectedMaterialHash: afterPeerChange!.materialHash,
+      expectedAdmissionVersion: afterPeerChange!.admissionVersion,
+    });
+    expect(policyLease.outcome).toBe('acquired');
+    expect(await subject.repository.settleRow({
+      sourceId, externalId: rowId, owner: 'policy-owner', now: '2026-10-01T00:02:01.000Z',
+      expectedSnapshotHash: afterPeerChange!.snapshotHash, expectedMaterialHash: afterPeerChange!.materialHash,
+      expectedAdmissionVersion: afterPeerChange!.admissionVersion, decision: 'blocked', reason: 'old policy',
+    })).toBe(true);
+    await subject.discover({ 'README.md': [rowA, rowB, rowC], 'SECOND.md': [rowS] }, { admissionVersion: 'standard-v2' });
+    expect(await subject.repository.getRow(sourceId, rowId)).toMatchObject({
+      state: 'queued', admissionVersion: 'standard-v2', notificationBaseline: true,
+    });
+    const plan = await planAdmissionV2Dispatch(sourceId, { ledger: subject.repository });
+    expect(plan.messages.find((message) => message.externalIds.includes(rowId))?.baseline).toBe(true);
     subject.database.close();
   });
 

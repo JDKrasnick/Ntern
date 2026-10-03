@@ -82,6 +82,11 @@ export interface AdmissionRowEvaluation {
   decision: AdmissionTerminalDecision;
   /** Optional catalog identity recorded on the ledger row. */
   jobId?: string;
+  /**
+   * Deferred idempotent catalog/notification effect. The consumer invokes it
+   * only after atomically claiming the evaluated row identity in D1.
+   */
+  commitEffect?: () => Promise<void>;
 }
 
 /** Context handed to a row evaluator for one message. */
@@ -105,9 +110,9 @@ export interface AdmissionRowContext {
 
 export interface AdmissionV2RowEvaluator {
   /**
-   * Grade one row and commit its terminal catalog effects idempotently. Resolve
-   * with a terminal decision, or reject with an `AdmissionRowTransientError` /
-   * `AdmissionInfrastructureError`.
+   * Grade one row and return any terminal effect as a deferred idempotent
+   * callback. Resolve with a terminal decision, or reject with an
+   * `AdmissionRowTransientError` / `AdmissionInfrastructureError`.
    */
   evaluate(context: AdmissionRowContext): Promise<AdmissionRowEvaluation>;
 }
@@ -156,7 +161,7 @@ export type AdmissionLeaseResult =
   | { outcome: 'acquired'; row: IngestionRowRecord }
   | { outcome: 'settled'; row: IngestionRowRecord }
   | { outcome: 'quarantined'; row: IngestionRowRecord }
-  | { outcome: 'no-op'; reason: 'absent' | 'stale' | 'leased' };
+  | { outcome: 'no-op'; reason: 'absent' | 'stale' | 'leased' | 'retry-not-due' };
 
 export type AdmissionRowOutcome =
   | { kind: 'settled'; decision: IngestionDecision; reason?: string; jobId?: string }

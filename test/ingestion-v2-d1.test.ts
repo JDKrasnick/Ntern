@@ -34,6 +34,7 @@ function subject(): { database: DatabaseSync; repository: D1IngestionV2Repositor
   database.exec(readFileSync(new URL('../cloudflare/migrations/0045_ingestion_v2.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0046_ingestion_v2_admission.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0047_ingestion_v2_dispatch_cursor.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0048_ingestion_v2_effect_claim.sql', import.meta.url), 'utf8'));
   return { database, repository: new D1IngestionV2Repository(sqliteD1(database)) };
 }
 
@@ -292,6 +293,41 @@ describe('ingestion v2 D1 repository', () => {
     expect(await repository.getRow('community-example', 'changed')).toMatchObject({ state: 'queued', attemptCount: 0 });
   });
 
+  it('preserves row-owned work when only a peer changes the board snapshot', async () => {
+    const { repository } = subject();
+    const nextSnapshotHash = 'b'.repeat(64);
+    await repository.putRows([
+      row({ externalId: 'retry', state: 'queued', decision: undefined, attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z', failureClass: 'destination-timeout' }),
+      row({ externalId: 'poison', state: 'quarantined', decision: 'blocked', attemptCount: 3, failureClass: 'upstream-server-error' }),
+      row({ externalId: 'leased', state: 'processing', decision: undefined, attemptCount: 1, leaseOwner: 'old-owner', leaseExpiresAt: '2026-10-01T00:05:00.000Z' }),
+    ]);
+    await repository.putRows(['retry', 'poison', 'leased'].map((externalId) => row({
+      externalId,
+      snapshotHash: nextSnapshotHash,
+      state: 'settled',
+      decision: 'admitted',
+      attemptCount: 0,
+      updatedAt: '2026-10-01T00:01:00.000Z',
+      lastObservedAt: '2026-10-01T00:01:00.000Z',
+    })));
+
+    expect(await repository.getRow('community-example', 'retry')).toMatchObject({
+      snapshotHash: nextSnapshotHash, state: 'queued', attemptCount: 1,
+      retryAt: '2026-10-01T00:10:00.000Z', failureClass: 'destination-timeout',
+    });
+    expect(await repository.getRow('community-example', 'poison')).toMatchObject({
+      snapshotHash: nextSnapshotHash, state: 'quarantined', attemptCount: 3, failureClass: 'upstream-server-error',
+    });
+    expect(await repository.getRow('community-example', 'leased')).toMatchObject({
+      snapshotHash: nextSnapshotHash, state: 'processing', attemptCount: 1, leaseOwner: 'old-owner',
+    });
+    expect(await repository.settleRow({
+      sourceId: 'community-example', externalId: 'leased', owner: 'old-owner', now: '2026-10-01T00:02:00.000Z',
+      expectedSnapshotHash: 'a'.repeat(64), expectedMaterialHash: 'm', expectedAdmissionVersion: 'standard-v1',
+      decision: 'admitted',
+    })).toBe(false);
+  });
+
   it('leaves an in-flight row untouched when it drops off the board', async () => {
     const { repository } = subject();
     await repository.putRows([
@@ -345,6 +381,57 @@ describe('ingestion v2 D1 repository', () => {
     expect(await repository.releaseLease('community-example', 'a', 'x', '2026-10-01T00:00:00.000Z')).toBe(false);
     await repository.putRows([row({ externalId: 'b', state: 'processing', decision: undefined, leaseOwner: 'x', leaseExpiresAt: '2026-10-01T01:00:00.000Z' })]);
     expect(await repository.releaseLease('community-example', 'b', 'x', '2026-10-01T00:00:00.000Z')).toBe(true);
+  });
+
+  it('requires an exact durable effect claim before settling an effectful row', async () => {
+    const { repository } = subject();
+    await repository.putRows([row({ externalId: 'effect', state: 'queued', decision: undefined })]);
+    const identity = {
+      expectedSnapshotHash: 'a'.repeat(64), expectedMaterialHash: 'm', expectedAdmissionVersion: 'standard-v1',
+    };
+    expect(await repository.acquireLease({
+      sourceId: 'community-example', externalId: 'effect', owner: 'owner', now: '2026-10-01T00:00:00.000Z', leaseMs: 60_000, ...identity,
+    })).toMatchObject({ outcome: 'acquired' });
+    expect(await repository.settleRow({
+      sourceId: 'community-example', externalId: 'effect', owner: 'owner', now: '2026-10-01T00:00:01.000Z',
+      ...identity, decision: 'admitted', effectClaimed: true,
+    })).toBe(false);
+    expect(await repository.claimRowEffect({
+      sourceId: 'community-example', externalId: 'effect', owner: 'owner', now: '2026-10-01T00:00:02.000Z',
+      ...identity,
+    })).toBe(true);
+    expect(await repository.settleRow({
+      sourceId: 'community-example', externalId: 'effect', owner: 'owner', now: '2026-10-01T00:00:03.000Z',
+      ...identity, decision: 'admitted', effectClaimed: true,
+    })).toBe(true);
+  });
+
+  it('does not acquire a retrying row before its durable backoff expires', async () => {
+    const { repository } = subject();
+    await repository.putRows([row({
+      externalId: 'retry', state: 'queued', decision: undefined, attemptCount: 1,
+      retryAt: '2026-10-01T00:01:00.000Z',
+    })]);
+    const identity = {
+      expectedSnapshotHash: 'a'.repeat(64), expectedMaterialHash: 'm', expectedAdmissionVersion: 'standard-v1',
+    };
+    expect(await repository.acquireLease({
+      sourceId: 'community-example', externalId: 'retry', owner: 'early', now: '2026-10-01T00:00:30.000Z', leaseMs: 60_000, ...identity,
+    })).toMatchObject({ outcome: 'no-op', reason: 'retry-not-due' });
+    expect(await repository.acquireLease({
+      sourceId: 'community-example', externalId: 'retry', owner: 'due', now: '2026-10-01T00:01:00.000Z', leaseMs: 60_000, ...identity,
+    })).toMatchObject({ outcome: 'acquired', row: { attemptCount: 1, leaseOwner: 'due' } });
+  });
+
+  it('reopens more rows than one D1 bind-limited statement can hold', async () => {
+    const { repository } = subject();
+    const records = Array.from({ length: 250 }, (_, index) => row({ externalId: `row-${String(index).padStart(3, '0')}` }));
+    await repository.putRows(records);
+    expect(await repository.reopenRows(
+      'community-example', records.map((record) => record.externalId), '2026-10-01T00:01:00.000Z',
+      { admissionVersion: 'standard-v2', notificationBaseline: true },
+    )).toBe(250);
+    expect(await repository.listRowsByState('community-example', 'queued', 500)).toHaveLength(250);
   });
 
   it('pages rows by observation order', async () => {

@@ -132,6 +132,21 @@ export async function processAdmissionV2Message(
       });
       const decision = evaluation.decision;
       const jobId = evaluation.jobId ?? (decision.kind === 'admitted' ? decision.jobId : undefined);
+      if (evaluation.commitEffect) {
+        const claimed = await dependencies.ledger.claimRowEffect({
+          sourceId: message.sourceId,
+          externalId,
+          owner,
+          now: now().toISOString(),
+          ...expectedIdentity,
+        });
+        if (!claimed) {
+          result.skipped += 1;
+          dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'effect-claim' });
+          continue;
+        }
+        await evaluation.commitEffect();
+      }
       const settled = await dependencies.ledger.settleRow({
         sourceId: message.sourceId,
         externalId,
@@ -139,13 +154,14 @@ export async function processAdmissionV2Message(
         now: now().toISOString(),
         ...expectedIdentity,
         decision: decision.kind,
+        effectClaimed: Boolean(evaluation.commitEffect),
         ...(jobId ? { jobId } : {}),
         ...(decision.kind === 'admitted' ? {} : { reason: decision.reason }),
       });
       if (!settled) {
-        // The lease lapsed and was reclaimed between evaluation and settle. The
-        // row is back in flight; the evaluator's sink commit is idempotent, so
-        // treat it as skipped rather than claiming a write that did not happen.
+        // A replacement observed after the effect claim owns the next row
+        // identity. The claimed effect is linearized before that observation;
+        // its idempotent retry remains safe while the replacement stays queued.
         result.skipped += 1;
         dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'settle' });
         continue;

@@ -49,7 +49,6 @@ CREATE TABLE IF NOT EXISTS ingestion_rows (
   snapshot_hash TEXT NOT NULL,
   material_hash TEXT NOT NULL,
   admission_version TEXT NOT NULL,
-  notification_baseline INTEGER NOT NULL DEFAULT 0 CHECK(notification_baseline IN (0, 1)),
   state TEXT NOT NULL CHECK(state IN ('pending', 'queued', 'processing', 'settled', 'quarantined', 'absent')),
   decision TEXT CHECK(decision IS NULL OR decision IN ('admitted', 'blocked', 'shelved')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),

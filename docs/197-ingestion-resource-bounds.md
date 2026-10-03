@@ -629,9 +629,17 @@ The admission lane is bounded in four independent ways:
 
 - One queue message carries at most 25 external IDs, so a delivery's work is
   bounded by the message, not by the source's retained history.
+- Bulk row reopening carries at most 96 IDs plus four fixed bindings per D1
+  statement. A 200-row policy slice or larger discovery diff therefore runs as
+  several bounded statements instead of exceeding D1's parameter limit.
 - The consumer downloads the referenced snapshot once per batch, never once per
   row (`test/ingestion-v2-admission-queue.test.ts` asserts one read for a 25-row
   batch).
+- `test/ingestion-resource-budget.test.ts` also drives a 25-row admission message
+  through the real D1 repository and R2 response-body reader using the measured
+  3,302-row `simplify-summer-2026` board. The test enforces the same 9 s CPU,
+  96 MB attributable-heap, and 112 MB absolute-heap ceilings as the production
+  ingestion budget.
 - Each row is leased with a bounded expiry; an expired lease is reclaimed and
   redispatched. Two concurrent consumers race for the same row through the
   conditional lease, so only one evaluates it

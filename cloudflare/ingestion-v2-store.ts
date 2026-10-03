@@ -26,15 +26,17 @@ import type {
 } from '../src/ingestion-v2/types.js';
 
 const chunkSize = 50;
+// D1 accepts at most 100 bound parameters. reopenRows has four fixed bindings,
+// leaving room for 96 external IDs per statement.
+const reopenRowsChunkSize = 96;
 const SNAPSHOT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
-// Shadow discovery preserves admission-owned state only while the complete
-// snapshot/material/policy identity is unchanged. A new identity clears the old
-// lease, decision, retry budget, and failure so it can be reopened as fresh work.
+// A board snapshot hash changes when any peer row changes. Admission ownership
+// therefore follows row material and policy identity; the current snapshot hash
+// may advance while retry, quarantine, or lease state remains durable.
 const ADMISSION_LANE_OWNED_STATES = ['pending', 'queued', 'processing', 'quarantined'] as const;
 const laneOwnedSqlList = ADMISSION_LANE_OWNED_STATES.map((state) => `'${state}'`).join(', ');
-const sameAdmissionIdentitySql = `ingestion_rows.snapshot_hash = excluded.snapshot_hash
-  AND ingestion_rows.material_hash = excluded.material_hash
+const sameAdmissionIdentitySql = `ingestion_rows.material_hash = excluded.material_hash
   AND ingestion_rows.admission_version = excluded.admission_version`;
 const preserveAdmissionResultSql = `(ingestion_rows.state IN (${laneOwnedSqlList}) AND ${sameAdmissionIdentitySql})
   OR (ingestion_rows.state = 'settled' AND ingestion_rows.attempt_count > 0 AND ${sameAdmissionIdentitySql})`;
@@ -239,6 +241,10 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         notification_baseline = CASE
           WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.notification_baseline
           ELSE excluded.notification_baseline
+        END,
+        effect_claimed_at = CASE
+          WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.effect_claimed_at
+          ELSE NULL
         END,
         state = CASE
           WHEN ingestion_rows.state IN (${laneOwnedSqlList}) AND ${sameAdmissionIdentitySql} THEN ingestion_rows.state
@@ -452,7 +458,8 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     if (!rows.length) return;
     const statement = this.db.prepare(`
       UPDATE ingestion_rows
-      SET state = 'queued', retry_at = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+      SET state = 'queued', retry_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
+        effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state IN ('pending', 'queued', 'processing')
     `);
     const statements = rows.map((row) => statement.bind(row.now, row.sourceId, row.externalId));
@@ -463,15 +470,17 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     const leaseExpiresAt = new Date(Date.parse(input.now) + input.leaseMs).toISOString();
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
-      SET state = 'processing', lease_owner = ?, lease_expires_at = ?, updated_at = ?
+      SET state = 'processing', lease_owner = ?, lease_expires_at = ?, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
         AND state IN ('pending', 'queued', 'processing')
+        AND (retry_at IS NULL OR retry_at <= ?)
         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
     `).bind(
       input.owner, leaseExpiresAt, input.now,
       input.sourceId, input.externalId,
       input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
+      input.now,
       input.now,
     ).run();
     if (result.meta.changes > 0) {
@@ -485,13 +494,30 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     if (row.state === 'processing' && row.leaseExpiresAt && row.leaseExpiresAt > input.now) {
       return { outcome: 'no-op', reason: 'leased' };
     }
+    if (row.retryAt && row.retryAt > input.now) return { outcome: 'no-op', reason: 'retry-not-due' };
     return { outcome: 'no-op', reason: 'stale' };
+  }
+
+  async claimRowEffect(input: {
+    sourceId: string; externalId: string; owner: string; now: string;
+    expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
+  }): Promise<boolean> {
+    const result = await this.db.prepare(`
+      UPDATE ingestion_rows
+      SET effect_claimed_at = ?, updated_at = ?
+      WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
+        AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
+    `).bind(
+      input.now, input.now, input.sourceId, input.externalId, input.owner,
+      input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
+    ).run();
+    return result.meta.changes > 0;
   }
 
   async releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<boolean> {
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
-      SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+      SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
     `).bind(now, sourceId, externalId, owner).run();
     return result.meta.changes > 0;
@@ -500,22 +526,23 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   async settleRow(input: {
     sourceId: string; externalId: string; owner: string; now: string;
     expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
-    decision: IngestionDecision; jobId?: string; reason?: string;
+    decision: IngestionDecision; jobId?: string; reason?: string; effectClaimed?: boolean;
   }): Promise<boolean> {
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'settled', decision = ?, job_id = COALESCE(?, job_id), settled_at = ?,
         attempt_count = attempt_count + 1, retry_at = NULL,
         failure_class = ?, failure_detail = ?,
-        lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+        lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
+        AND (? = 0 OR effect_claimed_at IS NOT NULL)
     `).bind(
       input.decision, input.jobId ?? null, input.now,
       input.decision === 'blocked' ? 'blocked' : input.decision === 'shelved' ? 'shelved' : null,
       input.reason ?? null,
       input.now, input.sourceId, input.externalId, input.owner,
-      input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
+      input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion, input.effectClaimed ? 1 : 0,
     ).run();
     return result.meta.changes > 0;
   }
@@ -528,7 +555,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'queued', attempt_count = ?, retry_at = ?, failure_class = ?, failure_detail = ?,
-        lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+        lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
     `).bind(
@@ -547,7 +574,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'quarantined', attempt_count = ?, retry_at = NULL, failure_class = ?, failure_detail = ?,
-        lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+        lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
     `).bind(
@@ -564,21 +591,26 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   } = {}): Promise<number> {
     const ids = [...new Set(externalIds)];
     if (!ids.length) return 0;
-    const placeholders = ids.map(() => '?').join(', ');
-    const result = await this.db.prepare(`
-      UPDATE ingestion_rows
-      SET state = 'queued', attempt_count = 0, retry_at = NULL,
-        lease_owner = NULL, lease_expires_at = NULL,
-        failure_class = NULL, failure_detail = NULL, settled_at = NULL, decision = NULL,
-        admission_version = COALESCE(?, admission_version),
-        notification_baseline = COALESCE(?, notification_baseline), updated_at = ?
-      WHERE source_id = ? AND external_id IN (${placeholders}) AND state IN ('settled', 'quarantined', 'absent')
-    `).bind(
-      options.admissionVersion ?? null,
-      options.notificationBaseline === undefined ? null : options.notificationBaseline ? 1 : 0,
-      now, sourceId, ...ids,
-    ).run();
-    return result.meta.changes;
+    let changed = 0;
+    for (let offset = 0; offset < ids.length; offset += reopenRowsChunkSize) {
+      const chunk = ids.slice(offset, offset + reopenRowsChunkSize);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const result = await this.db.prepare(`
+        UPDATE ingestion_rows
+        SET state = 'queued', attempt_count = 0, retry_at = NULL,
+        lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL,
+          failure_class = NULL, failure_detail = NULL, settled_at = NULL, decision = NULL,
+          admission_version = COALESCE(?, admission_version),
+          notification_baseline = COALESCE(?, notification_baseline), updated_at = ?
+        WHERE source_id = ? AND external_id IN (${placeholders}) AND state IN ('settled', 'quarantined', 'absent')
+      `).bind(
+        options.admissionVersion ?? null,
+        options.notificationBaseline === undefined ? null : options.notificationBaseline ? 1 : 0,
+        now, sourceId, ...chunk,
+      ).run();
+      changed += result.meta.changes;
+    }
+    return changed;
   }
 
   async reopenUnprocessedRows(
@@ -592,6 +624,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'queued', retry_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
+        effect_claimed_at = NULL,
         failure_class = NULL, failure_detail = NULL, settled_at = NULL, decision = NULL, updated_at = ?
       WHERE rowid IN (
         SELECT rowid FROM ingestion_rows
@@ -608,7 +641,8 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     if (!expired.length) return [];
     const statement = this.db.prepare(`
       UPDATE ingestion_rows
-      SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+      SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+        effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing'
         AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
     `);

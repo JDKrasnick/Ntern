@@ -155,9 +155,9 @@ export interface RuleBasedAdmissionEvaluatorDependencies {
 
 /**
  * The default Stage 2 evaluator. It grades the row with existing rules and
- * commits the catalog effect through the injected sink, so the same grading is
- * exercised whether the sink records decisions (verification canary) or writes
- * the live catalog.
+ * returns the catalog effect as a deferred callback. The consumer claims the
+ * exact row identity durably before invoking the sink, so material replaced
+ * during network evaluation can never publish a stale effect.
  */
 export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
   private readonly now: () => Date;
@@ -196,7 +196,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       evaluatedAt: observedAt,
     });
     if (isGraded(graded)) {
-      await this.dependencies.sink.commit({
+      const effect = {
         sourceId: context.sourceId,
         externalId: context.externalId,
         baseline: context.baseline,
@@ -205,8 +205,12 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
         admission: graded.admission,
         jobId: graded.jobId,
         notify: admissionRowShouldNotify(context),
-      });
-      return { decision: graded.decision, jobId: graded.jobId };
+      };
+      return {
+        decision: graded.decision,
+        jobId: graded.jobId,
+        commitEffect: () => this.dependencies.sink.commit(effect),
+      };
     }
     return { decision: graded.decision };
   }

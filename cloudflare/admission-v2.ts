@@ -1,4 +1,5 @@
 import { safeFetchText } from '../src/employer/index.js';
+import { applicationPageEvidenceFromHtml, ApplicationUrlValidationError } from '../src/core/application-url.js';
 import { processAdmissionV2Message, type AdmissionV2MessageResult } from '../src/ingestion-v2/admission/consumer.js';
 import { RuleBasedAdmissionV2Evaluator, type AdmissionCanonicalEmployerResolver, type AdmissionDestinationProber, type AdmissionV2CatalogSink } from '../src/ingestion-v2/admission/evaluator.js';
 import { validateAdmissionV2Message } from '../src/ingestion-v2/admission/message.js';
@@ -26,6 +27,7 @@ interface HostResolver {
 
 /** Bounded destination probe over the reviewed public-network fetcher. */
 export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDestinationProber {
+  const maximumEvidenceBytes = 128 * 1024;
   return {
     async probe({ applyUrl }) {
       let result;
@@ -34,9 +36,9 @@ export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDest
           resolver,
           timeoutMs: 8_000,
           maxRedirects: 2,
-          // Admission only consumes the status. Keep a tiny bounded prefix so a
-          // large healthy careers page cannot become a false transient failure.
-          maxBodyBytes: 1024,
+          // Retain enough bounded server-rendered evidence for nonstandard
+          // official forms while keeping large careers pages resource-safe.
+          maxBodyBytes: maximumEvidenceBytes,
           onOversize: 'truncate',
           headers: { Accept: 'text/html,application/xhtml+xml' },
         });
@@ -48,7 +50,24 @@ export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDest
       if (result.status === 429) throw new AdmissionRowTransientError('destination-rate-limited', `HTTP ${result.status}`);
       if (result.status >= 500) throw new AdmissionRowTransientError('upstream-server-error', `HTTP ${result.status}`);
       if (result.status >= 400) return { reachability: 'blocked' };
-      return { reachability: 'live' };
+      const inspectedBytes = new TextEncoder().encode(result.body).byteLength;
+      const declaredBytes = Number(result.headers.get('content-length'));
+      try {
+        return {
+          reachability: 'live',
+          evidence: applicationPageEvidenceFromHtml({
+            requestedUrl: applyUrl,
+            finalUrl: result.url,
+            html: result.body,
+            inspectedBytes,
+            inspectionTruncated: inspectedBytes >= maximumEvidenceBytes
+              || (Number.isFinite(declaredBytes) && declaredBytes > inspectedBytes),
+          }),
+        };
+      } catch (error) {
+        if (error instanceof ApplicationUrlValidationError) return { reachability: 'gone' };
+        throw error;
+      }
     },
   };
 }
