@@ -58,10 +58,11 @@ export async function planAdmissionV2Dispatch(
     if (covered.has(row.externalId)) continue;
     // An absent row has no snapshot to grade against until it reappears.
     if (row.state === 'absent') continue;
-    const key = `${row.snapshotHash}\u0000${row.admissionVersion}`;
+    const baseline = row.notificationBaseline ?? false;
+    const key = `${row.snapshotHash}\u0000${row.admissionVersion}\u0000${baseline ? 'baseline' : 'incremental'}`;
     let group = groups.get(key);
     if (!group) {
-      group = { snapshotHash: row.snapshotHash, admissionVersion: row.admissionVersion, baseline: false, rows: [] };
+      group = { snapshotHash: row.snapshotHash, admissionVersion: row.admissionVersion, baseline, rows: [] };
       groups.set(key, group);
     }
     group.rows.push(row);
@@ -75,7 +76,6 @@ export async function planAdmissionV2Dispatch(
   for (const group of groups.values()) {
     const snapshot = await dependencies.ledger.getSnapshot(sourceId, group.snapshotHash);
     if (!snapshot || !snapshot.isComplete) continue;
-    group.baseline = snapshot.baseline;
     firstGroup ??= group;
     const orderedIds = group.rows.map((row) => row.externalId);
     const built = buildAdmissionV2Messages({
@@ -83,7 +83,7 @@ export async function planAdmissionV2Dispatch(
       snapshotHash: group.snapshotHash,
       snapshotKey: snapshotObjectKey(sourceId, group.snapshotHash),
       admissionVersion: group.admissionVersion,
-      baseline: snapshot.baseline,
+      baseline: group.baseline,
       externalIds: orderedIds,
       maxIds: dependencies.maxIds ?? ADMISSION_V2_MAX_EXTERNAL_IDS,
     });

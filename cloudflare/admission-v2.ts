@@ -4,7 +4,7 @@ import { RuleBasedAdmissionV2Evaluator, type AdmissionDestinationProber, type Ad
 import { validateAdmissionV2Message } from '../src/ingestion-v2/admission/message.js';
 import { RecordingAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/recording-sink.js';
 import { AdmissionRowTransientError } from '../src/ingestion-v2/admission/taxonomy.js';
-import type { AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
+import { admissionV2FeatureConfig, type AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
 import type { D1Database, MessageBatch, R2Bucket } from './types.js';
 
@@ -68,6 +68,16 @@ export async function processAdmissionV2Batch(
   options: { resolver: HostResolver; sink?: AdmissionV2CatalogSink; now?: () => Date; retryDelaySeconds?: number },
 ): Promise<void> {
   const ledger = new D1IngestionV2Repository(env.DB);
+  if (!admissionV2FeatureConfig(env).admissionEnabled) {
+    const now = options.now ?? (() => new Date());
+    for (const message of batch.messages) {
+      const validated = validateAdmissionV2Message(message.body);
+      if (validated.ok) await ledger.acknowledgeHandoff(validated.message.batchId, now().toISOString());
+      message.ack();
+    }
+    console.log(JSON.stringify({ event: 'ingestion_v2_admission_disabled_drain', messages: batch.messages.length }));
+    return;
+  }
   const snapshots = new R2IngestionSnapshotStore(env.DOCUMENTS);
   const evaluator = stage2AdmissionEvaluator(options.resolver, options.sink);
   const now = options.now ?? (() => new Date());

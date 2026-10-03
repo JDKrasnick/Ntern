@@ -32,6 +32,8 @@ export interface ShadowDiscoveryDependencies {
     externalIds: readonly string[];
     now: string;
   }) => Promise<number>;
+  /** Whether this source is currently inside the admission rollout boundary. */
+  admissionEnabledForSource?: (sourceId: string) => boolean;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -93,6 +95,8 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
 
   private async run(input: ShadowDiscoveryInput, started: number): Promise<void> {
     const { repository, snapshots } = this.dependencies;
+    const admissionEnabled = this.dependencies.admissionEnabledForSource?.(input.sourceId)
+      ?? Boolean(this.dependencies.reopenActionableRows);
     const envelope = normalizeSourceSnapshot({
       sourceId: input.sourceId,
       postings: input.postings,
@@ -134,6 +138,7 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
         snapshotHash: envelope.snapshotHash,
         materialHash: row.materialHash,
         admissionVersion: input.admissionVersion,
+        notificationBaseline: input.baseline || !admissionEnabled,
         state: 'settled' as const,
         ...(decision ? { decision } : {}),
         attemptCount: 0,
@@ -155,7 +160,7 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
     const reopenExternalIds = diff.rows
       .filter((entry) => entry.actionable && entry.classification !== 'retryable')
       .map((entry) => entry.externalId);
-    if (this.dependencies.reopenActionableRows && reopenExternalIds.length) {
+    if (admissionEnabled && this.dependencies.reopenActionableRows && reopenExternalIds.length) {
       reopened = await this.dependencies.reopenActionableRows({
         sourceId: input.sourceId,
         snapshotHash: envelope.snapshotHash,

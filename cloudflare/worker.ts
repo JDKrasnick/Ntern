@@ -36,7 +36,7 @@ import { admissionSourceAllowed, processAdmissionV2Batch } from './admission-v2.
 import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
 import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState } from '../src/ingestion-v2/types.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
-import { migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
+import { bootstrapAdmissionSnapshot, migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import { admissionV2FeatureConfig } from '../src/ingestion-v2/admission/types.js';
 import {
@@ -202,6 +202,7 @@ function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscover
     // content-addressed and application-expired, never served to clients.
     snapshots: new R2IngestionSnapshotStore(env.DOCUMENTS),
     features,
+    admissionEnabledForSource: (sourceId) => admission.admissionEnabled && admissionSourceAllowed(env, sourceId),
     ...(admission.admissionEnabled ? {
       reopenActionableRows: async ({ sourceId, externalIds, admissionVersion, now }) => {
         if (!admissionSourceAllowed(env, sourceId)) return 0;
@@ -2085,11 +2086,14 @@ export async function runScheduledPostingIdentityAudit(
  * versioned messages to the dedicated admission queue. A failed send leaves the
  * rows queued with an unacknowledged handoff, so the next run reissues them.
  */
-async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promise<{ enabled: boolean; sources: number; migrated: number; batches: number; rows: number }> {
+export const ADMISSION_V2_SOURCE_LIMIT = 500;
+
+async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promise<{ enabled: boolean; sources: number; bootstrapped: number; migrated: number; batches: number; rows: number }> {
   const features = admissionV2FeatureConfig(env);
-  if (!features.admissionEnabled) return { enabled: false, sources: 0, migrated: 0, batches: 0, rows: 0 };
+  if (!features.admissionEnabled) return { enabled: false, sources: 0, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
   const ledger = new D1IngestionV2Repository(env.DB);
-  const sourceIds = (await ledger.listActiveSourceIds(50)).filter((sourceId) => admissionSourceAllowed(env, sourceId));
+  const sourceIds = (await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT)).filter((sourceId) => admissionSourceAllowed(env, sourceId));
+  let bootstrapped = 0;
   let migrated = 0;
   let batches = 0;
   let rows = 0;
@@ -2102,6 +2106,7 @@ async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promi
     if (overview.currentSnapshotHash) {
       const snapshot = await ledger.getSnapshot(sourceId, overview.currentSnapshotHash);
       if (snapshot?.isComplete) {
+        bootstrapped += await bootstrapAdmissionSnapshot(sourceId, snapshot.snapshotHash, snapshot.admissionVersion, { ledger, now: () => observedAt });
         const migration = await migrateAdmissionPolicy(sourceId, snapshot.admissionVersion, { ledger, now: () => observedAt });
         migrated += migration.reopened;
       }
@@ -2112,7 +2117,7 @@ async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promi
     batches += plan.messages.length;
     rows += plan.messages.reduce((sum, message) => sum + message.externalIds.length, 0);
   }
-  return { enabled: true, sources: sourceIds.length, migrated, batches, rows };
+  return { enabled: true, sources: sourceIds.length, bootstrapped, migrated, batches, rows };
 }
 
 async function scheduledHandler(event: ScheduledController, env: Environment): Promise<void> {

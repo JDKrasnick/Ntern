@@ -248,6 +248,22 @@ after(async () => {
   await runtime?.dispose();
 });
 
+test('drains a queued delivery without evaluating rows when admission is disabled', async () => {
+  const { snapshot, rows } = await boardSnapshot();
+  const before = await database.prepare('SELECT external_id, state, attempt_count FROM ingestion_rows WHERE source_id = ? ORDER BY external_id')
+    .bind(sourceId).all();
+  const messages = buildMessages(rows, snapshot.snapshot_hash, snapshot.admission_version);
+  const delivery = await deliverAdmission(messages, { INGESTION_V2_ADMISSION_ENABLED: 'false' });
+  assert.equal(delivery.settled.ack, messages.length);
+  assert.deepEqual(delivery.settled.retries, []);
+  const afterRows = await database.prepare('SELECT external_id, state, attempt_count FROM ingestion_rows WHERE source_id = ? ORDER BY external_id')
+    .bind(sourceId).all();
+  assert.deepEqual(afterRows.results, before.results, 'disabled admission must not lease or evaluate a row');
+  const activeHandoffs = await database.prepare('SELECT COUNT(*) AS count FROM ingestion_admission_handoffs WHERE source_id = ? AND acknowledged_at IS NULL')
+    .bind(sourceId).first();
+  assert.equal(activeHandoffs.count, 0, 'disabled draining must not suppress redispatch after re-enable');
+});
+
 test('settles a complete board through the queue and acknowledges the handoff', async () => {
   const { snapshot, rows } = await boardSnapshot();
   assert.equal(rows.length, boardRows);

@@ -636,13 +636,15 @@ The admission lane is bounded in four independent ways:
   the third failed attempt. A systemic failure releases the lease without
   consuming an attempt, so D1 pressure cannot manufacture quarantines.
 
-The scheduled dispatcher bounds each source to 500 candidate rows per pass and
-records a durable handoff per message; a source with no due work produces no
-messages. `test/ingestion-v2-admission-queue.test.ts` covers message validation,
+The scheduled dispatcher covers up to 500 active sources per pass, bounds each
+source to 500 candidate rows, and records a durable handoff per message; a source
+with no due work produces no messages. Shadow-observed rows that have never
+completed V2 admission bootstrap in 200-row silent batches. `test/ingestion-v2-admission-queue.test.ts` covers message validation,
 the failure taxonomy, the state machine, retries/quarantine, duplicates, stale
 deliveries, snapshot-once, and consumer contention; the integration suite covers
 the real D1 transitions and guarded replay; and
 `test/e2e/ingestion-v2-admission.e2e.mjs` runs the built ingestion Worker
 against local D1/R2/queues to settle a board, quarantine a permanently failing
 row without touching its peers, treat a duplicate and a stale delivery as
-no-ops, and exercise the guarded operations replay.
+no-ops, prove the disabled consumer leaves row state untouched, and exercise the
+guarded operations replay.

@@ -19,6 +19,30 @@ export interface AdmissionV2MigrationResult {
 }
 
 /**
+ * Seed admission from rows already observed by Stage 1. These rows carry a
+ * durable notification baseline, so a shadow-first rollout can grade them
+ * without minting historical new-role alerts.
+ */
+export async function bootstrapAdmissionSnapshot(
+  sourceId: string,
+  snapshotHash: string,
+  admissionVersion: string,
+  dependencies: AdmissionV2MigrationDependencies,
+): Promise<number> {
+  const now = (dependencies.now ?? (() => new Date()))().toISOString();
+  const batchSize = dependencies.batchSize ?? ADMISSION_V2_MIGRATION_BATCH;
+  const reopened = await dependencies.ledger.reopenUnprocessedRows(
+    sourceId,
+    snapshotHash,
+    admissionVersion,
+    now,
+    batchSize,
+  );
+  if (reopened > 0) dependencies.log?.({ event: 'ingestion_v2_admission_bootstrap', sourceId, snapshotHash, admissionVersion, reopened });
+  return reopened;
+}
+
+/**
  * Reopen a bounded batch of active rows whose settled admission version is
  * stale so they are re-graded under the current policy.
  *

@@ -27,6 +27,12 @@ export interface MarkQueuedInput {
   now: string;
 }
 
+export interface ExpectedAdmissionIdentity {
+  expectedSnapshotHash: string;
+  expectedMaterialHash: string;
+  expectedAdmissionVersion: string;
+}
+
 /**
  * Admission-lane ledger operations. Implemented by the same D1 repository as
  * the Stage 1 ledger; kept as a separate boundary so the queue consumer only
@@ -43,7 +49,7 @@ export interface AdmissionV2Ledger {
   acquireLease(input: AcquireLeaseInput): Promise<AdmissionLeaseResult>;
   /** Return a leased row to `queued` without consuming an attempt. Reports whether the guarded update applied. */
   releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<boolean>;
-  settleRow(input: {
+  settleRow(input: ExpectedAdmissionIdentity & {
     sourceId: string;
     externalId: string;
     owner: string;
@@ -52,7 +58,7 @@ export interface AdmissionV2Ledger {
     jobId?: string;
     reason?: string;
   }): Promise<boolean>;
-  scheduleRowRetry(input: {
+  scheduleRowRetry(input: ExpectedAdmissionIdentity & {
     sourceId: string;
     externalId: string;
     owner: string;
@@ -61,7 +67,7 @@ export interface AdmissionV2Ledger {
     retryAt: string;
     failure: AdmissionFailure;
   }): Promise<boolean>;
-  quarantineRow(input: {
+  quarantineRow(input: ExpectedAdmissionIdentity & {
     sourceId: string;
     externalId: string;
     owner: string;
@@ -75,6 +81,8 @@ export interface AdmissionV2Ledger {
    * migration re-grades a row under the current policy.
    */
   reopenRows(sourceId: string, externalIds: readonly string[], now: string, options?: { admissionVersion?: string }): Promise<number>;
+  /** Reopen shadow-observed rows that have never completed V2 admission. */
+  reopenUnprocessedRows(sourceId: string, snapshotHash: string, admissionVersion: string, now: string, limit: number): Promise<number>;
   /** Expired leases are reclaimable; returns the rows moved back to `queued`. */
   reclaimExpiredLeases(now: string, limit: number): Promise<IngestionRowRecord[]>;
   recordHandoff(handoff: AdmissionV2Handoff): Promise<void>;

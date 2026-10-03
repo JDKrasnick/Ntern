@@ -67,6 +67,8 @@ export interface IngestionRowRecord {
   snapshotHash: string;
   materialHash: string;
   admissionVersion: string;
+  /** Suppress notifications until this material completes its first V2 evaluation. */
+  notificationBaseline?: boolean;
   state: IngestionRowState;
   decision?: IngestionDecision;
   attemptCount: number;

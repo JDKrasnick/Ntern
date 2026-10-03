@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { processAdmissionV2Message } from '../src/ingestion-v2/admission/consumer.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
-import type { AcquireLeaseInput, AdmissionV2Ledger, MarkQueuedInput } from '../src/ingestion-v2/admission/ledger.js';
+import type { AcquireLeaseInput, AdmissionV2Ledger, ExpectedAdmissionIdentity, MarkQueuedInput } from '../src/ingestion-v2/admission/ledger.js';
 import { applyAdmissionReplay, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import { migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import {
@@ -73,9 +73,15 @@ class FakeLedger implements AdmissionV2Ledger {
     return true;
   }
 
-  async settleRow(input: { sourceId: string; externalId: string; owner: string; now: string; decision: 'admitted' | 'blocked' | 'shelved'; jobId?: string; reason?: string }): Promise<boolean> {
+  private identityMatches(row: IngestionRowRecord, input: ExpectedAdmissionIdentity): boolean {
+    return row.snapshotHash === input.expectedSnapshotHash
+      && row.materialHash === input.expectedMaterialHash
+      && row.admissionVersion === input.expectedAdmissionVersion;
+  }
+
+  async settleRow(input: ExpectedAdmissionIdentity & { sourceId: string; externalId: string; owner: string; now: string; decision: 'admitted' | 'blocked' | 'shelved'; jobId?: string; reason?: string }): Promise<boolean> {
     const row = this.row(input.sourceId, input.externalId);
-    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return false;
+    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner || !this.identityMatches(row, input)) return false;
     this.save({
       ...row, state: 'settled', decision: input.decision, attemptCount: row.attemptCount + 1,
       ...(input.jobId ? { jobId: input.jobId } : {}),
@@ -86,16 +92,16 @@ class FakeLedger implements AdmissionV2Ledger {
     return true;
   }
 
-  async scheduleRowRetry(input: { sourceId: string; externalId: string; owner: string; now: string; attemptCount: number; retryAt: string; failure: AdmissionFailure }): Promise<boolean> {
+  async scheduleRowRetry(input: ExpectedAdmissionIdentity & { sourceId: string; externalId: string; owner: string; now: string; attemptCount: number; retryAt: string; failure: AdmissionFailure }): Promise<boolean> {
     const row = this.row(input.sourceId, input.externalId);
-    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return false;
+    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner || !this.identityMatches(row, input)) return false;
     this.save({ ...row, state: 'queued', attemptCount: input.attemptCount, retryAt: input.retryAt, failureClass: input.failure.classification, failureDetail: input.failure.detail, updatedAt: input.now, leaseOwner: undefined, leaseExpiresAt: undefined });
     return true;
   }
 
-  async quarantineRow(input: { sourceId: string; externalId: string; owner: string; now: string; attemptCount: number; failure: AdmissionFailure }): Promise<boolean> {
+  async quarantineRow(input: ExpectedAdmissionIdentity & { sourceId: string; externalId: string; owner: string; now: string; attemptCount: number; failure: AdmissionFailure }): Promise<boolean> {
     const row = this.row(input.sourceId, input.externalId);
-    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner) return false;
+    if (!row || row.state !== 'processing' || row.leaseOwner !== input.owner || !this.identityMatches(row, input)) return false;
     this.save({ ...row, state: 'quarantined', attemptCount: input.attemptCount, failureClass: input.failure.classification, failureDetail: input.failure.detail, updatedAt: input.now, retryAt: undefined, leaseOwner: undefined, leaseExpiresAt: undefined });
     return true;
   }
@@ -113,6 +119,15 @@ class FakeLedger implements AdmissionV2Ledger {
       count += 1;
     }
     return count;
+  }
+
+  async reopenUnprocessedRows(sourceId: string, snapshotHash: string, admissionVersion: string, now: string, limit: number): Promise<number> {
+    const candidates = [...this.rows.values()]
+      .filter((row) => row.sourceId === sourceId && row.snapshotHash === snapshotHash
+        && row.admissionVersion === admissionVersion && row.state === 'settled' && row.attemptCount === 0)
+      .sort((left, right) => left.externalId.localeCompare(right.externalId))
+      .slice(0, limit);
+    return this.reopenRows(sourceId, candidates.map((row) => row.externalId), now);
   }
 
   async reclaimExpiredLeases(now: string, limit: number): Promise<IngestionRowRecord[]> {
@@ -473,6 +488,20 @@ describe('admission v2 dispatcher', () => {
     const second = await planAdmissionV2Dispatch(SOURCE, { ledger });
     expect(second.messages).toHaveLength(0);
     expect(snapshots).toBeDefined();
+  });
+
+  it('keeps baseline and incremental rows in separate messages', async () => {
+    const { ledger } = setup(['baseline', 'incremental']);
+    ledger.seedRow(ledgerRow('baseline', { notificationBaseline: true }));
+    ledger.seedRow(ledgerRow('incremental', { notificationBaseline: false }));
+
+    const plan = await planAdmissionV2Dispatch(SOURCE, { ledger });
+
+    expect(plan.messages).toHaveLength(2);
+    expect(plan.messages.map(({ baseline, externalIds }) => ({ baseline, externalIds }))).toEqual([
+      { baseline: true, externalIds: ['baseline'] },
+      { baseline: false, externalIds: ['incremental'] },
+    ]);
   });
 
   it('reissues a stale unacknowledged handoff', async () => {

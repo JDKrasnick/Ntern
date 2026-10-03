@@ -32,6 +32,11 @@ const chunkSize = 50;
 // refresh identity, material, snapshot, and observation columns.
 const ADMISSION_LANE_OWNED_STATES = ['pending', 'queued', 'processing', 'quarantined'] as const;
 const laneOwnedSqlList = ADMISSION_LANE_OWNED_STATES.map((state) => `'${state}'`).join(', ');
+const sameAdmissionIdentitySql = `ingestion_rows.snapshot_hash = excluded.snapshot_hash
+  AND ingestion_rows.material_hash = excluded.material_hash
+  AND ingestion_rows.admission_version = excluded.admission_version`;
+const preserveAdmissionResultSql = `ingestion_rows.state IN (${laneOwnedSqlList})
+  OR (ingestion_rows.state = 'settled' AND ingestion_rows.attempt_count > 0 AND ${sameAdmissionIdentitySql})`;
 
 interface SnapshotDbRow {
   source_id: string;
@@ -55,6 +60,7 @@ interface RowDbRow {
   snapshot_hash: string;
   material_hash: string;
   admission_version: string;
+  notification_baseline: number;
   state: string;
   decision: string | null;
   attempt_count: number;
@@ -96,6 +102,7 @@ function rowFromDb(row: RowDbRow): IngestionRowRecord {
     snapshotHash: row.snapshot_hash,
     materialHash: row.material_hash,
     admissionVersion: row.admission_version,
+    notificationBaseline: row.notification_baseline === 1,
     state: row.state as IngestionRowState,
     ...(row.decision ? { decision: row.decision as IngestionDecision } : {}),
     attemptCount: row.attempt_count,
@@ -130,7 +137,7 @@ function compactFromDb(row: RowDbRow): CompactIngestionRow {
 const snapshotColumns = `source_id, snapshot_hash, object_key, admission_version, document_count, row_count,
   state, is_complete, baseline, created_at, activated_at, terminal_at, expires_at`;
 
-const rowColumns = `source_id, external_id, snapshot_hash, material_hash, admission_version, state, decision,
+const rowColumns = `source_id, external_id, snapshot_hash, material_hash, admission_version, notification_baseline, state, decision,
   attempt_count, retry_at, lease_owner, lease_expires_at, consecutive_omissions, job_id, failure_class,
   failure_detail, first_observed_at, last_observed_at, updated_at, settled_at`;
 
@@ -199,21 +206,25 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     if (!records.length) return;
     const statement = this.db.prepare(`
       INSERT INTO ingestion_rows (${rowColumns})
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source_id, external_id) DO UPDATE SET
         snapshot_hash = excluded.snapshot_hash,
         material_hash = excluded.material_hash,
         admission_version = excluded.admission_version,
+        notification_baseline = CASE
+          WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.notification_baseline
+          ELSE excluded.notification_baseline
+        END,
         state = CASE
           WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.state
           ELSE excluded.state
         END,
         decision = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.decision
+          WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.decision
           ELSE COALESCE(excluded.decision, ingestion_rows.decision)
         END,
         attempt_count = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.attempt_count
+          WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.attempt_count
           ELSE excluded.attempt_count
         END,
         retry_at = CASE
@@ -231,17 +242,17 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         consecutive_omissions = excluded.consecutive_omissions,
         job_id = COALESCE(excluded.job_id, ingestion_rows.job_id),
         failure_class = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.failure_class
+          WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.failure_class
           ELSE excluded.failure_class
         END,
         failure_detail = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.failure_detail
+          WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.failure_detail
           ELSE excluded.failure_detail
         END,
         last_observed_at = excluded.last_observed_at,
         updated_at = excluded.updated_at,
         settled_at = CASE
-          WHEN ingestion_rows.state IN (${laneOwnedSqlList}) THEN ingestion_rows.settled_at
+          WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.settled_at
           ELSE COALESCE(excluded.settled_at, ingestion_rows.settled_at)
         END
     `);
@@ -251,6 +262,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       record.snapshotHash,
       record.materialHash,
       record.admissionVersion,
+      record.notificationBaseline ? 1 : 0,
       record.state,
       record.decision ?? null,
       record.attemptCount,
@@ -462,6 +474,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
 
   async settleRow(input: {
     sourceId: string; externalId: string; owner: string; now: string;
+    expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
     decision: IngestionDecision; jobId?: string; reason?: string;
   }): Promise<boolean> {
     const result = await this.db.prepare(`
@@ -471,17 +484,20 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         failure_class = ?, failure_detail = ?,
         lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
+        AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
     `).bind(
       input.decision, input.jobId ?? null, input.now,
       input.decision === 'blocked' ? 'blocked' : input.decision === 'shelved' ? 'shelved' : null,
       input.reason ?? null,
       input.now, input.sourceId, input.externalId, input.owner,
+      input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
     ).run();
     return result.meta.changes > 0;
   }
 
   async scheduleRowRetry(input: {
     sourceId: string; externalId: string; owner: string; now: string;
+    expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
     attemptCount: number; retryAt: string; failure: AdmissionFailure;
   }): Promise<boolean> {
     const result = await this.db.prepare(`
@@ -489,15 +505,18 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       SET state = 'queued', attempt_count = ?, retry_at = ?, failure_class = ?, failure_detail = ?,
         lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
+        AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
     `).bind(
       input.attemptCount, input.retryAt, input.failure.classification, input.failure.detail,
       input.now, input.sourceId, input.externalId, input.owner,
+      input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
     ).run();
     return result.meta.changes > 0;
   }
 
   async quarantineRow(input: {
     sourceId: string; externalId: string; owner: string; now: string;
+    expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
     attemptCount: number; failure: AdmissionFailure;
   }): Promise<boolean> {
     const result = await this.db.prepare(`
@@ -505,9 +524,11 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       SET state = 'quarantined', attempt_count = ?, retry_at = NULL, failure_class = ?, failure_detail = ?,
         lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
+        AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
     `).bind(
       input.attemptCount, input.failure.classification, input.failure.detail,
       input.now, input.sourceId, input.externalId, input.owner,
+      input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
     ).run();
     return result.meta.changes > 0;
   }
@@ -524,6 +545,28 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         admission_version = COALESCE(?, admission_version), updated_at = ?
       WHERE source_id = ? AND external_id IN (${placeholders}) AND state IN ('settled', 'quarantined', 'absent')
     `).bind(options.admissionVersion ?? null, now, sourceId, ...ids).run();
+    return result.meta.changes;
+  }
+
+  async reopenUnprocessedRows(
+    sourceId: string,
+    snapshotHash: string,
+    admissionVersion: string,
+    now: string,
+    limit: number,
+  ): Promise<number> {
+    const bounded = Math.max(1, Math.min(limit, 500));
+    const result = await this.db.prepare(`
+      UPDATE ingestion_rows
+      SET state = 'queued', retry_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
+        failure_class = NULL, failure_detail = NULL, settled_at = NULL, decision = NULL, updated_at = ?
+      WHERE rowid IN (
+        SELECT rowid FROM ingestion_rows
+        WHERE source_id = ? AND snapshot_hash = ? AND admission_version = ?
+          AND state = 'settled' AND attempt_count = 0
+        ORDER BY external_id LIMIT ?
+      )
+    `).bind(now, sourceId, snapshotHash, admissionVersion, bounded).run();
     return result.meta.changes;
   }
 

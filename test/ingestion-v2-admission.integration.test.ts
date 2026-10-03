@@ -43,6 +43,11 @@ function subject(): { database: DatabaseSync; repository: D1IngestionV2Repositor
 const SOURCE = 'community-example';
 const HASH = 'a'.repeat(64);
 const ADMISSION = 'standard-v1';
+const expectedIdentity = (externalId: string) => ({
+  expectedSnapshotHash: HASH,
+  expectedMaterialHash: `m-${externalId}`,
+  expectedAdmissionVersion: ADMISSION,
+});
 
 function snapshotRecord(): IngestionSnapshotRecord {
   return {
@@ -105,6 +110,42 @@ describe('ingestion v2 admission ledger (D1)', () => {
     expect(stale).toMatchObject({ outcome: 'no-op', reason: 'stale' });
   });
 
+  it('cannot settle changed material through a lease for the prior identity', async () => {
+    const { repository } = await seeded();
+    await repository.acquireLease({
+      sourceId: SOURCE, externalId: 'a', owner: 'old-owner', now: '2026-10-01T00:00:00.000Z', leaseMs: 60_000,
+      ...expectedIdentity('a'),
+    });
+    await repository.putRows([row('a', {
+      snapshotHash: 'b'.repeat(64), materialHash: 'm-a-v2', admissionVersion: 'standard-v2',
+      state: 'settled', notificationBaseline: false, lastObservedAt: '2026-10-01T00:00:10.000Z', updatedAt: '2026-10-01T00:00:10.000Z',
+    })]);
+
+    expect(await repository.settleRow({
+      sourceId: SOURCE, externalId: 'a', owner: 'old-owner', now: '2026-10-01T00:00:20.000Z',
+      ...expectedIdentity('a'), decision: 'blocked', reason: 'decision-for-old-material',
+    })).toBe(false);
+    expect(await repository.getRow(SOURCE, 'a')).toMatchObject({
+      snapshotHash: 'b'.repeat(64), materialHash: 'm-a-v2', admissionVersion: 'standard-v2', state: 'processing',
+    });
+
+    await repository.reclaimExpiredLeases('2026-10-01T00:02:00.000Z', 10);
+    const reclaimed = await repository.getRow(SOURCE, 'a');
+    expect(reclaimed).toMatchObject({ state: 'queued' });
+    expect(reclaimed?.decision).toBeUndefined();
+    const lease = await repository.acquireLease({
+      sourceId: SOURCE, externalId: 'a', owner: 'new-owner', now: '2026-10-01T00:02:01.000Z', leaseMs: 60_000,
+      expectedSnapshotHash: 'b'.repeat(64), expectedMaterialHash: 'm-a-v2', expectedAdmissionVersion: 'standard-v2',
+    });
+    expect(lease.outcome).toBe('acquired');
+    expect(await repository.settleRow({
+      sourceId: SOURCE, externalId: 'a', owner: 'new-owner', now: '2026-10-01T00:02:02.000Z',
+      expectedSnapshotHash: 'b'.repeat(64), expectedMaterialHash: 'm-a-v2', expectedAdmissionVersion: 'standard-v2',
+      decision: 'admitted', jobId: 'JOB#V2',
+    })).toBe(true);
+    expect(await repository.getRow(SOURCE, 'a')).toMatchObject({ state: 'settled', decision: 'admitted', jobId: 'JOB#V2' });
+  });
+
   it('settles, retries, quarantines, and reopens rows independently', async () => {
     const { repository } = await seeded();
     const lease = async (externalId: string) => repository.acquireLease({
@@ -112,15 +153,15 @@ describe('ingestion v2 admission ledger (D1)', () => {
       expectedSnapshotHash: HASH, expectedMaterialHash: `m-${externalId}`, expectedAdmissionVersion: ADMISSION,
     });
     await lease('a');
-    await repository.settleRow({ sourceId: SOURCE, externalId: 'a', owner: 'owner', now: '2026-10-01T00:00:10.000Z', decision: 'admitted', jobId: 'JOB#1' });
+    await repository.settleRow({ sourceId: SOURCE, externalId: 'a', owner: 'owner', now: '2026-10-01T00:00:10.000Z', ...expectedIdentity('a'), decision: 'admitted', jobId: 'JOB#1' });
     expect(await repository.getRow(SOURCE, 'a')).toMatchObject({ state: 'settled', decision: 'admitted', jobId: 'JOB#1', attemptCount: 1 });
 
     await lease('b');
-    await repository.scheduleRowRetry({ sourceId: SOURCE, externalId: 'b', owner: 'owner', now: '2026-10-01T00:00:10.000Z', attemptCount: 1, retryAt: '2026-10-01T00:01:10.000Z', failure: { kind: 'row-transient', classification: 'destination-timeout', detail: 'timeout' } });
+    await repository.scheduleRowRetry({ sourceId: SOURCE, externalId: 'b', owner: 'owner', now: '2026-10-01T00:00:10.000Z', ...expectedIdentity('b'), attemptCount: 1, retryAt: '2026-10-01T00:01:10.000Z', failure: { kind: 'row-transient', classification: 'destination-timeout', detail: 'timeout' } });
     expect(await repository.getRow(SOURCE, 'b')).toMatchObject({ state: 'queued', attemptCount: 1, retryAt: '2026-10-01T00:01:10.000Z', failureClass: 'destination-timeout' });
 
     await lease('c');
-    await repository.quarantineRow({ sourceId: SOURCE, externalId: 'c', owner: 'owner', now: '2026-10-01T00:00:10.000Z', attemptCount: 3, failure: { kind: 'row-transient', classification: 'upstream-server-error', detail: '503' } });
+    await repository.quarantineRow({ sourceId: SOURCE, externalId: 'c', owner: 'owner', now: '2026-10-01T00:00:10.000Z', ...expectedIdentity('c'), attemptCount: 3, failure: { kind: 'row-transient', classification: 'upstream-server-error', detail: '503' } });
     expect(await repository.getRow(SOURCE, 'c')).toMatchObject({ state: 'quarantined', attemptCount: 3, failureClass: 'upstream-server-error' });
 
     expect(await repository.reopenRows(SOURCE, ['c'], '2026-10-01T00:10:00.000Z', { admissionVersion: 'standard-v2' })).toBe(1);
@@ -153,7 +194,7 @@ describe('ingestion v2 admission ledger (D1)', () => {
         sourceId: SOURCE, externalId, owner: 'owner', now: '2026-10-01T00:00:00.000Z', leaseMs: 60_000,
         expectedSnapshotHash: HASH, expectedMaterialHash: `m-${externalId}`, expectedAdmissionVersion: ADMISSION,
       });
-      await repository.settleRow({ sourceId: SOURCE, externalId, owner: 'owner', now: '2026-10-01T00:00:10.000Z', decision: 'admitted', ...(externalId === 'a' ? { jobId: 'JOB#A' } : {}) });
+      await repository.settleRow({ sourceId: SOURCE, externalId, owner: 'owner', now: '2026-10-01T00:00:10.000Z', ...expectedIdentity(externalId), decision: 'admitted', ...(externalId === 'a' ? { jobId: 'JOB#A' } : {}) });
     }
     const result = await migrateAdmissionPolicy(SOURCE, 'standard-v2', { ledger: repository, now: () => new Date('2026-10-01T01:00:00.000Z') });
     expect(result).toMatchObject({ reopened: 2, remaining: false });
@@ -172,6 +213,7 @@ describe('ingestion v2 admission ledger (D1)', () => {
     });
     await repository.quarantineRow({
       sourceId: SOURCE, externalId: 'a', owner: 'owner', now: '2026-10-01T00:00:00.000Z', attemptCount: 3,
+      ...expectedIdentity('a'),
       failure: { kind: 'row-transient', classification: 'upstream-server-error', detail: '503' },
     });
     const preview = await planAdmissionReplay(repository, { sourceId: SOURCE, externalId: 'a' });

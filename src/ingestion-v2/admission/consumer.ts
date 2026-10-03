@@ -113,6 +113,11 @@ export async function processAdmissionV2Message(
       result.skipped += 1;
       continue;
     }
+    const expectedIdentity = {
+      expectedSnapshotHash: message.snapshotHash,
+      expectedMaterialHash: snapshotRow.materialHash,
+      expectedAdmissionVersion: message.admissionVersion,
+    };
 
     try {
       const evaluation = await dependencies.evaluator.evaluate({
@@ -132,6 +137,7 @@ export async function processAdmissionV2Message(
         externalId,
         owner,
         now: now().toISOString(),
+        ...expectedIdentity,
         decision: decision.kind,
         ...(jobId ? { jobId } : {}),
         ...(decision.kind === 'admitted' ? {} : { reason: decision.reason }),
@@ -164,6 +170,7 @@ export async function processAdmissionV2Message(
       if ('exhausted' in next) {
         const quarantined = await dependencies.ledger.quarantineRow({
           sourceId: message.sourceId, externalId, owner, now: now().toISOString(),
+          ...expectedIdentity,
           attemptCount: failedAttempt, failure,
         });
         if (!quarantined) {
@@ -176,6 +183,7 @@ export async function processAdmissionV2Message(
       } else {
         const retried = await dependencies.ledger.scheduleRowRetry({
           sourceId: message.sourceId, externalId, owner, now: now().toISOString(),
+          ...expectedIdentity,
           attemptCount: next.attemptCount, retryAt: next.retryAt, failure,
         });
         if (!retried) {

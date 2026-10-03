@@ -44,7 +44,7 @@ describe('ingestion v2 migration', () => {
       'state', 'is_complete', 'baseline', 'created_at', 'activated_at', 'terminal_at', 'expires_at',
     ]));
     expect(columnNames(database, 'ingestion_rows')).toEqual(expect.arrayContaining([
-      'source_id', 'external_id', 'snapshot_hash', 'material_hash', 'admission_version', 'state', 'decision',
+      'source_id', 'external_id', 'snapshot_hash', 'material_hash', 'admission_version', 'notification_baseline', 'state', 'decision',
       'attempt_count', 'retry_at', 'lease_owner', 'lease_expires_at', 'consecutive_omissions', 'job_id',
       'failure_class', 'failure_detail', 'first_observed_at', 'last_observed_at', 'updated_at', 'settled_at',
     ]));

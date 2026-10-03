@@ -5,6 +5,9 @@ import { D1IngestionV2Repository } from '../cloudflare/ingestion-v2-store.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
 import { planSnapshotDiff } from '../src/ingestion-v2/diff.js';
+import { processAdmissionV2Message } from '../src/ingestion-v2/admission/consumer.js';
+import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
+import { bootstrapAdmissionSnapshot } from '../src/ingestion-v2/admission/migration.js';
 import { parseEnvelope, serializeEnvelope, snapshotObjectKey } from '../src/ingestion-v2/normalize.js';
 import type { IngestionSnapshotObjectStore, NormalizedSnapshotEnvelope } from '../src/ingestion-v2/types.js';
 import { processSnapshot } from '../src/ingestion/processor.js';
@@ -90,6 +93,7 @@ interface Harness {
   adapter: GitHubMarkdownAdapter;
   reopened: string[][];
   discover: (documents: Record<string, BoardRow[]>) => Promise<void>;
+  setAdmissionEnabled: (enabled: boolean) => void;
   fetch: () => Promise<SourceSnapshot>;
 }
 
@@ -101,18 +105,18 @@ function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false):
   const repository = new D1IngestionV2Repository(sqliteD1(database));
   const snapshots = new MemoryObjectStore();
   const reopened: string[][] = [];
+  let admissionActive = admissionEnabled;
   const discovery = new IngestionV2ShadowDiscovery({
     repository,
     snapshots,
     features: { shadowDiscoveryEnabled: true },
     now: () => new Date(observedAt),
     log: () => undefined,
-    ...(admissionEnabled ? {
-      reopenActionableRows: async ({ sourceId: source, externalIds, admissionVersion, now }) => {
-        reopened.push([...externalIds]);
-        return repository.reopenRows(source, [...externalIds], now, { admissionVersion });
-      },
-    } : {}),
+    admissionEnabledForSource: () => admissionActive,
+    reopenActionableRows: async ({ sourceId: source, externalIds, admissionVersion, now }) => {
+      reopened.push([...externalIds]);
+      return repository.reopenRows(source, [...externalIds], now, { admissionVersion });
+    },
   });
   let documents = initial;
   const documentsById = [
@@ -148,7 +152,10 @@ function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false):
       now: observedAt,
     });
   };
-  return { database, repository, snapshots, discovery, adapter, reopened, discover, fetch };
+  return {
+    database, repository, snapshots, discovery, adapter, reopened, discover, fetch,
+    setAdmissionEnabled: (enabled) => { admissionActive = enabled; },
+  };
 }
 
 const rowA: BoardRow = { company: 'Acme', position: 'Software Engineering Intern', location: 'Remote', url: 'https://jobs.example.test/acme/1' };
@@ -275,6 +282,53 @@ describe('ingestion v2 shadow discovery integration', () => {
     subject.reopened.length = 0;
     await subject.discover({ 'README.md': [rowA, rowB, changed], 'SECOND.md': [rowS] });
     expect(subject.reopened).toEqual([]);
+    subject.database.close();
+  });
+
+  it('bootstraps and silently settles a board observed before admission was enabled', async () => {
+    const subject = harness({ 'README.md': [rowA], 'SECOND.md': [rowS] });
+    const board = { 'README.md': [rowA], 'SECOND.md': [rowS] };
+    await subject.discover(board);
+    expect(subject.reopened).toEqual([]);
+    expect((await subject.repository.listLedger(sourceId)).every((row) => row.attemptCount === 0)).toBe(true);
+
+    subject.setAdmissionEnabled(true);
+    await subject.discover(board);
+    expect(subject.reopened).toEqual([]);
+    const overview = await subject.repository.overview(sourceId);
+    const snapshot = await subject.repository.getSnapshot(sourceId, overview.currentSnapshotHash!);
+    expect(snapshot).toBeDefined();
+    expect(await bootstrapAdmissionSnapshot(sourceId, snapshot!.snapshotHash, snapshot!.admissionVersion, {
+      ledger: subject.repository,
+      now: () => new Date('2026-10-01T00:10:00.000Z'),
+    })).toBe(2);
+
+    const plan = await planAdmissionV2Dispatch(sourceId, {
+      ledger: subject.repository,
+      now: () => new Date('2026-10-01T00:10:01.000Z'),
+    });
+    expect(plan.messages).toHaveLength(1);
+    expect(plan.messages[0].baseline).toBe(true);
+    const observedBaselines: boolean[] = [];
+    await processAdmissionV2Message(plan.messages[0], {
+      ledger: subject.repository,
+      snapshots: subject.snapshots,
+      evaluator: {
+        async evaluate(context) {
+          observedBaselines.push(context.baseline);
+          return { decision: { kind: 'admitted', jobId: `JOB#${context.externalId}` } };
+        },
+      },
+      now: () => new Date('2026-10-01T00:10:02.000Z'),
+    });
+    expect(observedBaselines).toEqual([true, true]);
+    expect((await subject.repository.listLedger(sourceId)).every((row) => row.state === 'settled' && row.attemptCount === 1)).toBe(true);
+    await subject.discover(board);
+    expect((await subject.repository.listLedger(sourceId)).every((row) => row.attemptCount === 1)).toBe(true);
+    expect(await bootstrapAdmissionSnapshot(sourceId, snapshot!.snapshotHash, snapshot!.admissionVersion, {
+      ledger: subject.repository,
+      now: () => new Date('2026-10-01T00:20:00.000Z'),
+    })).toBe(0);
     subject.database.close();
   });
 

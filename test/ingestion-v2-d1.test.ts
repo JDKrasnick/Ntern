@@ -91,6 +91,18 @@ describe('ingestion v2 D1 repository', () => {
     expect(await repository.getSnapshot('community-example', 'a'.repeat(64))).toMatchObject({ activatedAt: '2026-10-01T01:00:00.000Z' });
   });
 
+  it('lists every currently configured source within the dispatcher bound', async () => {
+    const { repository } = subject();
+    for (let index = 0; index < 54; index += 1) {
+      const sourceId = `source-${String(index).padStart(2, '0')}`;
+      const snapshotHash = index.toString(16).padStart(64, '0');
+      await repository.putSnapshot(snapshot({ sourceId, snapshotHash, objectKey: `ingestion-v2/snapshots/${sourceId}/${snapshotHash}.json`, state: 'active' }));
+    }
+    const sourceIds = await repository.listActiveSourceIds(500);
+    expect(sourceIds).toHaveLength(54);
+    expect(sourceIds.at(-1)).toBe('source-53');
+  });
+
   it('upserts rows idempotently, preserving first observation', async () => {
     const { repository } = subject();
     await repository.putRows([row({ externalId: 'a', lastObservedAt: '2026-10-01T00:00:00.000Z' })]);
@@ -186,9 +198,10 @@ describe('ingestion v2 D1 repository', () => {
     const { repository } = subject();
     await repository.putRows([row({ externalId: 'a' })]);
     // Not leased, so every guarded write is refused.
-    expect(await repository.settleRow({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', decision: 'admitted' })).toBe(false);
-    expect(await repository.scheduleRowRetry({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', attemptCount: 1, retryAt: '2026-10-01T00:01:00.000Z', failure: { kind: 'row-transient', classification: 'destination-timeout', detail: 't' } })).toBe(false);
-    expect(await repository.quarantineRow({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', attemptCount: 3, failure: { kind: 'row-transient', classification: 'upstream-server-error', detail: '5' } })).toBe(false);
+    const expectedIdentity = { expectedSnapshotHash: 'a'.repeat(64), expectedMaterialHash: 'm', expectedAdmissionVersion: 'standard-v1' };
+    expect(await repository.settleRow({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', ...expectedIdentity, decision: 'admitted' })).toBe(false);
+    expect(await repository.scheduleRowRetry({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', ...expectedIdentity, attemptCount: 1, retryAt: '2026-10-01T00:01:00.000Z', failure: { kind: 'row-transient', classification: 'destination-timeout', detail: 't' } })).toBe(false);
+    expect(await repository.quarantineRow({ sourceId: 'community-example', externalId: 'a', owner: 'x', now: '2026-10-01T00:00:00.000Z', ...expectedIdentity, attemptCount: 3, failure: { kind: 'row-transient', classification: 'upstream-server-error', detail: '5' } })).toBe(false);
     expect(await repository.releaseLease('community-example', 'a', 'x', '2026-10-01T00:00:00.000Z')).toBe(false);
     await repository.putRows([row({ externalId: 'b', state: 'processing', decision: undefined, leaseOwner: 'x', leaseExpiresAt: '2026-10-01T01:00:00.000Z' })]);
     expect(await repository.releaseLease('community-example', 'b', 'x', '2026-10-01T00:00:00.000Z')).toBe(true);

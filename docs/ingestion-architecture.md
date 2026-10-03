@@ -212,6 +212,10 @@ the live catalog.
   becomes dispatchable work. A due-retry row is left in place so reopening cannot
   reset the attempt count that caps its retries. An authorized operator can also
   reopen one row through the guarded replay route.
+- A shadow-first rollout is bootstrapped explicitly. Rows observed while their
+  source is outside the admission rollout retain a durable notification baseline;
+  the dispatcher reopens bounded batches that have never completed V2 admission,
+  even when the board is unchanged, and their messages remain silent.
 - The scheduled dispatcher runs a bounded per-source policy migration before it
   dispatches: stale settled rows are reopened under the active snapshot's
   admission version in bounded batches, without hiding previously visible roles,
@@ -224,8 +228,9 @@ the live catalog.
   zero notifications without a live catalog writer.
 - `INGESTION_V2_ADMISSION_ENABLED` (default `false`) gates admission;
   `INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST` optionally bounds rollout. The
-  dispatcher only produces messages for sources on the allowlist, and the
-  consumer acknowledges anything else as a no-op.
+  dispatcher only produces messages for sources on the allowlist. The consumer
+  drains and acknowledges durable handoffs without leasing or evaluating rows
+  while the global flag is disabled, and acknowledges other sources as no-ops.
 - `GET /internal/operations/ingestion/rows?sourceId=&state=&cursor=` returns a
   bounded, sanitized page plus a source overview (pending/queued/processing/
   settled/quarantined/absent, oldest work, current snapshot).
