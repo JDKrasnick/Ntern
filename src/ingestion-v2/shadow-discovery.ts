@@ -137,21 +137,6 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       admissionVersion: input.admissionVersion,
       observedAt: input.observedAt,
     });
-    const { key, bytes } = await snapshots.putSnapshot(envelope);
-
-    await repository.putSnapshot({
-      sourceId: envelope.sourceId,
-      snapshotHash: envelope.snapshotHash,
-      objectKey: key,
-      admissionVersion: envelope.admissionVersion,
-      documentCount: envelope.documentCount,
-      rowCount: envelope.rowCount,
-      state: 'staged',
-      isComplete: true,
-      baseline: input.baseline,
-      createdAt: input.observedAt,
-    });
-
     const ledger = await repository.listLedger(input.sourceId);
     const diff = planSnapshotDiff({
       sourceId: input.sourceId,
@@ -162,6 +147,32 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       rows: envelope.rows,
       ledger,
     });
+    const existingSnapshot = await repository.getSnapshot(input.sourceId, envelope.snapshotHash);
+    // Continuation deliveries repeat the same complete board while the legacy
+    // lane advances through a bounded slice. Keep computing the diff and
+    // comparison, but avoid rewriting the immutable object and every ledger
+    // row when the active snapshot has no omission work left to apply.
+    const reuseActiveSnapshot = existingSnapshot?.state === 'active'
+      && existingSnapshot.isComplete
+      && existingSnapshot.admissionVersion === envelope.admissionVersion
+      && diff.omissionUpdates.length === 0;
+    let bytes = 0;
+    if (!reuseActiveSnapshot) {
+      const stored = await snapshots.putSnapshot(envelope);
+      bytes = stored.bytes;
+      await repository.putSnapshot({
+        sourceId: envelope.sourceId,
+        snapshotHash: envelope.snapshotHash,
+        objectKey: stored.key,
+        admissionVersion: envelope.admissionVersion,
+        documentCount: envelope.documentCount,
+        rowCount: envelope.rowCount,
+        state: 'staged',
+        isComplete: true,
+        baseline: input.baseline,
+        createdAt: input.observedAt,
+      });
+    }
 
     const decisions = new Map(input.processed.decisions.map((decision) => [decision.externalId, decision]));
     const classifications = new Map(diff.rows.map((row) => [row.externalId, row.classification]));
@@ -186,9 +197,11 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
         settledAt: input.observedAt,
       };
     });
-    await repository.putRows(rows);
-    await repository.applyOmissions(input.sourceId, diff.omissionUpdates, input.observedAt);
-    await repository.activateSnapshot(input.sourceId, envelope.snapshotHash, input.observedAt);
+    if (!reuseActiveSnapshot) {
+      await repository.putRows(rows);
+      await repository.applyOmissions(input.sourceId, diff.omissionUpdates, input.observedAt);
+      await repository.activateSnapshot(input.sourceId, envelope.snapshotHash, input.observedAt);
+    }
 
     // Re-enter the admission lane only for rows whose material, policy version,
     // or presence changed. A due-retry row is already dispatchable, so reopening
@@ -222,7 +235,7 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       v2Only: sample(difference(diff.actionableExternalIds, legacySet)),
       legacyOnly: sample(difference(input.legacyActionableExternalIds, v2Set)),
       d1RowsRead: ledger.length,
-      d1RowsWritten: rows.length + diff.omissionUpdates.length + reopened + 2,
+      d1RowsWritten: (reuseActiveSnapshot ? 0 : rows.length + diff.omissionUpdates.length + 1) + reopened + 1,
       r2Bytes: bytes,
       status: 'complete',
     };
@@ -243,6 +256,7 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       reappeared: diff.counts.reappeared,
       missing: diff.counts.missing,
       admissionReopened: reopened,
+      snapshotReused: reuseActiveSnapshot,
       v2ActionableCount: metrics.v2Actionable.count,
       legacyActionableCount: metrics.legacyActionable.count,
       v2OnlyCount: metrics.v2Only.count,

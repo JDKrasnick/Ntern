@@ -205,10 +205,13 @@ describe('ingestion v2 shadow discovery integration', () => {
   it('creates no actionable work for an unchanged full board', async () => {
     const subject = harness({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
     await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
+    const putCalls = subject.snapshots.putCalls;
     await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
     const comparison = await subject.repository.getShadowComparison(sourceId);
     expect(comparison?.counts).toMatchObject({ new: 0, changed: 0, missing: 0, unchanged: 3 });
     expect(comparison?.v2Actionable.count).toBe(0);
+    expect(comparison).toMatchObject({ d1RowsWritten: 1, r2Bytes: 0 });
+    expect(subject.snapshots.putCalls).toBe(putCalls);
     subject.database.close();
   });
 
@@ -428,7 +431,7 @@ describe('ingestion v2 shadow discovery integration', () => {
       postings: snapshot.postings,
       processed: processSnapshot(snapshot),
       snapshotHash: snapshot.contentHash,
-      admissionVersion: 'standard-v1',
+      admissionVersion: 'standard-v2',
       baseline: false,
       observedAt,
       legacyActionableExternalIds: [],
