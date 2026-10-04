@@ -1940,7 +1940,9 @@ export class IngestionRunner {
         // so it always continues.
         const resolutionProgressed = pendingResolutionRows.size === 0
           || nextPendingRows.length < pendingResolutionRows.size;
-        if (nextPendingRows.length && !resolutionProgressed) {
+        const resolutionStalled = nextPendingRows.length > 0 && !resolutionProgressed;
+        if (resolutionStalled) {
+          report.continuationSources = report.continuationSources.filter((sourceId) => sourceId !== connector.id);
           console.error(JSON.stringify({ event: 'github_resolution_stalled', sourceId: connector.id,
             pendingBefore: pendingResolutionRows.size, pendingAfter: nextPendingRows.length,
             scope: resolutionScope.length, slice: selectedSlice.length,
@@ -2230,11 +2232,11 @@ export class IngestionRunner {
         const provider = providerFor(connector.id);
         if ((trustedPolicy || boundedMetadataRefresh) && migrationLimit !== undefined && persistenceFailedJobIds.size) {
           admissionMigrationPending = true;
-          if (!report.continuationSources.includes(connector.id)) report.continuationSources.push(connector.id);
+          if (!resolutionStalled && !report.continuationSources.includes(connector.id)) report.continuationSources.push(connector.id);
         }
         if (boundedMetadataRefresh && report.failures.length) {
           admissionMigrationPending = true;
-          if (!report.continuationSources.includes(connector.id)) report.continuationSources.push(connector.id);
+          if (!resolutionStalled && !report.continuationSources.includes(connector.id)) report.continuationSources.push(connector.id);
         }
         const unchanged304 = result.unchangedReason === 'not_modified';
         const metricCounts: ProcessedSnapshot['counts'] = unchanged304 ? {
