@@ -21,6 +21,7 @@ the Stage 3 catalog effects that consume their decisions.
 | Baseline provenance survives quarantine and material changes; durable silence overrides old messages and in-flight evaluation | `ingestion-v2-baseline-origin.integration`, `ingestion-v2-notification-baseline-race.integration`, `ingestion-v2-during-lease-baseline.integration`, `ingestion-v2-baseline-lease-race` |
 | Nonexact trusted roles promote once after two complete cadences | `ingestion-v2-two-cadence.integration`: duplicates, retries, delayed consumption, changed material, omissions, gaps, and 570 promotions |
 | Unchanged settled roles avoid expensive evaluation | `ingestion-v2-two-cadence.integration`: one new candidate among 570 quiet baseline roles |
+| Multi-day convergence across live, gone, timeout, repaired, new, and omitted destinations | `ingestion-v2-two-cadence.integration`: 14 complete days over 1,200 roles, three-attempt quarantine, repaired-link requalification, two-day closure, and nine quiet days with exact final-state counts |
 | D1 bind, memory, query, snapshot-read, and publication budgets | `ingestion-resource-budget`, `ingestion-v2-d1`, built Worker large-board E2E |
 | Guarded silent bootstrap, writer ownership, rollback, re-enable, and operations authentication | `ingestion-v2-bootstrap`, built Worker admission E2E |
 

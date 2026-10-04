@@ -10,6 +10,7 @@ import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatche
 import { RuleBasedAdmissionV2Evaluator } from '../src/ingestion-v2/admission/evaluator.js';
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { AdmissionRowTransientError } from '../src/ingestion-v2/admission/taxonomy.js';
+import { reconcileIngestionV2Omissions } from '../src/ingestion-v2/omission-closure.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import type { SourcedPosting } from '../src/types.js';
 
@@ -58,6 +59,7 @@ function setup() {
   const sink = new ReconcilerAdmissionV2CatalogSink(store, now);
   let probes = 0;
   let fail = false;
+  const probeOutcomes = new Map<string, 'live' | 'gone' | 'timeout'>();
   let admissionEnabled = true;
   const evaluator = new RuleBasedAdmissionV2Evaluator({
     sink, now, trustedCommunityCatalogEnabled: true, trustedCommunityAlertsEnabledForSource: () => true,
@@ -66,6 +68,9 @@ function setup() {
     prober: { async probe({ applyUrl, externalId }) {
       probes++;
       if (fail) throw new AdmissionRowTransientError('upstream-server-error', '503');
+      const outcome = probeOutcomes.get(externalId) ?? 'live';
+      if (outcome === 'timeout') throw new AdmissionRowTransientError('destination-timeout', 'timed out');
+      if (outcome === 'gone') return { reachability: 'gone' };
       return { reachability: 'live', evidence: {
         url: applyUrl, title: 'Software Engineering Intern', description: 'Build software. Summer 2027 internship.',
         expectedPostingId: externalId, postingIdPresent: true, applicationFormPresent: true,
@@ -100,6 +105,13 @@ function setup() {
   }
   return { database, ledger, snapshots, store, evaluator, discover, drain, now,
     advance() { tick += 900_000; }, setFail(value: boolean) { fail = value; },
+    advanceBy(milliseconds: number) { tick += milliseconds; },
+    setProbeOutcome(externalId: string, outcome: 'live' | 'gone' | 'timeout') { probeOutcomes.set(externalId, outcome); },
+    reconcileOmissions(snapshotHash: string, admissionVersion = 'v1') {
+      return reconcileIngestionV2Omissions({ repository: ledger, sink }, {
+        sourceId, snapshotHash, admissionVersion, observedAt: now().toISOString(),
+      });
+    },
     setAdmissionEnabled(value: boolean) { admissionEnabled = value; },
     metrics: () => ({ probes, snapshotWrites }),
   };
@@ -301,6 +313,83 @@ describe('trusted community two complete cadence promotion', () => {
       expect(await s.ledger.getRow(sourceId, row.externalId)).toMatchObject({ state: 'settled', notificationBaseline: true, qualificationPending: false });
     }
   }, 20_000);
+
+  it('converges across fourteen full days of good, gone, flaky, repaired, new, and omitted links', async () => {
+    const s = setup();
+    const good = Array.from({ length: 900 }, (_, index) => posting(`good-${index}`));
+    const gone = Array.from({ length: 150 }, (_, index) => posting(`gone-${index}`));
+    const flaky = Array.from({ length: 150 }, (_, index) => posting(`flaky-${index}`));
+    const original = [...good, ...gone, ...flaky];
+    for (const row of gone) s.setProbeOutcome(row.externalId, 'gone');
+    for (const row of flaky) s.setProbeOutcome(row.externalId, 'timeout');
+
+    const drainReady = async () => {
+      let rows = 0;
+      for (;;) {
+        const messages = await s.drain();
+        if (!messages.length) return rows;
+        rows += messages.reduce((total, message) => total + message.externalIds.length, 0);
+      }
+    };
+
+    await s.discover(1, original);
+    expect(await drainReady()).toBe(1_200);
+    expect(s.database.prepare("SELECT state, attempt_count, count(*) AS count FROM ingestion_rows GROUP BY state, attempt_count ORDER BY state, attempt_count").all())
+      .toEqual([
+        { state: 'queued', attempt_count: 1, count: 150 },
+        { state: 'settled', attempt_count: 1, count: 1_050 },
+      ]);
+    expect(s.store.notificationEvents.size).toBe(0);
+
+    s.advanceBy(86_400_000);
+    await s.discover(2, original);
+    expect(await drainReady()).toBe(1_050);
+    expect(s.store.notificationEvents.size).toBe(900);
+
+    s.advanceBy(86_400_000);
+    await s.discover(3, original);
+    expect(await drainReady()).toBe(150);
+    expect(s.database.prepare("SELECT count(*) AS count FROM ingestion_rows WHERE state='quarantined' AND attempt_count=3").get())
+      .toEqual({ count: 150 });
+
+    const repaired = flaky.map((row) => ({ ...row, title: `${row.title} — repaired`, applyUrl: `${row.applyUrl}?repaired=1` }));
+    const newcomers = Array.from({ length: 25 }, (_, index) => posting(`new-${index}`));
+    const later = [...good.slice(25), ...gone, ...repaired, ...newcomers];
+    for (const row of flaky) s.setProbeOutcome(row.externalId, 'live');
+
+    s.advanceBy(86_400_000);
+    await s.discover(4, later);
+    expect(await drainReady()).toBe(175);
+    expect(s.store.notificationEvents.size).toBe(900);
+    expect(s.database.prepare("SELECT count(*) AS count FROM ingestion_rows WHERE consecutive_omissions=1").get())
+      .toEqual({ count: 25 });
+
+    s.advanceBy(86_400_000);
+    const dayFiveSnapshot = await s.discover(5, later);
+    expect(await s.reconcileOmissions(dayFiveSnapshot)).toEqual({ attempted: 25, completed: 25, superseded: 0 });
+    expect(await drainReady()).toBe(175);
+    expect(s.store.notificationEvents.size).toBe(1_075);
+
+    for (let sequence = 6; sequence <= 14; sequence += 1) {
+      s.advanceBy(86_400_000);
+      await s.discover(sequence, later);
+      expect(await drainReady(), `day ${sequence}`).toBe(0);
+    }
+
+    expect(s.metrics()).toEqual({ probes: 2_750, snapshotWrites: 2 });
+    expect(s.store.jobs.size).toBe(1_075);
+    expect(s.store.occurrences.size).toBe(1_075);
+    expect([...s.store.jobs.values()].filter(job => job.open)).toHaveLength(1_050);
+    expect([...s.store.jobs.values()].filter(job => !job.open)).toHaveLength(25);
+    expect(s.database.prepare("SELECT state, decision, count(*) AS count FROM ingestion_rows GROUP BY state, decision ORDER BY state, decision").all())
+      .toEqual([
+        { state: 'absent', decision: 'admitted', count: 25 },
+        { state: 'settled', decision: 'admitted', count: 1_050 },
+        { state: 'settled', decision: 'blocked', count: 150 },
+      ]);
+    expect(s.database.prepare("SELECT count(*) AS count FROM ingestion_admission_handoffs WHERE acknowledged_at IS NULL").get())
+      .toEqual({ count: 0 });
+  }, 60_000);
 
   it('recovers a promotion after the durable commit succeeds but settlement sees failure', async () => {
     const s = setup();
