@@ -50,6 +50,19 @@ idempotent.
 
 ## Verification and cohort advance
 
+Before a cutover, replay the pinned historical snapshots through the production
+GitHub adapters and V2 normalization/diff path:
+
+```bash
+npm run test:ingestion:history
+```
+
+The gate covers three immutable revisions for each of the six configured
+community feeds. It verifies one-to-one parsed row preservation, deterministic
+R2 envelopes, order-independent snapshot identity, new/changed/missing
+classification, and the two-complete-snapshot closure rule. Its checked-in
+summary digest makes row, identity, or transition drift fail the run.
+
 Drain admission work and reconcile terminal row totals to the planned active
 count. Confirm baseline notification count remains unchanged, pending legacy
 fields are absent, the active checkpoint version matches the V2 snapshot,
