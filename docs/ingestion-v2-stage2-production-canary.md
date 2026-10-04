@@ -8,8 +8,10 @@ for `northwestern-fintech-2027-quant`. Legacy ingestion remains the production
 catalog writer until Stage 3 selects and soaks the V2 writer.
 
 This canary validates the Ingestion V2 implementation merged in PR #463 and the
-trusted-community policy parity repair merged in PR #468. The deployed Worker
-revision is `17d1fed445f2b5aadfea56481f6cbea1273e7cc3`.
+trusted-community policy parity repair merged in PR #468. The implementation
+revision validated by the canary is `17d1fed445f2b5aadfea56481f6cbea1273e7cc3`;
+later documentation-only releases may advance deployment provenance without
+changing the Worker bundle.
 
 ## Stage 1 evidence
 
@@ -59,8 +61,9 @@ returned HTTP 200.
 - PR #468 exact head: `c6ef4ec0bf62d02526a32afb53985d5715ee72bb`;
   merge commit and deployed revision: `17d1fed445f2b5aadfea56481f6cbea1273e7cc3`.
 - Guarded production deploys `37160314066` and `37160846527` passed exact-main,
-  saved-plan, migration, convergence, smoke, and monitor gates. The active
-  ingestion Worker version is `cbab2489-d789-4120-a6f2-d668b3b36eec` at 100%.
+  saved-plan, migration, convergence, smoke, and monitor gates. The initial
+  canary ingestion Worker version was
+  `cbab2489-d789-4120-a6f2-d668b3b36eec` at 100%.
 - The final local full suite passed 164 files and 2,581 tests, with four live
   files and 313 tests skipped. Focused integration, ingestion CI, resource
   budget, built Worker E2E, lint, typecheck, and Worker build checks passed.
