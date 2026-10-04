@@ -145,6 +145,30 @@ variable "ingestion_v2_admission_source_allowlist" {
   default     = ""
 }
 
+variable "ingestion_v2_catalog_writer_enabled" {
+  description = "Allows explicitly allowlisted Ingestion V2 sources to commit live catalog and notification effects. This Stage 3 switch is independent from admission verification."
+  type        = bool
+  default     = false
+}
+
+variable "ingestion_v2_catalog_writer_source_allowlist" {
+  description = "Comma-separated ingestion source IDs allowed to use the live V2 catalog writer. Empty always means no live V2 writers."
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_v2_legacy_catalog_write_disabled_source_allowlist" {
+  description = "Comma-separated sources whose legacy catalog writer is disabled after V2 bootstrap. Empty preserves legacy ownership."
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_v2_trusted_community_alert_source_allowlist" {
+  description = "Comma-separated V2-owned trusted-community sources allowed to emit new-role alerts"
+  type        = string
+  default     = ""
+}
+
 variable "identity_confirmed_coverage_floor" {
   description = "Backstop for reviewed exact posting-identity coverage in the recurring integrity gate. The gate itself ratchets: it fails a pass that falls below the best coverage already reached, less a small churn tolerance, so this value only sets a floor the ratchet cannot go under."
   type        = number

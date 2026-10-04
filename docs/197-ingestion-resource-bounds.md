@@ -660,3 +660,21 @@ against local D1/R2/queues to settle a board, quarantine a permanently failing
 row without touching its peers, treat a duplicate and a stale delivery as
 no-ops, prove the disabled consumer leaves row state untouched, and exercise the
 guarded operations replay.
+
+## 2026-10-03 ingestion V2 Stage 3 bounds
+
+Stage 3 keeps the same 25-ID queue-message and 96-ID D1 update bounds. Bootstrap
+reads one complete active R2 envelope and the compact active ledger once, then
+uses one transactional D1 batch: one set-based row update, one checkpoint upsert,
+and one immutable receipt insert. It copies no retained historical row bodies and
+writes no R2 object. The dry-run reports the exact active/actionable counts and an
+estimated D1 write count before apply.
+
+After ownership transfer, the legacy poll still performs the bounded source fetch,
+quality check, normalized snapshot write, and source health/checkpoint write. It
+does not resolve every listing or execute catalog/occurrence/notification writes
+for that source. Admission keeps row-local leases and retries, so one poison row
+cannot expand a source delivery or block a valid peer. The Stage 3 E2E rehearsal
+asserts silent baseline, a single new-role receipt, duplicate suppression,
+unchanged zero work, two-cadence closure, rollback, and re-enable through the
+built Worker with local D1, R2, and queues.

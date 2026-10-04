@@ -219,6 +219,10 @@ describe('Cloudflare deployment configuration', () => {
     expect(deployment).toContain('TF_VAR_ingestion_v2_shadow_source_allowlist: ${{ vars.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST }}');
     expect(deployment).toContain('TF_VAR_ingestion_v2_admission_enabled: ${{ vars.INGESTION_V2_ADMISSION_ENABLED }}');
     expect(deployment).toContain('TF_VAR_ingestion_v2_admission_source_allowlist: ${{ vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST }}');
+    expect(deployment).toContain('TF_VAR_ingestion_v2_catalog_writer_enabled: ${{ vars.INGESTION_V2_CATALOG_WRITER_ENABLED }}');
+    expect(deployment).toContain('TF_VAR_ingestion_v2_catalog_writer_source_allowlist: ${{ vars.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST }}');
+    expect(deployment).toContain('TF_VAR_ingestion_v2_legacy_catalog_write_disabled_source_allowlist: ${{ vars.INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST }}');
+    expect(deployment).toContain('TF_VAR_ingestion_v2_trusted_community_alert_source_allowlist: ${{ vars.INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST }}');
     expect(deployment).toContain('wrangler vectorize create "$TF_VAR_resume_embedding_index_name"');
     expect(deployment).toContain('.config.preset == "@cf/baai/bge-base-en-v1.5"');
     expect(deployment).toContain('reconcile_worker cloudflare_workers_script.ingestion intern-notifs-ingestion');
@@ -389,9 +393,17 @@ describe('Cloudflare deployment configuration', () => {
     });
     expect(ingestion.vars.INGESTION_V2_ADMISSION_ENABLED).toBe('false');
     expect(ingestion.vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST).toBe('');
+    expect(ingestion.vars.INGESTION_V2_CATALOG_WRITER_ENABLED).toBe('false');
+    expect(ingestion.vars.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST).toBe('');
+    expect(ingestion.vars.INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST).toBe('');
+    expect(ingestion.vars.INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST).toBe('');
     expect(terraform).toContain('"admission-v2"');
     expect(terraform).toContain('{ name = "INGESTION_V2_ADMISSION_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_admission_enabled) }');
     expect(terraform).toContain('{ name = "INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST", type = "plain_text", text = var.ingestion_v2_admission_source_allowlist }');
+    expect(terraform).toContain('{ name = "INGESTION_V2_CATALOG_WRITER_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_catalog_writer_enabled) }');
+    expect(terraform).toContain('{ name = "INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST", type = "plain_text", text = var.ingestion_v2_catalog_writer_source_allowlist }');
+    expect(terraform).toContain('{ name = "INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST", type = "plain_text", text = var.ingestion_v2_legacy_catalog_write_disabled_source_allowlist }');
+    expect(terraform).toContain('{ name = "INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST", type = "plain_text", text = var.ingestion_v2_trusted_community_alert_source_allowlist }');
     expect(worker).toContain('ADMISSION_V2_QUEUE');
   });
 });
