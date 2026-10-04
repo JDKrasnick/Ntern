@@ -1195,11 +1195,17 @@ describe('polling', () => {
     const sourceId = 'github-example';
     const urls = Array.from({ length: 40 }, (_, index) => `https://jobs.example.com/always-fails-${index}`);
     const rows = urls.map((url, index) => ({ ...listing(url, sourceId), row: index + 1, title: `Software Engineering Intern ${index}` }));
+    const resolver = { async configurationVersion() { return 'fixture-v1'; },
+      async resolveCanonicalEmployer() { return undefined; }, async resolveDestinationRule() { return undefined; } };
     const poll = () => new Poller([new Adapter(sourceId, rows)], store, undefined, undefined,
-      async () => { throw new Error('Application link timed out'); }, false).poll({ maxListingsPerSourceRun: 25 });
+      async () => { throw new Error('Application link timed out'); }, false, undefined, resolver)
+      .poll({ maxListingsPerSourceRun: 25, maxAdmissionMigrationListingsPerSourceRun: 25 });
 
     const first = await poll();
     expect(first.continuationSources).toEqual([sourceId]);
+    const checkpoint = (await store.getCheckpoint(sourceId))!;
+    await store.putCheckpoint({ ...checkpoint,
+      admissionConfigurationVersion: 'fixture-v0', pendingAdmissionConfigurationVersion: 'fixture-v1' });
     // Every row is retryable and the frontier is larger than the slice, so the
     // pending set cannot shrink. The pass must fall back to the dispatcher's
     // cadence instead of re-enqueueing itself forever.
