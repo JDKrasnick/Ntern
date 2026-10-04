@@ -95,6 +95,21 @@ Store timestamped evidence under
 writer cohort remains a canary. Production expansion and legacy removal require
 the seven-day clean soak in the approved plan.
 
+The isolated dev stack runs a read-only checkpoint every hour after the workflow
+lands on the default branch. Run the same checkpoint on a feature branch with
+the workflow dispatch or locally with Cloudflare credentials:
+
+```bash
+npm run ingestion:v2:dev:soak
+```
+
+Each checkpoint verifies the 11 production cron triggers, public dev catalog,
+canary health and freshness, active snapshot and comparison, stale handoffs,
+expired leases, recent unresolved queue failures, and all nine work queue/DLQ
+pairs. JSON evidence is retained as a workflow artifact for 14 days. A clean
+24-hour dev soak is the pre-production gate; it does not replace the guarded
+production canary or the seven-day production soak.
+
 ## Rollback
 
 Pause the source, disable V2 discovery for it so no new row work is created,

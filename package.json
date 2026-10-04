@@ -25,6 +25,7 @@
     "source:quality": "tsx scripts/source-quality.ts",
     "source:trusted-community:dry-run": "tsx scripts/trusted-community-dry-run.ts",
     "ingestion:v2:bootstrap": "tsx scripts/ingestion-v2-bootstrap.ts",
+    "ingestion:v2:dev:soak": "tsx scripts/ingestion-v2-dev-soak.ts",
     "probes:trusted-catalog": "tsx scripts/trusted-catalog-probes.ts",
     "probes:random-official": "tsx scripts/random-official-probes.ts",
     "coverage:companies": "tsx scripts/company-coverage.ts",
