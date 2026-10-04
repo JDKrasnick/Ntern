@@ -27,6 +27,11 @@ visibility, suppression, and notification counts. Enable the source-scoped V2
 configuration, run one forced recovery so the active snapshot carries the current
 evaluator version, and confirm the source remains paused.
 
+The scheduled dev-soak checkpoint must also show an initialized one-hour cost
+window below both production alert boundaries: fewer than 60 V2 shadow runs and
+fewer than 100,000 D1 rows written. A breach blocks cohort promotion even when
+catalog parity and queue drain are otherwise healthy.
+
 Dry-run:
 
 ```bash

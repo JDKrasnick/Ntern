@@ -7,7 +7,10 @@ const healthy = (): DevSoakSample => ({
     sourceId: 'northwestern-fintech-2027-quant',
     health: { state: 'healthy', sourceStatus: 'active', lastSuccessAt: '2026-10-04T20:45:00.000Z', consecutiveFailures: 0 },
     activeSnapshot: { snapshot_hash: 'snapshot', is_complete: 1 },
-    shadowComparison: { observed_at: '2026-10-04T20:45:00.000Z' },
+    shadowComparison: {
+      observed_at: '2026-10-04T20:45:00.000Z', window_started_at: '2026-10-04T20:00:00.000Z',
+      window_run_count: 6, window_d1_rows_written: 300,
+    },
     rows: [{ state: 'settled', decision: 'admitted', rows: 71, attempts: 71 }],
     pendingHandoffs: 0, staleHandoffs: 0, expiredLeases: 0,
   },
@@ -47,5 +50,16 @@ describe('dev ingestion soak evaluation', () => {
     const sample = healthy();
     sample.queues['intern-notifs-dev-github']!.backlog_count = 101;
     expect(evaluateDevSoak(sample).find((check) => check.name === 'github work backlog')?.status).toBe('warn');
+  });
+
+  it('fails an uninitialized or over-budget V2 cost window', () => {
+    const sample = healthy();
+    sample.canary.shadowComparison = {
+      observed_at: '2026-10-04T20:45:00.000Z', window_run_count: 60, window_d1_rows_written: 100_000,
+    };
+    const failed = evaluateDevSoak(sample).filter((check) => check.status === 'fail').map((check) => check.name);
+    expect(failed).toEqual(expect.arrayContaining([
+      'V2 cost window initialized', 'V2 shadow run budget', 'V2 D1 write budget',
+    ]));
   });
 });

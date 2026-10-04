@@ -7,6 +7,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { INGESTION_V2_D1_WRITE_LIMIT, INGESTION_V2_RUN_LIMIT } from '../cloudflare/ingestion-health-alert.js';
 
 const DEFAULT_DATABASE_ID = 'cedc86d8-69a5-4a72-a1e6-f5629d722338';
 const DEFAULT_API_URL = 'https://intern-notifs-dev.jdkrasnick.workers.dev';
@@ -69,6 +70,15 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
     sample.canary.activeSnapshot ? `snapshot ${sample.canary.activeSnapshot.snapshot_hash}` : 'missing active snapshot');
   check('recent shadow comparison', Boolean(sample.canary.shadowComparison),
     sample.canary.shadowComparison ? `observed ${sample.canary.shadowComparison.observed_at}` : 'missing comparison');
+  const costWindow = sample.canary.shadowComparison;
+  const windowRunCount = Number(costWindow?.window_run_count ?? 0);
+  const windowD1RowsWritten = Number(costWindow?.window_d1_rows_written ?? 0);
+  check('V2 cost window initialized', typeof costWindow?.window_started_at === 'string',
+    costWindow?.window_started_at ? `started ${costWindow.window_started_at}` : 'missing cost window');
+  check('V2 shadow run budget', windowRunCount < INGESTION_V2_RUN_LIMIT,
+    `${windowRunCount}/${INGESTION_V2_RUN_LIMIT} runs in current one-hour window`);
+  check('V2 D1 write budget', windowD1RowsWritten < INGESTION_V2_D1_WRITE_LIMIT,
+    `${windowD1RowsWritten}/${INGESTION_V2_D1_WRITE_LIMIT} rows in current one-hour window`);
   const maintenance = sample.maintenance.find((row) => String(row.key).endsWith(':ingestion_v2_admission_dispatch'));
   const maintenanceValue = maintenance?.value ? JSON.parse(String(maintenance.value)) as { status?: string } : undefined;
   const maintenanceAgeMinutes = maintenance?.updated_at
@@ -155,7 +165,8 @@ async function main(): Promise<number> {
     query<Record<string, unknown>>(`SELECT snapshot_hash, admission_version, row_count, document_count, state,
       is_complete, baseline, activated_at FROM ingestion_snapshots
       WHERE source_id = ? AND state = 'active' ORDER BY activated_at DESC LIMIT 1`, [canary]),
-    query<Record<string, unknown>>(`SELECT snapshot_hash, admission_version, complete, observed_at, updated_at, run_count
+    query<Record<string, unknown>>(`SELECT snapshot_hash, admission_version, complete, observed_at, updated_at, run_count,
+      window_started_at, window_run_count, window_d1_rows_written
       FROM ingestion_v2_shadow_comparisons WHERE source_id = ? AND observed_at >= ?`, [canary, windowStart]),
     query<Record<string, unknown>>(`SELECT state, COALESCE(decision, '') AS decision, COUNT(*) AS rows,
       SUM(attempt_count) AS attempts, MAX(updated_at) AS latest_update FROM ingestion_rows
