@@ -4,7 +4,7 @@ import {
   serializeEnvelope,
   snapshotObjectKey,
 } from '../src/ingestion-v2/normalize.js';
-import type { AcquireLeaseInput, AdmissionV2Ledger, MarkQueuedInput } from '../src/ingestion-v2/admission/ledger.js';
+import type { AcquireLeaseInput, AdmissionV2Ledger, MarkQueuedInput, AdmissionLeaseReleaseGuard } from '../src/ingestion-v2/admission/ledger.js';
 import type { IngestionV2BootstrapReceipt } from '../src/ingestion-v2/bootstrap.js';
 import type { SourceCheckpoint } from '../src/types.js';
 import type {
@@ -614,6 +614,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   async claimRowEffect(input: {
     sourceId: string; externalId: string; owner: string; now: string;
     expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
+    expectedNotificationBaseline?: boolean; expectedLeaseExpiresAt?: string;
   }): Promise<boolean> {
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
@@ -621,25 +622,38 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
         AND consecutive_omissions < 2
+        AND notification_baseline = COALESCE(?, notification_baseline)
+        AND (? IS NULL OR lease_expires_at = ?)
     `).bind(
       input.now, input.now, input.sourceId, input.externalId, input.owner,
       input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
+      input.expectedNotificationBaseline === undefined ? null : input.expectedNotificationBaseline ? 1 : 0,
+      input.expectedLeaseExpiresAt ?? null,
+      input.expectedLeaseExpiresAt ?? null,
     ).run();
     return result.meta.changes > 0;
   }
 
-  async releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<boolean> {
+  async releaseLease(sourceId: string, externalId: string, owner: string, now: string, expected?: AdmissionLeaseReleaseGuard): Promise<boolean> {
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'queued', lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
-    `).bind(now, sourceId, externalId, owner).run();
+        AND snapshot_hash = COALESCE(?, snapshot_hash)
+        AND material_hash = COALESCE(?, material_hash)
+        AND admission_version = COALESCE(?, admission_version)
+        AND (? IS NULL OR lease_expires_at = ?)
+    `).bind(now, sourceId, externalId, owner,
+      expected?.expectedSnapshotHash ?? null, expected?.expectedMaterialHash ?? null,
+      expected?.expectedAdmissionVersion ?? null,
+      expected?.expectedLeaseExpiresAt ?? null, expected?.expectedLeaseExpiresAt ?? null).run();
     return result.meta.changes > 0;
   }
 
   async settleRow(input: {
     sourceId: string; externalId: string; owner: string; now: string;
     expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
+    expectedNotificationBaseline?: boolean; expectedLeaseExpiresAt?: string;
     decision: IngestionDecision; jobId?: string; reason?: string; effectClaimed?: boolean;
     completeFetchSequence?: number; qualificationPending?: boolean;
   }): Promise<boolean> {
@@ -655,6 +669,8 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
         AND (? = 0 OR effect_claimed_at IS NOT NULL)
+        AND notification_baseline = COALESCE(?, notification_baseline)
+        AND (? IS NULL OR lease_expires_at = ?)
     `).bind(
       input.qualificationPending ? 1 : 0, input.completeFetchSequence ?? null,
       input.decision, input.jobId ?? null, input.now,
@@ -664,6 +680,9 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       input.reason ?? null,
       input.now, input.sourceId, input.externalId, input.owner,
       input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion, input.effectClaimed ? 1 : 0,
+      input.expectedNotificationBaseline === undefined ? null : input.expectedNotificationBaseline ? 1 : 0,
+      input.expectedLeaseExpiresAt ?? null,
+      input.expectedLeaseExpiresAt ?? null,
     ).run();
     return result.meta.changes > 0;
   }
@@ -671,6 +690,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   async scheduleRowRetry(input: {
     sourceId: string; externalId: string; owner: string; now: string;
     expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
+    expectedNotificationBaseline?: boolean; expectedLeaseExpiresAt?: string;
     attemptCount: number; retryAt: string; failure: AdmissionFailure;
   }): Promise<boolean> {
     const result = await this.db.prepare(`
@@ -679,10 +699,14 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
+        AND notification_baseline = COALESCE(?, notification_baseline)
+        AND (? IS NULL OR lease_expires_at = ?)
     `).bind(
       input.attemptCount, input.retryAt, input.failure.classification, input.failure.detail,
       input.now, input.sourceId, input.externalId, input.owner,
       input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
+      input.expectedNotificationBaseline === undefined ? null : input.expectedNotificationBaseline ? 1 : 0,
+      input.expectedLeaseExpiresAt ?? null, input.expectedLeaseExpiresAt ?? null,
     ).run();
     return result.meta.changes > 0;
   }
@@ -690,6 +714,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   async quarantineRow(input: {
     sourceId: string; externalId: string; owner: string; now: string;
     expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
+    expectedNotificationBaseline?: boolean; expectedLeaseExpiresAt?: string;
     attemptCount: number; failure: AdmissionFailure;
   }): Promise<boolean> {
     const result = await this.db.prepare(`
@@ -698,10 +723,14 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
+        AND notification_baseline = COALESCE(?, notification_baseline)
+        AND (? IS NULL OR lease_expires_at = ?)
     `).bind(
       input.attemptCount, input.failure.classification, input.failure.detail,
       input.now, input.sourceId, input.externalId, input.owner,
       input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
+      input.expectedNotificationBaseline === undefined ? null : input.expectedNotificationBaseline ? 1 : 0,
+      input.expectedLeaseExpiresAt ?? null, input.expectedLeaseExpiresAt ?? null,
     ).run();
     return result.meta.changes > 0;
   }

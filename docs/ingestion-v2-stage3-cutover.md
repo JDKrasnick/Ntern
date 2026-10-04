@@ -64,7 +64,9 @@ classification, and the two-complete-snapshot closure rule. Its checked-in
 summary digest makes row, identity, or transition drift fail the run.
 
 Apply migrations `0050_ingestion_v2_omission_closure.sql` and
-`0051_ingestion_v2_qualification_cadence.sql` before enabling the writer.
+`0051_ingestion_v2_qualification_cadence.sql` before deploying the updated
+ingestion Worker or enabling the writer. Shadow and recording mode also read
+the new metadata columns.
 Complete-snapshot omissions persist a closure intent; each discovery delivery
 commits at most 25 source occurrence closures and retries until the remaining
 intents are drained. A reappeared row fences out an older closure. Terminal row

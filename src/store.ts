@@ -57,6 +57,7 @@ export interface PostingObservationAdmissionFence {
   admissionVersion: string;
   leaseOwner: string;
   leaseExpiresAt: string;
+  notificationBaseline?: boolean;
 }
 
 export type PostingObservationCommit =

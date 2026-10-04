@@ -18,7 +18,7 @@ the Stage 3 catalog effects that consume their decisions.
 | Negative decisions revoke public occurrences without closing live peer sources | `ingestion-v2-omission-closure`; built Worker admission E2E checks persisted occurrence and job |
 | Two complete omissions close public roles; durable bounded closure resumes after failure | `ingestion-v2-omission-closure`, including quarantined/in-flight rows, reappearance, and more than 25 closures |
 | Stale claimed positive/negative effects cannot overwrite a newer observation | `ingestion-v2-omission-closure` with D1 transaction fences |
-| Baseline provenance survives quarantine and material changes; durable silence overrides old messages | `ingestion-v2-baseline-origin.integration`, `ingestion-v2-notification-baseline-race.integration` |
+| Baseline provenance survives quarantine and material changes; durable silence overrides old messages and in-flight evaluation | `ingestion-v2-baseline-origin.integration`, `ingestion-v2-notification-baseline-race.integration`, `ingestion-v2-during-lease-baseline.integration`, `ingestion-v2-baseline-lease-race` |
 | Nonexact trusted roles promote once after two complete cadences | `ingestion-v2-two-cadence.integration`: duplicates, retries, delayed consumption, changed material, omissions, gaps, and 570 promotions |
 | Unchanged settled roles avoid expensive evaluation | `ingestion-v2-two-cadence.integration`: one new candidate among 570 quiet baseline roles |
 | D1 bind, memory, query, snapshot-read, and publication budgets | `ingestion-resource-budget`, `ingestion-v2-d1`, built Worker large-board E2E |

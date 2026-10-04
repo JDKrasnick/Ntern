@@ -511,6 +511,7 @@ export class D1InternshipStore implements InternshipStore {
         AND r.snapshot_hash = ? AND r.material_hash = ? AND r.admission_version = ?
         AND r.state = 'processing' AND r.lease_owner = ? AND r.lease_expires_at = ?
         AND r.effect_claimed_at IS NOT NULL
+        AND r.notification_baseline = COALESCE(?, r.notification_baseline)
     )` : '1 = 1';
     const effectGuard = `(${omissionGuard}) AND (${admissionGuard})`;
     const conflictGuard = `(${aliasGuard}) AND (${effectGuard})`;
@@ -520,7 +521,8 @@ export class D1InternshipStore implements InternshipStore {
         fence.materialHash, fence.admissionVersion, fence.updatedAt, fence.activeSnapshotHash] : []),
       ...(admissionFence ? [input.occurrence.sourceId, input.occurrence.externalId,
         admissionFence.snapshotHash, admissionFence.materialHash,
-        admissionFence.admissionVersion, admissionFence.leaseOwner, admissionFence.leaseExpiresAt] : []),
+        admissionFence.admissionVersion, admissionFence.leaseOwner, admissionFence.leaseExpiresAt,
+        admissionFence.notificationBaseline === undefined ? null : admissionFence.notificationBaseline ? 1 : 0] : []),
     ];
     let results: Awaited<ReturnType<D1Database['batch']>> = [];
     let notificationInserted = false;

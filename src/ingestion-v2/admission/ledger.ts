@@ -31,6 +31,15 @@ export interface ExpectedAdmissionIdentity {
   expectedSnapshotHash: string;
   expectedMaterialHash: string;
   expectedAdmissionVersion: string;
+  expectedNotificationBaseline?: boolean;
+  expectedLeaseExpiresAt?: string;
+}
+
+export interface AdmissionLeaseReleaseGuard {
+  expectedSnapshotHash: string;
+  expectedMaterialHash: string;
+  expectedAdmissionVersion: string;
+  expectedLeaseExpiresAt?: string;
 }
 
 /**
@@ -58,7 +67,7 @@ export interface AdmissionV2Ledger {
     now: string;
   }): Promise<boolean>;
   /** Return a leased row to `queued` without consuming an attempt. Reports whether the guarded update applied. */
-  releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<boolean>;
+  releaseLease(sourceId: string, externalId: string, owner: string, now: string, expected?: AdmissionLeaseReleaseGuard): Promise<boolean>;
   settleRow(input: ExpectedAdmissionIdentity & {
     sourceId: string;
     externalId: string;
