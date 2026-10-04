@@ -20,6 +20,9 @@ export const INGESTION_WORK_QUEUES = [
 ] as const;
 
 const DEFAULT_FAILURE_WINDOW_MS = 24 * 60 * 60_000;
+const DEFAULT_V2_COST_WINDOW_MS = 60 * 60_000;
+const DEFAULT_V2_RUN_LIMIT = 60;
+const DEFAULT_V2_D1_WRITE_LIMIT = 100_000;
 const MAX_DETAIL_ITEMS = 20;
 
 export type IngestionHealthSignals = { signals: string[]; details: string };
@@ -27,6 +30,12 @@ export type IngestionHealthSignals = { signals: string[]; details: string };
 type FailureRow = { queue_name: string; source_id: string | null; category: string; n: number; last_failed_at: string };
 type HealthRow = { pk: string; value: string };
 type MarkerRow = { value: string };
+type V2CostRow = {
+  source_id: string;
+  window_started_at: string;
+  window_run_count: number;
+  window_d1_rows_written: number;
+};
 
 /**
  * Names the ingestion conditions beyond the DLQ that an operator should hear
@@ -40,7 +49,7 @@ type MarkerRow = { value: string };
 export async function ingestionHealthSignals(
   db: D1Database,
   observedAt: Date,
-  options: { windowMs?: number } = {},
+  options: { windowMs?: number; v2CostWindowMs?: number; v2RunLimit?: number; v2D1WriteLimit?: number } = {},
 ): Promise<IngestionHealthSignals> {
   const windowMs = options.windowMs ?? DEFAULT_FAILURE_WINDOW_MS;
   const since = new Date(observedAt.getTime() - windowMs).toISOString();
@@ -92,6 +101,27 @@ export async function ingestionHealthSignals(
         details.push(`failure-ledger write failed at ${parsed.at} for ${parsed.queueName ?? 'unknown'} message ${parsed.messageId ?? 'unknown'}`);
       }
     } catch { /* a malformed marker is not itself an alert */ }
+  }
+
+  // 4. The shadow comparison is already written once per V2 discovery run.
+  // Its tumbling counters expose runaway continuation loops and write
+  // amplification without creating a second per-run telemetry write.
+  const v2CostSince = new Date(observedAt.getTime() - (options.v2CostWindowMs ?? DEFAULT_V2_COST_WINDOW_MS)).toISOString();
+  const v2RunLimit = options.v2RunLimit ?? DEFAULT_V2_RUN_LIMIT;
+  const v2D1WriteLimit = options.v2D1WriteLimit ?? DEFAULT_V2_D1_WRITE_LIMIT;
+  const v2Costs = (await db.prepare(`SELECT source_id, window_started_at, window_run_count, window_d1_rows_written
+      FROM ingestion_v2_shadow_comparisons
+      WHERE window_started_at >= ? AND updated_at >= ?
+        AND (window_run_count >= ? OR window_d1_rows_written >= ?)
+      ORDER BY window_d1_rows_written DESC, window_run_count DESC
+      LIMIT ?`)
+    .bind(v2CostSince, v2CostSince, v2RunLimit, v2D1WriteLimit, MAX_DETAIL_ITEMS).all<V2CostRow>()).results;
+  if (v2Costs.some((row) => row.window_run_count >= v2RunLimit)) signals.add('ingestion-v2-run-rate');
+  if (v2Costs.some((row) => row.window_d1_rows_written >= v2D1WriteLimit)) signals.add('ingestion-v2-d1-write-rate');
+  if (v2Costs.length) {
+    details.push(`ingestion V2 one-hour cost limits exceeded: ${v2Costs
+      .map((row) => `${row.source_id} ${row.window_run_count} runs/${row.window_d1_rows_written} D1 rows since ${row.window_started_at}`)
+      .join('; ')}`);
   }
 
   return { signals: [...signals].sort(), details: details.join('\n') };

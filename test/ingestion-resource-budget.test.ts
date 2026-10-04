@@ -346,6 +346,7 @@ describe('ingestion resource budgets', () => {
     const database = new DatabaseSync(':memory:');
     database.exec(readFileSync(new URL('../cloudflare/migrations/0045_ingestion_v2.sql', import.meta.url), 'utf8'));
     database.exec(readFileSync(new URL('../cloudflare/migrations/0048_ingestion_v2_effect_claim.sql', import.meta.url), 'utf8'));
+    database.exec(readFileSync(new URL('../cloudflare/migrations/0049_ingestion_v2_cost_windows.sql', import.meta.url), 'utf8'));
     const queries: string[] = [];
     const base = sqliteD1(database);
     const tracked: D1Database = { prepare: (query) => { queries.push(query); return base.prepare(query); }, batch: (statements) => base.batch(statements) };
