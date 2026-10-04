@@ -38,7 +38,8 @@ import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState 
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
 import { bootstrapAdmissionSnapshot, migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
-import { admissionV2FeatureConfig } from '../src/ingestion-v2/admission/types.js';
+import { applyIngestionV2Bootstrap, planIngestionV2Bootstrap } from '../src/ingestion-v2/bootstrap.js';
+import { admissionV2FeatureConfig, admissionV2OwnsCatalogWrites, admissionV2TrustedCommunityAlertsAllowed } from '../src/ingestion-v2/admission/types.js';
 import {
   CATALOG_RETENTION_CRON_MAX_DURATION_MS,
   CATALOG_RETENTION_CRON_MAX_PASSES,
@@ -180,6 +181,11 @@ export interface Environment extends AuthEnvironment,
   /** Stage 2 ingestion V2 fault-isolated admission. Both default off. */
   INGESTION_V2_ADMISSION_ENABLED?: string;
   INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST?: string;
+  /** Stage 3 live catalog effects. Independently default off and source-scoped. */
+  INGESTION_V2_CATALOG_WRITER_ENABLED?: string;
+  INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST?: string;
 }
 
 /**
@@ -420,6 +426,8 @@ async function runStructuredSource(source: ReviewedStructuredSource, env: Enviro
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
     shadowDiscovery: ingestionV2ShadowDiscovery(env),
+    v2CatalogWriteOwner: (sourceId) => admissionV2OwnsCatalogWrites(env, sourceId),
+    v2TrustedCommunityAlertsEnabled: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
     allowCompleteEmptySnapshot: true,
     config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT } });
   if ('poll' in result && result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
@@ -1338,6 +1346,51 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       { snapshots, actor: request.headers.get('X-Operations-Actor') ?? 'operator' },
     );
     return withCors(Response.json(result, { status: result.applied ? 200 : 409 }));
+  }
+  if (request.method === 'POST' && url.pathname === '/internal/operations/ingestion/bootstrap') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    let body: {
+      sourceId?: string;
+      apply?: boolean;
+      repairToken?: string;
+      expectedActive?: number;
+      expectedActionable?: number;
+    };
+    try {
+      body = await request.json() as typeof body;
+    } catch {
+      return withCors(Response.json({ message: 'Invalid JSON body' }, { status: 400 }));
+    }
+    if (!body.sourceId) return withCors(Response.json({ message: 'sourceId is required' }, { status: 400 }));
+    const dependencies = {
+      repository: new D1IngestionV2Repository(env.DB),
+      snapshots: new R2IngestionSnapshotStore(env.DOCUMENTS),
+      store: new D1InternshipStore(env.DB),
+      secret: env.OPERATIONS_SHARED_SECRET,
+    };
+    try {
+      if (!body.apply) {
+        return withCors(Response.json(await planIngestionV2Bootstrap(body.sourceId, dependencies), {
+          headers: { 'Cache-Control': 'no-store' },
+        }));
+      }
+      if (!body.repairToken || !Number.isSafeInteger(body.expectedActive) || !Number.isSafeInteger(body.expectedActionable)) {
+        return withCors(Response.json({ message: 'apply requires repairToken, expectedActive, and expectedActionable' }, { status: 400 }));
+      }
+      const receipt = await applyIngestionV2Bootstrap({
+        sourceId: body.sourceId,
+        repairToken: body.repairToken,
+        expectedActive: body.expectedActive!,
+        expectedActionable: body.expectedActionable!,
+        actor: request.headers.get('X-Operations-Actor') ?? 'operator',
+      }, dependencies);
+      console.log(JSON.stringify({ event: 'ingestion_v2_bootstrap_applied', ...receipt }));
+      return withCors(Response.json(receipt, { headers: { 'Cache-Control': 'no-store' } }));
+    } catch (error) {
+      return withCors(Response.json({
+        message: error instanceof Error ? error.message : 'Bootstrap failed',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } }));
+    }
   }
   if (request.method === 'POST' && url.pathname === '/internal/poll-source') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
@@ -2757,6 +2810,8 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
           trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
           shadowDiscovery: ingestionV2ShadowDiscovery(env),
+          v2CatalogWriteOwner: (sourceId) => admissionV2OwnsCatalogWrites(env, sourceId),
+          v2TrustedCommunityAlertsEnabled: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
           // One row can perform several bounded HTTP probes, so this stays well
           // inside the five-minute message deadline while still draining a
           // whole list's admission migration in a handful of deliveries: at 20

@@ -464,7 +464,7 @@ describe('ingestion v2 D1 repository', () => {
     expect(due).not.toContain('settled');
     expect((await repository.listStalePolicyRows('community-example', 'standard-v1', 10)).map((entry) => entry.externalId)).toEqual(['stale']);
     expect((await repository.listExpiredLeases('2026-10-01T00:00:00.000Z', 10)).map((entry) => entry.externalId)).toEqual(['leased']);
-    expect((await repository.listRowsForSnapshot('a'.repeat(64), 10)).map((entry) => entry.externalId)).toContain('settled');
+    expect((await repository.listRowsForSnapshot('community-example', 'a'.repeat(64), 10)).map((entry) => entry.externalId)).toContain('settled');
   });
 
   it('stores and increments shadow comparison counters', async () => {

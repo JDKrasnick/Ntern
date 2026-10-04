@@ -88,6 +88,24 @@ describe('polling', () => {
     }]);
   });
 
+  it('fails closed without advancing legacy state when a V2-owned snapshot is not persisted', async () => {
+    const source = 'github-v2-owner';
+    const adapter = new SnapshotAdapter(source, snapshotRows(1, source));
+    const store = new MemoryInternshipStore();
+    const shadow = {
+      isEnabledForSource: () => true,
+      async discover() { return { completed: false }; },
+    };
+    const report = await new Poller(
+      [adapter], store, undefined, undefined, undefined, undefined, undefined,
+      undefined, true, false, undefined, shadow, () => true,
+    ).poll();
+
+    expect(report.failures).toEqual([expect.stringContaining('failed to persist its complete source snapshot')]);
+    expect(await store.getCheckpoint(source)).toBeUndefined();
+    expect(await store.getSourceHealth(source)).toMatchObject({ state: 'degraded', diagnosticCategory: 'persistence' });
+  });
+
   it('persists successful not-modified checkpoints for source-health visibility', async () => {
     const store = new MemoryInternshipStore();
     await store.putCheckpoint({ sourceId: 'unchanged', successfulFetches: 1, lastRowCount: 3 });

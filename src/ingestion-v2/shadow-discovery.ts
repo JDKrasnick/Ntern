@@ -81,11 +81,11 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       && (!features.sourceAllowlist || features.sourceAllowlist.includes(sourceId));
   }
 
-  async discover(input: ShadowDiscoveryInput): Promise<void> {
-    if (!this.isEnabledForSource(input.sourceId)) return;
+  async discover(input: ShadowDiscoveryInput): Promise<{ completed: boolean; snapshotHash?: string }> {
+    if (!this.isEnabledForSource(input.sourceId)) return { completed: false };
     const started = this.now().getTime();
     try {
-      await this.run(input, started);
+      return { completed: true, snapshotHash: await this.run(input, started) };
     } catch (error) {
       // Shadow mode must never fail or retry a legacy delivery.
       const detail = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
@@ -124,10 +124,11 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
         status: failed.status,
         error: detail,
       });
+      return { completed: false };
     }
   }
 
-  private async run(input: ShadowDiscoveryInput, started: number): Promise<void> {
+  private async run(input: ShadowDiscoveryInput, started: number): Promise<string> {
     const { repository, snapshots } = this.dependencies;
     const admissionEnabled = this.dependencies.admissionEnabledForSource?.(input.sourceId)
       ?? Boolean(this.dependencies.reopenActionableRows);
@@ -269,5 +270,6 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       r2Bytes: metrics.r2Bytes,
       status: metrics.status,
     });
+    return envelope.snapshotHash;
   }
 }

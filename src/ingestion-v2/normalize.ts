@@ -162,7 +162,7 @@ export function normalizeSourceSnapshot(input: {
   return {
     schemaVersion: INGESTION_V2_SNAPSHOT_SCHEMA_VERSION,
     sourceId: input.sourceId,
-    snapshotHash: snapshotHashForRows(rows),
+    snapshotHash: snapshotHashForRowsAndAdmissionVersion(rows, input.admissionVersion),
     admissionVersion: input.admissionVersion,
     documentCount: new Set(rows.map((row) => row.document)).size,
     rowCount: rows.length,
@@ -177,6 +177,21 @@ export function snapshotHashForRows(rows: readonly { externalId: string; materia
     .map((row) => ({ externalId: row.externalId, materialHash: row.materialHash }))
     .sort((left, right) => left.externalId.localeCompare(right.externalId));
   return createHash('sha256').update(stableStringify(canonical)).digest('hex');
+}
+
+/**
+ * Schema 2 binds the immutable object identity to both source content and the
+ * evaluator policy that will interpret it. Schema 1 objects remain readable
+ * through `snapshotHashForRows` so in-flight pre-cutover messages can drain.
+ */
+export function snapshotHashForRowsAndAdmissionVersion(
+  rows: readonly { externalId: string; materialHash: string }[],
+  admissionVersion: string,
+): string {
+  const canonical = [...rows]
+    .map((row) => ({ externalId: row.externalId, materialHash: row.materialHash }))
+    .sort((left, right) => left.externalId.localeCompare(right.externalId));
+  return createHash('sha256').update(stableStringify({ admissionVersion, rows: canonical })).digest('hex');
 }
 
 /**
@@ -213,7 +228,7 @@ export function parseEnvelope(raw: string, expected: { sourceId: string; snapsho
   }
   if (!isRecord(parsed)) throw new Error('Ingestion snapshot envelope is malformed');
   const envelope = parsed as unknown as NormalizedSnapshotEnvelope;
-  if (envelope.schemaVersion !== INGESTION_V2_SNAPSHOT_SCHEMA_VERSION) {
+  if (envelope.schemaVersion !== 1 && envelope.schemaVersion !== INGESTION_V2_SNAPSHOT_SCHEMA_VERSION) {
     throw new Error(`Unsupported ingestion snapshot schema ${String(envelope.schemaVersion)}`);
   }
   if (envelope.sourceId !== expected.sourceId) throw new Error('Ingestion snapshot source mismatch');
@@ -258,7 +273,9 @@ export function parseEnvelope(raw: string, expected: { sourceId: string; snapsho
   if (envelope.documentCount !== new Set(envelope.rows.map((row) => row.document)).size) {
     throw new Error('Ingestion snapshot document count mismatch');
   }
-  const recomputed = snapshotHashForRows(envelope.rows);
+  const recomputed = envelope.schemaVersion === 1
+    ? snapshotHashForRows(envelope.rows)
+    : snapshotHashForRowsAndAdmissionVersion(envelope.rows, envelope.admissionVersion);
   if (recomputed !== envelope.snapshotHash) throw new Error('Ingestion snapshot hash mismatch');
   return envelope;
 }

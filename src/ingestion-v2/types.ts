@@ -9,7 +9,7 @@ import type { ProcessedSnapshot, SourcedPosting } from '../types.js';
  */
 
 /** Bumped only when the stored normalized snapshot shape changes incompatibly. */
-export const INGESTION_V2_SNAPSHOT_SCHEMA_VERSION = 1;
+export const INGESTION_V2_SNAPSHOT_SCHEMA_VERSION = 2;
 
 export type IngestionSnapshotState = 'staged' | 'active' | 'terminal' | 'expired';
 /** The full row-state domain; also validated at the operations boundary. */
@@ -230,7 +230,7 @@ export interface ShadowDiscoveryHook {
    * Must never throw. Implementations swallow and record their own failures so
    * shadow mode can never fail or retry a legacy delivery.
    */
-  discover(input: ShadowDiscoveryInput): Promise<void>;
+  discover(input: ShadowDiscoveryInput): Promise<{ completed: boolean; snapshotHash?: string } | void>;
 }
 
 /** Repository boundary for the V2 ledger; implemented by `D1IngestionV2Repository`. */
@@ -247,7 +247,7 @@ export interface IngestionV2Repository {
   listDueWork(sourceId: string, now: string, limit: number): Promise<CompactIngestionRow[]>;
   listStalePolicyRows(sourceId: string, admissionVersion: string, limit: number): Promise<CompactIngestionRow[]>;
   listExpiredLeases(now: string, limit: number): Promise<IngestionRowRecord[]>;
-  listRowsForSnapshot(snapshotHash: string, limit: number): Promise<CompactIngestionRow[]>;
+  listRowsForSnapshot(sourceId: string, snapshotHash: string, limit: number): Promise<CompactIngestionRow[]>;
   putShadowComparison(metrics: ShadowComparisonMetrics): Promise<void>;
   listShadowComparisons(): Promise<ShadowComparisonMetrics[]>;
   getShadowComparison(sourceId: string): Promise<ShadowComparisonMetrics | undefined>;

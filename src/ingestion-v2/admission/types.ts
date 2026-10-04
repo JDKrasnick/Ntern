@@ -1,4 +1,4 @@
-import type { IngestionDecision, IngestionRowRecord, IngestionRowState } from '../types.js';
+import { ingestionV2FeatureConfig, type IngestionDecision, type IngestionRowRecord, type IngestionRowState } from '../types.js';
 import type { SourcedPosting } from '../../types.js';
 
 /**
@@ -173,6 +173,14 @@ export interface AdmissionV2FeatureConfig {
   admissionEnabled: boolean;
   /** Optional bounded rollout allowlist. Absent means every source. */
   sourceAllowlist?: readonly string[];
+  /** Stage 3 live catalog effects remain independently default-off. */
+  catalogWriterEnabled: boolean;
+  /** Explicit sources allowed to use the live reconciler-backed writer. */
+  catalogWriterSourceAllowlist?: readonly string[];
+  /** Explicit sources whose legacy catalog writer is disabled after bootstrap. */
+  legacyCatalogWriteDisabledSourceAllowlist?: readonly string[];
+  /** Stage 3 sources allowed to emit trusted-community new-role alerts. */
+  trustedCommunityAlertSourceAllowlist?: readonly string[];
 }
 
 /**
@@ -182,17 +190,76 @@ export interface AdmissionV2FeatureConfig {
 export function admissionV2FeatureConfig(env: {
   INGESTION_V2_ADMISSION_ENABLED?: string;
   INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_CATALOG_WRITER_ENABLED?: string;
+  INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST?: string;
 }): AdmissionV2FeatureConfig {
   const allowlist = env.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST
+    ?.split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const catalogWriterAllowlist = env.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST
+    ?.split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const legacyCatalogWriteDisabledAllowlist = env.INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST
+    ?.split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const trustedCommunityAlertAllowlist = env.INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST
     ?.split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
   return {
     admissionEnabled: env.INGESTION_V2_ADMISSION_ENABLED === 'true',
     ...(allowlist?.length ? { sourceAllowlist: allowlist } : {}),
+    catalogWriterEnabled: env.INGESTION_V2_CATALOG_WRITER_ENABLED === 'true',
+    ...(catalogWriterAllowlist?.length ? { catalogWriterSourceAllowlist: catalogWriterAllowlist } : {}),
+    ...(legacyCatalogWriteDisabledAllowlist?.length
+      ? { legacyCatalogWriteDisabledSourceAllowlist: legacyCatalogWriteDisabledAllowlist }
+      : {}),
+    ...(trustedCommunityAlertAllowlist?.length
+      ? { trustedCommunityAlertSourceAllowlist: trustedCommunityAlertAllowlist }
+      : {}),
   };
 }
 
+/** Trusted-community alerts are a fourth explicit source gate after ownership. */
+export function admissionV2TrustedCommunityAlertsAllowed(env: Parameters<typeof admissionV2OwnsCatalogWrites>[0] & {
+  INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST?: string;
+}, sourceId: string): boolean {
+  const config = admissionV2FeatureConfig(env);
+  return admissionV2OwnsCatalogWrites(env, sourceId)
+    && config.trustedCommunityAlertSourceAllowlist?.includes(sourceId) === true;
+}
+
+/**
+ * Legacy ownership can move only after the complete V2 lane is enabled for the
+ * same explicit source. The third allowlist is an independent rollback switch.
+ */
+export function admissionV2OwnsCatalogWrites(env: {
+  INGESTION_V2_SHADOW_DISCOVERY_ENABLED?: string;
+  INGESTION_V2_SHADOW_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_ADMISSION_ENABLED?: string;
+  INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_CATALOG_WRITER_ENABLED?: string;
+  INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST?: string;
+}, sourceId: string): boolean {
+  const shadow = ingestionV2FeatureConfig(env);
+  const config = admissionV2FeatureConfig(env);
+  return shadow.shadowDiscoveryEnabled
+    && shadow.sourceAllowlist?.includes(sourceId) === true
+    && config.admissionEnabled
+    && config.sourceAllowlist?.includes(sourceId) === true
+    && config.catalogWriterEnabled
+    && config.catalogWriterSourceAllowlist?.includes(sourceId) === true
+    && config.legacyCatalogWriteDisabledSourceAllowlist?.includes(sourceId) === true;
+}
+
+/** Live effects require both the global Stage 3 switch and an explicit source allowlist. */
 /** A guarded, idempotent replay request from the operations surface. */
 export interface AdmissionReplayRequest {
   sourceId: string;

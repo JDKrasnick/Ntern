@@ -5,8 +5,8 @@ import type { AdmissionCatalogCommit, AdmissionV2CatalogSink } from './evaluator
 
 /**
  * Reconciler-backed effect boundary used by integration verification and the
- * eventual live cutover. The deployed Stage 2 lane still injects the recording
- * sink, but both modes now exercise the same idempotent catalog contract.
+ * source-scoped Stage 3 live writer. Default-off controls select this sink only
+ * for an explicit cutover source; all other rows use the recording sink.
  */
 export class ReconcilerAdmissionV2CatalogSink implements AdmissionV2CatalogSink {
   private readonly reconciler = new CatalogReconciler();

@@ -5,6 +5,8 @@ import {
   snapshotObjectKey,
 } from '../src/ingestion-v2/normalize.js';
 import type { AcquireLeaseInput, AdmissionV2Ledger, MarkQueuedInput } from '../src/ingestion-v2/admission/ledger.js';
+import type { IngestionV2BootstrapReceipt } from '../src/ingestion-v2/bootstrap.js';
+import type { SourceCheckpoint } from '../src/types.js';
 import type {
   AdmissionFailure,
   AdmissionLeaseResult,
@@ -407,10 +409,10 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     return results.map(rowFromDb);
   }
 
-  async listRowsForSnapshot(snapshotHash: string, limit: number): Promise<CompactIngestionRow[]> {
+  async listRowsForSnapshot(sourceId: string, snapshotHash: string, limit: number): Promise<CompactIngestionRow[]> {
     const { results } = await this.db.prepare(
-      `SELECT ${rowColumns} FROM ingestion_rows WHERE snapshot_hash = ? ORDER BY external_id LIMIT ?`,
-    ).bind(snapshotHash, limit).all<RowDbRow>();
+      `SELECT ${rowColumns} FROM ingestion_rows WHERE source_id = ? AND snapshot_hash = ? ORDER BY external_id LIMIT ?`,
+    ).bind(sourceId, snapshotHash, limit).all<RowDbRow>();
     return results.map(compactFromDb);
   }
 
@@ -790,6 +792,105 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       ...(oldestWorkAt ? { oldestWorkAt } : {}),
       ...(active ? { currentSnapshotHash: active.snapshot_hash } : {}),
     };
+  }
+
+  async getBootstrapReceipt(
+    sourceId: string,
+    snapshotHash: string,
+    admissionVersion: string,
+  ): Promise<IngestionV2BootstrapReceipt | undefined> {
+    const row = await this.db.prepare(`
+      SELECT receipt_json FROM ingestion_v2_bootstrap_receipts
+      WHERE source_id = ? AND snapshot_hash = ? AND admission_version = ?
+    `).bind(sourceId, snapshotHash, admissionVersion).first<{ receipt_json: string }>();
+    return row ? JSON.parse(row.receipt_json) as IngestionV2BootstrapReceipt : undefined;
+  }
+
+  /**
+   * Atomically fence every row in the active snapshot as a silent baseline,
+   * retire the legacy migration cursor, and write the immutable operator
+   * receipt. Every statement repeats the active-snapshot predicate, so a
+   * concurrent discovery activation makes the batch a no-op instead of mixing
+   * two snapshots.
+   */
+  async applyBootstrap(input: {
+    sourceId: string;
+    snapshotHash: string;
+    admissionVersion: string;
+    activeRows: number;
+    actionableRows: number;
+    checkpoint: SourceCheckpoint;
+    actor: string;
+    appliedAt: string;
+    receipt: IngestionV2BootstrapReceipt;
+  }): Promise<IngestionV2BootstrapReceipt> {
+    const activeSnapshotGuard = `EXISTS (
+      SELECT 1 FROM ingestion_snapshots
+      WHERE source_id = ? AND snapshot_hash = ? AND admission_version = ?
+        AND state = 'active' AND is_complete = 1 AND row_count = ?
+    ) AND (
+      SELECT COUNT(*) FROM ingestion_rows WHERE source_id = ? AND snapshot_hash = ?
+    ) = ? AND NOT EXISTS (
+      SELECT 1 FROM ingestion_rows
+      WHERE source_id = ? AND snapshot_hash = ? AND state IN ('queued', 'processing')
+    )`;
+    const guardValues = [
+      input.sourceId,
+      input.snapshotHash,
+      input.admissionVersion,
+      input.activeRows,
+      input.sourceId,
+      input.snapshotHash,
+      input.activeRows,
+      input.sourceId,
+      input.snapshotHash,
+    ] as const;
+    await this.db.batch([
+      this.db.prepare(`
+        UPDATE ingestion_rows SET
+          state = 'pending', decision = NULL, attempt_count = 0, retry_at = NULL,
+          lease_owner = NULL, lease_expires_at = NULL,
+          failure_class = NULL, failure_detail = NULL, settled_at = NULL,
+          notification_baseline = 1, effect_claimed_at = NULL,
+          admission_version = ?, updated_at = ?
+        WHERE source_id = ? AND snapshot_hash = ? AND ${activeSnapshotGuard}
+      `).bind(
+        input.admissionVersion,
+        input.appliedAt,
+        input.sourceId,
+        input.snapshotHash,
+        ...guardValues,
+      ),
+      this.db.prepare(`
+        INSERT INTO catalog_items (pk, sk, kind, value)
+        SELECT ?, 'CHECKPOINT', 'checkpoint', ? WHERE ${activeSnapshotGuard}
+        ON CONFLICT(pk, sk) DO UPDATE SET kind = excluded.kind, value = excluded.value
+      `).bind(
+        `SOURCE#${input.sourceId}`,
+        JSON.stringify(input.checkpoint),
+        ...guardValues,
+      ),
+      this.db.prepare(`
+        INSERT OR IGNORE INTO ingestion_v2_bootstrap_receipts
+          (source_id, snapshot_hash, admission_version, active_rows, actionable_rows,
+           checkpoint_json, actor, applied_at, receipt_json)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${activeSnapshotGuard}
+      `).bind(
+        input.sourceId,
+        input.snapshotHash,
+        input.admissionVersion,
+        input.activeRows,
+        input.actionableRows,
+        JSON.stringify(input.checkpoint),
+        input.actor,
+        input.appliedAt,
+        JSON.stringify(input.receipt),
+        ...guardValues,
+      ),
+    ]);
+    const receipt = await this.getBootstrapReceipt(input.sourceId, input.snapshotHash, input.admissionVersion);
+    if (!receipt) throw new Error('Bootstrap active snapshot drifted during apply');
+    return receipt;
   }
 
   private async batch(statements: ReturnType<D1Database['prepare']>[]): Promise<void> {

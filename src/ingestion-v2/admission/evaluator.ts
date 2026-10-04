@@ -107,6 +107,7 @@ export function gradeAdmissionRow(input: {
   canonicalEmployer?: Pick<CanonicalEmployer, 'id' | 'displayName'>;
   prior?: AdmissionV2PriorContext;
   trustedCommunityCatalogEnabled?: boolean;
+  trustedCommunityAlertsEnabled?: boolean;
   baseline?: boolean;
   probe: AdmissionDestinationProbe;
   evaluatedAt: string;
@@ -156,26 +157,32 @@ export function gradeAdmissionRow(input: {
     input.sourceId,
     input.trustedCommunityCatalogEnabled ?? false,
   );
-  const trustedCommunityQualification = trustedCommunityPolicy
+  const effectiveTrustedCommunityPolicy = trustedCommunityPolicy && input.trustedCommunityAlertsEnabled
+    ? { ...trustedCommunityPolicy, alertMode: 'exact-identity-or-two-complete-snapshots' as const }
+    : trustedCommunityPolicy;
+  const trustedCommunityQualification = effectiveTrustedCommunityPolicy
     ? advanceTrustedCommunityQualification({
       ...(input.prior?.trustedCommunityAlertQualification
         ? { previous: input.prior.trustedCommunityAlertQualification }
         : {}),
       destination,
       postingIdentityDecision: identity.decision,
-      alertMode: trustedCommunityPolicy.alertMode,
-      baselineSuppressed: trustedCommunityPolicy.alertMode === 'disabled' || input.baseline === true,
+      alertMode: effectiveTrustedCommunityPolicy.alertMode,
+      baselineSuppressed: effectiveTrustedCommunityPolicy.alertMode === 'disabled' || input.baseline === true,
       catalogPublicationSuppressed: false,
     })
     : undefined;
+  const qualifiedListing: ProcessedListing = trustedCommunityQualification
+    ? { ...normalized, trustedCommunityAlertQualification: trustedCommunityQualification }
+    : normalized;
   const admission = evaluateCatalogAdmission({
-    listing: normalized,
+    listing: qualifiedListing,
     destination,
     postingAttributed: true,
     evaluatedAt: input.evaluatedAt,
     ...(input.prior?.admission ? { previous: input.prior.admission } : {}),
-    ...(trustedCommunityPolicy && trustedCommunityQualification
-      ? { trustedCommunity: { policy: trustedCommunityPolicy, qualification: trustedCommunityQualification } }
+    ...(effectiveTrustedCommunityPolicy && trustedCommunityQualification
+      ? { trustedCommunity: { policy: effectiveTrustedCommunityPolicy, qualification: trustedCommunityQualification } }
       : {}),
   });
   const jobId = normalized.postingIdentity?.canonicalJobId
@@ -183,7 +190,7 @@ export function gradeAdmissionRow(input: {
   if (!admission.catalogEligible) {
     return { decision: { kind: 'blocked', reason: admission.reasonCodes[0] ?? 'not-catalog-eligible' } };
   }
-  return { jobId, listing: normalized, admission, decision: { kind: 'admitted', jobId } };
+  return { jobId, listing: qualifiedListing, admission, decision: { kind: 'admitted', jobId } };
 }
 
 function isGraded(row: GradedAdmissionRow | { decision: AdmissionRowEvaluation['decision'] }): row is GradedAdmissionRow {
@@ -196,6 +203,7 @@ export interface RuleBasedAdmissionEvaluatorDependencies {
   resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver;
   resolvePriorContext?: AdmissionV2PriorContextResolver;
   trustedCommunityCatalogEnabled?: boolean;
+  trustedCommunityAlertsEnabledForSource?: (sourceId: string) => boolean;
   now?: () => Date;
 }
 
@@ -243,6 +251,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       ...(canonicalEmployer ? { canonicalEmployer } : {}),
       ...(prior ? { prior } : {}),
       trustedCommunityCatalogEnabled: this.dependencies.trustedCommunityCatalogEnabled ?? false,
+      trustedCommunityAlertsEnabled: this.dependencies.trustedCommunityAlertsEnabledForSource?.(context.sourceId) ?? false,
       baseline: context.baseline,
       probe,
       evaluatedAt: observedAt,

@@ -4,8 +4,9 @@ import { processAdmissionV2Message, type AdmissionV2MessageResult } from '../src
 import { RuleBasedAdmissionV2Evaluator, type AdmissionCanonicalEmployerResolver, type AdmissionDestinationProber, type AdmissionV2CatalogSink, type AdmissionV2PriorContextResolver } from '../src/ingestion-v2/admission/evaluator.js';
 import { validateAdmissionV2Message } from '../src/ingestion-v2/admission/message.js';
 import { RecordingAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/recording-sink.js';
+import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { AdmissionRowTransientError } from '../src/ingestion-v2/admission/taxonomy.js';
-import { admissionV2FeatureConfig, type AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
+import { admissionV2FeatureConfig, admissionV2OwnsCatalogWrites, admissionV2TrustedCommunityAlertsAllowed, type AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
 import { D1RecordingAdmissionV2CatalogSink } from './admission-v2-recording-sink.js';
 import { D1CatalogAdmissionStore } from './catalog-admission-store.js';
@@ -18,8 +19,14 @@ export const ADMISSION_V2_QUEUE_NAME = 'intern-notifs-admission-v2';
 export interface AdmissionV2Environment {
   DB: D1Database;
   DOCUMENTS: R2Bucket;
+  INGESTION_V2_SHADOW_DISCOVERY_ENABLED?: string;
+  INGESTION_V2_SHADOW_SOURCE_ALLOWLIST?: string;
   INGESTION_V2_ADMISSION_ENABLED?: string;
   INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_CATALOG_WRITER_ENABLED?: string;
+  INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST?: string;
   TRUSTED_COMMUNITY_CATALOG_ENABLED?: string;
 }
 
@@ -87,6 +94,7 @@ export function stage2AdmissionEvaluator(
   options: {
     resolvePriorContext?: AdmissionV2PriorContextResolver;
     trustedCommunityCatalogEnabled?: boolean;
+    trustedCommunityAlertsEnabledForSource?: (sourceId: string) => boolean;
   } = {},
 ): AdmissionV2RowEvaluator {
   return new RuleBasedAdmissionV2Evaluator({
@@ -95,6 +103,9 @@ export function stage2AdmissionEvaluator(
     ...(resolveCanonicalEmployer ? { resolveCanonicalEmployer } : {}),
     ...(options.resolvePriorContext ? { resolvePriorContext: options.resolvePriorContext } : {}),
     trustedCommunityCatalogEnabled: options.trustedCommunityCatalogEnabled ?? false,
+    ...(options.trustedCommunityAlertsEnabledForSource
+      ? { trustedCommunityAlertsEnabledForSource: options.trustedCommunityAlertsEnabledForSource }
+      : {}),
   });
 }
 
@@ -128,12 +139,20 @@ export async function processAdmissionV2Batch(
   const internshipStore = new D1InternshipStore(env.DB);
   const evaluator = stage2AdmissionEvaluator(
     options.resolver,
-    options.sink ?? new D1RecordingAdmissionV2CatalogSink(env.DB, now),
+    options.sink ?? {
+      async commit(input) {
+        const sink = admissionV2OwnsCatalogWrites(env, input.sourceId)
+          ? new ReconcilerAdmissionV2CatalogSink(internshipStore, now)
+          : new D1RecordingAdmissionV2CatalogSink(env.DB, now);
+        await sink.commit(input);
+      },
+    },
     async (listing) => listing.providerIdentity
       ? admissionStore.resolveCanonicalEmployer(listing.providerIdentity)
       : undefined,
     {
       trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
+      trustedCommunityAlertsEnabledForSource: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
       resolvePriorContext: async (sourceId, externalId) => {
         const prior = await internshipStore.getSourceOccurrence(sourceId, externalId);
         if (!prior) return undefined;
