@@ -40,6 +40,7 @@
     "PUBLIC_API_URL": "https://intern-notifs-dev.jdkrasnick.workers.dev",
     "CATALOG_R2_READ_ENABLED": "true",
     "AUTH_FROM_EMAIL": "Ntern Dev <dev.example>",
+    "OUTBOUND_NOTIFICATIONS_ENABLED": "false",
     "AUTH_DEV_MODE": "true",
     "EMPLOYER_PORTAL_ENABLED": "false",
     "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED": "true",

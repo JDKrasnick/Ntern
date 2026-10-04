@@ -32,19 +32,37 @@ their public API is `https://intern-notifs-dev.jdkrasnick.workers.dev`.
 The development stack has its own D1 database (`intern-notifs-dev-db`), R2
 buckets, queues, Durable Object namespace, and Worker secrets. It must never
 bind a production database, bucket, queue, service, or secret. Its ingestion
-configuration intentionally has no cron triggers, so testing cannot begin
-provider polling or alter the production catalog.
+Worker uses the production cron schedule, queue consumers, resource limits, and
+observability settings against those isolated resources. Ingestion-generated
+email, push, and ntfy delivery is disabled by
+`OUTBOUND_NOTIFICATIONS_ENABLED=false`; delivery attempts and receipts are
+recorded in structured logs and the dev delivery ledger instead of contacting
+external providers.
 
-Use the committed, config-specific commands—never a bare Wrangler deploy:
+The bootstrapped `northwestern-fintech-2027-quant` source is the continuous V2
+writer canary in dev. Shadow discovery, admission, catalog ownership, legacy
+write suppression, and trusted-alert intent are enabled for that source only.
+All other sources retain normal polling through the mirrored legacy lanes and
+provide a comparison cohort. Expanding the canary requires a successful guarded
+bootstrap receipt for each added source before its writer and legacy-disable
+allowlists change.
+
+Use the committed, config-specific commands—never a bare Wrangler deploy. The
+API command preserves the existing dev container rollout, so Docker is not
+required to exercise or deploy ingestion:
 
 ```sh
 npm run build:cloudflare
 npm run cloudflare:dev:provision
-npx wrangler d1 migrations apply intern-notifs-dev-db --remote --config wrangler.dev.api.jsonc
 npx wrangler deploy --config wrangler.dev.ingestion.jsonc
-npx wrangler deploy --config wrangler.dev.api.jsonc
+npx wrangler deploy --config wrangler.dev.api.jsonc --containers-rollout=none
 curl -fsS 'https://intern-notifs-dev.jdkrasnick.workers.dev/catalog?limit=5'
 ```
+
+`cloudflare:dev:provision` reconciles every production-equivalent work queue and
+DLQ, both R2 buckets, the resume Vectorize index, and all D1 migrations. Use
+`npm run cloudflare:dev:deploy` to provision and deploy both dev Workers in the
+required ingestion-first order.
 
 Verify the public catalog, authentication lifecycle, and protected operations
 boundary there. A successful development run is a prerequisite for, but never

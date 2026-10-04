@@ -62,6 +62,7 @@
   "vars": {
     "PUBLIC_API_URL": "https://intern-notifs.jdkrasnick.workers.dev",
     "AUTH_FROM_EMAIL": "Ntern <notifications@send.ntern.app>",
+    "OUTBOUND_NOTIFICATIONS_ENABLED": "true",
     "EMPLOYER_PORTAL_ENABLED": "true",
     "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED": "true",
     "IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED": "false",

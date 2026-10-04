@@ -52,8 +52,13 @@ export interface DestinationVerificationEnvironment {
   RESEND_API_KEY?: string;
   ADMISSION_SUPPORT_RECIPIENT?: string;
   AUTH_FROM_EMAIL?: string;
+  OUTBOUND_NOTIFICATIONS_ENABLED?: string;
   TRUSTED_COMMUNITY_CATALOG_ENABLED?: string;
   IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED?: string;
+}
+
+function recordDevEmail(channel: string): void {
+  console.log(JSON.stringify({ event: 'dev_notification_recorded', channel, count: 1 }));
 }
 
 const DESTINATION_RETRY_DELAY_SECONDS = 86_400;
@@ -397,40 +402,46 @@ export async function persistDestinationAdmission(input: {
 
 async function sendIncidentEmail(
   store: D1CatalogAdmissionStore,
-  env: Pick<DestinationVerificationEnvironment, 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL'>,
+  env: Pick<DestinationVerificationEnvironment, 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL' | 'OUTBOUND_NOTIFICATIONS_ENABLED'>,
   group: { sourceId: string; host: string; reason: string; incidents: string[] },
   messageType: 'incident-opened' | 'grace-warning' | 'quarantine',
   sentAt: string,
 ): Promise<boolean> {
-  if (!env.RESEND_API_KEY || !env.ADMISSION_SUPPORT_RECIPIENT || !env.AUTH_FROM_EMAIL) return false;
+  const recording = env.OUTBOUND_NOTIFICATIONS_ENABLED === 'false';
+  if (!recording && (!env.RESEND_API_KEY || !env.ADMISSION_SUPPORT_RECIPIENT || !env.AUTH_FROM_EMAIL)) return false;
   const incidentIds = [...group.incidents].sort();
   const dedupeKey = createHash('sha256').update(`${messageType}\0${group.sourceId}\0${group.host}\0${group.reason}\0${incidentIds.join(',')}`).digest('hex');
   if (await store.emailDeliveryExists(dedupeKey)) return true;
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-      'Idempotency-Key': dedupeKey,
-    },
-    body: JSON.stringify({
-      from: env.AUTH_FROM_EMAIL,
-      to: [env.ADMISSION_SUPPORT_RECIPIENT],
-      subject: `[InternNotifs] ${messageType}: ${group.host}`,
-      text: `${group.incidents.length} catalog admission incident(s) for ${group.sourceId} on ${group.host}. Reason: ${group.reason}.`,
-    }),
-  });
-  if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);
+  if (recording) recordDevEmail(`admission_${messageType}`);
+  else {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': dedupeKey,
+      },
+      body: JSON.stringify({
+        from: env.AUTH_FROM_EMAIL,
+        to: [env.ADMISSION_SUPPORT_RECIPIENT],
+        subject: `[InternNotifs] ${messageType}: ${group.host}`,
+        text: `${group.incidents.length} catalog admission incident(s) for ${group.sourceId} on ${group.host}. Reason: ${group.reason}.`,
+      }),
+    });
+    if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);
+  }
   await store.recordEmailDelivery(dedupeKey, incidentIds[0]!, messageType, sentAt);
   return true;
 }
 
 export async function sendAdmissionOperationalAlert(
   store: D1CatalogAdmissionStore,
-  env: Pick<DestinationVerificationEnvironment, 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL'>,
+  env: Pick<DestinationVerificationEnvironment, 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL' | 'OUTBOUND_NOTIFICATIONS_ENABLED'>,
   input: { signals: string[]; details: string; observedAt: string },
 ): Promise<boolean> {
-  if (!input.signals.length || !env.RESEND_API_KEY || !env.ADMISSION_SUPPORT_RECIPIENT || !env.AUTH_FROM_EMAIL) return false;
+  if (!input.signals.length) return false;
+  const recording = env.OUTBOUND_NOTIFICATIONS_ENABLED === 'false';
+  if (!recording && (!env.RESEND_API_KEY || !env.ADMISSION_SUPPORT_RECIPIENT || !env.AUTH_FROM_EMAIL)) return false;
   const signals = [...new Set(input.signals)].sort();
   const action = signals.includes('destination-verification-dlq')
     ? '\n\nAction required: inspect the destination-verification DLQ and, after review, use the authenticated DLQ operations replay flow. Do not purge messages.'
@@ -438,17 +449,20 @@ export async function sendAdmissionOperationalAlert(
   const day = input.observedAt.slice(0, 10);
   const dedupeKey = createHash('sha256').update(`operational-health\0${day}\0${signals.join(',')}`).digest('hex');
   if (await store.emailDeliveryExists(dedupeKey)) return true;
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': dedupeKey },
-    body: JSON.stringify({
-      from: env.AUTH_FROM_EMAIL,
-      to: [env.ADMISSION_SUPPORT_RECIPIENT],
-      subject: `[InternNotifs] catalog admission health: ${signals.join(', ')}`,
-      text: `${input.details}${action}`,
-    }),
-  });
-  if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);
+  if (recording) recordDevEmail('admission_operational_alert');
+  else {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': dedupeKey },
+      body: JSON.stringify({
+        from: env.AUTH_FROM_EMAIL,
+        to: [env.ADMISSION_SUPPORT_RECIPIENT],
+        subject: `[InternNotifs] catalog admission health: ${signals.join(', ')}`,
+        text: `${input.details}${action}`,
+      }),
+    });
+    if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);
+  }
   await store.recordEmailDelivery(dedupeKey, `operational:${day}`, 'operational-health', input.observedAt);
   return true;
 }
@@ -457,25 +471,29 @@ export async function sendAdmissionOperationalAlert(
  * its full upper-bound cost. Resend and the delivery ledger share a stable key. */
 export async function sendShadowBudgetAlert(
   store: D1CatalogAdmissionStore,
-  env: Pick<DestinationVerificationEnvironment, 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL'>,
+  env: Pick<DestinationVerificationEnvironment, 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL' | 'OUTBOUND_NOTIFICATIONS_ENABLED'>,
   input: { period: string; spentCents: number; allowanceCents: number; observedAt: string },
 ): Promise<boolean> {
-  if (!env.RESEND_API_KEY || !env.ADMISSION_SUPPORT_RECIPIENT || !env.AUTH_FROM_EMAIL) {
+  const recording = env.OUTBOUND_NOTIFICATIONS_ENABLED === 'false';
+  if (!recording && (!env.RESEND_API_KEY || !env.ADMISSION_SUPPORT_RECIPIENT || !env.AUTH_FROM_EMAIL)) {
     throw new Error('Shadow budget alert email is not configured');
   }
   const dedupeKey = createHash('sha256').update(`shadow-budget-exhausted\0${input.period}`).digest('hex');
   if (await store.emailDeliveryExists(dedupeKey)) return true;
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': dedupeKey },
-    body: JSON.stringify({
-      from: env.AUTH_FROM_EMAIL,
-      to: [env.ADMISSION_SUPPORT_RECIPIENT],
-      subject: `[Ntern] shadow metadata budget reached (${input.period})`,
-      text: `The ${input.period} shadow metadata ledger is at ${input.spentCents}¢ of its ${input.allowanceCents}¢ allowance. A new provider run cannot reserve its 20¢ maximum, so new AI metadata processing will pause until there is headroom or the monthly budget resets.`,
-    }),
-  });
-  if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);
+  if (recording) recordDevEmail('shadow_budget_alert');
+  else {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': dedupeKey },
+      body: JSON.stringify({
+        from: env.AUTH_FROM_EMAIL,
+        to: [env.ADMISSION_SUPPORT_RECIPIENT],
+        subject: `[Ntern] shadow metadata budget reached (${input.period})`,
+        text: `The ${input.period} shadow metadata ledger is at ${input.spentCents}¢ of its ${input.allowanceCents}¢ allowance. A new provider run cannot reserve its 20¢ maximum, so new AI metadata processing will pause until there is headroom or the monthly budget resets.`,
+      }),
+    });
+    if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}`);
+  }
   await store.recordEmailDelivery(dedupeKey, `shadow-budget:${input.period}`, 'shadow-budget-exhausted', input.observedAt);
   return true;
 }
@@ -964,7 +982,7 @@ export async function processDestinationVerificationBatch(
  * hand. Returns the number of warning groups sent.
  */
 export async function enqueueDueDestinationVerifications(
-  env: Pick<DestinationVerificationEnvironment, 'DB' | 'DESTINATION_VERIFICATION_QUEUE' | 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL'>,
+  env: Pick<DestinationVerificationEnvironment, 'DB' | 'DESTINATION_VERIFICATION_QUEUE' | 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL' | 'OUTBOUND_NOTIFICATIONS_ENABLED'>,
   now = new Date(),
 ): Promise<number> {
   const operations = new D1CatalogAdmissionStore(env.DB);

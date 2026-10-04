@@ -44,6 +44,12 @@ variable "auth_dev_mode" {
   default     = false
 }
 
+variable "outbound_notifications_enabled" {
+  description = "Allow external email and push delivery. Disable only in isolated development environments that record delivery attempts."
+  type        = bool
+  default     = true
+}
+
 variable "employer_portal_enabled" {
   description = "Exposes the reviewed employer workspace API routes. Disable during persistence-layer rollout."
   type        = bool

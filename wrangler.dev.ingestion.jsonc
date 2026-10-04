@@ -4,6 +4,7 @@
   "main": "cloudflare/ingestion-worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }],
   "durable_objects": { "bindings": [{ "name": "D1_TRAFFIC_CONTROLLER", "class_name": "D1TrafficController" }] },
   "migrations": [{ "tag": "v1-d1-traffic-controller", "new_sqlite_classes": ["D1TrafficController"] }],
   "workers_dev": false,
@@ -40,7 +41,6 @@
       { "binding": "GMAIL_DLQ", "queue": "intern-notifs-dev-gmail-dlq" },
       { "binding": "DESTINATION_VERIFICATION_DLQ", "queue": "intern-notifs-dev-destination-verification-dlq" },
       { "binding": "SHADOW_EXTRACTION_DLQ", "queue": "intern-notifs-dev-shadow-extraction-dlq" },
-      { "binding": "RESUME_JOB_IMPORT_DLQ", "queue": "intern-notifs-dev-resume-job-import-dlq" },
       { "binding": "ADMISSION_V2_DLQ", "queue": "intern-notifs-dev-admission-v2-dlq" }
     ],
     "consumers": [
@@ -55,22 +55,26 @@
       { "queue": "intern-notifs-dev-admission-v2", "max_batch_size": 1, "max_concurrency": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-dev-admission-v2-dlq" }
     ]
   },
+  "triggers": {
+    "crons": ["*/5 * * * *", "7-57/10 * * * *", "9-59/10 * * * *", "1-51/10 * * * *", "6-56/10 * * * *", "12,42 * * * *", "22,52 * * * *", "2,32 * * * *", "0 * * * *", "34 8 * * *", "17 9 * * *"]
+  },
   "version_metadata": { "binding": "VERSION_METADATA" },
   "vars": {
     "PUBLIC_API_URL": "https://intern-notifs-dev.jdkrasnick.workers.dev",
     "AUTH_FROM_EMAIL": "Ntern Dev <dev.example>",
+    "OUTBOUND_NOTIFICATIONS_ENABLED": "false",
     "EMPLOYER_PORTAL_ENABLED": "false",
     "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED": "true",
     "IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED": "false",
     "TRUSTED_COMMUNITY_CATALOG_ENABLED": "false",
-    "INGESTION_V2_SHADOW_DISCOVERY_ENABLED": "false",
-    "INGESTION_V2_SHADOW_SOURCE_ALLOWLIST": "",
-    "INGESTION_V2_ADMISSION_ENABLED": "false",
-    "INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST": "",
-    "INGESTION_V2_CATALOG_WRITER_ENABLED": "false",
-    "INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST": "",
-    "INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST": "",
-    "INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST": "",
+    "INGESTION_V2_SHADOW_DISCOVERY_ENABLED": "true",
+    "INGESTION_V2_SHADOW_SOURCE_ALLOWLIST": "northwestern-fintech-2027-quant",
+    "INGESTION_V2_ADMISSION_ENABLED": "true",
+    "INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST": "northwestern-fintech-2027-quant",
+    "INGESTION_V2_CATALOG_WRITER_ENABLED": "true",
+    "INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST": "northwestern-fintech-2027-quant",
+    "INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST": "northwestern-fintech-2027-quant",
+    "INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST": "northwestern-fintech-2027-quant",
     "IDENTITY_CONFIRMED_COVERAGE_FLOOR": "0",
     "GMAIL_ENABLED": "false",
     "RESUME_TUNER_ENABLED": "true",

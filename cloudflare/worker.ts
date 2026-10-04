@@ -130,6 +130,7 @@ export interface Environment extends AuthEnvironment,
   RESEND_API_KEY?: string;
   ADMISSION_SUPPORT_RECIPIENT?: string;
   AUTH_FROM_EMAIL?: string;
+  OUTBOUND_NOTIFICATIONS_ENABLED?: string;
   DIGEST_TO_EMAIL?: string;
   NTFY_TOPIC?: string;
   NTFY_ENDPOINT?: string;
@@ -438,7 +439,8 @@ async function runStructuredSource(source: ReviewedStructuredSource, env: Enviro
     v2CatalogWriteOwner: (sourceId) => admissionV2OwnsCatalogWrites(env, sourceId),
     v2TrustedCommunityAlertsEnabled: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
     allowCompleteEmptySnapshot: true,
-    config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT } });
+    expoPublisher: notificationPublisher(env),
+    config: notificationConfig(env) });
   if ('poll' in result && result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
   return true;
 }
@@ -757,6 +759,42 @@ class ResendEmailSender implements EmailSender {
     });
     if (!response.ok) throw new Error(`Email provider rejected the digest with HTTP ${response.status}`);
   }
+}
+
+function outboundNotificationsEnabled(env: Environment): boolean {
+  return env.OUTBOUND_NOTIFICATIONS_ENABLED !== 'false';
+}
+
+function notificationConfig(env: Environment): {
+  sesFrom: string;
+  sesTo: string;
+  ntfyTopic?: string;
+  ntfyEndpoint?: string;
+} {
+  if (!outboundNotificationsEnabled(env)) return { sesFrom: '', sesTo: '' };
+  return {
+    sesFrom: env.AUTH_FROM_EMAIL ?? '',
+    sesTo: env.DIGEST_TO_EMAIL ?? '',
+    ntfyTopic: env.NTFY_TOPIC,
+    ntfyEndpoint: env.NTFY_ENDPOINT,
+  };
+}
+
+function notificationPublisher(env: Environment): ExpoPushPublisher {
+  if (outboundNotificationsEnabled(env)) return new ExpoPushPublisher();
+  const recordingFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : undefined;
+    if (typeof body === 'object' && body !== null && 'ids' in body) {
+      const ids = Array.isArray((body as { ids?: unknown }).ids) ? (body as { ids: string[] }).ids : [];
+      console.log(JSON.stringify({ event: 'dev_notification_recorded', channel: 'expo_receipt', count: ids.length }));
+      return Response.json({ data: Object.fromEntries(ids.map((id) => [id, { status: 'ok' }])) });
+    }
+    const count = Array.isArray(body) ? body.length : 1;
+    console.log(JSON.stringify({ event: 'dev_notification_recorded', channel: 'expo_push', count }));
+    const ticket = () => ({ status: 'ok', id: `dev-recorded-${crypto.randomUUID()}` });
+    return Response.json({ data: Array.isArray(body) ? body.map(ticket) : ticket() });
+  }) as typeof fetch;
+  return new ExpoPushPublisher('https://dev-notification-sink.invalid', recordingFetch);
 }
 
 function documentStorage(env: Environment): DocumentStorage {
@@ -1431,7 +1469,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
         ? { ...leverWorkMessages([source as typeof reviewedLeverSources[number]], now, crypto.randomUUID())[0]!, force: true }
         : { ...ashbyWorkMessages([source as typeof reviewedAshbySources[number]], now, crypto.randomUUID())[0]!, force: true };
     const event = { Records: [{ messageId: crypto.randomUUID(), body: JSON.stringify(message) }] };
-    const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB) };
+    const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env) };
     const result = atsProvider === 'greenhouse'
       ? await processGreenhouseQueue(event, { ...dependencies, sources: providers.greenhouse,
         enqueueContinuation: (continuation) => sendQueueMessageWithin(env.GREENHOUSE_QUEUE, continuation) })
@@ -2352,7 +2390,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
         ...shadowBudget, observedAt: observedAt.toISOString(),
       }), phases);
     }
-    const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)), phases);
+    const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), notificationPublisher(env), undefined, new D1ReleaseStore(env.DB)), phases);
     await recordPhase(phases, 'maintenance_complete', 'complete', observedAt);
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), legacyPostingIdentityIncidents, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
@@ -2385,6 +2423,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   if (event.cron === '0 * * * *') {
     const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }).format(new Date(event.scheduledTime)));
     if (hour !== 9 && hour !== 17) return;
+    if (!outboundNotificationsEnabled(env)) {
+      console.log(JSON.stringify({ event: 'dev_notification_recorded', channel: 'digest', count: 1 }));
+      return;
+    }
     if (!env.RESEND_API_KEY || !env.AUTH_FROM_EMAIL || !env.DIGEST_TO_EMAIL) throw new Error('Digest email is not configured');
     await runRuntimeCommand('digest', {
       store,
@@ -2821,6 +2863,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           shadowDiscovery: ingestionV2ShadowDiscovery(env),
           v2CatalogWriteOwner: (sourceId) => admissionV2OwnsCatalogWrites(env, sourceId),
           v2TrustedCommunityAlertsEnabled: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
+          expoPublisher: notificationPublisher(env),
           // One row can perform several bounded HTTP probes, so this stays well
           // inside the five-minute message deadline while still draining a
           // whole list's admission migration in a handful of deliveries: at 20
@@ -2830,7 +2873,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           // The largest reviewed board holds 3,029 postings; one delivery
           // resolves a bounded slice and re-enqueues itself for the rest.
           maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
-          config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT },
+          config: notificationConfig(env),
         }), SOURCE_MESSAGE_DEADLINE_MS);
         if (result.poll && (result.poll.continuationSources.length || result.poll.failures.length
           || Object.keys(result.poll.pendingResolution).length)) {
@@ -3042,6 +3085,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   const dependencies = {
     store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB),
+    publisher: notificationPublisher(env),
     enqueueDestinationVerification: (request: Parameters<typeof destinationVerificationMessage>[0]) => sendQueueMessageWithin(env.DESTINATION_VERIFICATION_QUEUE, destinationVerificationMessage(request)),
     catalogAdmissionResolver: catalogAdmissionResolver(env),
     enqueueEmployerIconResolution: employerIconEnqueue(env),

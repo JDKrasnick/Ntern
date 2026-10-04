@@ -20,6 +20,8 @@ type WorkerConfig = {
   containers?: Array<{ class_name: string; image: string; instance_type?: string; max_instances?: number }>;
   durable_objects?: { bindings: Array<{ name: string; class_name: string; script_name?: string }> };
   migrations?: Array<{ tag: string; new_sqlite_classes?: string[] }>;
+  limits?: { cpu_ms?: number; subrequests?: number };
+  rules?: Array<{ type: string; globs: string[]; fallthrough?: boolean }>;
   observability?: {
     enabled?: boolean;
     head_sampling_rate?: number;
@@ -74,6 +76,43 @@ describe('Cloudflare deployment configuration', () => {
     expect(ingestion.triggers?.crons).toContain('1-51/10 * * * *');
     expect(ingestion.workers_dev).toBe(false);
     expect(ingestion.preview_urls).toBe(false);
+  });
+
+  it('keeps isolated dev ingestion topology aligned with production', () => {
+    const normalizeQueue = (name: string) => name.replace(/^intern-notifs-dev-/u, '').replace(/^intern-notifs-/u, '');
+    const normalizedProducers = (config: WorkerConfig) => (config.queues?.producers ?? []).map(({ binding, queue }) => ({
+      binding,
+      queue: normalizeQueue(queue),
+    }));
+    const normalizedConsumers = (config: WorkerConfig) => (config.queues?.consumers ?? []).map((consumer) => ({
+      ...consumer,
+      queue: normalizeQueue(consumer.queue),
+      dead_letter_queue: normalizeQueue(consumer.dead_letter_queue),
+    }));
+
+    expect(devIngestion.triggers).toEqual(ingestion.triggers);
+    expect(devIngestion.limits).toEqual(ingestion.limits);
+    expect(devIngestion.rules).toEqual(ingestion.rules);
+    expect(devIngestion.browser).toEqual(ingestion.browser);
+    expect(devIngestion.observability).toEqual(ingestion.observability);
+    expect(normalizedProducers(devIngestion)).toEqual(normalizedProducers(ingestion));
+    expect(normalizedConsumers(devIngestion)).toEqual(normalizedConsumers(ingestion));
+    expect(devIngestion.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('false');
+    expect(devApi.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('false');
+    expect(ingestion.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('true');
+    expect(api.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('true');
+    expect(read('infra/cloudflare/main.tf').match(/name = "OUTBOUND_NOTIFICATIONS_ENABLED"/gu)).toHaveLength(2);
+    const canary = 'northwestern-fintech-2027-quant';
+    expect(devIngestion.vars.INGESTION_V2_SHADOW_DISCOVERY_ENABLED).toBe('true');
+    expect(devIngestion.vars.INGESTION_V2_ADMISSION_ENABLED).toBe('true');
+    expect(devIngestion.vars.INGESTION_V2_CATALOG_WRITER_ENABLED).toBe('true');
+    for (const name of [
+      'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST',
+      'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST',
+      'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST',
+      'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST',
+      'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST',
+    ]) expect(devIngestion.vars[name]).toBe(canary);
   });
 
   it('disables API invocation logs while keeping structured logs and ingestion at full sampling', () => {
