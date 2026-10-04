@@ -514,10 +514,12 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   }
 
   async putShadowComparison(metrics: ShadowComparisonMetrics): Promise<void> {
+    const updatedAt = new Date().toISOString();
     await this.db.prepare(`
       INSERT INTO ingestion_v2_shadow_comparisons
-        (source_id, snapshot_hash, admission_version, complete, metrics_json, observed_at, updated_at, run_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+        (source_id, snapshot_hash, admission_version, complete, metrics_json, observed_at, updated_at, run_count,
+         window_started_at, window_run_count, window_d1_rows_written)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?)
       ON CONFLICT(source_id) DO UPDATE SET
         snapshot_hash = excluded.snapshot_hash,
         admission_version = excluded.admission_version,
@@ -525,7 +527,20 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         metrics_json = excluded.metrics_json,
         observed_at = excluded.observed_at,
         updated_at = excluded.updated_at,
-        run_count = ingestion_v2_shadow_comparisons.run_count + 1
+        run_count = ingestion_v2_shadow_comparisons.run_count + 1,
+        window_started_at = CASE
+          WHEN ingestion_v2_shadow_comparisons.window_started_at IS NULL
+            OR unixepoch(excluded.updated_at) - unixepoch(ingestion_v2_shadow_comparisons.window_started_at) >= 3600
+          THEN excluded.updated_at ELSE ingestion_v2_shadow_comparisons.window_started_at END,
+        window_run_count = CASE
+          WHEN ingestion_v2_shadow_comparisons.window_started_at IS NULL
+            OR unixepoch(excluded.updated_at) - unixepoch(ingestion_v2_shadow_comparisons.window_started_at) >= 3600
+          THEN 1 ELSE ingestion_v2_shadow_comparisons.window_run_count + 1 END,
+        window_d1_rows_written = CASE
+          WHEN ingestion_v2_shadow_comparisons.window_started_at IS NULL
+            OR unixepoch(excluded.updated_at) - unixepoch(ingestion_v2_shadow_comparisons.window_started_at) >= 3600
+          THEN excluded.window_d1_rows_written
+          ELSE ingestion_v2_shadow_comparisons.window_d1_rows_written + excluded.window_d1_rows_written END
     `).bind(
       metrics.sourceId,
       metrics.snapshotHash,
@@ -533,7 +548,9 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       metrics.complete ? 1 : 0,
       JSON.stringify(metrics),
       metrics.observedAt,
-      new Date().toISOString(),
+      updatedAt,
+      updatedAt,
+      metrics.d1RowsWritten,
     ).run();
   }
 

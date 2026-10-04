@@ -35,6 +35,7 @@ function subject(): { database: DatabaseSync; repository: D1IngestionV2Repositor
   database.exec(readFileSync(new URL('../cloudflare/migrations/0046_ingestion_v2_admission.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0047_ingestion_v2_dispatch_cursor.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0048_ingestion_v2_effect_claim.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0049_ingestion_v2_cost_windows.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0050_ingestion_v2_omission_closure.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0051_ingestion_v2_qualification_cadence.sql', import.meta.url), 'utf8'));
   return { database, repository: new D1IngestionV2Repository(sqliteD1(database)) };
@@ -493,9 +494,20 @@ describe('ingestion v2 D1 repository', () => {
     const stored = await repository.getShadowComparison('community-example');
     expect(stored).toMatchObject({ snapshotHash: 'a'.repeat(64), counts: { total: 2 } });
     expect((await repository.listShadowComparisons()).length).toBe(1);
-    const { run_count: runCount } = database.prepare(
-      'SELECT run_count FROM ingestion_v2_shadow_comparisons WHERE source_id = ?',
-    ).get('community-example') as { run_count: number };
+    const { run_count: runCount, window_run_count: windowRunCount, window_d1_rows_written: windowD1RowsWritten } = database.prepare(
+      'SELECT run_count, window_run_count, window_d1_rows_written FROM ingestion_v2_shadow_comparisons WHERE source_id = ?',
+    ).get('community-example') as { run_count: number; window_run_count: number; window_d1_rows_written: number };
     expect(runCount).toBe(2);
+    expect(windowRunCount).toBe(2);
+    expect(windowD1RowsWritten).toBe(8);
+
+    database.prepare(`UPDATE ingestion_v2_shadow_comparisons
+      SET window_started_at = ?, window_run_count = ?, window_d1_rows_written = ? WHERE source_id = ?`)
+      .run('2020-01-01T00:00:00.000Z', 60, 99_999, 'community-example');
+    await repository.putShadowComparison(metrics);
+    const rolled = database.prepare(
+      'SELECT run_count, window_run_count, window_d1_rows_written FROM ingestion_v2_shadow_comparisons WHERE source_id = ?',
+    ).get('community-example') as { run_count: number; window_run_count: number; window_d1_rows_written: number };
+    expect(rolled).toMatchObject({ run_count: 3, window_run_count: 1, window_d1_rows_written: 4 });
   });
 });

@@ -28,6 +28,9 @@ function setup() {
     id TEXT PRIMARY KEY, queue_name TEXT, message_id TEXT, delivery_attempt INTEGER,
     category TEXT, diagnostic TEXT, source_id TEXT, resolved_at TEXT, last_failed_at TEXT)`);
   sql.exec('CREATE TABLE catalog_items (pk TEXT, sk TEXT, kind TEXT, value TEXT, PRIMARY KEY (pk, sk))');
+  sql.exec(`CREATE TABLE ingestion_v2_shadow_comparisons (
+    source_id TEXT PRIMARY KEY, window_started_at TEXT, updated_at TEXT,
+    window_run_count INTEGER NOT NULL, window_d1_rows_written INTEGER NOT NULL)`);
   return { sql, db: fakeDb(sql) };
 }
 
@@ -68,6 +71,25 @@ describe('ingestion health signals', () => {
     } finally { sql.close(); }
   });
 
+  it('detects runaway V2 runs and D1 write amplification from existing shadow counters', async () => {
+    const { sql, db } = setup();
+    try {
+      sql.prepare(`INSERT INTO ingestion_v2_shadow_comparisons
+        (source_id, window_started_at, updated_at, window_run_count, window_d1_rows_written)
+        VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`).run(
+        'community-hot-loop', '2026-09-25T11:30:00Z', '2026-09-25T11:59:00Z', 61, 20_000,
+        'community-write-heavy', '2026-09-25T11:20:00Z', '2026-09-25T11:58:00Z', 5, 100_001,
+        'community-healthy', '2026-09-25T11:10:00Z', '2026-09-25T11:50:00Z', 6, 9_000,
+      );
+
+      const result = await ingestionHealthSignals(db, observedAt);
+      expect(result.signals).toEqual(['ingestion-v2-d1-write-rate', 'ingestion-v2-run-rate']);
+      expect(result.details).toContain('community-hot-loop 61 runs/20000 D1 rows');
+      expect(result.details).toContain('community-write-heavy 5 runs/100001 D1 rows');
+      expect(result.details).not.toContain('community-healthy');
+    } finally { sql.close(); }
+  });
+
   it('stays quiet when failures recovered, the only failure is transient, and the catalog is fresh', async () => {
     const { sql, db } = setup();
     try {
@@ -101,6 +123,9 @@ describe('ingestion health signals', () => {
       health(sql, 'ashby-acme', { state: 'healthy', sourceStatus: 'active', lastChangedAt: '2026-09-15T12:00:00Z' });
       sql.prepare('INSERT INTO catalog_items (pk, sk, kind, value) VALUES (\'OPERATIONS#LEDGER_FAILURE\', \'LAST\', \'queue-failure-ledger-failure\', ?)')
         .run(JSON.stringify({ at: '2026-09-20T00:00:00Z', queueName: 'intern-notifs-github', messageId: 'm1' }));
+      sql.prepare(`INSERT INTO ingestion_v2_shadow_comparisons
+        (source_id, window_started_at, updated_at, window_run_count, window_d1_rows_written)
+        VALUES (?, ?, ?, ?, ?)`).run('community-old-loop', '2026-09-20T00:00:00Z', '2026-09-20T01:00:00Z', 10_000, 2_000_000);
 
       // Both rows are older than the 24h failure window, so neither survives.
       const result = await ingestionHealthSignals(db, observedAt);
