@@ -511,6 +511,7 @@ export class D1InternshipStore implements InternshipStore {
         AND r.snapshot_hash = ? AND r.material_hash = ? AND r.admission_version = ?
         AND r.state = 'processing' AND r.lease_owner = ? AND r.lease_expires_at = ?
         AND r.effect_claimed_at IS NOT NULL
+        AND r.consecutive_omissions < 2 AND r.closure_pending = 0
         AND r.notification_baseline = COALESCE(?, r.notification_baseline)
     )` : '1 = 1';
     const effectGuard = `(${omissionGuard}) AND (${admissionGuard})`;

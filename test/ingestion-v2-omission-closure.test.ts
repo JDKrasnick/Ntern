@@ -293,6 +293,24 @@ describe('durable public omission closure', () => {
     expect((await s.store.getJob('role'))?.open).toBe(false);
   });
 
+  it('prevents a claimed positive effect from publishing after two omissions', async () => {
+    const s = subject(); await seed(s, ['role']);
+    s.sqlite.prepare('DELETE FROM catalog_items').run();
+    s.sqlite.prepare("UPDATE ingestion_rows SET state='processing', lease_owner='consumer', lease_expires_at=? WHERE external_id='role'")
+      .run(leaseExpiresAt);
+    expect(await s.repository.claimRowEffect({ sourceId: 'source', externalId: 'role', owner: 'consumer', now,
+      expectedSnapshotHash: 'present', expectedMaterialHash: 'role', expectedAdmissionVersion: 'v1',
+      expectedLeaseExpiresAt: leaseExpiresAt })).toBe(true);
+    await omit(s, ['role'], 2);
+    const original = observation('role');
+    await s.sink.commit({ sourceId: 'source', externalId: 'role', baseline: false, admissionVersion: 'v1',
+      jobId: 'role', listing: { ...original.occurrence.occurrence, fetchedAt: now }, admission: admission(), notify: true,
+      effectFence: { snapshotHash: 'present', materialHash: 'role', admissionVersion: 'v1',
+        leaseOwner: 'consumer', leaseExpiresAt } });
+    expect(await s.store.getJob('role')).toBeUndefined();
+    expect(s.sqlite.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").get()).toEqual({ n: 0 });
+  });
+
   it('rejects an older retained active snapshot racing the closure transaction', async () => {
     const s = subject(); await seed(s, ['role']); await omit(s, ['role'], 2);
     await s.repository.putSnapshot({
