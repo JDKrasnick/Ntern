@@ -141,9 +141,10 @@ Provider admission and incident response remain provider-specific:
 ## Ingestion V2 foundation (Stage 1)
 
 `docs`/plans describe fault-isolated ingestion as three gated stages. Stage 1 is
-the additive foundation and side-effect-free shadow discovery; the legacy
-migration/continuation loop stays authoritative and is the only thing that can
-create a job, occurrence, notification, or admission write.
+the additive foundation and side-effect-free shadow discovery. It cannot create
+a job, occurrence, notification, or admission write. Legacy ingestion remains
+authoritative while the separately gated Stage 2 lane records non-publishing
+admission decisions.
 
 - `cloudflare/migrations/0045_ingestion_v2.sql` adds `ingestion_snapshots`,
   `ingestion_rows`, and `ingestion_v2_shadow_comparisons`. Nothing legacy is
@@ -229,9 +230,13 @@ the live catalog.
   prefix. Standard provider routes still classify from reviewed identity, while
   company-hosted forms receive the same title, posting, structured-data, form,
   closure, and truncation evidence used by the existing admission rules.
-- Admission resolves canonical employers through the reviewed D1 mapping before
-  catalog grading. An unresolved mapping remains a deterministic business
-  decision; a D1 resolver failure retries the delivery as infrastructure.
+- Admission loads the prior occurrence identity, admission decision, and trusted
+  qualification before grading. Reviewed trusted-community policy may admit a
+  source-reported employer for catalog visibility while keeping alerts disabled;
+  other unresolved mappings remain deterministic business decisions. A D1
+  resolver failure retries the delivery as infrastructure. The V2 evaluator
+  version includes this policy behavior so a change reopens stale rows without a
+  direct ledger edit.
 - Row reopening is change-driven. When admission is enabled the shadow pass hands
   the diff's `new`, `changed`, `stale-policy`, and `reappeared` IDs back to the
   lane, so a row whose material content, policy version, or presence changed
@@ -299,8 +304,10 @@ of scope and belong to Stage 3:
   mutating the live catalog. Integration tests compose the reconciler-backed
   writer with jobs, occurrences, and notification receipts; Stage 3 selects it
   for production traffic.
-- Broad production cutover. Both flags are default off; the queue, schema, and
-  Worker code deploy disabled and legacy ingestion stays authoritative.
+- Broad production cutover. Shadow discovery is enabled for the bounded
+  Northwestern and SpeedyApply cohorts, and non-publishing admission is enabled
+  only for Northwestern after the [2026-10-03 production canary](ingestion-v2-stage2-production-canary.md).
+  Legacy ingestion remains authoritative until Stage 3.
 
 The end-to-end suite covers the lane by seeding dispatchable rows and by driving
 real deliveries through the built Worker. Two writers share `ingestion_rows`, so
