@@ -79,6 +79,8 @@ export interface AdmissionFailure {
 
 /** The evaluator's result for one row. Throws for failures; returns this to settle. */
 export interface AdmissionRowEvaluation {
+  completeFetchSequence?: number;
+  qualificationPending?: boolean;
   decision: AdmissionTerminalDecision;
   /** Optional catalog identity recorded on the ledger row. */
   jobId?: string;
@@ -91,6 +93,8 @@ export interface AdmissionRowEvaluation {
 
 /** Context handed to a row evaluator for one message. */
 export interface AdmissionRowContext {
+  completeFetchSequence?: number;
+  qualificationCompleteSnapshots?: number;
   sourceId: string;
   externalId: string;
   snapshotHash: string;

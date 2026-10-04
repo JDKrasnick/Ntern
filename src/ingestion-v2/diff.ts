@@ -24,9 +24,11 @@ function retryDue(row: CompactIngestionRow, now: string): boolean {
 
 function classify(row: { externalId: string; materialHash: string }, prior: CompactIngestionRow | undefined, input: DiffPlannerInput): IngestionRowClassification {
   if (!prior) return 'new';
-  if (prior.state === 'absent') return 'reappeared';
+  // Policy migrations must reopen every retained state and stay silent even
+  // when the same snapshot also changes material or restores an absent row.
+  if (prior.admissionVersion !== input.admissionVersion) return 'stale-policy';
+  if (prior.state === 'absent' || prior.consecutiveOmissions >= 2) return 'reappeared';
   if (prior.materialHash !== row.materialHash) return 'changed';
-  if (prior.state === 'settled' && prior.admissionVersion !== input.admissionVersion) return 'stale-policy';
   if (retryDue(prior, input.now)) return 'retryable';
   return 'unchanged';
 }
@@ -78,7 +80,7 @@ export function planSnapshotDiff(input: DiffPlannerInput): SnapshotDiff {
 
   const omissionUpdates: SnapshotOmissionUpdate[] = [];
   for (const prior of input.ledger) {
-    if (seen.has(prior.externalId) || prior.state === 'absent') continue;
+    if (seen.has(prior.externalId) || prior.state === 'absent' || prior.consecutiveOmissions >= 2) continue;
     const next = prior.consecutiveOmissions + 1;
     omissionUpdates.push({ externalId: prior.externalId, consecutiveOmissions: next, becomesAbsent: next >= 2 });
   }

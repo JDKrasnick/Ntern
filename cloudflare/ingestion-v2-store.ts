@@ -39,11 +39,13 @@ const SNAPSHOT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const ADMISSION_LANE_OWNED_STATES = ['pending', 'queued', 'processing', 'quarantined'] as const;
 const laneOwnedSqlList = ADMISSION_LANE_OWNED_STATES.map((state) => `'${state}'`).join(', ');
 const sameAdmissionIdentitySql = `ingestion_rows.material_hash = excluded.material_hash
-  AND ingestion_rows.admission_version = excluded.admission_version`;
+  AND ingestion_rows.admission_version = excluded.admission_version
+  AND ingestion_rows.consecutive_omissions < 2`;
 const preserveAdmissionResultSql = `(ingestion_rows.state IN (${laneOwnedSqlList}) AND ${sameAdmissionIdentitySql})
   OR (ingestion_rows.state = 'settled' AND ingestion_rows.attempt_count > 0 AND ${sameAdmissionIdentitySql})`;
 
 interface SnapshotDbRow {
+  complete_fetch_sequence: number | null;
   source_id: string;
   snapshot_hash: string;
   object_key: string;
@@ -60,6 +62,10 @@ interface SnapshotDbRow {
 }
 
 interface RowDbRow {
+  complete_fetch_sequence: number | null;
+  qualification_pending: number;
+  qualification_observed_sequence: number | null;
+  qualification_complete_snapshots: number;
   source_id: string;
   external_id: string;
   snapshot_hash: string;
@@ -84,6 +90,7 @@ interface RowDbRow {
 
 function snapshotFromRow(row: SnapshotDbRow): IngestionSnapshotRecord {
   return {
+    ...(row.complete_fetch_sequence !== null ? { completeFetchSequence: row.complete_fetch_sequence } : {}),
     sourceId: row.source_id,
     snapshotHash: row.snapshot_hash,
     objectKey: row.object_key,
@@ -102,6 +109,10 @@ function snapshotFromRow(row: SnapshotDbRow): IngestionSnapshotRecord {
 
 function rowFromDb(row: RowDbRow): IngestionRowRecord {
   return {
+    ...(row.complete_fetch_sequence !== null ? { completeFetchSequence: row.complete_fetch_sequence } : {}),
+    qualificationPending: row.qualification_pending === 1,
+    ...(row.qualification_observed_sequence !== null ? { qualificationObservedSequence: row.qualification_observed_sequence } : {}),
+    qualificationCompleteSnapshots: row.qualification_complete_snapshots,
     sourceId: row.source_id,
     externalId: row.external_id,
     snapshotHash: row.snapshot_hash,
@@ -140,11 +151,12 @@ function compactFromDb(row: RowDbRow): CompactIngestionRow {
 }
 
 const snapshotColumns = `source_id, snapshot_hash, object_key, admission_version, document_count, row_count,
-  state, is_complete, baseline, created_at, activated_at, terminal_at, expires_at`;
+  state, is_complete, baseline, created_at, activated_at, terminal_at, expires_at, complete_fetch_sequence`;
 
 const rowColumns = `source_id, external_id, snapshot_hash, material_hash, admission_version, notification_baseline, state, decision,
   attempt_count, retry_at, lease_owner, lease_expires_at, consecutive_omissions, job_id, failure_class,
-  failure_detail, first_observed_at, last_observed_at, updated_at, settled_at`;
+  failure_detail, first_observed_at, last_observed_at, updated_at, settled_at, complete_fetch_sequence, qualification_pending,
+  qualification_observed_sequence, qualification_complete_snapshots`;
 
 interface HandoffDbRow {
   batch_id: string;
@@ -164,7 +176,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   async putSnapshot(record: IngestionSnapshotRecord): Promise<void> {
     await this.db.prepare(`
       INSERT INTO ingestion_snapshots (${snapshotColumns})
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source_id, snapshot_hash) DO UPDATE SET
         object_key = excluded.object_key,
         admission_version = excluded.admission_version,
@@ -194,6 +206,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       record.activatedAt ?? null,
       record.terminalAt ?? null,
       record.expiresAt ?? null,
+      record.completeFetchSequence ?? null,
     ).run();
   }
 
@@ -202,6 +215,51 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       `SELECT ${snapshotColumns} FROM ingestion_snapshots WHERE source_id = ? AND snapshot_hash = ?`,
     ).bind(sourceId, snapshotHash).first<SnapshotDbRow>();
     return row ? snapshotFromRow(row) : undefined;
+  }
+
+  async recordCompleteCadence(
+    sourceId: string, snapshotHash: string, admissionVersion: string, sequence: number, now: string,
+  ): Promise<number> {
+    if (!Number.isSafeInteger(sequence) || sequence < 1) return 0;
+    // Snapshot objects are immutable; complete cadence is mutable metadata.
+    // Updating it must not replace a row's queue/retry/lease ownership.
+    await this.db.prepare(`
+      UPDATE ingestion_snapshots SET complete_fetch_sequence = ?
+      WHERE source_id = ? AND snapshot_hash = ? AND admission_version = ? AND is_complete = 1
+        AND (complete_fetch_sequence IS NULL OR complete_fetch_sequence < ?)
+    `).bind(sequence, sourceId, snapshotHash, admissionVersion, sequence).run();
+    // Observe every current row before bounded queue consumption. A delayed
+    // first evaluation still receives both distinct complete cadences.
+    await this.db.prepare(`
+      UPDATE ingestion_rows SET
+        qualification_complete_snapshots = CASE
+          WHEN qualification_observed_sequence = ? - 1 THEN MIN(2, qualification_complete_snapshots + 1)
+          ELSE 1 END,
+        qualification_observed_sequence = ?
+      WHERE source_id = ? AND snapshot_hash = ? AND admission_version = ?
+        AND consecutive_omissions = 0 AND state <> 'absent'
+        AND (qualification_observed_sequence IS NULL OR qualification_observed_sequence < ?)
+        AND EXISTS (SELECT 1 FROM ingestion_snapshots WHERE source_id = ? AND snapshot_hash = ?
+          AND admission_version = ? AND state = 'active' AND complete_fetch_sequence = ?)
+    `).bind(sequence, sequence, sourceId, snapshotHash, admissionVersion, sequence,
+      sourceId, snapshotHash, admissionVersion, sequence).run();
+    const result = await this.db.prepare(`
+      UPDATE ingestion_rows SET state = 'queued', attempt_count = 0, retry_at = NULL,
+        lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL,
+        failure_class = NULL, failure_detail = NULL, settled_at = NULL, updated_at = ?
+      WHERE rowid IN (
+        SELECT rowid FROM ingestion_rows
+        WHERE source_id = ? AND snapshot_hash = ? AND admission_version = ?
+          AND state = 'settled' AND qualification_pending = 1 AND notification_baseline = 0
+          AND consecutive_omissions = 0
+          AND (complete_fetch_sequence IS NULL OR complete_fetch_sequence < ?)
+      ) AND EXISTS (
+        SELECT 1 FROM ingestion_snapshots WHERE source_id = ? AND snapshot_hash = ?
+          AND admission_version = ? AND state = 'active' AND complete_fetch_sequence = ?
+      )
+    `).bind(now, sourceId, snapshotHash, admissionVersion, sequence,
+      sourceId, snapshotHash, admissionVersion, sequence).run();
+    return result.meta.changes;
   }
 
   async activateSnapshot(sourceId: string, snapshotHash: string, activatedAt: string): Promise<void> {
@@ -235,15 +293,18 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     if (!records.length) return;
     const statement = this.db.prepare(`
       INSERT INTO ingestion_rows (${rowColumns})
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source_id, external_id) DO UPDATE SET
         snapshot_hash = excluded.snapshot_hash,
         material_hash = excluded.material_hash,
+        complete_fetch_sequence = CASE WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.complete_fetch_sequence ELSE excluded.complete_fetch_sequence END,
+        qualification_pending = CASE WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.qualification_pending ELSE excluded.qualification_pending END,
+        qualification_observed_sequence = CASE WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.qualification_observed_sequence ELSE excluded.qualification_observed_sequence END,
+        qualification_complete_snapshots = CASE WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.qualification_complete_snapshots ELSE excluded.qualification_complete_snapshots END,
         admission_version = excluded.admission_version,
-        notification_baseline = CASE
-          WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.notification_baseline
-          ELSE excluded.notification_baseline
-        END,
+        -- Baseline provenance belongs to the retained source/external role,
+        -- even when its first successful publication needs replacement material.
+        notification_baseline = ingestion_rows.notification_baseline OR excluded.notification_baseline,
         effect_claimed_at = CASE
           WHEN ${sameAdmissionIdentitySql} THEN ingestion_rows.effect_claimed_at
           ELSE NULL
@@ -273,6 +334,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
           ELSE excluded.lease_expires_at
         END,
         consecutive_omissions = excluded.consecutive_omissions,
+        closure_pending = 0,
         job_id = COALESCE(excluded.job_id, ingestion_rows.job_id),
         failure_class = CASE
           WHEN ${preserveAdmissionResultSql} THEN ingestion_rows.failure_class
@@ -310,6 +372,10 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       record.lastObservedAt,
       record.updatedAt,
       record.settledAt ?? null,
+      record.completeFetchSequence ?? null,
+      record.qualificationPending ? 1 : 0,
+      record.qualificationObservedSequence ?? null,
+      record.qualificationCompleteSnapshots ?? 0,
     ));
     for (let offset = 0; offset < statements.length; offset += chunkSize) {
       await this.db.batch(statements.slice(offset, offset + chunkSize));
@@ -318,24 +384,54 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
 
   async applyOmissions(sourceId: string, updates: readonly SnapshotOmissionUpdate[], updatedAt: string): Promise<void> {
     if (!updates.length) return;
-    // A lane-owned row (pending/queued/processing/quarantined) is owned by the
-    // admission lane. Closing it here would drop pending work, erase a
-    // quarantine, or leave an `absent` row still carrying a lease and race the
-    // consumer's guarded settle, so omission increments wait for it to settle.
+    // Preserve lane ownership and failure history, but missing published rows
+    // still need a durable negative effect. An already-claimed effect drains
+    // before closure; new claims reject two-omission rows.
     const statement = this.db.prepare(`
-      UPDATE ingestion_rows SET consecutive_omissions = ?, state = ?, updated_at = ?
-      WHERE source_id = ? AND external_id = ? AND state NOT IN (${laneOwnedSqlList})
+      UPDATE ingestion_rows SET consecutive_omissions = ?,
+        state = CASE WHEN state IN (${laneOwnedSqlList}) THEN state ELSE ? END, updated_at = ?,
+        closure_pending = CASE WHEN ? THEN 1 ELSE closure_pending END
+      WHERE source_id = ? AND external_id = ?
+        AND last_observed_at <= ? AND updated_at <= ?
     `);
     const statements = updates.map((update) => statement.bind(
       update.consecutiveOmissions,
       update.becomesAbsent ? 'absent' : 'settled',
       updatedAt,
+      update.becomesAbsent ? 1 : 0,
       sourceId,
       update.externalId,
+      updatedAt,
+      updatedAt,
     ));
     for (let offset = 0; offset < statements.length; offset += chunkSize) {
       await this.db.batch(statements.slice(offset, offset + chunkSize));
     }
+  }
+
+  async listPendingOmissionClosures(sourceId: string, limit: number): Promise<IngestionRowRecord[]> {
+    const bounded = Math.min(25, Math.max(1, Math.floor(limit) || 25));
+    const result = await this.db.prepare(`SELECT ${rowColumns} FROM ingestion_rows
+      WHERE source_id = ? AND closure_pending = 1 AND effect_claimed_at IS NULL
+        AND consecutive_omissions >= 2 ORDER BY external_id LIMIT ?`)
+      .bind(sourceId, bounded).all<RowDbRow>();
+    return result.results.map(rowFromDb);
+  }
+
+  async acknowledgeOmissionClosure(row: IngestionRowRecord): Promise<void> {
+    await this.db.prepare(`UPDATE ingestion_rows SET closure_pending = 0
+      WHERE source_id = ? AND external_id = ? AND snapshot_hash = ? AND material_hash = ?
+        AND admission_version = ? AND updated_at = ? AND effect_claimed_at IS NULL
+        AND consecutive_omissions >= 2 AND closure_pending = 1`)
+      .bind(row.sourceId, row.externalId, row.snapshotHash, row.materialHash,
+        row.admissionVersion, row.updatedAt).run();
+  }
+
+  async hasPendingOmissionClosures(sourceId: string): Promise<boolean> {
+    const row = await this.db.prepare(`SELECT 1 AS present FROM ingestion_rows
+      WHERE source_id = ? AND closure_pending = 1 AND consecutive_omissions >= 2 LIMIT 1`)
+      .bind(sourceId).first();
+    return Boolean(row);
   }
 
   async getRow(sourceId: string, externalId: string): Promise<IngestionRowRecord | undefined> {
@@ -385,7 +481,8 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   async listDueWork(sourceId: string, now: string, limit: number): Promise<CompactIngestionRow[]> {
     const { results } = await this.db.prepare(
       `SELECT ${rowColumns} FROM ingestion_rows
-        WHERE source_id = ? AND state IN ('pending', 'queued', 'processing') AND (retry_at IS NULL OR retry_at <= ?)
+        WHERE source_id = ? AND state IN ('pending', 'queued', 'processing')
+          AND consecutive_omissions < 2 AND (retry_at IS NULL OR retry_at <= ?)
         ORDER BY retry_at, external_id LIMIT ?`,
     ).bind(sourceId, now, limit).all<RowDbRow>();
     return results.map(compactFromDb);
@@ -456,16 +553,29 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
 
   // --- Admission lane (Stage 2) -------------------------------------------------
 
-  async markQueued(rows: readonly MarkQueuedInput[]): Promise<void> {
-    if (!rows.length) return;
+  async markQueued(rows: readonly MarkQueuedInput[]): Promise<MarkQueuedInput[]> {
+    const marked: MarkQueuedInput[] = [];
     const statement = this.db.prepare(`
       UPDATE ingestion_rows
       SET state = 'queued', retry_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
         effect_claimed_at = NULL, updated_at = ?
-      WHERE source_id = ? AND external_id = ? AND state IN ('pending', 'queued', 'processing')
+      WHERE source_id = ? AND external_id = ? AND state IN ('pending', 'queued')
+        AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
+        AND consecutive_omissions < 2
+        AND (retry_at IS NULL OR retry_at <= ?)
+        AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
     `);
-    const statements = rows.map((row) => statement.bind(row.now, row.sourceId, row.externalId));
-    await this.batch(statements);
+    for (let offset = 0; offset < rows.length; offset += chunkSize) {
+      const chunk = rows.slice(offset, offset + chunkSize);
+      const results = await this.db.batch(chunk.map((row) => statement.bind(
+        row.now, row.sourceId, row.externalId,
+        row.snapshotHash, row.materialHash, row.admissionVersion, row.now, row.now,
+      )));
+      for (let index = 0; index < chunk.length; index += 1) {
+        if (results[index]?.meta.changes > 0) marked.push(chunk[index]!);
+      }
+    }
+    return marked;
   }
 
   async acquireLease(input: AcquireLeaseInput): Promise<AdmissionLeaseResult> {
@@ -476,6 +586,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       WHERE source_id = ? AND external_id = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
         AND state IN ('pending', 'queued', 'processing')
+        AND consecutive_omissions < 2
         AND (retry_at IS NULL OR retry_at <= ?)
         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
     `).bind(
@@ -509,6 +620,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       SET effect_claimed_at = ?, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
+        AND consecutive_omissions < 2
     `).bind(
       input.now, input.now, input.sourceId, input.externalId, input.owner,
       input.expectedSnapshotHash, input.expectedMaterialHash, input.expectedAdmissionVersion,
@@ -529,18 +641,25 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     sourceId: string; externalId: string; owner: string; now: string;
     expectedSnapshotHash: string; expectedMaterialHash: string; expectedAdmissionVersion: string;
     decision: IngestionDecision; jobId?: string; reason?: string; effectClaimed?: boolean;
+    completeFetchSequence?: number; qualificationPending?: boolean;
   }): Promise<boolean> {
     const result = await this.db.prepare(`
       UPDATE ingestion_rows
-      SET state = 'settled', decision = ?, job_id = COALESCE(?, job_id), settled_at = ?,
-        attempt_count = attempt_count + 1, retry_at = NULL,
+      SET state = CASE WHEN ? = 1 AND qualification_observed_sequence > COALESCE(?, 0) THEN 'queued' ELSE 'settled' END,
+        decision = ?, job_id = COALESCE(?, job_id), settled_at = ?,
+        attempt_count = CASE WHEN ? = 1 AND qualification_observed_sequence > COALESCE(?, 0) THEN 0 ELSE attempt_count + 1 END,
+        retry_at = NULL,
+        complete_fetch_sequence = ?, qualification_pending = ?,
         failure_class = ?, failure_detail = ?,
         lease_owner = NULL, lease_expires_at = NULL, effect_claimed_at = NULL, updated_at = ?
       WHERE source_id = ? AND external_id = ? AND state = 'processing' AND lease_owner = ?
         AND snapshot_hash = ? AND material_hash = ? AND admission_version = ?
         AND (? = 0 OR effect_claimed_at IS NOT NULL)
     `).bind(
+      input.qualificationPending ? 1 : 0, input.completeFetchSequence ?? null,
       input.decision, input.jobId ?? null, input.now,
+      input.qualificationPending ? 1 : 0, input.completeFetchSequence ?? null,
+      input.completeFetchSequence ?? null, input.qualificationPending ? 1 : 0,
       input.decision === 'blocked' ? 'blocked' : input.decision === 'shelved' ? 'shelved' : null,
       input.reason ?? null,
       input.now, input.sourceId, input.externalId, input.owner,
@@ -657,7 +776,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     const bounded = Math.max(1, Math.min(limit, 1000));
     const { results } = await this.db.prepare(`
       SELECT ${rowColumns} FROM ingestion_rows
-      WHERE source_id = ? AND (
+      WHERE source_id = ? AND consecutive_omissions < 2 AND (
         (state IN ('pending', 'queued') AND (retry_at IS NULL OR retry_at <= ?))
         OR (state = 'processing' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
       )

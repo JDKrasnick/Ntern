@@ -1831,6 +1831,10 @@ export class IngestionRunner {
         let v2Discovery: { completed: boolean; snapshotHash?: string } | void = undefined;
         if (this.shadowDiscovery && isSourceSnapshot(result) && result.unchangedReason !== 'not_modified') {
           v2Discovery = await this.shadowDiscovery.discover({
+            // Legacy bounded continuations re-fetch a full body but do not
+            // constitute another qualification cadence.
+            completeFetchSequence: resolutionPassOpen || previous?.pendingAdmissionConfigurationVersion
+              ? undefined : result.checkpoint.successfulFetches,
             sourceId: connector.id,
             postings: result.postings,
             processed: batch.processed,

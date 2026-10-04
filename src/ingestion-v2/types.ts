@@ -59,6 +59,7 @@ export interface IngestionSnapshotRecord {
   activatedAt?: string;
   terminalAt?: string;
   expiresAt?: string;
+  completeFetchSequence?: number;
 }
 
 export interface IngestionRowRecord {
@@ -67,8 +68,13 @@ export interface IngestionRowRecord {
   snapshotHash: string;
   materialHash: string;
   admissionVersion: string;
-  /** Suppress notifications until this material completes its first V2 evaluation. */
+  /** Durable silence for a retained role first seen in baseline or policy migration. */
   notificationBaseline?: boolean;
+  /** Last complete source cadence evaluated, independent of queue attempts. */
+  completeFetchSequence?: number;
+  qualificationPending?: boolean;
+  qualificationObservedSequence?: number;
+  qualificationCompleteSnapshots?: number;
   state: IngestionRowState;
   decision?: IngestionDecision;
   attemptCount: number;
@@ -208,6 +214,8 @@ export function ingestionV2FeatureConfig(env: {
  * enqueue admission, mutate checkpoints, or touch the live catalog.
  */
 export interface ShadowDiscoveryInput {
+  /** Absent for continuations or fetches without complete cadence evidence. */
+  completeFetchSequence?: number;
   sourceId: string;
   postings: readonly SourcedPosting[];
   processed: ProcessedSnapshot;
@@ -235,6 +243,8 @@ export interface ShadowDiscoveryHook {
 
 /** Repository boundary for the V2 ledger; implemented by `D1IngestionV2Repository`. */
 export interface IngestionV2Repository {
+  /** Observe compact cadence evidence and queue pending qualifications; dispatch stays bounded. */
+  recordCompleteCadence?(sourceId: string, snapshotHash: string, admissionVersion: string, sequence: number, now: string): Promise<number>;
   putSnapshot(record: IngestionSnapshotRecord): Promise<void>;
   getSnapshot(sourceId: string, snapshotHash: string): Promise<IngestionSnapshotRecord | undefined>;
   activateSnapshot(sourceId: string, snapshotHash: string, activatedAt: string): Promise<void>;

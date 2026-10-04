@@ -34,6 +34,9 @@ export interface ShadowDiscoveryDependencies {
   }) => Promise<number>;
   /** Whether this source is currently inside the admission rollout boundary. */
   admissionEnabledForSource?: (sourceId: string) => boolean;
+  reconcileOmissions?: (input: {
+    sourceId: string; snapshotHash: string; admissionVersion: string; observedAt: string;
+  }) => Promise<void>;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -203,16 +206,21 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       await repository.applyOmissions(input.sourceId, diff.omissionUpdates, input.observedAt);
       await repository.activateSnapshot(input.sourceId, envelope.snapshotHash, input.observedAt);
     }
-
     // Re-enter the admission lane only for rows whose material, policy version,
     // or presence changed. A due-retry row is already dispatchable, so reopening
     // it would reset the attempt count that caps its retries.
     let reopened = 0;
+    if (admissionEnabled && input.completeFetchSequence !== undefined && repository.recordCompleteCadence) {
+      reopened += await repository.recordCompleteCadence(
+        input.sourceId, envelope.snapshotHash, input.admissionVersion,
+        input.completeFetchSequence, input.observedAt,
+      );
+    }
     const reopenExternalIds = diff.rows
       .filter((entry) => entry.actionable && entry.classification !== 'retryable')
       .map((entry) => entry.externalId);
     if (admissionEnabled && this.dependencies.reopenActionableRows && reopenExternalIds.length) {
-      reopened = await this.dependencies.reopenActionableRows({
+      reopened += await this.dependencies.reopenActionableRows({
         sourceId: input.sourceId,
         snapshotHash: envelope.snapshotHash,
         admissionVersion: input.admissionVersion,
@@ -220,6 +228,14 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
         now: input.observedAt,
       });
     }
+
+    // Persist new admission work before a bounded closure continuation can
+    // fail this pass. Recovery must not turn newly observed rows into unchanged
+    // shadow rows that never entered the admission lane.
+    await this.dependencies.reconcileOmissions?.({
+      sourceId: input.sourceId, snapshotHash: envelope.snapshotHash,
+      admissionVersion: input.admissionVersion, observedAt: input.observedAt,
+    });
 
     const legacySet = new Set(input.legacyActionableExternalIds);
     const v2Set = new Set(diff.actionableExternalIds);

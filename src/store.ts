@@ -40,6 +40,25 @@ export function deletedUserTombstoneKey(userId: string) {
 export type { CatalogSource } from './catalog-fields.js';
 export type CatalogQuery = { query?: string; source?: CatalogSource };
 
+/** Fence a negative catalog effect against the exact durable omitted row. */
+export interface PostingObservationOmissionFence {
+  snapshotHash: string;
+  materialHash: string;
+  admissionVersion: string;
+  updatedAt: string;
+  activeSnapshotHash: string;
+}
+
+export class SupersededPostingObservationError extends Error {}
+
+export interface PostingObservationAdmissionFence {
+  snapshotHash: string;
+  materialHash: string;
+  admissionVersion: string;
+  leaseOwner: string;
+  leaseExpiresAt: string;
+}
+
 export type PostingObservationCommit =
   | {
       decision: Exclude<PostingIdentityDecision, { status: 'quarantined' }>;
@@ -48,6 +67,8 @@ export type PostingObservationCommit =
       occurrence: SourceOccurrenceState;
       notificationEvent?: NotificationEvent;
       providerShadowVerification?: DestinationVerificationRequest;
+      omissionFence?: PostingObservationOmissionFence;
+      admissionEffectFence?: PostingObservationAdmissionFence;
     }
   | {
       decision: Extract<PostingIdentityDecision, { status: 'quarantined' }>;

@@ -35,6 +35,8 @@ function subject(): { database: DatabaseSync; repository: D1IngestionV2Repositor
   database.exec(readFileSync(new URL('../cloudflare/migrations/0046_ingestion_v2_admission.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0047_ingestion_v2_dispatch_cursor.sql', import.meta.url), 'utf8'));
   database.exec(readFileSync(new URL('../cloudflare/migrations/0048_ingestion_v2_effect_claim.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0050_ingestion_v2_omission_closure.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0051_ingestion_v2_qualification_cadence.sql', import.meta.url), 'utf8'));
   return { database, repository: new D1IngestionV2Repository(sqliteD1(database)) };
 }
 
@@ -328,7 +330,7 @@ describe('ingestion v2 D1 repository', () => {
     })).toBe(false);
   });
 
-  it('leaves an in-flight row untouched when it drops off the board', async () => {
+  it('preserves an in-flight lease while counting complete omissions', async () => {
     const { repository } = subject();
     await repository.putRows([
       row({ externalId: 'leased', state: 'processing', decision: undefined, leaseOwner: 'worker', leaseExpiresAt: '2026-10-01T01:00:00.000Z' }),
@@ -339,14 +341,14 @@ describe('ingestion v2 D1 repository', () => {
       { externalId: 'idle', consecutiveOmissions: 1, becomesAbsent: false },
     ], '2026-10-02T00:00:00.000Z');
     expect(await repository.getRow('community-example', 'leased')).toMatchObject({
-      state: 'processing', consecutiveOmissions: 0, leaseOwner: 'worker',
+      state: 'processing', consecutiveOmissions: 1, leaseOwner: 'worker',
     });
     expect(await repository.getRow('community-example', 'idle')).toMatchObject({
       state: 'settled', consecutiveOmissions: 1,
     });
   });
 
-  it('does not clobber queued or quarantined lane rows when they drop off the board', async () => {
+  it('preserves queued or quarantined lane history while recording closure intent', async () => {
     const { repository } = subject();
     await repository.putRows([
       row({ externalId: 'queued', state: 'queued', decision: undefined, attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z' }),
@@ -359,10 +361,10 @@ describe('ingestion v2 D1 repository', () => {
       { externalId: 'settled', consecutiveOmissions: 2, becomesAbsent: true },
     ], '2026-10-02T00:00:00.000Z');
     expect(await repository.getRow('community-example', 'queued')).toMatchObject({
-      state: 'queued', attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z', consecutiveOmissions: 0,
+      state: 'queued', attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z', consecutiveOmissions: 2,
     });
     expect(await repository.getRow('community-example', 'quarantined')).toMatchObject({
-      state: 'quarantined', attemptCount: 3, failureClass: 'destination-timeout', consecutiveOmissions: 0,
+      state: 'quarantined', attemptCount: 3, failureClass: 'destination-timeout', consecutiveOmissions: 2,
     });
     // A discovery-owned settled row still closes to absent.
     expect(await repository.getRow('community-example', 'settled')).toMatchObject({

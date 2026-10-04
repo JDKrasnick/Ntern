@@ -578,6 +578,22 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
     .bind(sourceId, removedExternalId).first();
   assert.equal(afterTwoOmissions.state, 'absent');
   assert.equal(afterTwoOmissions.consecutive_omissions, 2);
+  const closedOccurrenceRow = await database.prepare(
+    "SELECT value FROM catalog_items WHERE kind = 'source-occurrence' AND source_id = ? AND external_id = ?",
+  ).bind(sourceId, removedExternalId).first();
+  assert.ok(closedOccurrenceRow, 'published role must retain its durable occurrence');
+  const closedOccurrence = JSON.parse(closedOccurrenceRow.value);
+  assert.equal(closedOccurrence.occurrence.state, 'closed');
+  assert.equal(closedOccurrence.present, false);
+  const closedJobRow = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'")
+    .bind(`JOB#${closedOccurrence.jobId}`).first();
+  assert.ok(closedJobRow);
+  assert.equal(JSON.parse(closedJobRow.value).open, false, 'two complete omissions must close the public job');
+  assert.equal((await database.prepare('SELECT closure_pending FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, removedExternalId).first()).closure_pending, 0);
+  await deliverGithub(ownershipOverrides);
+  assert.equal((await database.prepare('SELECT consecutive_omissions FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, removedExternalId).first()).consecutive_omissions, 2, 'completed closure is not recurring work');
 
   // Roll back admission while a row is pending, prove the disabled consumer
   // drains without mutation, then re-enable and settle the same durable work.
@@ -596,4 +612,40 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
   await deliverAdmission(rollbackMessage, liveOverrides);
   assert.equal((await database.prepare('SELECT state FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
     .bind(sourceId, rollbackTarget).first()).state, 'settled');
+
+  // The production dynamic sink must forward a terminal rejection after claim,
+  // revoking a role published by the baseline without minting another alert.
+  const rejectedId = `README.md:${applyUrl(0)}`;
+  documentBodies.set(
+    `https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md`,
+    markdownTable(4).replace('Software Engineering Intern 0', 'Software Engineering Intern 0 Updated'),
+  );
+  destinationStatus.set(applicationHosts[0], 404);
+  try {
+    await deliverGithub(ownershipOverrides);
+    current = await boardSnapshot();
+    const rejection = await deliverAdmission(buildMessages(
+      current.rows.filter((row) => row.external_id === rejectedId),
+      current.snapshot.snapshot_hash, current.snapshot.admission_version,
+    ), liveOverrides);
+    assert.equal(rejection.settled.ack, 1, JSON.stringify(rejection.settled.retries));
+    const rejectedLedger = await database.prepare('SELECT state, decision FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+      .bind(sourceId, rejectedId).first();
+    assert.deepEqual(rejectedLedger, { state: 'settled', decision: 'blocked' });
+    const rejectedOccurrenceRow = await database.prepare(
+      "SELECT value FROM catalog_items WHERE kind = 'source-occurrence' AND source_id = ? AND external_id = ?",
+    ).bind(sourceId, rejectedId).first();
+    assert.ok(rejectedOccurrenceRow);
+    const rejectedOccurrence = JSON.parse(rejectedOccurrenceRow.value);
+    assert.equal(rejectedOccurrence.occurrence.state, 'closed');
+    assert.equal(rejectedOccurrence.occurrence.admission.catalogEligible, false);
+    const rejectedJob = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'")
+      .bind(`JOB#${rejectedOccurrence.jobId}`).first();
+    assert.equal(JSON.parse(rejectedJob.value).open, false);
+    assert.equal(JSON.parse(rejectedJob.value).admission.catalogEligible, false);
+    assert.equal((await database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'notification-event'").first()).count,
+      notificationsAfterNew.count);
+  } finally {
+    destinationStatus.clear();
+  }
 });

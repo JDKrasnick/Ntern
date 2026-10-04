@@ -45,12 +45,19 @@ class FakeLedger implements AdmissionV2Ledger {
   seedSnapshot(record: IngestionSnapshotRecord) { this.snapshots.set(this.key(record.sourceId, record.snapshotHash), record); }
   seedRow(record: IngestionRowRecord) { this.save(record); }
 
-  async markQueued(rows: readonly MarkQueuedInput[]): Promise<void> {
+  async markQueued(rows: readonly MarkQueuedInput[]): Promise<MarkQueuedInput[]> {
+    const marked: MarkQueuedInput[] = [];
     for (const input of rows) {
       const row = this.row(input.sourceId, input.externalId);
-      if (!row || !['pending', 'queued', 'processing'].includes(row.state)) continue;
+      if (!row || !['pending', 'queued'].includes(row.state)
+        || row.snapshotHash !== input.snapshotHash || row.materialHash !== input.materialHash
+        || row.admissionVersion !== input.admissionVersion || row.consecutiveOmissions >= 2
+        || (row.retryAt && row.retryAt > input.now)
+        || (row.leaseExpiresAt && row.leaseExpiresAt > input.now)) continue;
       this.save({ ...row, state: 'queued', retryAt: undefined, leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: input.now });
+      marked.push(input);
     }
+    return marked;
   }
 
   async acquireLease(input: AcquireLeaseInput): Promise<AdmissionLeaseResult> {

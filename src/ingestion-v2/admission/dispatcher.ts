@@ -73,8 +73,17 @@ export async function planAdmissionV2Dispatch(
   for (const group of groups.values()) {
     const snapshot = await dependencies.ledger.getSnapshot(sourceId, group.snapshotHash);
     if (!snapshot || !snapshot.isComplete) continue;
+    const marked = await dependencies.ledger.markQueued(group.rows.map((row) => ({
+      sourceId,
+      externalId: row.externalId,
+      snapshotHash: row.snapshotHash,
+      materialHash: row.materialHash,
+      admissionVersion: row.admissionVersion,
+      now: nowIso,
+    })));
+    if (marked.length === 0) continue;
     firstGroup ??= group;
-    const orderedIds = group.rows.map((row) => row.externalId);
+    const orderedIds = marked.map((row) => row.externalId);
     const built = buildAdmissionV2Messages({
       sourceId,
       snapshotHash: group.snapshotHash,
@@ -84,14 +93,6 @@ export async function planAdmissionV2Dispatch(
       externalIds: orderedIds,
       maxIds: dependencies.maxIds ?? ADMISSION_V2_MAX_EXTERNAL_IDS,
     });
-    await dependencies.ledger.markQueued(group.rows.map((row) => ({
-      sourceId,
-      externalId: row.externalId,
-      snapshotHash: row.snapshotHash,
-      materialHash: row.materialHash,
-      admissionVersion: row.admissionVersion,
-      now: nowIso,
-    })));
     for (const message of built) {
       await dependencies.ledger.recordHandoff({
         batchId: message.batchId,

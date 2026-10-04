@@ -63,6 +63,22 @@ R2 envelopes, order-independent snapshot identity, new/changed/missing
 classification, and the two-complete-snapshot closure rule. Its checked-in
 summary digest makes row, identity, or transition drift fail the run.
 
+Apply migrations `0050_ingestion_v2_omission_closure.sql` and
+`0051_ingestion_v2_qualification_cadence.sql` before enabling the writer.
+Complete-snapshot omissions persist a closure intent; each discovery delivery
+commits at most 25 source occurrence closures and retries until the remaining
+intents are drained. A reappeared row fences out an older closure. Terminal row
+rejections revoke that occurrence through the leased effect boundary, while
+other live source occurrences retain the canonical role.
+
+Trusted-community qualification counts distinct complete fetch sequences in
+the ledger, including cadences observed before admission finishes. Queue
+duplicates, retries, and bounded legacy continuations do not add evidence.
+Unchanged candidates that still need qualification return to the existing
+bounded admission dispatcher. Baseline and policy-migration rows remain silent;
+an eligible post-baseline occurrence promotes its existing job through the
+deterministic notification receipt.
+
 Drain admission work and reconcile terminal row totals to the planned active
 count. Confirm baseline notification count remains unchanged, pending legacy
 fields are absent, the active checkpoint version matches the V2 snapshot,

@@ -148,4 +148,27 @@ describe('ingestion v2 migration', () => {
     `).get()).toEqual({ notification_baseline: 0, effect_claimed_at: null });
     database.close();
   });
+
+  it('upgrades retained admission rows without changing ownership or notification baselines', () => {
+    const database = new DatabaseSync(':memory:');
+    for (const migration of migrationsUpTo('0049_ingestion_v2_bootstrap.sql')) {
+      database.exec(readFileSync(new URL(migration, migrationsDirectory), 'utf8'));
+    }
+    for (const [id, state, omissions] of [['absent', 'absent', 2], ['quarantined', 'quarantined', 0], ['queued', 'queued', 0]] as const) {
+      database.prepare(`INSERT INTO ingestion_rows
+        (source_id,external_id,snapshot_hash,material_hash,admission_version,state,attempt_count,
+         consecutive_omissions,notification_baseline,first_observed_at,last_observed_at,updated_at)
+        VALUES ('source',?,'snapshot','material','v1',?,3,?,1,'t','t','t')`).run(id,state,omissions);
+    }
+    for (const migration of ['0050_ingestion_v2_omission_closure.sql', '0051_ingestion_v2_qualification_cadence.sql']) {
+      database.exec(readFileSync(new URL(migration, migrationsDirectory), 'utf8'));
+    }
+    expect(database.prepare(`SELECT external_id,state,attempt_count,notification_baseline,closure_pending,
+      complete_fetch_sequence,qualification_pending FROM ingestion_rows ORDER BY external_id`).all()).toEqual([
+      {external_id:'absent',state:'absent',attempt_count:3,notification_baseline:1,closure_pending:1,complete_fetch_sequence:null,qualification_pending:0},
+      {external_id:'quarantined',state:'quarantined',attempt_count:3,notification_baseline:1,closure_pending:0,complete_fetch_sequence:null,qualification_pending:0},
+      {external_id:'queued',state:'queued',attempt_count:3,notification_baseline:1,closure_pending:0,complete_fetch_sequence:null,qualification_pending:0},
+    ]);
+    database.close();
+  });
 });

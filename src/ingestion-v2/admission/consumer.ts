@@ -125,10 +125,14 @@ export async function processAdmissionV2Message(
         externalId,
         snapshotHash: message.snapshotHash,
         admissionVersion: message.admissionVersion,
-        baseline: message.baseline,
+        // The durable row fence wins if an older queued message predates a
+        // silent bootstrap or migration of the same admission identity.
+        baseline: message.baseline || lease.row.notificationBaseline === true,
         row: lease.row,
         posting: snapshotRow.posting,
         firstObservationEligible: snapshotRow.firstObservationEligible,
+        completeFetchSequence: lease.row.qualificationObservedSequence,
+        qualificationCompleteSnapshots: lease.row.qualificationCompleteSnapshots,
       });
       const decision = evaluation.decision;
       const jobId = evaluation.jobId ?? (decision.kind === 'admitted' ? decision.jobId : undefined);
@@ -155,6 +159,8 @@ export async function processAdmissionV2Message(
         ...expectedIdentity,
         decision: decision.kind,
         effectClaimed: Boolean(evaluation.commitEffect),
+        completeFetchSequence: evaluation.completeFetchSequence,
+        qualificationPending: evaluation.qualificationPending ?? false,
         ...(jobId ? { jobId } : {}),
         ...(decision.kind === 'admitted' ? {} : { reason: decision.reason }),
       });

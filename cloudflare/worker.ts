@@ -34,6 +34,8 @@ import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore 
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
 import { admissionSourceAllowed, processAdmissionV2Batch } from './admission-v2.js';
 import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
+import { reconcileIngestionV2Omissions } from '../src/ingestion-v2/omission-closure.js';
+import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState } from '../src/ingestion-v2/types.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
 import { bootstrapAdmissionSnapshot, migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
@@ -192,7 +194,7 @@ export interface Environment extends AuthEnvironment,
  * Builds the shadow discovery hook when the feature flag is on. Returns
  * `undefined` when disabled so the runner performs no V2 work at all.
  */
-function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscovery | undefined {
+export function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscovery | undefined {
   const features = ingestionV2FeatureConfig(env);
   if (!features.shadowDiscoveryEnabled) return undefined;
   const repository = new D1IngestionV2Repository(env.DB);
@@ -208,6 +210,13 @@ function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscover
     snapshots: new R2IngestionSnapshotStore(env.DOCUMENTS),
     features,
     admissionEnabledForSource: (sourceId) => admission.admissionEnabled && admissionSourceAllowed(env, sourceId),
+    reconcileOmissions: async (input) => {
+      if (!admissionV2OwnsCatalogWrites(env, input.sourceId)) return;
+      await reconcileIngestionV2Omissions({
+        repository,
+        sink: new ReconcilerAdmissionV2CatalogSink(new D1InternshipStore(env.DB)),
+      }, input);
+    },
     ...(admission.admissionEnabled ? {
       reopenActionableRows: async ({ sourceId, externalIds, admissionVersion, now }) => {
         if (!admissionSourceAllowed(env, sourceId)) return 0;

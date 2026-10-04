@@ -140,6 +140,10 @@ export async function processAdmissionV2Batch(
   const evaluator = stage2AdmissionEvaluator(
     options.resolver,
     options.sink ?? {
+      async revoke(input) {
+        if (!admissionV2OwnsCatalogWrites(env, input.sourceId)) return;
+        await new ReconcilerAdmissionV2CatalogSink(internshipStore, now).revoke(input);
+      },
       async commit(input) {
         const sink = admissionV2OwnsCatalogWrites(env, input.sourceId)
           ? new ReconcilerAdmissionV2CatalogSink(internshipStore, now)

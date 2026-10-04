@@ -346,6 +346,8 @@ describe('ingestion resource budgets', () => {
     const database = new DatabaseSync(':memory:');
     database.exec(readFileSync(new URL('../cloudflare/migrations/0045_ingestion_v2.sql', import.meta.url), 'utf8'));
     database.exec(readFileSync(new URL('../cloudflare/migrations/0048_ingestion_v2_effect_claim.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0050_ingestion_v2_omission_closure.sql', import.meta.url), 'utf8'));
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0051_ingestion_v2_qualification_cadence.sql', import.meta.url), 'utf8'));
     const queries: string[] = [];
     const base = sqliteD1(database);
     const tracked: D1Database = { prepare: (query) => { queries.push(query); return base.prepare(query); }, batch: (statements) => base.batch(statements) };
@@ -403,7 +405,7 @@ describe('ingestion resource budgets', () => {
 
   it('consumes a 25-row admission message from a production-shaped immutable snapshot within Worker limits', async () => {
     const database = new DatabaseSync(':memory:');
-    for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
+    for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql', '0050_ingestion_v2_omission_closure.sql', '0051_ingestion_v2_qualification_cadence.sql']) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
     }
     const repository = new D1IngestionV2Repository(sqliteD1(database));
