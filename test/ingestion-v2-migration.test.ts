@@ -160,7 +160,7 @@ describe('ingestion v2 migration', () => {
          consecutive_omissions,notification_baseline,first_observed_at,last_observed_at,updated_at)
         VALUES ('source',?,'snapshot','material','v1',?,3,?,1,'t','t','t')`).run(id,state,omissions);
     }
-    for (const migration of ['0050_ingestion_v2_omission_closure.sql', '0051_ingestion_v2_qualification_cadence.sql']) {
+    for (const migration of ['0049_ingestion_v2_cost_windows.sql', '0050_ingestion_v2_omission_closure.sql', '0051_ingestion_v2_qualification_cadence.sql']) {
       database.exec(readFileSync(new URL(migration, migrationsDirectory), 'utf8'));
     }
     expect(database.prepare(`SELECT external_id,state,attempt_count,notification_baseline,closure_pending,
