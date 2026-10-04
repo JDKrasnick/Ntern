@@ -30,6 +30,13 @@ Test names above refer to files under `test/`; built Worker tests live under
 notification receipts, and row state rather than inferring publication from
 ledger decisions alone.
 
+`npm run test:e2e` builds the complete Cloudflare deployment bundles when the
+Docker daemon is available. When Docker is unavailable, the same command uses
+Wrangler's `--containers-rollout=none` dry-run mode to build both Worker
+entrypoints and then runs every compiled-Worker E2E test. This fallback affects
+only the local test build; deployment builds continue to require the complete
+container build.
+
 Dev validation uses isolated D1, R2, and Cloudflare Queues with a temporary
 authenticated fixture driver calling the production discovery factory and
 dispatcher. Mock official application pages cover 24 company labels and six

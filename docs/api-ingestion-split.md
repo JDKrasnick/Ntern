@@ -40,6 +40,9 @@ them as separate services in one ephemeral local `workerd` process, applies all
 checked-in D1 migrations, and sends requests through the real `INGESTION`
 service binding. It uses fixed test-only secrets, requires no Cloudflare account
 or credentials, and leaves no persistent database or Worker state behind.
+If Docker is unavailable, the local command builds both Worker entrypoints with
+Wrangler's `--containers-rollout=none` dry-run mode. Deployment builds continue
+to include the complete container build.
 
 ## Secret inventory
 
