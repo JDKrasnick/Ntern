@@ -121,6 +121,12 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
       .filter((row) => row.state === 'quarantined')
       .reduce((sum, row) => sum + Number(row.rows ?? 0), 0);
     sourceCheck('canary row ledger populated', rowCount > 0, `${rowCount} durable row(s)`);
+    const activeRows = canary.rows.filter((row) => row.state !== 'absent');
+    const unsettled = activeRows.filter((row) => row.state !== 'settled').reduce((sum, row) => sum + Number(row.rows ?? 0), 0);
+    const unattempted = activeRows.filter((row) => row.state === 'settled')
+      .reduce((sum, row) => sum + Number(row.rows ?? 0) - Number(row.attempted ?? 0), 0);
+    sourceCheck('independent admission complete', unsettled === 0 && unattempted === 0,
+      `${unsettled} unsettled row(s), ${unattempted} settled row(s) without a V2 attempt`);
     sourceCheck('no quarantined canary rows', quarantined === 0, `${quarantined} quarantined row(s)`);
     sourceCheck('no stale admission handoff', canary.staleHandoffs === 0,
       `${canary.staleHandoffs} handoff(s) older than 15 minutes`);
@@ -236,7 +242,7 @@ async function main(): Promise<number> {
       window_started_at, window_run_count, window_d1_rows_written
       FROM ingestion_v2_shadow_comparisons WHERE source_id IN (${placeholders})`, sourceIds),
     query<Record<string, unknown>>(`SELECT source_id, state, COALESCE(decision, '') AS decision, COUNT(*) AS rows,
-      SUM(attempt_count) AS attempts, MAX(updated_at) AS latest_update FROM ingestion_rows
+      SUM(attempt_count) AS attempts, SUM(CASE WHEN attempt_count > 0 THEN 1 ELSE 0 END) AS attempted, MAX(updated_at) AS latest_update FROM ingestion_rows
       WHERE source_id IN (${placeholders}) GROUP BY source_id, state, decision ORDER BY source_id, state, decision`, sourceIds),
     query<{ source_id: string; pending: number; stale: number }>(`SELECT source_id, COUNT(*) AS pending,
       SUM(CASE WHEN dispatched_at < ? THEN 1 ELSE 0 END) AS stale

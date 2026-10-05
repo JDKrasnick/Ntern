@@ -14,7 +14,7 @@ const healthy = (): DevSoakSample => ({
       observed_at: '2026-10-04T20:45:00.000Z', window_started_at: '2026-10-04T20:00:00.000Z',
       window_run_count: 6, window_d1_rows_written: 300,
     },
-    rows: [{ state: 'settled', decision: 'admitted', rows: 71, attempts: 71 }],
+    rows: [{ state: 'settled', decision: 'admitted', rows: 71, attempts: 71, attempted: 71 }],
     pendingHandoffs: 0, staleHandoffs: 0, expiredLeases: 0, r2SnapshotValid: true,
   },
   maintenance: [{
@@ -118,6 +118,12 @@ describe('dev ingestion soak evaluation', () => {
     expect(evaluateDevSoak(sample).filter((check) => check.status === 'fail').map((check) => check.name))
       .toEqual(['Worker runtime healthy', 'R2 snapshot integrity']);
     expect(evaluateDevSoak(sample).find((check) => check.name === 'Worker resource headroom')?.status).toBe('warn');
+  });
+
+  it('does not mistake inherited shadow classifications for completed admission', () => {
+    const sample = healthy();
+    sample.canary.rows = [{ state: 'settled', decision: 'admitted', rows: 71, attempts: 0, attempted: 0 }];
+    expect(evaluateDevSoak(sample).find((check) => check.name === 'independent admission complete')?.status).toBe('fail');
   });
 
 });
