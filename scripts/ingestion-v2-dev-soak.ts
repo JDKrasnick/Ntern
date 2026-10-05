@@ -8,12 +8,21 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseEnvelope } from '../src/ingestion-v2/normalize.js';
+import { admissionV2OwnsCatalogWrites } from '../src/ingestion-v2/admission/types.js';
 import { INGESTION_V2_D1_WRITE_LIMIT, INGESTION_V2_RUN_LIMIT } from '../cloudflare/ingestion-health-alert.js';
 
 const DEFAULT_DATABASE_ID = 'cedc86d8-69a5-4a72-a1e6-f5629d722338';
 const DEFAULT_API_URL = 'https://intern-notifs-dev.jdkrasnick.workers.dev';
 const DEFAULT_WORKER = 'intern-notifs-dev-ingestion';
-const DEV_CONFIG = JSON.parse(readFileSync(new URL('../wrangler.dev.ingestion.jsonc', import.meta.url), 'utf8')) as { vars: Record<string, string>; triggers: { crons: string[] } };
+export function parseDevSoakConfig(text: string): { name: string; vars: Record<string, string>; triggers: { crons: string[] } } {
+  const config = JSON.parse(text) as { name: string; vars: Record<string, string>; triggers: { crons: string[] } };
+  if (config.name !== DEFAULT_WORKER || config.vars.OUTBOUND_NOTIFICATIONS_ENABLED !== 'false') {
+    throw new Error('Soak profiles must target isolated dev ingestion with outbound delivery disabled');
+  }
+  return config;
+}
+const DEV_CONFIG = parseDevSoakConfig(readFileSync(process.env.INGESTION_V2_DEV_CONFIG
+  ?? new URL('../wrangler.dev.ingestion.jsonc', import.meta.url), 'utf8'));
 const EXPECTED_CRONS = (JSON.parse(readFileSync(new URL('../wrangler.ingestion.jsonc', import.meta.url), 'utf8')) as { triggers: { crons: string[] } }).triggers.crons;
 const DEFAULT_CANARY = 'northwestern-fintech-2027-quant';
 const QUEUE_SUFFIXES = [
@@ -48,6 +57,8 @@ export interface DevSoakSample {
     staleHandoffs: number;
     expiredLeases: number;
     r2SnapshotValid: boolean;
+    catalogOwned?: boolean;
+    catalogMismatches?: number;
   };
   canaries?: Array<DevSoakSample['canary']>;
   schedules: string[];
@@ -127,6 +138,8 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
       .reduce((sum, row) => sum + Number(row.rows ?? 0) - Number(row.attempted ?? 0), 0);
     sourceCheck('independent admission complete', unsettled === 0 && unattempted === 0,
       `${unsettled} unsettled row(s), ${unattempted} settled row(s) without a V2 attempt`);
+    if (canary.catalogOwned) sourceCheck('durable catalog parity', canary.catalogMismatches === 0,
+      `${canary.catalogMismatches ?? 'missing'} admitted-link or revoked-occurrence mismatch(es)`);
     sourceCheck('no quarantined canary rows', quarantined === 0, `${quarantined} quarantined row(s)`);
     sourceCheck('no stale admission handoff', canary.staleHandoffs === 0,
       `${canary.staleHandoffs} handoff(s) older than 15 minutes`);
@@ -233,7 +246,7 @@ async function main(): Promise<number> {
   }
 
   const placeholders = sourceIds.map(() => '?').join(',');
-  const [healthRows, snapshots, comparisons, rowStates, handoffs, leases, failures, exhaustedFailures, maintenance, queues, schedules, settings, catalog, publication, runtime] = await Promise.all([
+  const [healthRows, snapshots, comparisons, rowStates, handoffs, leases, catalogParity, failures, exhaustedFailures, maintenance, queues, schedules, settings, apiSettings, catalog, publication, runtime] = await Promise.all([
     query<{ pk: string; value: string }>(`SELECT pk, value FROM catalog_items WHERE pk IN (${placeholders}) AND sk = 'HEALTH'`, sourceIds.map((source) => `SOURCE#${source}`)),
     query<Record<string, unknown>>(`SELECT source_id, snapshot_hash, object_key, admission_version, row_count, document_count, state,
       is_complete, baseline, activated_at FROM ingestion_snapshots
@@ -249,6 +262,23 @@ async function main(): Promise<number> {
       FROM ingestion_admission_handoffs WHERE source_id IN (${placeholders}) AND acknowledged_at IS NULL GROUP BY source_id`, [staleHandoffBefore, ...sourceIds]),
     query<{ source_id: string; expired: number }>(`SELECT source_id, COUNT(*) AS expired FROM ingestion_rows
       WHERE source_id IN (${placeholders}) AND state = 'processing' AND lease_expires_at < ? GROUP BY source_id`, [...sourceIds, capturedAt.toISOString()]),
+    query<{ source_id: string; mismatches: number }>(`SELECT r.source_id, SUM(CASE
+      WHEN r.decision = 'admitted' AND (
+        r.job_id IS NULL OR COALESCE(json_extract(c.value, '$.jobId'), '') != r.job_id
+        OR COALESCE(json_extract(c.value, '$.occurrence.state'), '') != 'open'
+        OR COALESCE(json_extract(c.value, '$.occurrence.admission.catalogEligible'), 0) != 1
+        OR COALESCE(json_extract(c.value, '$.occurrence.admissionConfigurationVersion'), '') != r.admission_version
+        OR COALESCE(json_extract(j.value, '$.open'), 0) != 1
+        OR COALESCE(json_extract(c.value, '$.occurrence.trustedCommunityAlertQualification.catalogPublicationSuppressed'), 0) = 1
+      ) THEN 1
+      WHEN r.decision IN ('blocked', 'shelved')
+        AND json_extract(c.value, '$.occurrence.state') = 'open'
+        AND json_extract(c.value, '$.occurrence.admission.catalogEligible') = 1 THEN 1
+      ELSE 0 END) AS mismatches
+      FROM ingestion_rows r
+      LEFT JOIN catalog_items c ON c.pk = 'SOURCE#' || r.source_id AND c.sk = 'OCCURRENCE#' || r.external_id
+      LEFT JOIN catalog_items j ON j.pk = 'JOB#' || r.job_id AND j.sk = 'META'
+      WHERE r.source_id IN (${placeholders}) AND r.state = 'settled' GROUP BY r.source_id`, sourceIds),
     query<Record<string, unknown>>(`SELECT queue_name, category, COUNT(*) AS failures, MAX(last_failed_at) AS latest
       FROM queue_failure_events WHERE resolved_at IS NULL AND last_failed_at >= ?
       GROUP BY queue_name, category ORDER BY queue_name, category`, [windowStart]),
@@ -263,6 +293,7 @@ async function main(): Promise<number> {
     cloudflare<QueueSummary[]>('/queues?per_page=100'),
     cloudflare<{ schedules: Array<{ cron: string }> }>(`/workers/scripts/${workerName}/schedules`),
     cloudflare<{ bindings: Array<{ name: string; type: string; text?: string }> }>(`/workers/scripts/${workerName}/settings`),
+    cloudflare<{ bindings: Array<{ name: string; type: string; text?: string }> }>('/workers/scripts/intern-notifs-dev/settings'),
     fetch(`${publicApiUrl}/catalog?limit=1`, { signal: AbortSignal.timeout(30_000) }),
     fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/intern-notifs-dev-documents/objects/public-catalog/v1/current`, {
       headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000),
@@ -313,11 +344,15 @@ async function main(): Promise<number> {
       lastSuccessAt: sourceHealth.lastSuccessAt, lastAttemptAt: sourceHealth.lastAttemptAt, consecutiveFailures: sourceHealth.consecutiveFailures } } : {}),
       ...(snapshot ? { activeSnapshot: snapshot } : {}), ...(comparison ? { shadowComparison: comparison } : {}),
       rows: rowStates.filter((row) => row.source_id === sourceId), pendingHandoffs: handoff?.pending ?? 0,
-      staleHandoffs: handoff?.stale ?? 0, expiredLeases: leases.find((row) => row.source_id === sourceId)?.expired ?? 0, r2SnapshotValid };
+      staleHandoffs: handoff?.stale ?? 0, expiredLeases: leases.find((row) => row.source_id === sourceId)?.expired ?? 0, r2SnapshotValid,
+      catalogOwned: admissionV2OwnsCatalogWrites(DEV_CONFIG.vars, sourceId),
+      catalogMismatches: catalogParity.find((row) => row.source_id === sourceId)?.mismatches ?? 0 };
   }));
-  const controlMismatches = Object.entries(DEV_CONFIG.vars).filter(([name]) => name.startsWith('INGESTION_V2_') || name === 'OUTBOUND_NOTIFICATIONS_ENABLED')
-    .filter(([name, expected]) => settings.bindings.find((binding) => binding.name === name && binding.type === 'plain_text')?.text !== expected)
-    .map(([name]) => `${name} differs from tracked dev configuration`);
+  const controlMismatches = [{ worker: workerName, live: settings }, { worker: 'intern-notifs-dev', live: apiSettings }]
+    .flatMap(({ worker, live }) => Object.entries(DEV_CONFIG.vars)
+      .filter(([name]) => name.startsWith('INGESTION_V2_') || name === 'OUTBOUND_NOTIFICATIONS_ENABLED')
+      .filter(([name, expected]) => live.bindings.find((binding) => binding.name === name && binding.type === 'plain_text')?.text !== expected)
+      .map(([name]) => `${worker}: ${name} differs from selected dev profile`));
   const sample: DevSoakSample = {
     capturedAt: capturedAt.toISOString(), windowStartedAt: windowStart, windowHours, runtime,
     soakStartedAt: new Date(Math.max(deploymentAt.getTime(), configuredWindowStart?.getTime() ?? 0)).toISOString(),

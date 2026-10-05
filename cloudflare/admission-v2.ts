@@ -1,4 +1,4 @@
-import { safeFetchText } from '../src/employer/index.js';
+import { PublicNetworkPolicyError, safeFetchText } from '../src/employer/index.js';
 import { applicationPageEvidenceFromHtml, ApplicationUrlValidationError } from '../src/core/application-url.js';
 import { processAdmissionV2Message, type AdmissionV2MessageResult } from '../src/ingestion-v2/admission/consumer.js';
 import { RuleBasedAdmissionV2Evaluator, type AdmissionCanonicalEmployerResolver, type AdmissionDestinationProber, type AdmissionV2CatalogSink, type AdmissionV2PriorContextResolver } from '../src/ingestion-v2/admission/evaluator.js';
@@ -52,7 +52,9 @@ export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDest
           headers: { Accept: 'text/html,application/xhtml+xml' },
         });
       } catch (error) {
-        // A refused, unresolved, or timed-out probe is row-local and retryable.
+        // A policy refusal remains fail-closed and cannot improve by retrying.
+        // DNS/transport failures remain retryable and consume the row budget.
+        if (error instanceof PublicNetworkPolicyError) return { reachability: 'blocked' };
         throw new AdmissionRowTransientError('destination-timeout', error instanceof Error ? error.message : String(error));
       }
       if (result.status === 404 || result.status === 410) return { reachability: 'gone' };

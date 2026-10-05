@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { evaluateDevSoak, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
+import { evaluateDevSoak, parseDevSoakConfig, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
 
 const healthy = (): DevSoakSample => ({
   capturedAt: '2026-10-04T21:00:00.000Z', windowStartedAt: '2026-10-03T21:00:00.000Z', windowHours: 24, soakStartedAt: '2026-10-03T21:00:00.000Z',
@@ -16,6 +16,7 @@ const healthy = (): DevSoakSample => ({
     },
     rows: [{ state: 'settled', decision: 'admitted', rows: 71, attempts: 71, attempted: 71 }],
     pendingHandoffs: 0, staleHandoffs: 0, expiredLeases: 0, r2SnapshotValid: true,
+    catalogOwned: true, catalogMismatches: 0,
   },
   maintenance: [{
     key: 'maintenance_phase:maintenance:ingestion_v2_admission_dispatch',
@@ -126,4 +127,20 @@ describe('dev ingestion soak evaluation', () => {
     expect(evaluateDevSoak(sample).find((check) => check.name === 'independent admission complete')?.status).toBe('fail');
   });
 
+});
+
+describe('full dev ownership evidence', () => {
+  it('rejects a production profile or enabled outbound delivery', () => {
+    const dev = JSON.parse(readFileSync('wrangler.dev.ingestion.jsonc', 'utf8'));
+    expect(parseDevSoakConfig(JSON.stringify(dev)).name).toBe('intern-notifs-dev-ingestion');
+    expect(() => parseDevSoakConfig(JSON.stringify({ ...dev, name: 'intern-notifs-ingestion' }))).toThrow('isolated dev');
+    expect(() => parseDevSoakConfig(JSON.stringify({ ...dev, vars: { ...dev.vars, OUTBOUND_NOTIFICATIONS_ENABLED: 'true' } }))).toThrow('outbound');
+  });
+  it('rejects settled writer decisions when durable catalog effects drift', () => {
+    const sample = healthy();
+    sample.canary.catalogMismatches = 1;
+    expect(evaluateDevSoak(sample).find(check => check.name === 'durable catalog parity')?.status).toBe('fail');
+    sample.canary.catalogOwned = false;
+    expect(evaluateDevSoak(sample).some(check => check.name === 'durable catalog parity')).toBe(false);
+  });
 });
