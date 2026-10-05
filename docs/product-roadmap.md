@@ -18,6 +18,8 @@
 
 ## Milestones
 
+- [x] Add search metadata, production canonicals, robots rules, and a sitemap to the public web export; keep Pages previews out of search. Deployment and Search Console verification are tracked in [`seo.md`](seo.md).
+
 - [x] Add the provider-neutral résumé subscription foundation: Free ($0, 2 tailored reviews/month), Plus ($4.99, 25/month), and Pro ($9.99, 100/month), with atomic server-side usage enforcement and no client-granted entitlement.
 - [x] Make the Master Bank hierarchical by contract: role, project, and education objects own typed bullet pointers; imports, saved bases, model diffs, persistence, and finalization reject orphaned, wrong-kind, cross-user, and cross-parent references.
 - [x] Validate the résumé backend in isolated Cloudflare development: D1 migration, private R2 artifacts, Workers AI, Vectorize, queue/DLQ, and a two-instance PDF compiler pool complete a real authenticated PDF/TeX/PNG lifecycle while production remains disabled.
