@@ -2224,6 +2224,18 @@ export class IngestionRunner {
                 row: occurrence.occurrence.row,
                 reason: `posting identity conflict (${result.incident.decision.reason})`,
               });
+              // The incident is the durable result for this policy version. A
+              // bounded migration must advance past it while preserving the
+              // previously published decision, or the same identity conflicts
+              // consume every future slice and starve the remaining source.
+              const prior = priorByExternalId.get(occurrence.externalId);
+              if (migrationLimit !== undefined && githubAdmissionConfigurationVersion && prior
+                && prior.occurrence.admissionConfigurationVersion !== githubAdmissionConfigurationVersion) {
+                await this.store.putSourceOccurrence({
+                  ...prior,
+                  occurrence: { ...prior.occurrence, admissionConfigurationVersion: githubAdmissionConfigurationVersion },
+                });
+              }
               return;
             }
             committedJobIds.add(job.jobId);
