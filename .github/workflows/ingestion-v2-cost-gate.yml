@@ -1,0 +1,37 @@
+name: Ingestion V2 production cost gate
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingestion-v2-production-cost-gate
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    environment:
+      name: cloudflare-workers-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Audit production ingestion V2 cost windows
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run ingestion:v2:cost:gate
+      - name: Retain cost report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingestion-v2-production-cost-${{ github.run_id }}
+          path: .context/verification/ingestion-v2/production-cost/report.json
+          if-no-files-found: error
+          retention-days: 30
