@@ -74,11 +74,12 @@ const workerBuild = await build({
 const workerCode = workerBuild.outputFiles[0].text;
 const rendererVersion = createHash("sha256").update(workerCode).digest("hex").slice(0, 16);
 await writeFile(resolve(outputDirectory, "_worker.js"), workerCode.replaceAll("PUBLIC_RENDERER_VERSION", rendererVersion));
+await writeFile(resolve(outputDirectory, "public-api.json"), JSON.stringify({ apiOrigin: publicApiUrl }));
 await writeFile(resolve(outputDirectory, "_routes.json"), JSON.stringify({
   version: 1, include: ["/jobs", "/jobs/*", "/sitemap.xml"], exclude: [],
 }));
 
-const requiredFiles = ["index.html", "robots.txt", "sitemap.xml", "_worker.js", "_routes.json", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles, ...Object.values(topics).map((topic) => `${topic.path.slice(1)}.html`)];
+const requiredFiles = ["index.html", "robots.txt", "sitemap.xml", "public-api.json", "_worker.js", "_routes.json", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles, ...Object.values(topics).map((topic) => `${topic.path.slice(1)}.html`)];
 await Promise.all(requiredFiles.map(async (name) => {
   const value = await readFile(resolve(outputDirectory, name));
   if (value.byteLength === 0) throw new Error(`Web export produced an empty ${name}`);
