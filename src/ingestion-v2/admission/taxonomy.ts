@@ -22,6 +22,14 @@ export class AdmissionRowTransientError extends Error {
   }
 }
 
+/** A provider cooldown or a shared failed probe is not a fresh row attempt. */
+export class AdmissionProviderDeferredError extends AdmissionRowTransientError {
+  constructor(detail: string, retryAfterMs: number, classification: AdmissionRowFailureClass = 'destination-rate-limited') {
+    super(classification, detail, retryAfterMs);
+    this.name = 'AdmissionProviderDeferredError';
+  }
+}
+
 /**
  * An infrastructure or systemic failure: D1, the queue, the runtime, or a
  * missing/malformed snapshot. It must not consume a row attempt or quarantine a
@@ -51,6 +59,7 @@ function bounded(detail: string): string {
 export function classifyAdmissionFailure(error: unknown): AdmissionFailure {
   if (error instanceof AdmissionRowTransientError) {
     return { kind: 'row-transient', classification: error.classification, detail: bounded(error.message),
+      ...(error instanceof AdmissionProviderDeferredError ? { retryWithoutAttempt: true } : {}),
       ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}) };
   }
   if (error instanceof AdmissionInfrastructureError) {
@@ -95,6 +104,11 @@ export function nextAdmissionAttempt(
   now: number,
   failure?: AdmissionFailure,
 ): { retryAt: string; attemptCount: number } | { exhausted: true; attemptCount: number } {
+  if (failure?.retryWithoutAttempt) {
+    const delay = failure.retryAfterMs !== undefined && Number.isFinite(failure.retryAfterMs) && failure.retryAfterMs > 0
+      ? failure.retryAfterMs : 60_000;
+    return { retryAt: new Date(now + delay).toISOString(), attemptCount: failedAttempt };
+  }
   if (failedAttempt >= ADMISSION_V2_MAX_ATTEMPTS) return { exhausted: true, attemptCount: failedAttempt };
   const delays = failure?.classification === 'destination-rate-limited'
     ? [15 * 60_000, 60 * 60_000] : ADMISSION_V2_RETRY_DELAYS_MS;

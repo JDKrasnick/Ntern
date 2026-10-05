@@ -5,7 +5,7 @@ import { RuleBasedAdmissionV2Evaluator, type AdmissionCanonicalEmployerResolver,
 import { validateAdmissionV2Message } from '../src/ingestion-v2/admission/message.js';
 import { RecordingAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/recording-sink.js';
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
-import { AdmissionRowTransientError, admissionRetryAfterMs } from '../src/ingestion-v2/admission/taxonomy.js';
+import { AdmissionProviderDeferredError, AdmissionRowTransientError, admissionRetryAfterMs } from '../src/ingestion-v2/admission/taxonomy.js';
 import { admissionV2FeatureConfig, admissionV2OwnsCatalogWrites, admissionV2TrustedCommunityAlertsAllowed, type AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
 import { D1RecordingAdmissionV2CatalogSink } from './admission-v2-recording-sink.js';
@@ -14,6 +14,8 @@ import { D1InternshipStore } from './d1-store.js';
 import { recordQueueFailureBestEffort, resolveQueueFailures } from './dlq-operations.js';
 import type { D1Database, MessageBatch, R2Bucket } from './types.js';
 import { officialAdmissionProviderProbe } from './admission-v2-provider.js';
+import { D1AdmissionProviderGovernor, type AdmissionProviderGovernor } from './admission-v2-provider-governor.js';
+import { providerPostingReference } from '../src/identity/posting.js';
 
 export const ADMISSION_V2_QUEUE_NAME = 'intern-notifs-admission-v2';
 
@@ -36,12 +38,23 @@ interface HostResolver {
 }
 
 /** Bounded destination probe over the reviewed public-network fetcher. */
-export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDestinationProber {
+export function cloudflareAdmissionProber(resolver: HostResolver, governor?: AdmissionProviderGovernor): AdmissionDestinationProber {
   const maximumEvidenceBytes = 128 * 1024;
-  const providerProbe = officialAdmissionProviderProbe(resolver);
+  const providerProbe = officialAdmissionProviderProbe(resolver, governor);
   return {
     async probe({ applyUrl }) {
       const url = new URL(applyUrl);
+      const workday = url.protocol === 'https:' && !url.username && !url.password && !url.port
+        && providerPostingReference(applyUrl).provider === 'workday';
+      const workdayKey = `workday:${url.hostname}` as const;
+      if (workday && governor) {
+        let delay = await governor.acquire(workdayKey);
+        if (delay > 0 && delay <= 2_000) {
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay = await governor.acquire(workdayKey);
+        }
+        if (delay > 0) throw new AdmissionProviderDeferredError('Workday provider cooldown; no destination request made', delay, 'upstream-server-error');
+      }
       if (url.hostname === 'apply.workable.com' && /^\/[a-z0-9_-]{1,100}\/j\/[a-z0-9]{10}(?:\/apply)?\/?$/iu.test(url.pathname)) {
         const providerResult = await providerProbe(applyUrl);
         if (providerResult) return providerResult;
@@ -66,6 +79,15 @@ export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDest
       }
       if (result.status === 404 || result.status === 410) return { reachability: 'gone' };
       if (result.status === 429 || result.status >= 500) {
+        // Workday explicitly publishes this script while its application
+        // service is under maintenance. It is a provider outage, not a bad row
+        // or proof of closure; defer peers through the durable host cooldown.
+        if (workday && result.status >= 500
+          && /\bwindow\.location(?:\.href)?\s*=\s*["']https:\/\/community\.workday\.com\/maintenance-page["']/u.test(result.body)) {
+          const delay = Math.max(15 * 60_000, admissionRetryAfterMs(result.headers.get('retry-after')) ?? 0);
+          if (governor) await governor.defer(workdayKey, delay);
+          throw new AdmissionProviderDeferredError('Workday published service-maintenance notice; posting remains unresolved', delay, 'upstream-server-error');
+        }
         const providerResult = await providerProbe(applyUrl);
         if (providerResult) return providerResult;
         if (result.status === 429) throw new AdmissionRowTransientError('destination-rate-limited',
@@ -109,10 +131,11 @@ export function stage2AdmissionEvaluator(
     resolvePriorContext?: AdmissionV2PriorContextResolver;
     trustedCommunityCatalogEnabled?: boolean;
     trustedCommunityAlertsEnabledForSource?: (sourceId: string) => boolean;
+    providerGovernor?: AdmissionProviderGovernor;
   } = {},
 ): AdmissionV2RowEvaluator {
   return new RuleBasedAdmissionV2Evaluator({
-    prober: cloudflareAdmissionProber(resolver),
+    prober: cloudflareAdmissionProber(resolver, options.providerGovernor),
     sink,
     ...(resolveCanonicalEmployer ? { resolveCanonicalEmployer } : {}),
     ...(options.resolvePriorContext ? { resolvePriorContext: options.resolvePriorContext } : {}),
@@ -169,6 +192,7 @@ export async function processAdmissionV2Batch(
       ? admissionStore.resolveCanonicalEmployer(listing.providerIdentity)
       : undefined,
     {
+      providerGovernor: new D1AdmissionProviderGovernor(env.DB, now),
       trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
       trustedCommunityAlertsEnabledForSource: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
       resolvePriorContext: async (sourceId, externalId) => {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { officialAdmissionProviderProbe } from '../cloudflare/admission-v2-provider.js';
 import { cloudflareAdmissionProber } from '../cloudflare/admission-v2.js';
+import { AdmissionProviderDeferredError, classifyAdmissionFailure } from '../src/ingestion-v2/admission/taxonomy.js';
 afterEach(() => vi.unstubAllGlobals());
 const resolver = { async resolve() { return ['93.184.216.34']; } };
 const workable = 'https://apply.workable.com/cogna/j/45A6283F88/';
@@ -8,6 +9,30 @@ const helsing = 'https://helsing.ai/jobs/4941957101?gh_jid=4941957101';
 const probe = (url: string, prober = officialAdmissionProviderProbe(resolver)) => prober(url);
 const job = { shortcode:'45A6283F88',title:'Software Engineer Intern',url:'https://apply.workable.com/j/45A6283F88',description:'Internship responsibilities and qualifications. '.repeat(20) };
 describe('official admission provider evidence', () => {
+ it('defers an explicit Workday maintenance notice and peers without marking a posting closed or spending row attempts', async () => {
+  const url='https://nio.wd3.myworkdayjobs.com/en-US/nio_careers/job/San-Jose-US/Role_R-000144';
+  const fetcher=vi.fn(async()=>new Response('<script>window.location.href = "https://community.workday.com/maintenance-page"</script>',{status:500}));vi.stubGlobal('fetch',fetcher);
+  let cooldown=0;
+  const defer=vi.fn(async(provider:unknown,delay:number)=>{expect(provider).toBe('workday:nio.wd3.myworkdayjobs.com');cooldown=delay;});
+  const prober=cloudflareAdmissionProber(resolver,{async acquire(){return cooldown;},defer});
+  for(let i=0;i<2;i++) {
+   const error=await prober.probe({sourceId:'source',externalId:'role',applyUrl:url,observedAt:new Date().toISOString()}).catch(e=>e);
+   expect(classifyAdmissionFailure(error)).toMatchObject({kind:'row-transient',classification:'upstream-server-error',retryWithoutAttempt:true,retryAfterMs:900000});
+  }
+  expect(defer).toHaveBeenCalledWith('workday:nio.wd3.myworkdayjobs.com',900000);
+  expect(fetcher).toHaveBeenCalledOnce();
+ });
+ it('does not accept a Workday maintenance claim from an unrelated host', async () => {
+  vi.stubGlobal('fetch',vi.fn(async()=>new Response('<script>window.location.href = "https://community.workday.com/maintenance-page"</script>',{status:500})));
+  const error=await cloudflareAdmissionProber(resolver).probe({sourceId:'source',externalId:'role',applyUrl:'https://jobs.example.com/role',observedAt:new Date().toISOString()}).catch(e=>e);
+  expect(classifyAdmissionFailure(error)).not.toHaveProperty('retryWithoutAttempt');
+ });
+ it('does not make an HTTP request or spend an attempt during the durable provider cooldown', async () => {
+  const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
+  const prober=officialAdmissionProviderProbe(resolver,{async acquire(){return 900000;},async defer(){throw Error('Not reached');}});
+  await expect(probe(workable,prober)).rejects.toBeInstanceOf(AdmissionProviderDeferredError);
+  expect(fetcher).not.toHaveBeenCalled();
+ });
  it.each([429, 503])('settles a challenged employer page using its reviewed official API on HTTP %s', async status => {
   const fetcher = vi.fn(async (url: unknown) => String(url).includes('boards-api.greenhouse.io')
     ? Response.json({id:4941957101,title:'AI Research Intern',content:job.description,absolute_url:helsing})

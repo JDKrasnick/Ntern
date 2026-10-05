@@ -77,6 +77,8 @@ export interface AdmissionFailure {
   detail: string;
   /** Provider-requested minimum wait, retained in the durable retry timestamp. */
   retryAfterMs?: number;
+  /** No destination request occurred: wait without spending a row attempt. */
+  retryWithoutAttempt?: boolean;
 }
 
 /** The evaluator's result for one row. Throws for failures; returns this to settle. */

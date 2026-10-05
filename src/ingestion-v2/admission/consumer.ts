@@ -199,7 +199,7 @@ export async function processAdmissionV2Message(
         dependencies.log?.({ event: 'ingestion_v2_admission_infrastructure', batchId: message.batchId, externalId, classification: failure.classification });
         return result;
       }
-      const failedAttempt = lease.row.attemptCount + 1;
+      const failedAttempt = lease.row.attemptCount + (failure.retryWithoutAttempt ? 0 : 1);
       const next = nextAdmissionAttempt(failedAttempt, now().getTime(), failure);
       if ('exhausted' in next) {
         const quarantined = await dependencies.ledger.quarantineRow({

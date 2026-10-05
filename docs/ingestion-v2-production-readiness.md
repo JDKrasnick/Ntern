@@ -90,13 +90,26 @@ failed tenant requests per delivery, and checks reviewed Greenhouse APIs when
 application pages return 429 or 5xx. Posting IDs, tenant routes, redirects, complete
 inventory shape, and public URLs must agree. Partial or failed responses cannot
 prove closure. Rate-limit retries honor Retry-After and otherwise wait 15 minutes
-then one hour; the three-attempt limit remains unchanged. Evaluator revision 4
+then one hour; the three-attempt limit remains unchanged. A durable D1 provider
+governor shares Workable pacing and cooldowns across deliveries and isolates.
+Requests start at least two seconds apart; an actual 429 sets a shared minimum
+15-minute cooldown (or the longer Retry-After). Rows that wait without an HTTP
+request retain their attempt count, including peers reusing a throttled tenant
+probe. D1 governor failures retry as infrastructure and cannot spend row attempts.
+Short pacing waits are bounded to two seconds inside the delivery; long waits
+remain durable queued work. Evaluator revision 4
 forces a quiet policy regrade before promotion. A later drain exposed three EquipmentShare 503 responses and one NIO Workday
 500 response. Cloudflare confirmed the EquipmentShare challenge and the exact
 Greenhouse posting 404, allowing a conclusive closed decision through the
 reviewed API. NIO returned 500 locally and from Cloudflare; its public detail API
-returned 422, which cannot prove posting closure. NIO remains a provider outage
-until healthy evidence or an authoritative terminal response arrives. Provider
+returned 422, which cannot prove posting closure. A normal-browser inspection confirms Workday redirects this exact role to its
+official service-interruption page. The HTTP 500 body explicitly assigns
+`window.location.href` to `https://community.workday.com/maintenance-page`.
+V2 recognizes that exact notice only on a validated Workday posting host,
+records a shared host cooldown, and defers the row without consuming an attempt.
+It neither proves closure nor grants publication. Peers wait durably without
+repeating the maintenance request. NIO remains unresolved until the service
+recovers or authoritative terminal evidence arrives. Provider
 throttling and outages can still block the soak gate; the repair does not count replay acceptance as success.
 
 A separate Cloudflare D1/R2/Queue experiment uses the production discovery,

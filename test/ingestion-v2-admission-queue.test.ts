@@ -1,3 +1,4 @@
+import { AdmissionProviderDeferredError } from '../src/ingestion-v2/admission/taxonomy.js';
 import { describe, expect, it } from 'vitest';
 import { processAdmissionV2Message } from '../src/ingestion-v2/admission/consumer.js';
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
@@ -309,6 +310,18 @@ class CountingEvaluator implements AdmissionV2RowEvaluator {
 }
 
 describe('admission v2 queue consumer', () => {
+  it('does not spend row attempts when a provider cooldown prevents an HTTP request', async () => {
+    const { ledger, snapshots } = setup(['a']);
+    const [message] = messagesFor(['a']);
+    const now = new Date('2026-10-05T00:00:00Z');
+    const result = await processAdmissionV2Message(message, { ledger, snapshots, now: () => now,
+      evaluator: { async evaluate() { throw new AdmissionProviderDeferredError('Provider cooldown', 900000); } } });
+    expect(result.acknowledged).toBe(true);
+    expect(result.retried).toBe(1);
+    expect(result.quarantined).toBe(0);
+    expect(await ledger.getRow(SOURCE, 'a')).toMatchObject({state:'queued',attemptCount:0,retryAt:'2026-10-05T00:15:00.000Z'});
+  });
+
   it('settles every row and acknowledges the message', async () => {
     const { ledger, snapshots } = setup(['a', 'b', 'c']);
     const evaluator = new CountingEvaluator(async () => ({ kind: 'admitted' }));

@@ -3,7 +3,8 @@ import { providerPostingReference, customGreenhouseReference } from '../src/iden
 import { metadataApiRoute, parseMetadataApiResponse } from '../src/metadata-acquisition.js';
 import { metadataDescriptionText } from '../src/core/metadata-text.js';
 import type { AdmissionDestinationProbe } from '../src/ingestion-v2/admission/evaluator.js';
-import { AdmissionRowTransientError, admissionRetryAfterMs } from '../src/ingestion-v2/admission/taxonomy.js';
+import { AdmissionProviderDeferredError, AdmissionRowTransientError, admissionRetryAfterMs } from '../src/ingestion-v2/admission/taxonomy.js';
+import type { AdmissionProviderGovernor } from './admission-v2-provider-governor.js';
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 function unavailable(detail: string): never { throw new AdmissionRowTransientError('upstream-server-error', detail); }
@@ -19,9 +20,19 @@ function evidence(url: string, postingId: string, title: string, description: st
 }
 
 /** One bounded tenant cache per queue delivery, never a global Worker cache. */
-export function officialAdmissionProviderProbe(resolver: { resolve(host: string): Promise<string[]> }) {
+export function officialAdmissionProviderProbe(resolver: { resolve(host: string): Promise<string[]> }, governor?: AdmissionProviderGovernor) {
   let cache: { url: string; promise: Promise<Record<string, unknown> | 'gone' | 'blocked'> } | undefined;
-  async function read(url: string, permittedFinal: (final: URL) => boolean): Promise<Record<string, unknown> | 'gone' | 'blocked'> {
+  async function read(url: string, permittedFinal: (final: URL) => boolean, provider?: 'workable'): Promise<Record<string, unknown> | 'gone' | 'blocked'> {
+    if (provider && governor) {
+      let delay = await governor.acquire(provider);
+      // A short pacing reservation can finish inside this bounded delivery.
+      // Long provider cooldowns remain durable queued work, never a long sleep.
+      if (delay > 0 && delay <= 2_000) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay = await governor.acquire(provider);
+      }
+      if (delay > 0) throw new AdmissionProviderDeferredError('Workable provider cooldown; no destination request made', delay);
+    }
     let response;
     try { response = await safeFetchText(url, { resolver, timeoutMs: 8000, maxRedirects: 2,
       maxBodyBytes: 512 * 1024, onOversize: 'fail', headers: { Accept: 'application/json' } }); }
@@ -31,8 +42,11 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
     }
     if (!permittedFinal(new URL(response.url))) unavailable('Official provider API redirected outside its posting route');
     if (response.status === 404 || response.status === 410) return 'gone';
-    if (response.status === 429) throw new AdmissionRowTransientError('destination-rate-limited',
-      `HTTP 429 from ${new URL(response.url).hostname}`, admissionRetryAfterMs(response.headers.get('retry-after')));
+    if (response.status === 429) {
+      const delay = admissionRetryAfterMs(response.headers.get('retry-after'));
+      if (provider && governor) await governor.defer(provider, delay ?? 15 * 60_000);
+      throw new AdmissionRowTransientError('destination-rate-limited', `HTTP 429 from ${new URL(response.url).hostname}`, delay);
+    }
     if (response.status >= 500) unavailable(`Official provider API HTTP ${response.status}`);
     if (response.status >= 400) return 'blocked';
     let payload: unknown;
@@ -69,11 +83,19 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
     if (original.hostname !== 'apply.workable.com' || !match) return undefined;
     const [, tenant, id] = match;
     const url = `https://www.workable.com/api/accounts/${tenant}?details=true`;
-    if (cache?.url !== url) cache = { url, promise: read(url, final =>
+    const shared = cache?.url === url;
+    if (!shared) cache = { url, promise: read(url, final =>
       (final.origin === 'https://www.workable.com' && final.pathname === `/api/accounts/${tenant}`)
-      || (final.origin === 'https://apply.workable.com' && final.pathname === `/api/v1/widget/accounts/${tenant}`)) };
+      || (final.origin === 'https://apply.workable.com' && final.pathname === `/api/v1/widget/accounts/${tenant}`), 'workable') };
     // Cache failures too: peer rows must not repeat a throttled tenant request.
-    const payload = await cache.promise;
+    let payload;
+    try { payload = await cache!.promise; }
+    catch (error) {
+      if (shared && error instanceof AdmissionRowTransientError && error.classification === 'destination-rate-limited') {
+        throw new AdmissionProviderDeferredError('Shared Workable throttled probe; no new destination request made', error.retryAfterMs ?? 15 * 60_000);
+      }
+      throw error;
+    }
     if (payload === 'gone') unavailable('Workable tenant inventory is unavailable; posting closure is unproven');
     if (typeof payload === 'string') return { reachability: payload };
     // A tenant-level 404 is not proof that an individual posting closed.
