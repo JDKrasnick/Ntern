@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   deploy:
+    outputs:
+      ci_run_id: ${{ steps.revision.outputs.ci_run_id }}
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -106,17 +108,22 @@ jobs:
             fi
           done
       - name: Reject an obsolete or unverified main revision
+        id: revision
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           test "$DEPLOY_SHA" = "$(git rev-parse HEAD)"
           test "$DEPLOY_SHA" = "$(git ls-remote origin refs/heads/main | cut -f1)"
+          ci_run_id='${{ github.event.workflow_run.id }}'
           if test "$GITHUB_EVENT_NAME" = workflow_dispatch; then
-            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=$DEPLOY_SHA&per_page=10" \
-              --jq '.workflow_runs | map(select(.head_sha == env.DEPLOY_SHA)) | first | .conclusion')
-            test "$conclusion" = success
+            ci_run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=$DEPLOY_SHA&per_page=10" \
+              --jq '.workflow_runs | map(select(.head_sha == env.DEPLOY_SHA and .conclusion == "success")) | first | .id')
           fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id" \
+            --jq '.head_sha == env.DEPLOY_SHA and .head_branch == "main" and .event == "push" and .conclusion == "success" and .head_repository.full_name == env.GITHUB_REPOSITORY' \
+            | grep -qx true
+          echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
       - run: npm ci
       - name: Ensure the resume embedding index exists
         shell: bash
@@ -313,3 +320,36 @@ jobs:
             curl -fsS -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" "$api/internal/deployment" \
               | jq -e '.api and .ingestion' >/dev/null
           fi
+  deploy-web:
+    needs: deploy
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cloudflare-pages-production
+      cancel-in-progress: false
+    environment:
+      name: cloudflare-pages-production
+      url: https://ntern.app
+    env:
+      DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist-${{ env.DEPLOY_SHA }}
+          path: mobile/dist
+          run-id: ${{ needs.deploy.outputs.ci_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify the artifact's API supports bounded public reads
+        run: npx tsx scripts/verify-public-web-api.ts mobile/dist/public-api.json
+      - name: Reject an obsolete main revision
+        run: test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$DEPLOY_SHA"
+      - name: Deploy verified web artifact
+        run: npx wrangler pages deploy mobile/dist --project-name internnotifs --branch main --commit-hash "$DEPLOY_SHA" --commit-dirty=false
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
