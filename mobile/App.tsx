@@ -3330,6 +3330,7 @@ function LaunchInbox({
     />
   ) : null;
   if (groupedRows.length) return (
+    <>
     <FlatList
       style={[styles.list, styles.webScrollbarHidden]}
       data={groupedRows}
@@ -3352,7 +3353,6 @@ function LaunchInbox({
               <Text style={styles.inboxViewAllText}>Search all roles</Text>
             </TouchableOpacity>
             {onStartSwipe ? <SwipePillButton onPress={onStartSwipe} /> : null}
-            {Platform.OS === "web" ? <Text accessibilityRole="link" {...{ href: "/jobs" }} style={styles.inboxViewAllText}>About Ntern &amp; browse roles</Text> : null}
             {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
               <QueuePillButton count={queueCount} onPress={onOpenQueue} />
             ) : null}
@@ -3408,8 +3408,11 @@ function LaunchInbox({
         </View>
       }
     />
+    <WebAboutLink />
+    </>
   );
   return (
+    <>
     <FlatList
       style={[styles.list, styles.webScrollbarHidden]}
       data={visibleJobs}
@@ -3443,7 +3446,6 @@ function LaunchInbox({
           {isLatest ? (
             <View style={styles.inboxActions}>
               {onStartSwipe ? <SwipePillButton onPress={onStartSwipe} /> : null}
-              {Platform.OS === "web" ? <Text accessibilityRole="link" {...{ href: "/jobs" }} style={styles.inboxViewAllText}>About Ntern &amp; browse roles</Text> : null}
               {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
                 <QueuePillButton count={queueCount} onPress={onOpenQueue} />
               ) : null}
@@ -3522,7 +3524,18 @@ function LaunchInbox({
         </View>
       }
     />
+    <WebAboutLink />
+    </>
   );
+}
+
+function WebAboutLink() {
+  const { width } = useWindowDimensions();
+  return Platform.OS === "web" ? (
+    <View style={[styles.webAboutFooter, width >= 900 && styles.webAboutCorner]}>
+      <Text accessibilityRole="link" {...{ href: "/about" }} style={styles.webAboutLink}>About</Text>
+    </View>
+  ) : null;
 }
 
 function CatalogPaginationFooter({
@@ -10391,6 +10404,9 @@ const styles = StyleSheet.create({
   },
   inboxViewAllText: { color: colors.signal, fontSize: 15, fontWeight: "700" },
   inboxViewAllFooter: { alignSelf: "center", marginBottom: 12, marginTop: 24 },
+  webAboutFooter: { alignItems: "flex-end", paddingRight: 12, paddingBottom: 4 },
+  webAboutCorner: { position: "fixed", right: 8, bottom: 4, paddingRight: 0, paddingBottom: 0 } as unknown as ViewStyle,
+  webAboutLink: { color: colors.muted, fontSize: 12, fontWeight: "400", paddingHorizontal: 12, paddingVertical: 10 },
   inboxActions: { alignItems: "center", flexDirection: "row", gap: 8, marginTop: 16 },
   inboxViewAllInline: { alignSelf: "auto", marginTop: 0 },
   inboxSectionLabel: { color: colors.signal, fontSize: 12, fontWeight: "700", letterSpacing: 1, marginTop: 28 },
