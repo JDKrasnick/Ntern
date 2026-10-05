@@ -200,7 +200,7 @@ export async function processAdmissionV2Message(
         return result;
       }
       const failedAttempt = lease.row.attemptCount + 1;
-      const next = nextAdmissionAttempt(failedAttempt, now().getTime());
+      const next = nextAdmissionAttempt(failedAttempt, now().getTime(), failure);
       if ('exhausted' in next) {
         const quarantined = await dependencies.ledger.quarantineRow({
           sourceId: message.sourceId, externalId, owner, now: now().toISOString(),

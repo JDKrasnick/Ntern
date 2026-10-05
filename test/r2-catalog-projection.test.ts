@@ -33,6 +33,33 @@ function fakeBucket() {
 }
 
 describe('R2 catalog projection', () => {
+  it('retains complete pages across an unchanged D1 generation and renews its pointer', async () => {
+    const { bucket, objects } = fakeBucket();
+    const projection = new R2CatalogProjection(bucket);
+    const groups = groupCatalogJobs([role(0)]).map(catalogGroupDetails);
+    const first = new Date(Date.now() - 60_000).toISOString();
+    await projection.publish(groups, first, 'watermark');
+    const page = [...objects.entries()].find(([key]) => key.endsWith('/0'))!;
+    const generatedAt = new Date().toISOString();
+    await projection.revalidate(groups, generatedAt, 'watermark');
+    expect(objects.get(page[0])).toBe(page[1]);
+    expect(objects.size).toBe(2);
+    const pointer = JSON.parse(new TextDecoder().decode(objects.get('public-catalog/v1/current')));
+    expect(pointer.generatedAt).toBe(generatedAt);
+    expect((await projection.list())?.groups).toHaveLength(1);
+  });
+
+  it('invalidates changed admission content even when the live watermark is unchanged', async () => {
+    const { bucket, objects } = fakeBucket();
+    const projection = new R2CatalogProjection(bucket);
+    const groups = groupCatalogJobs([role(0)], { includeClosed: true }).map(catalogGroupDetails);
+    await projection.publish(groups, new Date().toISOString(), 'watermark');
+    const closed = groupCatalogJobs([{ ...role(0), open: false }], { includeClosed: true }).map(catalogGroupDetails);
+    await projection.revalidate(closed, new Date().toISOString(), 'watermark');
+    expect(objects.has('public-catalog/v1/current')).toBe(false);
+    expect(await projection.list()).toBeUndefined();
+  });
+
   it('reads role pages with bounded concurrency for the days index', async () => {
     const { bucket } = fakeBucket();
     const groups = groupCatalogJobs(Array.from({ length: 501 }, (_, index) => role(index)), { includeClosed: true }).map(catalogGroupDetails);

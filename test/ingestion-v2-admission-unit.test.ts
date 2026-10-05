@@ -11,6 +11,7 @@ import {
   AdmissionRowTransientError,
   classifyAdmissionFailure,
   nextAdmissionAttempt,
+  admissionRetryAfterMs,
 } from '../src/ingestion-v2/admission/taxonomy.js';
 import { canTransition, planRowTransition } from '../src/ingestion-v2/admission/transitions.js';
 import { admissionRowShouldNotify } from '../src/ingestion-v2/admission/evaluator.js';
@@ -105,6 +106,21 @@ describe('admission v2 failure taxonomy', () => {
     expect(nextAdmissionAttempt(1, now)).toEqual({ retryAt: '2026-10-01T00:01:00.000Z', attemptCount: 1 });
     expect(nextAdmissionAttempt(2, now)).toEqual({ retryAt: '2026-10-01T00:05:00.000Z', attemptCount: 2 });
     expect(nextAdmissionAttempt(3, now)).toEqual({ exhausted: true, attemptCount: 3 });
+  });
+
+  it('honors provider minimum waits and spaces rate-limit retries without extending the attempt budget', () => {
+    const now = Date.parse('2026-10-01T00:00:00.000Z');
+    const failure = classifyAdmissionFailure(new AdmissionRowTransientError('destination-rate-limited', '429', 7_200_000));
+    expect(nextAdmissionAttempt(1, now, failure)).toEqual({ retryAt: '2026-10-01T02:00:00.000Z', attemptCount: 1 });
+    expect(nextAdmissionAttempt(3, now, failure)).toEqual({ exhausted: true, attemptCount: 3 });
+    const noHeader = classifyAdmissionFailure(new AdmissionRowTransientError('destination-rate-limited', '429'));
+    expect(nextAdmissionAttempt(1, now, noHeader)).toMatchObject({ retryAt: '2026-10-01T00:15:00.000Z' });
+    expect(nextAdmissionAttempt(2, now, noHeader)).toMatchObject({ retryAt: '2026-10-01T01:00:00.000Z' });
+    expect(admissionRetryAfterMs('7200', now)).toBe(7_200_000);
+    expect(admissionRetryAfterMs('Thu, 01 Oct 2026 02:00:00 GMT', now)).toBe(7_200_000);
+    for (const invalid of [null, '', '-1', 'garbage', '999999999999999999999999', 'Wed, 30 Sep 2026 02:00:00 GMT']) {
+      expect(admissionRetryAfterMs(invalid, now)).toBeUndefined();
+    }
   });
 });
 

@@ -75,6 +75,8 @@ export interface AdmissionFailure {
   classification: AdmissionRowFailureClass | AdmissionInfrastructureFailureClass;
   /** Bounded, sanitized detail. Never a raw response body. */
   detail: string;
+  /** Provider-requested minimum wait, retained in the durable retry timestamp. */
+  retryAfterMs?: number;
 }
 
 /** The evaluator's result for one row. Throws for failures; returns this to settle. */

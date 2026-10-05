@@ -1936,7 +1936,7 @@ export async function runCatalogProjectionMaintenance<T>(
   return { prospectiveShadowMetadata, projection };
 }
 
-async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket, phases?: MaintenancePhaseRecorder) {
+async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket, phases?: MaintenancePhaseRecorder, revalidateOnly = false) {
   // One order for both read models: the card's own `updatedAt` (with its group id
   // breaking ties) is stored on each D1 row as its sort key, and R2 pages are
   // written in the same order, so a reader of either sees the same sequence.
@@ -1960,7 +1960,15 @@ async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Buc
     await recordPhase(phases, 'catalog_projection_d1', 'failed');
     throw error;
   }
-  if (bucket) {
+  if (bucket && revalidateOnly) {
+    try {
+      await new R2CatalogProjection(bucket).revalidate(groups, generatedAt, liveWatermark);
+    } catch (error) {
+      // A newly committed D1 generation must never leave an unverified old R2 view live.
+      await new R2CatalogProjection(bucket).invalidate();
+      throw error;
+    }
+  } else if (bucket) {
     await recordPhase(phases, 'catalog_projection_r2', 'started');
     try {
       await new R2CatalogProjection(bucket).publish(groups, generatedAt, liveWatermark);
@@ -1989,11 +1997,9 @@ async function refreshCatalogProjectionD1(
   bucket: R2Bucket | undefined,
   phases?: MaintenancePhaseRecorder,
 ) {
-  const result = await refreshCatalogProjection(store, undefined, phases);
-  // The R2 pointer describes the previous D1 generation until the separate R2
-  // cron publishes it. Remove it so readers use the newly committed D1 view.
-  if (bucket) await new R2CatalogProjection(bucket).invalidate();
-  return result;
+  // Reuse complete pages only when their content hash matches this exact D1 view.
+  // Changed admission decisions still invalidate R2 until its dedicated cron publishes.
+  return refreshCatalogProjection(store, bucket, phases, true);
 }
 
 async function refreshCatalogProjectionR2(store: D1InternshipStore, bucket: R2Bucket, phases?: MaintenancePhaseRecorder) {

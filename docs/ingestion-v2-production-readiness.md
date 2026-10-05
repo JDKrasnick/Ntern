@@ -73,6 +73,27 @@ from an isolated Cloudflare Worker. Both dev Workers received the repair, and
 all ten rows were reopened through reviewed replay previews and apply receipts.
 The cohort still must drain and reconcile; replay acceptance is not a pass.
 
+Further diagnosis found two distinct root causes. The D1 publication cron
+unconditionally deleted the R2 pointer every ten minutes, even for unchanged
+catalog content. This system defect created a three-minute handoff gap before
+the R2 cron. The repair retains immutable pages only when their content hash
+matches the new D1 projection, renews the pointer timestamp and watermark, and
+still invalidates changed content until the dedicated publication completes.
+
+The subsequent 23 quarantines were provider HTTP 429 responses: 22 Workable
+postings and one Helsing posting. An isolated Cloudflare probe observed Workable
+alternating between 200 and 429, including its documented public inventory API.
+Helsing returned a Vercel Security Checkpoint locally and from Cloudflare, while
+its reviewed official Greenhouse API returned the exact live posting. The V2
+probe now uses a bounded Workable published inventory, caches successful and
+failed tenant requests per delivery, and checks reviewed Greenhouse APIs when
+application pages return 429. Posting IDs, tenant routes, redirects, complete
+inventory shape, and public URLs must agree. Partial or failed responses cannot
+prove closure. Rate-limit retries honor Retry-After and otherwise wait 15 minutes
+then one hour; the three-attempt limit remains unchanged. Evaluator revision 4
+forces a quiet policy regrade before promotion. Provider throttling can still
+block the soak gate; the repair does not count replay acceptance as success.
+
 A separate Cloudflare D1/R2/Queue experiment uses the production discovery,
 admission, bootstrap, and catalog implementations. Its controlled 1,000-row
 baseline settled independently: 999 blocked rows, one canonical Figma internship,

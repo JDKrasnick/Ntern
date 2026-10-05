@@ -31,6 +31,13 @@ function row(): IngestionRowRecord {
 }
 
 describe('Cloudflare admission v2 boundary', () => {
+  it('retains a provider Retry-After minimum without interpreting a 429 as a closed job', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Throttled', { status: 429, headers: { 'Retry-After': '7200' } })));
+    const prober = cloudflareAdmissionProber({ async resolve() { return ['93.184.216.34']; } });
+    await expect(prober.probe({ sourceId: 'source', externalId: 'role', applyUrl: 'https://jobs.example.com/role', observedAt }))
+      .rejects.toMatchObject({ classification: 'destination-rate-limited', retryAfterMs: 7_200_000,
+        message: 'HTTP 429 from jobs.example.com' });
+  });
   it.each(['http://jobs.example.com/role', 'https://127.0.0.1/admin', 'https://jobs.example.com:8443/role'])('blocks a refused redirect without retrying it: %s', async (location) => {
     const fetcher = vi.fn(async () => new Response(null, { status: 302, headers: { location } }));
     vi.stubGlobal('fetch', fetcher);

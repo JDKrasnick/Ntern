@@ -5,7 +5,7 @@ import { RuleBasedAdmissionV2Evaluator, type AdmissionCanonicalEmployerResolver,
 import { validateAdmissionV2Message } from '../src/ingestion-v2/admission/message.js';
 import { RecordingAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/recording-sink.js';
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
-import { AdmissionRowTransientError } from '../src/ingestion-v2/admission/taxonomy.js';
+import { AdmissionRowTransientError, admissionRetryAfterMs } from '../src/ingestion-v2/admission/taxonomy.js';
 import { admissionV2FeatureConfig, admissionV2OwnsCatalogWrites, admissionV2TrustedCommunityAlertsAllowed, type AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
 import { D1RecordingAdmissionV2CatalogSink } from './admission-v2-recording-sink.js';
@@ -13,6 +13,7 @@ import { D1CatalogAdmissionStore } from './catalog-admission-store.js';
 import { D1InternshipStore } from './d1-store.js';
 import { recordQueueFailureBestEffort, resolveQueueFailures } from './dlq-operations.js';
 import type { D1Database, MessageBatch, R2Bucket } from './types.js';
+import { officialAdmissionProviderProbe } from './admission-v2-provider.js';
 
 export const ADMISSION_V2_QUEUE_NAME = 'intern-notifs-admission-v2';
 
@@ -37,8 +38,14 @@ interface HostResolver {
 /** Bounded destination probe over the reviewed public-network fetcher. */
 export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDestinationProber {
   const maximumEvidenceBytes = 128 * 1024;
+  const providerProbe = officialAdmissionProviderProbe(resolver);
   return {
     async probe({ applyUrl }) {
+      const url = new URL(applyUrl);
+      if (url.hostname === 'apply.workable.com' && /^\/[a-z0-9_-]{1,100}\/j\/[a-z0-9]{10}(?:\/apply)?\/?$/iu.test(url.pathname)) {
+        const providerResult = await providerProbe(applyUrl);
+        if (providerResult) return providerResult;
+      }
       let result;
       try {
         result = await safeFetchText(applyUrl, {
@@ -58,7 +65,12 @@ export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDest
         throw new AdmissionRowTransientError('destination-timeout', error instanceof Error ? error.message : String(error));
       }
       if (result.status === 404 || result.status === 410) return { reachability: 'gone' };
-      if (result.status === 429) throw new AdmissionRowTransientError('destination-rate-limited', `HTTP ${result.status}`);
+      if (result.status === 429) {
+        const providerResult = await providerProbe(applyUrl);
+        if (providerResult) return providerResult;
+        throw new AdmissionRowTransientError('destination-rate-limited',
+          `HTTP 429 from ${new URL(result.url).hostname}`, admissionRetryAfterMs(result.headers.get('retry-after')));
+      }
       if (result.status >= 500) throw new AdmissionRowTransientError('upstream-server-error', `HTTP ${result.status}`);
       if (result.status >= 400) return { reachability: 'blocked' };
       const inspectedBytes = new TextEncoder().encode(result.body).byteLength;

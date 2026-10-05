@@ -11,6 +11,12 @@ const filterReadPageConcurrency = 4;
 const maxAgeMs = 7 * 24 * 60 * 60_000;
 const encoded = (value: unknown): ArrayBuffer => new TextEncoder().encode(JSON.stringify(value)).buffer as ArrayBuffer;
 
+function contentVersion(groups: CatalogGroupDetails[]): string {
+  const hash = createHash('sha256');
+  for (const group of groups) hash.update(JSON.stringify(group)).update('\0');
+  return hash.digest('hex').slice(0, 20);
+}
+
 type Pointer = { schemaVersion: 1; version: string; generatedAt: string; count: number; groupPages: Record<string, number>;
   /** The D1 publish's open-catalog watermark, so a reader can detect an unprojected role. */
   liveWatermark?: string };
@@ -25,6 +31,18 @@ export class R2CatalogProjection {
   constructor(private readonly bucket: R2Bucket) {}
 
   async invalidate(): Promise<void> { await this.bucket.delete(`${prefix}/current`); }
+
+  /** Keep complete immutable pages when only the D1 generation timestamp changed. */
+  async revalidate(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void> {
+    const previous = await this.pointer();
+    if (!previous || previous.version !== contentVersion(groups)) {
+      await this.invalidate();
+      return;
+    }
+    await this.bucket.put(`${prefix}/current`, encoded({
+      ...previous, generatedAt, liveWatermark,
+    }));
+  }
 
   private async pointer(): Promise<Pointer | undefined> {
     const object = await this.bucket.get(`${prefix}/current`);
@@ -47,9 +65,7 @@ export class R2CatalogProjection {
   }
 
   async publish(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void> {
-    const hash = createHash('sha256');
-    for (const group of groups) hash.update(JSON.stringify(group)).update('\0');
-    const version = hash.digest('hex').slice(0, 20);
+    const version = contentVersion(groups);
     const previous = await this.pointer();
     if (previous?.version !== version) {
       for (let index = 0; index * pageSize < groups.length; index += 1) {
