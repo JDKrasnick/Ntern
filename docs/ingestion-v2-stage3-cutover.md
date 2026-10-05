@@ -35,7 +35,10 @@ catalog parity and queue drain are otherwise healthy.
 The checkpoint also fails on any queue message that reaches its final configured
 delivery attempt during the observation window. A later retry, deferral, or
 ledger resolution does not erase that exhaustion signal; diagnose it and restart
-the clean soak window after the fix is deployed.
+the clean soak window after the fix is deployed. Set
+`INGESTION_V2_SOAK_STARTED_AT` to that deployment's ISO-8601 timestamp for a
+restarted local monitor; the rolling 24-hour boundary still applies if it is
+later.
 
 Dry-run:
 

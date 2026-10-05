@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { evaluateDevSoak, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
 
 const healthy = (): DevSoakSample => ({
-  capturedAt: '2026-10-04T21:00:00.000Z', windowHours: 24,
+  capturedAt: '2026-10-04T21:00:00.000Z', windowStartedAt: '2026-10-03T21:00:00.000Z', windowHours: 24,
   canary: {
     sourceId: 'northwestern-fintech-2027-quant',
     health: { state: 'healthy', sourceStatus: 'active', lastSuccessAt: '2026-10-04T20:45:00.000Z', consecutiveFailures: 0 },

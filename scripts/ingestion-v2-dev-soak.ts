@@ -31,6 +31,7 @@ interface Check { name: string; status: 'pass' | 'warn' | 'fail'; detail: string
 
 export interface DevSoakSample {
   capturedAt: string;
+  windowStartedAt: string;
   windowHours: number;
   canary: {
     sourceId: string;
@@ -134,7 +135,14 @@ async function main(): Promise<number> {
   const output = process.env.INGESTION_V2_SOAK_REPORT
     ?? '.context/verification/ingestion-v2/dev-soak/report.json';
   const capturedAt = new Date();
-  const windowStart = new Date(capturedAt.getTime() - windowHours * 3_600_000).toISOString();
+  const rollingWindowStart = new Date(capturedAt.getTime() - windowHours * 3_600_000);
+  const configuredWindowStart = process.env.INGESTION_V2_SOAK_STARTED_AT
+    ? new Date(process.env.INGESTION_V2_SOAK_STARTED_AT)
+    : undefined;
+  if (configuredWindowStart && !Number.isFinite(configuredWindowStart.getTime())) {
+    throw new Error('INGESTION_V2_SOAK_STARTED_AT must be an ISO-8601 timestamp');
+  }
+  const windowStart = new Date(Math.max(rollingWindowStart.getTime(), configuredWindowStart?.getTime() ?? 0)).toISOString();
   const staleHandoffBefore = new Date(capturedAt.getTime() - 15 * 60_000).toISOString();
 
   async function cloudflare<T>(path: string): Promise<T> {
@@ -203,6 +211,7 @@ async function main(): Promise<number> {
   const handoff = handoffs[0];
   const sample: DevSoakSample = {
     capturedAt: capturedAt.toISOString(),
+    windowStartedAt: windowStart,
     windowHours,
     canary: {
       sourceId: canary,
