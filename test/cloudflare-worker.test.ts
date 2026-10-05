@@ -329,7 +329,7 @@ describe('Cloudflare maintenance cron', () => {
     ]);
   });
 
-  it('refreshes the catalog projection on its dedicated cron and marks every step', async () => {
+  it('refreshes the D1 catalog projection on its dedicated cron and invalidates the old R2 pointer', async () => {
     // The projection is the Roles feed's whole source of truth, and it is now the
     // only memory-heavy step on this cron so the `9-59/10` phases cannot pile up
     // beside it and cross the isolate limit.
@@ -342,8 +342,6 @@ describe('Cloudflare maintenance cron', () => {
         cron: '1-51/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:01:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         DB: { prepare: () => ({ async first() { return null; } }) },
-        // R2 publication runs so the marker brackets it too; an empty catalog has
-        // no pages, so only the pointer write reaches the bucket.
         DOCUMENTS: {
           async get() { return null; }, async put() { return undefined; }, async delete() { return undefined; },
         },
@@ -353,10 +351,35 @@ describe('Cloudflare maintenance cron', () => {
       expect(projection).toHaveBeenCalledOnce();
       expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'started');
       expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'complete');
-      expect(markers).toHaveBeenCalledWith('catalog_projection_r2', 'started');
-      expect(markers).toHaveBeenCalledWith('catalog_projection_r2', 'complete');
+      expect(markers).not.toHaveBeenCalledWith('catalog_projection_r2', expect.anything());
       expect(markers).toHaveBeenCalledWith('catalog_projection_complete', 'complete', expect.any(Date));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_catalog_projection_complete"'));
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('publishes the R2 catalog projection in a separate invocation', async () => {
+    const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+    const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
+    const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const put = vi.fn().mockResolvedValue(undefined);
+    try {
+      await cloudflareWorker.scheduled({
+        cron: '4-54/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
+      } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) },
+        DOCUMENTS: { async get() { return null; }, put, async delete() { return undefined; } },
+      } as unknown as Environment);
+
+      expect(listCatalog).toHaveBeenCalledOnce();
+      expect(projection).not.toHaveBeenCalled();
+      expect(put).toHaveBeenCalledOnce();
+      expect(markers).toHaveBeenCalledWith('catalog_projection_r2', 'started');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_r2', 'complete');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_r2_complete', 'complete', expect.any(Date));
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_catalog_projection_r2_complete"'));
     } finally {
       vi.restoreAllMocks();
     }

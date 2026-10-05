@@ -448,16 +448,17 @@ observability, alert, and notification phase.
 
 Two changes bound that invocation:
 
-1. **A dedicated catalog-projection cron.** `1-51/10 * * * *` now owns
-   `runCatalogProjectionMaintenance` — prospective shadow publication, the D1
-   projection write, and the R2 publication — and nothing else. The `9-59/10`
-   cron keeps only the remaining maintenance phases. Each expensive phase has
+1. **Dedicated catalog-projection crons.** `1-51/10 * * * *` owns
+   `runCatalogProjectionMaintenance` — prospective shadow publication and the
+   D1 projection write — and nothing else. `4-54/10 * * * *` rebuilds and
+   publishes the R2 mirror in a fresh isolate after D1 invalidates the old R2
+   pointer. The `9-59/10` cron keeps only the remaining maintenance phases. Each expensive phase has
    exactly one cron owner: the projection cron is the only scheduled caller of
    `listCatalog`, `putCatalogProjection`, and `R2CatalogProjection.publish`, and
    no phase is run from both schedules. Operator-triggered routes also call
    `refreshCatalogProjection`, but they are request-scoped, not scheduled. The
-   separate invocation gives the projection a fresh 128 MB isolate instead of
-   sharing one with every later phase. The `1-51/10` slot also keeps three
+   separate invocations prevent the D1 and R2 projection heaps from accumulating
+   in one 128 MB isolate. The `1-51/10` slot also keeps three
    minutes between its nearest minute (`:31`) and the daily write-heavy
    retention cron at `34 8`.
 2. **Durable phase markers.** `cloudflare/maintenance-phases.ts` writes a small
