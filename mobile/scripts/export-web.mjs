@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { addMetadata, homeDescription, homeTitle, policyDescriptions, sitemap } from "./web-seo.mjs";
 
 const mobileRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -56,8 +57,21 @@ await Promise.all(Object.entries(policyDescriptions).map(async ([slug, descripti
   await writeFile(path, addMetadata(html, { title, description, path: `/${slug}` }));
 }));
 await writeFile(resolve(outputDirectory, "sitemap.xml"), sitemap(["/", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`)]));
+const workerBuild = await build({
+  entryPoints: [resolve(mobileRoot, "web/public-worker.mjs")],
+  outfile: resolve(outputDirectory, "_worker.js"), bundle: true, format: "esm", platform: "browser", target: "es2022",
+  define: { __PUBLIC_API_ORIGIN__: JSON.stringify(publicApiUrl) },
+  write: false,
+});
+const workerCode = workerBuild.outputFiles[0].text;
+const rendererVersion = createHash("sha256").update(workerCode).digest("hex").slice(0, 16);
+await writeFile(resolve(outputDirectory, "_worker.js"), workerCode.replaceAll("PUBLIC_RENDERER_VERSION", rendererVersion));
+await writeFile(resolve(outputDirectory, "public-api.json"), JSON.stringify({ apiOrigin: publicApiUrl }));
+await writeFile(resolve(outputDirectory, "_routes.json"), JSON.stringify({
+  version: 1, include: ["/jobs", "/jobs/*", "/sitemap.xml"], exclude: [],
+}));
 
-const requiredFiles = ["index.html", "robots.txt", "sitemap.xml", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles];
+const requiredFiles = ["index.html", "robots.txt", "sitemap.xml", "public-api.json", "_worker.js", "_routes.json", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles];
 await Promise.all(requiredFiles.map(async (name) => {
   const value = await readFile(resolve(outputDirectory, name));
   if (value.byteLength === 0) throw new Error(`Web export produced an empty ${name}`);

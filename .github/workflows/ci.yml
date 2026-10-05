@@ -168,35 +168,9 @@ jobs:
       - run: npx expo config --type public
       - run: npm run web:export
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.web == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: web-dist-${{ github.sha }}
           path: mobile/dist
           if-no-files-found: error
           retention-days: 1
-  deploy-web:
-    needs: [changes, verify-core, ingestion-traffic-contracts, ingestion-resource-budget, worker-bundles, e2e, infrastructure, verify-mobile]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.web == 'true'
-    runs-on: ubuntu-latest
-    concurrency:
-      group: cloudflare-pages-production
-      cancel-in-progress: false
-    environment:
-      name: cloudflare-pages-production
-      url: https://ntern.app
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: web-dist-${{ github.sha }}
-          path: mobile/dist
-      - name: Reject an obsolete main revision
-        run: test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$GITHUB_SHA"
-      - name: Deploy verified web artifact
-        run: npx wrangler pages deploy mobile/dist --project-name internnotifs --branch main --commit-hash "${GITHUB_SHA}" --commit-dirty=false
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -1047,22 +1047,28 @@ export class D1InternshipStore implements InternshipStore {
     const clauses = ['catalog_state = ?'];
     const values: unknown[] = [status === 'open' ? 'OPEN' : 'CLOSED'];
     const needle = query.query?.trim().toLowerCase();
-    if (needle) { clauses.push('search_text LIKE ?'); values.push(`%${needle}%`); }
-    if (query.source && query.source !== 'all') { clauses.push('source_classes LIKE ?'); values.push(`%"${query.source}"%`); }
+    const scanBudget = query.scanBudget === undefined ? undefined : Math.max(1, Math.min(100, Math.trunc(query.scanBudget)));
+    // A leading-wildcard predicate before LIMIT can inspect the whole catalog.
+    // Bounded callers filter an indexed raw window and continue by raw offset.
+    if (scanBudget === undefined && needle) { clauses.push('search_text LIKE ?'); values.push(`%${needle}%`); }
+    if (scanBudget === undefined && query.source && query.source !== 'all') { clauses.push('source_classes LIKE ?'); values.push(`%"${query.source}"%`); }
     const jobs: Internship[] = [];
     const batchSize = Math.max(50, limit * 2);
     let scanned = offset;
     while (true) {
       const result = await this.db.prepare(`SELECT value FROM catalog_items WHERE ${clauses.join(' AND ')} ORDER BY catalog_sort_key DESC LIMIT ? OFFSET ?`)
-        .bind(...values, batchSize, scanned).all<JsonRow>();
+        .bind(...values, scanBudget === undefined ? batchSize : Math.min(batchSize, scanBudget - (scanned - offset)), scanned).all<JsonRow>();
       for (const row of result.results) {
         const rowOffset = scanned;
         scanned += 1;
         const job = withEmployerCategory(JSON.parse(row.value) as Internship);
         if (!catalogEligible(job) || isPastSeason(job.season)) continue;
+        if (scanBudget !== undefined && ((needle && !catalogSearchText(job).includes(needle))
+          || (query.source && query.source !== 'all' && !catalogSourceClasses(job).includes(query.source)))) continue;
         if (jobs.length === limit) return { jobs, cursor: String(rowOffset) };
         jobs.push(job);
       }
+      if (scanBudget !== undefined && scanned - offset >= scanBudget) return { jobs, cursor: String(scanned) };
       if (result.results.length < batchSize) return { jobs };
     }
   }
