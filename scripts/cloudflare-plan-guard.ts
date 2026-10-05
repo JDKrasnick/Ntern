@@ -460,18 +460,21 @@ const outboundNotificationsBindingName = 'OUTBOUND_NOTIFICATIONS_ENABLED';
  * Removes the first reviewed production addition of the outbound-notification
  * switch so it can be validated together with another reviewed binding change.
  * The binding is pinned to an enabled boolean plain-text value; duplicates,
- * replacements, and extra attributes remain unsafe.
+ * replacements, and configured extra attributes remain unsafe. Provider-schema
+ * attributes represented as null are harmless and match the other binding guards.
  */
 function withoutReviewedOutboundNotificationsAddition(before: unknown, after: unknown): unknown[] | undefined {
   if (!Array.isArray(before) || !Array.isArray(after)) return undefined;
   if (before.some((binding) => isRecord(binding) && binding.name === outboundNotificationsBindingName)) return undefined;
   const additions = after.filter((binding) => isRecord(binding) && binding.name === outboundNotificationsBindingName);
   if (additions.length !== 1 || !isRecord(additions[0])) return undefined;
-  if (!isDeepStrictEqual(additions[0], {
-    name: outboundNotificationsBindingName,
-    type: 'plain_text',
-    text: 'true',
-  })) return undefined;
+  const addition = additions[0];
+  if (addition.name !== outboundNotificationsBindingName
+    || addition.type !== 'plain_text'
+    || addition.text !== 'true'
+    || Object.entries(addition).some(([key, value]) => (
+      !['name', 'type', 'text'].includes(key) && value !== null
+    ))) return undefined;
   return after.filter((binding) => !isRecord(binding) || binding.name !== outboundNotificationsBindingName);
 }
 
