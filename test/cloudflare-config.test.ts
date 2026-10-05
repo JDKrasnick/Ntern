@@ -107,9 +107,14 @@ describe('Cloudflare deployment configuration', () => {
     expect(devIngestion.vars.INGESTION_V2_SHADOW_DISCOVERY_ENABLED).toBe('true');
     expect(devIngestion.vars.INGESTION_V2_ADMISSION_ENABLED).toBe('true');
     expect(devIngestion.vars.INGESTION_V2_CATALOG_WRITER_ENABLED).toBe('true');
+    const cohort = [canary, 'speedyapply-2027-swe', 'vanshb03-summer-2027', 'canadian-tech-2027',
+      'simplify-summer-2026', 'speedyapply-2027-ai', 'greenhouse-figma', 'lever-palantir', 'ashby-mistral-ai'].join(',');
+    expect(devIngestion.vars.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST).toBe(cohort);
+    expect(devIngestion.vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST).toBe(cohort);
+    for (const [name, value] of Object.entries(devIngestion.vars).filter(([name]) => name.startsWith('INGESTION_V2_'))) {
+      expect(devApi.vars[name]).toBe(value);
+    }
     for (const name of [
-      'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST',
-      'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST',
       'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST',
       'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST',
       'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST',

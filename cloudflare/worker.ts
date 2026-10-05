@@ -1469,7 +1469,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
         ? { ...leverWorkMessages([source as typeof reviewedLeverSources[number]], now, crypto.randomUUID())[0]!, force: true }
         : { ...ashbyWorkMessages([source as typeof reviewedAshbySources[number]], now, crypto.randomUUID())[0]!, force: true };
     const event = { Records: [{ messageId: crypto.randomUUID(), body: JSON.stringify(message) }] };
-    const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env) };
+    const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env),
+      shadowDiscovery: ingestionV2ShadowDiscovery(env),
+      v2CatalogWriteOwner: (sourceId: string) => admissionV2OwnsCatalogWrites(env, sourceId),
+      v2TrustedCommunityAlertsEnabled: (sourceId: string) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId) };
     const result = atsProvider === 'greenhouse'
       ? await processGreenhouseQueue(event, { ...dependencies, sources: providers.greenhouse,
         enqueueContinuation: (continuation) => sendQueueMessageWithin(env.GREENHOUSE_QUEUE, continuation) })
@@ -3130,6 +3133,9 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     catalogAdmissionResolver: catalogAdmissionResolver(env),
     enqueueEmployerIconResolution: employerIconEnqueue(env),
     onRecordFailure,
+    shadowDiscovery: ingestionV2ShadowDiscovery(env),
+    v2CatalogWriteOwner: (sourceId: string) => admissionV2OwnsCatalogWrites(env, sourceId),
+    v2TrustedCommunityAlertsEnabled: (sourceId: string) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
   };
   // Legacy Lever admissions are irrelevant to Greenhouse and Ashby polls.
   // Avoid an additional D1 read before those providers enter their per-record
