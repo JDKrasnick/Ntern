@@ -90,7 +90,7 @@ async function jobsPage(
     if (!page) return { jobs: [] };
     jobs.push(...page.jobs.filter((job) => identityPublished(job, identityUnconfirmedPublicationEnabled)));
     next = page.cursor;
-  } while (jobs.length < limit && next);
+  } while (jobs.length < limit && next && query?.scanBudget === undefined);
   return { jobs, ...(next ? { cursor: next } : {}) };
 }
 
@@ -715,8 +715,10 @@ export function createApiHandler(dependencies: ApiDependencies) {
         if (query && query.length > 120) return reply(400, { message: 'q must be 120 characters or fewer' });
         const source = event.queryStringParameters?.source;
         if (source && !['all', 'direct', 'community', 'corroborated'].includes(source)) return reply(400, { message: 'source is not supported' });
-        const page = await jobsPage(dependencies.jobs, event.queryStringParameters?.cursor, limit, status, { ...(query ? { query } : {}), ...(source ? { source: source as 'all' | 'direct' | 'community' | 'corroborated' } : {}) }, identityUnconfirmedPublicationEnabled);
-        return reply(200, { ...page, jobs: page.jobs.map(publicJob) });
+        // Crawlers accept short/empty pages rather than scanning until a page fills.
+        const bounded = event.queryStringParameters?.scan === 'bounded';
+        const page = await jobsPage(dependencies.jobs, event.queryStringParameters?.cursor, limit, status, { ...(query ? { query } : {}), ...(source ? { source: source as 'all' | 'direct' | 'community' | 'corroborated' } : {}), ...(bounded ? { scanBudget: 100 } : {}) }, identityUnconfirmedPublicationEnabled);
+        return reply(200, { ...page, jobs: page.jobs.map(publicJob), ...(bounded ? { scanBudget: 100 } : {}) });
       }
       if (method === 'GET' && path === '/catalog') {
         const requestedLimit = Number(event.queryStringParameters?.limit ?? 25);

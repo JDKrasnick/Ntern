@@ -38,7 +38,7 @@ export function deletedUserTombstoneKey(userId: string) {
 }
 
 export type { CatalogSource } from './catalog-fields.js';
-export type CatalogQuery = { query?: string; source?: CatalogSource };
+export type CatalogQuery = { query?: string; source?: CatalogSource; scanBudget?: number };
 
 /** Fence a negative catalog effect against the exact durable omitted row. */
 export interface PostingObservationOmissionFence {

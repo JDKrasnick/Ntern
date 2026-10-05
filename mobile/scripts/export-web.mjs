@@ -3,7 +3,10 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { addMetadata, homeDescription, homeTitle, policyDescriptions, sitemap } from "./web-seo.mjs";
+import { page } from "../web/public-worker.mjs";
+import { topicLinks, topics } from "../web/topics.mjs";
 
 const mobileRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(mobileRoot, "..");
@@ -55,9 +58,28 @@ await Promise.all(Object.entries(policyDescriptions).map(async ([slug, descripti
   if (!title) throw new Error(`Missing policy title: ${slug}`);
   await writeFile(path, addMetadata(html, { title, description, path: `/${slug}` }));
 }));
-await writeFile(resolve(outputDirectory, "sitemap.xml"), sitemap(["/", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`)]));
+await Promise.all(Object.values(topics).map(async (topic) => {
+  const path = resolve(outputDirectory, `${topic.path.slice(1)}.html`);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, page({ title: `${topic.title} — Ntern`, description: topic.description, path: topic.path,
+    body: `${topic.body}<h2>Explore another path</h2>${topicLinks()}` }));
+}));
+await writeFile(resolve(outputDirectory, "sitemap.xml"), sitemap(["/", "/jobs", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`), ...Object.values(topics).map((topic) => topic.path)]));
+const workerBuild = await build({
+  entryPoints: [resolve(mobileRoot, "web/public-worker.mjs")],
+  outfile: resolve(outputDirectory, "_worker.js"), bundle: true, format: "esm", platform: "browser", target: "es2022",
+  define: { __PUBLIC_API_ORIGIN__: JSON.stringify(publicApiUrl) },
+  write: false,
+});
+const workerCode = workerBuild.outputFiles[0].text;
+const rendererVersion = createHash("sha256").update(workerCode).digest("hex").slice(0, 16);
+await writeFile(resolve(outputDirectory, "_worker.js"), workerCode.replaceAll("PUBLIC_RENDERER_VERSION", rendererVersion));
+await writeFile(resolve(outputDirectory, "public-api.json"), JSON.stringify({ apiOrigin: publicApiUrl }));
+await writeFile(resolve(outputDirectory, "_routes.json"), JSON.stringify({
+  version: 1, include: ["/jobs", "/jobs/*", "/sitemap.xml"], exclude: [],
+}));
 
-const requiredFiles = ["index.html", "robots.txt", "sitemap.xml", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles];
+const requiredFiles = ["index.html", "robots.txt", "sitemap.xml", "public-api.json", "_worker.js", "_routes.json", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles, ...Object.values(topics).map((topic) => `${topic.path.slice(1)}.html`)];
 await Promise.all(requiredFiles.map(async (name) => {
   const value = await readFile(resolve(outputDirectory, name));
   if (value.byteLength === 0) throw new Error(`Web export produced an empty ${name}`);
