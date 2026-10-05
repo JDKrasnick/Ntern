@@ -5,6 +5,8 @@ import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
 import { openCatalogSortKey } from '../src/catalog-recency.js';
 import type { EducationLevel, Internship, InternshipIdentity } from '../src/types.js';
+import { createApiHandler } from '../src/api.js';
+import { MemoryUserStore } from '../src/store.js';
 
 function job(jobId: string, title: string): Internship {
   return {
@@ -71,6 +73,66 @@ function sqliteD1(
 
 describe('D1 filtered catalog projection', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('bounds sparse text/source searches before filtering and continues through the real API', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`CREATE TABLE catalog_items (value TEXT, catalog_state TEXT, catalog_sort_key TEXT);
+      CREATE INDEX catalog_items_state_sort ON catalog_items(catalog_state, catalog_sort_key DESC);`);
+    const insert = database.prepare('INSERT INTO catalog_items VALUES (?, ?, ?)');
+    database.exec('BEGIN');
+    for (let index = 0; index < 50_000; index += 1) {
+      insert.run(JSON.stringify(job(`role-${index}`, index === 125 || index === 126 ? 'New Graduate Engineer' : 'Software Intern')),
+        'OPEN', String(100_000 - index).padStart(6, '0'));
+    }
+    database.exec('COMMIT');
+    const queries: string[] = []; let hydrated = 0;
+    const store = new D1InternshipStore(sqliteD1(database, (query, rows) => { queries.push(query); hydrated += rows.length; }));
+    const handler = createApiHandler({ jobs: store, users: new MemoryUserStore() });
+    const request = (cursor?: string) => handler({ rawPath: '/jobs', requestContext: { http: { method: 'GET' } },
+      queryStringParameters: { scan: 'bounded', q: 'grad', limit: '25', ...(cursor ? { cursor } : {}) } });
+    try {
+      const first = await request();
+      expect(first.statusCode).toBe(200);
+      expect(JSON.parse(first.body)).toEqual({ jobs: [], cursor: '100', scanBudget: 100 });
+      expect(hydrated).toBe(100);
+      expect(queries).toHaveLength(2);
+      expect(queries.every((query) => !query.includes('LIKE'))).toBe(true);
+      const plan = database.prepare(`EXPLAIN QUERY PLAN ${queries[0]}`).all('OPEN', 50, 0) as { detail: string }[];
+      expect(plan.some(({ detail }) => detail.includes('catalog_items_state_sort'))).toBe(true);
+      expect(plan.some(({ detail }) => detail.includes('TEMP B-TREE'))).toBe(false);
+
+      hydrated = 0;
+      const second = JSON.parse((await request('100')).body);
+      expect(second.jobs.map((job: Internship) => job.jobId)).toEqual(['role-125', 'role-126']);
+      expect(second.cursor).toBe('200');
+      expect(second.scanBudget).toBe(100);
+      expect(hydrated).toBe(100);
+
+      hydrated = 0;
+      const absentSource = await store.listOpen(undefined, 25, 'open', { scanBudget: 100, source: 'community' });
+      expect(absentSource).toEqual({ jobs: [], cursor: '100' });
+      expect(hydrated).toBe(100);
+      expect(queries.every((query) => !query.includes('LIKE'))).toBe(true);
+    } finally { database.close(); }
+  });
+
+  it('does not skip matching roles at the page limit or scan-window boundary', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (value TEXT, catalog_state TEXT, catalog_sort_key TEXT)');
+    const insert = database.prepare('INSERT INTO catalog_items VALUES (?, ?, ?)');
+    for (let index = 0; index < 105; index += 1) {
+      insert.run(JSON.stringify(job(`role-${index}`, 'Software Intern')), 'OPEN', String(1000 - index).padStart(6, '0'));
+    }
+    const store = new D1InternshipStore(sqliteD1(database));
+    try {
+      const seen: string[] = []; let cursor: string | undefined;
+      do {
+        const page = await store.listOpen(cursor, 25, 'open', { scanBudget: 100, query: 'software' });
+        seen.push(...page.jobs.map((job) => job.jobId)); cursor = page.cursor;
+      } while (cursor);
+      expect(seen).toEqual(Array.from({ length: 105 }, (_, index) => `role-${index}`));
+    } finally { database.close(); }
+  });
 
   it('bounds candidate hydration and keeps a continuation across an empty crawler page', async () => {
     const database = new DatabaseSync(':memory:');
