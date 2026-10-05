@@ -17,7 +17,7 @@ const healthy = (): DevSoakSample => ({
   maintenance: [{
     key: 'maintenance_phase:maintenance:ingestion_v2_admission_dispatch',
     value: '{"status":"complete"}', updated_at: '2026-10-04T20:49:00.000Z',
-  }], unresolvedFailures: [], cronCount: 11, publicCatalogStatus: 200,
+  }], unresolvedFailures: [], exhaustedFailures: [], cronCount: 11, publicCatalogStatus: 200,
   queues: Object.fromEntries([
     'greenhouse', 'lever', 'ashby', 'github', 'gmail', 'destination-verification',
     'shadow-extraction', 'resume-job-import', 'admission-v2',
@@ -38,11 +38,12 @@ describe('dev ingestion soak evaluation', () => {
     sample.canary.expiredLeases = 1;
     sample.canary.staleHandoffs = 2;
     sample.unresolvedFailures = [{ queue_name: 'intern-notifs-dev-admission-v2' }];
+    sample.exhaustedFailures = [{ queue_name: 'intern-notifs-dev-greenhouse', source_id: 'greenhouse-awardco' }];
     sample.queues['intern-notifs-dev-admission-v2-dlq']!.backlog_count = 1;
     const failed = evaluateDevSoak(sample).filter((check) => check.status === 'fail').map((check) => check.name);
     expect(failed).toEqual(expect.arrayContaining([
       'canary polling freshness', 'no expired admission lease', 'no stale admission handoff',
-      'no unresolved queue failures', 'admission-v2 DLQ empty',
+      'no unresolved queue failures', 'no exhausted queue deliveries', 'admission-v2 DLQ empty',
     ]));
   });
 

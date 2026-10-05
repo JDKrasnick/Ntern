@@ -6,7 +6,7 @@ import { GreenhouseBoardAdapter } from './sources/greenhouse.js';
 import { greenhouseQualityPolicy, verifySourceQuality } from './sources/quality.js';
 import { type InternshipStore, type UserStore } from './store.js';
 import type { GreenhouseWorkMessage } from './greenhouse-dispatch.js';
-import { ApplicationLinkValidationError, failedSourceHealth, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
+import { ApplicationLinkValidationError, failedSourceHealth, failureFromPollReport, PollReportFailure, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
 import { processFifoBatch } from './sqs-fifo-batch.js';
 import { legacyDeliveryExclusions, type GroupedNotificationCohort } from './grouped-notification-cohort.js';
 import type { CatalogAdmissionResolver, DestinationVerificationRequest } from './destination-verification.js';
@@ -132,18 +132,8 @@ export async function runGreenhouseBoard(
 
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver).poll({ naturalProviderPoll: !message.force });
-  // An outer fetch or persistence failure aborts the whole source and must
-  // never be acknowledged as a successful poll: retry the queue message so
-  // resilientD1 and the bounded queue retries can apply. Only a sparse set of
-  // per-row link-validation failures is tolerated.
-  if (poll.sourceFailures.length) {
-    throw new Error(poll.sourceFailures.map(({ message }) => message).join('; '));
-  }
-  const rowFailures = poll.failures.filter((failure) => failure.startsWith(`${source.id}:`));
-  const widespreadLinkFailure = poll.processedListings > 0 && rowFailures.length / poll.processedListings > SHADOW_LINK_FAILURE_THRESHOLD;
-  if (rowFailures.length && widespreadLinkFailure) {
-    throw new Error(`${rowFailures.length}/${poll.processedListings} eligible Greenhouse application links failed validation`);
-  }
+  const pollFailure = failureFromPollReport(poll, sourceHealth);
+  if (pollFailure) throw pollFailure;
   const checkpoint = await dependencies.store.getCheckpoint(source.id);
   const notifications = dependencies.userStore
     ? await sendNewJobNotifications(
@@ -167,7 +157,7 @@ export async function runGreenhouseBoard(
     notModified: poll.unchangedSources.includes(adapter.id),
     listings: poll.processedListings,
     rawRows: checkpoint?.lastRawRowCount,
-    withheldRows: (checkpoint?.lastWithheldRowCount ?? 0) + rowFailures.length,
+    withheldRows: checkpoint?.lastWithheldRowCount,
     notifications,
   };
 }
@@ -207,17 +197,21 @@ export async function processGreenhouseQueue(
     } catch (error) {
       try {
         const message = parseWorkMessage(record.body);
-        const previous = await dependencies.store.getSourceHealth(message.sourceId);
+        const previous = error instanceof PollReportFailure
+          ? error.previousHealth
+          : await dependencies.store.getSourceHealth(message.sourceId);
         const completedAt = new Date().toISOString();
-        await dependencies.store.putSourceHealth(failedSourceHealth({
-          sourceId: message.sourceId,
-          provider: integrationRegistry.greenhouse.id,
-          region: integrationRegistry.greenhouse.defaultRegion,
-          previous,
-          startedAt,
-          completedAt,
-          error,
-        }));
+        if (!(error instanceof PollReportFailure && error.healthRecorded)) {
+          await dependencies.store.putSourceHealth(failedSourceHealth({
+            sourceId: message.sourceId,
+            provider: integrationRegistry.greenhouse.id,
+            region: integrationRegistry.greenhouse.defaultRegion,
+            previous,
+            startedAt,
+            completedAt,
+            error,
+          }));
+        }
       } catch (healthError) {
         console.error(JSON.stringify({ command: 'greenhouse-health', messageId: record.messageId, error: healthError instanceof Error ? healthError.message : String(healthError) }));
       }

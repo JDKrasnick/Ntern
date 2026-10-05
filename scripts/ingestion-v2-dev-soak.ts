@@ -44,6 +44,7 @@ export interface DevSoakSample {
   };
   maintenance: Array<Record<string, unknown>>;
   unresolvedFailures: Array<Record<string, unknown>>;
+  exhaustedFailures: Array<Record<string, unknown>>;
   queues: Record<string, QueueMetrics>;
   cronCount: number;
   publicCatalogStatus: number;
@@ -98,6 +99,8 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
     `${sample.canary.expiredLeases} expired processing lease(s)`);
   check('no unresolved queue failures', sample.unresolvedFailures.length === 0,
     `${sample.unresolvedFailures.length} unresolved failure group(s) in ${sample.windowHours}h`);
+  check('no exhausted queue deliveries', sample.exhaustedFailures.length === 0,
+    `${sample.exhaustedFailures.length} final-delivery failure group(s) in ${sample.windowHours}h`);
 
   for (const suffix of QUEUE_SUFFIXES) {
     const dlqName = `intern-notifs-dev-${suffix}-dlq`;
@@ -160,7 +163,7 @@ async function main(): Promise<number> {
     return body.result?.[0]?.results ?? [];
   }
 
-  const [healthRows, snapshots, comparisons, rowStates, handoffs, leases, failures, maintenance, queues, schedules, catalog] = await Promise.all([
+  const [healthRows, snapshots, comparisons, rowStates, handoffs, leases, failures, exhaustedFailures, maintenance, queues, schedules, catalog] = await Promise.all([
     query<{ value: string }>("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'HEALTH'", [`SOURCE#${canary}`]),
     query<Record<string, unknown>>(`SELECT snapshot_hash, admission_version, row_count, document_count, state,
       is_complete, baseline, activated_at FROM ingestion_snapshots
@@ -179,6 +182,10 @@ async function main(): Promise<number> {
     query<Record<string, unknown>>(`SELECT queue_name, category, COUNT(*) AS failures, MAX(last_failed_at) AS latest
       FROM queue_failure_events WHERE resolved_at IS NULL AND last_failed_at >= ?
       GROUP BY queue_name, category ORDER BY queue_name, category`, [windowStart]),
+    query<Record<string, unknown>>(`SELECT queue_name, COALESCE(source_id, '') AS source_id, category,
+      COUNT(*) AS failures, MAX(last_failed_at) AS latest
+      FROM queue_failure_events WHERE delivery_attempt >= 3 AND last_failed_at >= ?
+      GROUP BY queue_name, source_id, category ORDER BY queue_name, source_id, category`, [windowStart]),
     query<Record<string, unknown>>(`SELECT key, value, updated_at FROM system_state
       WHERE key IN ('maintenance_phase:maintenance:ingestion_v2_admission_dispatch',
       'maintenance_phase:maintenance:maintenance_complete') ORDER BY key`),
@@ -209,6 +216,7 @@ async function main(): Promise<number> {
     },
     maintenance,
     unresolvedFailures: failures,
+    exhaustedFailures,
     queues: queueMetrics,
     cronCount: schedules.schedules.length,
     publicCatalogStatus: catalog.status,
