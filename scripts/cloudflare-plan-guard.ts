@@ -454,6 +454,27 @@ function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
   );
 }
 
+const outboundNotificationsBindingName = 'OUTBOUND_NOTIFICATIONS_ENABLED';
+
+/**
+ * Removes the first reviewed production addition of the outbound-notification
+ * switch so it can be validated together with another reviewed binding change.
+ * The binding is pinned to an enabled boolean plain-text value; duplicates,
+ * replacements, and extra attributes remain unsafe.
+ */
+function withoutReviewedOutboundNotificationsAddition(before: unknown, after: unknown): unknown[] | undefined {
+  if (!Array.isArray(before) || !Array.isArray(after)) return undefined;
+  if (before.some((binding) => isRecord(binding) && binding.name === outboundNotificationsBindingName)) return undefined;
+  const additions = after.filter((binding) => isRecord(binding) && binding.name === outboundNotificationsBindingName);
+  if (additions.length !== 1 || !isRecord(additions[0])) return undefined;
+  if (!isDeepStrictEqual(additions[0], {
+    name: outboundNotificationsBindingName,
+    type: 'plain_text',
+    text: 'true',
+  })) return undefined;
+  return after.filter((binding) => !isRecord(binding) || binding.name !== outboundNotificationsBindingName);
+}
+
 // Stage 1/2 ingestion V2 ships behind default-off plain-text bindings. Their
 // first addition and later value toggles are reviewed, additive config changes;
 // every other binding stays protected. The admission flags need the same
@@ -595,12 +616,22 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change'], e
     afterUnknown = { ...afterUnknown, bindings: normalized.unknown };
     normalizedAfterBindings = normalized.after;
   }
-  const permittedBindingChanged = isPermittedBindingUpdate(before.bindings, normalizedAfterBindings)
-    || isPermittedBindingRetirement(before.bindings, normalizedAfterBindings)
-    || isResumeTunerEnablement(before.bindings, normalizedAfterBindings)
-    || (address === 'cloudflare_workers_script.ingestion' && isIngestionV2BindingUpdate(before.bindings, normalizedAfterBindings))
-    || (address === 'cloudflare_workers_script.ingestion' && isAdmissionV2WorkerBindingUpdate(before.bindings, normalizedAfterBindings))
-    || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, normalizedAfterBindings));
+  const withoutOutboundAddition = withoutReviewedOutboundNotificationsAddition(before.bindings, normalizedAfterBindings);
+  const bindingCandidates = withoutOutboundAddition === undefined
+    ? [normalizedAfterBindings]
+    : [normalizedAfterBindings, withoutOutboundAddition];
+  const permittedBindingChanged = bindingCandidates.some((candidate) => (
+    isPermittedBindingUpdate(before.bindings, candidate)
+    || isPermittedBindingRetirement(before.bindings, candidate)
+    || isResumeTunerEnablement(before.bindings, candidate)
+    || (address === 'cloudflare_workers_script.ingestion' && isIngestionV2BindingUpdate(before.bindings, candidate))
+    || (address === 'cloudflare_workers_script.ingestion' && isAdmissionV2WorkerBindingUpdate(before.bindings, candidate))
+    || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, candidate))
+    || (withoutOutboundAddition !== undefined
+      && Array.isArray(before.bindings)
+      && Array.isArray(candidate)
+      && bindingsMatchByName(before.bindings, candidate))
+  ));
   // The ingestion Worker exhausted its 10,000-subrequest invocation budget
   // while finishing a bounded GitHub source slice. Permit only this reviewed
   // increase; all other Worker limits remain protected.

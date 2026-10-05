@@ -882,6 +882,53 @@ describe('Cloudflare deployment plan guard', () => {
     }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits the exact outbound-notification binding addition by itself or with Stage 3', () => {
+    const outbound = { name: 'OUTBOUND_NOTIFICATIONS_ENABLED', type: 'plain_text', text: 'true' };
+    expect(validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      after: { ...contentUpdate.after, bindings: [outbound, ...worker.bindings] },
+    }]))).toHaveLength(1);
+
+    const stage2 = [
+      { name: 'INGESTION_V2_SHADOW_DISCOVERY_ENABLED', type: 'plain_text', text: 'true' },
+      { name: 'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST', type: 'plain_text', text: 'canary' },
+      { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'true' },
+      { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: 'canary' },
+    ];
+    const stage3 = [
+      { name: 'INGESTION_V2_CATALOG_WRITER_ENABLED', type: 'plain_text', text: 'false' },
+      { name: 'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST', type: 'plain_text', text: ',' },
+      { name: 'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST', type: 'plain_text', text: ',' },
+      { name: 'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST', type: 'plain_text', text: ',' },
+    ];
+    const ingestionUpdate = {
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, bindings: [...worker.bindings, ...stage2] },
+      after: { ...contentUpdate.after, bindings: [outbound, ...worker.bindings, ...stage2, ...stage3] },
+    };
+    expect(validateCloudflarePlan(plan([ingestionUpdate]))).toHaveLength(1);
+
+    for (const invalidOutbound of [
+      { ...outbound, text: 'false' },
+      { ...outbound, type: 'secret_text' },
+      { ...outbound, extra: 'value' },
+    ]) {
+      expect(() => validateCloudflarePlan(plan([{
+        ...contentUpdate,
+        after: { ...contentUpdate.after, bindings: [invalidOutbound, ...worker.bindings] },
+      }]))).toThrow('Refusing unsafe Cloudflare plan');
+    }
+    expect(() => validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      after: { ...contentUpdate.after, bindings: [outbound, outbound, ...worker.bindings] },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([{
+      ...ingestionUpdate,
+      after: { ...ingestionUpdate.after, bindings: [...ingestionUpdate.after.bindings, { name: 'OTHER', type: 'plain_text', text: 'on' }] },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits enabling the existing resume feature flag but not disabling it', () => {
     const disabled = { name: 'RESUME_TUNER_ENABLED', type: 'plain_text', text: 'false' };
     const enabled = { ...disabled, text: 'true' };
