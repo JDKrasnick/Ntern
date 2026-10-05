@@ -1156,6 +1156,25 @@ describe('trusted rollout repair boundaries', { timeout: 20_000 }, () => {
       .admissionConfigurationVersion).not.toBe(original.occurrence.admissionConfigurationVersion);
   });
 
+  it('does not let disabled-alert material changes starve admission-version migration', async () => {
+    const { store, rows, state, poll, sourceId } = migrationFixture();
+    await poll(true);
+    state.version = 'registry-v2';
+
+    await poll(true, 1);
+    const migratedVersion = (await store.getSourceOccurrences(sourceId))
+      .find((item) => item.externalId === rows[0]!.externalId)?.occurrence.admissionConfigurationVersion;
+    expect(migratedVersion).toBeDefined();
+
+    // Simplify does not emit community alerts. A source-material change on an
+    // already migrated row must not consume the next bounded admission slice.
+    rows[0]!.title = 'Updated Software Engineering Intern';
+    await poll(true, 1);
+
+    expect((await store.getSourceOccurrences(sourceId)).find((item) => item.externalId === rows[1]!.externalId)?.occurrence
+      .admissionConfigurationVersion).toBe(migratedVersion);
+  });
+
   it('limits concurrent D1 commits in an admission migration slice', async () => {
     const { store, poll } = migrationFixture();
     await poll(false);
