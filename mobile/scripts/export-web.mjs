@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { addMetadata, homeDescription, homeTitle, policyDescriptions, sitemap } from "./web-seo.mjs";
 
 const mobileRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(mobileRoot, "..");
@@ -43,12 +44,20 @@ const favicon = await readFile(resolve(outputDirectory, "favicon.ico"));
 const iconVersion = createHash("sha256").update(favicon).digest("hex").slice(0, 12);
 const faviconName = `favicon-${iconVersion}.ico`;
 await copyFile(resolve(outputDirectory, "favicon.ico"), resolve(outputDirectory, faviconName));
-await writeFile(indexPath, indexHtml
+await writeFile(indexPath, addMetadata(indexHtml, { title: homeTitle, description: homeDescription })
   .replace('href="/favicon.ico"', `href="/${faviconName}"`)
   .replace("</head>", `<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=${iconVersion}" /></head>`));
 await Promise.all(policyFiles.map((name) => copyFile(resolve(repositoryRoot, "docs", name), resolve(outputDirectory, name))));
+await Promise.all(Object.entries(policyDescriptions).map(async ([slug, description]) => {
+  const path = resolve(outputDirectory, `${slug}.html`);
+  const html = await readFile(path, "utf8");
+  const title = html.match(/<title>(.*?)<\/title>/i)?.[1];
+  if (!title) throw new Error(`Missing policy title: ${slug}`);
+  await writeFile(path, addMetadata(html, { title, description, path: `/${slug}` }));
+}));
+await writeFile(resolve(outputDirectory, "sitemap.xml"), sitemap(["/", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`)]));
 
-const requiredFiles = ["index.html", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles];
+const requiredFiles = ["index.html", "robots.txt", "sitemap.xml", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles];
 await Promise.all(requiredFiles.map(async (name) => {
   const value = await readFile(resolve(outputDirectory, name));
   if (value.byteLength === 0) throw new Error(`Web export produced an empty ${name}`);
