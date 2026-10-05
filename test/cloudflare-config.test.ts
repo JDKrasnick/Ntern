@@ -71,9 +71,10 @@ describe('Cloudflare deployment configuration', () => {
       'intern-notifs-greenhouse', 'intern-notifs-lever', 'intern-notifs-ashby', 'intern-notifs-github', 'intern-notifs-gmail', 'intern-notifs-destination-verification',
       'intern-notifs-shadow-extraction', 'intern-notifs-resume-job-import', 'intern-notifs-admission-v2',
     ]);
-    expect(ingestion.triggers?.crons).toHaveLength(11);
+    expect(ingestion.triggers?.crons).toHaveLength(12);
     expect(ingestion.triggers?.crons).toContain('6-56/10 * * * *');
     expect(ingestion.triggers?.crons).toContain('1-51/10 * * * *');
+    expect(ingestion.triggers?.crons).toContain('4-54/10 * * * *');
     expect(ingestion.workers_dev).toBe(false);
     expect(ingestion.preview_urls).toBe(false);
   });

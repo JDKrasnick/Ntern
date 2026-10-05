@@ -305,7 +305,8 @@ describe('D1 filtered catalog projection', () => {
         kind TEXT NOT NULL,
         value TEXT NOT NULL,
         PRIMARY KEY (pk, sk)
-      )
+      );
+      CREATE INDEX catalog_items_kind_pk_sk ON catalog_items(kind, pk, sk)
     `);
     const insert = database.prepare('INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, ?, ?, ?)');
     for (let index = 0; index < 205; index++) {
@@ -326,6 +327,11 @@ describe('D1 filtered catalog projection', () => {
       expect(listed.some((item) => item.jobId === 'filtered')).toBe(false);
       expect(listed.every((item) => item.employerCategory === 'normal')).toBe(true);
       expect(pageSizes).toEqual([100, 100, 7]);
+      const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT pk, sk, value FROM catalog_items
+        WHERE kind = 'internship' AND (pk, sk) > (?, ?) ORDER BY pk, sk LIMIT 100`)
+        .all('JOB#099', 'META') as Array<{ detail: string }>;
+      expect(plan.map((step) => step.detail).join(' '))
+        .toContain('catalog_items_kind_pk_sk (kind=? AND (pk,sk)>(?,?))');
     } finally {
       database.close();
     }

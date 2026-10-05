@@ -1981,6 +1981,40 @@ async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Buc
   };
 }
 
+async function refreshCatalogProjectionD1(
+  store: D1InternshipStore,
+  bucket: R2Bucket | undefined,
+  phases?: MaintenancePhaseRecorder,
+) {
+  const result = await refreshCatalogProjection(store, undefined, phases);
+  // The R2 pointer describes the previous D1 generation until the separate R2
+  // cron publishes it. Remove it so readers use the newly committed D1 view.
+  if (bucket) await new R2CatalogProjection(bucket).invalidate();
+  return result;
+}
+
+async function refreshCatalogProjectionR2(store: D1InternshipStore, bucket: R2Bucket, phases?: MaintenancePhaseRecorder) {
+  const jobs = await store.listCatalog();
+  const liveWatermark = jobs.reduce<string | undefined>((newest, job) => {
+    if (!job.open || catalogRecency(job) !== 'normal') return newest;
+    const key = openCatalogSortKey(job);
+    return !newest || key > newest ? key : newest;
+  }, undefined);
+  const groups = groupCatalogJobs(jobs, { includeClosed: true })
+    .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
+  const generatedAt = new Date().toISOString();
+  await recordPhase(phases, 'catalog_projection_r2', 'started');
+  try {
+    await new R2CatalogProjection(bucket).publish(groups, generatedAt, liveWatermark);
+    await recordPhase(phases, 'catalog_projection_r2', 'complete');
+  } catch (error) {
+    await recordPhase(phases, 'catalog_projection_r2', 'failed');
+    try { await new R2CatalogProjection(bucket).invalidate(); } catch { /* D1 remains authoritative. */ }
+    throw error;
+  }
+  return { generatedAt, groups: groups.length, roles: groups.reduce((total, group) => total + group.roles.length, 0) };
+}
+
 /**
  * Metadata collection has no other trigger, so a field the employer's own API
  * states plainly could stay blank until an operator remembered to ask — which is
@@ -2293,24 +2327,36 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   if (event.cron === '1-51/10 * * * *') {
     const observedAt = new Date(event.scheduledTime);
     // The catalog projection is the Roles feed's whole source of truth, and it is
-    // the memory-heaviest scheduled work: the complete catalog is grouped, sorted,
-    // written to D1, and serialized to R2 in one invocation. It runs on its own
-    // cron so the many small observability, alert, and notification phases in the
-    // `9-59/10` handler cannot accumulate beside it and cross the 128 MB isolate
-    // limit. The `1-51/10` minute also avoids the daily retention cron at `34 8`:
+    // the memory-heaviest scheduled work. This invocation groups and writes D1;
+    // a fresh invocation at :04 rebuilds and serializes R2. Keeping those heaps
+    // separate prevents either phase from inheriting the other's retained objects
+    // and crossing the 128 MB isolate limit. The `1-51/10` minute also avoids the
+    // daily retention cron at `34 8`:
     // the nearest projection minute, `:31`, leaves three minutes before that
     // write-heavy pass. See docs/197-ingestion-resource-bounds.md.
     const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection');
-    // Shadow publication can change at most one role. Stage it before the catalog
-    // refresh and share its callback so this invocation builds the memory-heavy
-    // projection exactly once. A shadow failure remains isolated from the feed.
+    // Shadow publication can change at most one role. Stage it before the D1
+    // refresh and share its callback so this invocation builds the projection
+    // exactly once. A shadow failure remains isolated from the feed.
     const { prospectiveShadowMetadata, projection } = await runCatalogProjectionMaintenance(
       (refreshProjection) => publishProspectiveShadowMetadata(env, refreshProjection),
-      () => refreshCatalogProjection(store, env.DOCUMENTS, phases),
+      () => refreshCatalogProjectionD1(store, env.DOCUMENTS, phases),
       phases,
     );
     await recordPhase(phases, 'catalog_projection_complete', 'complete', observedAt);
     console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_complete', observedAt: observedAt.toISOString(), prospectiveShadowMetadata, projection }));
+    return;
+  }
+  if (event.cron === '4-54/10 * * * *') {
+    const observedAt = new Date(event.scheduledTime);
+    const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection_r2');
+    const projection = await runScheduledStep(
+      'catalog_projection_r2_publish',
+      () => refreshCatalogProjectionR2(store, env.DOCUMENTS, phases),
+      phases,
+    );
+    await recordPhase(phases, 'catalog_projection_r2_complete', 'complete', observedAt);
+    console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_r2_complete', observedAt: observedAt.toISOString(), projection }));
     return;
   }
   if (event.cron === '9-59/10 * * * *') {

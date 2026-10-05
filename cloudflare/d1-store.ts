@@ -1086,8 +1086,8 @@ export class D1InternshipStore implements InternshipStore {
     while (true) {
       const query = cursor
         ? this.db.prepare(`SELECT pk, sk, value FROM catalog_items
-            WHERE kind = 'internship' AND (pk > ? OR (pk = ? AND sk > ?))
-            ORDER BY pk, sk LIMIT 100`).bind(cursor.pk, cursor.pk, cursor.sk)
+            WHERE kind = 'internship' AND (pk, sk) > (?, ?)
+            ORDER BY pk, sk LIMIT 100`).bind(cursor.pk, cursor.sk)
         : this.db.prepare("SELECT pk, sk, value FROM catalog_items WHERE kind = 'internship' ORDER BY pk, sk LIMIT 100");
       const page = await query.all<{ pk: string; sk: string; value: string }>();
       for (const row of page.results) {
@@ -1250,9 +1250,11 @@ export class D1InternshipStore implements InternshipStore {
       const stale = manifest.keys.filter((key) => !protectedKeys.has(key));
       // Keep the expired manifest until every card delete succeeds. If a batch
       // fails, this list is the durable retry record for the next refresh.
-      for (let offset = 0; offset < stale.length; offset += 100) {
-        const batch = stale.slice(offset, offset + 100).map((sk) => this.db.prepare(`DELETE FROM catalog_items
-          WHERE pk = ? AND sk = ? AND kind = 'catalog-projection'
+      for (let offset = 0; offset < stale.length; offset += 90) {
+        const chunk = stale.slice(offset, offset + 90);
+        const placeholders = chunk.map(() => '?').join(', ');
+        await this.db.prepare(`DELETE FROM catalog_items
+          WHERE pk = ? AND sk IN (${placeholders}) AND kind = 'catalog-projection'
             AND EXISTS (SELECT 1 FROM catalog_items AS candidate
               WHERE candidate.pk = ? AND candidate.sk = ?
                 AND json_extract(candidate.value, '$.createdAt') < ?
@@ -1263,11 +1265,11 @@ export class D1InternshipStore implements InternshipStore {
                         WHERE json_extract(retained.value, '$.version') = ?))))
             AND NOT EXISTS (SELECT 1 FROM catalog_items AS other_manifest,
               json_each(other_manifest.value, '$.keys') AS active
-              WHERE other_manifest.pk = ? AND other_manifest.sk != ? AND active.value = ?)`)
-          .bind(CATALOG_PROJECTION_GROUPS_PK, sk,
+              WHERE other_manifest.pk = ? AND other_manifest.sk != ?
+                AND active.value = catalog_items.sk)`)
+          .bind(CATALOG_PROJECTION_GROUPS_PK, ...chunk,
             CATALOG_PROJECTION_MANIFESTS_PK, manifest.version, cutoff, manifest.version, manifest.version,
-            CATALOG_PROJECTION_MANIFESTS_PK, manifest.version, sk));
-        await this.db.batch(batch);
+            CATALOG_PROJECTION_MANIFESTS_PK, manifest.version).run();
       }
       await this.db.prepare(`DELETE FROM catalog_items WHERE pk = ? AND sk = ?
         AND json_extract(value, '$.createdAt') < ?
