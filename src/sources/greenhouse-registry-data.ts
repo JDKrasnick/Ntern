@@ -202,7 +202,7 @@ const apiProbedBoards: Array<{
   // `/job-board/{board}/job/{id}` form handled in `reviewed-provider.ts`.
   { token: "aqr", name: "AQR", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["aqr.com"], finalHosts: ["aqr.com"] },
   { token: "asm", name: "ASM", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["asm.com"], finalHosts: ["asm.com"] },
-  { token: "awardco", name: "Awardco", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["award.co"], finalHosts: ["award.co"] },
+  { token: "awardco", name: "Awardco", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["award.co"], finalHosts: ["award.co", "www.awardco.com"] },
   { token: "formlabs", name: "Formlabs", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["formlabs.com"], finalHosts: ["formlabs.com"] },
   { token: "healthesystems", name: "Healthesystems", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["healthesystems.com"], finalHosts: ["healthesystems.com"] },
   { token: "helsing", name: "Helsing", admittedAt: "2026-09-29T16:46:00.000Z", initialHosts: ["helsing.ai"], finalHosts: ["helsing.ai"] },

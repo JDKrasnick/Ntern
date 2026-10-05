@@ -107,6 +107,10 @@ describe('reviewed Greenhouse registry', () => {
 
     expect(sources).toHaveLength(batch2.length);
     expect(sources.every((source) => source.admittedAt === '2026-09-29T16:46:00.000Z')).toBe(true);
+    expect(sources.find((source) => source.id === 'greenhouse-awardco')).toMatchObject({
+      allowedInitialHosts: ['award.co'],
+      allowedFinalHosts: ['award.co', 'www.awardco.com'],
+    });
     // The Trillium board's public name is generic, so the reviewed display name
     // and the probed board name are deliberately kept separate.
     expect(sources.find((source) => source.id === 'greenhouse-trillium')).toMatchObject({
