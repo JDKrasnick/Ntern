@@ -1,9 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, expect, it, vi } from 'vitest';
-import { D1InternshipStore } from '../../cloudflare/d1-store.ts';
-import { createApiHandler } from '../../src/api.ts';
-import { MemoryUserStore } from '../../src/store.ts';
-import { createPublicWorker } from '../web/public-worker.mjs';
+import { D1InternshipStore } from '../cloudflare/d1-store.ts';
+import { createApiHandler } from '../src/api.ts';
+import { MemoryUserStore } from '../src/store.ts';
+import { createPublicWorker } from '../mobile/web/public-worker.mjs';
+
+const { Request, Response, URL } = globalThis;
 
 afterEach(() => vi.unstubAllGlobals());
 
