@@ -370,7 +370,7 @@ describe('Cloudflare maintenance cron', () => {
     const put = vi.fn().mockResolvedValue(undefined);
     try {
       await cloudflareWorker.scheduled({
-        cron: '4-54/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
+        cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         DB: { prepare: () => ({ async first() { return null; } }) },
         DOCUMENTS: { async get() { return null; }, put, async delete() { return undefined; } },

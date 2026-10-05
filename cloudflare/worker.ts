@@ -2341,7 +2341,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_complete', observedAt: observedAt.toISOString(), prospectiveShadowMetadata, projection }));
     return;
   }
-  if (event.cron === '4-54/10 * * * *') {
+  if (event.cron === '4,14,24,34,44,54 * * * *') {
     const observedAt = new Date(event.scheduledTime);
     const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection_r2');
     const projection = await runScheduledStep(
