@@ -416,6 +416,10 @@ describe('D1 filtered catalog projection', () => {
       expect(page?.groups.map((group) => group.group.groupId))
         .toEqual(Array.from({ length: 25 }, (_, index) => `group-${String(25 - index).padStart(2, '0')}`));
       expect(page?.cursor).toBe('25');
+      const snapshot = await store.catalogProjectionSnapshot();
+      expect(snapshot?.generatedAt).toBe(generatedAt);
+      expect(snapshot?.groups.map((group) => group.group.groupId))
+        .toEqual(Array.from({ length: 26 }, (_, index) => `group-${String(25 - index).padStart(2, '0')}`));
 
       // The old row remains briefly for requests that already read its pointer,
       // but the new manifest makes only the renamed card visible.

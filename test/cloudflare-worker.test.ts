@@ -361,6 +361,9 @@ describe('Cloudflare maintenance cron', () => {
 
   it('publishes the R2 catalog projection in a separate invocation', async () => {
     const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+    const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot').mockResolvedValue({
+      groups: [], generatedAt: '2026-09-17T17:01:00.000Z',
+    });
     const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
     const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -373,7 +376,8 @@ describe('Cloudflare maintenance cron', () => {
         DOCUMENTS: { async get() { return null; }, put, async delete() { return undefined; } },
       } as unknown as Environment);
 
-      expect(listCatalog).toHaveBeenCalledOnce();
+      expect(listCatalog).not.toHaveBeenCalled();
+      expect(snapshot).toHaveBeenCalledOnce();
       expect(projection).not.toHaveBeenCalled();
       expect(put).toHaveBeenCalledOnce();
       expect(markers).toHaveBeenCalledWith('catalog_projection_r2', 'started');
