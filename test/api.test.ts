@@ -12,6 +12,15 @@ const hasUndefined = (value: unknown): boolean =>
 
 describe('public API ownership boundary', () => {
   afterEach(() => vi.useRealTimers());
+  it('keeps bounded crawler requests to one store page even when publication filters it empty', async () => {
+    const jobs = new MemoryInternshipStore();
+    const page = vi.spyOn(jobs, 'listOpen').mockResolvedValue({ jobs: [{ ...job, postingIdentityStatus: 'unconfirmed' }], cursor: '100' });
+    const handler = createApiHandler({ jobs, users: new MemoryUserStore(), identityUnconfirmedPublicationEnabled: false });
+    const result = await handler(event(undefined, 'GET', '/jobs', undefined, { scan: 'bounded', limit: '25' }));
+    expect(JSON.parse(result.body)).toEqual({ jobs: [], cursor: '100', scanBudget: 100 });
+    expect(page).toHaveBeenCalledTimes(1);
+    expect(page).toHaveBeenCalledWith(undefined, 25, 'open', { scanBudget: 100 });
+  });
   it('returns the last exact-role verification timestamp during temporary unreadability', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-26T00:00:00Z'));

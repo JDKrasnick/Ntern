@@ -3352,6 +3352,7 @@ function LaunchInbox({
               <Text style={styles.inboxViewAllText}>Search all roles</Text>
             </TouchableOpacity>
             {onStartSwipe ? <SwipePillButton onPress={onStartSwipe} /> : null}
+            {Platform.OS === "web" ? <Text accessibilityRole="link" {...{ href: "/jobs" }} style={styles.inboxViewAllText}>About Ntern &amp; browse roles</Text> : null}
             {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
               <QueuePillButton count={queueCount} onPress={onOpenQueue} />
             ) : null}

@@ -72,6 +72,28 @@ function sqliteD1(
 describe('D1 filtered catalog projection', () => {
   afterEach(() => vi.useRealTimers());
 
+  it('bounds candidate hydration and keeps a continuation across an empty crawler page', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`CREATE TABLE catalog_items (value TEXT, catalog_state TEXT, catalog_sort_key TEXT)`);
+    const insert = database.prepare('INSERT INTO catalog_items VALUES (?, ?, ?)');
+    for (let index = 0; index < 150; index += 1) {
+      insert.run(JSON.stringify({ ...job(`role-${index}`, 'Software Intern'),
+        season: index < 125 ? 'summer-2020' : 'summer-2027' }), 'OPEN', String(1000 - index).padStart(5, '0'));
+    }
+    let hydrated = 0; let calls = 0;
+    const store = new D1InternshipStore(sqliteD1(database, (_query, rows) => { hydrated += rows.length; calls += 1; }));
+    const first = await store.listOpen(undefined, 25, 'open', { scanBudget: 100 });
+    expect(first).toEqual({ jobs: [], cursor: '100' });
+    expect(hydrated).toBe(100);
+    expect(calls).toBe(2);
+    hydrated = 0;
+    const second = await store.listOpen(first.cursor, 25, 'open', { scanBudget: 100 });
+    expect(second.jobs).toHaveLength(25);
+    expect(second.jobs[0]?.jobId).toBe('role-125');
+    expect(hydrated).toBeLessThanOrEqual(100);
+    database.close();
+  });
+
   it('continues serving a complete projection after a missed daily refresh without loading catalog jobs', async () => {
     vi.useFakeTimers();
     const now = new Date('2026-09-15T05:30:00.000Z');

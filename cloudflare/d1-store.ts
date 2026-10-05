@@ -1051,10 +1051,11 @@ export class D1InternshipStore implements InternshipStore {
     if (query.source && query.source !== 'all') { clauses.push('source_classes LIKE ?'); values.push(`%"${query.source}"%`); }
     const jobs: Internship[] = [];
     const batchSize = Math.max(50, limit * 2);
+    const scanBudget = query.scanBudget === undefined ? undefined : Math.max(1, Math.min(100, Math.trunc(query.scanBudget)));
     let scanned = offset;
     while (true) {
       const result = await this.db.prepare(`SELECT value FROM catalog_items WHERE ${clauses.join(' AND ')} ORDER BY catalog_sort_key DESC LIMIT ? OFFSET ?`)
-        .bind(...values, batchSize, scanned).all<JsonRow>();
+        .bind(...values, scanBudget === undefined ? batchSize : Math.min(batchSize, scanBudget - (scanned - offset)), scanned).all<JsonRow>();
       for (const row of result.results) {
         const rowOffset = scanned;
         scanned += 1;
@@ -1063,6 +1064,7 @@ export class D1InternshipStore implements InternshipStore {
         if (jobs.length === limit) return { jobs, cursor: String(rowOffset) };
         jobs.push(job);
       }
+      if (scanBudget !== undefined && scanned - offset >= scanBudget) return { jobs, cursor: String(scanned) };
       if (result.results.length < batchSize) return { jobs };
     }
   }
