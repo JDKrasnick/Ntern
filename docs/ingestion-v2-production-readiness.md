@@ -26,7 +26,8 @@ poll cannot bypass the writer boundary.
   baseline-silence, and idempotent catalog tests pass locally.
 - [x] Soak checks exact cron expressions, all configured admission sources,
   immutable R2 envelopes, publication, runtime errors, and live rollout controls.
-- [ ] Deploy the validated revision to both isolated dev Workers.
+- [x] Deploy the validated revision to both isolated dev Workers, with matching
+  source controls, outbound delivery disabled, and a separate dev operations key.
 - [ ] Reconcile all nine sources to snapshots, durable decisions, and queue drain.
 - [ ] Prove large-board admission resource headroom and explain every retry/quarantine.
 - [ ] Exercise provider catalog effects, recovery, and rollback in dev.
@@ -51,3 +52,17 @@ attempt: confirm attempt counts and recording-sink receipts. A settled ledger is
 not evidence of catalog publication: reconcile source occurrences and canonical
 jobs. A missing notification during baseline is expected; post-baseline eligible
 changes must produce exactly one deterministic event.
+
+## Current dev validation (2026-10-05)
+
+The provider repair is deployed to dev. All nine sources produced complete,
+verified immutable snapshots. The first independent admission pass is still
+draining; queued rows are not counted as completed validation. Initial runtime
+analytics show no errors, but memory p99 reached 120.1 MiB, so resource headroom
+remains under review. One browser-capacity retry resolved without exhaustion.
+The dedicated publication cron has not yet produced a fresh completion marker
+after this deployment. Production ownership remains unchanged.
+
+Local validation: 2,729 tests passed, compiled Worker integration tests passed
+(45 passed, one skipped), and historical replay, resource budgets, typecheck,
+and lint passed. PR CI is pending runner availability.
