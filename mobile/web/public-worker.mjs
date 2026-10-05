@@ -1,5 +1,6 @@
 import { escapeHtml, metadata, policyDescriptions, sitemap } from "../scripts/web-seo.mjs";
 import { isPastSeason } from "../../src/core/early-career.ts";
+import { topicLinks, topics } from "./topics.mjs";
 
 const approvedOrigins = new Set([
   "https://intern-notifs.jdkrasnick.workers.dev",
@@ -41,7 +42,7 @@ function problem(status, title, message) {
 }
 
 function validRole(job) {
-  return job && roleIdPattern.test(job.jobId) && typeof job.title === "string" && job.title.length > 0
+  return job && typeof job.jobId === "string" && roleIdPattern.test(job.jobId) && typeof job.title === "string" && job.title.length > 0
     && typeof job.company === "string" && job.company.length > 0 && typeof job.open === "boolean";
 }
 
@@ -85,12 +86,12 @@ async function apiJson(apiOrigin, path) {
   return JSON.parse(new TextDecoder().decode(buffer));
 }
 
-async function jobsPage(apiOrigin, cursor = "0", limit = 25) {
-  const data = await apiJson(apiOrigin, `/jobs?status=open&scan=bounded&limit=${limit}${cursor !== "0" ? `&cursor=${cursor}` : ""}`);
+async function jobsPage(apiOrigin, cursor = "0", limit = 25, topic) {
+  const data = await apiJson(apiOrigin, `/jobs?status=open&scan=bounded&limit=${limit}${cursor !== "0" ? `&cursor=${cursor}` : ""}${topic ? `&q=${encodeURIComponent(topic.query)}` : ""}`);
   if (!data || data.scanBudget !== 100 || !Array.isArray(data.jobs) || data.jobs.length > limit || data.jobs.some((job) => !validRole(job))) {
     throw new Error("Invalid catalog page");
   }
-  return { jobs: data.jobs.filter((job) => job.open && applyUrl(job.applyUrl)),
+  return { jobs: data.jobs.filter((job) => job.open && applyUrl(job.applyUrl) && (!topic || topic.matches(job))),
     cursor: typeof data.cursor === "string" && /^\d{1,5}$/.test(data.cursor)
       && Number(data.cursor) > Number(cursor) && Number(data.cursor) <= maxCursor ? data.cursor : undefined };
 }
@@ -99,24 +100,30 @@ async function render(request, apiOrigin) {
   const url = new URL(request.url);
   if (url.pathname === "/sitemap.xml") {
     const { jobs } = await jobsPage(apiOrigin, "0", 50);
-    return response(sitemap(["/", "/jobs", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`),
+    return response(sitemap(["/", "/jobs", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`), ...Object.values(topics).map((topic) => topic.path),
       ...jobs.map((job) => `/jobs/${job.jobId}`)]), 200, "application/xml; charset=utf-8");
   }
   if (url.pathname === "/jobs") {
+    const topicKey = url.searchParams.get("topic");
+    const topic = topicKey && Object.hasOwn(topics, topicKey) ? topics[topicKey] : undefined;
+    if (topicKey && !topic) return problem(400, "Unknown role category", "Choose a category from the role directory.");
     const cursor = url.searchParams.get("cursor") ?? "0";
     if (!/^(0|[1-9]\d{0,4})$/.test(cursor) || Number(cursor) > maxCursor) {
       return problem(400, "Invalid role page", "Choose a page using the next-page link in the role list.");
     }
-    const { jobs, cursor: next } = await jobsPage(apiOrigin, cursor);
-    return response(page({ title: "Technical internships and entry-level roles — Ntern", path: "/jobs",
+    const { jobs, cursor: next } = await jobsPage(apiOrigin, cursor, 25, topic);
+    const nextParams = new URLSearchParams(topicKey ? { topic: topicKey } : {});
+    if (next) nextParams.set("cursor", next);
+    return response(page({ title: `${topic?.title ?? "Technical internships and entry-level roles"} — Ntern`, path: topic?.path ?? "/jobs",
       description: "Browse open technical internships, co-ops, and entry-level roles. Learn how Ntern finds opportunities and takes you to official employer applications.",
-      noindex: cursor !== "0",
-      body: `<h1>Find your next technical role.</h1><p class="lede">Ntern is a free early-career radar for students and new graduates. Find technical internships, co-ops, apprenticeships, and entry-level opportunities without refreshing dozens of career sites.</p>
+      noindex: cursor !== "0" || Boolean(topic),
+      body: `<h1>${topic?.title ?? "Find your next technical role."}</h1><p class="lede">Ntern is a free early-career radar for students and new graduates. Find technical internships, co-ops, apprenticeships, and entry-level opportunities without refreshing dozens of career sites.</p>
       <a class="primary" href="/">Open Ntern</a><h2>How Ntern works</h2>
       <p>Browse without an account. Ntern brings together reviewed employer career feeds and attributed community sources, with source labels so you can see where a listing came from. Applications always open on the employer’s official site, where you review the full requirements and submit yourself.</p>
       <p>The app lets you set role preferences and device alerts without signing in. Create an account when you want to sync saved applications or store a résumé or profile.</p>
-      <h2>Open roles${cursor !== "0" ? " · continued" : ""}</h2>${jobs.length ? roleList(jobs) : '<p>No roles are available on this page. Check the app for the latest catalog.</p>'}
-      <div class="pagination">${cursor !== "0" ? '<a href="/jobs">Newest roles</a>' : ""}${next ? `<a href="/jobs?cursor=${next}">Next roles</a>` : ""}</div>`,
+      ${!topic ? `<h2>Explore by role</h2>${topicLinks()}` : ""}
+      <h2>Open roles${cursor !== "0" ? " · continued" : ""}</h2>${jobs.length ? roleList(jobs) : '<p>No matching roles are available on this page. Continue to the next page if available, or <a href="/jobs">browse all roles</a>.</p>'}
+      <div class="pagination">${cursor !== "0" ? `<a href="/jobs${topicKey ? `?topic=${topicKey}` : ""}">Newest roles</a>` : ""}${next ? `<a href="/jobs?${escapeHtml(nextParams.toString())}">Next roles</a>` : ""}</div>`,
     }));
   }
   const match = /^\/jobs\/([^/]+)$/.exec(url.pathname);
@@ -157,7 +164,9 @@ export function createPublicWorker(apiOrigin) {
       if (url.pathname !== "/jobs") url.search = "";
       else {
         const cursor = url.searchParams.get("cursor");
+        const topic = url.searchParams.get("topic");
         url.search = "";
+        if (topic) url.searchParams.set("topic", topic);
         if (cursor && cursor !== "0") url.searchParams.set("cursor", cursor);
       }
       if (url.href !== request.url) return new Response(null, { status: 308, headers: { Location: url.href, "Cache-Control": "no-store" } });
