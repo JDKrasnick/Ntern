@@ -31,6 +31,15 @@ export interface ExpectedAdmissionIdentity {
   expectedSnapshotHash: string;
   expectedMaterialHash: string;
   expectedAdmissionVersion: string;
+  expectedNotificationBaseline?: boolean;
+  expectedLeaseExpiresAt?: string;
+}
+
+export interface AdmissionLeaseReleaseGuard {
+  expectedSnapshotHash: string;
+  expectedMaterialHash: string;
+  expectedAdmissionVersion: string;
+  expectedLeaseExpiresAt?: string;
 }
 
 /**
@@ -39,8 +48,8 @@ export interface ExpectedAdmissionIdentity {
  * depends on the transition primitives it needs.
  */
 export interface AdmissionV2Ledger {
-  /** Commit rows as `queued` before the producer sends their message. */
-  markQueued(rows: readonly MarkQueuedInput[]): Promise<void>;
+  /** Guard the queued transition and return only successfully marked intents. */
+  markQueued(rows: readonly MarkQueuedInput[]): Promise<MarkQueuedInput[]>;
   /**
    * Atomically acquire a bounded lease. Returns `no-op` when the row is already
    * settled/quarantined, is owned by another delivery, or the message intent is
@@ -58,7 +67,7 @@ export interface AdmissionV2Ledger {
     now: string;
   }): Promise<boolean>;
   /** Return a leased row to `queued` without consuming an attempt. Reports whether the guarded update applied. */
-  releaseLease(sourceId: string, externalId: string, owner: string, now: string): Promise<boolean>;
+  releaseLease(sourceId: string, externalId: string, owner: string, now: string, expected?: AdmissionLeaseReleaseGuard): Promise<boolean>;
   settleRow(input: ExpectedAdmissionIdentity & {
     sourceId: string;
     externalId: string;
@@ -68,6 +77,8 @@ export interface AdmissionV2Ledger {
     jobId?: string;
     reason?: string;
     effectClaimed?: boolean;
+    completeFetchSequence?: number;
+    qualificationPending?: boolean;
   }): Promise<boolean>;
   scheduleRowRetry(input: ExpectedAdmissionIdentity & {
     sourceId: string;

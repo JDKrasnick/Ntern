@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ApplicationLinkValidationError, failedSourceHealth, sourceFailureCategory, sourceFailureOutcome, successfulSourceHealth } from '../src/source-health.js';
+import { ApplicationLinkValidationError, failedSourceHealth, failureFromPollReport, sourceFailureCategory, sourceFailureOutcome, successfulSourceHealth } from '../src/source-health.js';
 import { ApplicationUrlValidationError } from '../src/core/application-url.js';
 import { SourceFetchError } from '../src/sources/source-error.js';
 import type { SourceHealth } from '../src/types.js';
@@ -80,6 +80,36 @@ describe('source health', () => {
     expect(first.state).toBe('degraded');
     expect(second.state).toBe('quarantined');
     expect(second.recentRuns).toHaveLength(2);
+  });
+
+  it('preserves the pre-poll health state for row failures without inflating the failed-row count', () => {
+    const previous = successfulSourceHealth({
+      sourceId: 'greenhouse-awardco',
+      startedAt: '2026-10-05T03:00:00.000Z',
+      completedAt: '2026-10-05T03:00:01.000Z',
+    });
+    const error = failureFromPollReport({
+      sourceFailures: [],
+      failures: [
+        'greenhouse-awardco: 3 of 3 rows could not be verified (100% above 20%)',
+        'greenhouse-awardco: row 1: Application link returned 404',
+        'greenhouse-awardco: row 2: Application link returned 404',
+        'greenhouse-awardco: row 3: Application link returned 404',
+      ],
+    }, previous);
+    expect(error).toMatchObject({
+      healthRecorded: false,
+      previousHealth: previous,
+    });
+    expect(error?.message).toContain('3 of 3 rows');
+    expect(error?.message).not.toContain('4/3');
+  });
+
+  it('marks Poller source failures as already recorded', () => {
+    expect(failureFromPollReport({
+      sourceFailures: [{ message: 'provider fetch failed' }],
+      failures: ['provider fetch failed'],
+    }))?.toMatchObject({ healthRecorded: true, message: 'provider fetch failed' });
   });
 
   it('treats a body-capacity failure as a resource limit and quarantines only the repeat', () => {

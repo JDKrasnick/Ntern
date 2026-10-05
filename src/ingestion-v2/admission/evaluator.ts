@@ -1,4 +1,5 @@
 import { evaluateCatalogAdmission } from '../../catalog-admission.js';
+import type { PostingObservationAdmissionFence } from '../../store.js';
 import type { ApplicationPageEvidence } from '../../core/application-url.js';
 import type { Reachability } from '../../core/application-verification.js';
 import { classifyDestination } from '../../destination-verification.js';
@@ -48,6 +49,7 @@ export type AdmissionV2PriorContextResolver = (
 
 /** Terminal catalog effects for one admitted row. */
 export interface AdmissionCatalogCommit {
+  effectFence?: PostingObservationAdmissionFence;
   sourceId: string;
   externalId: string;
   baseline: boolean;
@@ -56,35 +58,38 @@ export interface AdmissionCatalogCommit {
   admission: CatalogAdmission;
   jobId: string;
   /**
-   * Whether this commit may mint a new-role notification. It is always false for
-   * baseline work and for a row that already has a catalog job (policy-migration
-   * or re-admission), so a verification/canary sink can prove zero notifications
-   * without a live catalog writer.
+   * Whether this commit may mint a new-role notification. Baselines and policy
+   * migrations stay silent. Qualified unsuppressed trusted-community rows may
+   * promote their existing catalog job using its deterministic notification receipt.
    */
   notify: boolean;
+  trustedCommunityAlertsEnabled?: boolean;
 }
 
 /**
- * Notification fencing for one admitted row. Baseline work and work for a row
- * that already owns a catalog job are silent; only a genuinely new post-baseline
- * role may notify. Retries and duplicate deliveries reuse the same durable row
- * identity, so this decision is stable across attempts.
+ * Notification fencing for one admitted row, including delayed promotion of a
+ * genuinely new post-baseline trusted-community role. Retries and duplicates
+ * reuse the durable notification receipt.
  */
 export function admissionRowShouldNotify(
   context: Pick<AdmissionRowContext, 'baseline' | 'row' | 'firstObservationEligible'>,
-  options: { policyMigration?: boolean } = {},
+  options: { policyMigration?: boolean; delayedPromotion?: boolean } = {},
 ): boolean {
   return admissionShouldNotify({
     baseline: context.baseline,
     policyMigration: options.policyMigration ?? false,
     firstObservation: context.firstObservationEligible ?? true,
-    existingJob: Boolean(context.row.jobId),
+    existingJob: Boolean(context.row.jobId) && !options.delayedPromotion,
   });
 }
 
 export interface AdmissionV2CatalogSink {
   /** Commit the row's decision and catalog effects idempotently. */
   commit(input: AdmissionCatalogCommit): Promise<void>;
+  revoke?(input: {
+    sourceId: string; externalId: string; reason: string; admissionVersion: string;
+    effectFence?: PostingObservationAdmissionFence;
+  }): Promise<void>;
 }
 
 export interface GradedAdmissionRow {
@@ -107,7 +112,11 @@ export function gradeAdmissionRow(input: {
   canonicalEmployer?: Pick<CanonicalEmployer, 'id' | 'displayName'>;
   prior?: AdmissionV2PriorContext;
   trustedCommunityCatalogEnabled?: boolean;
+  trustedCommunityAlertsEnabled?: boolean;
   baseline?: boolean;
+  completeFetchSequence?: number;
+  sourceMaterialHash?: string;
+  qualificationCompleteSnapshots?: number;
   probe: AdmissionDestinationProbe;
   evaluatedAt: string;
 }): GradedAdmissionRow | { decision: AdmissionRowEvaluation['decision'] } {
@@ -156,26 +165,50 @@ export function gradeAdmissionRow(input: {
     input.sourceId,
     input.trustedCommunityCatalogEnabled ?? false,
   );
-  const trustedCommunityQualification = trustedCommunityPolicy
-    ? advanceTrustedCommunityQualification({
-      ...(input.prior?.trustedCommunityAlertQualification
-        ? { previous: input.prior.trustedCommunityAlertQualification }
+  const effectiveTrustedCommunityPolicy = trustedCommunityPolicy && input.trustedCommunityAlertsEnabled
+    ? { ...trustedCommunityPolicy, alertMode: 'exact-identity-or-two-complete-snapshots' as const }
+    : trustedCommunityPolicy;
+  const previousQualification = input.prior?.trustedCommunityAlertQualification;
+  const materialChanged = Boolean(input.sourceMaterialHash && previousQualification?.sourceMaterialHash
+    && input.sourceMaterialHash !== previousQualification.sourceMaterialHash);
+  const previousCadence = input.completeFetchSequence !== undefined && input.qualificationCompleteSnapshots !== undefined
+    ? {
+      consecutiveCompleteSnapshots: Math.max(0, input.qualificationCompleteSnapshots - 1),
+      lastCountedSuccessfulFetchSequence: input.completeFetchSequence - 1,
+      basis: undefined,
+    } : {};
+  const qualificationSeed = previousQualification ?? (effectiveTrustedCommunityPolicy
+    ? advanceTrustedCommunityQualification({ destination, postingIdentityDecision: identity.decision,
+      alertMode: effectiveTrustedCommunityPolicy.alertMode }) : undefined);
+  const trustedCommunityQualification = effectiveTrustedCommunityPolicy
+    ? { ...advanceTrustedCommunityQualification({
+      ...(qualificationSeed
+        ? { previous: {
+          ...qualificationSeed,
+          ...(materialChanged ? { consecutiveCompleteSnapshots: 0,
+            lastCountedSuccessfulFetchSequence: undefined, basis: undefined } : {}),
+          ...previousCadence,
+        } }
         : {}),
       destination,
       postingIdentityDecision: identity.decision,
-      alertMode: trustedCommunityPolicy.alertMode,
-      baselineSuppressed: trustedCommunityPolicy.alertMode === 'disabled' || input.baseline === true,
+      alertMode: effectiveTrustedCommunityPolicy.alertMode,
+      completeFetchSequence: input.completeFetchSequence,
+      baselineSuppressed: effectiveTrustedCommunityPolicy.alertMode === 'disabled' || input.baseline === true,
       catalogPublicationSuppressed: false,
-    })
+    }), ...(input.sourceMaterialHash ? { sourceMaterialHash: input.sourceMaterialHash } : {}) }
     : undefined;
+  const qualifiedListing: ProcessedListing = trustedCommunityQualification
+    ? { ...normalized, trustedCommunityAlertQualification: trustedCommunityQualification }
+    : normalized;
   const admission = evaluateCatalogAdmission({
-    listing: normalized,
+    listing: qualifiedListing,
     destination,
     postingAttributed: true,
     evaluatedAt: input.evaluatedAt,
     ...(input.prior?.admission ? { previous: input.prior.admission } : {}),
-    ...(trustedCommunityPolicy && trustedCommunityQualification
-      ? { trustedCommunity: { policy: trustedCommunityPolicy, qualification: trustedCommunityQualification } }
+    ...(effectiveTrustedCommunityPolicy && trustedCommunityQualification
+      ? { trustedCommunity: { policy: effectiveTrustedCommunityPolicy, qualification: trustedCommunityQualification } }
       : {}),
   });
   const jobId = normalized.postingIdentity?.canonicalJobId
@@ -183,7 +216,7 @@ export function gradeAdmissionRow(input: {
   if (!admission.catalogEligible) {
     return { decision: { kind: 'blocked', reason: admission.reasonCodes[0] ?? 'not-catalog-eligible' } };
   }
-  return { jobId, listing: normalized, admission, decision: { kind: 'admitted', jobId } };
+  return { jobId, listing: qualifiedListing, admission, decision: { kind: 'admitted', jobId } };
 }
 
 function isGraded(row: GradedAdmissionRow | { decision: AdmissionRowEvaluation['decision'] }): row is GradedAdmissionRow {
@@ -196,6 +229,7 @@ export interface RuleBasedAdmissionEvaluatorDependencies {
   resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver;
   resolvePriorContext?: AdmissionV2PriorContextResolver;
   trustedCommunityCatalogEnabled?: boolean;
+  trustedCommunityAlertsEnabledForSource?: (sourceId: string) => boolean;
   now?: () => Date;
 }
 
@@ -219,9 +253,10 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
     // terminal instead of spending the row's transient retry budget.
     const deterministic = processPosting(context.posting);
     if (deterministic.decision.outcome !== 'included') {
-      return deterministic.decision.outcome === 'shelved'
-        ? { decision: { kind: 'shelved', reason: deterministic.decision.reason } }
-        : { decision: { kind: 'blocked', reason: deterministic.decision.reason } };
+      return this.terminal(context, {
+        kind: deterministic.decision.outcome === 'shelved' ? 'shelved' : 'blocked',
+        reason: deterministic.decision.reason,
+      });
     }
     const canonicalEmployer = deterministic.listing?.employerEvidence?.canonicalEmployer
       ?? (deterministic.listing && this.dependencies.resolveCanonicalEmployer
@@ -243,27 +278,67 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       ...(canonicalEmployer ? { canonicalEmployer } : {}),
       ...(prior ? { prior } : {}),
       trustedCommunityCatalogEnabled: this.dependencies.trustedCommunityCatalogEnabled ?? false,
+      trustedCommunityAlertsEnabled: this.dependencies.trustedCommunityAlertsEnabledForSource?.(context.sourceId) ?? false,
       baseline: context.baseline,
+      completeFetchSequence: context.completeFetchSequence,
+      sourceMaterialHash: context.row.materialHash,
+      qualificationCompleteSnapshots: context.qualificationCompleteSnapshots,
       probe,
       evaluatedAt: observedAt,
     });
     if (isGraded(graded)) {
+      const qualification = graded.listing.trustedCommunityAlertQualification;
+      const alertsEnabled = this.dependencies.trustedCommunityAlertsEnabledForSource?.(context.sourceId) === true;
+      const delayedPromotion = alertsEnabled && qualification?.status === 'eligible'
+        && qualification.baselineSuppressed !== true && qualification.catalogPublicationSuppressed !== true
+        && graded.admission.alertEligible;
       const effect = {
         sourceId: context.sourceId,
         externalId: context.externalId,
         baseline: context.baseline,
         admissionVersion: context.admissionVersion,
+        ...(context.row.leaseOwner && context.row.leaseExpiresAt ? { effectFence: {
+          snapshotHash: context.row.snapshotHash, materialHash: context.row.materialHash,
+          admissionVersion: context.row.admissionVersion, leaseOwner: context.row.leaseOwner,
+          leaseExpiresAt: context.row.leaseExpiresAt,
+          notificationBaseline: context.row.notificationBaseline ?? false,
+        } } : {}),
         listing: graded.listing,
         admission: graded.admission,
         jobId: graded.jobId,
-        notify: admissionRowShouldNotify(context),
+        notify: admissionRowShouldNotify(context, { delayedPromotion }),
+        trustedCommunityAlertsEnabled: delayedPromotion,
       };
       return {
         decision: graded.decision,
         jobId: graded.jobId,
+        completeFetchSequence: context.completeFetchSequence,
+        qualificationPending: alertsEnabled && qualification?.status === 'pending'
+          && qualification.baselineSuppressed !== true && qualification.catalogPublicationSuppressed !== true,
         commitEffect: () => this.dependencies.sink.commit(effect),
       };
     }
-    return { decision: graded.decision };
+    return this.terminal(context, graded.decision);
+  }
+
+  private terminal(context: AdmissionRowContext, decision: AdmissionRowEvaluation['decision']): AdmissionRowEvaluation {
+    const revoke = this.dependencies.sink.revoke;
+    return {
+      decision,
+      completeFetchSequence: context.completeFetchSequence,
+      qualificationPending: false,
+      ...(revoke && decision.kind !== 'admitted' ? {
+        commitEffect: () => revoke.call(this.dependencies.sink, {
+          sourceId: context.sourceId, externalId: context.externalId,
+          reason: decision.reason, admissionVersion: context.admissionVersion,
+          ...(context.row.leaseOwner && context.row.leaseExpiresAt ? { effectFence: {
+            snapshotHash: context.row.snapshotHash, materialHash: context.row.materialHash,
+            admissionVersion: context.row.admissionVersion, leaseOwner: context.row.leaseOwner,
+            leaseExpiresAt: context.row.leaseExpiresAt,
+            notificationBaseline: context.row.notificationBaseline ?? false,
+          } } : {}),
+        }),
+      } : {}),
+    };
   }
 }

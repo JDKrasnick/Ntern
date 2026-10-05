@@ -117,6 +117,16 @@ export async function processAdmissionV2Message(
       expectedSnapshotHash: message.snapshotHash,
       expectedMaterialHash: snapshotRow.materialHash,
       expectedAdmissionVersion: message.admissionVersion,
+      expectedNotificationBaseline: lease.row.notificationBaseline ?? false,
+      expectedLeaseExpiresAt: lease.row.leaseExpiresAt,
+    };
+    // Baseline is intentionally excluded: a silence change must release this
+    // exact owned lease for immediate quiet reevaluation, without an attempt.
+    const releaseGuard = {
+      expectedSnapshotHash: message.snapshotHash,
+      expectedMaterialHash: snapshotRow.materialHash,
+      expectedAdmissionVersion: message.admissionVersion,
+      expectedLeaseExpiresAt: lease.row.leaseExpiresAt,
     };
 
     try {
@@ -125,10 +135,14 @@ export async function processAdmissionV2Message(
         externalId,
         snapshotHash: message.snapshotHash,
         admissionVersion: message.admissionVersion,
-        baseline: message.baseline,
+        // The durable row fence wins if an older queued message predates a
+        // silent bootstrap or migration of the same admission identity.
+        baseline: message.baseline || lease.row.notificationBaseline === true,
         row: lease.row,
         posting: snapshotRow.posting,
         firstObservationEligible: snapshotRow.firstObservationEligible,
+        completeFetchSequence: lease.row.qualificationObservedSequence,
+        qualificationCompleteSnapshots: lease.row.qualificationCompleteSnapshots,
       });
       const decision = evaluation.decision;
       const jobId = evaluation.jobId ?? (decision.kind === 'admitted' ? decision.jobId : undefined);
@@ -141,6 +155,7 @@ export async function processAdmissionV2Message(
           ...expectedIdentity,
         });
         if (!claimed) {
+          await dependencies.ledger.releaseLease(message.sourceId, externalId, owner, now().toISOString(), releaseGuard);
           result.skipped += 1;
           dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'effect-claim' });
           continue;
@@ -155,14 +170,17 @@ export async function processAdmissionV2Message(
         ...expectedIdentity,
         decision: decision.kind,
         effectClaimed: Boolean(evaluation.commitEffect),
+        completeFetchSequence: evaluation.completeFetchSequence,
+        qualificationPending: evaluation.qualificationPending ?? false,
         ...(jobId ? { jobId } : {}),
         ...(decision.kind === 'admitted' ? {} : { reason: decision.reason }),
       });
       if (!settled) {
-        // A replacement observed after the effect claim owns the next row
-        // identity. The claimed effect is linearized before that observation;
-        // its idempotent retry remains safe while the replacement stays queued.
+        // Material, policy, silence, or lease replacement invalidated this
+        // evaluation. Release only the original lease epoch; a surviving
+        // silence update is then immediately eligible for quiet reevaluation.
         result.skipped += 1;
+        await dependencies.ledger.releaseLease(message.sourceId, externalId, owner, now().toISOString(), releaseGuard);
         dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'settle' });
         continue;
       }
@@ -174,7 +192,7 @@ export async function processAdmissionV2Message(
       const failure = classifyAdmissionFailure(error);
       if (failure.kind === 'infrastructure') {
         // Do not consume a row attempt or quarantine on a systemic failure.
-        const released = await dependencies.ledger.releaseLease(message.sourceId, externalId, owner, now().toISOString());
+        const released = await dependencies.ledger.releaseLease(message.sourceId, externalId, owner, now().toISOString(), releaseGuard);
         if (!released) dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'release' });
         result.acknowledged = false;
         result.infrastructureFailure = failure;
@@ -190,6 +208,7 @@ export async function processAdmissionV2Message(
           attemptCount: failedAttempt, failure,
         });
         if (!quarantined) {
+          await dependencies.ledger.releaseLease(message.sourceId, externalId, owner, now().toISOString(), releaseGuard);
           result.skipped += 1;
           dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'quarantine' });
           continue;
@@ -203,6 +222,7 @@ export async function processAdmissionV2Message(
           attemptCount: next.attemptCount, retryAt: next.retryAt, failure,
         });
         if (!retried) {
+          await dependencies.ledger.releaseLease(message.sourceId, externalId, owner, now().toISOString(), releaseGuard);
           result.skipped += 1;
           dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'retry' });
           continue;

@@ -4,7 +4,7 @@ import { Poller } from './poll.js';
 import { reviewedAshbySources, type ReviewedAshbySource } from './sources/ashby-config.js';
 import { AshbyPostingsAdapter } from './sources/ashby.js';
 import { SourceFetchError } from './sources/source-error.js';
-import { ApplicationLinkValidationError, failedSourceHealth, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
+import { ApplicationLinkValidationError, failedSourceHealth, failureFromPollReport, PollReportFailure, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
 import { SOURCE_RETRY_DELAY_CAP_MS } from './source-poll-cadence.js';
 import { type InternshipStore, type UserStore } from './store.js';
 import type { SourceCheckpoint, SourceFetchResult } from './types.js';
@@ -327,7 +327,8 @@ export async function runAshbyBoard(
     allowCompleteEmptySnapshot: true,
     naturalProviderPoll: !message.force,
   });
-  if (poll.failures.length) throw new Error(poll.failures.join('; '));
+  const pollFailure = failureFromPollReport(poll, sourceHealth);
+  if (pollFailure) throw pollFailure;
   const publishedHealth = await dependencies.store.getSourceHealth(source.id);
   if (publishedHealth) {
     await dependencies.store.putSourceHealth({
@@ -362,6 +363,7 @@ export async function processAshbyQueue(
   context?: { awsRequestId?: string },
 ): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> {
   return processFifoBatch(event.Records, async (record) => {
+    const startedAt = new Date().toISOString();
     try {
       const parsed = parseWorkMessage(record.body);
       const result = await runAshbyBoard(
@@ -375,6 +377,23 @@ export async function processAshbyQueue(
         ...result,
       }));
     } catch (error) {
+      if (error instanceof PollReportFailure && !error.healthRecorded) {
+        try {
+          const message = parseWorkMessage(record.body);
+          await dependencies.store.putSourceHealth(failedSourceHealth({
+            sourceId: message.sourceId,
+            provider: 'ashby',
+            region: error.previousHealth?.region,
+            previous: error.previousHealth,
+            startedAt,
+            completedAt: new Date().toISOString(),
+            runId: message.runId,
+            error,
+          }));
+        } catch (healthError) {
+          console.error(JSON.stringify({ command: 'ashby-health', messageId: record.messageId, error: safeDiagnostic(healthError) }));
+        }
+      }
       console.error(JSON.stringify({
         command: 'ashby-poll',
         messageId: record.messageId,

@@ -62,6 +62,9 @@ secrets in Worker variables.
 services in an ephemeral local `workerd` process. The harness applies the
 checked-in D1 migrations, exercises the real `INGESTION` service binding, and
 uses test-only secrets. It does not contact or mutate Cloudflare resources.
+When Docker is unavailable, the command automatically uses Wrangler's
+`--containers-rollout=none` mode for these local dry-run bundles. Deployment
+builds still use the complete container build.
 
 ## Provision infrastructure
 

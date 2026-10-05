@@ -34,11 +34,14 @@ import { cleanupExpiredUserData, D1InternshipStore, D1ReleaseStore, D1UserStore 
 import { D1IngestionV2Repository, R2IngestionSnapshotStore } from './ingestion-v2-store.js';
 import { admissionSourceAllowed, processAdmissionV2Batch } from './admission-v2.js';
 import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
+import { reconcileIngestionV2Omissions } from '../src/ingestion-v2/omission-closure.js';
+import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState } from '../src/ingestion-v2/types.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
 import { bootstrapAdmissionSnapshot, migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
-import { admissionV2FeatureConfig } from '../src/ingestion-v2/admission/types.js';
+import { applyIngestionV2Bootstrap, planIngestionV2Bootstrap } from '../src/ingestion-v2/bootstrap.js';
+import { admissionV2FeatureConfig, admissionV2OwnsCatalogWrites, admissionV2TrustedCommunityAlertsAllowed } from '../src/ingestion-v2/admission/types.js';
 import {
   CATALOG_RETENTION_CRON_MAX_DURATION_MS,
   CATALOG_RETENTION_CRON_MAX_PASSES,
@@ -127,6 +130,7 @@ export interface Environment extends AuthEnvironment,
   RESEND_API_KEY?: string;
   ADMISSION_SUPPORT_RECIPIENT?: string;
   AUTH_FROM_EMAIL?: string;
+  OUTBOUND_NOTIFICATIONS_ENABLED?: string;
   DIGEST_TO_EMAIL?: string;
   NTFY_TOPIC?: string;
   NTFY_ENDPOINT?: string;
@@ -180,13 +184,18 @@ export interface Environment extends AuthEnvironment,
   /** Stage 2 ingestion V2 fault-isolated admission. Both default off. */
   INGESTION_V2_ADMISSION_ENABLED?: string;
   INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST?: string;
+  /** Stage 3 live catalog effects. Independently default off and source-scoped. */
+  INGESTION_V2_CATALOG_WRITER_ENABLED?: string;
+  INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST?: string;
+  INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST?: string;
 }
 
 /**
  * Builds the shadow discovery hook when the feature flag is on. Returns
  * `undefined` when disabled so the runner performs no V2 work at all.
  */
-function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscovery | undefined {
+export function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscovery | undefined {
   const features = ingestionV2FeatureConfig(env);
   if (!features.shadowDiscoveryEnabled) return undefined;
   const repository = new D1IngestionV2Repository(env.DB);
@@ -202,6 +211,13 @@ function ingestionV2ShadowDiscovery(env: Environment): IngestionV2ShadowDiscover
     snapshots: new R2IngestionSnapshotStore(env.DOCUMENTS),
     features,
     admissionEnabledForSource: (sourceId) => admission.admissionEnabled && admissionSourceAllowed(env, sourceId),
+    reconcileOmissions: async (input) => {
+      if (!admissionV2OwnsCatalogWrites(env, input.sourceId)) return;
+      await reconcileIngestionV2Omissions({
+        repository,
+        sink: new ReconcilerAdmissionV2CatalogSink(new D1InternshipStore(env.DB)),
+      }, input);
+    },
     ...(admission.admissionEnabled ? {
       reopenActionableRows: async ({ sourceId, externalIds, admissionVersion, now }) => {
         if (!admissionSourceAllowed(env, sourceId)) return 0;
@@ -420,8 +436,11 @@ async function runStructuredSource(source: ReviewedStructuredSource, env: Enviro
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
     shadowDiscovery: ingestionV2ShadowDiscovery(env),
+    v2CatalogWriteOwner: (sourceId) => admissionV2OwnsCatalogWrites(env, sourceId),
+    v2TrustedCommunityAlertsEnabled: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
     allowCompleteEmptySnapshot: true,
-    config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT } });
+    expoPublisher: notificationPublisher(env),
+    config: notificationConfig(env) });
   if ('poll' in result && result.poll?.failures.length) throw new Error(result.poll.failures.join('; '));
   return true;
 }
@@ -740,6 +759,42 @@ class ResendEmailSender implements EmailSender {
     });
     if (!response.ok) throw new Error(`Email provider rejected the digest with HTTP ${response.status}`);
   }
+}
+
+function outboundNotificationsEnabled(env: Environment): boolean {
+  return env.OUTBOUND_NOTIFICATIONS_ENABLED !== 'false';
+}
+
+function notificationConfig(env: Environment): {
+  sesFrom: string;
+  sesTo: string;
+  ntfyTopic?: string;
+  ntfyEndpoint?: string;
+} {
+  if (!outboundNotificationsEnabled(env)) return { sesFrom: '', sesTo: '' };
+  return {
+    sesFrom: env.AUTH_FROM_EMAIL ?? '',
+    sesTo: env.DIGEST_TO_EMAIL ?? '',
+    ntfyTopic: env.NTFY_TOPIC,
+    ntfyEndpoint: env.NTFY_ENDPOINT,
+  };
+}
+
+function notificationPublisher(env: Environment): ExpoPushPublisher {
+  if (outboundNotificationsEnabled(env)) return new ExpoPushPublisher();
+  const recordingFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : undefined;
+    if (typeof body === 'object' && body !== null && 'ids' in body) {
+      const ids = Array.isArray((body as { ids?: unknown }).ids) ? (body as { ids: string[] }).ids : [];
+      console.log(JSON.stringify({ event: 'dev_notification_recorded', channel: 'expo_receipt', count: ids.length }));
+      return Response.json({ data: Object.fromEntries(ids.map((id) => [id, { status: 'ok' }])) });
+    }
+    const count = Array.isArray(body) ? body.length : 1;
+    console.log(JSON.stringify({ event: 'dev_notification_recorded', channel: 'expo_push', count }));
+    const ticket = () => ({ status: 'ok', id: `dev-recorded-${crypto.randomUUID()}` });
+    return Response.json({ data: Array.isArray(body) ? body.map(ticket) : ticket() });
+  }) as typeof fetch;
+  return new ExpoPushPublisher('https://dev-notification-sink.invalid', recordingFetch);
 }
 
 function documentStorage(env: Environment): DocumentStorage {
@@ -1339,6 +1394,51 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     );
     return withCors(Response.json(result, { status: result.applied ? 200 : 409 }));
   }
+  if (request.method === 'POST' && url.pathname === '/internal/operations/ingestion/bootstrap') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    let body: {
+      sourceId?: string;
+      apply?: boolean;
+      repairToken?: string;
+      expectedActive?: number;
+      expectedActionable?: number;
+    };
+    try {
+      body = await request.json() as typeof body;
+    } catch {
+      return withCors(Response.json({ message: 'Invalid JSON body' }, { status: 400 }));
+    }
+    if (!body.sourceId) return withCors(Response.json({ message: 'sourceId is required' }, { status: 400 }));
+    const dependencies = {
+      repository: new D1IngestionV2Repository(env.DB),
+      snapshots: new R2IngestionSnapshotStore(env.DOCUMENTS),
+      store: new D1InternshipStore(env.DB),
+      secret: env.OPERATIONS_SHARED_SECRET,
+    };
+    try {
+      if (!body.apply) {
+        return withCors(Response.json(await planIngestionV2Bootstrap(body.sourceId, dependencies), {
+          headers: { 'Cache-Control': 'no-store' },
+        }));
+      }
+      if (!body.repairToken || !Number.isSafeInteger(body.expectedActive) || !Number.isSafeInteger(body.expectedActionable)) {
+        return withCors(Response.json({ message: 'apply requires repairToken, expectedActive, and expectedActionable' }, { status: 400 }));
+      }
+      const receipt = await applyIngestionV2Bootstrap({
+        sourceId: body.sourceId,
+        repairToken: body.repairToken,
+        expectedActive: body.expectedActive!,
+        expectedActionable: body.expectedActionable!,
+        actor: request.headers.get('X-Operations-Actor') ?? 'operator',
+      }, dependencies);
+      console.log(JSON.stringify({ event: 'ingestion_v2_bootstrap_applied', ...receipt }));
+      return withCors(Response.json(receipt, { headers: { 'Cache-Control': 'no-store' } }));
+    } catch (error) {
+      return withCors(Response.json({
+        message: error instanceof Error ? error.message : 'Bootstrap failed',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } }));
+    }
+  }
   if (request.method === 'POST' && url.pathname === '/internal/poll-source') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     const provider = url.searchParams.get('provider');
@@ -1369,7 +1469,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
         ? { ...leverWorkMessages([source as typeof reviewedLeverSources[number]], now, crypto.randomUUID())[0]!, force: true }
         : { ...ashbyWorkMessages([source as typeof reviewedAshbySources[number]], now, crypto.randomUUID())[0]!, force: true };
     const event = { Records: [{ messageId: crypto.randomUUID(), body: JSON.stringify(message) }] };
-    const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB) };
+    const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env) };
     const result = atsProvider === 'greenhouse'
       ? await processGreenhouseQueue(event, { ...dependencies, sources: providers.greenhouse,
         enqueueContinuation: (continuation) => sendQueueMessageWithin(env.GREENHOUSE_QUEUE, continuation) })
@@ -2290,7 +2390,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
         ...shadowBudget, observedAt: observedAt.toISOString(),
       }), phases);
     }
-    const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), new ExpoPushPublisher(), undefined, new D1ReleaseStore(env.DB)), phases);
+    const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), notificationPublisher(env), undefined, new D1ReleaseStore(env.DB)), phases);
     await recordPhase(phases, 'maintenance_complete', 'complete', observedAt);
     console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), legacyPostingIdentityIncidents, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
@@ -2323,6 +2423,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   if (event.cron === '0 * * * *') {
     const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }).format(new Date(event.scheduledTime)));
     if (hour !== 9 && hour !== 17) return;
+    if (!outboundNotificationsEnabled(env)) {
+      console.log(JSON.stringify({ event: 'dev_notification_recorded', channel: 'digest', count: 1 }));
+      return;
+    }
     if (!env.RESEND_API_KEY || !env.AUTH_FROM_EMAIL || !env.DIGEST_TO_EMAIL) throw new Error('Digest email is not configured');
     await runRuntimeCommand('digest', {
       store,
@@ -2757,6 +2861,9 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
           trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
           shadowDiscovery: ingestionV2ShadowDiscovery(env),
+          v2CatalogWriteOwner: (sourceId) => admissionV2OwnsCatalogWrites(env, sourceId),
+          v2TrustedCommunityAlertsEnabled: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
+          expoPublisher: notificationPublisher(env),
           // One row can perform several bounded HTTP probes, so this stays well
           // inside the five-minute message deadline while still draining a
           // whole list's admission migration in a handful of deliveries: at 20
@@ -2766,7 +2873,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           // The largest reviewed board holds 3,029 postings; one delivery
           // resolves a bounded slice and re-enqueues itself for the rest.
           maxListingsPerSourceRun: GITHUB_RESOLUTION_ROWS_PER_DELIVERY,
-          config: { sesFrom: env.AUTH_FROM_EMAIL ?? '', sesTo: env.DIGEST_TO_EMAIL ?? '', ntfyTopic: env.NTFY_TOPIC, ntfyEndpoint: env.NTFY_ENDPOINT },
+          config: notificationConfig(env),
         }), SOURCE_MESSAGE_DEADLINE_MS);
         if (result.poll && (result.poll.continuationSources.length || result.poll.failures.length
           || Object.keys(result.poll.pendingResolution).length)) {
@@ -2978,6 +3085,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
   }
   const dependencies = {
     store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB),
+    publisher: notificationPublisher(env),
     enqueueDestinationVerification: (request: Parameters<typeof destinationVerificationMessage>[0]) => sendQueueMessageWithin(env.DESTINATION_VERIFICATION_QUEUE, destinationVerificationMessage(request)),
     catalogAdmissionResolver: catalogAdmissionResolver(env),
     enqueueEmployerIconResolution: employerIconEnqueue(env),

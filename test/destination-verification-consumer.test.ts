@@ -746,6 +746,22 @@ describe('destination verification queue consumer', () => {
     vi.unstubAllGlobals();
   });
 
+  it('suppresses external operational email in the dev recording environment', async () => {
+    const { operations } = subject();
+    const send = vi.fn();
+    vi.stubGlobal('fetch', send);
+    const sent = await sendAdmissionOperationalAlert(operations, {
+      RESEND_API_KEY: 'resend-key', ADMISSION_SUPPORT_RECIPIENT: 'support@example.test',
+      AUTH_FROM_EMAIL: 'Ntern Dev <dev.example>', OUTBOUND_NOTIFICATIONS_ENABLED: 'false',
+    }, { signals: ['destination-verification-dlq'], details: 'One message is waiting.', observedAt: '2026-08-30T12:00:00Z' });
+    expect(sent).toBe(true);
+    await expect(sendShadowBudgetAlert(operations, {
+      RESEND_API_KEY: 'resend-key', ADMISSION_SUPPORT_RECIPIENT: 'support@example.test',
+      AUTH_FROM_EMAIL: 'Ntern Dev <dev.example>', OUTBOUND_NOTIFICATIONS_ENABLED: 'false',
+    }, { period: '2026-09', spentCents: 2000, allowanceCents: 2000, observedAt: '2026-09-24T12:00:00.000Z' })).resolves.toBe(true);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('sends one budget exhaustion email per month', async () => {
     const { operations } = subject();
     const send = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));

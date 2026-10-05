@@ -1,0 +1,38 @@
+name: Ingestion V2 dev soak
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingestion-v2-dev-soak
+  cancel-in-progress: false
+
+jobs:
+  checkpoint:
+    runs-on: ubuntu-latest
+    environment:
+      name: cloudflare-workers-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Audit production-mirrored dev ingestion
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          INGESTION_V2_SOAK_WINDOW_HOURS: '24'
+        run: npm run ingestion:v2:dev:soak
+      - name: Retain checkpoint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingestion-v2-dev-soak-${{ github.run_id }}
+          path: .context/verification/ingestion-v2/dev-soak/report.json
+          if-no-files-found: error
+          retention-days: 14

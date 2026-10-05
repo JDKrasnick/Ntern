@@ -47,6 +47,10 @@ export interface RuntimeDependencies {
   enqueueEmployerIconResolution?: (seed: EmployerIconSeed) => Promise<void>;
   /** Default-off V2 shadow discovery; observes only and never admits. */
   shadowDiscovery?: ShadowDiscoveryHook;
+  /** Sources whose successful polls persist only V2 discovery and source state. */
+  v2CatalogWriteOwner?: (sourceId: string) => boolean;
+  /** Source-scoped alert policy participates in the durable V2 admission version. */
+  v2TrustedCommunityAlertsEnabled?: (sourceId: string) => boolean;
   /** Defaults off in deployed runtimes until the compatible client is live. */
   identityUnconfirmedPublicationEnabled?: boolean;
   /** Catalog exposure gate; alert activation stays in reviewed source policy. */
@@ -68,6 +72,8 @@ export async function runRuntimeCommand(command: 'poll' | 'digest', dependencies
       dependencies.trustedCommunityCatalogEnabled ?? false,
       dependencies.enqueueEmployerIconResolution,
       dependencies.shadowDiscovery,
+      dependencies.v2CatalogWriteOwner,
+      dependencies.v2TrustedCommunityAlertsEnabled,
     ).poll({
       allowCompleteEmptySnapshot: dependencies.allowCompleteEmptySnapshot,
       maxAdmissionMigrationListingsPerSourceRun: dependencies.maxAdmissionMigrationListingsPerSourceRun,

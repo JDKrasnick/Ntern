@@ -9,7 +9,7 @@ import type { ProcessedSnapshot, SourcedPosting } from '../types.js';
  */
 
 /** Bumped only when the stored normalized snapshot shape changes incompatibly. */
-export const INGESTION_V2_SNAPSHOT_SCHEMA_VERSION = 1;
+export const INGESTION_V2_SNAPSHOT_SCHEMA_VERSION = 2;
 
 export type IngestionSnapshotState = 'staged' | 'active' | 'terminal' | 'expired';
 /** The full row-state domain; also validated at the operations boundary. */
@@ -59,6 +59,7 @@ export interface IngestionSnapshotRecord {
   activatedAt?: string;
   terminalAt?: string;
   expiresAt?: string;
+  completeFetchSequence?: number;
 }
 
 export interface IngestionRowRecord {
@@ -67,8 +68,13 @@ export interface IngestionRowRecord {
   snapshotHash: string;
   materialHash: string;
   admissionVersion: string;
-  /** Suppress notifications until this material completes its first V2 evaluation. */
+  /** Durable silence for a retained role first seen in baseline or policy migration. */
   notificationBaseline?: boolean;
+  /** Last complete source cadence evaluated, independent of queue attempts. */
+  completeFetchSequence?: number;
+  qualificationPending?: boolean;
+  qualificationObservedSequence?: number;
+  qualificationCompleteSnapshots?: number;
   state: IngestionRowState;
   decision?: IngestionDecision;
   attemptCount: number;
@@ -208,6 +214,8 @@ export function ingestionV2FeatureConfig(env: {
  * enqueue admission, mutate checkpoints, or touch the live catalog.
  */
 export interface ShadowDiscoveryInput {
+  /** Absent for continuations or fetches without complete cadence evidence. */
+  completeFetchSequence?: number;
   sourceId: string;
   postings: readonly SourcedPosting[];
   processed: ProcessedSnapshot;
@@ -230,11 +238,13 @@ export interface ShadowDiscoveryHook {
    * Must never throw. Implementations swallow and record their own failures so
    * shadow mode can never fail or retry a legacy delivery.
    */
-  discover(input: ShadowDiscoveryInput): Promise<void>;
+  discover(input: ShadowDiscoveryInput): Promise<{ completed: boolean; snapshotHash?: string } | void>;
 }
 
 /** Repository boundary for the V2 ledger; implemented by `D1IngestionV2Repository`. */
 export interface IngestionV2Repository {
+  /** Observe compact cadence evidence and queue pending qualifications; dispatch stays bounded. */
+  recordCompleteCadence?(sourceId: string, snapshotHash: string, admissionVersion: string, sequence: number, now: string): Promise<number>;
   putSnapshot(record: IngestionSnapshotRecord): Promise<void>;
   getSnapshot(sourceId: string, snapshotHash: string): Promise<IngestionSnapshotRecord | undefined>;
   activateSnapshot(sourceId: string, snapshotHash: string, activatedAt: string): Promise<void>;
@@ -247,7 +257,7 @@ export interface IngestionV2Repository {
   listDueWork(sourceId: string, now: string, limit: number): Promise<CompactIngestionRow[]>;
   listStalePolicyRows(sourceId: string, admissionVersion: string, limit: number): Promise<CompactIngestionRow[]>;
   listExpiredLeases(now: string, limit: number): Promise<IngestionRowRecord[]>;
-  listRowsForSnapshot(snapshotHash: string, limit: number): Promise<CompactIngestionRow[]>;
+  listRowsForSnapshot(sourceId: string, snapshotHash: string, limit: number): Promise<CompactIngestionRow[]>;
   putShadowComparison(metrics: ShadowComparisonMetrics): Promise<void>;
   listShadowComparisons(): Promise<ShadowComparisonMetrics[]>;
   getShadowComparison(sourceId: string): Promise<ShadowComparisonMetrics | undefined>;

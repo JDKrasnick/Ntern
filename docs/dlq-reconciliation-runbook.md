@@ -497,6 +497,6 @@ stale.
    queue and DLQ on rollback; the additive schema and R2 snapshot objects stay in
    place for diagnosis.
 
-Before Stage 3 cutover this lane runs in verification mode (the catalog writer is
+Outside a Stage 3 source allowlist this lane runs in verification mode (the catalog writer is
 a recorded decision sink), so a drained or retained `admission-v2` DLQ cannot have
 published anything to the live catalog.

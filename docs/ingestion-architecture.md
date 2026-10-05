@@ -183,9 +183,9 @@ The protected `GET /internal/operations/ingestion-v2` endpoint returns the lates
 shadow comparison per source (or one source with `?sourceId=`). It requires the
 `X-Operations-Key` header and is otherwise a 404.
 
-## Ingestion V2 fault-isolated admission (Stage 2)
+## Ingestion V2 fault-isolated admission (Stages 2 and 3)
 
-Stage 2 adds a dedicated `intern-notifs-admission-v2` queue and DLQ and makes
+Stage 2 added a dedicated `intern-notifs-admission-v2` queue and DLQ and makes
 each ledger row settle, retry, or quarantine independently. It stays
 feature-flagged and, before Stage 3 cutover, runs in verification mode: the
 catalog writer is replaced by a recorded decision sink, so admission writes
@@ -292,22 +292,37 @@ the live catalog.
   immutable retained R2 snapshot before issuing a token. Both require
   `X-Operations-Key` and are otherwise a 404.
 
-### Stage 2 production boundary (owned by Stage 3)
+### Stage 3 bootstrap and source-scoped catalog ownership
 
-Stage 2 ships the whole lane: the dedicated queue/DLQ, versioned messages, the
-durable handoff and change-driven producer, leases, retries, quarantine, guarded
-replay, bounded policy migration, and notification fencing. Two things stay out
-of scope and belong to Stage 3:
+Stage 3 selects the reconciler-backed writer without introducing a second live
+writer. Migration `0049_ingestion_v2_bootstrap.sql` stores an immutable bootstrap
+receipt. `POST /internal/operations/ingestion/bootstrap` first returns a dry-run
+whose HMAC guard covers the paused source status, checkpoint, active snapshot,
+ledger counts, active/actionable counts, visibility estimate, and 15-minute
+expiry. Apply requires the exact token and expected counts. One D1 batch marks
+the active rows as a silent baseline, clears legacy pending migration fields,
+stamps the snapshot admission version in the checkpoint, and records the
+receipt. Repeating the same completed bootstrap is a zero-change success.
 
-- The deployed catalog writer is still a durable recorded decision sink, so V2
-  commits ledger state and the decision it *would* have published without
-  mutating the live catalog. Integration tests compose the reconciler-backed
-  writer with jobs, occurrences, and notification receipts; Stage 3 selects it
-  for production traffic.
-- Broad production cutover. Shadow discovery is enabled for the bounded
-  Northwestern and SpeedyApply cohorts, and non-publishing admission is enabled
-  only for Northwestern after the [2026-10-03 production canary](ingestion-v2-stage2-production-canary.md).
-  Legacy ingestion remains authoritative until Stage 3.
+Live ownership uses independent, default-empty source controls:
+
+- `INGESTION_V2_CATALOG_WRITER_ENABLED` plus
+  `INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST` select the live V2 sink.
+- `INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST` transfers the
+  source's catalog-write ownership only when shadow discovery, V2 admission, and
+  the live writer are all enabled for that same explicit source. The legacy
+  poll still fetches, applies source-quality gates, records a complete V2
+  snapshot, and updates source health/checkpoint state; it skips catalog,
+  occurrence, and notification writes.
+- `INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST` independently enables
+  the reviewed `exact-identity-or-two-complete-snapshots` alert policy. It is
+  effective only for a V2-owned source and participates in the durable V2
+  evaluator version. Existing bootstrap and policy-migration rows stay silent.
+
+Removing the legacy-disable source entry restores legacy write ownership without
+removing additive V2 tables or R2 snapshots. Disabling admission drains handoffs
+without evaluating rows. The complete cohort sequence and rollback checks are in
+[`ingestion-v2-stage3-cutover.md`](ingestion-v2-stage3-cutover.md).
 
 The end-to-end suite covers the lane by seeding dispatchable rows and by driving
 real deliveries through the built Worker. Two writers share `ingestion_rows`, so

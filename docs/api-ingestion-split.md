@@ -40,6 +40,9 @@ them as separate services in one ephemeral local `workerd` process, applies all
 checked-in D1 migrations, and sends requests through the real `INGESTION`
 service binding. It uses fixed test-only secrets, requires no Cloudflare account
 or credentials, and leaves no persistent database or Worker state behind.
+If Docker is unavailable, the local command builds both Worker entrypoints with
+Wrangler's `--containers-rollout=none` dry-run mode. Deployment builds continue
+to include the complete container build.
 
 ## Secret inventory
 
@@ -214,3 +217,20 @@ The rollback is code/configuration-only: D1 and queues remain untouched.
 If the API version is healthy but only the internal forwarding fails, leave
 ingestion paused and restore the prior API configuration. Do not roll back or
 alter shared D1 schema as part of this procedure.
+
+## Ingestion V2 Stage 3 operations
+
+The ingestion Worker owns the protected
+`POST /internal/operations/ingestion/bootstrap` route. The API Worker forwards
+the route through the existing service binding; unauthorized requests keep the
+hidden `404` response. The operator CLI sends the operations key only at runtime:
+
+```bash
+npm run ingestion:v2:bootstrap -- --source <source-id>
+```
+
+Live V2 catalog effects require matching source IDs across the shadow,
+admission, writer, and legacy-write-disable allowlists. Keep those controls
+default-off during a code or schema deployment. Follow
+[`ingestion-v2-stage3-cutover.md`](ingestion-v2-stage3-cutover.md) for the
+pause, forced recovery, guarded apply, verification, and rollback sequence.

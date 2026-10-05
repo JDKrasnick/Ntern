@@ -30,9 +30,10 @@ const resumeInfrastructureCreates = new Set([
   'cloudflare_queue_consumer.ingestion["resume-job-import"]',
 ]);
 
-// Stage 2 ingestion V2 adds one dedicated admission queue, its DLQ, and one
-// consumer, plus four default-off bindings on the ingestion Worker. The create
-// names, settings, and bindings are pinned so a plan cannot repurpose them.
+// Ingestion V2 adds one dedicated admission queue, its DLQ, and one consumer,
+// plus the Stage 2 and Stage 3 default-off bindings on the ingestion Worker.
+// The create names, settings, and bindings are pinned so a plan cannot
+// repurpose them.
 const admissionV2InfrastructureCreates = new Set([
   'cloudflare_queue.work["admission-v2"]',
   'cloudflare_queue.dead_letter["admission-v2"]',
@@ -44,6 +45,10 @@ const admissionV2IngestionBindings: Array<Record<string, unknown>> = [
   { name: 'ADMISSION_V2_DLQ', type: 'queue', queue_name: 'intern-notifs-admission-v2-dlq' },
   { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'false' },
   { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+  { name: 'INGESTION_V2_CATALOG_WRITER_ENABLED', type: 'plain_text', text: 'false' },
+  { name: 'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+  { name: 'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+  { name: 'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
 ];
 
 const resumeWorkerBindings: Record<string, Array<Record<string, unknown>>> = {
@@ -457,11 +462,15 @@ function isCatalogR2ReadToggle(before: unknown, after: unknown): boolean {
 const ingestionV2BooleanToggles = new Set([
   'INGESTION_V2_SHADOW_DISCOVERY_ENABLED',
   'INGESTION_V2_ADMISSION_ENABLED',
+  'INGESTION_V2_CATALOG_WRITER_ENABLED',
 ]);
 const ingestionV2ToggleBindings = new Set([
   ...ingestionV2BooleanToggles,
   'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST',
   'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST',
+  'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST',
+  'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST',
+  'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST',
 ]);
 
 function isIngestionV2Toggle(binding: unknown): boolean {
@@ -495,11 +504,10 @@ function isIngestionV2BindingUpdate(before: unknown, after: unknown): boolean {
     // First addition: every toggle is new, so length grows by exactly that many.
     return after.length === before.length + afterToggles.length;
   }
-  if (beforeToggles.length !== afterToggles.length) return false;
-  const beforeByName = new Map(beforeToggles.map((binding) => [String((binding as Record<string, unknown>).name), binding]));
-  let changed = false;
-  for (const toggle of afterToggles) {
-    const prior = beforeByName.get(String((toggle as Record<string, unknown>).name));
+  const afterByName = new Map(afterToggles.map((binding) => [String((binding as Record<string, unknown>).name), binding]));
+  let changed = afterToggles.length > beforeToggles.length;
+  for (const prior of beforeToggles) {
+    const toggle = afterByName.get(String((prior as Record<string, unknown>).name));
     if (!isRecord(prior) || !isRecord(toggle)) return false;
     const { text: priorText, ...priorRest } = prior;
     const { text: nextText, ...nextRest } = toggle;

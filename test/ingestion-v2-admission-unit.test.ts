@@ -14,7 +14,13 @@ import {
 } from '../src/ingestion-v2/admission/taxonomy.js';
 import { canTransition, planRowTransition } from '../src/ingestion-v2/admission/transitions.js';
 import { admissionRowShouldNotify } from '../src/ingestion-v2/admission/evaluator.js';
-import { ADMISSION_V2_MAX_EXTERNAL_IDS, type AdmissionV2Message } from '../src/ingestion-v2/admission/types.js';
+import {
+  ADMISSION_V2_MAX_EXTERNAL_IDS,
+  admissionV2FeatureConfig,
+  admissionV2OwnsCatalogWrites,
+  admissionV2TrustedCommunityAlertsAllowed,
+  type AdmissionV2Message,
+} from '../src/ingestion-v2/admission/types.js';
 import type { IngestionRowRecord } from '../src/ingestion-v2/types.js';
 
 function message(overrides: Partial<AdmissionV2Message> = {}): AdmissionV2Message {
@@ -146,5 +152,34 @@ describe('admission v2 notification fencing', () => {
     expect(admissionRowShouldNotify({ baseline: false, row: fencingRow(), firstObservationEligible: false })).toBe(false);
     // Policy-migration work is silent even without a recorded job.
     expect(admissionRowShouldNotify({ baseline: false, row: fencingRow(), firstObservationEligible: true }, { policyMigration: true })).toBe(false);
+  });
+});
+
+describe('admission v2 Stage 3 writer controls', () => {
+  it('keeps live effects off by default', () => {
+    expect(admissionV2FeatureConfig({})).toMatchObject({
+      admissionEnabled: false,
+      catalogWriterEnabled: false,
+    });
+  });
+
+  it('transfers legacy ownership only when discovery, admission, writer, and every source gate match', () => {
+    const enabled = {
+      INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true',
+      INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: 'canary',
+      INGESTION_V2_ADMISSION_ENABLED: 'true',
+      INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: 'canary',
+      INGESTION_V2_CATALOG_WRITER_ENABLED: 'true',
+      INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: 'canary',
+      INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: 'canary',
+      INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST: 'canary',
+    };
+    expect(admissionV2OwnsCatalogWrites(enabled, 'canary')).toBe(true);
+    expect(admissionV2OwnsCatalogWrites({ ...enabled, INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: '' }, 'canary')).toBe(false);
+    expect(admissionV2OwnsCatalogWrites({ ...enabled, INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: '' }, 'canary')).toBe(false);
+    expect(admissionV2OwnsCatalogWrites({ ...enabled, INGESTION_V2_CATALOG_WRITER_ENABLED: 'false' }, 'canary')).toBe(false);
+    expect(admissionV2OwnsCatalogWrites({ ...enabled, INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: '' }, 'canary')).toBe(false);
+    expect(admissionV2TrustedCommunityAlertsAllowed(enabled, 'canary')).toBe(true);
+    expect(admissionV2TrustedCommunityAlertsAllowed({ ...enabled, INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST: '' }, 'canary')).toBe(false);
   });
 });

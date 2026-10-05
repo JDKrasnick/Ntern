@@ -20,6 +20,36 @@ export class ApplicationLinkValidationError extends Error {
   }
 }
 
+/**
+ * A Poller report can fail after it has already written source health. Queue
+ * wrappers must not count that same attempt twice. Row-level failures, however,
+ * are reported after Poller wrote success health, so the wrapper must replace
+ * that success using the health state captured before the poll began.
+ */
+export class PollReportFailure extends Error {
+  constructor(
+    message: string,
+    readonly healthRecorded: boolean,
+    readonly previousHealth?: SourceHealth,
+  ) {
+    super(message);
+    this.name = 'PollReportFailure';
+  }
+}
+
+export function failureFromPollReport(
+  report: { failures: string[]; sourceFailures: Array<{ message: string }> },
+  previousHealth?: SourceHealth,
+): PollReportFailure | undefined {
+  if (report.sourceFailures.length) {
+    return new PollReportFailure(report.sourceFailures.map(({ message }) => message).join('; '), true);
+  }
+  if (report.failures.length) {
+    return new PollReportFailure(report.failures.join('; '), false, previousHealth);
+  }
+  return undefined;
+}
+
 export function safeDiagnostic(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message

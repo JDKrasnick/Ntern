@@ -58,7 +58,9 @@ const sourceDocuments = [
   { path: 'README.md', branch: 'dev', season: 'summer-2027', rows: 4 },
 ];
 const applicationHosts = ['careers-a.example.test', 'careers-b.example.test'];
-const applyUrl = (index) => `https://${applicationHosts[index % applicationHosts.length]}/board/role-${index}`;
+const applyUrl = (index) => index === 4
+  ? 'https://job-boards.greenhouse.io/acme/jobs/1004'
+  : `https://${applicationHosts[index % applicationHosts.length]}/board/role-${index}`;
 
 function markdownTable(rows) {
   const header = '| Company | Position | Location | Posting | Salary |\n| --- | --- | --- | --- | --- |\n';
@@ -96,7 +98,7 @@ function installFetchStub() {
       const answers = type === 'A' ? [{ type: 1, data: '93.184.216.34' }] : [];
       return new Response(JSON.stringify({ Answer: answers }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
-    if (hostname.endsWith('.example.test')) {
+    if (hostname.endsWith('.example.test') || hostname === 'job-boards.greenhouse.io') {
       const status = destinationStatus.get(hostname) ?? 200;
       if (init?.method === 'HEAD') return new Response(null, { status, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
       return new Response(status >= 400 ? 'error' : employerPage(), { status, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
@@ -109,7 +111,7 @@ function recorder() {
   return { sent: [], async send(message) { this.sent.push(message); } };
 }
 
-async function deliverGithub() {
+async function deliverGithub(overrides = {}, messageOverrides = {}) {
   const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
   const queues = { github: recorder(), destinationVerification: recorder(), admission: recorder() };
   const settled = { ack: 0, retries: [] };
@@ -119,38 +121,44 @@ async function deliverGithub() {
     DESTINATION_VERIFICATION_QUEUE: queues.destinationVerification, DESTINATION_VERIFICATION_DLQ: recorder(),
     ADMISSION_V2_QUEUE: queues.admission, ADMISSION_V2_DLQ: recorder(),
     INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true',
+    INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: '',
     INGESTION_V2_ADMISSION_ENABLED: 'true',
     INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: '',
+    INGESTION_V2_CATALOG_WRITER_ENABLED: 'false',
+    INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: '',
+    INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: '',
+    INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST: '',
     IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'false',
     TRUSTED_COMMUNITY_CATALOG_ENABLED: 'false',
     PUBLIC_API_URL: 'https://api.example.test',
+    ...overrides,
   };
   await builtWorker.queue({
     queue: 'intern-notifs-github',
-    messages: [{ id: `v2-board-${Date.now()}`, body: { sourceId }, attempts: 1, timestamp: new Date(), ack() { settled.ack += 1; }, retry(options, error) { settled.retries.push({ options, error: String(error) }); } }],
+    messages: [{ id: `v2-board-${Date.now()}`, body: { sourceId, ...messageOverrides }, attempts: 1, timestamp: new Date(), ack() { settled.ack += 1; }, retry(options, error) { settled.retries.push({ options, error: String(error) }); } }],
   }, environment);
   return settled;
 }
 
-function admissionBatchId(snapshotHash, admissionVersion, externalIds) {
+function admissionBatchId(snapshotHash, admissionVersion, externalIds, baseline = false) {
   const ordered = [...new Set(externalIds)].sort();
-  return createHash('sha256').update(['admission-v2', sourceId, snapshotHash, admissionVersion, 'incremental', ordered.join(',')].join('|')).digest('hex');
+  return createHash('sha256').update(['admission-v2', sourceId, snapshotHash, admissionVersion, baseline ? 'baseline' : 'incremental', ordered.join(',')].join('|')).digest('hex');
 }
 
-function buildMessages(rows, snapshotHash, admissionVersion) {
+function buildMessages(rows, snapshotHash, admissionVersion, baseline = false) {
   const ordered = rows.map((row) => row.external_id).sort();
   const messages = [];
   for (let offset = 0; offset < ordered.length; offset += 25) {
     const externalIds = ordered.slice(offset, offset + 25);
     messages.push({
       version: 1,
-      batchId: admissionBatchId(snapshotHash, admissionVersion, externalIds),
+      batchId: admissionBatchId(snapshotHash, admissionVersion, externalIds, baseline),
       sourceId,
       snapshotHash,
       snapshotKey: `ingestion-v2/snapshots/${sourceId}/${snapshotHash}.json`,
       admissionVersion,
       externalIds,
-      baseline: false,
+      baseline,
     });
   }
   return messages;
@@ -165,7 +173,7 @@ async function deliverAdmission(messages, overrides = {}) {
       INSERT OR IGNORE INTO ingestion_admission_handoffs
         (batch_id, source_id, snapshot_hash, admission_version, baseline, external_ids, dispatched_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).bind(body.batchId, body.sourceId, body.snapshotHash, body.admissionVersion, 0, JSON.stringify(body.externalIds), new Date().toISOString()).run();
+    `).bind(body.batchId, body.sourceId, body.snapshotHash, body.admissionVersion, body.baseline ? 1 : 0, JSON.stringify(body.externalIds), new Date().toISOString()).run();
   }
   const deadLetter = recorder();
   const settled = { ack: 0, retries: [] };
@@ -234,6 +242,17 @@ before(async () => {
   database = await runtime.getD1Database('DB', ingestionWorkerName);
   documentsBucket = await runtime.getR2Bucket('DOCUMENTS', ingestionWorkerName);
   await applyMigrations(database);
+  const reviewedAt = '2026-10-03T00:00:00.000Z';
+  await database.batch([
+    database.prepare(`INSERT INTO canonical_employers
+      (id, display_name, reviewed_at, reviewed_by, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .bind('acme', 'Acme', reviewedAt, 'e2e', reviewedAt, reviewedAt),
+    database.prepare(`INSERT INTO employer_mappings
+      (id, provider, scope, canonical_employer_id, reviewed_at, reviewed_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .bind('e2e-greenhouse-acme', 'greenhouse', 'acme', 'acme', reviewedAt, 'e2e', reviewedAt),
+  ]);
   ingestion = await runtime.getWorker(ingestionWorkerName);
   installFetchStub();
   const seeded = await deliverGithub();
@@ -419,4 +438,214 @@ test('guards row inspection and replay behind the operations boundary', async ()
   const ghost = await ghostResponse.json();
   assert.equal(ghost.eligible, false);
   assert.equal(ghost.reason, 'row-not-in-retained-snapshot');
+});
+
+test('rehearses guarded bootstrap, live publication, closure, rollback, and re-enable', async () => {
+  const ownershipOverrides = {
+    INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true',
+    INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: sourceId,
+    INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: sourceId,
+    INGESTION_V2_CATALOG_WRITER_ENABLED: 'true',
+    INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: sourceId,
+    INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: sourceId,
+    INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST: sourceId,
+  };
+  // Repair state intentionally dirtied by the preceding boundary probes, then
+  // take a fresh complete snapshot before planning the guarded bootstrap.
+  await database.prepare('DELETE FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, 'ghost-not-in-snapshot').run();
+  documentBodies.set(
+    `https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md`,
+    markdownTable(4),
+  );
+  const refreshed = await deliverGithub();
+  assert.equal(refreshed.ack, 1, JSON.stringify(refreshed.retries));
+  await database.prepare(`UPDATE ingestion_rows SET state = 'settled', lease_owner = NULL, lease_expires_at = NULL
+    WHERE source_id = ? AND state IN ('queued', 'processing')`).bind(sourceId).run();
+
+  const healthRow = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'HEALTH'")
+    .bind(`SOURCE#${sourceId}`).first();
+  const health = JSON.parse(healthRow.value);
+  await database.prepare("UPDATE catalog_items SET value = ? WHERE pk = ? AND sk = 'HEALTH'")
+    .bind(JSON.stringify({ ...health, sourceStatus: 'paused', configVersion: (health.configVersion ?? 0) + 1 }), `SOURCE#${sourceId}`).run();
+
+  // A cutover recovery runs with the final source-scoped policy while the
+  // source remains paused. This makes the bootstrap receipt bind to the same
+  // evaluator version that will own live catalog writes after resume.
+  const recovered = await deliverGithub(ownershipOverrides, { force: true });
+  assert.equal(recovered.ack, 1, JSON.stringify(recovered.retries));
+  await database.prepare(`UPDATE ingestion_rows SET state = 'pending', lease_owner = NULL, lease_expires_at = NULL
+    WHERE source_id = ? AND state IN ('queued', 'processing')`).bind(sourceId).run();
+
+  const headers = {
+    'X-InternNotifs-Service-Key': internalServiceSecret,
+    'X-Operations-Key': operationsSecret,
+    'Content-Type': 'application/json',
+  };
+  const previewResponse = await ingestion.fetch('https://ingestion.example.test/internal/operations/ingestion/bootstrap', {
+    method: 'POST', headers, body: JSON.stringify({ sourceId }),
+  });
+  const previewText = await previewResponse.text();
+  assert.equal(previewResponse.status, 200, previewText);
+  const preview = JSON.parse(previewText);
+  assert.equal(preview.sourceStatus, 'paused');
+  assert.equal(preview.activeRows, 4);
+  assert.equal(preview.actionableRows, 4);
+  assert.equal(preview.expectedNotifications, 0);
+
+  const applyResponse = await ingestion.fetch('https://ingestion.example.test/internal/operations/ingestion/bootstrap', {
+    method: 'POST', headers, body: JSON.stringify({
+      sourceId, apply: true, repairToken: preview.repairToken,
+      expectedActive: preview.activeRows, expectedActionable: preview.actionableRows,
+    }),
+  });
+  const applyText = await applyResponse.text();
+  assert.equal(applyResponse.status, 200, applyText);
+  const receipt = JSON.parse(applyText);
+  assert.equal(receipt.expectedNotifications, 0);
+  const notificationBaseline = await database.prepare(
+    'SELECT COUNT(*) AS count FROM ingestion_rows WHERE source_id = ? AND state = ? AND notification_baseline = 1',
+  ).bind(sourceId, 'pending').first();
+  assert.equal(notificationBaseline.count, 4);
+
+  const notificationsBeforeBaseline = await database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'notification-event'").first();
+  let current = await boardSnapshot();
+  const baselineDelivery = await deliverAdmission(
+    buildMessages(current.rows, current.snapshot.snapshot_hash, current.snapshot.admission_version, true),
+    {
+      ...ownershipOverrides,
+      TRUSTED_COMMUNITY_CATALOG_ENABLED: 'true',
+    },
+  );
+  assert.equal(baselineDelivery.settled.ack, 1, JSON.stringify(baselineDelivery.settled.retries));
+  const notificationsAfterBaseline = await database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'notification-event'").first();
+  assert.equal(notificationsAfterBaseline.count, notificationsBeforeBaseline.count, 'bootstrap baseline must stay silent');
+  const pausedHealthRow = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'HEALTH'")
+    .bind(`SOURCE#${sourceId}`).first();
+  const pausedHealth = JSON.parse(pausedHealthRow.value);
+  await database.prepare("UPDATE catalog_items SET value = ? WHERE pk = ? AND sk = 'HEALTH'")
+    .bind(JSON.stringify({ ...pausedHealth, sourceStatus: 'active', configVersion: (pausedHealth.configVersion ?? 0) + 1 }), `SOURCE#${sourceId}`).run();
+
+  // A genuinely new post-baseline row crosses discovery, R2, D1, the admission
+  // queue, the live catalog sink, and the deterministic notification outbox.
+  documentBodies.set(
+    `https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md`,
+    markdownTable(5),
+  );
+  const changed = await deliverGithub(ownershipOverrides);
+  assert.equal(changed.ack, 1, JSON.stringify(changed.retries));
+  current = await boardSnapshot();
+  const pendingRows = current.rows.filter((row) => row.state === 'pending' || row.state === 'queued');
+  assert.equal(pendingRows.length, 1);
+  const incrementalMessages = buildMessages(pendingRows, current.snapshot.snapshot_hash, current.snapshot.admission_version);
+  const liveOverrides = {
+    ...ownershipOverrides,
+    TRUSTED_COMMUNITY_CATALOG_ENABLED: 'true',
+  };
+  const incremental = await deliverAdmission(incrementalMessages, liveOverrides);
+  assert.equal(incremental.settled.ack, 1, JSON.stringify(incremental.settled.retries));
+  const notificationsAfterNew = await database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'notification-event'").first();
+  const newRowDiagnostic = await database.prepare(
+    'SELECT external_id, state, decision, job_id, notification_baseline FROM ingestion_rows WHERE source_id = ? AND external_id = ?',
+  ).bind(sourceId, `README.md:${applyUrl(4)}`).first();
+  const newOccurrenceDiagnostic = await database.prepare(
+    "SELECT value FROM catalog_items WHERE kind = 'source-occurrence' AND source_id = ? AND external_id = ?",
+  ).bind(sourceId, `README.md:${applyUrl(4)}`).first();
+  assert.equal(notificationsAfterNew.count, notificationsAfterBaseline.count + 1,
+    JSON.stringify({ newRowDiagnostic, newOccurrenceDiagnostic }));
+  await deliverAdmission(incrementalMessages, liveOverrides);
+  const notificationsAfterDuplicate = await database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'notification-event'").first();
+  assert.equal(notificationsAfterDuplicate.count, notificationsAfterNew.count, 'duplicate delivery must not notify twice');
+
+  const unchanged = await deliverGithub(ownershipOverrides);
+  assert.equal(unchanged.ack, 1, JSON.stringify(unchanged.retries));
+  const unchangedWork = await database.prepare("SELECT COUNT(*) AS count FROM ingestion_rows WHERE source_id = ? AND state IN ('pending','queued','processing')")
+    .bind(sourceId).first();
+  assert.equal(unchangedWork.count, 0);
+
+  // Two complete omissions close the removed row. The first cadence retains it.
+  documentBodies.set(
+    `https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md`,
+    markdownTable(4),
+  );
+  await deliverGithub(ownershipOverrides);
+  const removedExternalId = `README.md:${applyUrl(4)}`;
+  const afterOneOmission = await database.prepare('SELECT state, consecutive_omissions FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, removedExternalId).first();
+  assert.notEqual(afterOneOmission.state, 'absent');
+  await deliverGithub(ownershipOverrides);
+  const afterTwoOmissions = await database.prepare('SELECT state, consecutive_omissions FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, removedExternalId).first();
+  assert.equal(afterTwoOmissions.state, 'absent');
+  assert.equal(afterTwoOmissions.consecutive_omissions, 2);
+  const closedOccurrenceRow = await database.prepare(
+    "SELECT value FROM catalog_items WHERE kind = 'source-occurrence' AND source_id = ? AND external_id = ?",
+  ).bind(sourceId, removedExternalId).first();
+  assert.ok(closedOccurrenceRow, 'published role must retain its durable occurrence');
+  const closedOccurrence = JSON.parse(closedOccurrenceRow.value);
+  assert.equal(closedOccurrence.occurrence.state, 'closed');
+  assert.equal(closedOccurrence.present, false);
+  const closedJobRow = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'")
+    .bind(`JOB#${closedOccurrence.jobId}`).first();
+  assert.ok(closedJobRow);
+  assert.equal(JSON.parse(closedJobRow.value).open, false, 'two complete omissions must close the public job');
+  assert.equal((await database.prepare('SELECT closure_pending FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, removedExternalId).first()).closure_pending, 0);
+  await deliverGithub(ownershipOverrides);
+  assert.equal((await database.prepare('SELECT consecutive_omissions FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, removedExternalId).first()).consecutive_omissions, 2, 'completed closure is not recurring work');
+
+  // Roll back admission while a row is pending, prove the disabled consumer
+  // drains without mutation, then re-enable and settle the same durable work.
+  const rollbackTarget = current.rows[0].external_id;
+  await database.prepare("UPDATE ingestion_rows SET state = 'pending', retry_at = NULL WHERE source_id = ? AND external_id = ?")
+    .bind(sourceId, rollbackTarget).run();
+  current = await boardSnapshot();
+  const rollbackMessage = buildMessages(
+    current.rows.filter((row) => row.external_id === rollbackTarget),
+    current.snapshot.snapshot_hash,
+    current.snapshot.admission_version,
+  );
+  await deliverAdmission(rollbackMessage, { INGESTION_V2_ADMISSION_ENABLED: 'false' });
+  assert.equal((await database.prepare('SELECT state FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, rollbackTarget).first()).state, 'pending');
+  await deliverAdmission(rollbackMessage, liveOverrides);
+  assert.equal((await database.prepare('SELECT state FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+    .bind(sourceId, rollbackTarget).first()).state, 'settled');
+
+  // The production dynamic sink must forward a terminal rejection after claim,
+  // revoking a role published by the baseline without minting another alert.
+  const rejectedId = `README.md:${applyUrl(0)}`;
+  documentBodies.set(
+    `https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md`,
+    markdownTable(4).replace('Software Engineering Intern 0', 'Software Engineering Intern 0 Updated'),
+  );
+  destinationStatus.set(applicationHosts[0], 404);
+  try {
+    await deliverGithub(ownershipOverrides);
+    current = await boardSnapshot();
+    const rejection = await deliverAdmission(buildMessages(
+      current.rows.filter((row) => row.external_id === rejectedId),
+      current.snapshot.snapshot_hash, current.snapshot.admission_version,
+    ), liveOverrides);
+    assert.equal(rejection.settled.ack, 1, JSON.stringify(rejection.settled.retries));
+    const rejectedLedger = await database.prepare('SELECT state, decision FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
+      .bind(sourceId, rejectedId).first();
+    assert.deepEqual(rejectedLedger, { state: 'settled', decision: 'blocked' });
+    const rejectedOccurrenceRow = await database.prepare(
+      "SELECT value FROM catalog_items WHERE kind = 'source-occurrence' AND source_id = ? AND external_id = ?",
+    ).bind(sourceId, rejectedId).first();
+    assert.ok(rejectedOccurrenceRow);
+    const rejectedOccurrence = JSON.parse(rejectedOccurrenceRow.value);
+    assert.equal(rejectedOccurrence.occurrence.state, 'closed');
+    assert.equal(rejectedOccurrence.occurrence.admission.catalogEligible, false);
+    const rejectedJob = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'")
+      .bind(`JOB#${rejectedOccurrence.jobId}`).first();
+    assert.equal(JSON.parse(rejectedJob.value).open, false);
+    assert.equal(JSON.parse(rejectedJob.value).admission.catalogEligible, false);
+    assert.equal((await database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'notification-event'").first()).count,
+      notificationsAfterNew.count);
+  } finally {
+    destinationStatus.clear();
+  }
 });

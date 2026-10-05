@@ -551,11 +551,12 @@ export class IngestionRunner {
      * binding must swallow its own failures: an icon is never worth failing a poll.
      */
     private readonly enqueueEmployerIconResolution?: (seed: EmployerIconSeed) => Promise<void>,
-    /**
-     * Read-only V2 shadow discovery. It runs after the legacy quality gates and
-     * must never enqueue admission, mutate a checkpoint, or touch the catalog.
-     */
+    /** V2 snapshot and ledger discovery. Before ownership, failures stay observational. */
     private readonly shadowDiscovery?: ShadowDiscoveryHook,
+    /** True only after a guarded bootstrap transfers catalog ownership to V2. */
+    private readonly v2CatalogWriteOwner?: (sourceId: string) => boolean,
+    /** Included in the durable admission version so alert-policy changes re-grade safely. */
+    private readonly v2TrustedCommunityAlertsEnabled?: (sourceId: string) => boolean,
   ) {}
 
   private async quarantine(job: Internship) {
@@ -1540,6 +1541,7 @@ export class IngestionRunner {
       let failureCategory: NonNullable<SourceHealth['diagnosticCategory']> = 'transport';
       let trustedMetrics: SourceHealth['trustedCommunity'];
       try {
+        const v2OwnsCatalogWrites = this.v2CatalogWriteOwner?.(connector.id) === true;
         const admissionConfigurationVersion = prefetched
           ? prefetched.admissionConfigurationVersion
           : effectiveAdmissionConfigurationVersion({
@@ -1549,7 +1551,7 @@ export class IngestionRunner {
           });
         let remainingMigrationLimit = options.maxAdmissionMigrationListingsPerSourceRun;
         let revocationOccurrences: SourceOccurrenceState[] | undefined;
-        if (!this.trustedCommunityCatalogEnabled && sourceAdmissionPolicy(connector.id).trust === 'trusted-community') {
+        if (!v2OwnsCatalogWrites && !this.trustedCommunityCatalogEnabled && sourceAdmissionPolicy(connector.id).trust === 'trusted-community') {
           failureCategory = 'persistence';
           // The disabled gate used to hydrate every retained occurrence merely
           // to discover that no old admission remained. Large GitHub sources
@@ -1826,14 +1828,20 @@ export class IngestionRunner {
         // array is not a complete empty board and must never become a V2
         // snapshot. A hash-unchanged full response still has a body and remains
         // eligible for shadow comparison.
+        let v2Discovery: { completed: boolean; snapshotHash?: string } | void = undefined;
         if (this.shadowDiscovery && isSourceSnapshot(result) && result.unchangedReason !== 'not_modified') {
-          await this.shadowDiscovery.discover({
+          v2Discovery = await this.shadowDiscovery.discover({
+            // Legacy bounded continuations re-fetch a full body but do not
+            // constitute another qualification cadence.
+            completeFetchSequence: resolutionPassOpen || previous?.pendingAdmissionConfigurationVersion
+              ? undefined : result.checkpoint.successfulFetches,
             sourceId: connector.id,
             postings: result.postings,
             processed: batch.processed,
             snapshotHash: batch.snapshotHash,
             admissionVersion: ingestionV2AdmissionVersion(
               githubAdmissionConfigurationVersion ?? admissionConfigurationVersion ?? 'standard-v1',
+              { trustedCommunityAlertsEnabled: this.v2TrustedCommunityAlertsEnabled?.(connector.id) === true },
             ),
             baseline,
             observedAt: now,
@@ -1842,6 +1850,59 @@ export class IngestionRunner {
             ...(options.runId ? { runId: options.runId } : {}),
             now,
           });
+        }
+        if (v2OwnsCatalogWrites) {
+          failureCategory = 'persistence';
+          if (!isSourceSnapshot(result) || result.unchangedReason === 'not_modified') {
+            throw new Error(`V2 catalog owner ${connector.id} requires a complete source snapshot`);
+          }
+          if (!v2Discovery?.completed || !v2Discovery.snapshotHash) {
+            throw new Error(`V2 catalog owner ${connector.id} failed to persist its complete source snapshot`);
+          }
+          const provider = providerFor(connector.id);
+          const metricCounts = batch.processed.counts;
+          const successHealth: SourceHealth = {
+            ...successfulSourceHealth({
+              contentOmitted: result.checkpoint.contentOmitted === true,
+              sourceId: connector.id,
+              provider,
+              region: regionFor(provider),
+              previous: previousHealth,
+              startedAt: attemptedAt,
+              completedAt: now,
+              runId: options.runId,
+              outcome: batch.unchanged ? 'success_unchanged_hash' : 'success_changed',
+              etag: result.checkpoint.etag,
+              contentHash: batch.snapshotHash,
+              rawRows: metricCounts.raw,
+              validRows: metricCounts.valid,
+              eligibleRows: metricCounts.eligible,
+              filteredRows: metricCounts.filtered,
+              withheldRows: metricCounts.withheld,
+            }),
+            counts: metricCounts,
+            ...(previousHealth?.trustedCommunity ? { trustedCommunity: previousHealth.trustedCommunity } : {}),
+          };
+          await this.store.putSourceHealth(successHealth);
+          health.push(successHealth);
+          await this.store.putCheckpoint({
+            ...result.checkpoint,
+            contentHash: batch.snapshotHash,
+            activeExternalIds: [...batch.activeExternalIds],
+            pendingResolutionRows: undefined,
+            pendingAdmissionConfigurationVersion: undefined,
+            ...(admissionConfigurationVersion ? { admissionConfigurationVersion } : {}),
+          });
+          console.log(JSON.stringify({
+            event: 'ingestion_v2_catalog_ownership', sourceId: connector.id,
+            snapshotHash: batch.snapshotHash, activeRows: batch.activeExternalIds.size,
+            legacyCatalogWrites: 0,
+          }));
+          emitSuccessMetric(
+            connector.id, provider, batch.unchanged ? 'success_unchanged_hash' : 'success_changed',
+            metricCounts, Date.now() - started, result.conditionalRequest, options.runId,
+          );
+          continue;
         }
         const resolution = await this.resolveListings(
           resolvedListings,

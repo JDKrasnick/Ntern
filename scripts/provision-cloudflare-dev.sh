@@ -1,20 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-resume_queue='intern-notifs-dev-resume-job-import'
-resume_dlq='intern-notifs-dev-resume-job-import-dlq'
+dev_prefix='intern-notifs-dev'
+dev_database='intern-notifs-dev-db'
+dev_api_config='wrangler.dev.api.jsonc'
 resume_index='intern-notifs-dev-resume-bank-v1'
+queue_suffixes=(
+  greenhouse
+  lever
+  ashby
+  github
+  gmail
+  destination-verification
+  shadow-extraction
+  resume-job-import
+  admission-v2
+)
 
 ensure_queue() {
   local name="$1"
   local retention="$2"
   if ! npx wrangler queues info "$name" >/dev/null 2>&1; then
     npx wrangler queues create "$name" --message-retention-period-secs "$retention"
+  else
+    npx wrangler queues update "$name" --message-retention-period-secs "$retention" >/dev/null
   fi
 }
 
-ensure_queue "$resume_queue" 86400
-ensure_queue "$resume_dlq" 1209600
+ensure_bucket() {
+  local name="$1"
+  if ! npx wrangler r2 bucket info "$name" >/dev/null 2>&1; then
+    npx wrangler r2 bucket create "$name"
+  fi
+}
+
+npx wrangler whoami >/dev/null
+
+if ! npx wrangler d1 info "$dev_database" --json >/dev/null 2>&1; then
+  echo "Missing $dev_database. Create it and update both wrangler.dev configs with its database ID." >&2
+  exit 1
+fi
+
+ensure_bucket "$dev_prefix-documents"
+ensure_bucket "$dev_prefix-shadow-extraction"
+
+for suffix in "${queue_suffixes[@]}"; do
+  retention=86400
+  if test "$suffix" = 'destination-verification'; then retention=604800; fi
+  ensure_queue "$dev_prefix-$suffix" "$retention"
+  ensure_queue "$dev_prefix-$suffix-dlq" 1209600
+done
 
 index=$(npx wrangler vectorize list --json | jq -c --arg name "$resume_index" '.[] | select(.name == $name)')
 if test -z "$index"; then
@@ -27,4 +62,6 @@ jq -e '.config.dimensions == 768
   and .config.metric == "cosine"
   and .config.preset == "@cf/baai/bge-base-en-v1.5"' <<<"$index" >/dev/null
 
-echo 'Cloudflare development resume resources are ready.'
+npx wrangler d1 migrations apply "$dev_database" --remote --config "$dev_api_config"
+
+echo 'Cloudflare development resources and migrations mirror the production topology.'

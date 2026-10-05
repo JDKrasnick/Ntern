@@ -169,7 +169,7 @@ describe('Cloudflare admission v2 boundary', () => {
 
   it('ledgers malformed work and retries it toward the DLQ instead of dropping it', async () => {
     const database = new DatabaseSync(':memory:');
-    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
+    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql', '0049_ingestion_v2_cost_windows.sql', '0050_ingestion_v2_omission_closure.sql', '0051_ingestion_v2_qualification_cadence.sql']) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
     }
     let acked = 0;
@@ -191,7 +191,7 @@ describe('Cloudflare admission v2 boundary', () => {
 
   it('ledgers systemic delivery failure without consuming a row attempt', async () => {
     const database = new DatabaseSync(':memory:');
-    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
+    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql', '0049_ingestion_v2_cost_windows.sql', '0050_ingestion_v2_omission_closure.sql', '0051_ingestion_v2_qualification_cadence.sql']) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
     }
     const [body] = buildAdmissionV2Messages({
@@ -213,7 +213,7 @@ describe('Cloudflare admission v2 boundary', () => {
 
   it('resolves a prior failure-ledger row when a disabled canary drains safely', async () => {
     const database = new DatabaseSync(':memory:');
-    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql']) {
+    for (const file of ['0001_initial.sql', '0015_dlq_recovery.sql', '0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql', '0049_ingestion_v2_cost_windows.sql', '0050_ingestion_v2_omission_closure.sql', '0051_ingestion_v2_qualification_cadence.sql']) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
     }
     const [body] = buildAdmissionV2Messages({

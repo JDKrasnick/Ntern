@@ -5,7 +5,7 @@ import { isPastSeason } from '../src/core/early-career.js';
 import { employerCategory } from '../src/core/employers.js';
 import type { ApplicationSession } from '../src/application-automation.js';
 import { preferredJobIdentityConflicts, providerPostingKey, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
-import { deletedUserTombstoneKey, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
+import { deletedUserTombstoneKey, SupersededPostingObservationError, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
 import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
 import { liveCatalogOverlayFromStore, overlaySupersedesGroup, type LiveCatalogOverlay } from '../src/catalog-live.js';
 import type { ApplicantProfile, ApplicationRecord, CatalogAdmissionReason, DeliveryReceipt, DestinationClassification, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceSelectionMetadata, SourceOccurrenceState, TrustedCommunityAlertQualification, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from '../src/types.js';
@@ -488,12 +488,43 @@ export class D1InternshipStore implements InternshipStore {
       return this.commitPostingObservation({ decision, sourceId: input.occurrence.sourceId, externalId: input.occurrence.externalId, occurrence: input.occurrence.occurrence });
     }
     const aliasKeys = aliases.map((alias) => `POSTING_ALIAS#${alias}`);
-    const conflictGuard = aliasKeys.length ? `NOT EXISTS (
+    const aliasGuard = aliasKeys.length ? `NOT EXISTS (
       SELECT 1 FROM catalog_items WHERE kind = 'posting-alias'
         AND pk IN (${aliasKeys.map(() => '?').join(', ')})
         AND json_extract(value, '$.canonicalJobId') <> ?
     )` : '1 = 1';
-    const guardValues = aliasKeys.length ? [...aliasKeys, input.job.jobId] : [];
+    const fence = input.omissionFence;
+    const omissionGuard = fence ? `EXISTS (
+      SELECT 1 FROM ingestion_rows r WHERE r.source_id = ? AND r.external_id = ?
+        AND r.snapshot_hash = ? AND r.material_hash = ? AND r.admission_version = ?
+        AND r.updated_at = ? AND r.consecutive_omissions >= 2 AND r.effect_claimed_at IS NULL
+        AND r.closure_pending = 1
+        AND EXISTS (SELECT 1 FROM ingestion_snapshots s WHERE s.source_id = r.source_id
+          AND s.snapshot_hash = ? AND s.state = 'active'
+          AND s.snapshot_hash = (SELECT latest.snapshot_hash FROM ingestion_snapshots latest
+            WHERE latest.source_id = s.source_id AND latest.state = 'active'
+            ORDER BY latest.activated_at DESC, latest.snapshot_hash DESC LIMIT 1))
+    )` : '1 = 1';
+    const admissionFence = input.admissionEffectFence;
+    const admissionGuard = admissionFence ? `EXISTS (
+      SELECT 1 FROM ingestion_rows r WHERE r.source_id = ? AND r.external_id = ?
+        AND r.snapshot_hash = ? AND r.material_hash = ? AND r.admission_version = ?
+        AND r.state = 'processing' AND r.lease_owner = ? AND r.lease_expires_at = ?
+        AND r.effect_claimed_at IS NOT NULL
+        AND r.consecutive_omissions < 2 AND r.closure_pending = 0
+        AND r.notification_baseline = COALESCE(?, r.notification_baseline)
+    )` : '1 = 1';
+    const effectGuard = `(${omissionGuard}) AND (${admissionGuard})`;
+    const conflictGuard = `(${aliasGuard}) AND (${effectGuard})`;
+    const guardValues = [
+      ...(aliasKeys.length ? [...aliasKeys, input.job.jobId] : []),
+      ...(fence ? [input.occurrence.sourceId, input.occurrence.externalId, fence.snapshotHash,
+        fence.materialHash, fence.admissionVersion, fence.updatedAt, fence.activeSnapshotHash] : []),
+      ...(admissionFence ? [input.occurrence.sourceId, input.occurrence.externalId,
+        admissionFence.snapshotHash, admissionFence.materialHash,
+        admissionFence.admissionVersion, admissionFence.leaseOwner, admissionFence.leaseExpiresAt,
+        admissionFence.notificationBaseline === undefined ? null : admissionFence.notificationBaseline ? 1 : 0] : []),
+    ];
     let results: Awaited<ReturnType<D1Database['batch']>> = [];
     let notificationInserted = false;
     let projectionCommitted = false;
@@ -626,7 +657,14 @@ export class D1InternshipStore implements InternshipStore {
       notificationInserted = Boolean(notificationIndex >= 0 && results[notificationIndex]?.meta.changes);
       if (projectionCommitted) break;
     }
-    if (!projectionCommitted) throw new Error('Unable to commit posting observation projection');
+    if (!projectionCommitted) {
+      if (fence || admissionFence) {
+        const current = await this.db.prepare(`SELECT 1 AS present WHERE ${effectGuard}`)
+          .bind(...guardValues.slice(aliasKeys.length ? aliasKeys.length + 1 : 0)).first();
+        if (!current) throw new SupersededPostingObservationError('Negative catalog effect was superseded');
+      }
+      throw new Error('Unable to commit posting observation projection');
+    }
     const verified = input.identity ? await this.resolvePostingIdentity(input.identity, input.job.jobId) : preview;
     if (verified.outcome === 'quarantine' || verified.canonicalJobId !== input.job.jobId) {
       const conflicts = verified.outcome === 'quarantine' ? verified.conflictingCanonicalJobIds : [verified.canonicalJobId, input.job.jobId];

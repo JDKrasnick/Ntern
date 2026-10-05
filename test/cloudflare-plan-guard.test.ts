@@ -763,6 +763,10 @@ describe('Cloudflare deployment plan guard', () => {
       { name: 'ADMISSION_V2_DLQ', type: 'queue', queue_name: 'intern-notifs-admission-v2-dlq' },
       { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'false' },
       { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+      { name: 'INGESTION_V2_CATALOG_WRITER_ENABLED', type: 'plain_text', text: 'false' },
+      { name: 'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+      { name: 'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+      { name: 'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
     ];
     const changes = [
       {
@@ -802,6 +806,10 @@ describe('Cloudflare deployment plan guard', () => {
       { name: 'ADMISSION_V2_DLQ', type: 'queue', queue_name: 'intern-notifs-admission-v2-dlq' },
       { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'false' },
       { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+      { name: 'INGESTION_V2_CATALOG_WRITER_ENABLED', type: 'plain_text', text: 'false' },
+      { name: 'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+      { name: 'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
+      { name: 'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST', type: 'plain_text', text: '' },
     ];
     const combined = (bindings: unknown[]) => ({
       ...contentUpdate,
@@ -846,6 +854,32 @@ describe('Cloudflare deployment plan guard', () => {
     // An invalid enablement value is still refused.
     expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'yes', allowlist: '' })]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: 'Bad/Path' })]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
+  it('permits adding the Stage 3 controls after Stage 2 is already deployed', () => {
+    const stage2 = [
+      { name: 'INGESTION_V2_SHADOW_DISCOVERY_ENABLED', type: 'plain_text', text: 'true' },
+      { name: 'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST', type: 'plain_text', text: 'canary' },
+      { name: 'INGESTION_V2_ADMISSION_ENABLED', type: 'plain_text', text: 'true' },
+      { name: 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST', type: 'plain_text', text: 'canary' },
+    ];
+    const stage3 = [
+      { name: 'INGESTION_V2_CATALOG_WRITER_ENABLED', type: 'plain_text', text: 'false' },
+      { name: 'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST', type: 'plain_text', text: ',' },
+      { name: 'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST', type: 'plain_text', text: ',' },
+      { name: 'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST', type: 'plain_text', text: ',' },
+    ];
+    const update = {
+      ...contentUpdate,
+      address: 'cloudflare_workers_script.ingestion',
+      before: { ...worker, bindings: [...worker.bindings, ...stage2] },
+      after: { ...contentUpdate.after, bindings: [...worker.bindings, ...stage2, ...stage3] },
+    };
+    expect(validateCloudflarePlan(plan([update]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([{
+      ...update,
+      after: { ...update.after, bindings: [...worker.bindings, ...stage2, ...stage3, { name: 'OTHER', type: 'plain_text', text: 'on' }] },
+    }]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
   it('permits enabling the existing resume feature flag but not disabling it', () => {

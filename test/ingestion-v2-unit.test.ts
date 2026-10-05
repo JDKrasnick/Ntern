@@ -5,6 +5,7 @@ import {
   parseEnvelope,
   serializeEnvelope,
   snapshotObjectKey,
+  snapshotHashForRows,
   stableStringify,
 } from '../src/ingestion-v2/normalize.js';
 import { planSnapshotDiff } from '../src/ingestion-v2/diff.js';
@@ -72,6 +73,19 @@ describe('ingestion v2 normalization', () => {
     expect(forward.rowCount).toBe(3);
     expect(forward.documentCount).toBe(2);
     expect(forward.rows.map((entry) => entry.externalId)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('binds schema 2 snapshot identity to the admission policy while retaining schema 1 readability', () => {
+    const postings = [posting({ externalId: 'a' })];
+    const first = normalizeSourceSnapshot({ sourceId: 'community-example', postings, admissionVersion: 'v1', observedAt: POSTING_FETCHED_AT });
+    const second = normalizeSourceSnapshot({ sourceId: 'community-example', postings, admissionVersion: 'v2', observedAt: POSTING_FETCHED_AT });
+    expect(first.snapshotHash).not.toBe(second.snapshotHash);
+
+    const legacy = { ...first, schemaVersion: 1, snapshotHash: snapshotHashForRows(first.rows) };
+    expect(parseEnvelope(serializeEnvelope(legacy), {
+      sourceId: legacy.sourceId,
+      snapshotHash: legacy.snapshotHash,
+    }).admissionVersion).toBe('v1');
   });
 
   it('omits volatile fetch metadata from the material hash', () => {
