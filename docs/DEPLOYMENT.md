@@ -42,8 +42,11 @@ external providers.
 The bootstrapped `northwestern-fintech-2027-quant` source is the continuous V2
 writer canary in dev. Shadow discovery, admission, catalog ownership, legacy
 write suppression, and trusted-alert intent are enabled for that source only.
-All other sources retain normal polling through the mirrored legacy lanes and
-provide a comparison cohort. Expanding the canary requires a successful guarded
+Non-publishing V2 admission also covers SpeedyApply SWE and AI, Vansh, Canadian
+Tech, Simplify, Greenhouse Figma, Lever Palantir, and Ashby Mistral AI. These
+eight sources retain legacy catalog ownership while their V2 snapshots and
+independent admission decisions are verified. The dev API carries identical
+V2 controls so forced provider polls respect the same ownership boundary. Expanding the canary requires a successful guarded
 bootstrap receipt for each added source before its writer and legacy-disable
 allowlists change.
 

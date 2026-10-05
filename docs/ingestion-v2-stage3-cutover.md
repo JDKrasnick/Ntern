@@ -116,10 +116,15 @@ the workflow dispatch or locally with Cloudflare credentials:
 npm run ingestion:v2:dev:soak
 ```
 
-Each checkpoint verifies the 11 production cron triggers, public dev catalog,
-canary health and freshness, active snapshot and comparison, stale handoffs,
-expired leases, recent unresolved queue failures, and all nine work queue/DLQ
-pairs. JSON evidence is retained as a workflow artifact for 14 days. A clean
+Each checkpoint verifies the exact 12 production cron expressions, live dev
+rollout controls and outbound suppression, the public dev catalog, and every
+configured admission source. It checks source freshness, complete comparisons,
+D1/R2 snapshot identity and envelope integrity, cost windows, stale handoffs,
+expired leases, fresh scheduled R2 catalog publication, Worker runtime failures
+and resource percentiles, and all nine work queue/DLQ pairs. The observation
+window starts no earlier than the latest ingestion deployment; a newly deployed
+Worker cannot claim a completed 24-hour soak. Resource-headroom warnings require
+review before promotion. JSON evidence is retained as a workflow artifact for 14 days. A clean
 24-hour dev soak is the pre-production gate; it does not replace the guarded
 production canary or the seven-day production soak.
 
