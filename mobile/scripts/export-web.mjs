@@ -7,6 +7,7 @@ import { build } from "esbuild";
 import { addMetadata, homeDescription, homeTitle, policyDescriptions, sitemap } from "./web-seo.mjs";
 import { page } from "../web/public-worker.mjs";
 import { topicLinks, topics } from "../web/topics.mjs";
+import { aboutPage } from "../web/about.mjs";
 
 const mobileRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(mobileRoot, "..");
@@ -64,7 +65,8 @@ await Promise.all(Object.values(topics).map(async (topic) => {
   await writeFile(path, page({ title: `${topic.title} — Ntern`, description: topic.description, path: topic.path,
     body: `${topic.body}<h2>Explore another path</h2>${topicLinks()}` }));
 }));
-await writeFile(resolve(outputDirectory, "sitemap.xml"), sitemap(["/", "/jobs", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`), ...Object.values(topics).map((topic) => topic.path)]));
+await writeFile(resolve(outputDirectory, "about.html"), page(aboutPage));
+await writeFile(resolve(outputDirectory, "sitemap.xml"), sitemap(["/", "/about", "/jobs", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`), ...Object.values(topics).map((topic) => topic.path)]));
 const workerBuild = await build({
   entryPoints: [resolve(mobileRoot, "web/public-worker.mjs")],
   outfile: resolve(outputDirectory, "_worker.js"), bundle: true, format: "esm", platform: "browser", target: "es2022",
@@ -79,7 +81,7 @@ await writeFile(resolve(outputDirectory, "_routes.json"), JSON.stringify({
   version: 1, include: ["/jobs", "/jobs/*", "/sitemap.xml"], exclude: [],
 }));
 
-const requiredFiles = ["index.html", "robots.txt", "sitemap.xml", "public-api.json", "_worker.js", "_routes.json", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles, ...Object.values(topics).map((topic) => `${topic.path.slice(1)}.html`)];
+const requiredFiles = ["index.html", "about.html", "robots.txt", "sitemap.xml", "public-api.json", "_worker.js", "_routes.json", "_headers", "favicon.ico", "apple-touch-icon.png", ...policyFiles, ...Object.values(topics).map((topic) => `${topic.path.slice(1)}.html`)];
 await Promise.all(requiredFiles.map(async (name) => {
   const value = await readFile(resolve(outputDirectory, name));
   if (value.byteLength === 0) throw new Error(`Web export produced an empty ${name}`);

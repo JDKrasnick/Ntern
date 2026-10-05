@@ -17,7 +17,7 @@ export function page({ title, description, path, body, noindex = false }) {
     <link rel="icon" href="/favicon.ico" /><link rel="stylesheet" href="/policy.css" />
     <style>body{background:#f2f2f7}header{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:2.5rem}header a{font-weight:700;text-decoration:none}.brand{color:#061a33;font-size:1.25rem}.primary{display:inline-block;background:#0e7490;color:white;padding:.7rem 1rem;border-radius:.5rem;font-weight:600;text-decoration:none;min-height:24px}.roles{list-style:none;padding:0;margin:1.5rem 0}.roles li{border-bottom:1px solid #d1d1d6;padding:1rem 0}.roles a{font-weight:600}.roles p{margin:.35rem 0 0}.facts{display:grid;grid-template-columns:minmax(7rem,1fr) 2fr;gap:.5rem 1rem;margin:1.5rem 0}dt{font-weight:600}dd{margin:0}h1,h2,p,a,dd{overflow-wrap:anywhere}.pagination{display:flex;justify-content:space-between;gap:1rem}a{min-height:24px;text-underline-offset:.2em}a:hover{text-decoration:underline}a:focus-visible{outline:3px solid #0e7490;outline-offset:4px}::selection{background:#ceeaf0;color:#061a33}</style>
     </head><body><main><header><a class="brand" href="/">Ntern</a><a href="/">Open the app</a></header>
-    ${body}<nav aria-label="More from Ntern"><a href="/jobs">Browse roles</a><a href="/source-policy">Sources and corrections</a><a href="/privacy">Privacy</a><a href="/support">Support</a></nav>
+    ${body}<nav aria-label="More from Ntern"><a href="/about">About</a><a href="/jobs">Browse roles</a><a href="/source-policy">Sources and corrections</a><a href="/privacy">Privacy</a><a href="/support">Support</a></nav>
     </main></body></html>`;
 }
 
@@ -100,7 +100,7 @@ async function render(request, apiOrigin) {
   const url = new URL(request.url);
   if (url.pathname === "/sitemap.xml") {
     const { jobs } = await jobsPage(apiOrigin, "0", 50);
-    return response(sitemap(["/", "/jobs", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`), ...Object.values(topics).map((topic) => topic.path),
+    return response(sitemap(["/", "/about", "/jobs", ...Object.keys(policyDescriptions).map((slug) => `/${slug}`), ...Object.values(topics).map((topic) => topic.path),
       ...jobs.map((job) => `/jobs/${job.jobId}`)]), 200, "application/xml; charset=utf-8");
   }
   if (url.pathname === "/jobs") {
