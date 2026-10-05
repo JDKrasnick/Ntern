@@ -116,6 +116,12 @@ the workflow dispatch or locally with Cloudflare credentials:
 npm run ingestion:v2:dev:soak
 ```
 
+For a reviewed experiment profile, set `INGESTION_V2_DEV_CONFIG` to its dev
+ingestion JSON configuration. The checkpoint rejects a production Worker name
+or enabled outbound delivery and compares both live dev Workers with that
+profile. Sources owned by V2 also require matching durable occurrence links,
+canonical jobs, policy versions, and revoked catalog eligibility.
+
 Each checkpoint verifies the exact 12 production cron expressions, live dev
 rollout controls and outbound suppression, the public dev catalog, and every
 configured admission source. It checks source freshness, complete comparisons,

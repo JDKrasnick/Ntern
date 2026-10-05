@@ -55,14 +55,44 @@ changes must produce exactly one deterministic event.
 
 ## Current dev validation (2026-10-05)
 
-The provider repair is deployed to dev. All nine sources produced complete,
-verified immutable snapshots. The first independent admission pass is still
-draining; queued rows are not counted as completed validation. Initial runtime
-analytics show no errors, but memory p99 reached 120.1 MiB, so resource headroom
-remains under review. One browser-capacity retry resolved without exhaustion.
-The dedicated publication cron has not yet produced a fresh completion marker
-after this deployment. Production ownership remains unchanged.
+All nine sources produced complete, verified immutable snapshots. A guarded dev
+cutover gave Northwestern, Greenhouse Figma, and Ashby Mistral AI V2 catalog
+ownership while the other six retained legacy ownership. Sources remain paused
+until baseline reconciliation succeeds; outbound delivery remains disabled.
 
-Local validation: 2,729 tests passed, compiled Worker integration tests passed
-(45 passed, one skipped), and historical replay, resource budgets, typecheck,
-and lint passed. PR CI is pending runner availability.
+The dedicated publication cron completed at 20:54 UTC. Independent inspection
+verified every immutable R2 page, its aggregate content hash, and the matching
+D1 projection manifest, timestamp, and live watermark. Evidence is retained in
+`.context/verification/ingestion-v2/publication-proof/scheduled-publication.json`.
+
+The experiment stopped on ten quarantined rows: seven Workable HTTP 429s and
+three Rippling redirects refused for using HTTP. Unsafe redirects now produce a
+terminal blocked result instead of spending the timeout retry budget. Genuine
+DNS and transport failures remain retryable. Workable subsequently returned 200
+from an isolated Cloudflare Worker. Both dev Workers received the repair, and
+all ten rows were reopened through reviewed replay previews and apply receipts.
+The cohort still must drain and reconcile; replay acceptance is not a pass.
+
+A separate Cloudflare D1/R2/Queue experiment uses the production discovery,
+admission, bootstrap, and catalog implementations. Its controlled 1,000-row
+baseline settled independently: 999 blocked rows, one canonical Figma internship,
+and zero notification events. Changed-role, duplicate-delivery, missing-snapshot recovery, and source-local
+omission checks passed with durable assertions. Policy migration and rollback
+also passed after correcting the legacy resolver composition in the harness.
+Both legacy source polls returned zero failures, all three original canonical
+identities and both notification records persisted, and the public catalog
+exposed exactly those three roles. Legacy retained 50 unqualified fixture records;
+all remain ineligible for catalog publication and alerts.
+The fixture catalog and notifications are isolated from both normal dev and prod.
+Cloudflare consumer analytics report zero errors, 64.1 MiB memory p99, and
+0.27 seconds CPU p99. Captured queue traces contain no exceptions or failed
+outcomes. An initial driver configuration error occurred before source discovery;
+replacing its public self-fetch with a service binding repaired the harness.
+
+Initial normal-dev runtime analytics showed no errors, but memory p99 reached
+120.1 MiB, so resource headroom remains under review. The 24-hour clean dev gate
+has not passed. Production ownership remains unchanged.
+
+Local repair validation: 2,735 tests passed; typecheck and lint passed. Compiled
+Worker integration validation passed (45 passed, one skipped). Both exact-head
+CI runs for `6b60f0ee` passed, including resource budgets and infrastructure checks.
