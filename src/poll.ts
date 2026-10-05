@@ -1654,17 +1654,31 @@ export class IngestionRunner {
             ? githubSelectionMetadata.map((entry) => [entry.externalId, selectionOccurrence(entry)])
             : priorOccurrences.map((occurrence) => [occurrence.externalId, occurrence]),
         );
-        const requiredMigrationCandidates = migrationLimit === undefined ? [] : batch.processed.listings.filter((sourceListing) => {
+        const requiredAdmissionVersionMigrations = migrationLimit === undefined ? [] : batch.processed.listings.filter((sourceListing) => {
           const prior = priorByExternalId.get(externalId(sourceListing));
           // The per-occurrence stamp is the durable migration cursor. Stored
           // occurrences can contain page-derived enrichment (for example a
           // verified season) that deliberately differs from the raw source;
           // reopening those rows by material comparison makes a completed
           // slice recur forever.
-          return prior && (prior.occurrence.admissionConfigurationVersion !== githubAdmissionConfigurationVersion
-            || (this.trustedCommunityCatalogEnabled && prior.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash
-              && prior.occurrence.trustedCommunityAlertQualification.sourceMaterialHash !== sourceMaterialHash(sourceListing)));
+          return prior && prior.occurrence.admissionConfigurationVersion !== githubAdmissionConfigurationVersion;
         });
+        const requiredTrustedMaterialMigrations = migrationLimit === undefined ? [] : batch.processed.listings.filter((sourceListing) => {
+          const prior = priorByExternalId.get(externalId(sourceListing));
+          if (!prior) return false;
+          return prior.occurrence.admissionConfigurationVersion === githubAdmissionConfigurationVersion
+            && this.trustedCommunityCatalogEnabled
+            && prior.occurrence.trustedCommunityAlertQualification?.sourceMaterialHash
+            && prior.occurrence.trustedCommunityAlertQualification.sourceMaterialHash !== sourceMaterialHash(sourceListing);
+        });
+        // A changed trusted-row hash may require fresh evidence, but it must not
+        // repeatedly consume the bounded slice ahead of rows that still carry
+        // the old admission policy. Simplify's large board exposed this as a
+        // migration that polled successfully forever without advancing.
+        const requiredMigrationCandidates = [
+          ...requiredAdmissionVersionMigrations,
+          ...requiredTrustedMaterialMigrations,
+        ];
         const metadataProgressKey = (row: NonNullable<SourceCheckpoint['pendingMetadataProcessedRows']>[number]) =>
           JSON.stringify([row.externalId, row.sourceMaterialHash, row.extractionVersion, row.processingRevision]);
         const priorMetadataProgress = new Set((previous?.pendingMetadataProcessedRows ?? []).map(metadataProgressKey));
@@ -2210,6 +2224,18 @@ export class IngestionRunner {
                 row: occurrence.occurrence.row,
                 reason: `posting identity conflict (${result.incident.decision.reason})`,
               });
+              // The incident is the durable result for this policy version. A
+              // bounded migration must advance past it while preserving the
+              // previously published decision, or the same identity conflicts
+              // consume every future slice and starve the remaining source.
+              const prior = priorByExternalId.get(occurrence.externalId);
+              if (migrationLimit !== undefined && githubAdmissionConfigurationVersion && prior
+                && prior.occurrence.admissionConfigurationVersion !== githubAdmissionConfigurationVersion) {
+                await this.store.putSourceOccurrence({
+                  ...prior,
+                  occurrence: { ...prior.occurrence, admissionConfigurationVersion: githubAdmissionConfigurationVersion },
+                });
+              }
               return;
             }
             committedJobIds.add(job.jobId);
