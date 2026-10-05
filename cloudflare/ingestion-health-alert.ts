@@ -20,9 +20,9 @@ export const INGESTION_WORK_QUEUES = [
 ] as const;
 
 const DEFAULT_FAILURE_WINDOW_MS = 24 * 60 * 60_000;
-const DEFAULT_V2_COST_WINDOW_MS = 60 * 60_000;
-const DEFAULT_V2_RUN_LIMIT = 60;
-const DEFAULT_V2_D1_WRITE_LIMIT = 100_000;
+export const INGESTION_V2_COST_WINDOW_MS = 60 * 60_000;
+export const INGESTION_V2_RUN_LIMIT = 60;
+export const INGESTION_V2_D1_WRITE_LIMIT = 100_000;
 const MAX_DETAIL_ITEMS = 20;
 
 export type IngestionHealthSignals = { signals: string[]; details: string };
@@ -106,9 +106,9 @@ export async function ingestionHealthSignals(
   // 4. The shadow comparison is already written once per V2 discovery run.
   // Its tumbling counters expose runaway continuation loops and write
   // amplification without creating a second per-run telemetry write.
-  const v2CostSince = new Date(observedAt.getTime() - (options.v2CostWindowMs ?? DEFAULT_V2_COST_WINDOW_MS)).toISOString();
-  const v2RunLimit = options.v2RunLimit ?? DEFAULT_V2_RUN_LIMIT;
-  const v2D1WriteLimit = options.v2D1WriteLimit ?? DEFAULT_V2_D1_WRITE_LIMIT;
+  const v2CostSince = new Date(observedAt.getTime() - (options.v2CostWindowMs ?? INGESTION_V2_COST_WINDOW_MS)).toISOString();
+  const v2RunLimit = options.v2RunLimit ?? INGESTION_V2_RUN_LIMIT;
+  const v2D1WriteLimit = options.v2D1WriteLimit ?? INGESTION_V2_D1_WRITE_LIMIT;
   const v2Costs = (await db.prepare(`SELECT source_id, window_started_at, window_run_count, window_d1_rows_written
       FROM ingestion_v2_shadow_comparisons
       WHERE window_started_at >= ? AND updated_at >= ?
