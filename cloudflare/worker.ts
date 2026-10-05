@@ -1994,15 +1994,9 @@ async function refreshCatalogProjectionD1(
 }
 
 async function refreshCatalogProjectionR2(store: D1InternshipStore, bucket: R2Bucket, phases?: MaintenancePhaseRecorder) {
-  const jobs = await store.listCatalog();
-  const liveWatermark = jobs.reduce<string | undefined>((newest, job) => {
-    if (!job.open || catalogRecency(job) !== 'normal') return newest;
-    const key = openCatalogSortKey(job);
-    return !newest || key > newest ? key : newest;
-  }, undefined);
-  const groups = groupCatalogJobs(jobs, { includeClosed: true })
-    .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
-  const generatedAt = new Date().toISOString();
+  const snapshot = await store.catalogProjectionSnapshot();
+  if (!snapshot) throw new Error('D1 catalog projection is unavailable for R2 publication');
+  const { groups, generatedAt, liveWatermark } = snapshot;
   await recordPhase(phases, 'catalog_projection_r2', 'started');
   try {
     await new R2CatalogProjection(bucket).publish(groups, generatedAt, liveWatermark);

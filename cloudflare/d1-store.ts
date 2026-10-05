@@ -1303,6 +1303,40 @@ export class D1InternshipStore implements InternshipStore {
       WHERE manifest.pk = '${CATALOG_PROJECTION_MANIFESTS_PK}' AND manifest.sk = ?)` : '';
   }
 
+  /** Reads the exact durable projection for an R2 mirror without rebuilding it from raw jobs. */
+  async catalogProjectionSnapshot(): Promise<{
+    groups: CatalogGroupDetails[];
+    generatedAt: string;
+    liveWatermark?: string;
+  } | undefined> {
+    const pointer = await this.readCatalogProjectionPointer();
+    if (!pointer) return undefined;
+    const scope = this.catalogProjectionScope(pointer);
+    const groups: CatalogGroupDetails[] = [];
+    let cursor: { sortKey: string; sk: string } | undefined;
+    for (;;) {
+      const comparison = scope.order === 'ASC' ? '>' : '<';
+      const query = this.db.prepare(`SELECT projection.sk, projection.catalog_sort_key, projection.value
+        FROM catalog_items AS projection
+        WHERE projection.pk = ? AND projection.kind = 'catalog-projection'
+          ${this.catalogProjectionMembership(scope, 'projection')}
+          ${cursor ? `AND (projection.catalog_sort_key, projection.sk) ${comparison} (?, ?)` : ''}
+        ORDER BY projection.catalog_sort_key ${scope.order}, projection.sk ${scope.order} LIMIT 25`)
+        .bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []),
+          ...(cursor ? [cursor.sortKey, cursor.sk] : []));
+      const page = await query.all<{ sk: string; catalog_sort_key: string; value: string }>();
+      groups.push(...page.results.map((row) => JSON.parse(row.value) as CatalogGroupDetails));
+      if (page.results.length < 25) break;
+      const last = page.results.at(-1)!;
+      cursor = { sortKey: last.catalog_sort_key, sk: last.sk };
+    }
+    return {
+      groups,
+      generatedAt: pointer.generatedAt,
+      ...(pointer.liveWatermark ? { liveWatermark: pointer.liveWatermark } : {}),
+    };
+  }
+
   async listCatalogProjection(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {
     const pointer = await this.readCatalogProjectionPointer();
     if (!pointer) return undefined;
