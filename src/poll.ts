@@ -1092,7 +1092,7 @@ export class IngestionRunner {
             row: listing.row,
             reason: `posting identity conflict (${identityResult.decision.reason})`,
           });
-          handledExternalIds.add(id);
+          await completeFailedAdmissionMigration();
           return;
         }
         const identity = identityResult.identity;
@@ -1143,7 +1143,7 @@ export class IngestionRunner {
               row: listing.row,
               reason: `posting identity conflict (${identityResolution.reason})`,
             });
-            handledExternalIds.add(id);
+            await completeFailedAdmissionMigration();
             return;
           }
           if (!existing || existing.jobId !== identityResolution.canonicalJobId) {

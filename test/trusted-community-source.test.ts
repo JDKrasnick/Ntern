@@ -1202,6 +1202,29 @@ describe('trusted rollout repair boundaries', { timeout: 20_000 }, () => {
     expect(stamped.occurrence.admission).toEqual(prior.occurrence.admission);
   });
 
+  it('advances a bounded migration when identity resolution finds an existing conflict', async () => {
+    const { store, rows, state, poll, sourceId } = migrationFixture();
+    rows[0]!.applyUrl = 'https://boards.greenhouse.io/acme/jobs/1234567';
+    await poll(true);
+    const prior = (await store.getSourceOccurrences(sourceId))
+      .find((item) => item.externalId === rows[0]!.externalId)!;
+    state.version = 'registry-v2';
+    vi.spyOn(store, 'resolvePostingIdentity').mockResolvedValue({
+      outcome: 'quarantine', aliases: ['url:https://careers.example.test/jobs/role-0'],
+      conflictingCanonicalJobIds: ['job-a', 'job-b'], reason: 'aliases-resolve-to-different-jobs',
+    });
+
+    const conflicted = await poll(true, 1);
+
+    expect(conflicted.failures).toEqual([]);
+    expect(conflicted.quarantinedListings).toHaveLength(1);
+    const stamped = (await store.getSourceOccurrences(sourceId))
+      .find((item) => item.externalId === rows[0]!.externalId)!;
+    expect(stamped.occurrence.admissionConfigurationVersion)
+      .not.toBe(prior.occurrence.admissionConfigurationVersion);
+    expect(stamped.occurrence.admission).toEqual(prior.occurrence.admission);
+  });
+
   it('limits concurrent D1 commits in an admission migration slice', async () => {
     const { store, poll } = migrationFixture();
     await poll(false);
