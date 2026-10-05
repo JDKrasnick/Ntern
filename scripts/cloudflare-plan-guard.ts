@@ -786,6 +786,9 @@ const iconResolutionIngestionCrons = [
 const projectionIsolationIngestionCrons = [
   ...iconResolutionIngestionCrons.slice(0, 3), '1-51/10 * * * *', ...iconResolutionIngestionCrons.slice(3),
 ];
+const splitProjectionIngestionCrons = [
+  ...projectionIsolationIngestionCrons.slice(0, 4), '4-54/10 * * * *', ...projectionIsolationIngestionCrons.slice(4),
+];
 
 function cronValues(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -822,10 +825,13 @@ function isReviewedIngestionCronUpdate(address: string, change: ResourceChange['
     && isDeepStrictEqual(afterCrons, iconResolutionIngestionCrons);
   const addsProjectionCron = isDeepStrictEqual(beforeCrons, iconResolutionIngestionCrons)
     && isDeepStrictEqual(afterCrons, projectionIsolationIngestionCrons);
+  const addsR2ProjectionCron = isDeepStrictEqual(beforeCrons, projectionIsolationIngestionCrons)
+    && isDeepStrictEqual(afterCrons, splitProjectionIngestionCrons);
   const reviewedTransition = (isDeepStrictEqual(beforeCrons, priorIngestionCrons)
-      && isDeepStrictEqual(afterCrons, currentIngestionCrons)) || addsIconCron || addsProjectionCron;
+      && isDeepStrictEqual(afterCrons, currentIngestionCrons))
+    || addsIconCron || addsProjectionCron || addsR2ProjectionCron;
   if (!reviewedTransition || !afterCrons) return false;
-  const insertsElement = addsIconCron || addsProjectionCron;
+  const insertsElement = addsIconCron || addsProjectionCron || addsR2ProjectionCron;
   return isDeepStrictEqual(change.after_unknown, {
     // The provider models schedules as an ordered list. Inserting a cron shifts
     // every following value and associates the new element's unknown metadata
