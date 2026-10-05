@@ -450,7 +450,7 @@ Two changes bound that invocation:
 
 1. **Dedicated catalog-projection crons.** `1-51/10 * * * *` owns
    `runCatalogProjectionMaintenance` — prospective shadow publication and the
-   D1 projection write — and nothing else. `4-54/10 * * * *` reads that durable
+   D1 projection write — and nothing else. `4,14,24,34,44,54 * * * *` reads that durable
    projection in bounded 25-card pages and publishes the R2 mirror in a fresh
    isolate after D1 invalidates the old R2 pointer. It does not retain the raw
    internship rows or repeat grouping. The `9-59/10` cron keeps only the
