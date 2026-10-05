@@ -65,13 +65,13 @@ export function cloudflareAdmissionProber(resolver: HostResolver): AdmissionDest
         throw new AdmissionRowTransientError('destination-timeout', error instanceof Error ? error.message : String(error));
       }
       if (result.status === 404 || result.status === 410) return { reachability: 'gone' };
-      if (result.status === 429) {
+      if (result.status === 429 || result.status >= 500) {
         const providerResult = await providerProbe(applyUrl);
         if (providerResult) return providerResult;
-        throw new AdmissionRowTransientError('destination-rate-limited',
+        if (result.status === 429) throw new AdmissionRowTransientError('destination-rate-limited',
           `HTTP 429 from ${new URL(result.url).hostname}`, admissionRetryAfterMs(result.headers.get('retry-after')));
+        throw new AdmissionRowTransientError('upstream-server-error', `HTTP ${result.status} from ${new URL(result.url).hostname}`);
       }
-      if (result.status >= 500) throw new AdmissionRowTransientError('upstream-server-error', `HTTP ${result.status}`);
       if (result.status >= 400) return { reachability: 'blocked' };
       const inspectedBytes = new TextEncoder().encode(result.body).byteLength;
       const declaredBytes = Number(result.headers.get('content-length'));

@@ -8,10 +8,10 @@ const helsing = 'https://helsing.ai/jobs/4941957101?gh_jid=4941957101';
 const probe = (url: string, prober = officialAdmissionProviderProbe(resolver)) => prober(url);
 const job = { shortcode:'45A6283F88',title:'Software Engineer Intern',url:'https://apply.workable.com/j/45A6283F88',description:'Internship responsibilities and qualifications. '.repeat(20) };
 describe('official admission provider evidence', () => {
- it('settles a challenged employer page using its reviewed official API without treating the challenge as closure', async () => {
+ it.each([429, 503])('settles a challenged employer page using its reviewed official API on HTTP %s', async status => {
   const fetcher = vi.fn(async (url: unknown) => String(url).includes('boards-api.greenhouse.io')
     ? Response.json({id:4941957101,title:'AI Research Intern',content:job.description,absolute_url:helsing})
-    : new Response('<title>Vercel Security Checkpoint</title>',{status:429}));
+    : new Response('<title>Vercel Security Checkpoint</title>',{status}));
   vi.stubGlobal('fetch',fetcher);
   expect(await cloudflareAdmissionProber(resolver).probe({sourceId:'source',externalId:'role',applyUrl:helsing,observedAt:new Date().toISOString()}))
     .toMatchObject({reachability:'live',evidence:{expectedPostingId:'4941957101'}});

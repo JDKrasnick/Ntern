@@ -87,12 +87,17 @@ Helsing returned a Vercel Security Checkpoint locally and from Cloudflare, while
 its reviewed official Greenhouse API returned the exact live posting. The V2
 probe now uses a bounded Workable published inventory, caches successful and
 failed tenant requests per delivery, and checks reviewed Greenhouse APIs when
-application pages return 429. Posting IDs, tenant routes, redirects, complete
+application pages return 429 or 5xx. Posting IDs, tenant routes, redirects, complete
 inventory shape, and public URLs must agree. Partial or failed responses cannot
 prove closure. Rate-limit retries honor Retry-After and otherwise wait 15 minutes
 then one hour; the three-attempt limit remains unchanged. Evaluator revision 4
-forces a quiet policy regrade before promotion. Provider throttling can still
-block the soak gate; the repair does not count replay acceptance as success.
+forces a quiet policy regrade before promotion. A later drain exposed three EquipmentShare 503 responses and one NIO Workday
+500 response. Cloudflare confirmed the EquipmentShare challenge and the exact
+Greenhouse posting 404, allowing a conclusive closed decision through the
+reviewed API. NIO returned 500 locally and from Cloudflare; its public detail API
+returned 422, which cannot prove posting closure. NIO remains a provider outage
+until healthy evidence or an authoritative terminal response arrives. Provider
+throttling and outages can still block the soak gate; the repair does not count replay acceptance as success.
 
 A separate Cloudflare D1/R2/Queue experiment uses the production discovery,
 admission, bootstrap, and catalog implementations. Its controlled 1,000-row
