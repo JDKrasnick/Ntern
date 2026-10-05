@@ -888,6 +888,10 @@ describe('Cloudflare deployment plan guard', () => {
       ...contentUpdate,
       after: { ...contentUpdate.after, bindings: [outbound, ...worker.bindings] },
     }]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([{
+      ...contentUpdate,
+      after: { ...contentUpdate.after, bindings: [{ ...outbound, namespace_id: null }, ...worker.bindings] },
+    }]))).toHaveLength(1);
 
     const stage2 = [
       { name: 'INGESTION_V2_SHADOW_DISCOVERY_ENABLED', type: 'plain_text', text: 'true' },
