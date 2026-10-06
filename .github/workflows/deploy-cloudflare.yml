@@ -55,6 +55,7 @@ jobs:
       TF_VAR_identity_unconfirmed_publication_enabled: ${{ vars.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED }}
       TF_VAR_trusted_community_catalog_enabled: ${{ vars.TRUSTED_COMMUNITY_CATALOG_ENABLED }}
       TF_VAR_identity_confirmed_coverage_floor: ${{ vars.IDENTITY_CONFIRMED_COVERAGE_FLOOR }}
+      TF_VAR_ingestion_v2_isolated_workers_enabled: ${{ vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED || 'false' }}
       TF_VAR_ingestion_v2_shadow_discovery_enabled: ${{ vars.INGESTION_V2_SHADOW_DISCOVERY_ENABLED }}
       TF_VAR_ingestion_v2_shadow_source_allowlist: ${{ vars.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST }}
       TF_VAR_ingestion_v2_admission_enabled: ${{ vars.INGESTION_V2_ADMISSION_ENABLED }}
@@ -223,6 +224,14 @@ jobs:
           echo "EXPECTED_INGESTION_VERSION=$ingestion_version" >> "$GITHUB_ENV"
           echo "EXPECTED_API_ETAG=$(jq -er '.resources.script.etag' "$RUNNER_TEMP/api-expected-version.json")" >> "$GITHUB_ENV"
           echo "EXPECTED_INGESTION_ETAG=$(jq -er '.resources.script.etag' "$RUNNER_TEMP/ingestion-expected-version.json")" >> "$GITHUB_ENV"
+          for role in admission catalog-publisher; do
+            name="intern-notifs-$role"
+            npx wrangler deployments status --name "$name" --config "wrangler.$role.jsonc" --json > "$RUNNER_TEMP/$role-expected-deployment.json"
+            jq -e '.versions | length == 1 and .[0].percentage == 100' "$RUNNER_TEMP/$role-expected-deployment.json" >/dev/null
+            version="$(jq -er '.versions[0].version_id' "$RUNNER_TEMP/$role-expected-deployment.json")"
+            npx wrangler versions view "$version" --name "$name" --config "wrangler.$role.jsonc" --json > "$RUNNER_TEMP/$role-expected-version.json"
+            jq -e --arg sha "$DEPLOY_SHA" '.annotations["workers/tag"] == $sha and .annotations["workers/message"] == ("Release " + $sha)' "$RUNNER_TEMP/$role-expected-version.json" >/dev/null
+          done
       - name: Restore operations binding if its deployment check rejects the key
         shell: bash
         run: |
@@ -273,6 +282,19 @@ jobs:
           npx wrangler versions view "$api_version" --name "$api_name" --config wrangler.api.jsonc --json > "$RUNNER_TEMP/api-version.json"
           npx wrangler versions view "$ingestion_version" --name "$ingestion_name" --config wrangler.ingestion.jsonc --json > "$RUNNER_TEMP/ingestion-version.json"
 
+          for role in admission catalog-publisher; do
+            name="intern-notifs-$role"
+            npx wrangler deployments status --name "$name" --config "wrangler.$role.jsonc" --json > "$RUNNER_TEMP/$role-deployment.json"
+            version="$(jq -er '.versions[0].version_id' "$RUNNER_TEMP/$role-deployment.json")"
+            npx wrangler versions view "$version" --name "$name" --config "wrangler.$role.jsonc" --json > "$RUNNER_TEMP/$role-version.json"
+            jq -n --arg name "$name" --arg role "$role" \
+              --slurpfile expected "$RUNNER_TEMP/$role-expected-version.json" \
+              --slurpfile deployment "$RUNNER_TEMP/$role-deployment.json" \
+              --slurpfile version "$RUNNER_TEMP/$role-version.json" \
+              '{scriptName:$name,address:("cloudflare_workers_script.isolated[\""+$role+"\"]"),expectedEtag:$expected[0].resources.script.etag,deployment:$deployment[0],version:$version[0]}' > "$RUNNER_TEMP/$role-audit.json"
+          done
+          jq -s '.' "$RUNNER_TEMP/admission-audit.json" "$RUNNER_TEMP/catalog-publisher-audit.json" > "$RUNNER_TEMP/isolated-audit.json"
+
           # Capture the post-apply plan and require that production has converged.
           set +e
           tofu -chdir=infra/cloudflare plan -lock-timeout=5m -detailed-exitcode -out="$RUNNER_TEMP/cloudflare-final.tfplan"
@@ -292,6 +314,7 @@ jobs:
             --ingestion-expected-etag "$EXPECTED_INGESTION_ETAG" \
             --ingestion-deployment "$RUNNER_TEMP/ingestion-deployment.json" \
             --ingestion-version "$RUNNER_TEMP/ingestion-version.json" \
+            --isolated-workers "$RUNNER_TEMP/isolated-audit.json" \
             --drift-exit-code "$drift"
 
           # Any drift fails the deployment before smoke tests or success reporting.

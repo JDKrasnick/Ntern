@@ -71,7 +71,7 @@ export interface DevSoakSample {
   windowStartedAt: string;
   windowHours: number;
   soakStartedAt: string;
-  runtime: Array<{ status: string; requests: number; errors: number; cpuTimeP99: number; memoryUsageBytesP99: number }>;
+  runtime: Array<{ worker?: string; version?: string; status: string; requests: number; errors: number; cpuTimeP99: number; memoryUsageBytesP99: number }>;
   canary: {
     sourceId: string;
     health?: SourceHealth;
@@ -87,6 +87,7 @@ export interface DevSoakSample {
   };
   canaries?: Array<DevSoakSample['canary']>;
   schedules: string[];
+  expectedRuntimeWorkers?: string[];
   controlMismatches: string[];
   publication?: { generatedAt?: string; version?: string; count?: number };
   maintenance: Array<Record<string, unknown>>;
@@ -112,12 +113,13 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
   const elapsedHours = (now.getTime() - Date.parse(sample.soakStartedAt)) / 3_600_000;
   check('dev soak elapsed', elapsedHours >= sample.windowHours, `${elapsedHours.toFixed(1)}/${sample.windowHours} clean observation hours since latest deployment`);
   check('Worker runtime healthy', sample.runtime.length > 0
+    && (sample.expectedRuntimeWorkers ?? []).every((worker) => sample.runtime.some((row) => row.worker === worker))
     && sample.runtime.every((row) => row.status === 'success' && row.errors === 0),
-    sample.runtime.map((row) => `${row.status}: ${row.requests} requests, ${row.errors} errors`).join('; ') || 'missing runtime analytics');
+    sample.runtime.map((row) => `${row.worker ?? "ingestion"}/${row.status}: ${row.requests} requests, ${row.errors} errors`).join('; ') || 'missing runtime analytics');
   const memoryP99 = Math.max(...sample.runtime.map((row) => row.memoryUsageBytesP99));
   const cpuP99 = Math.max(...sample.runtime.map((row) => row.cpuTimeP99));
   checks.push({ name: 'Worker resource headroom', status: memoryP99 <= 120 * 1024 * 1024 && cpuP99 <= 60_000_000 ? 'pass' : 'warn',
-    detail: `memory p99 ${(memoryP99 / 1024 / 1024).toFixed(1)} MiB; CPU p99 ${(cpuP99 / 1_000_000).toFixed(2)} s (whole ingestion Worker)` });
+    detail: `memory p99 ${(memoryP99 / 1024 / 1024).toFixed(1)} MiB; CPU p99 ${(cpuP99 / 1_000_000).toFixed(2)} s (all ingestion isolates)` });
   check('public dev catalog', sample.publicCatalogStatus === 200, `HTTP ${sample.publicCatalogStatus}`);
 
   const canaries = sample.canaries ?? [sample.canary];
@@ -296,7 +298,7 @@ async function main(): Promise<number> {
       FROM queue_failure_events WHERE delivery_attempt >= CASE WHEN queue_name = 'intern-notifs-dev-gmail' THEN 6 ELSE 3 END AND last_failed_at >= ?
       GROUP BY queue_name, source_id, category ORDER BY queue_name, source_id, category`, [windowStart]),
     query<Record<string, unknown>>(`SELECT key, value, updated_at FROM system_state
-      WHERE key IN ('maintenance_phase:maintenance:ingestion_v2_admission_dispatch',
+      WHERE key IN ('maintenance_phase:maintenance:ingestion_v2_admission_dispatch', 'maintenance_phase:admission_v2:dispatch',
       'maintenance_phase:maintenance:maintenance_complete',
       'maintenance_phase:catalog_projection_r2:catalog_projection_r2_complete') ORDER BY key`),
     cloudflare<QueueSummary[]>('/queues?per_page=100'),
@@ -311,17 +313,26 @@ async function main(): Promise<number> {
       const pointer = await response.json() as NonNullable<DevSoakSample['publication']>;
       return { generatedAt: pointer.generatedAt, version: pointer.version, count: pointer.count };
     }),
-    fetch('https://api.cloudflare.com/client/v4/graphql', { method: 'POST', signal: AbortSignal.timeout(30_000),
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: `query($account: String!, $since: Time!, $worker: String!) { viewer { accounts(filter: { accountTag: $account }) {
-        workersInvocationsAdaptive(limit: 100, filter: { datetime_geq: $since, scriptName: $worker }) {
-          dimensions { status } sum { requests errors } quantiles { cpuTimeP99 memoryUsageBytesP99 } } } } }`,
-      variables: { account: accountId, since: new Date(Math.max(capturedAt.getTime() - 3_600_000, deploymentAt.getTime())).toISOString(), worker: workerName } }),
-    }).then(async (response) => {
-      const body = await response.json() as { errors?: unknown; data?: { viewer: { accounts: Array<{ workersInvocationsAdaptive: Array<{ dimensions: { status: string }; sum: { requests: number; errors: number }; quantiles: { cpuTimeP99: number; memoryUsageBytesP99: number } }> }> } } };
+    (async () => {
+      const isolated = DEV_CONFIG.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true';
+      const names = isolated ? [workerName, workerName.replace(/-ingestion$/u, '-admission'), workerName.replace(/-ingestion$/u, '-catalog-publisher')] : [workerName];
+      const versions = await Promise.all(names.map(async (name) => {
+        const deployment = await cloudflare<{ deployments: Array<{ versions: Array<{ version_id: string; percentage: number }> }> }>(`/workers/scripts/${name}/deployments`);
+        const active = deployment.deployments[0]?.versions;
+        if (active?.length !== 1 || active[0]?.percentage !== 100) throw new Error(`Unstable deployment identity: ${name}`);
+        return active[0].version_id;
+      }));
+      const response = await fetch('https://api.cloudflare.com/client/v4/graphql', { method: 'POST', signal: AbortSignal.timeout(30_000),
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: `query($account: String!, $since: Time!, $workers: [String!]!, $versions: [String!]!) { viewer { accounts(filter: { accountTag: $account }) {
+          workersInvocationsAdaptive(limit: 100, filter: { datetime_geq: $since, scriptName_in: $workers, scriptVersion_in: $versions }) {
+            dimensions { status scriptName scriptVersion } sum { requests errors } quantiles { cpuTimeP99 memoryUsageBytesP99 } } } } }`,
+          variables: { account: accountId, since: new Date(Math.max(capturedAt.getTime() - 3_600_000, deploymentAt.getTime())).toISOString(), workers: names, versions } }),
+      });
+      const body = await response.json() as { errors?: unknown; data?: { viewer: { accounts: Array<{ workersInvocationsAdaptive: Array<{ dimensions: { status: string; scriptName: string; scriptVersion: string }; sum: { requests: number; errors: number }; quantiles: { cpuTimeP99: number; memoryUsageBytesP99: number } }> }> } } };
       if (!response.ok || body.errors) throw new Error('Worker runtime analytics unavailable');
-      return body.data?.viewer.accounts[0]?.workersInvocationsAdaptive.map((row) => ({ status: row.dimensions.status, ...row.sum, ...row.quantiles })) ?? [];
-    }),
+      return body.data?.viewer.accounts[0]?.workersInvocationsAdaptive.map((row) => ({ worker: row.dimensions.scriptName, version: row.dimensions.scriptVersion, status: row.dimensions.status, ...row.sum, ...row.quantiles })) ?? [];
+    })(),
   ]);
 
   const relevantQueueNames = new Set(QUEUE_SUFFIXES.flatMap((suffix) => [
@@ -357,15 +368,37 @@ async function main(): Promise<number> {
       catalogOwned: admissionV2OwnsCatalogWrites(DEV_CONFIG.vars, sourceId),
       catalogMismatches: catalogParity.find((row) => row.source_id === sourceId)?.mismatches ?? 0 };
   }));
-  const controlMismatches = [{ worker: workerName, live: settings }, { worker: 'intern-notifs-dev', live: apiSettings }]
+  const isolated = DEV_CONFIG.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true';
+  const extraSettings = isolated ? await Promise.all(['admission', 'catalog-publisher'].map(async (role) => {
+    const worker = workerName.replace(/-ingestion$/u, `-${role}`);
+    const live = await cloudflare<{ bindings: Array<{ name: string; type: string; text?: string }> }>(`/workers/scripts/${worker}/settings`);
+    const schedules = await cloudflare<{ schedules: Array<{ cron: string }> }>(`/workers/scripts/${worker}/schedules`);
+    return { worker, role, live, schedules: schedules.schedules.map((s) => s.cron) };
+  })) : [];
+  const controlMismatches = [{ worker: workerName, live: settings }, { worker: 'intern-notifs-dev', live: apiSettings }, ...extraSettings.filter((row) => row.role === 'admission')]
     .flatMap(({ worker, live }) => Object.entries(DEV_CONFIG.vars)
-      .filter(([name]) => name.startsWith('INGESTION_V2_') || name === 'OUTBOUND_NOTIFICATIONS_ENABLED')
+      .filter(([name]) => (name.startsWith('INGESTION_V2_') || name === 'OUTBOUND_NOTIFICATIONS_ENABLED') && !(worker === 'intern-notifs-dev' && name === 'INGESTION_V2_ISOLATED_WORKERS_ENABLED'))
       .filter(([name, expected]) => live.bindings.find((binding) => binding.name === name && binding.type === 'plain_text')?.text !== expected)
       .map(([name]) => `${worker}: ${name} differs from selected dev profile`));
+  for (const row of extraSettings) {
+    const expected = row.role === 'admission' ? ['9-59/10 * * * *'] : ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'];
+    if (row.schedules.length !== expected.length || expected.some((cron) => !row.schedules.includes(cron))) controlMismatches.push(`${row.worker}: cron ownership differs`);
+    if (row.live.bindings.find((b) => b.name === 'INGESTION_V2_ISOLATED_WORKERS_ENABLED')?.text !== 'true') controlMismatches.push(`${row.worker}: isolation disabled`);
+    if (row.live.bindings.find((b) => b.name === 'OUTBOUND_NOTIFICATIONS_ENABLED')?.text !== 'false') controlMismatches.push(`${row.worker}: outbound suppression differs`);
+    if (row.role === 'catalog-publisher' && row.live.bindings.find((b) => b.name === 'LLM_METADATA_PUBLICATION_POLICY_JSON')?.text !== DEV_CONFIG.vars.LLM_METADATA_PUBLICATION_POLICY_JSON) controlMismatches.push(`${row.worker}: metadata publication policy differs`);
+  }
+  if (isolated) {
+    const queue = queues.find((q) => q.queue_name === 'intern-notifs-dev-admission-v2');
+    const consumers = queue ? await cloudflare<Array<{ script_name?: string; script?: string; service?: string }>>(`/queues/${queue.queue_id}/consumers`) : [];
+    const owner = workerName.replace(/-ingestion$/u, '-admission');
+    if (consumers.length !== 1 || (consumers[0]?.script_name ?? consumers[0]?.script ?? consumers[0]?.service) !== owner) controlMismatches.push('Admission queue has an unexpected consumer');
+  }
+  if (isolated && schedules.schedules.some((s) => ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'].includes(s.cron))) controlMismatches.push('Legacy ingestion still owns projection crons');
   const sample: DevSoakSample = {
     capturedAt: capturedAt.toISOString(), windowStartedAt: windowStart, windowHours, runtime,
     soakStartedAt: new Date(Math.max(deploymentAt.getTime(), configuredWindowStart?.getTime() ?? 0)).toISOString(),
-    canary: canaries[0]!, canaries, schedules: schedules.schedules.map(({ cron }) => cron), controlMismatches,
+    canary: canaries[0]!, canaries, schedules: [...new Set([...schedules.schedules.map(({ cron }) => cron), ...extraSettings.flatMap((row) => row.schedules)])], controlMismatches,
+    ...(isolated ? { expectedRuntimeWorkers: [workerName, ...extraSettings.map((row) => row.worker)] } : {}),
     ...(publication ? { publication } : {}),
     maintenance,
     unresolvedFailures: failures,

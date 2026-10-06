@@ -52,6 +52,8 @@ if (dockerIsAvailable()) {
   );
   buildWorker('api');
   buildWorker('ingestion');
+  buildWorker('admission');
+  buildWorker('catalog-publisher');
 }
 
 const testFiles = readdirSync(new URL('../test/e2e/', import.meta.url))

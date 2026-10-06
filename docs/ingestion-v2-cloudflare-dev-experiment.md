@@ -105,3 +105,40 @@ hash, and unsupported-provider observations do not request extraction.
 This preserves shadow metadata evidence under V2 catalog ownership. It does
 not grant the model admission authority or enable LLM field publication.
 The independent publication policy remains disabled in this experiment.
+
+### Dedicated admission and publication isolates
+
+`INGESTION_V2_ISOLATED_WORKERS_ENABLED` defaults to false. Its dev experiment
+uses `intern-notifs-dev-admission` for the existing admission queue and the
+`:09/:19/...` dispatcher, and `intern-notifs-dev-catalog-publisher` for the
+`:01/:11/...` D1 projection and `:04/:14/...` R2 publication. The original
+ingestion Worker retains discovery, provider queues, shadow extraction, alerts,
+and recovery. Its maintenance cron stays registered but skips admission
+dispatch; its projection crons are removed when isolation is enabled.
+
+The new entry points share neither the ingestion module nor its icon WASM or
+resume/API handlers. Catalog publication retains its existing LLM policy and
+durable phase keys. Admission retains the same queue, leases, handoff receipts,
+retry attempts, provider cooldowns, source allowlists, and fenced catalog/outbox
+transaction. No queue recreation or data migration is needed.
+
+Stage both Workers disabled, activate the ingestion split, enable the admission
+Worker, update the existing queue consumer in place, then enable the publisher
+crons. Compare all three Workers' controls and source ownership before resuming
+the experiment. Roll back by moving that same consumer to ingestion, disabling
+the dedicated Workers, restoring ingestion crons, and disabling the split flag.
+Preserve the queue settings and durable retry state in both directions.
+
+The dev soak requires runtime evidence for every active isolate, samples only
+its current 100-percent Worker version, checks independent cron ownership and
+the admission consumer, and retains the existing 120 MiB warning threshold.
+Absent analytics, mismatched controls, failed publication, and memory warnings
+keep the clean observation clock stopped. Reduced bundle size is not memory
+proof; scheduled publication and durable admission outcomes must also pass.
+
+OpenTofu provisions the production Workers inert first. The plan guard rejects
+initial active provisioning, unexpected bindings, database/queue swaps, model
+secrets, increased limits, and widened queue retry settings. Reviewed routing
+updates can later transfer the existing consumer and the two projection crons.
+The guarded deployment workflow audits all four Worker identities and binding
+sets after final convergence. Production ownership remains separately gated.

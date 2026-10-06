@@ -6,6 +6,7 @@ locals {
   # name so the `files` part key can equal the import specifier.
   ingestion_worker_module = "${path.module}/../../cloudflare/dist/ingestion/resvg.wasm"
   ingestion_worker_name   = "${var.worker_name}-ingestion"
+  isolated_worker_bundles = { admission = "${path.module}/../../cloudflare/dist/admission/admission-worker.js", catalog-publisher = "${path.module}/../../cloudflare/dist/catalog-publisher/catalog-publisher-worker.js" }
   catalog_providers       = toset(["greenhouse", "lever", "ashby", "github"])
   asynchronous_queues     = setunion(local.catalog_providers, toset(["gmail", "destination-verification", "shadow-extraction", "resume-job-import", "admission-v2"]))
 
@@ -60,6 +61,7 @@ locals {
       { name = "IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED", type = "plain_text", text = tostring(var.identity_integrity_enforcement_enabled) },
       { name = "TRUSTED_COMMUNITY_CATALOG_ENABLED", type = "plain_text", text = tostring(var.trusted_community_catalog_enabled) },
       { name = "OUTBOUND_NOTIFICATIONS_ENABLED", type = "plain_text", text = tostring(var.outbound_notifications_enabled) },
+      { name = "INGESTION_V2_ISOLATED_WORKERS_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_isolated_workers_enabled) },
       { name = "INGESTION_V2_SHADOW_DISCOVERY_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_shadow_discovery_enabled) },
       { name = "INGESTION_V2_SHADOW_SOURCE_ALLOWLIST", type = "plain_text", text = var.ingestion_v2_shadow_source_allowlist },
       { name = "INGESTION_V2_ADMISSION_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_admission_enabled) },
@@ -185,6 +187,58 @@ resource "cloudflare_workers_script" "ingestion" {
   }
 }
 
+# Dedicated isolates have no public routes, icon WASM, browser, or model secrets.
+# Provision inert workers first; queue and cron routing changes only with the flag.
+resource "cloudflare_workers_script" "isolated" {
+  for_each            = local.isolated_worker_bundles
+  account_id          = var.cloudflare_account_id
+  script_name         = "${var.worker_name}-${each.key}"
+  main_module         = each.key == "admission" ? "admission-worker.js" : "catalog-publisher-worker.js"
+  content_file        = each.value
+  content_sha256      = filesha256(each.value)
+  annotations         = { workers_message = "Release ${var.deploy_sha}", workers_tag = var.deploy_sha }
+  compatibility_date  = "2026-09-08"
+  compatibility_flags = ["nodejs_compat"]
+  keep_bindings       = ["secret_text"]
+  bindings = concat([
+    { name = "DB", type = "d1", id = cloudflare_d1_database.application.id },
+    { name = "DOCUMENTS", type = "r2_bucket", bucket_name = cloudflare_r2_bucket.documents.name },
+    { name = "VERSION_METADATA", type = "version_metadata" },
+    { name = "DEPLOYMENT_ROLE", type = "plain_text", text = each.key },
+    { name = "OUTBOUND_NOTIFICATIONS_ENABLED", type = "plain_text", text = "false" },
+    { name = "INGESTION_V2_ISOLATED_WORKERS_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_isolated_workers_enabled) },
+    ], each.key == "admission" ? concat([
+      { name = "ADMISSION_V2_QUEUE", type = "queue", queue_name = cloudflare_queue.work["admission-v2"].queue_name },
+      { name = "ADMISSION_V2_QUEUE_NAME", type = "plain_text", text = cloudflare_queue.work["admission-v2"].queue_name },
+    ], [for binding in local.ingestion_plain_bindings : binding if(startswith(binding.name, "INGESTION_V2_") && binding.name != "INGESTION_V2_ISOLATED_WORKERS_ENABLED") || binding.name == "TRUSTED_COMMUNITY_CATALOG_ENABLED"]) : [
+    { name = "SHADOW_EXTRACTION_ARTIFACTS", type = "r2_bucket", bucket_name = cloudflare_r2_bucket.shadow_extraction.name },
+    { name = "LLM_METADATA_PUBLICATION_POLICY_JSON", type = "plain_text", text = var.llm_metadata_publication_policy_json },
+  ])
+  limits = { cpu_ms = 120000, subrequests = 50000 }
+  observability = {
+    enabled = true, head_sampling_rate = 1
+    logs    = { enabled = true, invocation_logs = true, head_sampling_rate = 1, persist = true }
+    traces  = { enabled = false, head_sampling_rate = 1, persist = true }
+  }
+}
+
+resource "cloudflare_workers_script_subdomain" "isolated" {
+  for_each         = local.isolated_worker_bundles
+  account_id       = var.cloudflare_account_id
+  script_name      = cloudflare_workers_script.isolated[each.key].script_name
+  enabled          = false
+  previews_enabled = false
+}
+
+resource "cloudflare_workers_cron_trigger" "isolated" {
+  for_each    = local.isolated_worker_bundles
+  account_id  = var.cloudflare_account_id
+  script_name = cloudflare_workers_script.isolated[each.key].script_name
+  schedules = var.ingestion_v2_isolated_workers_enabled ? (
+    each.key == "admission" ? [{ cron = "9-59/10 * * * *" }] : [{ cron = "1-51/10 * * * *" }, { cron = "4,14,24,34,44,54 * * * *" }]
+  ) : []
+}
+
 resource "cloudflare_workers_script_subdomain" "ingestion" {
   account_id       = var.cloudflare_account_id
   script_name      = cloudflare_workers_script.ingestion.script_name
@@ -247,7 +301,7 @@ resource "cloudflare_queue_consumer" "ingestion" {
   account_id        = var.cloudflare_account_id
   queue_id          = each.value.queue_id
   type              = "worker"
-  script_name       = cloudflare_workers_script.ingestion.script_name
+  script_name       = each.key == "admission-v2" && var.ingestion_v2_isolated_workers_enabled ? cloudflare_workers_script.isolated["admission"].script_name : cloudflare_workers_script.ingestion.script_name
   dead_letter_queue = cloudflare_queue.dead_letter[each.key].queue_name
   settings = {
     batch_size       = each.key == "destination-verification" ? 5 : 1
@@ -261,12 +315,12 @@ resource "cloudflare_queue_consumer" "ingestion" {
 resource "cloudflare_workers_cron_trigger" "ingestion" {
   account_id  = var.cloudflare_account_id
   script_name = cloudflare_workers_script.ingestion.script_name
-  schedules = [
+  schedules = [for schedule in [
     { cron = "*/5 * * * *" }, { cron = "7-57/10 * * * *" }, { cron = "9-59/10 * * * *" }, { cron = "1-51/10 * * * *" }, { cron = "4,14,24,34,44,54 * * * *" },
     { cron = "6-56/10 * * * *" },
     { cron = "12,42 * * * *" }, { cron = "22,52 * * * *" }, { cron = "2,32 * * * *" },
     { cron = "0 * * * *" }, { cron = "34 8 * * *" }, { cron = "17 9 * * *" },
-  ]
+  ] : schedule if !var.ingestion_v2_isolated_workers_enabled || !contains(["1-51/10 * * * *", "4,14,24,34,44,54 * * * *"], schedule.cron)]
 }
 
 resource "cloudflare_workers_custom_domain" "api" {

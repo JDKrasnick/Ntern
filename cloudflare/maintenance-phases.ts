@@ -9,6 +9,19 @@ export interface MaintenancePhaseRecorder {
   record(phase: string, status: MaintenancePhaseStatus, observedAt?: Date): Promise<void>;
 }
 
+export async function recordPhase(
+  phases: MaintenancePhaseRecorder | undefined,
+  phase: string,
+  status: MaintenancePhaseStatus,
+  observedAt?: Date,
+): Promise<void> {
+  try {
+    if (observedAt === undefined) await phases?.record(phase, status);
+    else await phases?.record(phase, status, observedAt);
+  }
+  catch { /* best-effort by contract; a marker failure never fails a phase */ }
+}
+
 const maintenancePhaseKeyPrefix = 'maintenance_phase';
 
 export function maintenancePhaseKey(scope: string, phase: string): string {

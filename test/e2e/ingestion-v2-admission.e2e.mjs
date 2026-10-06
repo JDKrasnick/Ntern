@@ -122,6 +122,7 @@ async function deliverGithub(overrides = {}, messageOverrides = {}) {
     ADMISSION_V2_QUEUE: queues.admission, ADMISSION_V2_DLQ: recorder(),
     INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true',
     INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: '',
+    INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true',
     INGESTION_V2_ADMISSION_ENABLED: 'true',
     INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: '',
     INGESTION_V2_CATALOG_WRITER_ENABLED: 'false',
@@ -165,7 +166,7 @@ function buildMessages(rows, snapshotHash, admissionVersion, baseline = false) {
 }
 
 async function deliverAdmission(messages, overrides = {}) {
-  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/admission/admission-worker.js', import.meta.url));
   // Mirror the dispatcher's durable handoff receipt, which is recorded before
   // the message is sent and acknowledged by the consumer after all rows settle.
   for (const body of messages) {
@@ -182,6 +183,7 @@ async function deliverAdmission(messages, overrides = {}) {
     ADMISSION_V2_QUEUE: recorder(), ADMISSION_V2_DLQ: deadLetter,
     GITHUB_QUEUE: recorder(), GITHUB_DLQ: recorder(),
     DESTINATION_VERIFICATION_QUEUE: recorder(), DESTINATION_VERIFICATION_DLQ: recorder(),
+    INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true',
     INGESTION_V2_ADMISSION_ENABLED: 'true',
     INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: '',
     ...overrides,
@@ -265,6 +267,17 @@ before(async () => {
 after(async () => {
   globalThis.fetch = originalFetch;
   await runtime?.dispose();
+});
+
+test('retains durable rows and queue work while the isolated consumer is staged off', async () => {
+  const { snapshot, rows } = await boardSnapshot();
+  const before = await database.prepare('SELECT external_id, state, attempt_count FROM ingestion_rows WHERE source_id = ? ORDER BY external_id').bind(sourceId).all();
+  const messages = buildMessages(rows, snapshot.snapshot_hash, snapshot.admission_version);
+  const result = await deliverAdmission(messages, { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false' });
+  assert.equal(result.settled.ack, 0);
+  assert.equal(result.settled.retries.length, messages.length);
+  const after = await database.prepare('SELECT external_id, state, attempt_count FROM ingestion_rows WHERE source_id = ? ORDER BY external_id').bind(sourceId).all();
+  assert.deepEqual(after.results, before.results);
 });
 
 test('drains a queued delivery without evaluating rows when admission is disabled', async () => {

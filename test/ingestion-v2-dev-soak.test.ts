@@ -36,6 +36,16 @@ const healthy = (): DevSoakSample => ({
 });
 
 describe('dev ingestion soak evaluation', () => {
+  it('requires runtime evidence from every dedicated isolate and keeps memory warnings visible', () => {
+    const sample = healthy();
+    sample.expectedRuntimeWorkers = ['ingestion', 'admission', 'catalog-publisher'];
+    sample.runtime[0]!.worker = 'ingestion';
+    expect(evaluateDevSoak(sample).some((c) => c.name === 'Worker runtime healthy' && c.status === 'fail')).toBe(true);
+    sample.runtime.push(...['admission', 'catalog-publisher'].map((worker) => ({ ...sample.runtime[0]!, worker })));
+    expect(evaluateDevSoak(sample).find((c) => c.name === 'Worker runtime healthy')?.status).toBe('pass');
+    sample.runtime[2]!.memoryUsageBytesP99 = 125 * 1024 * 1024;
+    expect(evaluateDevSoak(sample).find((c) => c.name === 'Worker resource headroom')?.status).toBe('warn');
+  });
   it('passes a fresh, drained production-mirrored sample', () => {
     expect(evaluateDevSoak(healthy()).filter((check) => check.status !== 'pass')).toEqual([]);
   });

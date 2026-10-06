@@ -60,6 +60,7 @@
   },
   "version_metadata": { "binding": "VERSION_METADATA" },
   "vars": {
+    "INGESTION_V2_ISOLATED_WORKERS_ENABLED": "false",
     "PUBLIC_API_URL": "https://intern-notifs.jdkrasnick.workers.dev",
     "AUTH_FROM_EMAIL": "Ntern <notifications@send.ntern.app>",
     "OUTBOUND_NOTIFICATIONS_ENABLED": "true",
