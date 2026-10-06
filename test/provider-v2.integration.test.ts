@@ -11,6 +11,41 @@ const postingId = '11111111-1111-4111-8111-111111111111';
 const title = 'Software Engineering Intern, Summer 2027';
 const scheduledAt = '2026-10-05T12:00:00.000Z';
 
+it.each([false, true])('re-fetches an unchanged reviewed Greenhouse board for V2 (catalog owner=%s)', async (owner) => {
+  const source = { ...acmeSource, id: 'greenhouse-figma', boardToken: 'figma', status: 'published' as const };
+  const store = new MemoryInternshipStore();
+  const observed: ShadowDiscoveryInput[] = [];
+  const conditionalRequests: boolean[] = [];
+  const dependencies = {
+    store, sources: [source], v2CatalogWriteOwner: () => owner,
+    linkValidator: async (url: string) => url,
+    shadowDiscovery: {
+      isEnabledForSource: () => true,
+      async discover(input: ShadowDiscoveryInput) {
+        observed.push(input);
+        return { completed: true, snapshotHash: normalizeSourceSnapshot(input).snapshotHash };
+      },
+    },
+    fetchImpl: async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const conditional = new Headers(init?.headers).has('If-None-Match');
+      conditionalRequests.push(conditional);
+      return conditional ? new Response(null, { status: 304 }) : new Response(JSON.stringify({ jobs: [{
+        ...technicalInternship, absolute_url: 'https://job-boards.greenhouse.io/figma/jobs/5001',
+      }] }), { headers: { ETag: 'stable-board' } });
+    },
+  };
+  await runGreenhouseBoard({ version: 1, sourceId: source.id, scheduledAt }, dependencies);
+  const before = await store.getCheckpoint(source.id);
+  expect(before?.etag).toBe('stable-board');
+  await runGreenhouseBoard({ version: 1, sourceId: source.id, scheduledAt }, dependencies);
+  expect(conditionalRequests).toEqual([false, false]);
+  expect(observed).toHaveLength(2);
+  expect(observed[1]!.snapshotHash).toBe(observed[0]!.snapshotHash);
+  expect(observed[1]!.postings).toHaveLength(1);
+  expect(await store.getSourceHealth(source.id)).toMatchObject({ state: 'healthy', consecutiveFailures: 0 });
+  expect((await store.getCheckpoint(source.id))?.contentHash).toBe(before?.contentHash);
+});
+
 async function run(provider: 'greenhouse' | 'lever' | 'ashby', owner: boolean, completed = true) {
   const store = new MemoryInternshipStore();
   const observed: ShadowDiscoveryInput[] = [];

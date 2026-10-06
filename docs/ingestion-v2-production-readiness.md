@@ -186,3 +186,14 @@ from 1.44 to 77.5 MiB with handles unreleased, versus 1.44 to 2.31 MiB with
 explicit cleanup. This establishes the retention mechanism; it does not prove
 that icons explain all live ingestion memory or replace current-version
 Cloudflare sampling and the sustained headroom gate.
+
+### Reviewed Greenhouse unchanged-board prefetch
+
+The resumed dev Figma source exposed a system error: the reviewed-board
+prefetch path retained its ETag, received a legitimate HTTP 304, and failed
+V2's complete-snapshot requirement. The ordinary fetch path already removed
+validators for V2 discovery, but prefetch bypassed it. Both paths now remove
+validators for V2 ownership/discovery and open resolution passes while
+preserving the prior content hash. Provider integration coverage performs two
+unchanged polls with an ETag-aware server and verifies complete discovery and
+healthy source state. The owned-source regression fails against the prior code.
