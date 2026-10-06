@@ -198,6 +198,34 @@ describe('dev ingestion soak evaluation', () => {
 });
 
 describe('full dev ownership evidence', () => {
+  it('keeps the checked dev profile aligned with isolated worker ownership', () => {
+    const ingestion = JSON.parse(readFileSync('wrangler.dev.ingestion.jsonc', 'utf8'));
+    const admission = JSON.parse(readFileSync('wrangler.dev.admission.jsonc', 'utf8'));
+    const publisher = JSON.parse(readFileSync('wrangler.dev.catalog-publisher.jsonc', 'utf8'));
+    const api = JSON.parse(readFileSync('wrangler.dev.api.jsonc', 'utf8'));
+    const ownerControls = [
+      'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST',
+      'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST',
+      'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST',
+    ];
+
+    expect(ingestion.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED).toBe('true');
+    expect(admission.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED).toBe('true');
+    expect(publisher.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED).toBe('true');
+    expect(admission.triggers.crons).toEqual(['9-59/10 * * * *']);
+    expect(publisher.triggers.crons).toEqual(['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']);
+    expect(ingestion.triggers.crons).not.toContain('1-51/10 * * * *');
+    expect(ingestion.triggers.crons).not.toContain('4,14,24,34,44,54 * * * *');
+    expect(ingestion.queues.consumers.some((consumer: { queue: string }) => consumer.queue === 'intern-notifs-dev-admission-v2')).toBe(false);
+    expect(admission.queues.consumers).toEqual([
+      expect.objectContaining({ queue: 'intern-notifs-dev-admission-v2', max_batch_size: 1, max_concurrency: 1 }),
+    ]);
+    for (const name of ownerControls) {
+      expect(admission.vars[name]).toBe(ingestion.vars[name]);
+      expect(api.vars[name]).toBe(ingestion.vars[name]);
+    }
+  });
+
   it('rejects a production profile or enabled outbound delivery', () => {
     const dev = JSON.parse(readFileSync('wrangler.dev.ingestion.jsonc', 'utf8'));
     expect(parseDevSoakConfig(JSON.stringify(dev)).name).toBe('intern-notifs-dev-ingestion');
