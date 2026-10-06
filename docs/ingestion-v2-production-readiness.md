@@ -118,8 +118,9 @@ correctly excluded them. These rows could never settle and blocked cutover.
 Two omissions now move unclaimed work to `absent` while retaining attempts,
 failure history, and durable closure work. Already-claimed effects drain before
 closure acknowledgement retires their row. Complete recovery passes repair old
-stranded rows; incomplete snapshots cannot retire them. The readiness gate stays
-strict for present rows and pending catalog effects.
+stranded rows; incomplete snapshots cannot retire them. The readiness gate checks
+retired occurrences as well as settled admission decisions: a pending omission
+closure or an omitted occurrence still marked open fails durable parity.
 
 A separate Cloudflare D1/R2/Queue experiment uses the production discovery,
 admission, bootstrap, and catalog implementations. Its controlled 1,000-row

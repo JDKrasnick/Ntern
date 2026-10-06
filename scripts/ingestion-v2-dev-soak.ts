@@ -31,6 +31,31 @@ const QUEUE_SUFFIXES = [
 ] as const;
 
 interface QueueSummary { queue_id: string; queue_name: string }
+/** Durable parity includes retired occurrences and pending negative effects. */
+export function ingestionV2CatalogParitySql(sourceCount: number): string {
+  if (!Number.isSafeInteger(sourceCount) || sourceCount < 1 || sourceCount > 500) throw new Error('Invalid source count');
+  const placeholders = Array.from({ length: sourceCount }, () => '?').join(',');
+  return `SELECT r.source_id, SUM(CASE
+      WHEN r.consecutive_omissions >= 2 THEN CASE
+        WHEN r.closure_pending = 1 OR json_extract(c.value, '$.occurrence.state') = 'open' THEN 1 ELSE 0 END
+      WHEN r.decision = 'admitted' AND (
+        r.job_id IS NULL OR COALESCE(json_extract(c.value, '$.jobId'), '') != r.job_id
+        OR COALESCE(json_extract(c.value, '$.occurrence.state'), '') != 'open'
+        OR COALESCE(json_extract(c.value, '$.occurrence.admission.catalogEligible'), 0) != 1
+        OR COALESCE(json_extract(c.value, '$.occurrence.admissionConfigurationVersion'), '') != r.admission_version
+        OR COALESCE(json_extract(j.value, '$.open'), 0) != 1
+        OR COALESCE(json_extract(c.value, '$.occurrence.trustedCommunityAlertQualification.catalogPublicationSuppressed'), 0) = 1
+      ) THEN 1
+      WHEN r.decision IN ('blocked', 'shelved')
+        AND json_extract(c.value, '$.occurrence.state') = 'open'
+        AND json_extract(c.value, '$.occurrence.admission.catalogEligible') = 1 THEN 1
+      ELSE 0 END) AS mismatches
+      FROM ingestion_rows r
+      LEFT JOIN catalog_items c ON c.pk = 'SOURCE#' || r.source_id AND c.sk = 'OCCURRENCE#' || r.external_id
+      LEFT JOIN catalog_items j ON j.pk = 'JOB#' || r.job_id AND j.sk = 'META'
+      WHERE r.source_id IN (${placeholders}) AND (r.state = 'settled' OR r.consecutive_omissions >= 2) GROUP BY r.source_id`;
+}
+
 interface QueueMetrics { backlog_count: number; backlog_bytes: number }
 interface SourceHealth {
   state?: string;
@@ -262,23 +287,7 @@ async function main(): Promise<number> {
       FROM ingestion_admission_handoffs WHERE source_id IN (${placeholders}) AND acknowledged_at IS NULL GROUP BY source_id`, [staleHandoffBefore, ...sourceIds]),
     query<{ source_id: string; expired: number }>(`SELECT source_id, COUNT(*) AS expired FROM ingestion_rows
       WHERE source_id IN (${placeholders}) AND state = 'processing' AND lease_expires_at < ? GROUP BY source_id`, [...sourceIds, capturedAt.toISOString()]),
-    query<{ source_id: string; mismatches: number }>(`SELECT r.source_id, SUM(CASE
-      WHEN r.decision = 'admitted' AND (
-        r.job_id IS NULL OR COALESCE(json_extract(c.value, '$.jobId'), '') != r.job_id
-        OR COALESCE(json_extract(c.value, '$.occurrence.state'), '') != 'open'
-        OR COALESCE(json_extract(c.value, '$.occurrence.admission.catalogEligible'), 0) != 1
-        OR COALESCE(json_extract(c.value, '$.occurrence.admissionConfigurationVersion'), '') != r.admission_version
-        OR COALESCE(json_extract(j.value, '$.open'), 0) != 1
-        OR COALESCE(json_extract(c.value, '$.occurrence.trustedCommunityAlertQualification.catalogPublicationSuppressed'), 0) = 1
-      ) THEN 1
-      WHEN r.decision IN ('blocked', 'shelved')
-        AND json_extract(c.value, '$.occurrence.state') = 'open'
-        AND json_extract(c.value, '$.occurrence.admission.catalogEligible') = 1 THEN 1
-      ELSE 0 END) AS mismatches
-      FROM ingestion_rows r
-      LEFT JOIN catalog_items c ON c.pk = 'SOURCE#' || r.source_id AND c.sk = 'OCCURRENCE#' || r.external_id
-      LEFT JOIN catalog_items j ON j.pk = 'JOB#' || r.job_id AND j.sk = 'META'
-      WHERE r.source_id IN (${placeholders}) AND r.state = 'settled' GROUP BY r.source_id`, sourceIds),
+    query<{ source_id: string; mismatches: number }>(ingestionV2CatalogParitySql(sourceIds.length), sourceIds),
     query<Record<string, unknown>>(`SELECT queue_name, category, COUNT(*) AS failures, MAX(last_failed_at) AS latest
       FROM queue_failure_events WHERE resolved_at IS NULL AND last_failed_at >= ?
       GROUP BY queue_name, category ORDER BY queue_name, category`, [windowStart]),

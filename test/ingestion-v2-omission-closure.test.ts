@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { ingestionV2CatalogParitySql } from '../scripts/ingestion-v2-dev-soak.js';
 import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { D1IngestionV2Repository } from '../cloudflare/ingestion-v2-store.js';
@@ -133,9 +134,13 @@ describe('durable public omission closure', () => {
     expect(await s.repository.getRow('source', 'role')).toMatchObject({ state: 'absent', attemptCount: 2, failureDetail: 'provider timeout' });
     expect(await s.repository.listPendingOmissionClosures('source', 25)).toHaveLength(1);
     expect(await s.repository.listDispatchableRows('source', later, 25)).toHaveLength(0);
+    expect(s.sqlite.prepare(ingestionV2CatalogParitySql(1)).get('source')).toMatchObject({ mismatches: 1 });
     await reconcileIngestionV2Omissions(s, input);
     expect((await s.store.getJob('role'))?.open).toBe(false);
     expect(await s.repository.listPendingOmissionClosures('source', 25)).toHaveLength(0);
+    expect(s.sqlite.prepare(ingestionV2CatalogParitySql(1)).get('source')).toMatchObject({ mismatches: 0 });
+    s.sqlite.prepare("UPDATE catalog_items SET value=json_set(value,'$.occurrence.state','open') WHERE pk='SOURCE#source' AND sk='OCCURRENCE#role'").run();
+    expect(s.sqlite.prepare(ingestionV2CatalogParitySql(1)).get('source')).toMatchObject({ mismatches: 1 });
   });
 
   it('keeps the first omission public, closes the second, and does not repeat completed effects', async () => {
