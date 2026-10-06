@@ -22,7 +22,7 @@ import type {
 
 // Source preprocessing can change independently of the shared API/page parser.
 // Revisit source snapshots without invalidating complete API acquisitions.
-export const SOURCE_METADATA_PROCESSING_REVISION = 2;
+export const SOURCE_METADATA_PROCESSING_REVISION = 3;
 
 function markdownToText(value: string): string {
   return htmlToText(value
@@ -86,7 +86,12 @@ export function processPosting(
   const locations = normalizeLocations(sourceLocations);
   const location = locationSummary(locations);
   const titleSeason = inferSeason(title, '');
-  const season = titleSeason !== 'ongoing' ? titleSeason : posting.seasonHint ?? inferSeason('', content);
+  const contentSeason = inferSeason('', content);
+  const season = titleSeason !== 'ongoing' ? titleSeason : posting.seasonHint ?? contentSeason;
+  // An explicit named season in the employer description is the same evidence
+  // as one in its title. A source default or a bare year remains inferred.
+  const explicitContentSeason = !posting.seasonHint
+    && /^(?:winter|spring|summer|fall)-20\d{2}$/u.test(contentSeason);
   const classificationTitle = [title, ...(posting.classificationTags ?? []).map(htmlToText)].filter(Boolean).join(' ');
   const assessment = assessTechnicalRole({ company, title: classificationTitle, location, season }, content);
   const urlReason = withheldReason(posting.applyUrl);
@@ -148,7 +153,7 @@ export function processPosting(
       title,
       location,
       season,
-      seasonEvidenceStatus: titleSeason !== 'ongoing' || posting.seasonHintAuthority === 'posting'
+      seasonEvidenceStatus: titleSeason !== 'ongoing' || posting.seasonHintAuthority === 'posting' || explicitContentSeason
         ? 'explicit'
         : season !== 'ongoing' ? 'inferred' : 'unspecified',
       content,

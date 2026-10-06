@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { stableSourceOccurrenceJobId } from '../src/identity/registry.js';
 import { MemoryInternshipStore } from '../src/store.js';
+import { processPosting } from '../src/ingestion/processor.js';
 import type { AdmissionCatalogCommit } from '../src/ingestion-v2/admission/evaluator.js';
 import type { CatalogAdmission, ProcessedListing } from '../src/types.js';
 
@@ -74,6 +75,28 @@ function commit(overrides: Partial<AdmissionCatalogCommit> = {}): AdmissionCatal
 }
 
 describe('ingestion v2 reconciler catalog sink', () => {
+  it('keeps an employer-confirmed open role open when its explicit description season has begun', async () => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const processed = processPosting({
+      sourceId, externalId, provenance: 'official-ats',
+      sourceUrl: 'https://jobs.example.com/board', fetchedAt: observedAt,
+      employer: { id: 'acme', name: 'Acme', authority: 'reviewed-registry' },
+      title: 'Software Engineer - New Grad', locations: ['Remote'],
+      content: [{ kind: 'description', format: 'plain', value: 'Join our engineering team in Fall 2026.' }],
+      applyUrl: listing().applyUrl, sourceState: 'open', lifecycleAuthority: 'title',
+    }).listing!;
+    const incoming = { ...processed, postingIdentityDecision: listing().postingIdentityDecision };
+    await sink.commit(commit({ listing: incoming, baseline: true, notify: false }));
+    const job = [...store.jobs.values()][0]!;
+    expect(job.open).toBe(true);
+    // Regrade an existing closed canonical row, as in the real Lever failure.
+    store.jobs.set(job.jobId, { ...job, open: false });
+    await sink.commit(commit({ listing: incoming, baseline: true, notify: false }));
+    expect(store.jobs.get(job.jobId)?.open).toBe(true);
+    expect([...store.occurrences.values()][0]?.occurrence.state).toBe('open');
+    expect(store.notificationEvents.size).toBe(0);
+  });
   it('commits one catalog job, occurrence, and notification across duplicate delivery', async () => {
     const store = new MemoryInternshipStore();
     const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));

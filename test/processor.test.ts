@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { processSnapshot } from '../src/ingestion/processor.js';
+import { processPosting, processSnapshot } from '../src/ingestion/processor.js';
 import type { SourcedPosting } from '../src/types.js';
 
 const posting = (overrides: Partial<SourcedPosting> = {}): SourcedPosting => ({
@@ -17,6 +17,22 @@ const posting = (overrides: Partial<SourcedPosting> = {}): SourcedPosting => ({
 });
 
 describe('shared posting processor', () => {
+  it('recognizes an explicit named season in the employer description without upgrading defaults or bare years', () => {
+    const title = 'Software Engineer - New Grad';
+    const declared = processPosting(posting({ title,
+      content: [{ kind: 'description', format: 'html', value: '<p>Join our engineering team in Fall 2026.</p>' }],
+    })).listing;
+    expect(declared?.season).toBe('fall-2026');
+    expect(declared?.internshipIdentity?.season.evidenceStatus).toBe('explicit');
+    const defaulted = processPosting(posting({ title, content: [],
+      seasonHint: 'fall-2026', seasonHintAuthority: 'source-default',
+    })).listing;
+    expect(defaulted?.internshipIdentity?.season.evidenceStatus).toBe('inferred');
+    const bareYear = processPosting(posting({ title,
+      content: [{ kind: 'description', format: 'plain', value: 'Graduating between December 2026 and May 2027.' }],
+    })).listing;
+    expect(bareYear?.internshipIdentity?.season.evidenceStatus).toBe('inferred');
+  });
   it('includes an explicitly technical project management internship from an official board', () => {
     const result = processSnapshot({ sourceId: 'greenhouse-astranis', outcome: 'changed', complete: true,
       postings: [posting({ sourceId: 'greenhouse-astranis', title: 'Technical Project Management Intern (Summer 2027)',
