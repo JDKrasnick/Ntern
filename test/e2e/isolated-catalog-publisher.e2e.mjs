@@ -62,6 +62,22 @@ test('R2 failure invalidates the old pointer and does not advance the completion
   assert.ok(await bucket.get('public-catalog/v1/current'));
 });
 
+test('legacy scheduled expression repairs real R2 pages without double ownership or notifications', async () => {
+  const old = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  await bucket.delete(`public-catalog/v1/${old.version}/0`);
+  const scheduledTime = Date.now();
+  await worker.scheduled({ cron: '4-54/10 * * * *', scheduledTime }, env);
+  const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  assert.equal(pointer.schemaVersion, 1);
+  assert.equal(pointer.version, old.version);
+  assert.ok(await bucket.get(`public-catalog/v1/${pointer.version}/0`));
+  assert.equal(JSON.parse((await marker('catalog_projection_r2')).value).observedAt, new Date(scheduledTime).toISOString());
+  await worker.scheduled({ cron: '4-54/10 * * * *', scheduledTime }, {
+    INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected disabled publisher read'); } },
+  });
+  assert.equal((await db.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
+});
+
 test('unchanged catalog cycles retire and repair missing or corrupt active pages', async () => {
   for (const fault of ['missing', 'malformed', 'changed']) {
     const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());

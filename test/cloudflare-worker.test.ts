@@ -360,6 +360,22 @@ describe('Cloudflare maintenance cron', () => {
     }
   });
 
+  it('keeps D1 publication failures from advancing the overall completion marker', async () => {
+    vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockRejectedValue(new Error('D1 write failed'));
+    const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(cloudflareWorker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) }, DOCUMENTS: {},
+      } as unknown as Environment)).rejects.toThrow('D1 catalog projection failed');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'failed');
+      expect(markers).not.toHaveBeenCalledWith('catalog_projection_complete', 'complete', expect.any(Date));
+      expect(logs).not.toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_catalog_projection_complete"'));
+    } finally { vi.restoreAllMocks(); }
+  });
+
   it('keeps a matching R2 publication available across the intervening D1 cron', async () => {
     const values = new Map<string, string>();
     const documents = {
@@ -381,7 +397,7 @@ describe('Cloudflare maintenance cron', () => {
     } finally { vi.restoreAllMocks(); }
   });
 
-  it('publishes the R2 catalog projection in a separate invocation', async () => {
+  it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('publishes the R2 catalog projection for %s in a separate invocation', async (cron) => {
     const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
     const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot').mockResolvedValue({
       groups: [], generatedAt: '2026-09-17T17:01:00.000Z',
@@ -392,7 +408,7 @@ describe('Cloudflare maintenance cron', () => {
     const put = vi.fn().mockResolvedValue(undefined);
     try {
       await cloudflareWorker.scheduled({
-        cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
+        cron, scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         DB: { prepare: () => ({ async first() { return null; } }) },
         DOCUMENTS: { async get() { return null; }, put, async delete() { return undefined; } },
@@ -409,6 +425,34 @@ describe('Cloudflare maintenance cron', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('does not report a successful R2 publication when %s fails', async (cron) => {
+    vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot').mockResolvedValue({ groups: [], generatedAt: new Date().toISOString() });
+    const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(cloudflareWorker.scheduled({ cron, scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) },
+        DOCUMENTS: { async get() { return null; }, async put() { throw new Error('R2 internal error'); } },
+      } as unknown as Environment)).rejects.toThrow('R2 catalog projection failed');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_r2', 'failed');
+      expect(markers).not.toHaveBeenCalledWith('catalog_projection_r2_complete', 'complete', expect.any(Date));
+      expect(logs).not.toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_catalog_projection_r2_complete"'));
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('leaves %s to the isolated publisher when isolation is enabled', async (cron) => {
+    const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot');
+    try {
+      await cloudflareWorker.scheduled({ cron, scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) },
+        INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true',
+        DOCUMENTS: { get() { throw new Error('unexpected second publisher'); } },
+      } as unknown as Environment);
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); }
   });
 
   it('runs the remaining maintenance phases and marks them without rebuilding the projection', async () => {
