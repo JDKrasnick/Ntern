@@ -31,7 +31,7 @@ import type {
 // Increment whenever a parser change can produce a different result from an
 // unchanged artifact. This makes the collection scheduler revisit both a
 // previous negative result and an already-enriched posting.
-export const ROLE_METADATA_EXTRACTION_VERSION = 19;
+export const ROLE_METADATA_EXTRACTION_VERSION = 20;
 export const VERIFIED_PAGE_METADATA_SOURCES = ['official-json-ld', 'official-page'] as const;
 const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
   // Exact-role detail retrieval owns its own slot; a later board-list poll
@@ -322,8 +322,15 @@ function graduationWindow(value: string): GraduationDateWindow | undefined {
   // evidence of a graduation window.
   const marker = /\b(?:graduat(?:es|ed|ing|ion)|graduate(?!\s+(?:students?|school|degree|program|intern|level)\b)|class of|degree completion)\b/iu;
   const context = value.split(/(?<=[.!?;])\s+|\n+/u)
-    .map(clause => clause.split(/\b(?:applications? (?:close|deadline)|apply by|(?:internship|program) (?:starts?|begins?))\b/iu)[0] ?? '')
-    .filter(clause => marker.test(clause)).map(clause => clause.slice(0, 400)).join(' ');
+    .map(clause => {
+      const graduation = marker.exec(clause);
+      if (!graduation) return '';
+      const hiring = /\b(?:(?:winter|spring|summer|fall)\s+20\d{2}\s+(?:internship|program|role|position|job)|(?:internship|program)\s+(?:starts?|begins?))\b/iu.exec(clause);
+      // A hiring clause on either side is not part of the applicant's window.
+      const requirement = hiring && hiring.index < graduation.index ? clause.slice(graduation.index)
+        : hiring ? clause.slice(0, hiring.index) : clause;
+      return (requirement.split(/\b(?:applications? (?:close|deadline)|apply by)\b/iu)[0] ?? '').slice(0, 400);
+    }).join(' ');
   if (!context) return undefined;
   const dates = [
     ...[...context.matchAll(/\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(20\d{2})\b/giu)]

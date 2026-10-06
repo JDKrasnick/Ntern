@@ -59,6 +59,28 @@ test('R2 failure invalidates the old pointer and does not advance the completion
   assert.ok(await bucket.get('public-catalog/v1/current'));
 });
 
+test('unchanged catalog cycles retire and repair missing or corrupt active pages', async () => {
+  for (const fault of ['missing', 'malformed', 'changed']) {
+    const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+    const pageKey = `public-catalog/v1/${pointer.version}/0`;
+    const original = await (await bucket.get(pageKey)).text();
+    if (fault === 'missing') await bucket.delete(pageKey);
+    if (fault === 'malformed') await bucket.put(pageKey, '{');
+    if (fault === 'changed') {
+      const altered = JSON.parse(original);
+      altered[0].roles[0].title = 'Corrupted title';
+      await bucket.put(pageKey, JSON.stringify(altered));
+    }
+    await scheduled('1-51/10 * * * *');
+    assert.equal(await bucket.get('public-catalog/v1/current'), null, `${fault} page must retire its pointer`);
+    await scheduled('4,14,24,34,44,54 * * * *');
+    const repaired = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+    assert.equal(repaired.version, pointer.version);
+    assert.equal(await (await bucket.get(pageKey)).text(), original);
+    assert.equal(JSON.parse((await marker('catalog_projection_r2')).value).status, 'complete');
+  }
+});
+
 test('billing shutdown preserves the published catalog', async () => {
   await db.prepare("INSERT OR REPLACE INTO system_state(key,value,updated_at) VALUES ('billing_shutdown','stopped',?)").bind(new Date().toISOString()).run();
   const before = await marker('catalog_projection');

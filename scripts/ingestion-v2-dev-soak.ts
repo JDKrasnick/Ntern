@@ -244,6 +244,28 @@ export function runtimeWorkerIdentity(
   return name;
 }
 
+interface DevSoakDeployments {
+  deployments: Array<{ created_on: string; versions: Array<{ version_id: string; percentage: number }> }>;
+}
+
+/** The clean window belongs to the entire active stack, including dedicated repairs. */
+export async function loadDevSoakDeployments(
+  names: string[], load: (name: string) => Promise<DevSoakDeployments>, now: Date,
+): Promise<{ versions: string[]; latestDeploymentAt: Date }> {
+  if (!names.length) throw new Error('Missing runtime Workers');
+  const active = await Promise.all(names.map(async (name) => {
+    const deployment = (await load(name)).deployments[0];
+    const versions = deployment?.versions;
+    if (versions?.length !== 1 || versions[0]?.percentage !== 100 || !versions[0].version_id) {
+      throw new Error(`Unstable deployment identity: ${name}`);
+    }
+    const createdAt = Date.parse(deployment.created_on);
+    if (!Number.isFinite(createdAt) || createdAt > now.getTime()) throw new Error(`Invalid deployment time: ${name}`);
+    return { version: versions[0].version_id, createdAt };
+  }));
+  return { versions: active.map((row) => row.version), latestDeploymentAt: new Date(Math.max(...active.map((row) => row.createdAt))) };
+}
+
 async function main(): Promise<number> {
   const token = requireEnv('CLOUDFLARE_API_TOKEN');
   const accountId = requireEnv('CLOUDFLARE_ACCOUNT_ID');
@@ -259,12 +281,11 @@ async function main(): Promise<number> {
     ?? '.context/verification/ingestion-v2/dev-soak/report.json';
   if (!Number.isFinite(windowHours) || windowHours <= 0 || windowHours > 168) throw new Error('soak window must be between 0 and 168 hours');
   const capturedAt = new Date();
-  const deploymentResponse = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}/deployments`, {
-    headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000),
-  });
-  const deploymentBody = await deploymentResponse.json() as { success: boolean; result?: { deployments: Array<{ created_on: string }> } };
-  const deploymentAt = new Date(deploymentBody.result?.deployments[0]?.created_on ?? '');
-  if (!deploymentResponse.ok || !deploymentBody.success || !Number.isFinite(deploymentAt.getTime())) throw new Error('could not identify latest dev deployment');
+  const isolated = DEV_CONFIG.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true';
+  const runtimeNames = isolated ? [workerName, workerName.replace(/-ingestion$/u, '-admission'), workerName.replace(/-ingestion$/u, '-catalog-publisher')] : [workerName];
+  const deployments = await loadDevSoakDeployments(runtimeNames,
+    (name) => cloudflare<DevSoakDeployments>(`/workers/scripts/${name}/deployments`), capturedAt);
+  const deploymentAt = deployments.latestDeploymentAt;
   const rollingWindowStart = new Date(capturedAt.getTime() - windowHours * 3_600_000);
   const configuredWindowStart = process.env.INGESTION_V2_SOAK_STARTED_AT
     ? new Date(process.env.INGESTION_V2_SOAK_STARTED_AT)
@@ -343,14 +364,8 @@ async function main(): Promise<number> {
       return { generatedAt: pointer.generatedAt, version: pointer.version, count: pointer.count };
     }),
     (async () => {
-      const isolated = DEV_CONFIG.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true';
-      const names = isolated ? [workerName, workerName.replace(/-ingestion$/u, '-admission'), workerName.replace(/-ingestion$/u, '-catalog-publisher')] : [workerName];
-      const versions = await Promise.all(names.map(async (name) => {
-        const deployment = await cloudflare<{ deployments: Array<{ versions: Array<{ version_id: string; percentage: number }> }> }>(`/workers/scripts/${name}/deployments`);
-        const active = deployment.deployments[0]?.versions;
-        if (active?.length !== 1 || active[0]?.percentage !== 100) throw new Error(`Unstable deployment identity: ${name}`);
-        return active[0].version_id;
-      }));
+      const names = runtimeNames;
+      const versions = deployments.versions;
       const response = await fetch('https://api.cloudflare.com/client/v4/graphql', { method: 'POST', signal: AbortSignal.timeout(30_000),
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: `query($account: String!, $since: Time!, $workers: [String!]!, $versions: [String!]!) { viewer { accounts(filter: { accountTag: $account }) {
@@ -397,7 +412,6 @@ async function main(): Promise<number> {
       catalogOwned: admissionV2OwnsCatalogWrites(DEV_CONFIG.vars, sourceId),
       catalogMismatches: catalogParity.find((row) => row.source_id === sourceId)?.mismatches ?? 0 };
   }));
-  const isolated = DEV_CONFIG.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true';
   const extraSettings = isolated ? await Promise.all(['admission', 'catalog-publisher'].map(async (role) => {
     const worker = workerName.replace(/-ingestion$/u, `-${role}`);
     const live = await cloudflare<{ bindings: Array<{ name: string; type: string; text?: string }> }>(`/workers/scripts/${worker}/settings`);

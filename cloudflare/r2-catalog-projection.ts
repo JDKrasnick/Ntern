@@ -35,7 +35,7 @@ export class R2CatalogProjection {
   /** Keep complete immutable pages when only the D1 generation timestamp changed. */
   async revalidate(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void> {
     const previous = await this.pointer();
-    if (!previous || previous.version !== contentVersion(groups)) {
+    if (!previous || previous.version !== contentVersion(groups) || !await this.pagesMatch(previous, groups)) {
       await this.invalidate();
       return;
     }
@@ -64,10 +64,27 @@ export class R2CatalogProjection {
     return groups;
   }
 
+  /** Read one page at a time so validation never hydrates a second catalog. */
+  private async pagesMatch(pointer: Pointer, groups: CatalogGroupDetails[]): Promise<boolean> {
+    if (pointer.count !== groups.length || Object.keys(pointer.groupPages).length !== groups.length
+      || groups.some((group, index) => pointer.groupPages[group.group.groupId] !== Math.floor(index / pageSize))) return false;
+    try {
+      for (let index = 0; index * pageSize < groups.length; index += 1) {
+        const page = await this.page(pointer, index);
+        if (JSON.stringify(page) !== JSON.stringify(groups.slice(index * pageSize, (index + 1) * pageSize))) return false;
+      }
+      return true;
+    } catch { return false; }
+  }
+
   async publish(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void> {
     const version = contentVersion(groups);
     const previous = await this.pointer();
-    if (previous?.version !== version) {
+    const retained = previous?.version === version && await this.pagesMatch(previous, groups);
+    if (!retained) {
+      // Hide an incomplete active version before attempting its repair. A failed
+      // write must leave readers on D1, rather than renewing a broken pointer.
+      if (previous?.version === version) await this.invalidate();
       for (let index = 0; index * pageSize < groups.length; index += 1) {
         await this.bucket.put(`${prefix}/${version}/${index}`, encoded(groups.slice(index * pageSize, (index + 1) * pageSize)));
       }

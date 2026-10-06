@@ -33,6 +33,45 @@ function fakeBucket() {
 }
 
 describe('R2 catalog projection', () => {
+  it.each(['missing', 'malformed', 'changed', 'shortened', 'index'])('invalidates an unchanged %s page set and repairs it on publication', async (fault) => {
+    const { bucket, objects } = fakeBucket();
+    const projection = new R2CatalogProjection(bucket);
+    const groups = groupCatalogJobs(Array.from({ length: 101 }, (_, index) => role(index))).map(catalogGroupDetails);
+    const now = new Date().toISOString();
+    await projection.publish(groups, now);
+    const pointerKey = 'public-catalog/v1/current';
+    const pointer = JSON.parse(new TextDecoder().decode(objects.get(pointerKey)));
+    const pageKey = `public-catalog/v1/${pointer.version}/1`;
+    if (fault === 'missing') objects.delete(pageKey);
+    if (fault === 'malformed') objects.set(pageKey, new TextEncoder().encode('{').buffer);
+    if (fault === 'changed') objects.set(pageKey, new TextEncoder().encode(JSON.stringify([groups[0]])).buffer);
+    if (fault === 'shortened') objects.set(pageKey, new TextEncoder().encode('[]').buffer);
+    if (fault === 'index') {
+      pointer.groupPages[groups[100]!.group.groupId] = 0;
+      objects.set(pointerKey, new TextEncoder().encode(JSON.stringify(pointer)).buffer);
+    }
+    await projection.revalidate(groups, now);
+    expect(objects.has(pointerKey)).toBe(false);
+    await projection.publish(groups, now);
+    expect((await projection.list('100', 1))?.groups).toEqual(groups.slice(100));
+  });
+
+  it('repairs an incomplete active version even when publication runs before D1 revalidation', async () => {
+    const { bucket, objects, failNextPage } = fakeBucket();
+    const projection = new R2CatalogProjection(bucket);
+    const groups = groupCatalogJobs([role(0)]).map(catalogGroupDetails);
+    const now = new Date().toISOString();
+    await projection.publish(groups, now);
+    const pageKey = [...objects.keys()].find((key) => key.endsWith('/0'))!;
+    objects.delete(pageKey);
+    await projection.publish(groups, now);
+    expect((await projection.list())?.groups).toEqual(groups);
+    objects.delete(pageKey);
+    failNextPage();
+    await expect(projection.publish(groups, now)).rejects.toThrow('R2 write failed');
+    expect(await projection.list()).toBeUndefined();
+  });
+
   it('retains complete pages across an unchanged D1 generation and renews its pointer', async () => {
     const { bucket, objects } = fakeBucket();
     const projection = new R2CatalogProjection(bucket);

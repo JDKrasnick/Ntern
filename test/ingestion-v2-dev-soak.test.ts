@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { devSoakCoverage, evaluateDevSoak, nextDevSoakSampleAt, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
+import { devSoakCoverage, evaluateDevSoak, loadDevSoakDeployments, nextDevSoakSampleAt, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
 
 describe('scheduled soak observation boundaries', () => {
   it.each([
@@ -52,6 +52,33 @@ const healthy = (): DevSoakSample => ({
 });
 
 describe('dev ingestion soak evaluation', () => {
+  it.each(['admission', 'catalog-publisher'])('resets the full-stack soak after a %s-only redeployment', async (repaired) => {
+    const sample = healthy();
+    const now = new Date(sample.capturedAt);
+    const originalStart = sample.soakStartedAt;
+    const names = ['ingestion', 'admission', 'catalog-publisher'];
+    const fresh = new Date(now.getTime() - 60_000).toISOString();
+    const load = async (name: string) => ({ deployments: [{
+      created_on: name === repaired ? fresh : originalStart,
+      versions: [{ version_id: `${name}-version`, percentage: 100 }],
+    }] });
+    const active = await loadDevSoakDeployments(names, load, now);
+    expect(active.versions).toEqual(names.map((name) => `${name}-version`));
+    expect(active.latestDeploymentAt.toISOString()).toBe(fresh);
+    sample.soakStartedAt = active.latestDeploymentAt.toISOString();
+    expect(evaluateDevSoak(sample).find((check) => check.name === 'dev soak elapsed')?.status).toBe('fail');
+    const combined = await loadDevSoakDeployments(['ingestion'], load, now);
+    sample.soakStartedAt = combined.latestDeploymentAt.toISOString();
+    expect(evaluateDevSoak(sample).find((check) => check.name === 'dev soak elapsed')?.status).toBe('pass');
+  });
+
+  it.each(['missing time', 'future time', 'split traffic', 'missing version'])('fails closed on %s in a dedicated deployment', async (fault) => {
+    const now = new Date('2026-10-04T21:00:00.000Z');
+    await expect(loadDevSoakDeployments(['admission'], async () => ({ deployments: [{
+      created_on: fault === 'missing time' ? '' : fault === 'future time' ? '2026-10-05T00:00:00Z' : '2026-10-03T00:00:00Z',
+      versions: [{ version_id: fault === 'missing version' ? '' : 'version', percentage: fault === 'split traffic' ? 50 : 100 }],
+    }] }), now)).rejects.toThrow();
+  });
   it('requires the dedicated dispatch marker after isolation rather than a legacy completion', () => {
     const sample = healthy();
     sample.expectedRuntimeWorkers = ['ingestion', 'admission', 'catalog-publisher'];

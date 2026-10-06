@@ -17,6 +17,20 @@ const posting = (overrides: Partial<SourcedPosting> = {}): SourcedPosting => ({
 });
 
 describe('shared posting processor', () => {
+  it.each([
+    'This Summer 2027 internship is open to students graduating in Spring 2028.',
+    'Students graduating in Spring 2028 may apply for this Summer 2027 internship.',
+    'Our Summer 2027 internship begins in June for students graduating in Spring 2028.',
+  ])('preserves the role season independently of graduation: %s', (description) => {
+    const result = processPosting(posting({ title: 'Software Engineering Intern',
+      content: [{ kind: 'description', format: 'plain', value: description }],
+    })).listing;
+    expect(result?.season).toBe('summer-2027');
+    expect(result?.internshipIdentity?.season.evidenceStatus).toBe('explicit');
+    expect(result?.metadataEvidence?.find((evidence) => evidence.season)?.season?.value)
+      .toEqual({ term: 'summer', year: 2027 });
+  });
+
   it('recognizes an explicit named season in the employer description without upgrading defaults or bare years', () => {
     const title = 'Software Engineer - New Grad';
     const declared = processPosting(posting({ title,

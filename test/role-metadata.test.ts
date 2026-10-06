@@ -642,6 +642,18 @@ describe('provider-neutral role metadata', () => {
       .toEqual({ term: 'summer', year: 2027 });
   });
 
+  it.each([
+    'This Summer 2027 internship is open to students graduating in Spring 2028.',
+    'Students graduating in Spring 2028 may apply for this Summer 2027 internship.',
+  ])('keeps mixed hiring and graduation dates independent: %s', (text) => {
+    const [item] = extractPostingMetadataEvidence({ artifact: { title: 'Engineering Intern', text },
+      sourceClass: 'official-api', sourceId: 'test', sourceUrl: 'https://example.test/123', observedAt, exactPosting: true });
+    expect(item?.season?.value).toEqual({ term: 'summer', year: 2027 });
+    expect(item?.excerpts?.season).toContain('Summer 2027');
+    expect(item?.excerpts?.season).not.toContain('Spring 2028');
+    expect(item?.education?.graduationDateWindow).toEqual({ start: '2028-05', end: '2028-05' });
+  });
+
   it('preserves degree alternatives and rejects explicitly waived requirements', () => {
     const extract = (text: string) => extractPostingMetadataEvidence({ artifact: { title: 'Engineering Intern', text },
       sourceClass: 'official-api', sourceId: 'test', sourceUrl: 'https://example.test/123', observedAt, exactPosting: true })[0]?.education;
