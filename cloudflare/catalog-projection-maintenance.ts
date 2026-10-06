@@ -78,7 +78,7 @@ export async function refreshCatalogProjection(store: D1InternshipStore, bucket?
       await new R2CatalogProjection(bucket).revalidate(groups, generatedAt, liveWatermark);
     } catch (error) {
       // A newly committed D1 generation must never leave an unverified old R2 view live.
-      await new R2CatalogProjection(bucket).invalidate();
+      await new R2CatalogProjection(bucket).invalidate(generatedAt);
       throw error;
     }
   } else if (bucket) {
@@ -92,7 +92,7 @@ export async function refreshCatalogProjection(store: D1InternshipStore, bucket?
       console.error(JSON.stringify({ event: 'r2_catalog_projection_publish_failed', error: String(error) }));
       // D1 already points at the new projection. Hide an older R2 pointer so
       // readers fall back to D1 instead of serving stale admission decisions.
-      try { await new R2CatalogProjection(bucket).invalidate(); }
+      try { await new R2CatalogProjection(bucket).invalidate(generatedAt); }
       catch (invalidationError) {
         console.error(JSON.stringify({ event: 'r2_catalog_projection_invalidation_failed', error: String(invalidationError) }));
       }
@@ -125,9 +125,8 @@ export async function refreshCatalogProjectionR2(store: D1InternshipStore, bucke
     await recordPhase(phases, 'catalog_projection_r2', 'complete');
   } catch (error) {
     await recordPhase(phases, 'catalog_projection_r2', 'failed');
-    try { await new R2CatalogProjection(bucket).invalidate(); } catch { /* D1 remains authoritative. */ }
+    try { await new R2CatalogProjection(bucket).invalidate(generatedAt); } catch { /* D1 remains authoritative. */ }
     throw error;
   }
   return { generatedAt, groups: groups.length, roles: groups.reduce((total, group) => total + group.roles.length, 0) };
 }
-

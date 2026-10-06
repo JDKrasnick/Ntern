@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync, readdirSync } from 'node:fs';
+import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
 import type { Internship } from '../src/types.js';
 import { R2CatalogProjection, R2CatalogReadStore } from '../cloudflare/r2-catalog-projection.js';
-import type { D1Database, R2Bucket } from '../cloudflare/types.js';
+import type { D1Database, D1PreparedStatement, R2Bucket } from '../cloudflare/types.js';
 
 function role(index: number): Internship {
   const id = `job-${index}`;
@@ -18,14 +22,18 @@ function fakeBucket() {
   const objects = new Map<string, ArrayBuffer>();
   let failPage = false;
   const bucket = {
-    async put(key: string, value: ArrayBuffer | ReadableStream | null) {
+    async put(key: string, value: ArrayBuffer | ReadableStream | null, options?: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } }) {
+      const current = objects.get(key);
+      if (options?.onlyIf?.etagMatches && (!current || createHash('md5').update(new Uint8Array(current)).digest('hex') !== options.onlyIf.etagMatches)) return null;
+      if (options?.onlyIf?.etagDoesNotMatch === '*' && current) return null;
       if (failPage && /\/[^/]+\/0$/.test(key)) throw new Error('R2 write failed');
       if (!(value instanceof ArrayBuffer)) throw new Error('Expected a JSON buffer');
       objects.set(key, value);
+      return { etag: createHash('md5').update(new Uint8Array(value)).digest('hex') };
     },
     async get(key: string) {
       const bytes = objects.get(key);
-      return bytes ? { body: new Response(bytes).body! } : null;
+      return bytes ? { body: new Response(bytes).body!, etag: createHash('md5').update(new Uint8Array(bytes)).digest('hex') } : null;
     },
     async delete(key: string) { objects.delete(key); },
   } as R2Bucket;
@@ -33,6 +41,85 @@ function fakeBucket() {
 }
 
 describe('R2 catalog projection', () => {
+  it('falls back to the durable closed D1 generation when every R2 write is unavailable', async () => {
+    const database = new DatabaseSync(':memory:');
+    const migrations = new URL('../cloudflare/migrations/', import.meta.url);
+    for (const name of readdirSync(migrations).filter(name => name.endsWith('.sql')).sort()) {
+      database.exec(readFileSync(new URL(name, migrations), 'utf8'));
+    }
+    const prepared = (sql: string, params: unknown[] = []): D1PreparedStatement => ({
+      bind: (...next) => prepared(sql, next),
+      async first<T>() { return (database.prepare(sql).get(...params as (string | number | null)[]) as T | undefined) ?? null; },
+      async all<T>() { return { results: database.prepare(sql).all(...params as (string | number | null)[]) as T[] }; },
+      async run() { return { meta: { changes: Number(database.prepare(sql).run(...params as (string | number | null)[]).changes) } }; },
+    });
+    const db: D1Database = { prepare: prepared, async batch(statements) { return Promise.all(statements.map(statement => statement.run())); } };
+    const { bucket } = fakeBucket();
+    const first = new Date(Date.now() - 60_000).toISOString();
+    const later = new Date().toISOString();
+    const open = groupCatalogJobs([role(0)], { includeClosed: true }).map(catalogGroupDetails);
+    const closed = groupCatalogJobs([{ ...role(0), open: false }], { includeClosed: true }).map(catalogGroupDetails);
+    const store = new D1InternshipStore(db);
+    const projection = new R2CatalogProjection(bucket);
+    try {
+      await store.putCatalogProjection(open, first);
+      await projection.publish(open, first);
+      const reader = new R2CatalogReadStore(db, bucket);
+      expect((await reader.listCatalogProjection())?.groups[0]?.roles[0]?.open).toBe(true);
+      await store.putCatalogProjection(closed, later);
+      const unavailable = new R2CatalogProjection({ ...bucket, async put() { throw new Error('all R2 writes unavailable'); } });
+      await expect(unavailable.revalidate(closed, later)).rejects.toThrow('all R2 writes unavailable');
+      await expect(unavailable.invalidate(later)).rejects.toThrow('all R2 writes unavailable');
+      // Physical R2 bytes remain stale, but every public read path uses D1.
+      expect((await projection.list())?.groups[0]?.roles[0]?.open).toBe(true);
+      expect((await reader.listCatalogProjection())?.groups[0]?.roles[0]?.open).toBe(false);
+      expect((await reader.listCatalogProjectionFiltered(undefined, 25, {}))?.groups).toEqual([]);
+      expect((await reader.getCatalogProjectionGroup(closed[0]!.group.groupId))?.roles[0]?.open).toBe(false);
+      expect(await reader.listCatalogProjectionRoles({}, {})).toEqual([]);
+    } finally { database.close(); }
+  });
+
+  it.each(['renewal', 'invalidation', 'publication', 'initial-publication'])('a paused %s cannot replace a newer closed-role generation', async (operation) => {
+    const { bucket } = fakeBucket();
+    const projection = new R2CatalogProjection(bucket);
+    const open = groupCatalogJobs([role(0)], { includeClosed: true }).map(catalogGroupDetails);
+    const closed = groupCatalogJobs([{ ...role(0), open: false }], { includeClosed: true }).map(catalogGroupDetails);
+    const first = new Date(Date.now() - 60_000).toISOString();
+    const later = new Date().toISOString();
+    if (operation !== 'initial-publication') await projection.publish(open, first);
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    let intercepted = false;
+    const delayed = new R2CatalogProjection({ ...bucket, async get(key) {
+      const object = await bucket.get(key);
+      // Pause after the old pointer has been captured. Its ETag is now stale.
+      if (key.endsWith('/current') && !intercepted) { intercepted = true; enter(); await released; }
+      return object;
+    } });
+    const pending = operation === 'renewal' ? delayed.revalidate(open, first)
+      : operation === 'invalidation' ? delayed.invalidate(first) : delayed.publish(open, first);
+    await entered;
+    try { await projection.publish(closed, later); } finally { release(); }
+    await pending;
+    expect((await projection.list())?.groups[0]?.roles[0]?.open).toBe(false);
+  });
+
+  it('keeps a newer retirement fenced against an older publication before the next R2 cron', async () => {
+    const { bucket } = fakeBucket();
+    const projection = new R2CatalogProjection(bucket);
+    const groups = groupCatalogJobs([role(0)]).map(catalogGroupDetails);
+    const first = new Date(Date.now() - 60_000).toISOString();
+    const later = new Date().toISOString();
+    await projection.publish(groups, first);
+    await projection.invalidate(later);
+    await projection.publish(groups, first);
+    await projection.revalidate(groups, first);
+    expect(await projection.list()).toBeUndefined();
+    await projection.publish(groups, later);
+    expect((await projection.list())?.groups).toEqual(groups);
+  });
+
   it.each(['missing', 'malformed', 'changed', 'shortened', 'index'])('invalidates an unchanged %s page set and repairs it on publication', async (fault) => {
     const { bucket, objects } = fakeBucket();
     const projection = new R2CatalogProjection(bucket);
@@ -51,7 +138,7 @@ describe('R2 catalog projection', () => {
       objects.set(pointerKey, new TextEncoder().encode(JSON.stringify(pointer)).buffer);
     }
     await projection.revalidate(groups, now);
-    expect(objects.has(pointerKey)).toBe(false);
+    expect(await projection.list()).toBeUndefined();
     await projection.publish(groups, now);
     expect((await projection.list('100', 1))?.groups).toEqual(groups.slice(100));
   });
@@ -95,7 +182,7 @@ describe('R2 catalog projection', () => {
     await projection.publish(groups, new Date().toISOString(), 'watermark');
     const closed = groupCatalogJobs([{ ...role(0), open: false }], { includeClosed: true }).map(catalogGroupDetails);
     await projection.revalidate(closed, new Date().toISOString(), 'watermark');
-    expect(objects.has('public-catalog/v1/current')).toBe(false);
+    expect(JSON.parse(new TextDecoder().decode(objects.get('public-catalog/v1/current'))).schemaVersion).toBe(0);
     expect(await projection.list()).toBeUndefined();
   });
 
@@ -153,9 +240,15 @@ describe('R2 catalog projection', () => {
     const filtered = await projection.listFiltered(undefined, 1, { query: 'Special' });
     expect(filtered?.groups).toHaveLength(1);
     expect(filtered?.groups[0]?.roles[0]?.title).toBe('Special Software Intern');
-    const noD1 = { prepare() { throw new Error('Public read reached D1'); },
-      async batch() { throw new Error('Public read reached D1'); } } as D1Database;
-    const reader = new R2CatalogReadStore(noD1, bucket);
+    const indexedD1 = { prepare(sql: string) {
+      if (!sql.startsWith('SELECT value FROM catalog_items WHERE pk = ? AND sk = ?')) throw new Error('Public read scanned D1');
+      return { bind(pk: string, sk: string) {
+        expect([pk, sk]).toEqual(['CATALOG_PROJECTION', 'CURRENT']);
+        return { async first() { return { value: JSON.stringify({ generatedAt: now }) }; } };
+      } };
+    },
+      async batch() { throw new Error('Public read wrote D1'); } } as unknown as D1Database;
+    const reader = new R2CatalogReadStore(indexedD1, bucket);
     expect((await reader.listCatalogProjection('99', 3))?.groups).toEqual(page?.groups);
     expect((await reader.listCatalogProjectionFiltered(undefined, 1, { query: 'Special' }))?.groups).toEqual(filtered?.groups);
     expect((await reader.getCatalogProjectionGroup(groups[150]!.group.groupId))?.group.groupId).toBe(groups[150]!.group.groupId);

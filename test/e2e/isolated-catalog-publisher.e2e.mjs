@@ -51,9 +51,12 @@ test('publishes the matching D1 generation to real local R2 without notification
 
 test('R2 failure invalidates the old pointer and does not advance the completion marker; retry recovers', async () => {
   const before = await marker('catalog_projection_r2');
-  const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket), async put() { throw new Error('R2 unavailable'); } } };
+  const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket), async put(key, value, options) {
+    if (key.endsWith('/current') && JSON.parse(new TextDecoder().decode(value)).schemaVersion === 0) return bucket.put(key, value, options);
+    throw new Error('R2 unavailable');
+  } } };
   await assert.rejects(worker.scheduled({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /R2 unavailable/);
-  assert.equal(await bucket.get('public-catalog/v1/current'), null);
+  assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
   assert.deepEqual(await marker('catalog_projection_r2'), before);
   await scheduled('4,14,24,34,44,54 * * * *');
   assert.ok(await bucket.get('public-catalog/v1/current'));
@@ -72,7 +75,7 @@ test('unchanged catalog cycles retire and repair missing or corrupt active pages
       await bucket.put(pageKey, JSON.stringify(altered));
     }
     await scheduled('1-51/10 * * * *');
-    assert.equal(await bucket.get('public-catalog/v1/current'), null, `${fault} page must retire its pointer`);
+    assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0, `${fault} page must retire its pointer`);
     await scheduled('4,14,24,34,44,54 * * * *');
     const repaired = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
     assert.equal(repaired.version, pointer.version);
@@ -98,7 +101,7 @@ test('repairs a corrupt later page across a failed repair without exposing a par
   const pages = await Promise.all(keys.map(async key => (await bucket.get(key)).text()));
   await bucket.put(keys[1], '[]');
   await scheduled('1-51/10 * * * *');
-  assert.equal(await bucket.get('public-catalog/v1/current'), null);
+  assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
   const completion = await marker('catalog_projection_r2');
   const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket),
     async put(key, value) {
@@ -106,7 +109,7 @@ test('repairs a corrupt later page across a failed repair without exposing a par
       return bucket.put(key, value);
     } } };
   await assert.rejects(worker.scheduled({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /second page write failed/);
-  assert.equal(await bucket.get('public-catalog/v1/current'), null);
+  assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
   assert.deepEqual(await marker('catalog_projection_r2'), completion);
   await scheduled('4,14,24,34,44,54 * * * *');
   const repaired = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
@@ -120,4 +123,43 @@ test('billing shutdown preserves the published catalog', async () => {
   await db.prepare("INSERT OR REPLACE INTO system_state(key,value,updated_at) VALUES ('billing_shutdown','stopped',?)").bind(new Date().toISOString()).run();
   const before = await marker('catalog_projection');
   await scheduled('1-51/10 * * * *'); assert.deepEqual(await marker('catalog_projection'), before);
+});
+
+test('retains a healthy unchanged multi-page catalog across the D1 refresh', async () => {
+  await db.prepare("DELETE FROM system_state WHERE key='billing_shutdown'").run();
+  const before = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  await scheduled('1-51/10 * * * *');
+  const after = await bucket.get('public-catalog/v1/current');
+  assert.ok(after, 'unchanged healthy multi-page pointer must remain readable');
+  assert.equal(JSON.parse(await after.text()).version, before.version);
+});
+
+test('a paused unchanged D1 renewal cannot resurrect a pointer after a newer closed-role generation publishes', async () => {
+  await db.prepare("DELETE FROM catalog_items WHERE pk LIKE 'JOB#multi-page-%'").run();
+  await scheduled('1-51/10 * * * *');
+  await scheduled('4,14,24,34,44,54 * * * *');
+  const oldPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const released = new Promise(resolve => { release = resolve; });
+  let intercepted = false;
+  const delayed = { ...env, DOCUMENTS: { put: bucket.put.bind(bucket), delete: bucket.delete.bind(bucket), async get(key) {
+    const object = await bucket.get(key);
+    if (/\/[^/]+\/\d+$/.test(key) && !intercepted) { intercepted = true; enter(); await released; }
+    return object;
+  } } };
+  const staleRenewal = worker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, delayed);
+  await Promise.race([entered, new Promise((_, reject) => setTimeout(() => reject(Error('renewal did not reach a page read')), 5000))]);
+  const row = await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#isolated-role'").first();
+  const job = JSON.parse(row.value); job.open = false;
+  await db.prepare("UPDATE catalog_items SET value=? WHERE pk='JOB#isolated-role'").bind(JSON.stringify(job)).run();
+  await scheduled('1-51/10 * * * *');
+  await scheduled('4,14,24,34,44,54 * * * *');
+  const freshPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  assert.notEqual(freshPointer.version, oldPointer.version);
+  release(); await staleRenewal;
+  const finalPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  assert.equal(finalPointer.version, freshPointer.version, 'stale renewal must not overwrite the newer published generation');
+  const finalPage = JSON.parse(await (await bucket.get(`public-catalog/v1/${finalPointer.version}/0`)).text());
+  assert.equal(finalPage[0].roles[0].open, false, 'the public projection must keep the role closed');
 });

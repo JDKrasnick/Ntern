@@ -166,12 +166,30 @@ the nine-source production gate. Pause those owners again before later
 ownership deployments or the remaining full-cohort cutover drills.
 
 Observe scheduled publication after the paired D1 and R2 jobs finish, normally
-at minutes 6, 16, 26, 36, 46, and 56 UTC. Changed D1 content deliberately removes
+at minutes 6, 16, 26, 36, 46, and 56 UTC. Changed D1 content deliberately retires
 the stale R2 pointer until the minute-4 publication completes. Sampling inside
 that transition produces an expected missing-pointer failure and prevents a
 clean observation window from starting. Keep the strict pointer, contents,
 completion-marker, freshness, resource, and queue failure checks; adjust the
 observation time rather than treating missing publication as healthy.
+
+The catalog publisher uses the same binary group ordering as D1, including
+mixed-case group IDs with tied timestamps. R2 pointer renewal, publication,
+and retirement use conditional ETag writes. Retirement stores a timestamped
+tombstone so a delayed older publication cannot restore stale content before
+the next R2 cron. Compiled Worker tests cover unchanged multi-page retention
+and overlapping refreshes while a role closes. Local tests also cover stale
+initial publication, failed-generation invalidation, and retirement fences.
+Public R2 reads also verify the current D1 generation with one indexed pointer
+read. If all R2 writes fail and retirement cannot be stored, readers still fall
+back to the authoritative D1 generation instead of serving stale open roles.
+
+Provider adapters reject oversized UTF-8 or mapped snapshot rows as capacity
+failures before declaring a complete board. Large accepted Greenhouse, Lever,
+and Ashby rows round-trip through immutable storage and selective reads.
+Mixed hiring-season and graduation dates are checked in both parsing paths,
+including hiring text on either side of the graduation requirement. These
+local regressions do not replace an exact-version clean dev observation.
 ### Ingestion icon native-memory cleanup
 
 The restored dev ingestion version still reported approximately 139 MiB p99

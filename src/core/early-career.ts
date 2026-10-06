@@ -56,17 +56,17 @@ export function earlyCareerRequirements(content: string): JobRequirements {
  * become part of the role's identity.
  */
 /** Graduation requirements describe applicants, not the role's hiring season. */
+export const hiringClausePattern = /\b(?:(?<!degree\s)(?<!academic\s)(?:internship|program|role|position|job)\s+(?:starts?|begins?|runs?|occurs?|in)\b|(?:winter|spring|summer|fall)\s+(?:20\d{2}\s+(?:internship|program|role|position|job)|internship\s+20\d{2}))\b/iu;
+
 export function hiringSeasonText(value: string): string {
   const graduation = /\b(?:graduat(?:es|ed|ing|ion)|graduate(?!\s+(?:students?|school|degree|program|intern|level)\b)|class of|degree completion)\b/iu;
-  const hiring = /\b(?:internship|program|role|position|job)\s+(?:starts?|begins?)\b/iu;
-  const seasonalRole = /\b(?:winter|spring|summer|fall)\s+(?:20\d{2})\s+(?:internship|program|role|position|job)\b/iu;
   return value.split(/(?<=[.!?;])\s+|\n+/u).flatMap((sentence) =>
-    sentence.split(/(?=\b(?:(?:internship|program|role|position|job)\s+(?:starts?|begins?)|(?:winter|spring|summer|fall)\s+20\d{2}\s+(?:internship|program|role|position|job))\b)/iu),
+    sentence.split(new RegExp(`(?=${hiringClausePattern.source})`, 'iu')),
   ).map((clause) => {
     const marker = graduation.exec(clause);
     if (!marker) return clause;
     // A start date before the graduation requirement remains role evidence.
-    const start = hiring.exec(clause) ?? seasonalRole.exec(clause);
+    const start = hiringClausePattern.exec(clause);
     return start && start.index < marker.index ? clause.slice(0, marker.index) : '';
   }).join('\n');
 }

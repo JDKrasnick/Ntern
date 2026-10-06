@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { compensationLabels } from '../shared/compensation-display.js';
 import { metadataDescriptionText } from './core/metadata-text.js';
-import { hiringSeasonText } from './core/early-career.js';
+import { hiringClausePattern, hiringSeasonText } from './core/early-career.js';
 import { boundedText, locationSummary, normalizeLocations } from './catalog-quality.js';
 import { educationAudienceLevels, effectiveAdvancedDegreeRequired, mergeEducationEvidence, mergeProvenance } from './identity/enrichment.js';
 import type {
@@ -325,7 +325,7 @@ function graduationWindow(value: string): GraduationDateWindow | undefined {
     .map(clause => {
       const graduation = marker.exec(clause);
       if (!graduation) return '';
-      const hiring = /\b(?:(?:winter|spring|summer|fall)\s+20\d{2}\s+(?:internship|program|role|position|job)|(?:internship|program)\s+(?:starts?|begins?))\b/iu.exec(clause);
+      const hiring = hiringClausePattern.exec(clause);
       // A hiring clause on either side is not part of the applicant's window.
       const requirement = hiring && hiring.index < graduation.index ? clause.slice(graduation.index)
         : hiring ? clause.slice(0, hiring.index) : clause;

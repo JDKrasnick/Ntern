@@ -433,8 +433,11 @@ function releaseGroups(jobs: Internship[]): { releases: Array<{ roles: Internshi
  * than dependent on the order the cards happened to be built in.
  */
 export function compareCatalogProjectionGroups(left: CatalogGroupDetails, right: CatalogGroupDetails): number {
-  return right.group.updatedAt.localeCompare(left.group.updatedAt)
-    || right.group.groupId.localeCompare(left.group.groupId);
+  const leftKey = catalogProjectionSortKey(left);
+  const rightKey = catalogProjectionSortKey(right);
+  // SQLite's BINARY order is case-sensitive; localeCompare orders mixed-case
+  // base64url group ids differently and changes an unchanged snapshot's hash.
+  return leftKey < rightKey ? 1 : leftKey > rightKey ? -1 : 0;
 }
 
 /** The row's order key: read descending, so it matches `compareCatalogProjectionGroups`. */

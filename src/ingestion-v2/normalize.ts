@@ -111,6 +111,15 @@ function canonicalPosting(posting: SourcedPosting): SourcedPosting {
   };
 }
 
+/** Exact serialized row capacity without computing a second material hash. */
+export function snapshotPostingByteLength(posting: SourcedPosting): number {
+  return new TextEncoder().encode(JSON.stringify({ externalId: posting.externalId,
+    document: posting.document ?? posting.externalId, row: posting.row ?? 0,
+    materialHash: '0'.repeat(64), posting: canonicalPosting(posting),
+    firstObservationEligible: posting.sourceState === 'open',
+  })).byteLength;
+}
+
 function firstObservationEligible(posting: SourcedPosting): boolean {
   return posting.sourceState === 'open';
 }

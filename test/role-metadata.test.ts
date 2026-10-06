@@ -644,12 +644,15 @@ describe('provider-neutral role metadata', () => {
 
   it.each([
     'This Summer 2027 internship is open to students graduating in Spring 2028.',
+    'Our internship runs in Summer 2027 and is open to students graduating in Spring 2028.',
+    'This Summer internship 2027 welcomes students graduating in Spring 2028.',
+    'Applicants graduating in Spring 2028 can join the program in Summer 2027.',
     'Students graduating in Spring 2028 may apply for this Summer 2027 internship.',
   ])('keeps mixed hiring and graduation dates independent: %s', (text) => {
     const [item] = extractPostingMetadataEvidence({ artifact: { title: 'Engineering Intern', text },
       sourceClass: 'official-api', sourceId: 'test', sourceUrl: 'https://example.test/123', observedAt, exactPosting: true });
     expect(item?.season?.value).toEqual({ term: 'summer', year: 2027 });
-    expect(item?.excerpts?.season).toContain('Summer 2027');
+    expect(item?.excerpts?.season).toMatch(/Summer\s+(?:internship\s+)?2027/);
     expect(item?.excerpts?.season).not.toContain('Spring 2028');
     expect(item?.education?.graduationDateWindow).toEqual({ start: '2028-05', end: '2028-05' });
   });

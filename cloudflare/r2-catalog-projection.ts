@@ -20,6 +20,7 @@ function contentVersion(groups: CatalogGroupDetails[]): string {
 type Pointer = { schemaVersion: 1; version: string; generatedAt: string; count: number; groupPages: Record<string, number>;
   /** The D1 publish's open-catalog watermark, so a reader can detect an unprojected role. */
   liveWatermark?: string };
+type RetiredPointer = { schemaVersion: 0; generatedAt: string };
 
 function offsetOf(cursor?: string): number {
   const value = Number(cursor ?? 0);
@@ -30,25 +31,52 @@ function offsetOf(cursor?: string): number {
 export class R2CatalogProjection {
   constructor(private readonly bucket: R2Bucket) {}
 
-  async invalidate(): Promise<void> { await this.bucket.delete(`${prefix}/current`); }
+  async invalidate(generatedAt?: string): Promise<void> {
+    const object = await this.bucket.get(`${prefix}/current`);
+    if (!object?.etag) return;
+    const previous = await this.decodeState(object.body);
+    if (generatedAt && previous && previous.generatedAt > generatedAt) return;
+    await this.bucket.put(`${prefix}/current`, encoded({ schemaVersion: 0, generatedAt: generatedAt ?? previous?.generatedAt ?? new Date().toISOString() }), { onlyIf: { etagMatches: object.etag } });
+  }
 
   /** Keep complete immutable pages when only the D1 generation timestamp changed. */
   async revalidate(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void> {
-    const previous = await this.pointer();
+    const object = await this.bucket.get(`${prefix}/current`);
+    // No pointer means D1 already owns reads. Never overwrite a publication
+    // that completed while pages were being checked, including invalidation.
+    if (!object?.etag) return;
+    const state = await this.decodeState(object.body);
+    if (state && state.generatedAt > generatedAt) return;
+    const previous = state?.schemaVersion === 1 ? state : undefined;
     if (!previous || previous.version !== contentVersion(groups) || !await this.pagesMatch(previous, groups)) {
-      await this.invalidate();
+      // R2 has conditional writes but no conditional delete. A tombstone hides
+      // this generation atomically without deleting a concurrent newer one.
+      await this.bucket.put(`${prefix}/current`, encoded({ schemaVersion: 0, generatedAt }), { onlyIf: { etagMatches: object.etag } });
       return;
     }
     await this.bucket.put(`${prefix}/current`, encoded({
       ...previous, generatedAt, liveWatermark,
-    }));
+    }), { onlyIf: { etagMatches: object.etag } });
   }
 
   private async pointer(): Promise<Pointer | undefined> {
     const object = await this.bucket.get(`${prefix}/current`);
     if (!object) return undefined;
-    const pointer = await new Response(object.body).json() as Pointer;
-    if (pointer.schemaVersion !== 1 || !/^[a-f0-9]{20}$/.test(pointer.version)
+    return this.decodePointer(object.body);
+  }
+
+  private async decodePointer(body: ReadableStream): Promise<Pointer | undefined> {
+    const state = await this.decodeState(body);
+    return state?.schemaVersion === 1 ? state : undefined;
+  }
+
+  private async decodeState(body: ReadableStream): Promise<Pointer | RetiredPointer | undefined> {
+    let pointer: Pointer;
+    try { pointer = await new Response(body).json() as Pointer; } catch { return undefined; }
+    if (pointer && (pointer as { schemaVersion: number }).schemaVersion === 0 && Number.isFinite(Date.parse(pointer.generatedAt))) {
+      return { schemaVersion: 0, generatedAt: pointer.generatedAt };
+    }
+    if (!pointer || pointer.schemaVersion !== 1 || !/^[a-f0-9]{20}$/.test(pointer.version)
       || !Number.isSafeInteger(pointer.count) || pointer.count < 0
       || !pointer.groupPages || typeof pointer.groupPages !== 'object'
       || !Number.isFinite(Date.parse(pointer.generatedAt))
@@ -79,26 +107,41 @@ export class R2CatalogProjection {
 
   async publish(groups: CatalogGroupDetails[], generatedAt: string, liveWatermark?: string): Promise<void> {
     const version = contentVersion(groups);
-    const previous = await this.pointer();
+    const object = await this.bucket.get(`${prefix}/current`);
+    let etag = object?.etag;
+    const state = object ? await this.decodeState(object.body) : undefined;
+    if (state && state.generatedAt > generatedAt) return;
+    const previous = state?.schemaVersion === 1 ? state : undefined;
     const retained = previous?.version === version && await this.pagesMatch(previous, groups);
     if (!retained) {
       // Hide an incomplete active version before attempting its repair. A failed
       // write must leave readers on D1, rather than renewing a broken pointer.
-      if (previous?.version === version) await this.invalidate();
+      if (previous?.version === version) {
+        if (!object?.etag) throw new Error('R2 catalog pointer ETag is missing');
+        const retired = await this.bucket.put(`${prefix}/current`, encoded({ schemaVersion: 0, generatedAt }), { onlyIf: { etagMatches: object.etag } });
+        if (retired === null) return;
+        etag = (retired as { etag?: string } | undefined)?.etag;
+        if (!etag) throw new Error('R2 catalog tombstone ETag is missing');
+      }
       for (let index = 0; index * pageSize < groups.length; index += 1) {
         await this.bucket.put(`${prefix}/${version}/${index}`, encoded(groups.slice(index * pageSize, (index + 1) * pageSize)));
       }
     }
     const groupPages = Object.fromEntries(groups.map((group, index) => [group.group.groupId, Math.floor(index / pageSize)]));
+    if (object && !etag) throw new Error('R2 catalog pointer ETag is missing');
     await this.bucket.put(`${prefix}/current`, encoded({
       schemaVersion: 1, version, generatedAt, count: groups.length, groupPages,
       ...(liveWatermark ? { liveWatermark } : {}),
-    } satisfies Pointer));
+    } satisfies Pointer), { onlyIf: etag ? { etagMatches: etag } : { etagDoesNotMatch: '*' } });
   }
 
   /** The watermark of the published version, for a reader that holds no page. */
   async liveWatermark(): Promise<string | undefined> {
     return (await this.pointer())?.liveWatermark;
+  }
+
+  async generatedAt(): Promise<string | undefined> {
+    return (await this.pointer())?.generatedAt;
   }
 
   async list(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {
@@ -195,8 +238,14 @@ export class R2CatalogReadStore extends D1InternshipStore {
     this.projection = new R2CatalogProjection(bucket);
   }
 
+  private async currentGeneration(): Promise<boolean> {
+    const [r2, d1] = await Promise.all([this.projection.generatedAt(), this.catalogProjectionGeneratedAt()]);
+    return r2 !== undefined && r2 === d1;
+  }
+
   override async listCatalogProjection(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {
     try {
+      if (!await this.currentGeneration()) return super.listCatalogProjection(cursor, limit);
       const page = await this.projection.list(cursor, limit);
       if (!page) return super.listCatalogProjection(cursor, limit);
       return (await this.liveOverlayFor(page.liveWatermark)) ? super.listCatalogProjection(cursor, limit) : page;
@@ -208,6 +257,7 @@ export class R2CatalogReadStore extends D1InternshipStore {
 
   override async listCatalogProjectionFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
     try {
+      if (!await this.currentGeneration()) return super.listCatalogProjectionFiltered(cursor, limit, filter);
       const page = await this.projection.listFiltered(cursor, limit, filter);
       if (!page) return super.listCatalogProjectionFiltered(cursor, limit, filter);
       return (await this.liveOverlayFor(page.liveWatermark)) ? super.listCatalogProjectionFiltered(cursor, limit, filter) : page;
@@ -219,6 +269,7 @@ export class R2CatalogReadStore extends D1InternshipStore {
 
   override async listCatalogProjectionRoles(filter: CatalogGroupFilter, range: { from?: string; to?: string }): Promise<CatalogGroupRole[] | undefined> {
     try {
+      if (!await this.currentGeneration()) return super.listCatalogProjectionRoles(filter, range);
       const roles = await this.projection.roles(filter, range);
       if (!roles) return super.listCatalogProjectionRoles(filter, range);
       return (await this.liveOverlayFor(await this.projection.liveWatermark())) ? super.listCatalogProjectionRoles(filter, range) : roles;
@@ -230,6 +281,7 @@ export class R2CatalogReadStore extends D1InternshipStore {
 
   override async getCatalogProjectionGroup(groupId: string): Promise<CatalogGroupDetails | undefined> {
     try {
+      if (!await this.currentGeneration()) return super.getCatalogProjectionGroup(groupId);
       if (await this.liveOverlayFor(await this.projection.liveWatermark())) return super.getCatalogProjectionGroup(groupId);
       return await this.projection.group(groupId) ?? await super.getCatalogProjectionGroup(groupId);
     } catch (error) {

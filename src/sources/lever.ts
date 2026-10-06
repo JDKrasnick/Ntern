@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { assertPostingCapacity } from './posting-capacity.js';
 import { readBoundedJson } from '../core/bounded-body.js';
 import { hasLifecycleTitleSignal } from '../core/early-career.js';
 import { isTechnicalJob } from '../core/filters.js';
@@ -261,6 +262,7 @@ export class LeverPostingsAdapter implements SourceAdapter, SourceConnector {
     }
     const fetchedAt = this.now().toISOString();
     const sourced = postings.map((posting, index) => mapLeverSourcedPosting(posting, this.options, fetchedAt, index + 1));
+    sourced.forEach(assertPostingCapacity);
     if (new Set(sourced.map((posting) => posting.externalId)).size !== sourced.length) {
       throw new SourceFetchError(`${this.id}: Lever returned duplicate posting IDs`, 'identity');
     }
