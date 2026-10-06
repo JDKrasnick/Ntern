@@ -43,6 +43,7 @@ const admissionV2InfrastructureCreates = new Set([
   'cloudflare_queue.work["admission-v2"]',
   'cloudflare_queue.dead_letter["admission-v2"]',
   'cloudflare_queue_consumer.ingestion["admission-v2"]',
+  'cloudflare_queue_consumer.admission',
 ]);
 
 const admissionV2IngestionBindings: Array<Record<string, unknown>> = [
@@ -973,7 +974,7 @@ function isIsolatedRoutingChange(address: string, change: ResourceChange['change
     if (!b) return isDeepStrictEqual(a.schedules, []);
     return isDeepStrictEqual({ ...b, schedules: a.schedules }, a);
   }
-  if (address === 'cloudflare_queue_consumer.ingestion["admission-v2"]' && b) {
+  if (['cloudflare_queue_consumer.ingestion["admission-v2"]', 'cloudflare_queue_consumer.admission'].includes(address) && b) {
     return ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(b.script_name))
       && ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(a.script_name))
       && isDeepStrictEqual({ ...b, script_name: a.script_name }, a);
@@ -990,6 +991,30 @@ function isIsolatedRoutingChange(address: string, change: ResourceChange['change
   return false;
 }
 
+function isAdmissionAttachmentReplacement(address: string, change: ResourceChange['change']): boolean {
+  if (address !== 'cloudflare_queue_consumer.admission' || !isDeepStrictEqual(change.actions, ['delete', 'create'])
+    || !isRecord(change.before) || !isRecord(change.after)) return false;
+  const b = change.before, a = change.after;
+  const generated = new Set(['consumer_id', 'id', 'created_on']);
+  const stable = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([key]) => !generated.has(key) && key !== 'script_name'));
+  return typeof b.queue_id === 'string' && b.queue_id.length > 0 && b.queue_id === a.queue_id
+    && b.type === 'worker' && a.type === 'worker'
+    && b.dead_letter_queue === 'intern-notifs-admission-v2-dlq'
+    && ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(b.script_name))
+    && ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(a.script_name))
+    && isDeepStrictEqual(stable(b), stable(a))
+    && (!isRecord(change.after_unknown) || Object.entries(change.after_unknown).every(([key, value]) => value === false || generated.has(key)));
+}
+
+function isAdmissionRouteState(address: string, change: ResourceChange['change']): boolean {
+  if (address !== 'terraform_data.admission_queue_owner' || !isRecord(change.after)) return false;
+  if (!['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(change.after.input))) return false;
+  if (change.before === null) return change.actions[0] === 'create';
+  if (!isRecord(change.before)) return false;
+  const omit = (v: Record<string, unknown>) => Object.fromEntries(Object.entries(v).filter(([key]) => !['id', 'input', 'output'].includes(key)));
+  return ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(change.before.input)) && isDeepStrictEqual(omit(change.before), omit(change.after));
+}
+
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
   return (plan.resource_changes ?? [])
     .filter(({ change }) => !change.actions.every((action) => action === 'no-op' || action === 'read'))
@@ -1001,20 +1026,22 @@ export function validateCloudflarePlan(plan: Plan, options: PlanValidationOption
     !change.actions.every((action) => action === 'no-op' || action === 'read')
   ));
   const unsafe = resourceChanges.filter(({ address, change }) => (
-    change.actions.length !== 1
+    !isAdmissionAttachmentReplacement(address, change) && (change.actions.length !== 1
     || !(
       (change.actions[0] === 'update'
         && ((allowedUpdates.has(address)
           && (isSafeWorkerUpdate(address, change, options.expectedDeploySha) || isResumeWorkerUpdate(address, change)))
           || isReviewedIngestionCronUpdate(address, change)
           || isIsolatedRoutingChange(address, change)
-          || isApiPreviewUrlShutdown(address, change)))
+          || isApiPreviewUrlShutdown(address, change)
+          || isAdmissionRouteState(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
         || isAdmissionV2InfrastructureCreate(address, change)
         || isIsolatedWorkerCreate(address, change, options.expectedDeploySha)
         || isIsolatedRoutingChange(address, change)
-        || isCustomDomainCreate(address, change)))
-    )
+        || isCustomDomainCreate(address, change)
+        || isAdmissionRouteState(address, change)))
+    ))
   )).map(({ address, change }) => ({ address, actions: change.actions }));
 
   if (unsafe.length > 0) {

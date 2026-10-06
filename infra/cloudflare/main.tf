@@ -296,13 +296,20 @@ resource "cloudflare_workers_script_subdomain" "application" {
   previews_enabled = false
 }
 
+# Cloudflare's consumer PUT echoes script_name but can retain the old persisted
+# Worker binding. Recreate only that attachment on an owner change; retain queue.
+resource "terraform_data" "admission_queue_owner" {
+  input = var.ingestion_v2_isolated_workers_enabled ? "${var.worker_name}-admission" : local.ingestion_worker_name
+}
+
 resource "cloudflare_queue_consumer" "ingestion" {
-  for_each          = cloudflare_queue.work
+  for_each          = { for name, queue in cloudflare_queue.work : name => queue if name != "admission-v2" }
   account_id        = var.cloudflare_account_id
   queue_id          = each.value.queue_id
   type              = "worker"
-  script_name       = each.key == "admission-v2" && var.ingestion_v2_isolated_workers_enabled ? cloudflare_workers_script.isolated["admission"].script_name : cloudflare_workers_script.ingestion.script_name
+  script_name       = cloudflare_workers_script.ingestion.script_name
   dead_letter_queue = cloudflare_queue.dead_letter[each.key].queue_name
+
   settings = {
     batch_size       = each.key == "destination-verification" ? 5 : 1
     max_concurrency  = lookup(local.consumer_max_concurrency, each.key, 1)
@@ -310,6 +317,23 @@ resource "cloudflare_queue_consumer" "ingestion" {
     max_wait_time_ms = contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000
     retry_delay      = each.key == "shadow-extraction" ? 300 : null
   }
+}
+
+resource "cloudflare_queue_consumer" "admission" {
+  account_id        = var.cloudflare_account_id
+  queue_id          = cloudflare_queue.work["admission-v2"].queue_id
+  type              = "worker"
+  script_name       = terraform_data.admission_queue_owner.input
+  dead_letter_queue = cloudflare_queue.dead_letter["admission-v2"].queue_name
+  settings          = { batch_size = 1, max_concurrency = 1, max_retries = 2, max_wait_time_ms = 5000 }
+  lifecycle {
+    replace_triggered_by = [terraform_data.admission_queue_owner.input]
+  }
+}
+
+moved {
+  from = cloudflare_queue_consumer.ingestion["admission-v2"]
+  to   = cloudflare_queue_consumer.admission
 }
 
 resource "cloudflare_workers_cron_trigger" "ingestion" {

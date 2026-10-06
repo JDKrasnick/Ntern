@@ -41,6 +41,26 @@ describe('isolated Worker release boundaries', () => {
     const enlarged = create('admission'); enlarged.change.after.limits.cpu_ms = 300000;
     expect(() => validate(enlarged)).toThrow('unsafe');
   });
+  it('permits only the admission attachment replacement and preserves the existing queue', () => {
+    const before = { account_id: 'account', queue_id: 'existing-queue', consumer_id: 'old-consumer',
+      script_name: 'intern-notifs-ingestion', type: 'worker', dead_letter_queue: 'intern-notifs-admission-v2-dlq', settings: { max_retries: 2 } };
+    const after = { ...before, consumer_id: null, script_name: 'intern-notifs-admission' };
+    const resource = { address: 'cloudflare_queue_consumer.admission', change: { actions: ['delete', 'create'], before, after, after_unknown: { consumer_id: true } } };
+    expect(validateCloudflarePlan({ resource_changes: [resource] })).toHaveLength(1);
+    expect(() => validateCloudflarePlan({ resource_changes: [{ ...resource, address: 'cloudflare_queue_consumer.ingestion["greenhouse"]' }] })).toThrow('unsafe');
+    after.queue_id = 'another-queue';
+    expect(() => validateCloudflarePlan({ resource_changes: [resource] })).toThrow('unsafe');
+    after.queue_id = before.queue_id; after.settings = { max_retries: 0 };
+    expect(() => validateCloudflarePlan({ resource_changes: [resource] })).toThrow('unsafe');
+  });
+
+  it('pins the local owner state to the two reviewed Worker names', () => {
+    const resource = { address: 'terraform_data.admission_queue_owner', change: { actions: ['create'], before: null, after: { input: 'intern-notifs-ingestion' } } };
+    expect(validateCloudflarePlan({ resource_changes: [resource] })).toHaveLength(1);
+    resource.change.after.input = 'another-worker';
+    expect(() => validateCloudflarePlan({ resource_changes: [resource] })).toThrow('unsafe');
+  });
+
   it('transfers only the existing admission consumer and preserves retry settings', () => {
     const before = { script_name: 'intern-notifs-ingestion', dead_letter_queue: 'intern-notifs-admission-v2-dlq', settings: { batch_size: 1, max_retries: 2 } };
     const resource = { address: 'cloudflare_queue_consumer.ingestion["admission-v2"]', change: { actions: ['update'], before, after: { ...before, script_name: 'intern-notifs-admission' } } };

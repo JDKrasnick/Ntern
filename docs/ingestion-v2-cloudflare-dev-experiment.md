@@ -123,9 +123,9 @@ retry attempts, provider cooldowns, source allowlists, and fenced catalog/outbox
 transaction. No queue recreation or data migration is needed.
 
 Stage both Workers disabled, activate the ingestion split, enable the admission
-Worker, update the existing queue consumer in place, then enable the publisher
+Worker, replace only the consumer attachment on the existing queue, then enable the publisher
 crons. Compare all three Workers' controls and source ownership before resuming
-the experiment. Roll back by moving that same consumer to ingestion, disabling
+the experiment. Roll back by reattaching that same queue to ingestion, disabling
 the dedicated Workers, restoring ingestion crons, and disabling the split flag.
 Preserve the queue settings and durable retry state in both directions.
 
@@ -142,3 +142,13 @@ secrets, increased limits, and widened queue retry settings. Reviewed routing
 updates can later transfer the existing consumer and the two projection crons.
 The guarded deployment workflow audits all four Worker identities and binding
 sets after final convergence. Production ownership remains separately gated.
+
+The dev retarget probe found a Cloudflare control-plane discrepancy: consumer
+PUT returns the requested new `script_name`, while consumer/queue GETs retain
+the old `script`. Rollout therefore checks persisted routing and replaces only
+the consumer attachment. The queue ID, messages, retry settings, DLQ, row
+leases, and attempts survive. The consumer ID changes and is recorded explicitly.
+OpenTofu uses a moved admission-consumer address and a local owner state trigger
+to force that bounded replacement; every other provider consumer stays intact.
+The plan guard permits only this attachment replacement on the same queue with
+identical retries and DLQ. A failed dev attach immediately restores ingestion.
