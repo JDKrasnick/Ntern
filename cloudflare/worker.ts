@@ -2160,6 +2160,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       () => refreshCatalogProjectionR2(store, env.DOCUMENTS, phases),
       phases,
     );
+    if (!projection) throw new Error('R2 catalog projection failed');
     await recordPhase(phases, 'catalog_projection_r2_complete', 'complete', observedAt);
     console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_r2_complete', observedAt: observedAt.toISOString(), projection }));
     return;
