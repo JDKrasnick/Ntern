@@ -22,7 +22,7 @@ import type {
 
 // Source preprocessing can change independently of the shared API/page parser.
 // Revisit source snapshots without invalidating complete API acquisitions.
-export const SOURCE_METADATA_PROCESSING_REVISION = 3;
+export const SOURCE_METADATA_PROCESSING_REVISION = 4;
 
 function markdownToText(value: string): string {
   return htmlToText(value

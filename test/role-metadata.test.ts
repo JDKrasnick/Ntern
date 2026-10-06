@@ -626,6 +626,21 @@ describe('provider-neutral role metadata', () => {
     expect(extract('You will graduate in Fall 2027 or Spring 2028.')?.education?.graduationDateWindow)
       .toEqual({ start: '2027-12', end: '2028-05' });
   });
+  it('does not turn graduation seasons into hiring dates, and preserves independent start dates', () => {
+    const extract = (text: string) => extractPostingMetadataEvidence({ artifact: { title: 'Software Engineer - New Grad', text },
+      sourceClass: 'official-api', sourceId: 'test', sourceUrl: 'https://example.test/123', observedAt, exactPosting: true })[0];
+    const graduation = extract('Must be graduating in Fall 2026 or Spring 2027.');
+    expect(graduation?.season).toBeUndefined();
+    expect(graduation?.education?.graduationDateWindow).toEqual({ start: '2026-12', end: '2027-05' });
+    expect(extract('Fall 2026 graduates are eligible.')?.season).toBeUndefined();
+    const independent = extract('Must graduate in Spring 2027 and the internship begins Summer 2027.');
+    expect(independent?.season?.value).toEqual({ term: 'summer', year: 2027 });
+    expect(independent?.excerpts?.season).not.toContain('Spring 2027');
+    expect(extract('The internship begins Summer 2027 for students graduating in Spring 2028.')?.season?.value)
+      .toEqual({ term: 'summer', year: 2027 });
+    expect(extract('Graduate students welcome. Summer 2027 internship.')?.season?.value)
+      .toEqual({ term: 'summer', year: 2027 });
+  });
 
   it('preserves degree alternatives and rejects explicitly waived requirements', () => {
     const extract = (text: string) => extractPostingMetadataEvidence({ artifact: { title: 'Engineering Intern', text },

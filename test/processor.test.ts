@@ -29,9 +29,19 @@ describe('shared posting processor', () => {
     })).listing;
     expect(defaulted?.internshipIdentity?.season.evidenceStatus).toBe('inferred');
     const bareYear = processPosting(posting({ title,
-      content: [{ kind: 'description', format: 'plain', value: 'Graduating between December 2026 and May 2027.' }],
+      content: [{ kind: 'description', format: 'plain', value: 'Join our engineering team in 2027.' }],
     })).listing;
     expect(bareYear?.internshipIdentity?.season.evidenceStatus).toBe('inferred');
+  });
+  it('keeps a new-grad graduation window out of the hiring season', () => {
+    const result = processPosting(posting({ title: 'Software Engineer - New Grad',
+      content: [{ kind: 'description', format: 'html', value: '<li>Must be graduating in Fall 2026 or Spring 2027.</li>' }],
+    }));
+    expect(result.listing?.season).toBe('ongoing');
+    expect(result.listing?.internshipIdentity?.season.evidenceStatus).toBe('unspecified');
+    expect(result.listing?.metadataEvidence?.find(evidence => evidence.education)?.education?.graduationDateWindow)
+      .toEqual({ start: '2026-12', end: '2027-05' });
+    expect(result.listing?.metadataEvidence?.some(evidence => evidence.season)).toBe(false);
   });
   it('includes an explicitly technical project management internship from an official board', () => {
     const result = processSnapshot({ sourceId: 'greenhouse-astranis', outcome: 'changed', complete: true,

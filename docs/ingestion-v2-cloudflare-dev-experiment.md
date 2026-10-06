@@ -68,13 +68,15 @@ quarantine, durable drift, stale handoffs, and queue exhaustion all stop promoti
 
 The dev gate found a Palantir new-grad occurrence admitted and open while its
 canonical job was closed. Captured posting facts reproduce the system error:
-the processor finds an explicit `Fall 2026` in the employer description but
-labels it inferred, so reconciliation expires the season. Metadata projection
-later restores explicit evidence without restoring the open flag. Description
-seasons now retain explicit evidence; source defaults and bare years remain
-inferred. Processor revision 3 and evaluator revision 5 invalidate prior grading.
-The captured replay changes both the proposed and canonical projection from
-closed to open. Regression coverage verifies creation and reopening remain quiet.
+the processor mistakes `Must be graduating in Fall 2026 or Spring 2027` for a
+hiring season, then expires that season. Metadata projection also mistakes the
+graduation dates for explicit role dates. Both parsers now exclude graduation
+clauses while preserving independent role start dates. Genuine named hiring
+seasons in descriptions retain explicit evidence; source defaults and bare years
+remain inferred. Processor revision 4, metadata extraction version 19, and
+evaluator revision 6 invalidate prior grading. The captured replay changes the
+role to `ongoing`, open, and browsable while retaining its graduation window.
+Regression coverage verifies creation and reopening remain quiet.
 
 Admission batches now retain only selected postings after full immutable-board
 validation, so provider awaits do not keep the rest of the board alive. Snapshot
