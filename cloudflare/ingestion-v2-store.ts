@@ -384,18 +384,21 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
 
   async applyOmissions(sourceId: string, updates: readonly SnapshotOmissionUpdate[], updatedAt: string): Promise<void> {
     if (!updates.length) return;
-    // Preserve lane ownership and failure history, but missing published rows
-    // still need a durable negative effect. An already-claimed effect drains
-    // before closure; new claims reject two-omission rows.
+    // Retire missing work without erasing failure history or closure work.
+    // An already-claimed effect keeps its lane until settlement and closure;
+    // every other two-omission row becomes absent and rejects new claims.
     const statement = this.db.prepare(`
       UPDATE ingestion_rows SET consecutive_omissions = ?,
-        state = CASE WHEN state IN (${laneOwnedSqlList}) THEN state ELSE ? END, updated_at = ?,
+        state = CASE
+          WHEN ? AND effect_claimed_at IS NULL THEN 'absent'
+          WHEN state IN (${laneOwnedSqlList}) THEN state ELSE ? END, updated_at = ?,
         closure_pending = CASE WHEN ? THEN 1 ELSE closure_pending END
       WHERE source_id = ? AND external_id = ?
         AND last_observed_at <= ? AND updated_at <= ?
     `);
     const statements = updates.map((update) => statement.bind(
       update.consecutiveOmissions,
+      update.becomesAbsent ? 1 : 0,
       update.becomesAbsent ? 'absent' : 'settled',
       updatedAt,
       update.becomesAbsent ? 1 : 0,
@@ -419,7 +422,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   }
 
   async acknowledgeOmissionClosure(row: IngestionRowRecord): Promise<void> {
-    await this.db.prepare(`UPDATE ingestion_rows SET closure_pending = 0
+    await this.db.prepare(`UPDATE ingestion_rows SET closure_pending = 0, state = 'absent'
       WHERE source_id = ? AND external_id = ? AND snapshot_hash = ? AND material_hash = ?
         AND admission_version = ? AND updated_at = ? AND effect_claimed_at IS NULL
         AND consecutive_omissions >= 2 AND closure_pending = 1`)

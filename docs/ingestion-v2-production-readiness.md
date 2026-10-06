@@ -112,6 +112,15 @@ repeating the maintenance request. NIO remains unresolved until the service
 recovers or authoritative terminal evidence arrives. Provider
 throttling and outages can still block the soak gate; the repair does not count replay acceptance as success.
 
+The live drain also exposed a system defect in omission retirement: queued rows
+missing from two complete snapshots retained their lane state, while dispatch
+correctly excluded them. These rows could never settle and blocked cutover.
+Two omissions now move unclaimed work to `absent` while retaining attempts,
+failure history, and durable closure work. Already-claimed effects drain before
+closure acknowledgement retires their row. Complete recovery passes repair old
+stranded rows; incomplete snapshots cannot retire them. The readiness gate stays
+strict for present rows and pending catalog effects.
+
 A separate Cloudflare D1/R2/Queue experiment uses the production discovery,
 admission, bootstrap, and catalog implementations. Its controlled 1,000-row
 baseline settled independently: 999 blocked rows, one canonical Figma internship,

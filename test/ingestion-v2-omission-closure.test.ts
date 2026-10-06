@@ -121,6 +121,23 @@ async function omit(s: ReturnType<typeof subject>, ids: string[], count: number)
 }
 
 describe('durable public omission closure', () => {
+  it('repairs historical queued omissions on a complete pass without resetting failures or losing closure work', async () => {
+    const s = subject(); await seed(s, ['role']);
+    s.sqlite.prepare("UPDATE ingestion_rows SET state='queued', consecutive_omissions=2, attempt_count=2, failure_detail='provider timeout', closure_pending=1 WHERE external_id='role'").run();
+    const ledger = await s.repository.listLedger('source');
+    const args = { sourceId: 'source', snapshotHash: 'absent', admissionVersion: 'v1', now: later, rows: [], ledger };
+    expect(planSnapshotDiff({ ...args, complete: false }).omissionUpdates).toHaveLength(0);
+    const diff = planSnapshotDiff({ ...args, complete: true });
+    expect(diff.omissionUpdates).toEqual([{ externalId: 'role', consecutiveOmissions: 2, becomesAbsent: true }]);
+    await s.repository.applyOmissions('source', diff.omissionUpdates, later);
+    expect(await s.repository.getRow('source', 'role')).toMatchObject({ state: 'absent', attemptCount: 2, failureDetail: 'provider timeout' });
+    expect(await s.repository.listPendingOmissionClosures('source', 25)).toHaveLength(1);
+    expect(await s.repository.listDispatchableRows('source', later, 25)).toHaveLength(0);
+    await reconcileIngestionV2Omissions(s, input);
+    expect((await s.store.getJob('role'))?.open).toBe(false);
+    expect(await s.repository.listPendingOmissionClosures('source', 25)).toHaveLength(0);
+  });
+
   it('keeps the first omission public, closes the second, and does not repeat completed effects', async () => {
     const s = subject(); await seed(s, ['role']);
     await omit(s, ['role'], 1);
@@ -260,7 +277,7 @@ describe('durable public omission closure', () => {
     await omit(s, ['role'], 2);
     await reconcileIngestionV2Omissions(s, input);
     expect((await s.store.getJob('role'))?.open).toBe(false);
-    expect(await s.repository.getRow('source', 'role')).toMatchObject({ state, attemptCount: 3,
+    expect(await s.repository.getRow('source', 'role')).toMatchObject({ state: 'absent', attemptCount: 3,
       consecutiveOmissions: 2, failureDetail: 'provider unavailable' });
     expect(await s.repository.listDispatchableRows('source', later, 25)).toHaveLength(0);
     const lease = await s.repository.acquireLease({ sourceId: 'source', externalId: 'role',
@@ -281,6 +298,7 @@ describe('durable public omission closure', () => {
     expect(settled).toBe(true);
     await reconcileIngestionV2Omissions(s, input);
     expect((await s.store.getJob('role'))?.open).toBe(false);
+    expect(await s.repository.getRow('source', 'role')).toMatchObject({ state: 'absent' });
   });
 
   it('prevents an evaluating consumer from claiming a publication after two omissions', async () => {
