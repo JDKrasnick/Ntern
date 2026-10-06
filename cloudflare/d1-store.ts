@@ -1536,6 +1536,14 @@ export class D1InternshipStore implements InternshipStore {
     }, watermark);
   }
 
+  /** One indexed row read fences R2 when its pointer could not be retired. */
+  async catalogProjectionGeneratedAt(): Promise<string | undefined> {
+    const pointer = await this.get<CatalogProjectionPointer>('CATALOG_PROJECTION', 'CURRENT');
+    return pointer && Number.isFinite(Date.parse(pointer.generatedAt))
+      && Date.now() - Date.parse(pointer.generatedAt) <= catalogProjectionMaxAgeMs
+      ? pointer.generatedAt : undefined;
+  }
+
   private async readCatalogProjectionPointer(): Promise<CatalogProjectionPointer | undefined> {
     const pointer = await this.get<CatalogProjectionPointer>('CATALOG_PROJECTION', 'CURRENT');
     if (!pointer || Date.now() - Date.parse(pointer.generatedAt) > catalogProjectionMaxAgeMs) return undefined;

@@ -80,7 +80,13 @@ export function planSnapshotDiff(input: DiffPlannerInput): SnapshotDiff {
 
   const omissionUpdates: SnapshotOmissionUpdate[] = [];
   for (const prior of input.ledger) {
-    if (seen.has(prior.externalId) || prior.state === 'absent' || prior.consecutiveOmissions >= 2) continue;
+    if (seen.has(prior.externalId) || prior.state === 'absent') continue;
+    // Older ledgers retained admission lane states after two omissions. A
+    // complete recovery pass repairs those states without grading missing rows.
+    if (prior.consecutiveOmissions >= 2) {
+      omissionUpdates.push({ externalId: prior.externalId, consecutiveOmissions: prior.consecutiveOmissions, becomesAbsent: true });
+      continue;
+    }
     const next = prior.consecutiveOmissions + 1;
     omissionUpdates.push({ externalId: prior.externalId, consecutiveOmissions: next, becomesAbsent: next >= 2 });
   }

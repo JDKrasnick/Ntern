@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { assertPostingCapacity } from './posting-capacity.js';
 import { readBoundedJson } from '../core/bounded-body.js';
 import { isTechnicalJob } from '../core/filters.js';
 import { parseCompensation } from '../core/normalize.js';
@@ -453,12 +454,9 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     const rejectedApplicationUrls: Array<{ row: number; url: string; reason: string }> = [];
     for (const [index, job] of jobs.entries()) {
       if (!isGreenhouseJobShape(job)) throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
-      // Description text is the only field that can approach the per-job limit,
-      // and UTF-8 bytes are never fewer than the UTF-16 code units that hold
-      // them, so only a row long enough to matter is measured exactly: an
-      // ordinary board no longer re-serializes every job to prove it fits.
-      if ((job.content?.length ?? 0) > GREENHOUSE_JOB_MAX_BYTES
-        && new TextEncoder().encode(JSON.stringify(job)).byteLength > GREENHOUSE_JOB_MAX_BYTES) {
+      // Measure the full serialized UTF-8 row: CJK/emoji and non-description
+      // fields can exceed the limit with fewer UTF-16 code units.
+      if (new TextEncoder().encode(JSON.stringify(job)).byteLength > GREENHOUSE_JOB_MAX_BYTES) {
         throw new SourceFetchError(`${this.id}: Greenhouse job ${String(job.id ?? index + 1)} exceeds ${GREENHOUSE_JOB_MAX_BYTES} bytes`, 'capacity');
       }
       // An oversized-board hash represents its index. Detail documents arrive
@@ -468,6 +466,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       if (contentOmitted && !selectedDetailIds.has(String(job.id ?? ''))) continue;
       const posting = mapGreenhouseSourcedPosting(job, this.options.source, fetchedAt, index + 1);
       if (!posting) continue;
+      assertPostingCapacity(posting);
       const rejection = greenhouseApplicationUrlRejection(posting.applyUrl, this.options.source.allowedInitialHosts);
       if (rejection) rejectedApplicationUrls.push({ row: index + 1, url: posting.applyUrl, reason: rejection });
       else postings.push(posting);

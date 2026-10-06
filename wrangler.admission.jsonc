@@ -1,0 +1,69 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "limits": {
+    "cpu_ms": 120000,
+    "subrequests": 50000
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "intern-notifs-db",
+      "database_id": "4e389f1c-7c6d-48e1-aa97-dc4cb1769bb8",
+      "migrations_dir": "cloudflare/migrations"
+    }
+  ],
+  "name": "intern-notifs-admission",
+  "main": "cloudflare/admission-worker.ts",
+  "workers_dev": false,
+  "preview_urls": false,
+  "r2_buckets": [
+    {
+      "binding": "DOCUMENTS",
+      "bucket_name": "intern-notifs-documents"
+    }
+  ],
+  "version_metadata": {
+    "binding": "VERSION_METADATA"
+  },
+  "triggers": {
+    "crons": []
+  },
+  "vars": {
+    "INGESTION_V2_ISOLATED_WORKERS_ENABLED": "false",
+    "OUTBOUND_NOTIFICATIONS_ENABLED": "false",
+    "DEPLOYMENT_ROLE": "admission",
+    "TRUSTED_COMMUNITY_CATALOG_ENABLED": "false",
+    "INGESTION_V2_SHADOW_DISCOVERY_ENABLED": "false",
+    "INGESTION_V2_SHADOW_SOURCE_ALLOWLIST": "",
+    "INGESTION_V2_ADMISSION_ENABLED": "false",
+    "INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST": "",
+    "INGESTION_V2_CATALOG_WRITER_ENABLED": "false",
+    "INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST": "",
+    "INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST": "",
+    "INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST": "",
+    "ADMISSION_V2_QUEUE_NAME": "intern-notifs-admission-v2"
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "ADMISSION_V2_QUEUE",
+        "queue": "intern-notifs-admission-v2"
+      }
+    ],
+    "consumers": []
+  }
+}

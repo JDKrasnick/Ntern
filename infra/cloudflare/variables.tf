@@ -229,3 +229,9 @@ variable "admission_queue_age_alert_hours" {
   type        = number
   default     = 120
 }
+
+variable "ingestion_v2_isolated_workers_enabled" {
+  description = "Route V2 admission and catalog projection to dedicated isolates after dev validation."
+  type        = bool
+  default     = false
+}

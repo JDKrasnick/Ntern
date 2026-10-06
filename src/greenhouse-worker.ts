@@ -1,3 +1,4 @@
+import type { ShadowDiscoveryHook } from './ingestion-v2/types.js';
 import { createSourceUrlValidator, type ApplicationUrlValidator } from './core/application-url.js';
 import { ExpoPushPublisher, sendNewJobNotifications } from './notifications.js';
 import { Poller } from './poll.js';
@@ -37,6 +38,9 @@ export interface GreenhouseBoardDependencies {
   enqueueDestinationVerification?: (request: DestinationVerificationRequest) => Promise<void>;
   enqueueContinuation?: (message: GreenhouseWorkMessage) => Promise<void>;
   catalogAdmissionResolver?: CatalogAdmissionResolver;
+  shadowDiscovery?: ShadowDiscoveryHook;
+  v2CatalogWriteOwner?: (sourceId: string) => boolean;
+  v2TrustedCommunityAlertsEnabled?: (sourceId: string) => boolean;
   onRecordFailure?: (record: QueueRecord, error: unknown) => Promise<void> | void;
   messageDeadlineMs?: number;
 }
@@ -131,7 +135,8 @@ export async function runGreenhouseBoard(
   }
 
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
-    dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver).poll({ naturalProviderPoll: !message.force });
+    dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
+    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({ naturalProviderPoll: !message.force });
   const pollFailure = failureFromPollReport(poll, sourceHealth);
   if (pollFailure) throw pollFailure;
   const checkpoint = await dependencies.store.getCheckpoint(source.id);

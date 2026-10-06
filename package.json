@@ -62,7 +62,7 @@
     "eval:shadow:offline": "tsx scripts/shadow-extraction-eval.ts --offline test/fixtures/shadow-extraction-recorded.json --report eval/shadow-extraction-results",
     "eval:shadow:live": "tsx scripts/shadow-extraction-eval.ts --live --report eval/shadow-extraction-results",
     "build:browser-companion": "esbuild browser-companion/content.ts --bundle --format=iife --platform=browser --outfile=browser-companion/dist/content.js",
-    "build:cloudflare": "npm run build:cloudflare:api && npm run build:cloudflare:ingestion",
+    "build:cloudflare": "npm run build:cloudflare:api && npm run build:cloudflare:ingestion && npm run build:cloudflare:admission && npm run build:cloudflare:catalog-publisher",
     "build:cloudflare:api": "wrangler deploy --config wrangler.api.jsonc --dry-run --outdir cloudflare/dist/api && node scripts/prepare-worker-modules.mjs cloudflare/dist/api",
     "build:cloudflare:ingestion": "wrangler deploy --config wrangler.ingestion.jsonc --dry-run --outdir cloudflare/dist/ingestion && node scripts/prepare-worker-modules.mjs cloudflare/dist/ingestion",
     "types:cloudflare:ingestion": "wrangler types cloudflare/ingestion-env.d.ts --config wrangler.ingestion.jsonc --env-interface IngestionBindings --include-runtime false --env-file cloudflare/types.env",
@@ -79,11 +79,14 @@
     "terraform:validate": "tofu -chdir=infra/cloudflare validate",
     "deploy:cloudflare": "npm run build:cloudflare && tsx scripts/deploy-cloudflare.ts",
     "eval:icons": "tsx scripts/company-icon-eval.ts --report eval/company-icon-results",
-    "eval:icons:no-model": "tsx scripts/company-icon-eval.ts --no-model --report eval/company-icon-results-no-model"
+    "eval:icons:no-model": "tsx scripts/company-icon-eval.ts --no-model --report eval/company-icon-results-no-model",
+    "build:cloudflare:admission": "wrangler deploy --config wrangler.admission.jsonc --dry-run --outdir cloudflare/dist/admission && node scripts/prepare-worker-modules.mjs cloudflare/dist/admission",
+    "build:cloudflare:catalog-publisher": "wrangler deploy --config wrangler.catalog-publisher.jsonc --dry-run --outdir cloudflare/dist/catalog-publisher && node scripts/prepare-worker-modules.mjs cloudflare/dist/catalog-publisher"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.0.16",
     "@resvg/resvg-wasm": "^2.6.2",
+    "@streamparser/json": "0.0.26",
     "fflate": "^0.8.3",
     "pdfjs-dist": "^5.7.284"
   },

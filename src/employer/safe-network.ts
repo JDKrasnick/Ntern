@@ -2,6 +2,14 @@ export interface HostResolver {
   resolve(hostname: string): Promise<readonly string[]>;
 }
 
+/** A deterministic network-policy refusal, rather than a transient transport failure. */
+export class PublicNetworkPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PublicNetworkPolicyError';
+  }
+}
+
 export interface ApplicationHostContract {
   host: string;
   includeSubdomains?: boolean;
@@ -106,20 +114,20 @@ function normalizedHostname(value: string): string {
 
 export async function assertPublicHttpsUrl(value: string | URL, resolver: HostResolver): Promise<URL> {
   let url: URL;
-  try { url = value instanceof URL ? new URL(value.href) : new URL(value); } catch { throw new Error('URL is invalid'); }
-  if (url.protocol !== 'https:') throw new Error('URL must use HTTPS');
-  if (url.username || url.password) throw new Error('URL credentials are not allowed');
-  if (url.port) throw new Error('URL must use the standard HTTPS port');
+  try { url = value instanceof URL ? new URL(value.href) : new URL(value); } catch { throw new PublicNetworkPolicyError('URL is invalid'); }
+  if (url.protocol !== 'https:') throw new PublicNetworkPolicyError('URL must use HTTPS');
+  if (url.username || url.password) throw new PublicNetworkPolicyError('URL credentials are not allowed');
+  if (url.port) throw new PublicNetworkPolicyError('URL must use the standard HTTPS port');
   const hostname = normalizedHostname(url.hostname);
   if (!hostname || hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local') || hostname.endsWith('.internal') || hostname.endsWith('.home.arpa')) {
-    throw new Error('URL host is not public');
+    throw new PublicNetworkPolicyError('URL host is not public');
   }
 
   const literalV4 = ipv4Number(hostname);
   const literalV6 = parseIpv6(hostname);
   const addresses = literalV4 !== undefined || literalV6 !== undefined ? [hostname] : [...await resolver.resolve(hostname)];
   if (addresses.length === 0) throw new Error('URL host did not resolve');
-  if (addresses.some((address) => !isPublicIpAddress(address))) throw new Error('URL host resolves to a non-public address');
+  if (addresses.some((address) => !isPublicIpAddress(address))) throw new PublicNetworkPolicyError('URL host resolves to a non-public address');
   return url;
 }
 
@@ -231,8 +239,10 @@ export async function safeFetchBytes(value: string, options: SafeFetchOptions): 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
       if (!location) throw new Error('Redirect is missing a location');
-      if (hops >= maxRedirects) throw new Error('Redirect limit exceeded');
-      current = await assertPublicHttpsUrl(new URL(location, current), options.resolver);
+      if (hops >= maxRedirects) throw new PublicNetworkPolicyError('Redirect limit exceeded');
+      let target: URL;
+      try { target = new URL(location, current); } catch { throw new PublicNetworkPolicyError('Redirect URL is invalid'); }
+      current = await assertPublicHttpsUrl(target, options.resolver);
       redirects.push(current.href);
       continue;
     }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { processSnapshot } from '../src/ingestion/processor.js';
+import { processPosting, processSnapshot } from '../src/ingestion/processor.js';
 import type { SourcedPosting } from '../src/types.js';
 
 const posting = (overrides: Partial<SourcedPosting> = {}): SourcedPosting => ({
@@ -17,6 +17,60 @@ const posting = (overrides: Partial<SourcedPosting> = {}): SourcedPosting => ({
 });
 
 describe('shared posting processor', () => {
+  it.each([
+    'Applicants must be graduating from a degree program in Spring 2028.',
+    'Applicants must complete their degree program in Spring 2028 before graduation.',
+    'Students graduating in Spring 2028 are eligible for the internship.',
+  ])('keeps an applicant degree-program date out of hiring season: %s', (description) => {
+    const result = processPosting(posting({ title: 'Software Engineering Intern',
+      content: [{ kind: 'description', format: 'plain', value: description }],
+    })).listing;
+    expect(result?.season).toBe('ongoing');
+    expect(result?.metadataEvidence?.find((evidence) => evidence.season)?.season).toBeUndefined();
+  });
+  it.each([
+    'This Summer 2027 internship is open to students graduating in Spring 2028.',
+    'Our internship runs in Summer 2027 and is open to students graduating in Spring 2028.',
+    'This Summer internship 2027 welcomes students graduating in Spring 2028.',
+    'Applicants graduating in Spring 2028 can join the program in Summer 2027.',
+    'Students graduating in Spring 2028 may apply for this Summer 2027 internship.',
+    'Our Summer 2027 internship begins in June for students graduating in Spring 2028.',
+  ])('preserves the role season independently of graduation: %s', (description) => {
+    const result = processPosting(posting({ title: 'Software Engineering Intern',
+      content: [{ kind: 'description', format: 'plain', value: description }],
+    })).listing;
+    expect(result?.season).toBe('summer-2027');
+    expect(result?.internshipIdentity?.season.evidenceStatus).toBe('explicit');
+    expect(result?.metadataEvidence?.find((evidence) => evidence.season)?.season?.value)
+      .toEqual({ term: 'summer', year: 2027 });
+  });
+
+  it('recognizes an explicit named season in the employer description without upgrading defaults or bare years', () => {
+    const title = 'Software Engineer - New Grad';
+    const declared = processPosting(posting({ title,
+      content: [{ kind: 'description', format: 'html', value: '<p>Join our engineering team in Fall 2026.</p>' }],
+    })).listing;
+    expect(declared?.season).toBe('fall-2026');
+    expect(declared?.internshipIdentity?.season.evidenceStatus).toBe('explicit');
+    const defaulted = processPosting(posting({ title, content: [],
+      seasonHint: 'fall-2026', seasonHintAuthority: 'source-default',
+    })).listing;
+    expect(defaulted?.internshipIdentity?.season.evidenceStatus).toBe('inferred');
+    const bareYear = processPosting(posting({ title,
+      content: [{ kind: 'description', format: 'plain', value: 'Join our engineering team in 2027.' }],
+    })).listing;
+    expect(bareYear?.internshipIdentity?.season.evidenceStatus).toBe('inferred');
+  });
+  it('keeps a new-grad graduation window out of the hiring season', () => {
+    const result = processPosting(posting({ title: 'Software Engineer - New Grad',
+      content: [{ kind: 'description', format: 'html', value: '<li>Must be graduating in Fall 2026 or Spring 2027.</li>' }],
+    }));
+    expect(result.listing?.season).toBe('ongoing');
+    expect(result.listing?.internshipIdentity?.season.evidenceStatus).toBe('unspecified');
+    expect(result.listing?.metadataEvidence?.find(evidence => evidence.education)?.education?.graduationDateWindow)
+      .toEqual({ start: '2026-12', end: '2027-05' });
+    expect(result.listing?.metadataEvidence?.some(evidence => evidence.season)).toBe(false);
+  });
   it('includes an explicitly technical project management internship from an official board', () => {
     const result = processSnapshot({ sourceId: 'greenhouse-astranis', outcome: 'changed', complete: true,
       postings: [posting({ sourceId: 'greenhouse-astranis', title: 'Technical Project Management Intern (Summer 2027)',

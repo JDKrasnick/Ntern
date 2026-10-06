@@ -193,10 +193,12 @@ function auditFinalState(
   plan: AuditPlan,
   expected: { api: ExpectedWorkerIdentity; ingestion: ExpectedWorkerIdentity },
   driftExitCode: number,
+  isolated: Array<ExpectedWorkerIdentity & { address: string }> = [],
 ): void {
   const apiDeployment = deployment(expected.api);
   const ingestionDeployment = deployment(expected.ingestion);
   const result = auditLiveVersions(plan, {
+    isolated: isolated.map((worker) => { const live = deployment(worker); return { scriptName: worker.scriptName, address: worker.address, expectedEtag: worker.etag, deployment: live, version: version(worker, activeVersionId(worker.scriptName, live)) }; }),
     api: {
       scriptName: expected.api.scriptName,
       address: 'cloudflare_workers_script.application',
@@ -236,12 +238,16 @@ function main(): void {
       api: captureExpectedWorkerIdentity(workers.api, deploySha),
       ingestion: captureExpectedWorkerIdentity(workers.ingestion, deploySha),
     };
+    const isolated = ['admission', 'catalog-publisher'].map((role) => ({
+      ...captureExpectedWorkerIdentity({ scriptName: `intern-notifs-${role}`, config: `wrangler.${role}.jsonc` }, deploySha),
+      address: `cloudflare_workers_script.isolated["${role}"]`,
+    }));
     if (changes.length) restoreOperationsSecrets(expected, deploySha);
     const converged = tofu([
       'plan', '-input=false', '-lock-timeout=5m', '-detailed-exitcode', `-out=${finalPlanPath}`,
     ], { allowExitCodes: [0, 2] });
     const finalPlan = JSON.parse(tofu(['show', '-json', finalPlanPath]).stdout) as AuditPlan;
-    auditFinalState(finalPlan, expected, converged.status);
+    auditFinalState(finalPlan, expected, converged.status, isolated);
     console.log(changes.length ? 'Deployed and converged.' : 'Production already matches this working tree and passed the live audit.');
   } finally {
     rmSync(planPath, { force: true });

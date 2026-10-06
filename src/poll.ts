@@ -1512,7 +1512,14 @@ export class IngestionRunner {
           && prefetched.admissionConfigurationVersion !== prefetched.previous.admissionConfigurationVersion));
         const metadataVersionChanged = prefetched.previous?.metadataExtractionVersion !== ROLE_METADATA_EXTRACTION_VERSION
           || prefetched.previous?.metadataProcessingRevision !== SOURCE_METADATA_PROCESSING_REVISION;
-        const fetchCheckpoint = (configurationChanged || metadataVersionChanged) && prefetched.previous ? {
+        const fullBoardRequired = this.shadowDiscovery?.isEnabledForSource(connector.id) === true
+          || this.v2CatalogWriteOwner?.(connector.id) === true
+          || Boolean(prefetched.previous?.pendingResolutionRows?.length);
+        const fetchCheckpoint = fullBoardRequired && prefetched.previous ? {
+          ...prefetched.previous,
+          etag: undefined,
+          documentEtags: undefined,
+        } : (configurationChanged || metadataVersionChanged) && prefetched.previous ? {
           ...prefetched.previous,
           etag: undefined,
           documentEtags: undefined,
@@ -1599,7 +1606,8 @@ export class IngestionRunner {
         // Only the validators are cleared: the content hash still labels the
         // re-read as unchanged instead of reporting a spurious source change.
         const resolutionPassOpen = Boolean(previous?.pendingResolutionRows?.length);
-        const shadowFullBoardRequired = this.shadowDiscovery?.isEnabledForSource(connector.id) === true;
+        const shadowFullBoardRequired = this.shadowDiscovery?.isEnabledForSource(connector.id) === true
+          || v2OwnsCatalogWrites;
         const fetchCheckpoint = (resolutionPassOpen || shadowFullBoardRequired) && previous ? {
           ...previous,
           etag: undefined,

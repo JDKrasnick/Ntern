@@ -19,7 +19,12 @@ type PlanValidationOptions = {
   expectedDeploySha?: string;
 };
 
+const isolatedAddresses = new Map([
+  ['cloudflare_workers_script.isolated["admission"]', 'admission'],
+  ['cloudflare_workers_script.isolated["catalog-publisher"]', 'catalog-publisher'],
+]);
 const allowedUpdates = new Set([
+  ...isolatedAddresses.keys(),
   'cloudflare_workers_script.application',
   'cloudflare_workers_script.ingestion',
 ]);
@@ -38,6 +43,7 @@ const admissionV2InfrastructureCreates = new Set([
   'cloudflare_queue.work["admission-v2"]',
   'cloudflare_queue.dead_letter["admission-v2"]',
   'cloudflare_queue_consumer.ingestion["admission-v2"]',
+  'cloudflare_queue_consumer.admission',
 ]);
 
 const admissionV2IngestionBindings: Array<Record<string, unknown>> = [
@@ -484,6 +490,7 @@ function withoutReviewedOutboundNotificationsAddition(before: unknown, after: un
 // value-toggle path as shadow discovery, otherwise the reviewed canary that
 // flips `INGESTION_V2_ADMISSION_ENABLED` would be refused.
 const ingestionV2BooleanToggles = new Set([
+  'INGESTION_V2_ISOLATED_WORKERS_ENABLED',
   'INGESTION_V2_SHADOW_DISCOVERY_ENABLED',
   'INGESTION_V2_ADMISSION_ENABLED',
   'INGESTION_V2_CATALOG_WRITER_ENABLED',
@@ -627,7 +634,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change'], e
     isPermittedBindingUpdate(before.bindings, candidate)
     || isPermittedBindingRetirement(before.bindings, candidate)
     || isResumeTunerEnablement(before.bindings, candidate)
-    || (address === 'cloudflare_workers_script.ingestion' && isIngestionV2BindingUpdate(before.bindings, candidate))
+    || ((address === 'cloudflare_workers_script.ingestion' || isolatedAddresses.has(address)) && isIngestionV2BindingUpdate(before.bindings, candidate))
     || (address === 'cloudflare_workers_script.ingestion' && isAdmissionV2WorkerBindingUpdate(before.bindings, candidate))
     || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, candidate))
     || (withoutOutboundAddition !== undefined
@@ -911,6 +918,108 @@ function isAdmissionV2InfrastructureCreate(address: string, change: ResourceChan
     && Object.keys(after.settings).every((key) => ['batch_size', 'max_concurrency', 'max_retries', 'max_wait_time_ms'].includes(key));
 }
 
+function isIsolatedWorkerCreate(address: string, change: ResourceChange['change'], sha?: string): boolean {
+  const role = isolatedAddresses.get(address);
+  if (!role || change.before !== null || !isRecord(change.after)) return false;
+  const a = change.after;
+  if (a.script_name !== `intern-notifs-${role}` || a.main_module !== `${role === 'admission' ? 'admission' : 'catalog-publisher'}-worker.js`
+    || a.compatibility_date !== '2026-09-08' || !isDeepStrictEqual(a.compatibility_flags, ['nodejs_compat'])
+    || !isDeepStrictEqual(a.limits, { cpu_ms: 120000, subrequests: 50000 })
+    || !isReleaseAnnotationUpdate(address, a, sha) || !Array.isArray(a.bindings)
+    || typeof a.content_sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(a.content_sha256)
+    || (a.files !== undefined && a.files !== null && Object.keys(a.files as object).length !== 0)) return false;
+  const expected: Record<string, Record<string, unknown>> = {
+    DB: { type: 'd1', id: '4e389f1c-7c6d-48e1-aa97-dc4cb1769bb8' },
+    DOCUMENTS: { type: 'r2_bucket', bucket_name: 'intern-notifs-documents' },
+    VERSION_METADATA: { type: 'version_metadata' },
+    DEPLOYMENT_ROLE: { type: 'plain_text', text: role },
+    OUTBOUND_NOTIFICATIONS_ENABLED: { type: 'plain_text', text: 'false' },
+    INGESTION_V2_ISOLATED_WORKERS_ENABLED: { type: 'plain_text', text: 'false' },
+    ...(role === 'admission' ? {
+      ADMISSION_V2_QUEUE: { type: 'queue', queue_name: 'intern-notifs-admission-v2' },
+      ADMISSION_V2_QUEUE_NAME: { type: 'plain_text', text: 'intern-notifs-admission-v2' },
+    } : { SHADOW_EXTRACTION_ARTIFACTS: { type: 'r2_bucket', bucket_name: 'intern-notifs-shadow-extraction' } }),
+  };
+  const names = new Set<string>();
+  for (const binding of a.bindings) {
+    if (!isRecord(binding) || typeof binding.name !== 'string' || names.has(binding.name)) return false;
+    names.add(binding.name);
+    const pinned = expected[binding.name];
+    if (pinned) {
+      if (!Object.entries(pinned).every(([key, value]) => isDeepStrictEqual(binding[key], value))) return false;
+      if (!Object.entries(binding).every(([key, value]) => key === 'name' || key in pinned || value === null)) return false;
+    } else if (role === 'admission' && binding.name === 'TRUSTED_COMMUNITY_CATALOG_ENABLED' && binding.type === 'plain_text' && ['true', 'false'].includes(String(binding.text))) {
+      // Match the independently configured catalog policy.
+    } else if (role === 'admission' && isIngestionV2ToggleBinding(binding)) {
+      // Existing source and ownership flags are copied; isolation itself remains off.
+    } else if (role === 'catalog-publisher' && binding.name === 'LLM_METADATA_PUBLICATION_POLICY_JSON' && binding.type === 'plain_text') {
+      // Staged Workers have isolation disabled and no cron. They may carry the
+      // already-reviewed production metadata policy without activating it.
+      try {
+        const policy = JSON.parse(String(binding.text)) as unknown;
+        if (!isDeepStrictEqual(policy, disabledMetadataPolicy) && !isProspectiveMetadataPolicy(policy, true)) return false;
+      } catch { return false; }
+    } else return false;
+  }
+  return Object.keys(expected).every((name) => names.has(name));
+}
+
+function isIsolatedRoutingChange(address: string, change: ResourceChange['change']): boolean {
+  if (!isRecord(change.after)) return false;
+  const a = change.after;
+  const b = isRecord(change.before) ? change.before : undefined;
+  const subdomain = address.match(/^cloudflare_workers_script_subdomain\.isolated\["(admission|catalog-publisher)"\]$/u)?.[1];
+  if (subdomain) return a.script_name === `intern-notifs-${subdomain}` && a.enabled === false && a.previews_enabled === false
+    && (!b || isDeepStrictEqual({ ...b, enabled: false, previews_enabled: false }, a));
+  const role = address.match(/^cloudflare_workers_cron_trigger\.isolated\["(admission|catalog-publisher)"\]$/u)?.[1];
+  if (role) {
+    if (a.script_name !== `intern-notifs-${role}` || !Array.isArray(a.schedules)) return false;
+    const target = role === 'admission' ? [{ cron: '9-59/10 * * * *' }] : [{ cron: '1-51/10 * * * *' }, { cron: '4,14,24,34,44,54 * * * *' }];
+    if (!isDeepStrictEqual(a.schedules, []) && !isDeepStrictEqual(a.schedules, target)) return false;
+    if (!b) return isDeepStrictEqual(a.schedules, []);
+    return isDeepStrictEqual({ ...b, schedules: a.schedules }, a);
+  }
+  if (['cloudflare_queue_consumer.ingestion["admission-v2"]', 'cloudflare_queue_consumer.admission'].includes(address) && b) {
+    return ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(b.script_name))
+      && ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(a.script_name))
+      && isDeepStrictEqual({ ...b, script_name: a.script_name }, a);
+  }
+  if (address === 'cloudflare_workers_cron_trigger.ingestion' && b && Array.isArray(b.schedules) && Array.isArray(a.schedules)) {
+    const projection = new Set(['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']);
+    const omit = (rows: unknown[]) => rows.filter((row) => !isRecord(row) || !projection.has(String(row.cron)));
+    // Only the two reviewed projection crons may transfer in either direction.
+    const valid = (rows: unknown[]) => rows.every((row) => isRecord(row) && Object.keys(row).length === 1 && typeof row.cron === 'string');
+    return valid(b.schedules) && valid(a.schedules)
+      && new Set(a.schedules.map((row) => String((row as Record<string, unknown>).cron))).size === a.schedules.length
+      && isDeepStrictEqual(omit(b.schedules), omit(a.schedules)) && isDeepStrictEqual({ ...b, schedules: a.schedules }, a);
+  }
+  return false;
+}
+
+function isAdmissionAttachmentReplacement(address: string, change: ResourceChange['change']): boolean {
+  if (address !== 'cloudflare_queue_consumer.admission' || !isDeepStrictEqual(change.actions, ['delete', 'create'])
+    || !isRecord(change.before) || !isRecord(change.after)) return false;
+  const b = change.before, a = change.after;
+  const generated = new Set(['consumer_id', 'id', 'created_on']);
+  const stable = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([key]) => !generated.has(key) && key !== 'script_name'));
+  return typeof b.queue_id === 'string' && b.queue_id.length > 0 && b.queue_id === a.queue_id
+    && b.type === 'worker' && a.type === 'worker'
+    && b.dead_letter_queue === 'intern-notifs-admission-v2-dlq'
+    && ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(b.script_name))
+    && ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(a.script_name))
+    && isDeepStrictEqual(stable(b), stable(a))
+    && (!isRecord(change.after_unknown) || Object.entries(change.after_unknown).every(([key, value]) => value === false || generated.has(key)));
+}
+
+function isAdmissionRouteState(address: string, change: ResourceChange['change']): boolean {
+  if (address !== 'terraform_data.admission_queue_owner' || !isRecord(change.after)) return false;
+  if (!['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(change.after.input))) return false;
+  if (change.before === null) return change.actions[0] === 'create';
+  if (!isRecord(change.before)) return false;
+  const omit = (v: Record<string, unknown>) => Object.fromEntries(Object.entries(v).filter(([key]) => !['id', 'input', 'output'].includes(key)));
+  return ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(change.before.input)) && isDeepStrictEqual(omit(change.before), omit(change.after));
+}
+
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
   return (plan.resource_changes ?? [])
     .filter(({ change }) => !change.actions.every((action) => action === 'no-op' || action === 'read'))
@@ -922,17 +1031,22 @@ export function validateCloudflarePlan(plan: Plan, options: PlanValidationOption
     !change.actions.every((action) => action === 'no-op' || action === 'read')
   ));
   const unsafe = resourceChanges.filter(({ address, change }) => (
-    change.actions.length !== 1
+    !isAdmissionAttachmentReplacement(address, change) && (change.actions.length !== 1
     || !(
       (change.actions[0] === 'update'
         && ((allowedUpdates.has(address)
           && (isSafeWorkerUpdate(address, change, options.expectedDeploySha) || isResumeWorkerUpdate(address, change)))
           || isReviewedIngestionCronUpdate(address, change)
-          || isApiPreviewUrlShutdown(address, change)))
+          || isIsolatedRoutingChange(address, change)
+          || isApiPreviewUrlShutdown(address, change)
+          || isAdmissionRouteState(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
         || isAdmissionV2InfrastructureCreate(address, change)
-        || isCustomDomainCreate(address, change)))
-    )
+        || isIsolatedWorkerCreate(address, change, options.expectedDeploySha)
+        || isIsolatedRoutingChange(address, change)
+        || isCustomDomainCreate(address, change)
+        || isAdmissionRouteState(address, change)))
+    ))
   )).map(({ address, change }) => ({ address, actions: change.actions }));
 
   if (unsafe.length > 0) {

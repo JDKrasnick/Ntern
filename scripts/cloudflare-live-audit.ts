@@ -258,9 +258,15 @@ export function auditWorkerParity(input: WorkerAuditInput, plan: Plan): WorkerAu
   return { scriptName, versionId, etag, bindingCount };
 }
 
-export function auditLiveVersions(plan: Plan, input: { api: WorkerAuditInput; ingestion: WorkerAuditInput }): AuditResult {
+export function auditLiveVersions(plan: Plan, input: { api: WorkerAuditInput; ingestion: WorkerAuditInput; isolated?: WorkerAuditInput[] }): AuditResult {
+  const isolated = input.isolated ?? [];
+  const planned = [...collectPlannedResources(plan).keys()].filter((address) => address.startsWith('cloudflare_workers_script.isolated['));
+  if (planned.length !== isolated.length || planned.some((address) => !isolated.some((worker) => worker.address === address))) {
+    throw new Error('Every dedicated Worker requires an independent live identity audit');
+  }
   return {
     workers: [
+      ...isolated.map((worker) => auditWorkerParity(worker, plan)),
       auditWorkerParity({ ...input.api, address: apiAddress }, plan),
       auditWorkerParity({ ...input.ingestion, address: ingestionAddress }, plan),
     ],
@@ -323,6 +329,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const driftIndex = process.argv.indexOf('--drift-exit-code');
   const driftExitCode = driftIndex >= 0 ? Number(process.argv[driftIndex + 1]) : 0;
   const result = auditLiveVersions(readJson(options.plan) as Plan, {
+    isolated: process.argv.includes('--isolated-workers')
+      ? JSON.parse(readFileSync(readOption(process.argv, 'isolated-workers'), 'utf8')) as WorkerAuditInput[] : [],
     api: {
       scriptName: options.apiName,
       address: apiAddress,

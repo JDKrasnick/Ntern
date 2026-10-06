@@ -57,7 +57,7 @@ describe('Cloudflare deployment configuration', () => {
     const wranglerCrons = ingestion.triggers?.crons ?? [];
     const terraform = read('infra/cloudflare/main.tf');
     const cronResource = terraform.slice(terraform.indexOf('resource "cloudflare_workers_cron_trigger" "ingestion"'));
-    const terraformCrons = quotedValuesBetween(cronResource, 'schedules = [', ']');
+    const terraformCrons = quotedValuesBetween(cronResource, 'schedules = [for schedule in [', ']');
 
     expect(new Set(terraformCrons)).toEqual(new Set(wranglerCrons));
     expect(terraformCrons).toHaveLength(wranglerCrons.length);
@@ -102,14 +102,19 @@ describe('Cloudflare deployment configuration', () => {
     expect(devApi.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('false');
     expect(ingestion.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('true');
     expect(api.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('true');
-    expect(read('infra/cloudflare/main.tf').match(/name = "OUTBOUND_NOTIFICATIONS_ENABLED"/gu)).toHaveLength(2);
+    expect(read('infra/cloudflare/main.tf').match(/name = "OUTBOUND_NOTIFICATIONS_ENABLED"/gu)).toHaveLength(3);
     const canary = 'northwestern-fintech-2027-quant';
     expect(devIngestion.vars.INGESTION_V2_SHADOW_DISCOVERY_ENABLED).toBe('true');
     expect(devIngestion.vars.INGESTION_V2_ADMISSION_ENABLED).toBe('true');
     expect(devIngestion.vars.INGESTION_V2_CATALOG_WRITER_ENABLED).toBe('true');
+    const cohort = [canary, 'speedyapply-2027-swe', 'vanshb03-summer-2027', 'canadian-tech-2027',
+      'simplify-summer-2026', 'speedyapply-2027-ai', 'greenhouse-figma', 'lever-palantir', 'ashby-mistral-ai'].join(',');
+    expect(devIngestion.vars.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST).toBe(cohort);
+    expect(devIngestion.vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST).toBe(cohort);
+    for (const [name, value] of Object.entries(devIngestion.vars).filter(([name]) => name.startsWith('INGESTION_V2_') && name !== 'INGESTION_V2_ISOLATED_WORKERS_ENABLED')) {
+      expect(devApi.vars[name]).toBe(value);
+    }
     for (const name of [
-      'INGESTION_V2_SHADOW_SOURCE_ALLOWLIST',
-      'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST',
       'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST',
       'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST',
       'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST',
@@ -250,8 +255,8 @@ describe('Cloudflare deployment configuration', () => {
     expect(api.containers).toContainEqual({ class_name: 'ResumePdfCompilerV2', image: './cloudflare/resume-compiler/Dockerfile', instance_type: 'basic', max_instances: 2 });
     expect(terraform).toContain('{ name = "RESUME_PDF_COMPILER", type = "durable_object_namespace", class_name = "ResumePdfCompilerV2" }');
     expect(terraform).toContain('{ name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController", script_name = cloudflare_workers_script.ingestion.script_name }');
-    expect(terraform.match(/workers_message = "Release \$\{var\.deploy_sha\}"/gu)).toHaveLength(2);
-    expect(terraform.match(/workers_tag\s+= var\.deploy_sha/gu)).toHaveLength(2);
+    expect(terraform.match(/workers_message = "Release \$\{var\.deploy_sha\}"/gu)).toHaveLength(3);
+    expect(terraform.match(/workers_tag\s+= var\.deploy_sha/gu)).toHaveLength(3);
     expect(terraform).not.toMatch(/\bmigrations\s*=\s*\{/);
     expect(deployment).toContain('TF_VAR_deploy_sha: ${{ github.event_name == \'workflow_run\' && github.event.workflow_run.head_sha || inputs.sha }}');
     expect(deployment).toContain('TF_VAR_resume_tuner_enabled: "true"');
@@ -367,7 +372,7 @@ describe('Cloudflare deployment configuration', () => {
 
   it('declares Cloudflare trace defaults to prevent perpetual Worker drift', () => {
     const terraform = read('infra/cloudflare/main.tf');
-    expect(terraform.match(/traces\s+= \{ enabled = false, head_sampling_rate = 1, persist = true \}/gu)).toHaveLength(2);
+    expect(terraform.match(/traces\s+= \{ enabled = false, head_sampling_rate = 1, persist = true \}/gu)).toHaveLength(3);
   });
 
   it('restores billing-shutdown schedules only on ingestion', () => {

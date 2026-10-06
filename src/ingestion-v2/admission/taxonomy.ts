@@ -15,9 +15,18 @@ export class AdmissionRowTransientError extends Error {
   constructor(
     readonly classification: AdmissionRowFailureClass,
     detail: string,
+    readonly retryAfterMs?: number,
   ) {
     super(detail);
     this.name = 'AdmissionRowTransientError';
+  }
+}
+
+/** A provider cooldown or a shared failed probe is not a fresh row attempt. */
+export class AdmissionProviderDeferredError extends AdmissionRowTransientError {
+  constructor(detail: string, retryAfterMs: number, classification: AdmissionRowFailureClass = 'destination-rate-limited') {
+    super(classification, detail, retryAfterMs);
+    this.name = 'AdmissionProviderDeferredError';
   }
 }
 
@@ -49,7 +58,9 @@ function bounded(detail: string): string {
 /** Classify a caught error into the admission failure taxonomy. */
 export function classifyAdmissionFailure(error: unknown): AdmissionFailure {
   if (error instanceof AdmissionRowTransientError) {
-    return { kind: 'row-transient', classification: error.classification, detail: bounded(error.message) };
+    return { kind: 'row-transient', classification: error.classification, detail: bounded(error.message),
+      ...(error instanceof AdmissionProviderDeferredError ? { retryWithoutAttempt: true } : {}),
+      ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}) };
   }
   if (error instanceof AdmissionInfrastructureError) {
     return { kind: 'infrastructure', classification: error.classification, detail: bounded(error.message) };
@@ -91,8 +102,28 @@ export function isInfrastructureFailure(failure: AdmissionFailure): boolean {
 export function nextAdmissionAttempt(
   failedAttempt: number,
   now: number,
+  failure?: AdmissionFailure,
 ): { retryAt: string; attemptCount: number } | { exhausted: true; attemptCount: number } {
+  if (failure?.retryWithoutAttempt) {
+    const delay = failure.retryAfterMs !== undefined && Number.isFinite(failure.retryAfterMs) && failure.retryAfterMs > 0
+      ? failure.retryAfterMs : 60_000;
+    return { retryAt: new Date(now + delay).toISOString(), attemptCount: failedAttempt };
+  }
   if (failedAttempt >= ADMISSION_V2_MAX_ATTEMPTS) return { exhausted: true, attemptCount: failedAttempt };
-  const delay = ADMISSION_V2_RETRY_DELAYS_MS[Math.min(failedAttempt - 1, ADMISSION_V2_RETRY_DELAYS_MS.length - 1)];
+  const delays = failure?.classification === 'destination-rate-limited'
+    ? [15 * 60_000, 60 * 60_000] : ADMISSION_V2_RETRY_DELAYS_MS;
+  const defaultDelay = delays[Math.min(failedAttempt - 1, delays.length - 1)];
+  const providerDelay = failure?.retryAfterMs;
+  const delay = Math.max(defaultDelay, providerDelay !== undefined && Number.isFinite(providerDelay)
+    && providerDelay > 0 ? providerDelay : 0);
   return { retryAt: new Date(now + delay).toISOString(), attemptCount: failedAttempt };
+}
+
+/** HTTP Retry-After is a minimum wait, never a reason to probe early. */
+export function admissionRetryAfterMs(value: string | null, now = Date.now()): number | undefined {
+  if (!value?.trim()) return undefined;
+  const text = value.trim();
+  const delay = /^\d+$/u.test(text) ? Number(text) * 1000 : Date.parse(text) - now;
+  // Reject values outside JavaScript's representable date range.
+  return Number.isFinite(delay) && delay > 0 && now + delay <= 8.64e15 ? delay : undefined;
 }

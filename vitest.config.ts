@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 /**
  * Bound the local worker pool.
@@ -16,6 +16,7 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
+    exclude: [...configDefaults.exclude, '.context/**'],
     pool: 'forks',
     maxWorkers: 4,
     poolOptions: {

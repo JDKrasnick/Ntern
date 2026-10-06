@@ -1,4 +1,6 @@
 import { CatalogReconciler } from '../../ingestion/catalog-reconciler.js';
+import { createHash } from 'node:crypto';
+import { ROLE_METADATA_EXTRACTION_VERSION } from '../../role-metadata.js';
 import { SupersededPostingObservationError, type InternshipStore, type PostingObservationOmissionFence,
   type PostingObservationAdmissionFence } from '../../store.js';
 import { AdmissionInfrastructureError } from './taxonomy.js';
@@ -126,12 +128,27 @@ export class ReconcilerAdmissionV2CatalogSink implements AdmissionV2CatalogSink 
       throw new AdmissionInfrastructureError('internal', 'catalog reconciliation did not produce a committable posting observation');
     }
     let result;
+    const provider = listing.providerIdentity;
+    const previousShadowHash = prior?.occurrence.shadowContentHash;
+    const shadowEligible = provider && ['greenhouse', 'lever', 'ashby'].includes(provider.provider)
+      && decision.status === 'confirmed' && listing.technical !== false && job.open
+      && input.admission.catalogEligible && Boolean(listing.shadowContentHash)
+      && (!prior || Boolean(previousShadowHash && previousShadowHash !== listing.shadowContentHash));
     try {
       result = await this.store.commitPostingObservation({
         decision,
         ...(job.postingIdentity ? { identity: job.postingIdentity } : {}),
         job,
         occurrence,
+        ...(shadowEligible ? { providerShadowVerification: {
+          jobId: job.jobId, sourceId: input.sourceId, externalId: input.externalId,
+          providerIdentity: provider, candidateUrl: listing.applyUrl,
+          reason: prior ? 'content-change' as const : 'first-sight' as const,
+          metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
+          shadowContentHash: listing.shadowContentHash,
+          shadowOrigin: 'provider-poll' as const,
+          idempotencyKey: createHash('sha256').update(`provider-poll-shadow-v1\0${job.jobId}\0${input.sourceId}\0${input.externalId}\0${listing.shadowContentHash}`).digest('hex'),
+        } } : {}),
         ...(input.effectFence ? { admissionEffectFence: input.effectFence } : {}),
         ...(input.notify && notifications.get(job.jobId)
           ? { notificationEvent: notifications.get(job.jobId)! }

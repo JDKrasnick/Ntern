@@ -362,10 +362,10 @@ describe('ingestion v2 D1 repository', () => {
       { externalId: 'settled', consecutiveOmissions: 2, becomesAbsent: true },
     ], '2026-10-02T00:00:00.000Z');
     expect(await repository.getRow('community-example', 'queued')).toMatchObject({
-      state: 'queued', attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z', consecutiveOmissions: 2,
+      state: 'absent', attemptCount: 1, retryAt: '2026-10-01T00:10:00.000Z', consecutiveOmissions: 2,
     });
     expect(await repository.getRow('community-example', 'quarantined')).toMatchObject({
-      state: 'quarantined', attemptCount: 3, failureClass: 'destination-timeout', consecutiveOmissions: 2,
+      state: 'absent', attemptCount: 3, failureClass: 'destination-timeout', consecutiveOmissions: 2,
     });
     // A discovery-owned settled row still closes to absent.
     expect(await repository.getRow('community-example', 'settled')).toMatchObject({

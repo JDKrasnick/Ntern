@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { assertPostingCapacity } from './posting-capacity.js';
 import { readBoundedJson } from '../core/bounded-body.js';
 import { processSnapshot } from '../ingestion/processor.js';
 import { platformFetch } from '../core/platform-fetch.js';
@@ -232,6 +233,7 @@ export class AshbyPostingsAdapter implements SourceAdapter, SourceConnector {
     const postings: SourcedPosting[] = [];
     listed.forEach((row, index) => {
       const mapped = mapPosting(row, this.options.source, fetchedAt, index);
+      assertPostingCapacity(mapped);
       const reason = applicationRejection(row, this.options.source);
       if (reason) rejectedApplicationUrls.push({ row: index + 1, url: row.applyUrl, reason });
       else postings.push(mapped);

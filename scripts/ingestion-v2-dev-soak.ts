@@ -4,14 +4,26 @@
  * schedule, and the public dev catalog. Scheduled workflow runs retain the JSON
  * report so a 24-hour or seven-day soak can be assessed without mutating dev.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parseEnvelope } from '../src/ingestion-v2/normalize.js';
+import { admissionV2OwnsCatalogWrites } from '../src/ingestion-v2/admission/types.js';
 import { INGESTION_V2_D1_WRITE_LIMIT, INGESTION_V2_RUN_LIMIT } from '../cloudflare/ingestion-health-alert.js';
 
 const DEFAULT_DATABASE_ID = 'cedc86d8-69a5-4a72-a1e6-f5629d722338';
 const DEFAULT_API_URL = 'https://intern-notifs-dev.jdkrasnick.workers.dev';
 const DEFAULT_WORKER = 'intern-notifs-dev-ingestion';
+export function parseDevSoakConfig(text: string): { name: string; vars: Record<string, string>; triggers: { crons: string[] } } {
+  const config = JSON.parse(text) as { name: string; vars: Record<string, string>; triggers: { crons: string[] } };
+  if (config.name !== DEFAULT_WORKER || config.vars.OUTBOUND_NOTIFICATIONS_ENABLED !== 'false') {
+    throw new Error('Soak profiles must target isolated dev ingestion with outbound delivery disabled');
+  }
+  return config;
+}
+const DEV_CONFIG = parseDevSoakConfig(readFileSync(process.env.INGESTION_V2_DEV_CONFIG
+  ?? new URL('../wrangler.dev.ingestion.jsonc', import.meta.url), 'utf8'));
+const EXPECTED_CRONS = (JSON.parse(readFileSync(new URL('../wrangler.ingestion.jsonc', import.meta.url), 'utf8')) as { triggers: { crons: string[] } }).triggers.crons;
 const DEFAULT_CANARY = 'northwestern-fintech-2027-quant';
 const QUEUE_SUFFIXES = [
   'greenhouse', 'lever', 'ashby', 'github', 'gmail',
@@ -19,7 +31,48 @@ const QUEUE_SUFFIXES = [
 ] as const;
 
 interface QueueSummary { queue_id: string; queue_name: string }
+/** Durable parity includes retired occurrences and pending negative effects. */
+export function ingestionV2CatalogParitySql(sourceCount: number): string {
+  if (!Number.isSafeInteger(sourceCount) || sourceCount < 1 || sourceCount > 500) throw new Error('Invalid source count');
+  const placeholders = Array.from({ length: sourceCount }, () => '?').join(',');
+  return `SELECT r.source_id, SUM(CASE
+      WHEN r.consecutive_omissions >= 2 THEN CASE
+        WHEN r.closure_pending = 1 OR json_extract(c.value, '$.occurrence.state') = 'open' THEN 1 ELSE 0 END
+      WHEN r.decision = 'admitted' AND (
+        r.job_id IS NULL OR COALESCE(json_extract(c.value, '$.jobId'), '') != r.job_id
+        OR COALESCE(json_extract(c.value, '$.occurrence.state'), '') != 'open'
+        OR COALESCE(json_extract(c.value, '$.occurrence.admission.catalogEligible'), 0) != 1
+        OR COALESCE(json_extract(c.value, '$.occurrence.admissionConfigurationVersion'), '') != r.admission_version
+        OR COALESCE(json_extract(j.value, '$.open'), 0) != 1
+        OR COALESCE(json_extract(c.value, '$.occurrence.trustedCommunityAlertQualification.catalogPublicationSuppressed'), 0) = 1
+      ) THEN 1
+      WHEN r.decision IN ('blocked', 'shelved')
+        AND json_extract(c.value, '$.occurrence.state') = 'open'
+        AND json_extract(c.value, '$.occurrence.admission.catalogEligible') = 1 THEN 1
+      ELSE 0 END) AS mismatches
+      FROM ingestion_rows r
+      LEFT JOIN catalog_items c ON c.pk = 'SOURCE#' || r.source_id AND c.sk = 'OCCURRENCE#' || r.external_id
+      LEFT JOIN catalog_items j ON j.pk = 'JOB#' || r.job_id AND j.sk = 'META'
+      WHERE r.source_id IN (${placeholders}) AND (r.state = 'settled' OR r.consecutive_omissions >= 2) GROUP BY r.source_id`;
+}
+
 interface QueueMetrics { backlog_count: number; backlog_bytes: number }
+/** Sample after the paired minute-1 D1 / minute-4 R2 jobs finish. This changes
+ * observation timing, never the strict publication or resource checks. */
+export function nextDevSoakSampleAt(now: Date): Date {
+  const interval = 10 * 60_000;
+  const candidate = Math.floor(now.getTime() / interval) * interval + 6 * 60_000;
+  return new Date(candidate >= now.getTime() ? candidate : candidate + interval);
+}
+
+export function devSoakCoverage(configured: readonly string[], observed: readonly string[]) {
+  const configuredSourceIds = [...new Set(configured)].sort();
+  const observedSourceIds = [...new Set(observed)].sort();
+  const missingSourceIds = configuredSourceIds.filter((id) => !observedSourceIds.includes(id));
+  return { configuredSourceIds, observedSourceIds, missingSourceIds,
+    fullConfiguredCohort: configuredSourceIds.length > 0 && missingSourceIds.length === 0 };
+}
+
 interface SourceHealth {
   state?: string;
   sourceStatus?: string;
@@ -33,6 +86,8 @@ export interface DevSoakSample {
   capturedAt: string;
   windowStartedAt: string;
   windowHours: number;
+  soakStartedAt: string;
+  runtime: Array<{ worker?: string; version?: string; status: string; requests: number; errors: number; cpuTimeP99: number; memoryUsageBytesP99: number }>;
   canary: {
     sourceId: string;
     health?: SourceHealth;
@@ -42,7 +97,15 @@ export interface DevSoakSample {
     pendingHandoffs: number;
     staleHandoffs: number;
     expiredLeases: number;
+    r2SnapshotValid: boolean;
+    catalogOwned?: boolean;
+    catalogMismatches?: number;
   };
+  canaries?: Array<DevSoakSample['canary']>;
+  schedules: string[];
+  expectedRuntimeWorkers?: string[];
+  controlMismatches: string[];
+  publication?: { generatedAt?: string; version?: string; count?: number };
   maintenance: Array<Record<string, unknown>>;
   unresolvedFailures: Array<Record<string, unknown>>;
   exhaustedFailures: Array<Record<string, unknown>>;
@@ -56,50 +119,97 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
   const check = (name: string, ok: boolean, detail: string): void => {
     checks.push({ name, status: ok ? 'pass' : 'fail', detail });
   };
-  check('production cron parity', sample.cronCount === 11, `${sample.cronCount}/11 triggers active`);
+  const missing = EXPECTED_CRONS.filter((cron) => !sample.schedules.includes(cron));
+  const unexpected = sample.schedules.filter((cron) => !EXPECTED_CRONS.includes(cron));
+  check('production cron parity', missing.length === 0 && unexpected.length === 0
+    && sample.schedules.length === EXPECTED_CRONS.length,
+  `${sample.schedules.length}/${EXPECTED_CRONS.length} triggers; missing=${missing.join(';')}; unexpected=${unexpected.join(';')}`);
+  check('dev rollout controls', sample.controlMismatches.length === 0,
+    sample.controlMismatches.join('; ') || 'tracked V2 controls and outbound suppression match');
+  const elapsedHours = (now.getTime() - Date.parse(sample.soakStartedAt)) / 3_600_000;
+  check('dev soak elapsed', elapsedHours >= sample.windowHours, `${elapsedHours.toFixed(1)}/${sample.windowHours} clean observation hours since latest deployment`);
+  check('Worker runtime healthy', sample.runtime.length > 0
+    && (sample.expectedRuntimeWorkers ?? []).every((worker) => sample.runtime.some((row) => row.worker === worker))
+    && sample.runtime.every((row) => row.status === 'success' && row.errors === 0),
+    sample.runtime.map((row) => `${row.worker ?? "ingestion"}/${row.status}: ${row.requests} requests, ${row.errors} errors`).join('; ') || 'missing runtime analytics');
+  const memoryP99 = Math.max(...sample.runtime.map((row) => row.memoryUsageBytesP99));
+  const cpuP99 = Math.max(...sample.runtime.map((row) => row.cpuTimeP99));
+  checks.push({ name: 'Worker resource headroom', status: memoryP99 <= 120 * 1024 * 1024 && cpuP99 <= 60_000_000 ? 'pass' : 'warn',
+    detail: `memory p99 ${(memoryP99 / 1024 / 1024).toFixed(1)} MiB; CPU p99 ${(cpuP99 / 1_000_000).toFixed(2)} s (all ingestion isolates)` });
   check('public dev catalog', sample.publicCatalogStatus === 200, `HTTP ${sample.publicCatalogStatus}`);
 
-  const health = sample.canary.health;
-  const successAgeMinutes = health?.lastSuccessAt
-    ? Math.max(0, (now.getTime() - Date.parse(health.lastSuccessAt)) / 60_000)
-    : Number.POSITIVE_INFINITY;
-  check('canary source health', health?.state === 'healthy' && health.sourceStatus !== 'paused'
-    && (health.consecutiveFailures ?? 0) === 0,
-  `${health?.state ?? 'missing'}/${health?.sourceStatus ?? 'unknown'}, failures=${health?.consecutiveFailures ?? 'unknown'}`);
-  check('canary polling freshness', successAgeMinutes <= 60,
-    Number.isFinite(successAgeMinutes) ? `${successAgeMinutes.toFixed(1)} minutes since success` : 'no successful poll');
-  check('complete active snapshot', sample.canary.activeSnapshot?.is_complete === 1,
-    sample.canary.activeSnapshot ? `snapshot ${sample.canary.activeSnapshot.snapshot_hash}` : 'missing active snapshot');
-  check('recent shadow comparison', Boolean(sample.canary.shadowComparison),
-    sample.canary.shadowComparison ? `observed ${sample.canary.shadowComparison.observed_at}` : 'missing comparison');
-  const costWindow = sample.canary.shadowComparison;
-  const windowRunCount = Number(costWindow?.window_run_count ?? 0);
-  const windowD1RowsWritten = Number(costWindow?.window_d1_rows_written ?? 0);
-  check('V2 cost window initialized', typeof costWindow?.window_started_at === 'string',
-    costWindow?.window_started_at ? `started ${costWindow.window_started_at}` : 'missing cost window');
-  check('V2 shadow run budget', windowRunCount < INGESTION_V2_RUN_LIMIT,
-    `${windowRunCount}/${INGESTION_V2_RUN_LIMIT} runs in current one-hour window`);
-  check('V2 D1 write budget', windowD1RowsWritten < INGESTION_V2_D1_WRITE_LIMIT,
-    `${windowD1RowsWritten}/${INGESTION_V2_D1_WRITE_LIMIT} rows in current one-hour window`);
-  const maintenance = sample.maintenance.find((row) => String(row.key).endsWith(':ingestion_v2_admission_dispatch'));
+  const canaries = sample.canaries ?? [sample.canary];
+  for (const canary of canaries) {
+    const sourceCheck = (name: string, ok: boolean, detail: string): void =>
+      check(canaries.length > 1 ? `${canary.sourceId}: ${name}` : name, ok, detail);
+    const health = canary.health;
+    const successAgeMinutes = health?.lastSuccessAt
+      ? Math.max(0, (now.getTime() - Date.parse(health.lastSuccessAt)) / 60_000)
+      : Number.POSITIVE_INFINITY;
+    sourceCheck('canary source health', health?.state === 'healthy' && health.sourceStatus !== 'paused'
+      && (health.consecutiveFailures ?? 0) === 0,
+    `${health?.state ?? 'missing'}/${health?.sourceStatus ?? 'unknown'}, failures=${health?.consecutiveFailures ?? 'unknown'}`);
+    sourceCheck('canary polling freshness', successAgeMinutes <= 60,
+      Number.isFinite(successAgeMinutes) ? `${successAgeMinutes.toFixed(1)} minutes since success` : 'no successful poll');
+    sourceCheck('complete active snapshot', canary.activeSnapshot?.is_complete === 1,
+      canary.activeSnapshot ? `snapshot ${canary.activeSnapshot.snapshot_hash}` : 'missing active snapshot');
+    const comparisonAge = now.getTime() - Date.parse(String(canary.shadowComparison?.observed_at));
+    sourceCheck('recent shadow comparison', canary.shadowComparison?.complete === 1
+      && comparisonAge >= 0 && comparisonAge <= 60 * 60_000,
+      canary.shadowComparison ? `observed ${canary.shadowComparison.observed_at}` : 'missing comparison');
+    const costWindow = canary.shadowComparison;
+    const windowRunCount = Number(costWindow?.window_run_count ?? 0);
+    const windowD1RowsWritten = Number(costWindow?.window_d1_rows_written ?? 0);
+    sourceCheck('V2 cost window initialized', typeof costWindow?.window_started_at === 'string',
+      costWindow?.window_started_at ? `started ${costWindow.window_started_at}` : 'missing cost window');
+    sourceCheck('V2 shadow run budget', windowRunCount < INGESTION_V2_RUN_LIMIT,
+      `${windowRunCount}/${INGESTION_V2_RUN_LIMIT} runs in current one-hour window`);
+    sourceCheck('V2 D1 write budget', windowD1RowsWritten < INGESTION_V2_D1_WRITE_LIMIT,
+      `${windowD1RowsWritten}/${INGESTION_V2_D1_WRITE_LIMIT} rows in current one-hour window`);
+    sourceCheck('R2 snapshot integrity', canary.r2SnapshotValid, 'immutable R2 envelope matches D1 hash, policy, and row count');
+    sourceCheck('snapshot comparison identity', Boolean(canary.activeSnapshot?.snapshot_hash)
+      && canary.activeSnapshot?.snapshot_hash === canary.shadowComparison?.snapshot_hash
+      && canary.activeSnapshot?.admission_version === canary.shadowComparison?.admission_version, 'active snapshot and comparison hash/policy match');
+    const rowCount = canary.rows.reduce((sum, row) => sum + Number(row.rows ?? 0), 0);
+    const quarantined = canary.rows
+      .filter((row) => row.state === 'quarantined')
+      .reduce((sum, row) => sum + Number(row.rows ?? 0), 0);
+    sourceCheck('canary row ledger populated', rowCount > 0, `${rowCount} durable row(s)`);
+    const activeRows = canary.rows.filter((row) => row.state !== 'absent');
+    const unsettled = activeRows.filter((row) => row.state !== 'settled').reduce((sum, row) => sum + Number(row.rows ?? 0), 0);
+    const unattempted = activeRows.filter((row) => row.state === 'settled')
+      .reduce((sum, row) => sum + Number(row.rows ?? 0) - Number(row.attempted ?? 0), 0);
+    sourceCheck('independent admission complete', unsettled === 0 && unattempted === 0,
+      `${unsettled} unsettled row(s), ${unattempted} settled row(s) without a V2 attempt`);
+    if (canary.catalogOwned) sourceCheck('durable catalog parity', canary.catalogMismatches === 0,
+      `${canary.catalogMismatches ?? 'missing'} admitted-link or revoked-occurrence mismatch(es)`);
+    sourceCheck('no quarantined canary rows', quarantined === 0, `${quarantined} quarantined row(s)`);
+    sourceCheck('no stale admission handoff', canary.staleHandoffs === 0,
+      `${canary.staleHandoffs} handoff(s) older than 15 minutes`);
+    sourceCheck('no expired admission lease', canary.expiredLeases === 0,
+      `${canary.expiredLeases} expired processing lease(s)`);
+  }
+  const isolated = (sample.expectedRuntimeWorkers?.length ?? 0) > 1;
+  const maintenance = sample.maintenance.find((row) => isolated
+    ? row.key === 'maintenance_phase:admission_v2:dispatch'
+    : String(row.key).endsWith(':ingestion_v2_admission_dispatch'));
   const maintenanceValue = maintenance?.value ? JSON.parse(String(maintenance.value)) as { status?: string } : undefined;
   const maintenanceAgeMinutes = maintenance?.updated_at
     ? Math.max(0, (now.getTime() - Date.parse(String(maintenance.updated_at))) / 60_000)
     : Number.POSITIVE_INFINITY;
   check('scheduled admission maintenance', maintenanceValue?.status === 'complete' && maintenanceAgeMinutes <= 60,
     maintenance ? `${maintenanceValue?.status ?? 'unknown'}, ${maintenanceAgeMinutes.toFixed(1)} minutes ago` : 'missing phase marker');
-  const rowCount = sample.canary.rows.reduce((sum, row) => sum + Number(row.rows ?? 0), 0);
-  const quarantined = sample.canary.rows
-    .filter((row) => row.state === 'quarantined')
-    .reduce((sum, row) => sum + Number(row.rows ?? 0), 0);
-  check('canary row ledger populated', rowCount > 0, `${rowCount} durable row(s)`);
-  check('no quarantined canary rows', quarantined === 0, `${quarantined} quarantined row(s)`);
-  check('no stale admission handoff', sample.canary.staleHandoffs === 0,
-    `${sample.canary.staleHandoffs} handoff(s) older than 15 minutes`);
-  check('no expired admission lease', sample.canary.expiredLeases === 0,
-    `${sample.canary.expiredLeases} expired processing lease(s)`);
+  const publicationAge = now.getTime() - Date.parse(sample.publication?.generatedAt ?? '');
+  check('fresh R2 catalog publication', /^[a-f0-9]{20}$/.test(sample.publication?.version ?? '')
+    && Number.isSafeInteger(sample.publication?.count) && Number(sample.publication?.count) >= 0
+    && publicationAge >= 0 && publicationAge <= 30 * 60_000,
+  sample.publication ? `generated ${sample.publication.generatedAt}, ${sample.publication.count} groups` : 'missing R2 catalog pointer');
+  const r2Phase = sample.maintenance.find((row) => row.key === 'maintenance_phase:catalog_projection_r2:catalog_projection_r2_complete');
+  const r2Age = now.getTime() - Date.parse(String(r2Phase?.updated_at));
+  check('scheduled R2 publication', Boolean(r2Phase) && r2Age >= 0 && r2Age <= 30 * 60_000,
+    r2Phase ? `completed ${r2Phase.updated_at}` : 'missing R2 cron completion');
   check('no unresolved queue failures', sample.unresolvedFailures.length === 0,
-    `${sample.unresolvedFailures.length} unresolved failure group(s) in ${sample.windowHours}h`);
+    `${sample.unresolvedFailures.length} unresolved failure group(s) in the oldest 200 incident sample; recovery required regardless of observation window`);
   check('no exhausted queue deliveries', sample.exhaustedFailures.length === 0,
     `${sample.exhaustedFailures.length} final-delivery failure group(s) in ${sample.windowHours}h`);
 
@@ -124,30 +234,71 @@ function requireEnv(name: string): string {
   return value;
 }
 
+export function runtimeWorkerIdentity(
+  reportedName: string, version: string, names: string[], versions: string[],
+): string {
+  const index = versions.indexOf(version);
+  if (index < 0 || versions.lastIndexOf(version) !== index) throw new Error('Unrecognized runtime version');
+  const name = names[index]!;
+  if (reportedName !== '__unknown__' && reportedName !== name) throw new Error('Runtime Worker identity mismatch');
+  return name;
+}
+
+interface DevSoakDeployments {
+  deployments: Array<{ created_on: string; versions: Array<{ version_id: string; percentage: number }> }>;
+}
+
+/** The clean window belongs to the entire active stack, including dedicated repairs. */
+export async function loadDevSoakDeployments(
+  names: string[], load: (name: string) => Promise<DevSoakDeployments>, now: Date,
+): Promise<{ versions: string[]; latestDeploymentAt: Date }> {
+  if (!names.length) throw new Error('Missing runtime Workers');
+  const active = await Promise.all(names.map(async (name) => {
+    const deployment = (await load(name)).deployments[0];
+    const versions = deployment?.versions;
+    if (versions?.length !== 1 || versions[0]?.percentage !== 100 || !versions[0].version_id) {
+      throw new Error(`Unstable deployment identity: ${name}`);
+    }
+    const createdAt = Date.parse(deployment.created_on);
+    if (!Number.isFinite(createdAt) || createdAt > now.getTime()) throw new Error(`Invalid deployment time: ${name}`);
+    return { version: versions[0].version_id, createdAt };
+  }));
+  return { versions: active.map((row) => row.version), latestDeploymentAt: new Date(Math.max(...active.map((row) => row.createdAt))) };
+}
+
 async function main(): Promise<number> {
   const token = requireEnv('CLOUDFLARE_API_TOKEN');
   const accountId = requireEnv('CLOUDFLARE_ACCOUNT_ID');
   const databaseId = process.env.CLOUDFLARE_DEV_D1_DATABASE_ID ?? DEFAULT_DATABASE_ID;
   const publicApiUrl = (process.env.DEV_PUBLIC_API_URL ?? DEFAULT_API_URL).replace(/\/+$/u, '');
   const workerName = process.env.DEV_INGESTION_WORKER ?? DEFAULT_WORKER;
-  const canary = process.env.INGESTION_V2_DEV_CANARY ?? DEFAULT_CANARY;
+  const sourceIds = [...new Set((process.env.INGESTION_V2_DEV_SOURCES
+    ?? process.env.INGESTION_V2_DEV_CANARY ?? DEV_CONFIG.vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST
+    ?? DEFAULT_CANARY).split(',').map((source) => source.trim()).filter(Boolean))];
+  if (!sourceIds.length) throw new Error('at least one dev source is required');
   const windowHours = Number(process.env.INGESTION_V2_SOAK_WINDOW_HOURS ?? '24');
   const output = process.env.INGESTION_V2_SOAK_REPORT
     ?? '.context/verification/ingestion-v2/dev-soak/report.json';
+  if (!Number.isFinite(windowHours) || windowHours <= 0 || windowHours > 168) throw new Error('soak window must be between 0 and 168 hours');
   const capturedAt = new Date();
+  const isolated = DEV_CONFIG.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true';
+  const runtimeNames = isolated ? [workerName, workerName.replace(/-ingestion$/u, '-admission'), workerName.replace(/-ingestion$/u, '-catalog-publisher')] : [workerName];
+  const deployments = await loadDevSoakDeployments(runtimeNames,
+    (name) => cloudflare<DevSoakDeployments>(`/workers/scripts/${name}/deployments`), capturedAt);
+  const deploymentAt = deployments.latestDeploymentAt;
   const rollingWindowStart = new Date(capturedAt.getTime() - windowHours * 3_600_000);
   const configuredWindowStart = process.env.INGESTION_V2_SOAK_STARTED_AT
     ? new Date(process.env.INGESTION_V2_SOAK_STARTED_AT)
     : undefined;
-  if (configuredWindowStart && !Number.isFinite(configuredWindowStart.getTime())) {
+  if (configuredWindowStart && (!Number.isFinite(configuredWindowStart.getTime()) || configuredWindowStart > capturedAt)) {
     throw new Error('INGESTION_V2_SOAK_STARTED_AT must be an ISO-8601 timestamp');
   }
-  const windowStart = new Date(Math.max(rollingWindowStart.getTime(), configuredWindowStart?.getTime() ?? 0)).toISOString();
+  const windowStart = new Date(Math.max(rollingWindowStart.getTime(), deploymentAt.getTime(), configuredWindowStart?.getTime() ?? 0)).toISOString();
   const staleHandoffBefore = new Date(capturedAt.getTime() - 15 * 60_000).toISOString();
 
   async function cloudflare<T>(path: string): Promise<T> {
     const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}${path}`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000),
     });
     const body = (await response.json()) as { success: boolean; result: T; errors?: Array<{ message?: string }> };
     if (!response.ok || !body.success) throw new Error(
@@ -171,35 +322,64 @@ async function main(): Promise<number> {
     return body.result?.[0]?.results ?? [];
   }
 
-  const [healthRows, snapshots, comparisons, rowStates, handoffs, leases, failures, exhaustedFailures, maintenance, queues, schedules, catalog] = await Promise.all([
-    query<{ value: string }>("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'HEALTH'", [`SOURCE#${canary}`]),
-    query<Record<string, unknown>>(`SELECT snapshot_hash, admission_version, row_count, document_count, state,
+  const placeholders = sourceIds.map(() => '?').join(',');
+  const [healthRows, snapshots, comparisons, rowStates, handoffs, leases, catalogParity, failures, exhaustedFailures, maintenance, queues, schedules, settings, apiSettings, catalog, publication, runtime] = await Promise.all([
+    query<{ pk: string; value: string }>(`SELECT pk, value FROM catalog_items WHERE pk IN (${placeholders}) AND sk = 'HEALTH'`, sourceIds.map((source) => `SOURCE#${source}`)),
+    query<Record<string, unknown>>(`SELECT source_id, snapshot_hash, object_key, admission_version, row_count, document_count, state,
       is_complete, baseline, activated_at FROM ingestion_snapshots
-      WHERE source_id = ? AND state = 'active' ORDER BY activated_at DESC LIMIT 1`, [canary]),
-    query<Record<string, unknown>>(`SELECT snapshot_hash, admission_version, complete, observed_at, updated_at, run_count,
+      WHERE source_id IN (${placeholders}) AND state = 'active' ORDER BY activated_at DESC`, sourceIds),
+    query<Record<string, unknown>>(`SELECT source_id, snapshot_hash, admission_version, complete, observed_at, updated_at, run_count,
       window_started_at, window_run_count, window_d1_rows_written
-      FROM ingestion_v2_shadow_comparisons WHERE source_id = ? AND observed_at >= ?`, [canary, windowStart]),
-    query<Record<string, unknown>>(`SELECT state, COALESCE(decision, '') AS decision, COUNT(*) AS rows,
-      SUM(attempt_count) AS attempts, MAX(updated_at) AS latest_update FROM ingestion_rows
-      WHERE source_id = ? GROUP BY state, decision ORDER BY state, decision`, [canary]),
-    query<{ pending: number; stale: number }>(`SELECT COUNT(*) AS pending,
+      FROM ingestion_v2_shadow_comparisons WHERE source_id IN (${placeholders})`, sourceIds),
+    query<Record<string, unknown>>(`SELECT source_id, state, COALESCE(decision, '') AS decision, COUNT(*) AS rows,
+      SUM(attempt_count) AS attempts, SUM(CASE WHEN attempt_count > 0 THEN 1 ELSE 0 END) AS attempted, MAX(updated_at) AS latest_update FROM ingestion_rows
+      WHERE source_id IN (${placeholders}) GROUP BY source_id, state, decision ORDER BY source_id, state, decision`, sourceIds),
+    query<{ source_id: string; pending: number; stale: number }>(`SELECT source_id, COUNT(*) AS pending,
       SUM(CASE WHEN dispatched_at < ? THEN 1 ELSE 0 END) AS stale
-      FROM ingestion_admission_handoffs WHERE source_id = ? AND acknowledged_at IS NULL`, [staleHandoffBefore, canary]),
-    query<{ expired: number }>(`SELECT COUNT(*) AS expired FROM ingestion_rows
-      WHERE source_id = ? AND state = 'processing' AND lease_expires_at < ?`, [canary, capturedAt.toISOString()]),
+      FROM ingestion_admission_handoffs WHERE source_id IN (${placeholders}) AND acknowledged_at IS NULL GROUP BY source_id`, [staleHandoffBefore, ...sourceIds]),
+    query<{ source_id: string; expired: number }>(`SELECT source_id, COUNT(*) AS expired FROM ingestion_rows
+      WHERE source_id IN (${placeholders}) AND state = 'processing' AND lease_expires_at < ? GROUP BY source_id`, [...sourceIds, capturedAt.toISOString()]),
+    query<{ source_id: string; mismatches: number }>(ingestionV2CatalogParitySql(sourceIds.length), sourceIds),
+    // A redeployment or rolling observation boundary cannot resolve durable
+    // failures. Use the partial unresolved-age index and bound the sample.
     query<Record<string, unknown>>(`SELECT queue_name, category, COUNT(*) AS failures, MAX(last_failed_at) AS latest
-      FROM queue_failure_events WHERE resolved_at IS NULL AND last_failed_at >= ?
-      GROUP BY queue_name, category ORDER BY queue_name, category`, [windowStart]),
+      FROM (SELECT queue_name, category, last_failed_at FROM queue_failure_events
+        WHERE resolved_at IS NULL ORDER BY first_failed_at, id LIMIT 200)
+      GROUP BY queue_name, category ORDER BY queue_name, category`),
     query<Record<string, unknown>>(`SELECT queue_name, COALESCE(source_id, '') AS source_id, category,
       COUNT(*) AS failures, MAX(last_failed_at) AS latest
-      FROM queue_failure_events WHERE delivery_attempt >= 3 AND last_failed_at >= ?
+      FROM queue_failure_events WHERE delivery_attempt >= CASE WHEN queue_name = 'intern-notifs-dev-gmail' THEN 6 ELSE 3 END AND last_failed_at >= ?
       GROUP BY queue_name, source_id, category ORDER BY queue_name, source_id, category`, [windowStart]),
     query<Record<string, unknown>>(`SELECT key, value, updated_at FROM system_state
-      WHERE key IN ('maintenance_phase:maintenance:ingestion_v2_admission_dispatch',
-      'maintenance_phase:maintenance:maintenance_complete') ORDER BY key`),
+      WHERE key IN ('maintenance_phase:maintenance:ingestion_v2_admission_dispatch', 'maintenance_phase:admission_v2:dispatch',
+      'maintenance_phase:maintenance:maintenance_complete',
+      'maintenance_phase:catalog_projection_r2:catalog_projection_r2_complete') ORDER BY key`),
     cloudflare<QueueSummary[]>('/queues?per_page=100'),
     cloudflare<{ schedules: Array<{ cron: string }> }>(`/workers/scripts/${workerName}/schedules`),
-    fetch(`${publicApiUrl}/catalog?limit=1`),
+    cloudflare<{ bindings: Array<{ name: string; type: string; text?: string }> }>(`/workers/scripts/${workerName}/settings`),
+    cloudflare<{ bindings: Array<{ name: string; type: string; text?: string }> }>('/workers/scripts/intern-notifs-dev/settings'),
+    fetch(`${publicApiUrl}/catalog?limit=1`, { signal: AbortSignal.timeout(30_000) }),
+    fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/intern-notifs-dev-documents/objects/public-catalog/v1/current`, {
+      headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000),
+    }).then(async (response) => {
+      if (!response.ok) return undefined;
+      const pointer = await response.json() as NonNullable<DevSoakSample['publication']>;
+      return { generatedAt: pointer.generatedAt, version: pointer.version, count: pointer.count };
+    }),
+    (async () => {
+      const names = runtimeNames;
+      const versions = deployments.versions;
+      const response = await fetch('https://api.cloudflare.com/client/v4/graphql', { method: 'POST', signal: AbortSignal.timeout(30_000),
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: `query($account: String!, $since: Time!, $workers: [String!]!, $versions: [String!]!) { viewer { accounts(filter: { accountTag: $account }) {
+          workersInvocationsAdaptive(limit: 100, filter: { datetime_geq: $since, scriptName_in: $workers, scriptVersion_in: $versions }) {
+            dimensions { status scriptName scriptVersion } sum { requests errors } quantiles { cpuTimeP99 memoryUsageBytesP99 } } } } }`,
+          variables: { account: accountId, since: new Date(Math.max(capturedAt.getTime() - 3_600_000, deploymentAt.getTime())).toISOString(), workers: names, versions } }),
+      });
+      const body = await response.json() as { errors?: unknown; data?: { viewer: { accounts: Array<{ workersInvocationsAdaptive: Array<{ dimensions: { status: string; scriptName: string; scriptVersion: string }; sum: { requests: number; errors: number }; quantiles: { cpuTimeP99: number; memoryUsageBytesP99: number } }> }> } } };
+      if (!response.ok || body.errors) throw new Error('Worker runtime analytics unavailable');
+      return body.data?.viewer.accounts[0]?.workersInvocationsAdaptive.map((row) => ({ worker: runtimeWorkerIdentity(row.dimensions.scriptName, row.dimensions.scriptVersion, names, versions), version: row.dimensions.scriptVersion, status: row.dimensions.status, ...row.sum, ...row.quantiles })) ?? [];
+    })(),
   ]);
 
   const relevantQueueNames = new Set(QUEUE_SUFFIXES.flatMap((suffix) => [
@@ -208,21 +388,64 @@ async function main(): Promise<number> {
   const queueMetrics = Object.fromEntries(await Promise.all(queues
     .filter((queue) => relevantQueueNames.has(queue.queue_name))
     .map(async (queue) => [queue.queue_name, await cloudflare<QueueMetrics>(`/queues/${queue.queue_id}/metrics`)] as const)));
-  const handoff = handoffs[0];
+  const canaries = await Promise.all(sourceIds.map(async (sourceId): Promise<DevSoakSample['canary']> => {
+    const health = healthRows.find((row) => row.pk === `SOURCE#${sourceId}`);
+    const snapshot = snapshots.find((row) => row.source_id === sourceId);
+    const comparison = comparisons.find((row) => row.source_id === sourceId);
+    const handoff = handoffs.find((row) => row.source_id === sourceId);
+    let r2SnapshotValid = false;
+    if (snapshot) {
+      const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/intern-notifs-dev-documents/objects/${snapshot.object_key}`, {
+        headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000),
+      });
+      if (response.ok) {
+        try {
+          const envelope = parseEnvelope(await response.text(), { sourceId, snapshotHash: String(snapshot.snapshot_hash) });
+          r2SnapshotValid = envelope.sourceId === sourceId && envelope.snapshotHash === snapshot.snapshot_hash
+            && envelope.admissionVersion === snapshot.admission_version && envelope.rowCount === snapshot.row_count;
+        } catch { /* A corrupt snapshot is a failed integrity check, not a missing report. */ }
+      }
+    }
+    const sourceHealth = health ? JSON.parse(health.value) as SourceHealth : undefined;
+    return { sourceId, ...(sourceHealth ? { health: { state: sourceHealth.state, sourceStatus: sourceHealth.sourceStatus,
+      lastSuccessAt: sourceHealth.lastSuccessAt, lastAttemptAt: sourceHealth.lastAttemptAt, consecutiveFailures: sourceHealth.consecutiveFailures } } : {}),
+      ...(snapshot ? { activeSnapshot: snapshot } : {}), ...(comparison ? { shadowComparison: comparison } : {}),
+      rows: rowStates.filter((row) => row.source_id === sourceId), pendingHandoffs: handoff?.pending ?? 0,
+      staleHandoffs: handoff?.stale ?? 0, expiredLeases: leases.find((row) => row.source_id === sourceId)?.expired ?? 0, r2SnapshotValid,
+      catalogOwned: admissionV2OwnsCatalogWrites(DEV_CONFIG.vars, sourceId),
+      catalogMismatches: catalogParity.find((row) => row.source_id === sourceId)?.mismatches ?? 0 };
+  }));
+  const extraSettings = isolated ? await Promise.all(['admission', 'catalog-publisher'].map(async (role) => {
+    const worker = workerName.replace(/-ingestion$/u, `-${role}`);
+    const live = await cloudflare<{ bindings: Array<{ name: string; type: string; text?: string }> }>(`/workers/scripts/${worker}/settings`);
+    const schedules = await cloudflare<{ schedules: Array<{ cron: string }> }>(`/workers/scripts/${worker}/schedules`);
+    return { worker, role, live, schedules: schedules.schedules.map((s) => s.cron) };
+  })) : [];
+  const controlMismatches = [{ worker: workerName, live: settings }, { worker: 'intern-notifs-dev', live: apiSettings }, ...extraSettings.filter((row) => row.role === 'admission')]
+    .flatMap(({ worker, live }) => Object.entries(DEV_CONFIG.vars)
+      .filter(([name]) => (name.startsWith('INGESTION_V2_') || name === 'OUTBOUND_NOTIFICATIONS_ENABLED') && !(worker === 'intern-notifs-dev' && name === 'INGESTION_V2_ISOLATED_WORKERS_ENABLED'))
+      .filter(([name, expected]) => live.bindings.find((binding) => binding.name === name && binding.type === 'plain_text')?.text !== expected)
+      .map(([name]) => `${worker}: ${name} differs from selected dev profile`));
+  for (const row of extraSettings) {
+    const expected = row.role === 'admission' ? ['9-59/10 * * * *'] : ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'];
+    if (row.schedules.length !== expected.length || expected.some((cron) => !row.schedules.includes(cron))) controlMismatches.push(`${row.worker}: cron ownership differs`);
+    if (row.live.bindings.find((b) => b.name === 'INGESTION_V2_ISOLATED_WORKERS_ENABLED')?.text !== 'true') controlMismatches.push(`${row.worker}: isolation disabled`);
+    if (row.live.bindings.find((b) => b.name === 'OUTBOUND_NOTIFICATIONS_ENABLED')?.text !== 'false') controlMismatches.push(`${row.worker}: outbound suppression differs`);
+    if (row.role === 'catalog-publisher' && row.live.bindings.find((b) => b.name === 'LLM_METADATA_PUBLICATION_POLICY_JSON')?.text !== DEV_CONFIG.vars.LLM_METADATA_PUBLICATION_POLICY_JSON) controlMismatches.push(`${row.worker}: metadata publication policy differs`);
+  }
+  if (isolated) {
+    const queue = queues.find((q) => q.queue_name === 'intern-notifs-dev-admission-v2');
+    const consumers = queue ? await cloudflare<Array<{ script_name?: string; script?: string; service?: string }>>(`/queues/${queue.queue_id}/consumers`) : [];
+    const owner = workerName.replace(/-ingestion$/u, '-admission');
+    if (consumers.length !== 1 || (consumers[0]?.script_name ?? consumers[0]?.script ?? consumers[0]?.service) !== owner) controlMismatches.push('Admission queue has an unexpected consumer');
+  }
+  if (isolated && schedules.schedules.some((s) => ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'].includes(s.cron))) controlMismatches.push('Legacy ingestion still owns projection crons');
   const sample: DevSoakSample = {
-    capturedAt: capturedAt.toISOString(),
-    windowStartedAt: windowStart,
-    windowHours,
-    canary: {
-      sourceId: canary,
-      ...(healthRows[0] ? { health: JSON.parse(healthRows[0].value) as SourceHealth } : {}),
-      ...(snapshots[0] ? { activeSnapshot: snapshots[0] } : {}),
-      ...(comparisons[0] ? { shadowComparison: comparisons[0] } : {}),
-      rows: rowStates,
-      pendingHandoffs: handoff?.pending ?? 0,
-      staleHandoffs: handoff?.stale ?? 0,
-      expiredLeases: leases[0]?.expired ?? 0,
-    },
+    capturedAt: capturedAt.toISOString(), windowStartedAt: windowStart, windowHours, runtime,
+    soakStartedAt: new Date(Math.max(deploymentAt.getTime(), configuredWindowStart?.getTime() ?? 0)).toISOString(),
+    canary: canaries[0]!, canaries, schedules: [...new Set([...schedules.schedules.map(({ cron }) => cron), ...extraSettings.flatMap((row) => row.schedules)])], controlMismatches,
+    ...(isolated ? { expectedRuntimeWorkers: [workerName, ...extraSettings.map((row) => row.worker)] } : {}),
+    ...(publication ? { publication } : {}),
     maintenance,
     unresolvedFailures: failures,
     exhaustedFailures,
@@ -231,7 +454,9 @@ async function main(): Promise<number> {
     publicCatalogStatus: catalog.status,
   };
   const checks = evaluateDevSoak(sample, capturedAt);
-  const report = { ...sample, checks };
+  const report = { ...sample, checks, coverage: devSoakCoverage(
+    DEV_CONFIG.vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST.split(',').filter(Boolean), sourceIds,
+  ) };
   mkdirSync(dirname(output), { recursive: true });
   writeFileSync(output, `${JSON.stringify(report, null, 2)}\n`);
 

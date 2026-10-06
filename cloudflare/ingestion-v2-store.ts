@@ -1,3 +1,4 @@
+import { readSnapshotRows } from '../src/ingestion-v2/stream-snapshot.js';
 import type { D1Database, R2Bucket } from './types.js';
 import {
   parseEnvelope,
@@ -384,18 +385,21 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
 
   async applyOmissions(sourceId: string, updates: readonly SnapshotOmissionUpdate[], updatedAt: string): Promise<void> {
     if (!updates.length) return;
-    // Preserve lane ownership and failure history, but missing published rows
-    // still need a durable negative effect. An already-claimed effect drains
-    // before closure; new claims reject two-omission rows.
+    // Retire missing work without erasing failure history or closure work.
+    // An already-claimed effect keeps its lane until settlement and closure;
+    // every other two-omission row becomes absent and rejects new claims.
     const statement = this.db.prepare(`
       UPDATE ingestion_rows SET consecutive_omissions = ?,
-        state = CASE WHEN state IN (${laneOwnedSqlList}) THEN state ELSE ? END, updated_at = ?,
+        state = CASE
+          WHEN ? AND effect_claimed_at IS NULL THEN 'absent'
+          WHEN state IN (${laneOwnedSqlList}) THEN state ELSE ? END, updated_at = ?,
         closure_pending = CASE WHEN ? THEN 1 ELSE closure_pending END
       WHERE source_id = ? AND external_id = ?
         AND last_observed_at <= ? AND updated_at <= ?
     `);
     const statements = updates.map((update) => statement.bind(
       update.consecutiveOmissions,
+      update.becomesAbsent ? 1 : 0,
       update.becomesAbsent ? 'absent' : 'settled',
       updatedAt,
       update.becomesAbsent ? 1 : 0,
@@ -419,7 +423,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
   }
 
   async acknowledgeOmissionClosure(row: IngestionRowRecord): Promise<void> {
-    await this.db.prepare(`UPDATE ingestion_rows SET closure_pending = 0
+    await this.db.prepare(`UPDATE ingestion_rows SET closure_pending = 0, state = 'absent'
       WHERE source_id = ? AND external_id = ? AND snapshot_hash = ? AND material_hash = ?
         AND admission_version = ? AND updated_at = ? AND effect_claimed_at IS NULL
         AND consecutive_omissions >= 2 AND closure_pending = 1`)
@@ -1079,7 +1083,6 @@ function decodeCursor(cursor: string | undefined): { lastObservedAt: string; ext
 /** R2-backed, content-addressed normalized snapshot store. */
 export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
   private readonly encoder = new TextEncoder();
-  private readonly decoder = new TextDecoder();
 
   constructor(private readonly bucket: R2Bucket) {}
 
@@ -1105,17 +1108,25 @@ export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
    */
   async putSnapshot(envelope: NormalizedSnapshotEnvelope): Promise<{ key: string; bytes: number; existed: boolean }> {
     const key = snapshotObjectKey(envelope.sourceId, envelope.snapshotHash);
-    const body = serializeEnvelope(envelope);
-    const existing = await this.get(key);
+    const existing = await this.bucket.get(key);
     if (existing !== null) {
       // The key is the content hash, so an existing object can only differ in
       // volatile fetch metadata. Validate it and keep the original bytes rather
       // than rewriting; a corrupt or mismatched body fails closed.
-      parseEnvelope(existing, { sourceId: envelope.sourceId, snapshotHash: envelope.snapshotHash });
-      return { key, bytes: existing.length, existed: true };
+      const validated = await readSnapshotRows(existing.body, { sourceId: envelope.sourceId, snapshotHash: envelope.snapshotHash }, []);
+      return { key, bytes: validated.bytes, existed: true };
     }
-    await this.put(key, body);
-    return { key, bytes: body.length, existed: false };
+    const body = serializeEnvelope(envelope);
+    const bytes = this.encoder.encode(body);
+    // Enforce the reader's complete validation and capacity contract before
+    // publishing an immutable object that discovery can activate in D1.
+    // Enqueue the existing bytes directly rather than copying a large body.
+    await readSnapshotRows(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    } }), { sourceId: envelope.sourceId, snapshotHash: envelope.snapshotHash }, []);
+    await this.bucket.put(key, bytes.buffer as ArrayBuffer);
+    return { key, bytes: bytes.byteLength, existed: false };
   }
 
   async getSnapshot(sourceId: string, snapshotHash: string): Promise<NormalizedSnapshotEnvelope> {
@@ -1123,5 +1134,12 @@ export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
     const raw = await this.get(key);
     if (raw === null) throw new Error(`Ingestion snapshot object missing at ${key}`);
     return parseEnvelope(raw, { sourceId, snapshotHash });
+  }
+
+  async getSnapshotRows(sourceId: string, snapshotHash: string, externalIds: readonly string[]) {
+    const key = snapshotObjectKey(sourceId, snapshotHash);
+    const object = await this.bucket.get(key);
+    if (!object) throw new Error(`Ingestion snapshot object missing at ${key}`);
+    return (await readSnapshotRows(object.body, { sourceId, snapshotHash }, externalIds)).rows;
   }
 }

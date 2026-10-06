@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runCatalogProjectionMaintenance, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider, admissionOperationalSignals, catalogStarvationSignal } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
+import { R2CatalogProjection } from '../cloudflare/r2-catalog-projection.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
 import type { D1PreparedStatement, Queue } from '../cloudflare/types.js';
@@ -329,7 +330,7 @@ describe('Cloudflare maintenance cron', () => {
     ]);
   });
 
-  it('refreshes the D1 catalog projection on its dedicated cron and invalidates the old R2 pointer', async () => {
+  it('refreshes the D1 catalog projection on its dedicated cron when R2 is missing', async () => {
     // The projection is the Roles feed's whole source of truth, and it is now the
     // only memory-heavy step on this cron so the `9-59/10` phases cannot pile up
     // beside it and cross the isolate limit.
@@ -357,6 +358,27 @@ describe('Cloudflare maintenance cron', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it('keeps a matching R2 publication available across the intervening D1 cron', async () => {
+    const values = new Map<string, string>();
+    const documents = {
+      async get(key: string) { const value = values.get(key); return value === undefined ? null : { body: value }; },
+      async put(key: string, value: string) { values.set(key, value); },
+      delete: vi.fn(async (key: string) => { values.delete(key); }),
+    };
+    await new R2CatalogProjection(documents as unknown as Environment['DOCUMENTS']).publish([], new Date().toISOString());
+    vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
+    vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await cloudflareWorker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) }, DOCUMENTS: documents,
+      } as unknown as Environment);
+      expect(documents.delete).not.toHaveBeenCalled();
+      expect(await new R2CatalogProjection(documents as unknown as Environment['DOCUMENTS']).list()).toMatchObject({ groups: [] });
+    } finally { vi.restoreAllMocks(); }
   });
 
   it('publishes the R2 catalog projection in a separate invocation', async () => {

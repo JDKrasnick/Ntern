@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { compensationLabels } from '../shared/compensation-display.js';
 import { metadataDescriptionText } from './core/metadata-text.js';
+import { hiringClausePattern, hiringSeasonText } from './core/early-career.js';
 import { boundedText, locationSummary, normalizeLocations } from './catalog-quality.js';
 import { educationAudienceLevels, effectiveAdvancedDegreeRequired, mergeEducationEvidence, mergeProvenance } from './identity/enrichment.js';
 import type {
@@ -30,7 +31,7 @@ import type {
 // Increment whenever a parser change can produce a different result from an
 // unchanged artifact. This makes the collection scheduler revisit both a
 // previous negative result and an already-enriched posting.
-export const ROLE_METADATA_EXTRACTION_VERSION = 18;
+export const ROLE_METADATA_EXTRACTION_VERSION = 20;
 export const VERIFIED_PAGE_METADATA_SOURCES = ['official-json-ld', 'official-page'] as const;
 const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
   // Exact-role detail retrieval owns its own slot; a later board-list poll
@@ -321,8 +322,15 @@ function graduationWindow(value: string): GraduationDateWindow | undefined {
   // evidence of a graduation window.
   const marker = /\b(?:graduat(?:es|ed|ing|ion)|graduate(?!\s+(?:students?|school|degree|program|intern|level)\b)|class of|degree completion)\b/iu;
   const context = value.split(/(?<=[.!?;])\s+|\n+/u)
-    .map(clause => clause.split(/\b(?:applications? (?:close|deadline)|apply by|(?:internship|program) (?:starts?|begins?))\b/iu)[0] ?? '')
-    .filter(clause => marker.test(clause)).map(clause => clause.slice(0, 400)).join(' ');
+    .map(clause => {
+      const graduation = marker.exec(clause);
+      if (!graduation) return '';
+      const hiring = hiringClausePattern.exec(clause);
+      // A hiring clause on either side is not part of the applicant's window.
+      const requirement = hiring && hiring.index < graduation.index ? clause.slice(graduation.index)
+        : hiring ? clause.slice(0, hiring.index) : clause;
+      return (requirement.split(/\b(?:applications? (?:close|deadline)|apply by)\b/iu)[0] ?? '').slice(0, 400);
+    }).join(' ');
   if (!context) return undefined;
   const dates = [
     ...[...context.matchAll(/\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(20\d{2})\b/giu)]
@@ -708,7 +716,7 @@ function deadline(value: string | undefined, timezone?: string): ApplicationDead
 }
 
 function explicitSeason(value: string): Required<Pick<SeasonIdentity, 'term' | 'year'>> | undefined {
-  const match = /\b(spring|summer|fall|winter)\s*(?:intern(?:ship)?\s*)?(20\d{2})\b/iu.exec(value);
+  const match = /\b(spring|summer|fall|winter)\s*(?:intern(?:ship)?\s*)?(20\d{2})\b/iu.exec(hiringSeasonText(value));
   return match ? { term: match[1]!.toLowerCase() as NonNullable<SeasonIdentity['term']>, year: Number(match[2]) } : undefined;
 }
 
@@ -843,7 +851,7 @@ export function extractRoleMetadataEvidence(input: ExtractRoleMetadataInput): Ro
   if (compensationRanges.length) excerpts.compensation = boundedText([...new Set(compensationRanges.map((range) => range.sourceText))].join(' · '), 240);
   if (housing.length) excerpts.housing = housing[0]!.sourceText;
   if (education) excerpts.education = fieldExcerpt(text, /\b(?:bachelor|undergrad|four[ -]?year|master|graduate student|mba|ph\.?d\.?|doctoral?|graduat(?:e|ing|ion)|class of)\b/iu);
-  if (season) excerpts.season = fieldExcerpt(`${title}\n${text}`, /\b(?:spring|summer|fall|winter)\s*(?:intern(?:ship)?\s*)?20\d{2}\b/iu);
+  if (season) excerpts.season = fieldExcerpt(hiringSeasonText(`${title}\n${text}`), /\b(?:spring|summer|fall|winter)\s*(?:intern(?:ship)?\s*)?20\d{2}\b/iu);
   if (applicationDeadline) excerpts['application-deadline'] = fieldExcerpt(input.artifact.text ?? input.artifact.deadline ?? '', /\b(?:deadline|closes?|apply by|rolling)\b/iu);
   return {
     schemaVersion: 1, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, artifactHash,

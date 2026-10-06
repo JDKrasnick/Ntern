@@ -272,4 +272,6 @@ export interface IngestionSnapshotObjectStore {
   putSnapshot(envelope: NormalizedSnapshotEnvelope): Promise<{ key: string; bytes: number; existed: boolean }>;
   /** Reads and validates an envelope by source and hash. */
   getSnapshot(sourceId: string, snapshotHash: string): Promise<NormalizedSnapshotEnvelope>;
+  /** Streaming stores validate the entire object and retain only this batch. */
+  getSnapshotRows?(sourceId: string, snapshotHash: string, externalIds: readonly string[]): Promise<Map<string, NormalizedSnapshotRow>>;
 }

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { dnsJson, publicHostResolver } from './public-host-resolver.js';
+export { dnsJson, publicHostResolver } from './public-host-resolver.js';
 import { unzipSync } from 'fflate';
 import { decodeMetadataCursor, encodeMetadataCursor } from '../src/metadata-audit.js';
 import { createApiHandler, type DocumentStorage, type ResumeArtifactStorage, type ResumeImportCache, type ResumeImportQueue } from '../src/api.js';
@@ -17,8 +19,6 @@ import {
   readIdentityCoverageBaseline, writeIdentityCoverageBaseline,
 } from './identity-coverage-ratchet.js';
 import { runRuntimeCommand } from '../src/runtime.js';
-import { catalogGroupDetails, compareCatalogProjectionGroups, groupCatalogJobs } from '../src/catalog-groups.js';
-import { catalogRecency, openCatalogSortKey } from '../src/catalog-recency.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
 import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
@@ -37,8 +37,8 @@ import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery
 import { reconcileIngestionV2Omissions } from '../src/ingestion-v2/omission-closure.js';
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState } from '../src/ingestion-v2/types.js';
-import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
-import { bootstrapAdmissionSnapshot, migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
+import { runAdmissionV2Dispatch } from './admission-v2-dispatch.js';
+export { ADMISSION_V2_SOURCE_LIMIT } from './admission-v2-dispatch.js';
 import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import { applyIngestionV2Bootstrap, planIngestionV2Bootstrap } from '../src/ingestion-v2/bootstrap.js';
 import { admissionV2FeatureConfig, admissionV2OwnsCatalogWrites, admissionV2TrustedCommunityAlertsAllowed } from '../src/ingestion-v2/admission/types.js';
@@ -50,8 +50,10 @@ import {
   notificationEventRetentionCutoff,
   runCatalogRetention,
 } from './catalog-retention.js';
-import { R2CatalogProjection, R2CatalogReadStore } from './r2-catalog-projection.js';
-import { D1MaintenancePhaseStore, type MaintenancePhaseRecorder, type MaintenancePhaseStatus } from './maintenance-phases.js';
+import { R2CatalogReadStore } from './r2-catalog-projection.js';
+import { D1MaintenancePhaseStore } from './maintenance-phases.js';
+import { recordPhase, runScheduledStep, runCatalogProjectionMaintenance, refreshCatalogProjection, refreshCatalogProjectionD1, refreshCatalogProjectionR2 } from './catalog-projection-maintenance.js';
+export { runCatalogProjectionMaintenance } from './catalog-projection-maintenance.js';
 import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
 import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary } from './shadow-extraction.js';
@@ -142,6 +144,7 @@ export interface Environment extends AuthEnvironment,
   IDENTITY_CONFIRMED_COVERAGE_FLOOR?: string;
   BILLING_WEBHOOK_SECRET?: string;
   CLOUDFLARE_SHUTDOWN_TOKEN?: string;
+  INGESTION_V2_ISOLATED_WORKERS_ENABLED?: string;
   CLOUDFLARE_ACCOUNT_ID: string;
   WORKER_NAME: string;
   GREENHOUSE_QUEUE_ID: string;
@@ -262,8 +265,6 @@ function catalogAdmissionResolver(env: Environment): CatalogAdmissionResolver {
   };
 }
 
-const DOH_QUERY_TIMEOUT_MS = 8_000;
-const DNS_RECORD_TYPE: Readonly<Record<'A' | 'AAAA' | 'TXT', number>> = { A: 1, AAAA: 28, TXT: 16 };
 
 /**
  * Records company-icon tasks for admitted employers.
@@ -290,25 +291,6 @@ function employerIconEnqueue(env: Environment): (seed: EmployerIconSeed) => Prom
   };
 }
 
-export async function dnsJson(name: string, type: 'A' | 'AAAA' | 'TXT'): Promise<Array<{ type?: number; data?: string }>> {
-  const endpoint = new URL('https://cloudflare-dns.com/dns-query');
-  endpoint.searchParams.set('name', name); endpoint.searchParams.set('type', type);
-  let response: Response;
-  try {
-    response = await fetch(endpoint, { headers: { Accept: 'application/dns-json' }, signal: AbortSignal.timeout(DOH_QUERY_TIMEOUT_MS) });
-  } catch (error) {
-    // A stalled resolver query must fail the probe rather than park a queue
-    // consumer invocation until the platform's fifteen-minute limit.
-    throw new Error(`DNS verification timed out for ${name} (${type}): ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (!response.ok) throw new Error('DNS verification is temporarily unavailable');
-  const value = await response.json() as { Answer?: Array<{ type?: number; data?: string }> };
-  // A recursive answer carries the whole CNAME chain before the requested
-  // records. Keeping the CNAME target (for example `boards.us.example.com.`)
-  // would make `assertPublicHttpsUrl` treat a hostname as a non-public IP and
-  // reject an otherwise public host, so keep only the requested record type.
-  return (value.Answer ?? []).filter((answer) => answer.type === DNS_RECORD_TYPE[type]);
-}
 
 /**
  * The SVG rasterizer, provided by the entry point that can carry it.
@@ -324,13 +306,6 @@ let iconSvgRasterizer: IconSvgRasterizer | undefined;
 export function provideIconSvgRasterizer(rasterizer: IconSvgRasterizer): void {
   iconSvgRasterizer = rasterizer;
 }
-
-export const publicHostResolver = {
-  async resolve(hostname: string): Promise<string[]> {
-    const [ipv4, ipv6] = await Promise.all([dnsJson(hostname, 'A'), dnsJson(hostname, 'AAAA')]);
-    return [...ipv4, ...ipv6].map((answer) => answer.data).filter((value): value is string => Boolean(value));
-  },
-};
 
 async function verifyPublishedChallenge(challenge: EmployerVerificationChallenge, domain: string, token: string): Promise<boolean> {
   if (challenge.method === 'dns-txt') {
@@ -1469,7 +1444,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
         ? { ...leverWorkMessages([source as typeof reviewedLeverSources[number]], now, crypto.randomUUID())[0]!, force: true }
         : { ...ashbyWorkMessages([source as typeof reviewedAshbySources[number]], now, crypto.randomUUID())[0]!, force: true };
     const event = { Records: [{ messageId: crypto.randomUUID(), body: JSON.stringify(message) }] };
-    const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env) };
+    const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env),
+      shadowDiscovery: ingestionV2ShadowDiscovery(env),
+      v2CatalogWriteOwner: (sourceId: string) => admissionV2OwnsCatalogWrites(env, sourceId),
+      v2TrustedCommunityAlertsEnabled: (sourceId: string) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId) };
     const result = atsProvider === 'greenhouse'
       ? await processGreenhouseQueue(event, { ...dependencies, sources: providers.greenhouse,
         enqueueContinuation: (continuation) => sendQueueMessageWithin(env.GREENHOUSE_QUEUE, continuation) })
@@ -1877,137 +1855,6 @@ async function recordScheduledDispatch(
  * throws must not abort the handler or skip the work, so every write is
  * isolated from the phase it describes. D1MaintenancePhaseStore already
  * swallows its own failures; this keeps that guarantee for any recorder. */
-async function recordPhase(
-  phases: MaintenancePhaseRecorder | undefined,
-  phase: string,
-  status: MaintenancePhaseStatus,
-  observedAt?: Date,
-): Promise<void> {
-  try {
-    if (observedAt === undefined) await phases?.record(phase, status);
-    else await phases?.record(phase, status, observedAt);
-  }
-  catch { /* best-effort by contract; a marker failure never fails a phase */ }
-}
-
-/** Runs one scheduled responsibility in isolation. Several of them share the
- * maintenance cron, and a thrown error used to abort the handler — which is how
- * one failing step held the catalog projection on a day-old snapshot. The
- * failure stays visible as an error-level event instead.
- *
- * A durable marker brackets each step when a recorder is supplied. A Worker that
- * dies on the memory limit cannot flush its console, so the marker rows are the
- * only surviving record of which phase was entered and which one finished. A
- * caller may also pass a collector so the same failure reaches the scheduled
- * ingestion-health alert. */
-async function runScheduledStep<T>(
-  step: string,
-  run: () => Promise<T>,
-  phases?: MaintenancePhaseRecorder,
-  failures?: string[],
-): Promise<T | undefined> {
-  await recordPhase(phases, step, 'started');
-  try {
-    const result = await run();
-    await recordPhase(phases, step, 'complete');
-    return result;
-  } catch (error) {
-    await recordPhase(phases, step, 'failed');
-    // A step failure is already logged; when a caller passes a collector it is
-    // also surfaced through the scheduled ingestion-health alert.
-    failures?.push(step);
-    console.error(JSON.stringify({ event: 'scheduled_step_failed', step, error: error instanceof Error ? error.message : String(error) }));
-    return undefined;
-  }
-}
-
-export async function runCatalogProjectionMaintenance<T>(
-  publishShadow: (refreshProjection: () => Promise<T>) => Promise<unknown>,
-  refreshProjection: () => Promise<T>,
-  phases?: MaintenancePhaseRecorder,
-): Promise<{ prospectiveShadowMetadata: unknown; projection: T | undefined }> {
-  let projectionPromise: Promise<T> | undefined;
-  const refreshProjectionOnce = () => projectionPromise ??= refreshProjection();
-  const prospectiveShadowMetadata = await runScheduledStep('prospective_shadow_metadata', () => publishShadow(refreshProjectionOnce), phases);
-  const projection = await runScheduledStep('catalog_projection', refreshProjectionOnce, phases);
-  return { prospectiveShadowMetadata, projection };
-}
-
-async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket, phases?: MaintenancePhaseRecorder) {
-  // One order for both read models: the card's own `updatedAt` (with its group id
-  // breaking ties) is stored on each D1 row as its sort key, and R2 pages are
-  // written in the same order, so a reader of either sees the same sequence.
-  // The newest open role this publish can see becomes the readers' watermark: a
-  // role published after it is grouped live until the next tick, so an alert and
-  // the catalog never disagree about a role that already exists.
-  const jobs = await store.listCatalog();
-  const liveWatermark = jobs.reduce<string | undefined>((newest, job) => {
-    if (!job.open || catalogRecency(job) !== 'normal') return newest;
-    const key = openCatalogSortKey(job);
-    return !newest || key > newest ? key : newest;
-  }, undefined);
-  const groups = groupCatalogJobs(jobs, { includeClosed: true })
-    .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
-  const generatedAt = new Date().toISOString();
-  await recordPhase(phases, 'catalog_projection_d1', 'started');
-  try {
-    await store.putCatalogProjection(groups, generatedAt, liveWatermark);
-    await recordPhase(phases, 'catalog_projection_d1', 'complete');
-  } catch (error) {
-    await recordPhase(phases, 'catalog_projection_d1', 'failed');
-    throw error;
-  }
-  if (bucket) {
-    await recordPhase(phases, 'catalog_projection_r2', 'started');
-    try {
-      await new R2CatalogProjection(bucket).publish(groups, generatedAt, liveWatermark);
-      await recordPhase(phases, 'catalog_projection_r2', 'complete');
-    }
-    catch (error) {
-      await recordPhase(phases, 'catalog_projection_r2', 'failed');
-      console.error(JSON.stringify({ event: 'r2_catalog_projection_publish_failed', error: String(error) }));
-      // D1 already points at the new projection. Hide an older R2 pointer so
-      // readers fall back to D1 instead of serving stale admission decisions.
-      try { await new R2CatalogProjection(bucket).invalidate(); }
-      catch (invalidationError) {
-        console.error(JSON.stringify({ event: 'r2_catalog_projection_invalidation_failed', error: String(invalidationError) }));
-      }
-    }
-  }
-  return {
-    generatedAt,
-    groups: groups.length,
-    roles: groups.reduce((total, group) => total + group.roles.length, 0),
-  };
-}
-
-async function refreshCatalogProjectionD1(
-  store: D1InternshipStore,
-  bucket: R2Bucket | undefined,
-  phases?: MaintenancePhaseRecorder,
-) {
-  const result = await refreshCatalogProjection(store, undefined, phases);
-  // The R2 pointer describes the previous D1 generation until the separate R2
-  // cron publishes it. Remove it so readers use the newly committed D1 view.
-  if (bucket) await new R2CatalogProjection(bucket).invalidate();
-  return result;
-}
-
-async function refreshCatalogProjectionR2(store: D1InternshipStore, bucket: R2Bucket, phases?: MaintenancePhaseRecorder) {
-  const snapshot = await store.catalogProjectionSnapshot();
-  if (!snapshot) throw new Error('D1 catalog projection is unavailable for R2 publication');
-  const { groups, generatedAt, liveWatermark } = snapshot;
-  await recordPhase(phases, 'catalog_projection_r2', 'started');
-  try {
-    await new R2CatalogProjection(bucket).publish(groups, generatedAt, liveWatermark);
-    await recordPhase(phases, 'catalog_projection_r2', 'complete');
-  } catch (error) {
-    await recordPhase(phases, 'catalog_projection_r2', 'failed');
-    try { await new R2CatalogProjection(bucket).invalidate(); } catch { /* D1 remains authoritative. */ }
-    throw error;
-  }
-  return { generatedAt, groups: groups.length, roles: groups.reduce((total, group) => total + group.roles.length, 0) };
-}
 
 /**
  * Metadata collection has no other trigger, so a field the employer's own API
@@ -2219,46 +2066,6 @@ export async function runScheduledPostingIdentityAudit(
  * versioned messages to the dedicated admission queue. A failed send leaves the
  * rows queued with an unacknowledged handoff, so the next run reissues them.
  */
-export const ADMISSION_V2_SOURCE_LIMIT = 500;
-
-async function runAdmissionV2Dispatch(env: Environment, observedAt: Date): Promise<{ enabled: boolean; sources: number; bootstrapped: number; migrated: number; batches: number; rows: number }> {
-  const features = admissionV2FeatureConfig(env);
-  if (!features.admissionEnabled) return { enabled: false, sources: 0, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
-  const ledger = new D1IngestionV2Repository(env.DB);
-  const cursor = await ledger.getDispatchSourceCursor();
-  let selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT, cursor);
-  if (!selectedSourceIds.length && cursor) selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT);
-  const nextCursor = selectedSourceIds.length === ADMISSION_V2_SOURCE_LIMIT
-    ? selectedSourceIds[selectedSourceIds.length - 1]
-    : undefined;
-  await ledger.setDispatchSourceCursor(nextCursor, observedAt.toISOString());
-  const sourceIds = selectedSourceIds.filter((sourceId) => admissionSourceAllowed(env, sourceId));
-  let bootstrapped = 0;
-  let migrated = 0;
-  let batches = 0;
-  let rows = 0;
-  for (const sourceId of sourceIds) {
-    // Regrade a bounded batch of active rows settled under an older policy
-    // version before dispatching their fresh work. Migration only reopens rows;
-    // it never hides a visible role or sets a source-wide suppression, so a new
-    // eligible role still publishes while stale peers are regraded.
-    const overview = await ledger.overview(sourceId);
-    if (overview.currentSnapshotHash) {
-      const snapshot = await ledger.getSnapshot(sourceId, overview.currentSnapshotHash);
-      if (snapshot?.isComplete) {
-        bootstrapped += await bootstrapAdmissionSnapshot(sourceId, snapshot.snapshotHash, snapshot.admissionVersion, { ledger, now: () => observedAt });
-        const migration = await migrateAdmissionPolicy(sourceId, snapshot.admissionVersion, { ledger, now: () => observedAt });
-        migrated += migration.reopened;
-      }
-    }
-    const plan = await planAdmissionV2Dispatch(sourceId, { ledger, now: () => observedAt });
-    if (!plan.messages.length) continue;
-    await sendQueueMessages(env.ADMISSION_V2_QUEUE, plan.messages as unknown[]);
-    batches += plan.messages.length;
-    rows += plan.messages.reduce((sum, message) => sum + message.externalIds.length, 0);
-  }
-  return { enabled: true, sources: sourceIds.length, bootstrapped, migrated, batches, rows };
-}
 
 async function scheduledHandler(event: ScheduledController, env: Environment): Promise<void> {
   if (await isShutdown(env)) return;
@@ -2319,6 +2126,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     return;
   }
   if (event.cron === '1-51/10 * * * *') {
+    if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') return;
     const observedAt = new Date(event.scheduledTime);
     // The catalog projection is the Roles feed's whole source of truth, and it is
     // the memory-heaviest scheduled work. This invocation groups and writes D1;
@@ -2342,6 +2150,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     return;
   }
   if (event.cron === '4,14,24,34,44,54 * * * *') {
+    if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') return;
     const observedAt = new Date(event.scheduledTime);
     const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection_r2');
     const projection = await runScheduledStep(
@@ -2372,7 +2181,9 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     }
     const recentOverloads = await step('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await step('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
-    const admissionV2Dispatch = await step('ingestion_v2_admission_dispatch', () => runAdmissionV2Dispatch(env, observedAt));
+    const admissionV2Dispatch = env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true'
+      ? { enabled: false, isolated: true, batches: 0 }
+      : await step('ingestion_v2_admission_dispatch', () => runAdmissionV2Dispatch(env, observedAt));
     if (admissionV2Dispatch?.enabled && admissionV2Dispatch.batches > 0) {
       console.log(JSON.stringify({ event: 'ingestion_v2_admission_dispatch', observedAt: observedAt.toISOString(), ...admissionV2Dispatch }));
     }
@@ -3130,6 +2941,9 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     catalogAdmissionResolver: catalogAdmissionResolver(env),
     enqueueEmployerIconResolution: employerIconEnqueue(env),
     onRecordFailure,
+    shadowDiscovery: ingestionV2ShadowDiscovery(env),
+    v2CatalogWriteOwner: (sourceId: string) => admissionV2OwnsCatalogWrites(env, sourceId),
+    v2TrustedCommunityAlertsEnabled: (sourceId: string) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
   };
   // Legacy Lever admissions are irrelevant to Greenhouse and Ashby polls.
   // Avoid an additional D1 read before those providers enter their per-record

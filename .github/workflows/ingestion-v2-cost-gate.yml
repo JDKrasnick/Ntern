@@ -1,7 +1,8 @@
-name: Ingestion V2 production cost gate
+name: Ingestion watchdog and production cost gate
 
 on:
   schedule:
+    - cron: '8,28,48 * * * *'
     - cron: '23 * * * *'
   workflow_dispatch:
 
@@ -13,8 +14,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  audit:
+  watchdog:
+    if: github.event_name != 'schedule' || github.event.schedule == '8,28,48 * * * *'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [production, dev]
+    environment:
+      name: cloudflare-workers-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Inspect durable progress and send operator email
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          MONITOR_RESEND_API_KEY: ${{ secrets.MONITOR_RESEND_API_KEY }}
+          AUTH_FROM_EMAIL: ${{ secrets.AUTH_FROM_EMAIL }}
+          ADMISSION_SUPPORT_RECIPIENT: ${{ secrets.ADMISSION_SUPPORT_RECIPIENT }}
+          WATCHDOG_ENVIRONMENT: ${{ matrix.environment }}
+        run: node --import tsx scripts/ingestion-watchdog.ts
+      - name: Retain independent evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingestion-watchdog-${{ matrix.environment }}-${{ github.run_id }}
+          path: .context/verification/watchdog/${{ matrix.environment }}.json
+          if-no-files-found: error
+          retention-days: 14
+  audit:
+    if: github.event_name != 'schedule' || github.event.schedule == '23 * * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: cloudflare-workers-production
     steps:

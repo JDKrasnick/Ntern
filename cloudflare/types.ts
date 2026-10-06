@@ -14,11 +14,12 @@ export interface D1Database {
 
 export interface R2ObjectBody {
   body: ReadableStream;
+  etag?: string;
   size?: number;
   httpMetadata?: { contentType?: string };
 }
 export interface R2Bucket {
-  put(key: string, value: ReadableStream | ArrayBuffer | null, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
+  put(key: string, value: ReadableStream | ArrayBuffer | null, options?: { httpMetadata?: { contentType?: string }; onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } }): Promise<unknown>;
   get(key: string): Promise<R2ObjectBody | null>;
   delete(key: string): Promise<void>;
 }

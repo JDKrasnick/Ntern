@@ -1,0 +1,59 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "limits": {
+    "cpu_ms": 120000,
+    "subrequests": 50000
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "intern-notifs-db",
+      "database_id": "4e389f1c-7c6d-48e1-aa97-dc4cb1769bb8",
+      "migrations_dir": "cloudflare/migrations"
+    }
+  ],
+  "name": "intern-notifs-catalog-publisher",
+  "main": "cloudflare/catalog-publisher-worker.ts",
+  "workers_dev": false,
+  "preview_urls": false,
+  "r2_buckets": [
+    {
+      "binding": "DOCUMENTS",
+      "bucket_name": "intern-notifs-documents"
+    },
+    {
+      "binding": "SHADOW_EXTRACTION_ARTIFACTS",
+      "bucket_name": "intern-notifs-shadow-extraction"
+    }
+  ],
+  "version_metadata": {
+    "binding": "VERSION_METADATA"
+  },
+  "triggers": {
+    "crons": []
+  },
+  "vars": {
+    "INGESTION_V2_ISOLATED_WORKERS_ENABLED": "false",
+    "OUTBOUND_NOTIFICATIONS_ENABLED": "false",
+    "DEPLOYMENT_ROLE": "catalog-publisher",
+    "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":false,\"version\":\"disabled\",\"allowedFields\":[],\"cohort\":[]}"
+  },
+  "queues": {
+    "producers": [],
+    "consumers": []
+  }
+}

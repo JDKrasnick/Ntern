@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { AdmissionProviderDeferredError } from '../src/ingestion-v2/admission/taxonomy.js';
+import { describe, expect, it, vi } from 'vitest';
+import { officialAdmissionProviderProbe } from '../cloudflare/admission-v2-provider.js';
 import { processAdmissionV2Message } from '../src/ingestion-v2/admission/consumer.js';
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
@@ -309,6 +311,85 @@ class CountingEvaluator implements AdmissionV2RowEvaluator {
 }
 
 describe('admission v2 queue consumer', () => {
+  it.each(['503', 'timeout', '429', '404', '410', 'incomplete', 'paginated', 'duplicate-ids', 'invalid-id'])('preserves peer retry attempts for a cached Workable %s and recovers on a fresh delivery', async failure => {
+    const ids = ['45A6283F88', 'AAAAAAAAAA'];
+    const { ledger, snapshots } = setup(ids);
+    for (const id of ids) ledger.seedRow({ ...ledgerRow(id), attemptCount: 2 });
+    const [message] = messagesFor(ids);
+    const now = new Date('2026-10-05T00:00:00Z');
+    const fetcher = vi.fn(async () => {
+      if (failure === 'timeout') throw new Error('Request timed out');
+      if (failure === 'incomplete') return Response.json({ name: 'Cogna', jobs: [], total: 2 });
+      if (failure === 'paginated') return Response.json({ name: 'Cogna', jobs: [], next_page: 2 });
+      if (failure === 'invalid-id') return Response.json({ name: 'Cogna', jobs: [{ shortcode: 'invalid' }] });
+      if (failure === 'duplicate-ids') return Response.json({ name: 'Cogna', jobs: [{ shortcode: ids[0] }, { shortcode: ids[0].toLowerCase() }] });
+      return new Response('', { status: Number(failure), headers: { 'Retry-After': '7200' } });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const resolver = { async resolve() { return ['93.184.216.34']; } };
+      const prober = officialAdmissionProviderProbe(resolver);
+      const result = await processAdmissionV2Message(message, { ledger, snapshots, now: () => now,
+        evaluator: { async evaluate(context) {
+          await prober(`https://apply.workable.com/cogna/j/${context.externalId}/`);
+          return { decision: { kind: 'admitted' as const } };
+        } } });
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({ acknowledged: true, quarantined: 1, retried: 1 });
+      expect(await ledger.getRow(SOURCE, ids[0])).toMatchObject({ state: 'quarantined', attemptCount: 3 });
+      const retryAt = failure === '429' ? '2026-10-05T02:00:00.000Z' : '2026-10-05T00:01:00.000Z';
+      expect(await ledger.getRow(SOURCE, ids[1])).toMatchObject({ state: 'queued', attemptCount: 2, retryAt,
+        failureClass: failure === 'timeout' ? 'destination-timeout' : failure === '429' ? 'destination-rate-limited' : 'upstream-server-error' });
+      fetcher.mockImplementation(async () => Response.json({ name: 'Cogna', jobs: [] }));
+      const freshProber = officialAdmissionProviderProbe(resolver);
+      const [retry] = messagesFor([ids[1]]);
+      const recovered = await processAdmissionV2Message(retry, { ledger, snapshots, now: () => new Date(retryAt),
+        evaluator: { async evaluate(context) {
+          expect(await freshProber(`https://apply.workable.com/cogna/j/${context.externalId}/`)).toEqual({ reachability: 'gone' });
+          return { decision: { kind: 'blocked' as const, reason: 'closed' } };
+        } } });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(recovered).toMatchObject({ settled: 1, quarantined: 0, retried: 0 });
+      expect(await ledger.getRow(SOURCE, ids[1])).toMatchObject({ state: 'settled', decision: 'blocked', attemptCount: 3 });
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each(['title', 'url'])('keeps Workable posting-specific %s failures independent while a healthy peer settles', async field => {
+    const ids = ['45A6283F88', 'AAAAAAAAAA', 'BBBBBBBBBB'];
+    const { ledger, snapshots } = setup(ids);
+    for (const id of ids) ledger.seedRow({ ...ledgerRow(id), attemptCount: 2 });
+    const [message] = messagesFor(ids);
+    const jobs = ids.map((shortcode, index) => ({ shortcode,
+      title: field === 'title' && index < 2 ? '' : 'Software Engineering Intern',
+      url: field === 'url' && index < 2 ? `https://evil.example/j/${shortcode}` : `https://apply.workable.com/j/${shortcode}`,
+    }));
+    const fetcher = vi.fn(async () => Response.json({ name: 'Cogna', jobs }));
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const prober = officialAdmissionProviderProbe({ async resolve() { return ['93.184.216.34']; } });
+      const result = await processAdmissionV2Message(message, { ledger, snapshots,
+        now: () => new Date('2026-10-05T00:00:00Z'), evaluator: { async evaluate(context) {
+          const probe = await prober(`https://apply.workable.com/cogna/j/${context.externalId}/`);
+          expect(probe?.reachability).toBe('live');
+          return { decision: { kind: 'admitted' as const } };
+        } } });
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({ acknowledged: true, quarantined: 2, settled: 1, retried: 0 });
+      for (const id of ids.slice(0, 2)) expect(await ledger.getRow(SOURCE, id)).toMatchObject({ state: 'quarantined', attemptCount: 3 });
+      expect(await ledger.getRow(SOURCE, ids[2])).toMatchObject({ state: 'settled', decision: 'admitted', attemptCount: 3 });
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it('does not spend row attempts when a provider cooldown prevents an HTTP request', async () => {
+    const { ledger, snapshots } = setup(['a']);
+    const [message] = messagesFor(['a']);
+    const now = new Date('2026-10-05T00:00:00Z');
+    const result = await processAdmissionV2Message(message, { ledger, snapshots, now: () => now,
+      evaluator: { async evaluate() { throw new AdmissionProviderDeferredError('Provider cooldown', 900000); } } });
+    expect(result.acknowledged).toBe(true);
+    expect(result.retried).toBe(1);
+    expect(result.quarantined).toBe(0);
+    expect(await ledger.getRow(SOURCE, 'a')).toMatchObject({state:'queued',attemptCount:0,retryAt:'2026-10-05T00:15:00.000Z'});
+  });
+
   it('settles every row and acknowledges the message', async () => {
     const { ledger, snapshots } = setup(['a', 'b', 'c']);
     const evaluator = new CountingEvaluator(async () => ({ kind: 'admitted' }));
