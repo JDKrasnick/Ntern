@@ -384,6 +384,26 @@ test('a missing snapshot retries systemically and leaves a durable failure recor
   assert.equal(failure.resolved_at, null);
 });
 
+test('rejects corruption outside the selected batch before leasing or changing any durable row', async () => {
+  const { snapshot, rows } = await boardSnapshot();
+  const [message] = buildMessages(rows.slice(0, 1), snapshot.snapshot_hash, snapshot.admission_version);
+  const original = await (await documentsBucket.get(message.snapshotKey)).text();
+  const envelope = JSON.parse(original);
+  assert.ok(envelope.rows.length > 1);
+  envelope.rows.at(-1).posting.title = 'Corrupted unselected posting';
+  const before = await database.prepare('SELECT external_id, state, attempt_count, decision FROM ingestion_rows WHERE source_id = ? ORDER BY external_id').bind(sourceId).all();
+  await documentsBucket.put(message.snapshotKey, JSON.stringify(envelope));
+  try {
+    const delivered = await deliverAdmission([message]);
+    assert.equal(delivered.settled.ack, 0);
+    assert.equal(delivered.settled.retries.length, 1);
+    const after = await database.prepare('SELECT external_id, state, attempt_count, decision FROM ingestion_rows WHERE source_id = ? ORDER BY external_id').bind(sourceId).all();
+    assert.deepEqual(after.results, before.results);
+  } finally {
+    await documentsBucket.put(message.snapshotKey, original);
+  }
+});
+
 test('returns a stale delivery as a no-op', async () => {
   const { snapshot, rows } = await boardSnapshot();
   // Advance one row's material hash so the original message intent no longer matches.

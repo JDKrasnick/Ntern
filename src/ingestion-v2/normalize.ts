@@ -229,6 +229,34 @@ export function parseEnvelope(raw: string, expected: { sourceId: string; snapsho
   }
   if (!isRecord(parsed)) throw new Error('Ingestion snapshot envelope is malformed');
   const envelope = parsed as unknown as NormalizedSnapshotEnvelope;
+  validateSnapshotHeader(parsed, expected);
+  if (!Array.isArray(envelope.rows)) throw new Error('Ingestion snapshot rows are missing');
+  if (envelope.rowCount !== envelope.rows.length) throw new Error('Ingestion snapshot row count mismatch');
+  const externalIds = new Set<string>();
+  let previousExternalId: string | undefined;
+  for (const row of envelope.rows) {
+    validateSnapshotRow(row, envelope.sourceId);
+    if (externalIds.has(row.externalId)) throw new Error('Ingestion snapshot external IDs are not unique');
+    if (previousExternalId !== undefined && previousExternalId.localeCompare(row.externalId) >= 0) {
+      throw new Error('Ingestion snapshot rows are not canonically ordered');
+    }
+    externalIds.add(row.externalId);
+    previousExternalId = row.externalId;
+  }
+  if (envelope.documentCount !== new Set(envelope.rows.map((row) => row.document)).size) {
+    throw new Error('Ingestion snapshot document count mismatch');
+  }
+  const recomputed = envelope.schemaVersion === 1
+    ? snapshotHashForRows(envelope.rows)
+    : snapshotHashForRowsAndAdmissionVersion(envelope.rows, envelope.admissionVersion);
+  if (recomputed !== envelope.snapshotHash) throw new Error('Ingestion snapshot hash mismatch');
+  return envelope;
+}
+
+/** Shared by full-envelope and streaming readers; header order is immaterial. */
+export function validateSnapshotHeader(
+  envelope: Record<string, unknown>, expected: { sourceId: string; snapshotHash: string },
+): asserts envelope is Record<string, unknown> & Omit<NormalizedSnapshotEnvelope, 'rows'> {
   if (envelope.schemaVersion !== 1 && envelope.schemaVersion !== INGESTION_V2_SNAPSHOT_SCHEMA_VERSION) {
     throw new Error(`Unsupported ingestion snapshot schema ${String(envelope.schemaVersion)}`);
   }
@@ -243,40 +271,25 @@ export function parseEnvelope(raw: string, expected: { sourceId: string; snapsho
   if (typeof envelope.observedAt !== 'string' || !Number.isFinite(Date.parse(envelope.observedAt))) {
     throw new Error('Ingestion snapshot observation time is malformed');
   }
-  if (!Array.isArray(envelope.rows)) throw new Error('Ingestion snapshot rows are missing');
-  if (envelope.rowCount !== envelope.rows.length) throw new Error('Ingestion snapshot row count mismatch');
-  const externalIds = new Set<string>();
-  let previousExternalId: string | undefined;
-  for (const row of envelope.rows) {
-    if (!isRecord(row) || typeof row.externalId !== 'string' || !row.externalId || !isRecord(row.posting)) {
-      throw new Error('Ingestion snapshot row is malformed');
-    }
-    if (externalIds.has(row.externalId)) throw new Error('Ingestion snapshot external IDs are not unique');
-    if (previousExternalId !== undefined && previousExternalId.localeCompare(row.externalId) >= 0) {
-      throw new Error('Ingestion snapshot rows are not canonically ordered');
-    }
-    externalIds.add(row.externalId);
-    previousExternalId = row.externalId;
-    if (typeof row.document !== 'string' || !row.document || !validNonNegativeInteger(row.row)) {
-      throw new Error('Ingestion snapshot row location is malformed');
-    }
-    if (!/^[a-f0-9]{64}$/u.test(row.materialHash)) throw new Error('Ingestion snapshot row material hash is malformed');
-    if (row.posting.sourceId !== envelope.sourceId) throw new Error('Ingestion snapshot posting source mismatch');
-    if (row.posting.externalId !== row.externalId) throw new Error('Ingestion snapshot row identity mismatch');
-    if ((row.posting.document ?? row.externalId) !== row.document || (row.posting.row ?? 0) !== row.row) {
-      throw new Error('Ingestion snapshot row provenance mismatch');
-    }
-    if (row.firstObservationEligible !== firstObservationEligible(row.posting)) {
-      throw new Error('Ingestion snapshot first-observation eligibility mismatch');
-    }
-    if (materialHashFor(row.posting) !== row.materialHash) throw new Error('Ingestion snapshot row material mismatch');
+}
+
+/** Validate every material posting fact even for rows not selected for admission. */
+export function validateSnapshotRow(value: unknown, sourceId: string): asserts value is NormalizedSnapshotRow {
+  const row = value as NormalizedSnapshotRow;
+  if (!isRecord(row) || typeof row.externalId !== 'string' || !row.externalId || !isRecord(row.posting)) {
+    throw new Error('Ingestion snapshot row is malformed');
   }
-  if (envelope.documentCount !== new Set(envelope.rows.map((row) => row.document)).size) {
-    throw new Error('Ingestion snapshot document count mismatch');
+  if (typeof row.document !== 'string' || !row.document || !validNonNegativeInteger(row.row)) {
+    throw new Error('Ingestion snapshot row location is malformed');
   }
-  const recomputed = envelope.schemaVersion === 1
-    ? snapshotHashForRows(envelope.rows)
-    : snapshotHashForRowsAndAdmissionVersion(envelope.rows, envelope.admissionVersion);
-  if (recomputed !== envelope.snapshotHash) throw new Error('Ingestion snapshot hash mismatch');
-  return envelope;
+  if (!/^[a-f0-9]{64}$/u.test(row.materialHash)) throw new Error('Ingestion snapshot row material hash is malformed');
+  if (row.posting.sourceId !== sourceId) throw new Error('Ingestion snapshot posting source mismatch');
+  if (row.posting.externalId !== row.externalId) throw new Error('Ingestion snapshot row identity mismatch');
+  if ((row.posting.document ?? row.externalId) !== row.document || (row.posting.row ?? 0) !== row.row) {
+    throw new Error('Ingestion snapshot row provenance mismatch');
+  }
+  if (row.firstObservationEligible !== firstObservationEligible(row.posting)) {
+    throw new Error('Ingestion snapshot first-observation eligibility mismatch');
+  }
+  if (materialHashFor(row.posting) !== row.materialHash) throw new Error('Ingestion snapshot row material mismatch');
 }

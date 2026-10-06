@@ -86,6 +86,7 @@
   "dependencies": {
     "@cloudflare/containers": "^0.0.16",
     "@resvg/resvg-wasm": "^2.6.2",
+    "@streamparser/json": "0.0.26",
     "fflate": "^0.8.3",
     "pdfjs-dist": "^5.7.284"
   },

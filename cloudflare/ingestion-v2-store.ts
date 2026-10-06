@@ -1,3 +1,4 @@
+import { readSnapshotRows } from '../src/ingestion-v2/stream-snapshot.js';
 import type { D1Database, R2Bucket } from './types.js';
 import {
   parseEnvelope,
@@ -1082,7 +1083,6 @@ function decodeCursor(cursor: string | undefined): { lastObservedAt: string; ext
 /** R2-backed, content-addressed normalized snapshot store. */
 export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
   private readonly encoder = new TextEncoder();
-  private readonly decoder = new TextDecoder();
 
   constructor(private readonly bucket: R2Bucket) {}
 
@@ -1108,17 +1108,18 @@ export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
    */
   async putSnapshot(envelope: NormalizedSnapshotEnvelope): Promise<{ key: string; bytes: number; existed: boolean }> {
     const key = snapshotObjectKey(envelope.sourceId, envelope.snapshotHash);
-    const existing = await this.get(key);
+    const existing = await this.bucket.get(key);
     if (existing !== null) {
       // The key is the content hash, so an existing object can only differ in
       // volatile fetch metadata. Validate it and keep the original bytes rather
       // than rewriting; a corrupt or mismatched body fails closed.
-      parseEnvelope(existing, { sourceId: envelope.sourceId, snapshotHash: envelope.snapshotHash });
-      return { key, bytes: existing.length, existed: true };
+      const validated = await readSnapshotRows(existing.body, { sourceId: envelope.sourceId, snapshotHash: envelope.snapshotHash }, []);
+      return { key, bytes: validated.bytes, existed: true };
     }
     const body = serializeEnvelope(envelope);
-    await this.put(key, body);
-    return { key, bytes: body.length, existed: false };
+    const bytes = this.encoder.encode(body);
+    await this.bucket.put(key, bytes.buffer as ArrayBuffer);
+    return { key, bytes: bytes.byteLength, existed: false };
   }
 
   async getSnapshot(sourceId: string, snapshotHash: string): Promise<NormalizedSnapshotEnvelope> {
@@ -1126,5 +1127,12 @@ export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
     const raw = await this.get(key);
     if (raw === null) throw new Error(`Ingestion snapshot object missing at ${key}`);
     return parseEnvelope(raw, { sourceId, snapshotHash });
+  }
+
+  async getSnapshotRows(sourceId: string, snapshotHash: string, externalIds: readonly string[]) {
+    const key = snapshotObjectKey(sourceId, snapshotHash);
+    const object = await this.bucket.get(key);
+    if (!object) throw new Error(`Ingestion snapshot object missing at ${key}`);
+    return (await readSnapshotRows(object.body, { sourceId, snapshotHash }, externalIds)).rows;
   }
 }

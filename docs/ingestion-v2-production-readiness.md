@@ -41,6 +41,14 @@ poll cannot bypass the writer boundary.
 
 ## Evidence and interpretation
 
+Snapshot readers now validate R2 incrementally, retain only the admission batch,
+and reject oversized objects or rows before they can exhaust an isolate. Repeat
+discovery validates the existing immutable object without loading a second board.
+The 2026-10-06 local stress test used a 20.7 MB, 4,000-row snapshot: retained
+parsing growth fell from 20.5 MiB to 1.0 MiB, with 7.0 MiB transient growth in
+the controlled GC comparison. This proves an allocation reduction locally;
+Cloudflare measurements and the clean scheduled soak remain release gates.
+
 Store timestamped reports under `.context/verification/ingestion-v2/` and record
 the deployed version, source controls, snapshot identity, decision totals,
 notification receipts, queue/DLQ state, runtime outcomes, and D1/R2 usage.

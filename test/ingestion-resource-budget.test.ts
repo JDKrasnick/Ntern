@@ -12,6 +12,7 @@ import { buildAdmissionV2Messages } from '../src/ingestion-v2/admission/message.
 import type { AdmissionV2RowEvaluator } from '../src/ingestion-v2/admission/types.js';
 import { normalizeSourceSnapshot, parseEnvelope, serializeEnvelope, snapshotObjectKey } from '../src/ingestion-v2/normalize.js';
 import { IngestionV2ShadowDiscovery } from '../src/ingestion-v2/shadow-discovery.js';
+import { readSnapshotRows } from '../src/ingestion-v2/stream-snapshot.js';
 import type { IngestionRowRecord, IngestionSnapshotObjectStore } from '../src/ingestion-v2/types.js';
 import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PER_DELIVERY, IngestionRunner } from '../src/poll.js';
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
@@ -402,6 +403,51 @@ describe('ingestion resource budgets', () => {
       expect(peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
     }
     database.close();
+  }, 300_000);
+
+  it('reduces live snapshot parsing allocations while validating a large board', async () => {
+    if (!exposeGc) return;
+    const feed = PRODUCTION_GITHUB_FEEDS.simplify;
+    const fetched = await productionAdapter(sourceId, productionDocuments(feed)).fetch();
+    const seed = fetched.postings[0]!;
+    const envelope = normalizeSourceSnapshot({ sourceId, admissionVersion: 'standard-v1', observedAt: '2026-10-03T00:00:00.000Z',
+      postings: Array.from({ length: 4000 }, (_, index) => ({ ...seed, externalId: `memory-${String(index).padStart(5, '0')}`,
+        content: [{ kind: 'description' as const, format: 'plain' as const, value: `Description ${index}: ${'bounded snapshot content '.repeat(170)}` }] })),
+    });
+    const raw = serializeEnvelope(envelope);
+    const bytes = new TextEncoder().encode(raw);
+    expect(bytes.length).toBeGreaterThan(16 * 1024 * 1024);
+    exposeGc();
+    const baseline = process.memoryUsage().heapUsed;
+    const full = parseEnvelope(raw, envelope);
+    exposeGc();
+    const fullGrowth = process.memoryUsage().heapUsed - baseline;
+    // Release the baseline full-reader result before measuring the stream.
+    const fullRows = full.rows.length;
+    full.rows.length = 0;
+    exposeGc();
+    const streamBaseline = process.memoryUsage().heapUsed;
+    let offset = 0;
+    let retainedPeak = streamBaseline;
+    let transientPeak = streamBaseline;
+    const body = new ReadableStream<Uint8Array>({ pull(controller) {
+      transientPeak = Math.max(transientPeak, process.memoryUsage().heapUsed);
+      if (offset % (512 * 1024) === 0) {
+        exposeGc(); retainedPeak = Math.max(retainedPeak, process.memoryUsage().heapUsed);
+      }
+      if (offset >= bytes.length) return controller.close();
+      controller.enqueue(bytes.subarray(offset, offset + 32768)); offset += 32768;
+    } });
+    const started = process.cpuUsage();
+    const result = await readSnapshotRows(body, envelope, envelope.rows.slice(0, 25).map((row) => row.externalId));
+    const cpuMs = cpuMsSince(started);
+    expect(fullRows).toBe(4000);
+    expect(result.rows.size).toBe(25);
+    expect(retainedPeak - streamBaseline).toBeLessThan(fullGrowth / 2);
+    expect(transientPeak - streamBaseline).toBeLessThan(32 * 1024 * 1024);
+    expect(cpuMs).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
+    console.info('Snapshot parsing allocation comparison', { bytes: bytes.length, fullGrowthMb: fullGrowth / 1024 / 1024,
+      streamRetainedGrowthMb: (retainedPeak - streamBaseline) / 1024 / 1024, streamTransientGrowthMb: (transientPeak - streamBaseline) / 1024 / 1024, cpuMs });
   }, 300_000);
 
   it('consumes a 25-row admission message from a production-shaped immutable snapshot within Worker limits', async () => {

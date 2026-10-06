@@ -51,6 +51,7 @@ async function selectedSnapshotRows(
   message: AdmissionV2Message,
   snapshots: IngestionSnapshotObjectStore,
 ): Promise<Map<string, NormalizedSnapshotRow>> {
+  if (snapshots.getSnapshotRows) return snapshots.getSnapshotRows(message.sourceId, message.snapshotHash, message.externalIds);
   // The store validates the entire immutable board before any row can commit.
   // Let unselected postings become collectible before the first provider await.
   const envelope = await snapshots.getSnapshot(message.sourceId, message.snapshotHash);
