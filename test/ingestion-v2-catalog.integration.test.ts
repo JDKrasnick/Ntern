@@ -172,6 +172,33 @@ describe('ingestion v2 reconciler catalog sink', () => {
     expect(repaired.graduationWindow).toEqual({ start: '2026-12', end: '2027-05' });
     expect(store.notificationEvents.size).toBe(0);
   });
+  it.each([
+    'This Summer 2027 internship is open to students graduating in Spring 2028.',
+    'Students graduating in Spring 2028 may apply; the internship starts in Summer 2027.',
+  ])('preserves the role season through quiet canonical reopening and duplicate delivery: %s', async (description) => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const processed = processPosting({
+      sourceId, externalId, provenance: 'official-ats', sourceUrl: 'https://jobs.example.com/board', fetchedAt: observedAt,
+      employer: { id: 'acme', name: 'Acme', authority: 'reviewed-registry' },
+      title: 'Software Engineering Intern', locations: ['Remote'],
+      content: [{ kind: 'description', format: 'plain', value: description }],
+      applyUrl: listing().applyUrl, sourceState: 'open', lifecycleAuthority: 'title',
+    }).listing!;
+    expect(processed.season).toBe('summer-2027');
+    const input = commit({ listing: { ...processed, postingIdentityDecision: listing().postingIdentityDecision }, baseline: true, notify: false });
+    await sink.commit(input);
+    const original = [...store.jobs.values()][0]!;
+    store.jobs.set(original.jobId, { ...original, season: 'fall-2026', open: false });
+    await sink.commit(input);
+    await sink.commit(input);
+    expect(store.jobs.size).toBe(1);
+    expect(store.jobs.get(original.jobId)).toMatchObject({ season: 'summer-2027', open: true });
+    expect(catalogPublishable(store.jobs.get(original.jobId)!)).toBe(true);
+    expect(store.occurrences.size).toBe(1);
+    expect(store.notificationEvents.size).toBe(0);
+  });
+
   it('keeps an employer-confirmed open role open when its explicit description season has begun', async () => {
     const store = new MemoryInternshipStore();
     const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));

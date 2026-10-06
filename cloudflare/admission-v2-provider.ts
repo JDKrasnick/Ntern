@@ -8,6 +8,20 @@ import type { AdmissionProviderGovernor } from './admission-v2-provider-governor
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 function unavailable(detail: string): never { throw new AdmissionRowTransientError('upstream-server-error', detail); }
+function validateWorkableInventory(payload: Record<string, unknown> | 'gone' | 'blocked'): Record<string, unknown> | 'blocked' {
+  // A tenant-level 404/410 is not proof that an individual posting closed.
+  if (payload === 'gone') unavailable('Workable tenant inventory is unavailable; posting closure is unproven');
+  if (payload === 'blocked') return payload;
+  if (typeof payload.name !== 'string' || !payload.name || !Array.isArray(payload.jobs) || payload.jobs.length > 1000
+    || payload.next || payload.next_page || (typeof payload.total === 'number' && payload.total !== payload.jobs.length)) unavailable('Workable inventory is incomplete');
+  const seen = new Set<string>();
+  for (const job of payload.jobs) {
+    if (!record(job) || typeof job.shortcode !== 'string' || !/^[a-z0-9]{10}$/iu.test(job.shortcode)
+      || seen.has(job.shortcode.toUpperCase())) unavailable('Workable inventory has invalid or duplicate posting IDs');
+    seen.add(job.shortcode.toUpperCase());
+  }
+  return payload;
+}
 function evidence(url: string, postingId: string, title: string, description: string): AdmissionDestinationProbe {
   const contentExcerpt = metadataDescriptionText(description).slice(0, 32_768);
   return { reachability: 'live', evidence: {
@@ -21,7 +35,7 @@ function evidence(url: string, postingId: string, title: string, description: st
 
 /** One bounded tenant cache per queue delivery, never a global Worker cache. */
 export function officialAdmissionProviderProbe(resolver: { resolve(host: string): Promise<string[]> }, governor?: AdmissionProviderGovernor) {
-  let cache: { url: string; promise: Promise<Record<string, unknown> | 'gone' | 'blocked'> } | undefined;
+  let cache: { url: string; promise: Promise<Record<string, unknown> | 'blocked'> } | undefined;
   async function read(url: string, permittedFinal: (final: URL) => boolean, provider?: 'workable'): Promise<Record<string, unknown> | 'gone' | 'blocked'> {
     if (provider && governor) {
       let delay = await governor.acquire(provider);
@@ -86,8 +100,9 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
     const shared = cache?.url === url;
     if (!shared) cache = { url, promise: read(url, final =>
       (final.origin === 'https://www.workable.com' && final.pathname === `/api/accounts/${tenant}`)
-      || (final.origin === 'https://apply.workable.com' && final.pathname === `/api/v1/widget/accounts/${tenant}`), 'workable') };
-    // Cache failures too: peer rows must not repeat a throttled tenant request.
+      || (final.origin === 'https://apply.workable.com' && final.pathname === `/api/v1/widget/accounts/${tenant}`), 'workable').then(validateWorkableInventory) };
+    // Cache transport and tenant-wide validation failures together. Peers do
+    // not spend an attempt on the same failed observation without a new probe.
     let payload;
     try { payload = await cache!.promise; }
     catch (error) {
@@ -98,18 +113,9 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
       }
       throw error;
     }
-    if (payload === 'gone') unavailable('Workable tenant inventory is unavailable; posting closure is unproven');
     if (typeof payload === 'string') return { reachability: payload };
-    // A tenant-level 404 is not proof that an individual posting closed.
-    if (typeof payload.name !== 'string' || !payload.name || !Array.isArray(payload.jobs) || payload.jobs.length > 1000
-      || payload.next || payload.next_page || (typeof payload.total === 'number' && payload.total !== payload.jobs.length)) unavailable('Workable inventory is incomplete');
-    const jobs = payload.jobs;
-    const seen = new Set<string>();
-    for (const job of jobs) {
-      if (!record(job) || typeof job.shortcode !== 'string' || !/^[a-z0-9]{10}$/iu.test(job.shortcode)
-        || seen.has(job.shortcode.toUpperCase())) unavailable('Workable inventory has invalid or duplicate posting IDs');
-      seen.add(job.shortcode.toUpperCase());
-    }
+    // Posting-specific failures remain independent row attempts.
+    const jobs = payload.jobs as Record<string, unknown>[];
     const job = jobs.find(job => record(job) && String(job.shortcode).toUpperCase() === id!.toUpperCase());
     if (!job) return { reachability: 'gone' };
     if (!record(job) || typeof job.title !== 'string' || !job.title.trim() || typeof job.url !== 'string') unavailable('Workable posting is malformed');

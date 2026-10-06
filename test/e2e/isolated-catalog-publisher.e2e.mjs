@@ -81,6 +81,41 @@ test('unchanged catalog cycles retire and repair missing or corrupt active pages
   }
 });
 
+test('repairs a corrupt later page across a failed repair without exposing a partial multi-page catalog', async () => {
+  const originalJob = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#isolated-role'").first()).value);
+  await db.batch(Array.from({ length: 101 }, (_, index) => {
+    const jobId = `multi-page-${index}`;
+    const job = { ...originalJob, jobId, company: `Employer ${index}`, fingerprint: jobId,
+      applyUrl: `https://example.com/${jobId}`, normalizedUrl: `https://example.com/${jobId}` };
+    return db.prepare("INSERT INTO catalog_items(pk,sk,kind,value) VALUES (?,'INTERNSHIP','internship',?)")
+      .bind(`JOB#${jobId}`, JSON.stringify(job));
+  }));
+  await scheduled('1-51/10 * * * *');
+  await scheduled('4,14,24,34,44,54 * * * *');
+  const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  assert.equal(pointer.count, 102);
+  const keys = [0, 1].map(index => `public-catalog/v1/${pointer.version}/${index}`);
+  const pages = await Promise.all(keys.map(async key => (await bucket.get(key)).text()));
+  await bucket.put(keys[1], '[]');
+  await scheduled('1-51/10 * * * *');
+  assert.equal(await bucket.get('public-catalog/v1/current'), null);
+  const completion = await marker('catalog_projection_r2');
+  const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket),
+    async put(key, value) {
+      if (key === keys[1]) throw new Error('second page write failed');
+      return bucket.put(key, value);
+    } } };
+  await assert.rejects(worker.scheduled({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /second page write failed/);
+  assert.equal(await bucket.get('public-catalog/v1/current'), null);
+  assert.deepEqual(await marker('catalog_projection_r2'), completion);
+  await scheduled('4,14,24,34,44,54 * * * *');
+  const repaired = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  assert.equal(repaired.version, pointer.version);
+  for (let index = 0; index < keys.length; index++) assert.equal(await (await bucket.get(keys[index])).text(), pages[index]);
+  const notifications = await db.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").first();
+  assert.equal(notifications.n, 0);
+});
+
 test('billing shutdown preserves the published catalog', async () => {
   await db.prepare("INSERT OR REPLACE INTO system_state(key,value,updated_at) VALUES ('billing_shutdown','stopped',?)").bind(new Date().toISOString()).run();
   const before = await marker('catalog_projection');
