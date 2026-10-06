@@ -1118,6 +1118,13 @@ export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
     }
     const body = serializeEnvelope(envelope);
     const bytes = this.encoder.encode(body);
+    // Enforce the reader's complete validation and capacity contract before
+    // publishing an immutable object that discovery can activate in D1.
+    // Enqueue the existing bytes directly rather than copying a large body.
+    await readSnapshotRows(new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    } }), { sourceId: envelope.sourceId, snapshotHash: envelope.snapshotHash }, []);
     await this.bucket.put(key, bytes.buffer as ArrayBuffer);
     return { key, bytes: bytes.byteLength, existed: false };
   }

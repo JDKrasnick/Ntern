@@ -3,7 +3,9 @@ import { snapshotHashForRows, snapshotHashForRowsAndAdmissionVersion, validateSn
 import type { NormalizedSnapshotRow } from './types.js';
 
 export const SNAPSHOT_STREAM_MAX_BYTES = 64 * 1024 * 1024;
-export const SNAPSHOT_STREAM_MAX_ROW_BYTES = 512 * 1024;
+// Provider responses allow 512 KiB per job. Normalization adds identity,
+// provenance and metadata, so the stored row needs a separate bounded budget.
+export const SNAPSHOT_STREAM_MAX_ROW_BYTES = 1024 * 1024;
 const maxRows = 50_000;
 const maxHeaderBytes = 16 * 1024;
 const headers = ['admissionVersion', 'documentCount', 'observedAt', 'rowCount', 'schemaVersion', 'snapshotHash', 'sourceId'];

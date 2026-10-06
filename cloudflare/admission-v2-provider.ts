@@ -91,8 +91,10 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
     let payload;
     try { payload = await cache!.promise; }
     catch (error) {
-      if (shared && error instanceof AdmissionRowTransientError && error.classification === 'destination-rate-limited') {
-        throw new AdmissionProviderDeferredError('Shared Workable throttled probe; no new destination request made', error.retryAfterMs ?? 15 * 60_000);
+      if (shared && error instanceof AdmissionRowTransientError) {
+        throw new AdmissionProviderDeferredError('Shared Workable failed probe; no new destination request made',
+          error.retryAfterMs ?? (error.classification === 'destination-rate-limited' ? 15 * 60_000 : 60_000),
+          error.classification);
       }
       throw error;
     }

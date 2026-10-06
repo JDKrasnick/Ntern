@@ -4,6 +4,8 @@ import { readSnapshotRows, SNAPSHOT_STREAM_MAX_ROW_BYTES } from '../src/ingestio
 import type { SourcedPosting } from '../src/types.js';
 import { R2IngestionSnapshotStore } from '../cloudflare/ingestion-v2-store.js';
 import type { R2Bucket } from '../cloudflare/types.js';
+import { GreenhouseBoardAdapter, GREENHOUSE_JOB_MAX_BYTES } from '../src/sources/greenhouse.js';
+import { acmeSource, technicalInternship } from './fixtures/greenhouse.js';
 
 function fixture() {
   const postings: SourcedPosting[] = ['a', 'b', 'c'].map((externalId) => ({
@@ -28,6 +30,37 @@ function stream(raw: string, chunkSize = 8192, canceled = () => {}) {
 }
 
 describe('bounded immutable snapshot reader', () => {
+  it('round-trips a provider job near its byte ceiling, including selection of an unrelated row', async () => {
+    const job = { ...technicalInternship, content: 'a'.repeat(GREENHOUSE_JOB_MAX_BYTES - 400) };
+    expect(new TextEncoder().encode(JSON.stringify(job)).length).toBeLessThan(GREENHOUSE_JOB_MAX_BYTES);
+    const board = await new GreenhouseBoardAdapter({ source: acmeSource,
+      fetchImpl: async () => Response.json({ jobs: [job, { ...technicalInternship, id: 999 }] }),
+    }).fetch();
+    expect(board.complete).toBe(true);
+    const envelope = normalizeSourceSnapshot({ sourceId: acmeSource.id, postings: board.postings,
+      admissionVersion: 'v1', observedAt: '2026-10-01T00:00:00.000Z' });
+    const large = envelope.rows.find(row => row.externalId === String(job.id))!;
+    expect(new TextEncoder().encode(JSON.stringify(large)).length).toBeGreaterThan(GREENHOUSE_JOB_MAX_BYTES);
+    const objects = new Map<string, Uint8Array>();
+    const store = new R2IngestionSnapshotStore({
+      async put(key: string, body: ArrayBuffer) { objects.set(key, new Uint8Array(body)); },
+      async get(key: string) { const bytes = objects.get(key); return bytes ? { body: stream(new TextDecoder().decode(bytes)) } : null; },
+    } as unknown as R2Bucket);
+    await store.putSnapshot(envelope);
+    expect((await store.putSnapshot(envelope)).existed).toBe(true);
+    expect((await store.getSnapshotRows(envelope.sourceId, envelope.snapshotHash, [large.externalId])).get(large.externalId)).toEqual(large);
+    expect([...(await store.getSnapshotRows(envelope.sourceId, envelope.snapshotHash, ['999'])).keys()]).toEqual(['999']);
+  });
+  it('refuses an oversized normalized row before writing an immutable object', async () => {
+    const postings = fixture().rows.map(row => row.posting);
+    postings[0]!.content[0]!.value = 'a'.repeat(SNAPSHOT_STREAM_MAX_ROW_BYTES);
+    const envelope = normalizeSourceSnapshot({ sourceId: 'example', postings,
+      admissionVersion: 'v1', observedAt: '2026-10-01T00:00:00.000Z' });
+    let writes = 0;
+    const store = new R2IngestionSnapshotStore({ async get() { return null; }, async put() { writes++; } } as unknown as R2Bucket);
+    await expect(store.putSnapshot(envelope)).rejects.toThrow('row exceeds byte limit');
+    expect(writes).toBe(0);
+  });
   it.each([1, 7, 8192, 100_000])('validates UTF-8 and escaped content across %i-byte chunks, retaining only requested rows', async (size) => {
     const envelope = fixture();
     const result = await readSnapshotRows(stream(serializeEnvelope(envelope), size), envelope, ['b', 'missing']);
