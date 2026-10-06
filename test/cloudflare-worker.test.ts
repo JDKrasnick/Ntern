@@ -360,6 +360,22 @@ describe('Cloudflare maintenance cron', () => {
     }
   });
 
+  it('keeps D1 publication failures from advancing the overall completion marker', async () => {
+    vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
+    vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockRejectedValue(new Error('D1 write failed'));
+    const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(cloudflareWorker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) }, DOCUMENTS: {},
+      } as unknown as Environment)).rejects.toThrow('D1 catalog projection failed');
+      expect(markers).toHaveBeenCalledWith('catalog_projection_d1', 'failed');
+      expect(markers).not.toHaveBeenCalledWith('catalog_projection_complete', 'complete', expect.any(Date));
+      expect(logs).not.toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_catalog_projection_complete"'));
+    } finally { vi.restoreAllMocks(); }
+  });
+
   it('keeps a matching R2 publication available across the intervening D1 cron', async () => {
     const values = new Map<string, string>();
     const documents = {
