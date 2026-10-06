@@ -134,7 +134,7 @@ export function normalizeSourceSnapshot(input: {
   admissionVersion: string;
   observedAt: string;
 }): NormalizedSnapshotEnvelope {
-  const rowsByExternalId = new Map<string, { row: NormalizedSnapshotRow; canonical: string }>();
+  const rowsByExternalId = new Map<string, NormalizedSnapshotRow>();
   for (const posting of input.postings) {
     if (!posting.externalId) continue;
     const normalized: NormalizedSnapshotRow = {
@@ -145,19 +145,20 @@ export function normalizeSourceSnapshot(input: {
       posting: canonicalPosting(posting),
       firstObservationEligible: firstObservationEligible(posting),
     };
-    const canonical = stableStringify(normalized);
     const existing = rowsByExternalId.get(posting.externalId);
-    if (existing && existing.row.materialHash !== normalized.materialHash) {
+    if (existing && existing.materialHash !== normalized.materialHash) {
       throw new Error(`Conflicting duplicate ingestion external ID: ${posting.externalId}`);
     }
     // Exact/materially equivalent duplicates can appear in more than one source
     // document. Pick their bytewise canonical representative so input ordering
     // can never change the retained snapshot body or hash.
-    if (!existing || canonical < existing.canonical) {
-      rowsByExternalId.set(posting.externalId, { row: normalized, canonical });
+    // Only duplicates need a bytewise tie-break. Retaining serialized copies
+    // of every posting doubles the large-board working set for no benefit.
+    if (!existing || stableStringify(normalized) < stableStringify(existing)) {
+      rowsByExternalId.set(posting.externalId, normalized);
     }
   }
-  const rows = [...rowsByExternalId.values()].map(({ row }) => row);
+  const rows = [...rowsByExternalId.values()];
   rows.sort((left, right) => left.externalId.localeCompare(right.externalId));
   return {
     schemaVersion: INGESTION_V2_SNAPSHOT_SCHEMA_VERSION,

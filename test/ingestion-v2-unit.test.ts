@@ -121,6 +121,12 @@ describe('ingestion v2 normalization', () => {
       observedAt: POSTING_FETCHED_AT,
     });
     expect(snapshot.rowCount).toBe(1);
+    const reversed = normalizeSourceSnapshot({
+      sourceId: 'community-example',
+      postings: [{ ...duplicate, row: 99, fetchedAt: '2026-10-02T00:00:00.000Z' }, duplicate],
+      admissionVersion: 'v1', observedAt: POSTING_FETCHED_AT,
+    });
+    expect(serializeEnvelope(snapshot)).toBe(serializeEnvelope(reversed));
   });
 
   it('rejects conflicting duplicate external ids independent of input ordering', () => {

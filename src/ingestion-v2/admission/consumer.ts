@@ -1,4 +1,5 @@
 import type { IngestionSnapshotObjectStore } from '../types.js';
+import type { NormalizedSnapshotRow } from '../types.js';
 import type { AdmissionV2Ledger } from './ledger.js';
 import { classifyAdmissionFailure, nextAdmissionAttempt } from './taxonomy.js';
 import {
@@ -46,6 +47,17 @@ function infrastructureResult(result: AdmissionV2MessageResult, failure: Admissi
   return result;
 }
 
+async function selectedSnapshotRows(
+  message: AdmissionV2Message,
+  snapshots: IngestionSnapshotObjectStore,
+): Promise<Map<string, NormalizedSnapshotRow>> {
+  // The store validates the entire immutable board before any row can commit.
+  // Let unselected postings become collectible before the first provider await.
+  const envelope = await snapshots.getSnapshot(message.sourceId, message.snapshotHash);
+  const selected = new Set(message.externalIds);
+  return new Map(envelope.rows.filter((row) => selected.has(row.externalId)).map((row) => [row.externalId, row]));
+}
+
 /**
  * Process one admission message: read the referenced snapshot once, then let
  * every selected row settle, retry, or quarantine independently.
@@ -84,13 +96,12 @@ export async function processAdmissionV2Message(
   }
   // Read the immutable snapshot once per batch, never once per row. A missing or
   // corrupt R2 object is systemic, never a row's fault.
-  let envelope;
+  let rowsById;
   try {
-    envelope = await dependencies.snapshots.getSnapshot(message.sourceId, message.snapshotHash);
+    rowsById = await selectedSnapshotRows(message, dependencies.snapshots);
   } catch (error) {
     return infrastructureResult(result, classifyAdmissionFailure(error));
   }
-  const rowsById = new Map(envelope.rows.map((row) => [row.externalId, row]));
 
   for (const externalId of message.externalIds) {
     const snapshotRow = rowsById.get(externalId);

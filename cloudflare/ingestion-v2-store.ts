@@ -1108,7 +1108,6 @@ export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
    */
   async putSnapshot(envelope: NormalizedSnapshotEnvelope): Promise<{ key: string; bytes: number; existed: boolean }> {
     const key = snapshotObjectKey(envelope.sourceId, envelope.snapshotHash);
-    const body = serializeEnvelope(envelope);
     const existing = await this.get(key);
     if (existing !== null) {
       // The key is the content hash, so an existing object can only differ in
@@ -1117,6 +1116,7 @@ export class R2IngestionSnapshotStore implements IngestionSnapshotObjectStore {
       parseEnvelope(existing, { sourceId: envelope.sourceId, snapshotHash: envelope.snapshotHash });
       return { key, bytes: existing.length, existed: true };
     }
+    const body = serializeEnvelope(envelope);
     await this.put(key, body);
     return { key, bytes: body.length, existed: false };
   }

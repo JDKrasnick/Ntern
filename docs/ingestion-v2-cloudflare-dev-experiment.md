@@ -63,3 +63,28 @@ Retain the controlled D1 and R2 state for independent inspection. Remove its
 Workers and empty queues after proof capture so temporary scheduled work stops.
 Keep normal dev running for the cohort and scheduled soak; resource warnings,
 quarantine, durable drift, stale handoffs, and queue exhaustion all stop promotion.
+
+## Lever reconciliation and admission memory repair
+
+The dev gate found a Palantir new-grad occurrence admitted and open while its
+canonical job was closed. Captured posting facts reproduce the system error:
+the processor finds an explicit `Fall 2026` in the employer description but
+labels it inferred, so reconciliation expires the season. Metadata projection
+later restores explicit evidence without restoring the open flag. Description
+seasons now retain explicit evidence; source defaults and bare years remain
+inferred. Processor revision 3 and evaluator revision 5 invalidate prior grading.
+The captured replay changes both the proposed and canonical projection from
+closed to open. Regression coverage verifies creation and reopening remain quiet.
+
+Admission batches now retain only selected postings after full immutable-board
+validation, so provider awaits do not keep the rest of the board alive. Snapshot
+normalization serializes duplicate candidates only for their deterministic
+tie-break, and an existing R2 snapshot is validated before a replacement body is
+serialized. Integrity validation and duplicate selection remain unchanged.
+
+The production-shaped 25-row admission fixture retains about 3.7 MiB of extra
+parsed-board heap in the prior implementation at the first provider await; the
+repaired implementation retains no measurable extra board heap above the harness
+baseline. A 2 MiB retention guard fails on the prior head and passes on the repair.
+All eight resource-budget tests pass. These are local GC-backed measurements,
+not a replacement for Cloudflare memory analytics or the clean dev soak gate.

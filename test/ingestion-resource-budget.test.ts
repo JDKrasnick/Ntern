@@ -450,7 +450,14 @@ describe('ingestion resource budgets', () => {
       sourceId, snapshotHash: prepared.snapshotHash, snapshotKey: prepared.objectKey,
       admissionVersion: 'standard-v1', baseline: false, externalIds: prepared.externalIds,
     });
-    const evaluator: AdmissionV2RowEvaluator = { async evaluate() { return { decision: { kind: 'admitted' } }; } };
+    let providerAwaitHeapMb = 0;
+    const evaluator: AdmissionV2RowEvaluator = { async evaluate() {
+      if (!providerAwaitHeapMb) {
+        exposeGc?.();
+        providerAwaitHeapMb = process.memoryUsage().heapUsed / (1024 * 1024);
+      }
+      return { decision: { kind: 'admitted' } };
+    } };
 
     exposeGc?.();
     const baselineMb = process.memoryUsage().heapUsed / (1024 * 1024);
@@ -464,9 +471,13 @@ describe('ingestion resource budgets', () => {
     expect(result).toMatchObject({ acknowledged: true, settled: 25, skipped: 0 });
     expect(cpuMs).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
     if (exposeGc) {
+      // The parsed board must be released before a provider request can stall
+      // the delivery. Only its 25 selected rows should survive this await.
+      expect(providerAwaitHeapMb - baselineMb).toBeLessThan(2);
       expect(peakMb - baselineMb).toBeLessThan(MESSAGE_HEAP_BUDGET_MB);
       expect(peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
     }
+    console.info('V2 admission resource sample', { baselineMb, providerAwaitHeapMb, peakMb, cpuMs });
     database.close();
   }, 300_000);
 });
