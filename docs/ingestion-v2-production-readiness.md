@@ -172,3 +172,17 @@ that transition produces an expected missing-pointer failure and prevents a
 clean observation window from starting. Keep the strict pointer, contents,
 completion-marker, freshness, resource, and queue failure checks; adjust the
 observation time rather than treating missing publication as healthy.
+### Ingestion icon native-memory cleanup
+
+The restored dev ingestion version still reported approximately 139 MiB p99
+with no runtime errors. Admission and publishing isolation therefore does not
+establish ingestion headroom on its own. The shared ingestion icon renderer
+did not explicitly free either resvg's native renderer or rendered image.
+Cleanup now releases both in `finally`, including render/encode failures and
+oversized rejected PNGs, and copies accepted PNG bytes before release.
+
+A controlled 300-render native-allocation experiment grew WASM linear memory
+from 1.44 to 77.5 MiB with handles unreleased, versus 1.44 to 2.31 MiB with
+explicit cleanup. This establishes the retention mechanism; it does not prove
+that icons explain all live ingestion memory or replace current-version
+Cloudflare sampling and the sustained headroom gate.

@@ -25,16 +25,24 @@ export function createIconSvgRasterizer(wasm: InitInput): IconSvgRasterizer {
     return ready;
   };
   return async (safeSvg) => {
+    let renderer: InstanceType<typeof Resvg> | undefined;
+    let image: ReturnType<InstanceType<typeof Resvg>['render']> | undefined;
     try {
       await initialize();
-      const image = new Resvg(safeSvg, {
+      renderer = new Resvg(safeSvg, {
         fitTo: { mode: 'width', value: ICON_SVG_RASTER_WIDTH },
         font: { loadSystemFonts: false },
-      }).render();
+      });
+      image = renderer.render();
       const png = image.asPng();
-      return png.byteLength > 0 && png.byteLength <= MAX_ICON_ASSET_BYTES ? png : undefined;
+      // Keep the returned bytes independent of the native allocation we release.
+      return png.byteLength > 0 && png.byteLength <= MAX_ICON_ASSET_BYTES ? png.slice() : undefined;
     } catch {
       return undefined;
+    } finally {
+      // JS finalizers need not run before this isolate's next scheduled sweep.
+      // Release both WASM allocations even when rendering or encoding fails.
+      try { image?.free(); } finally { renderer?.free(); }
     }
   };
 }
