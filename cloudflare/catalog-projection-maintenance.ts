@@ -116,17 +116,20 @@ export async function refreshCatalogProjectionD1(
 }
 
 export async function refreshCatalogProjectionR2(store: D1InternshipStore, bucket: R2Bucket, phases?: MaintenancePhaseRecorder) {
-  const snapshot = await store.catalogProjectionSnapshot();
-  if (!snapshot) throw new Error('D1 catalog projection is unavailable for R2 publication');
-  const { groups, generatedAt, liveWatermark } = snapshot;
+  let generatedAt: string | undefined;
   await recordPhase(phases, 'catalog_projection_r2', 'started');
   try {
-    await new R2CatalogProjection(bucket).publish(groups, generatedAt, liveWatermark);
+    const snapshot = await store.catalogProjectionStream();
+    if (!snapshot) throw new Error('D1 catalog projection is unavailable for R2 publication');
+    generatedAt = snapshot.generatedAt;
+    const projection = await new R2CatalogProjection(bucket).publishStream(snapshot);
     await recordPhase(phases, 'catalog_projection_r2', 'complete');
+    return { generatedAt, ...projection };
   } catch (error) {
     await recordPhase(phases, 'catalog_projection_r2', 'failed');
-    try { await new R2CatalogProjection(bucket).invalidate(generatedAt); } catch { /* D1 remains authoritative. */ }
+    if (generatedAt) {
+      try { await new R2CatalogProjection(bucket).invalidate(generatedAt); } catch { /* D1 remains authoritative. */ }
+    }
     throw error;
   }
-  return { generatedAt, groups: groups.length, roles: groups.reduce((total, group) => total + group.roles.length, 0) };
 }

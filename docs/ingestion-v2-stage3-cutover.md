@@ -156,3 +156,11 @@ state as part of rollback.
 ### R2 schedule compatibility after deployment
 
 Keep the configured explicit-minute R2 schedule (`4,14,24,34,44,54 * * * *`). Both publishers also accept the equivalent prior expression (`4-54/10 * * * *`): production scheduled events continued using it more than 25 minutes after the schedule API reported the replacement on 2026-10-06. An API schedule listing or a successful deployment is insufficient evidence of publication. Check a completed scheduled event, the durable completion marker, and a valid R2 pointer/pages. Isolation gates still select the sole publisher; accepting the old expression must not transfer catalog or alert ownership.
+
+### Bounded R2 publication
+
+Production's 5,059-group catalog exceeded the combined Worker's memory limit during whole-catalog R2 hydration on 2026-10-06. The R2 phase now pins the content-addressed D1 manifest and reads its groups lazily in 25-row queries. It publishes at most 100 groups per R2 page, rejects pages above 4 MiB before activation, and checks the complete ordered content hash before activating the pointer. D1 projection rebuilds remain a separate memory-heavy phase and must independently pass headroom/soak gates.
+
+A schema-1 pointer can include `pageVersion`, a private immutable page namespace; `version` continues to identify the catalog content. Read pages through `pageVersion ?? version`. Existing pointers remain readable. Unchanged streams retain verified pages. Repairs copy validated pages into a new private namespace, so partial scans and concurrent publications cannot overwrite pages already visible to readers. Proven unpublished candidates are cleaned up; an uncertain final pointer-write acknowledgement preserves its pages because a newer writer may already retain them. Completion markers advance only after successful publication or yielding to a newer pointer.
+
+The compiled 5,059-group regression verifies real migrated D1-to-R2 publication while enforcing a maximum of 100 fetched-but-unpublished groups. Also verify the natural scheduled event, durable completion marker, valid pointer, all page/content hashes, queue drain, and current-version memory/error samples after deployment.

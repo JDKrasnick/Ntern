@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
-import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
+import { catalogGroupDetails, groupCatalogJobs, type CatalogGroupDetails } from '../src/catalog-groups.js';
 import type { Internship } from '../src/types.js';
 import { R2CatalogProjection, R2CatalogReadStore } from '../cloudflare/r2-catalog-projection.js';
 import type { D1Database, D1PreparedStatement, R2Bucket } from '../cloudflare/types.js';
@@ -39,6 +39,141 @@ function fakeBucket() {
   } as R2Bucket;
   return { bucket, objects, failNextPage: () => { failPage = true; } };
 }
+
+function streamed(groups: CatalogGroupDetails[], generatedAt = new Date().toISOString()) {
+  const hash = createHash('sha256');
+  for (const group of groups) hash.update(JSON.stringify(group)).update('\0');
+  return { version: hash.digest('hex').slice(0, 20), generatedAt,
+    groups: (async function* () { yield* groups; })() };
+}
+
+describe('streamed R2 publication', () => {
+  const groups = () => groupCatalogJobs(Array.from({ length: 251 }, (_, index) => role(index)), { includeClosed: true }).map(catalogGroupDetails);
+  const pointer = (objects: Map<string, ArrayBuffer>) => JSON.parse(new TextDecoder().decode(objects.get('public-catalog/v1/current')!));
+  const pageKey = (value: { version: string; pageVersion?: string }, index: number) => `public-catalog/v1/${value.pageVersion ?? value.version}/${index}`;
+
+  it('publishes each bounded page before reading the next and exposes the complete immutable view', async () => {
+    const values = groups(), source = streamed(values);
+    const { bucket, objects } = fakeBucket();
+    let read = 0, written = 0, largestPending = 0;
+    source.groups = (async function* () {
+      for (const group of values) {
+        read += 1; largestPending = Math.max(largestPending, read - written);
+        if (read - written > 100) throw new Error('whole-catalog hydration resumed');
+        yield group;
+      }
+    })();
+    const projection = new R2CatalogProjection({ ...bucket, async put(key, value, options) {
+      if (/\/[a-f0-9]{20}\/\d+$/.test(key)) written += JSON.parse(new TextDecoder().decode(value as ArrayBuffer)).length;
+      return bucket.put(key, value, options);
+    } });
+    expect(await projection.publishStream(source)).toEqual({ groups: 251, roles: 251 });
+    expect(largestPending).toBe(100);
+    const published = pointer(objects);
+    expect(published).toMatchObject({ schemaVersion: 1, count: 251, version: source.version });
+    expect(published.pageVersion).toMatch(/^[a-f0-9]{20}$/);
+    expect((await projection.list(undefined, 500))?.groups).toEqual(values);
+    expect((await projection.group(values[250]!.group.groupId))?.roles[0]?.jobId).toBe(values[250]!.roles[0]!.jobId);
+  });
+
+  it('keeps the private namespace across unchanged streaming, renewal and full publication', async () => {
+    const values = groups(), { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
+    const first = new Date(Date.now() - 60_000).toISOString(), later = new Date().toISOString();
+    await projection.publishStream(streamed(values, first));
+    const published = pointer(objects), keys = [...objects.keys()];
+    await projection.publishStream(streamed(values, later));
+    await projection.revalidate(values, later);
+    await projection.publish(values, later);
+    expect(pointer(objects).pageVersion).toBe(published.pageVersion);
+    expect([...objects.keys()]).toEqual(keys);
+    expect((await projection.list(undefined, 500))?.groups).toEqual(values);
+  });
+
+  it('repairs a late missing page by copying validated pages without changing their immutable bytes', async () => {
+    const values = groups(), { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
+    await projection.publishStream(streamed(values));
+    const original = pointer(objects), first = objects.get(pageKey(original, 0));
+    objects.delete(pageKey(original, 2));
+    await projection.publishStream(streamed(values));
+    const repaired = pointer(objects);
+    expect(repaired.version).toBe(original.version);
+    expect(repaired.pageVersion).not.toBe(original.pageVersion);
+    expect(objects.get(pageKey(original, 0))).toBe(first);
+    expect((await projection.list(undefined, 500))?.groups).toEqual(values);
+  });
+
+  it('cleans a partial candidate after a page-write failure and preserves the active view', async () => {
+    const values = groups(), { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
+    await projection.publish(values.slice(0, 1), new Date(Date.now() - 60_000).toISOString());
+    const before = [...objects.entries()];
+    const failing = new R2CatalogProjection({ ...bucket, async put(key, value, options) {
+      if (/\/[a-f0-9]{20}\/1$/.test(key)) throw new Error('partial candidate failure');
+      return bucket.put(key, value, options);
+    } });
+    await expect(failing.publishStream(streamed(values))).rejects.toThrow('partial candidate failure');
+    expect([...objects.entries()]).toEqual(before);
+  });
+
+  it.each(['incomplete', 'corrupt'])('rejects a %s manifest stream without overwriting active page bytes', async (fault) => {
+    const values = groups(), { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
+    await projection.publish(values, new Date(Date.now() - 60_000).toISOString());
+    const original = pointer(objects), bytes = objects.get(pageKey(original, 0));
+    const source = streamed(values);
+    source.groups = (async function* () {
+      if (fault === 'incomplete') yield* values.slice(0, 250);
+      else for (const value of values) yield { ...value, roles: value.roles.map(item => ({ ...item, open: false })) };
+    })();
+    await expect(projection.publishStream(source)).rejects.toThrow('does not match its manifest');
+    expect(objects.get(pageKey(original, 0))).toBe(bytes);
+    expect(pointer(objects).schemaVersion).toBe(0);
+    expect(objects.get(pageKey(original, 0))).toBe(bytes);
+    expect([...objects.keys()].filter(key => key !== 'public-catalog/v1/current')).toHaveLength(3);
+  });
+
+  it.each([false, true])('a delayed streamed candidate cannot replace a newer closed generation (existing pointer: %s)', async (existing) => {
+    const values = groups(), { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
+    const first = new Date(Date.now() - 60_000).toISOString(), later = new Date().toISOString();
+    if (existing) await projection.publish(values.slice(0, 1), first);
+    const closed = groupCatalogJobs(Array.from({ length: 251 }, (_, index) => ({ ...role(index), open: false })), { includeClosed: true }).map(catalogGroupDetails);
+    let raced = false;
+    const delayed = new R2CatalogProjection({ ...bucket, async put(key, value, options) {
+      if (!raced && /\/[a-f0-9]{20}\/0$/.test(key)) {
+        raced = true;
+        await projection.publish(closed, later);
+      }
+      return bucket.put(key, value, options);
+    } });
+    expect(await delayed.publishStream(streamed(values, first))).toMatchObject({ skipped: true });
+    expect(pointer(objects).version).toBe(streamed(closed, later).version);
+    expect((await projection.list(undefined, 500))?.groups).toEqual(closed);
+    expect([...objects.keys()].filter(key => /\/[a-f0-9]{20}\/\d+$/.test(key))).toHaveLength(existing ? 4 : 3);
+  });
+
+  it('preserves activated pages when a lost acknowledgement races with a newer renewal', async () => {
+    const values = groups(), { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
+    const first = new Date(Date.now() - 60_000).toISOString(), later = new Date().toISOString();
+    const uncertain = new R2CatalogProjection({ ...bucket, async put(key, value, options) {
+      const result = await bucket.put(key, value, options);
+      if (key === 'public-catalog/v1/current') {
+        await projection.revalidate(values, later);
+        throw new Error('activation acknowledgement lost');
+      }
+      return result;
+    } });
+    await expect(uncertain.publishStream(streamed(values, first))).rejects.toThrow('activation acknowledgement lost');
+    expect(pointer(objects).generatedAt).toBe(later);
+    expect((await projection.list(undefined, 500))?.groups).toEqual(values);
+  });
+
+  it('rejects an oversized page before activation instead of exhausting the isolate', async () => {
+    const values = groups(), { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
+    await projection.publish(values.slice(0, 1), new Date(Date.now() - 60_000).toISOString());
+    const original = [...objects.entries()];
+    const large = values.map(value => ({ ...value, roles: value.roles.map(item => ({ ...item, compensation: { raw: 'x'.repeat(50_000) } })) }));
+    await expect(projection.publishStream(streamed(large))).rejects.toThrow('page exceeds its memory budget');
+    expect([...objects.entries()]).toEqual(original);
+  });
+});
 
 describe('R2 catalog projection', () => {
   it('falls back to the durable closed D1 generation when every R2 write is unavailable', async () => {

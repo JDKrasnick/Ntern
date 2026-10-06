@@ -1311,8 +1311,36 @@ export class D1InternshipStore implements InternshipStore {
   } | undefined> {
     const pointer = await this.readCatalogProjectionPointer();
     if (!pointer) return undefined;
-    const scope = this.catalogProjectionScope(pointer);
     const groups: CatalogGroupDetails[] = [];
+    for await (const group of this.streamCatalogProjectionGroups(this.catalogProjectionScope(pointer))) groups.push(group);
+    return {
+      groups,
+      generatedAt: pointer.generatedAt,
+      ...(pointer.liveWatermark ? { liveWatermark: pointer.liveWatermark } : {}),
+    };
+  }
+
+  /** Pin the immutable manifest, but hydrate only the current D1 page. */
+  async catalogProjectionStream(): Promise<{
+    version: string;
+    generatedAt: string;
+    liveWatermark?: string;
+    groups: AsyncIterable<CatalogGroupDetails>;
+  } | undefined> {
+    const pointer = await this.readCatalogProjectionPointer();
+    if (!pointer) return undefined;
+    if (pointer.schemaVersion !== CATALOG_PROJECTION_SCHEMA_VERSION) {
+      throw new Error('Streaming publication requires the content-addressed D1 projection');
+    }
+    return {
+      version: pointer.version,
+      generatedAt: pointer.generatedAt,
+      ...(pointer.liveWatermark ? { liveWatermark: pointer.liveWatermark } : {}),
+      groups: this.streamCatalogProjectionGroups(this.catalogProjectionScope(pointer)),
+    };
+  }
+
+  private async *streamCatalogProjectionGroups(scope: CatalogProjectionScope): AsyncGenerator<CatalogGroupDetails> {
     let cursor: { sortKey: string; sk: string } | undefined;
     for (;;) {
       const comparison = scope.order === 'ASC' ? '>' : '<';
@@ -1325,16 +1353,11 @@ export class D1InternshipStore implements InternshipStore {
         .bind(scope.pk, ...(scope.manifestVersion ? [scope.manifestVersion] : []),
           ...(cursor ? [cursor.sortKey, cursor.sk] : []));
       const page = await query.all<{ sk: string; catalog_sort_key: string; value: string }>();
-      groups.push(...page.results.map((row) => JSON.parse(row.value) as CatalogGroupDetails));
+      for (const row of page.results) yield JSON.parse(row.value) as CatalogGroupDetails;
       if (page.results.length < 25) break;
       const last = page.results.at(-1)!;
       cursor = { sortKey: last.catalog_sort_key, sk: last.sk };
     }
-    return {
-      groups,
-      generatedAt: pointer.generatedAt,
-      ...(pointer.liveWatermark ? { liveWatermark: pointer.liveWatermark } : {}),
-    };
   }
 
   async listCatalogProjection(cursor?: string, limit = 25): Promise<CatalogProjectionPage | undefined> {

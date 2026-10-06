@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
 import { Miniflare } from 'miniflare';
@@ -64,13 +65,13 @@ test('R2 failure invalidates the old pointer and does not advance the completion
 
 test('legacy scheduled expression repairs real R2 pages without double ownership or notifications', async () => {
   const old = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
-  await bucket.delete(`public-catalog/v1/${old.version}/0`);
+  await bucket.delete(`public-catalog/v1/${old.pageVersion ?? old.version}/0`);
   const scheduledTime = Date.now();
   await worker.scheduled({ cron: '4-54/10 * * * *', scheduledTime }, env);
   const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(pointer.schemaVersion, 1);
   assert.equal(pointer.version, old.version);
-  assert.ok(await bucket.get(`public-catalog/v1/${pointer.version}/0`));
+  assert.ok(await bucket.get(`public-catalog/v1/${pointer.pageVersion ?? pointer.version}/0`));
   assert.equal(JSON.parse((await marker('catalog_projection_r2')).value).observedAt, new Date(scheduledTime).toISOString());
   await worker.scheduled({ cron: '4-54/10 * * * *', scheduledTime }, {
     INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected disabled publisher read'); } },
@@ -81,7 +82,7 @@ test('legacy scheduled expression repairs real R2 pages without double ownership
 test('unchanged catalog cycles retire and repair missing or corrupt active pages', async () => {
   for (const fault of ['missing', 'malformed', 'changed']) {
     const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
-    const pageKey = `public-catalog/v1/${pointer.version}/0`;
+    const pageKey = `public-catalog/v1/${pointer.pageVersion ?? pointer.version}/0`;
     const original = await (await bucket.get(pageKey)).text();
     if (fault === 'missing') await bucket.delete(pageKey);
     if (fault === 'malformed') await bucket.put(pageKey, '{');
@@ -95,7 +96,7 @@ test('unchanged catalog cycles retire and repair missing or corrupt active pages
     await scheduled('4,14,24,34,44,54 * * * *');
     const repaired = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
     assert.equal(repaired.version, pointer.version);
-    assert.equal(await (await bucket.get(pageKey)).text(), original);
+    assert.equal(await (await bucket.get(`public-catalog/v1/${repaired.pageVersion ?? repaired.version}/0`)).text(), original);
     assert.equal(JSON.parse((await marker('catalog_projection_r2')).value).status, 'complete');
   }
 });
@@ -113,7 +114,7 @@ test('repairs a corrupt later page across a failed repair without exposing a par
   await scheduled('4,14,24,34,44,54 * * * *');
   const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(pointer.count, 102);
-  const keys = [0, 1].map(index => `public-catalog/v1/${pointer.version}/${index}`);
+  const keys = [0, 1].map(index => `public-catalog/v1/${pointer.pageVersion ?? pointer.version}/${index}`);
   const pages = await Promise.all(keys.map(async key => (await bucket.get(key)).text()));
   await bucket.put(keys[1], '[]');
   await scheduled('1-51/10 * * * *');
@@ -121,7 +122,7 @@ test('repairs a corrupt later page across a failed repair without exposing a par
   const completion = await marker('catalog_projection_r2');
   const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket),
     async put(key, value) {
-      if (key === keys[1]) throw new Error('second page write failed');
+      if (/\/[a-f0-9]{20}\/1$/.test(key)) throw new Error('second page write failed');
       return bucket.put(key, value);
     } } };
   await assert.rejects(worker.scheduled({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /second page write failed/);
@@ -130,7 +131,7 @@ test('repairs a corrupt later page across a failed repair without exposing a par
   await scheduled('4,14,24,34,44,54 * * * *');
   const repaired = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(repaired.version, pointer.version);
-  for (let index = 0; index < keys.length; index++) assert.equal(await (await bucket.get(keys[index])).text(), pages[index]);
+  for (let index = 0; index < keys.length; index++) assert.equal(await (await bucket.get(`public-catalog/v1/${repaired.pageVersion ?? repaired.version}/${index}`)).text(), pages[index]);
   const notifications = await db.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").first();
   assert.equal(notifications.n, 0);
 });
@@ -176,6 +177,66 @@ test('a paused unchanged D1 renewal cannot resurrect a pointer after a newer clo
   release(); await staleRenewal;
   const finalPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(finalPointer.version, freshPointer.version, 'stale renewal must not overwrite the newer published generation');
-  const finalPage = JSON.parse(await (await bucket.get(`public-catalog/v1/${finalPointer.version}/0`)).text());
+  const finalPage = JSON.parse(await (await bucket.get(`public-catalog/v1/${finalPointer.pageVersion ?? finalPointer.version}/0`)).text());
   assert.equal(finalPage[0].roles[0].open, false, 'the public projection must keep the role closed');
+});
+
+
+test('production-size D1 projection reaches real R2 without hydrating the whole catalog', async () => {
+  const old = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  const template = JSON.parse(await (await bucket.get(`public-catalog/v1/${old.pageVersion ?? old.version}/0`)).text())[0];
+  const hash = createHash('sha256'), keys = [], pending = [];
+  const generatedAt = new Date().toISOString();
+  for (let index = 0; index < 5059; index++) {
+    const groupId = `scaled-group-${index}`, company = `Scaled Employer ${index}`;
+    const role = { ...template.roles[0], jobId: `scaled-job-${index}`, company,
+      compensation: { raw: `USD 30/hour; 開示された給与; ${index}; `.repeat(40) } };
+    const group = { group: { ...template.group, groupId, company, featuredRole: role }, roles: [role] };
+    const value = JSON.stringify(group), digest = createHash('sha256').update(value).digest('hex').slice(0, 20);
+    const key = `GROUP#${groupId}#${digest}`;
+    hash.update(value).update('\0'); keys.push(key);
+    pending.push(db.prepare("INSERT INTO catalog_items(pk,sk,kind,value,catalog_sort_key) VALUES ('CATALOG_PROJECTION#GROUPS',?,'catalog-projection',?,?)")
+      .bind(key, value, String(5059 - index).padStart(8, '0')));
+    if (pending.length === 25) await db.batch(pending.splice(0));
+  }
+  if (pending.length) await db.batch(pending);
+  const version = hash.digest('hex').slice(0, 20);
+  await db.prepare("INSERT OR REPLACE INTO catalog_items(pk,sk,kind,value) VALUES ('CATALOG_PROJECTION#MANIFESTS',?,'catalog-projection-manifest',?)")
+    .bind(version, JSON.stringify({ createdAt: generatedAt, keys })).run();
+  await db.prepare("UPDATE catalog_items SET value=? WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'")
+    .bind(JSON.stringify({ schemaVersion: 6, version, generatedAt, retainedVersions: [] })).run();
+  let hydrated = 0, written = 0, maximumPending = 0;
+  const boundedDb = { batch: db.batch.bind(db), prepare(sql) {
+    const wrap = statement => new Proxy(statement, { get(target, key) {
+      if (key === 'bind') return (...values) => wrap(target.bind(...values));
+      if (key === 'all') return async (...args) => {
+        const page = await target.all(...args);
+        if (page.results[0]?.catalog_sort_key !== undefined) {
+          hydrated += page.results.length;
+          maximumPending = Math.max(maximumPending, hydrated - written);
+          assert.ok(hydrated - written <= 100, 'full catalog retained before R2 publication');
+        }
+        return page;
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    return wrap(db.prepare(sql));
+  } };
+  const boundedBucket = { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket), async put(key, value, options) {
+    if (/\/[a-f0-9]{20}\/\d+$/.test(key)) {
+      const page = JSON.parse(new TextDecoder().decode(value));
+      assert.ok(page.length <= 100); written += page.length;
+    }
+    return bucket.put(key, value, options);
+  } };
+  await worker.scheduled({ cron: '4-54/10 * * * *', scheduledTime: Date.now() }, { ...env, DB: boundedDb, DOCUMENTS: boundedBucket });
+  const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  assert.equal(pointer.version, version); assert.equal(pointer.count, 5059);
+  assert.equal(hydrated, 5059); assert.equal(written, 5059); assert.equal(maximumPending, 100);
+  for (const [index, expected] of [[0, 100], [50, 59]]) {
+    assert.equal(JSON.parse(await (await bucket.get(`public-catalog/v1/${pointer.pageVersion ?? pointer.version}/${index}`)).text()).length, expected);
+  }
+  assert.equal(JSON.parse((await marker('catalog_projection_r2')).value).status, 'complete');
+  assert.equal((await db.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
 });
