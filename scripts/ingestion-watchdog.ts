@@ -8,7 +8,7 @@ import { SOURCE_CADENCE_SLIP_MS } from '../src/source-poll-cadence.js';
 
 export type Signal = { id: string; detail: string };
 type Marker = { key: string; value: string; updated_at: string };
-type Pointer = { schemaVersion: number; generatedAt: string; version: string; count: number; groupPages: Record<string, number> };
+type Pointer = { schemaVersion: number; generatedAt: string; version: string; pageVersion?: string; count: number; groupPages: Record<string, number> };
 const minute = 60_000;
 const reportUrl = 'https://github.com/JDKrasnick/Ntern/actions/workflows/ingestion-v2-cost-gate.yml';
 const descriptions: Record<string, string> = {
@@ -38,7 +38,9 @@ export function markerSignals(markers: Marker[], required: string[], now: Date):
 export function validateCatalogPages(pointer: Pointer, pages: unknown[], manifest?: string[]): Signal[] {
   const invalid = (detail: string) => [{ id: 'catalog-projection-unhealthy', detail }];
   if (pointer.schemaVersion !== 1 || !Number.isSafeInteger(pointer.count) || pointer.count < 0 || pointer.count > 10_000
-    || !/^[a-f0-9]{20}$/.test(pointer.version) || !pointer.groupPages || typeof pointer.groupPages !== 'object'
+    || !/^[a-f0-9]{20}$/.test(pointer.version)
+    || (pointer.pageVersion !== undefined && (typeof pointer.pageVersion !== 'string' || !/^[a-f0-9]{20}$/.test(pointer.pageVersion)))
+    || !pointer.groupPages || typeof pointer.groupPages !== 'object'
     || Object.keys(pointer.groupPages).length !== pointer.count || pages.length !== Math.ceil(pointer.count / 100)) return invalid('invalid R2 pointer or page count');
   const hash = createHash('sha256');
   const seen = new Set<string>();
@@ -156,11 +158,12 @@ export async function collectWatchdog(environment: 'production' | 'dev', now: Da
     if (!handoff) signals.push({ id: 'catalog-projection-unhealthy', detail: 'R2 pointer missing or retired outside the publication grace period' });
   } else if (!Number.isFinite(Date.parse(pointer.generatedAt)) || now.getTime() - Date.parse(pointer.generatedAt) > 30 * minute || now.getTime() - Date.parse(pointer.generatedAt) < -minute) {
     signals.push({ id: 'catalog-projection-unhealthy', detail: 'R2 generation is stale or invalid' });
-  } else if (!Number.isSafeInteger(pointer.count) || pointer.count < 0 || pointer.count > 10_000 || !/^[a-f0-9]{20}$/.test(pointer.version)) {
+  } else if (!Number.isSafeInteger(pointer.count) || pointer.count < 0 || pointer.count > 10_000 || !/^[a-f0-9]{20}$/.test(pointer.version)
+    || (pointer.pageVersion !== undefined && (typeof pointer.pageVersion !== 'string' || !/^[a-f0-9]{20}$/.test(pointer.pageVersion)))) {
     signals.push({ id: 'catalog-projection-unhealthy', detail: 'R2 pointer exceeds validation bounds' });
   } else {
     const pages: unknown[] = [];
-    for (let index = 0; index * 100 < pointer.count; index++) pages.push(await object(`public-catalog/v1/${pointer.version}/${index}`));
+    for (let index = 0; index * 100 < pointer.count; index++) pages.push(await object(`public-catalog/v1/${pointer.pageVersion ?? pointer.version}/${index}`));
     let manifest: string[] | undefined;
     if (d1?.schemaVersion === 6 && d1.generatedAt === pointer.generatedAt) {
       const rows = await query<{ value: string }>("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION#MANIFESTS' AND sk=?", [d1.version]);

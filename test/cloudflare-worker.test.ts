@@ -399,8 +399,8 @@ describe('Cloudflare maintenance cron', () => {
 
   it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('publishes the R2 catalog projection for %s in a separate invocation', async (cron) => {
     const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
-    const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot').mockResolvedValue({
-      groups: [], generatedAt: '2026-09-17T17:01:00.000Z',
+    const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionStream').mockResolvedValue({
+      version: 'e3b0c44298fc1c149afb', groups: (async function* () {})(), generatedAt: '2026-09-17T17:01:00.000Z',
     });
     const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
     const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
@@ -428,7 +428,7 @@ describe('Cloudflare maintenance cron', () => {
   });
 
   it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('does not report a successful R2 publication when %s fails', async (cron) => {
-    vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot').mockResolvedValue({ groups: [], generatedAt: new Date().toISOString() });
+    vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionStream').mockResolvedValue({ version: 'e3b0c44298fc1c149afb', groups: (async function* () {})(), generatedAt: new Date().toISOString() });
     const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -444,7 +444,7 @@ describe('Cloudflare maintenance cron', () => {
   });
 
   it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('leaves %s to the isolated publisher when isolation is enabled', async (cron) => {
-    const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot');
+    const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionStream');
     try {
       await cloudflareWorker.scheduled({ cron, scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         DB: { prepare: () => ({ async first() { return null; } }) },

@@ -66,7 +66,9 @@ function mockCloudflare(fault = 'healthy') {
     }
     if (url.includes('/catalog?')) return fault === 'invalid-public-response' ? Response.json({ message: 'not a catalog' }) : Response.json({ groups: [groups[0]] });
     if (url.includes('/objects/')) {
-      if (url.endsWith('/current')) return ['missing-pointer', 'publication-grace', 'future-generation'].includes(fault) ? new Response('', { status: 404 }) : Response.json(pointer);
+      if (url.endsWith('/current')) return ['missing-pointer', 'publication-grace', 'future-generation'].includes(fault) ? new Response('', { status: 404 })
+        : Response.json(fault === 'streamed-pointer' ? { ...pointer, pageVersion: 'a'.repeat(20) } : pointer);
+      if (fault === 'streamed-pointer') expect(url).toContain(`/objects/public-catalog/v1/${'a'.repeat(20)}/`);
       return Response.json(pages[Number(url.split('/').pop())]);
     }
     if (url.endsWith('/deployments')) return result({ deployments: [{ versions: [{ version_id: 'active-version', percentage: 100 }] }] });
@@ -83,7 +85,7 @@ function mockCloudflare(fault = 'healthy') {
 }
 
 it.each([
-  ['healthy', undefined], ['queue-failure', 'queue-failures-unresolved'], ['invalid-public-response', 'public-catalog-unavailable'],
+  ['healthy', undefined], ['streamed-pointer', undefined], ['queue-failure', 'queue-failures-unresolved'], ['invalid-public-response', 'public-catalog-unavailable'],
   ['missing-pointer', 'catalog-projection-unhealthy'], ['stale-source', 'source-polling-stalled'], ['stuck-admission', 'admission-progress-stalled'],
   ['oom', 'worker-errors'], ['headroom', 'worker-memory-headroom'],
   ['publication-grace', undefined], ['future-generation', 'catalog-projection-unhealthy'],
@@ -92,6 +94,11 @@ it.each([
   const signals = await collectWatchdog('dev', now);
   expect(signals.map(signal => signal.id)).toEqual(expected ? [expected] : []);
   expect(queries.every(query => !/^\s*(INSERT|UPDATE|DELETE)/i.test(query.sql))).toBe(true);
+});
+
+it.each(['../current', 'A'.repeat(20)])('rejects an invalid private page namespace: %s', pageVersion => {
+  expect(validateCatalogPages({ ...pointer, pageVersion }, pages, manifest)[0]?.id).toBe('catalog-projection-unhealthy');
+  expect(validateCatalogPages({ ...pointer, pageVersion: 'a'.repeat(20) }, pages, manifest)).toEqual([]);
 });
 
 it('reports lost API access instead of treating missing data as healthy', async () => {

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { catalogProjectionRoleMatches, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter,
   type CatalogGroupRole, type CatalogProjectionPage } from '../src/catalog-groups.js';
 import { D1InternshipStore } from './d1-store.js';
@@ -6,6 +6,7 @@ import type { D1Database, R2Bucket } from './types.js';
 
 const prefix = 'public-catalog/v1';
 const pageSize = 100;
+const streamedPageBytes = 4 * 1024 * 1024;
 const roleReadPageConcurrency = 4;
 const filterReadPageConcurrency = 4;
 const maxAgeMs = 7 * 24 * 60 * 60_000;
@@ -17,7 +18,7 @@ function contentVersion(groups: CatalogGroupDetails[]): string {
   return hash.digest('hex').slice(0, 20);
 }
 
-type Pointer = { schemaVersion: 1; version: string; generatedAt: string; count: number; groupPages: Record<string, number>;
+type Pointer = { schemaVersion: 1; version: string; pageVersion?: string; generatedAt: string; count: number; groupPages: Record<string, number>;
   /** The D1 publish's open-catalog watermark, so a reader can detect an unprojected role. */
   liveWatermark?: string };
 type RetiredPointer = { schemaVersion: 0; generatedAt: string };
@@ -77,6 +78,7 @@ export class R2CatalogProjection {
       return { schemaVersion: 0, generatedAt: pointer.generatedAt };
     }
     if (!pointer || pointer.schemaVersion !== 1 || !/^[a-f0-9]{20}$/.test(pointer.version)
+      || (pointer.pageVersion !== undefined && (typeof pointer.pageVersion !== 'string' || !/^[a-f0-9]{20}$/.test(pointer.pageVersion)))
       || !Number.isSafeInteger(pointer.count) || pointer.count < 0
       || !pointer.groupPages || typeof pointer.groupPages !== 'object'
       || !Number.isFinite(Date.parse(pointer.generatedAt))
@@ -85,7 +87,7 @@ export class R2CatalogProjection {
   }
 
   private async page(pointer: Pointer, index: number): Promise<CatalogGroupDetails[]> {
-    const object = await this.bucket.get(`${prefix}/${pointer.version}/${index}`);
+    const object = await this.bucket.get(`${prefix}/${pointer.pageVersion ?? pointer.version}/${index}`);
     if (!object) throw new Error('R2 catalog projection page is missing');
     const groups = await new Response(object.body).json() as CatalogGroupDetails[];
     if (!Array.isArray(groups) || groups.length > pageSize) throw new Error('R2 catalog projection page is invalid');
@@ -131,8 +133,113 @@ export class R2CatalogProjection {
     if (object && !etag) throw new Error('R2 catalog pointer ETag is missing');
     await this.bucket.put(`${prefix}/current`, encoded({
       schemaVersion: 1, version, generatedAt, count: groups.length, groupPages,
+      ...(retained && previous?.pageVersion ? { pageVersion: previous.pageVersion } : {}),
       ...(liveWatermark ? { liveWatermark } : {}),
     } satisfies Pointer), { onlyIf: etag ? { etagMatches: etag } : { etagDoesNotMatch: '*' } });
+  }
+
+  /** Keep one page live. A private page namespace prevents an incomplete or
+   * corrupt D1 scan from modifying pages already visible to readers. */
+  async publishStream(source: {
+    version: string; generatedAt: string; liveWatermark?: string; groups: AsyncIterable<CatalogGroupDetails>;
+  }): Promise<{ groups: number; roles: number; skipped?: boolean }> {
+    if (!/^[a-f0-9]{20}$/.test(source.version)) throw new Error('D1 catalog projection version is invalid');
+    const object = await this.bucket.get(`${prefix}/current`);
+    let etag = object?.etag;
+    const state = object ? await this.decodeState(object.body) : undefined;
+    if (state && state.generatedAt > source.generatedAt) return { groups: 0, roles: 0, skipped: true };
+    const previous = state?.schemaVersion === 1 ? state : undefined;
+    let reuse = previous?.version === source.version;
+    const pageVersion = randomBytes(10).toString('hex');
+    const stagedKeys: string[] = [];
+    const checkedPages: string[] = [];
+    const groupPages = new Map<string, number>();
+    const hash = createHash('sha256');
+    let page: CatalogGroupDetails[] = [], pageBytes = 2, count = 0, roles = 0, index = 0, published = false, activationUncertain = false;
+    const stage = async (pageIndex: number, serialized: string) => {
+      const key = `${prefix}/${pageVersion}/${pageIndex}`;
+      stagedKeys.push(key);
+      await this.bucket.put(key, new TextEncoder().encode(serialized).buffer as ArrayBuffer);
+    };
+    const flush = async (): Promise<boolean> => {
+      const serialized = JSON.stringify(page);
+      page = [];
+      pageBytes = 2;
+      if (reuse && previous) {
+        let matches = false;
+        let saved = '';
+        try {
+          const object = await this.bucket.get(`${prefix}/${previous.pageVersion ?? previous.version}/${index}`);
+          if (object) {
+            saved = await new Response(object.body).text();
+            matches = JSON.stringify(JSON.parse(saved)) === serialized;
+          }
+        } catch { /* Repair this page. */ }
+        if (matches) {
+          checkedPages.push(createHash('sha256').update(saved).digest('hex'));
+          index += 1;
+          return true;
+        }
+        if (!etag) throw new Error('R2 catalog pointer ETag is missing');
+        const retired = await this.bucket.put(`${prefix}/current`, encoded({ schemaVersion: 0, generatedAt: source.generatedAt }),
+          { onlyIf: { etagMatches: etag } });
+        if (retired === null) return false;
+        etag = (retired as { etag?: string } | undefined)?.etag;
+        if (!etag) throw new Error('R2 catalog tombstone ETag is missing');
+        reuse = false;
+        // Earlier pages were validated against this same D1 stream. Copy only
+        // one at a time, and reject any mutation since that validation.
+        for (let prior = 0; prior < index; prior += 1) {
+          const object = await this.bucket.get(`${prefix}/${previous.pageVersion ?? previous.version}/${prior}`);
+          if (!object) throw new Error('R2 catalog page disappeared during repair');
+          const saved = await new Response(object.body).text();
+          if (createHash('sha256').update(saved).digest('hex') !== checkedPages[prior]) {
+            throw new Error('R2 catalog page changed during repair');
+          }
+          await stage(prior, saved);
+        }
+      }
+      await stage(index, serialized);
+      index += 1;
+      return true;
+    };
+    try {
+      for await (const group of source.groups) {
+        if (groupPages.has(group.group.groupId)) throw new Error('D1 catalog projection has duplicate groups');
+        const serialized = JSON.stringify(group);
+        pageBytes += new TextEncoder().encode(serialized).byteLength + (page.length ? 1 : 0);
+        if (pageBytes > streamedPageBytes) throw new Error('R2 catalog projection page exceeds its memory budget');
+        hash.update(serialized).update('\0');
+        groupPages.set(group.group.groupId, Math.floor(count / pageSize));
+        count += 1; roles += group.roles.length;
+        page.push(group);
+        if (page.length === pageSize && !await flush()) return { groups: count, roles, skipped: true };
+      }
+      if (page.length && !await flush()) return { groups: count, roles, skipped: true };
+      if (hash.digest('hex').slice(0, 20) !== source.version) throw new Error('D1 catalog projection stream does not match its manifest');
+      if (object && !etag) throw new Error('R2 catalog pointer ETag is missing');
+      activationUncertain = true;
+      const result = await this.bucket.put(`${prefix}/current`, encoded({
+        schemaVersion: 1, version: source.version, generatedAt: source.generatedAt, count,
+        groupPages: Object.fromEntries(groupPages),
+        ...(reuse && previous?.pageVersion ? { pageVersion: previous.pageVersion } : {}),
+        ...(!reuse && count ? { pageVersion } : {}),
+        ...(source.liveWatermark ? { liveWatermark: source.liveWatermark } : {}),
+      } satisfies Pointer), { onlyIf: etag ? { etagMatches: etag } : { etagDoesNotMatch: '*' } });
+      activationUncertain = false;
+      published = result !== null;
+      return { groups: count, roles, ...(!published ? { skipped: true } : {}) };
+    } finally {
+      // A lost activation acknowledgement may already have exposed this prefix,
+      // and another writer may retain it. Delete only proven unpublished pages.
+      if (!published && !activationUncertain) {
+        for (let start = 0; start < stagedKeys.length; start += 4) {
+          await Promise.all(stagedKeys.slice(start, start + 4).map(async key => {
+            try { await this.bucket.delete(key); } catch { /* Rebuildable orphan; preserve the publication error. */ }
+          }));
+        }
+      }
+    }
   }
 
   /** The watermark of the published version, for a reader that holds no page. */
