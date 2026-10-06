@@ -381,7 +381,7 @@ describe('Cloudflare maintenance cron', () => {
     } finally { vi.restoreAllMocks(); }
   });
 
-  it('publishes the R2 catalog projection in a separate invocation', async () => {
+  it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('publishes the R2 catalog projection for %s in a separate invocation', async (cron) => {
     const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
     const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot').mockResolvedValue({
       groups: [], generatedAt: '2026-09-17T17:01:00.000Z',
@@ -392,7 +392,7 @@ describe('Cloudflare maintenance cron', () => {
     const put = vi.fn().mockResolvedValue(undefined);
     try {
       await cloudflareWorker.scheduled({
-        cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
+        cron, scheduledTime: Date.parse('2026-09-17T17:04:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         DB: { prepare: () => ({ async first() { return null; } }) },
         DOCUMENTS: { async get() { return null; }, put, async delete() { return undefined; } },
@@ -409,6 +409,18 @@ describe('Cloudflare maintenance cron', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('leaves %s to the isolated publisher when isolation is enabled', async (cron) => {
+    const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionSnapshot');
+    try {
+      await cloudflareWorker.scheduled({ cron, scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) },
+        INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true',
+        DOCUMENTS: { get() { throw new Error('unexpected second publisher'); } },
+      } as unknown as Environment);
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); }
   });
 
   it('runs the remaining maintenance phases and marks them without rebuilding the projection', async () => {

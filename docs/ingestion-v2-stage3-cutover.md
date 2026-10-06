@@ -152,3 +152,7 @@ Run one legacy cadence, reconcile catalog state and notification identities, and
 resume only after source health, visibility, and zero duplicate notifications are
 proven. Re-enable V2 by repeating the guarded source sequence; never purge V2
 state as part of rollback.
+
+### R2 schedule compatibility after deployment
+
+Keep the configured explicit-minute R2 schedule (`4,14,24,34,44,54 * * * *`). Both publishers also accept the equivalent prior expression (`4-54/10 * * * *`): production scheduled events continued using it more than 25 minutes after the schedule API reported the replacement on 2026-10-06. An API schedule listing or a successful deployment is insufficient evidence of publication. Check a completed scheduled event, the durable completion marker, and a valid R2 pointer/pages. Isolation gates still select the sole publisher; accepting the old expression must not transfer catalog or alert ownership.

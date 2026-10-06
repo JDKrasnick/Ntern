@@ -2149,7 +2149,9 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_complete', observedAt: observedAt.toISOString(), prospectiveShadowMetadata, projection }));
     return;
   }
-  if (event.cron === '4,14,24,34,44,54 * * * *') {
+  // Cloudflare can continue delivering the prior expression after its schedule
+  // API reports the replacement. Both expressions describe the same phase.
+  if (event.cron === '4,14,24,34,44,54 * * * *' || event.cron === '4-54/10 * * * *') {
     if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') return;
     const observedAt = new Date(event.scheduledTime);
     const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection_r2');
