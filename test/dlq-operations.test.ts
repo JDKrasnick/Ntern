@@ -281,6 +281,23 @@ describe('protected DLQ operations', () => {
     database.close();
   });
 
+  it('retains old unresolved failures and recent recovery receipts until resolution retention expires', async () => {
+    const { database, dependencies } = subject([]);
+    for (const messageId of ['unresolved', 'recently-resolved', 'old-resolved']) {
+      await recordQueueFailure({ db: dependencies.db, queueName: 'intern-notifs-admission-v2', messageId, attempts: 3,
+        body: { sourceId: 'source' }, error: new Error('snapshot unavailable'), now: new Date('2026-07-01T00:00:00.000Z') });
+    }
+    await resolveQueueFailures(dependencies.db, 'intern-notifs-admission-v2', 'recently-resolved', new Date('2026-09-04T00:00:00.000Z'));
+    await resolveQueueFailures(dependencies.db, 'intern-notifs-admission-v2', 'old-resolved', new Date('2026-07-02T00:00:00.000Z'));
+    await cleanupDlqRecords(dependencies.db, new Date('2026-09-04T12:00:00.000Z'));
+    expect(database.prepare('SELECT message_id FROM queue_failure_events ORDER BY message_id').all())
+      .toEqual([{ message_id: 'recently-resolved' }, { message_id: 'unresolved' }]);
+    await resolveQueueFailures(dependencies.db, 'intern-notifs-admission-v2', 'unresolved', new Date('2026-09-04T13:00:00.000Z'));
+    await cleanupDlqRecords(dependencies.db, new Date('2026-10-06T00:00:00.000Z'));
+    expect(database.prepare('SELECT COUNT(*) AS count FROM queue_failure_events').get()).toMatchObject({ count: 0 });
+    database.close();
+  });
+
   it('resolves the failure-ledger row for a message it disposes', async () => {
     const { database, dependencies } = subject([catalogMessage('m1')]);
     await recordQueueFailure({ db: dependencies.db, queueName: 'intern-notifs-github', messageId: 'm1', attempts: 3,

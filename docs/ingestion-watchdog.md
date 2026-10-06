@@ -21,9 +21,9 @@ existing workflow can also be dispatched against a reviewed PR branch.
 | Public catalog failure | HTTP failure or a response without a catalog groups array |
 | Worker failure | Any non-success invocation or recorded error on currently serving ingestion/admission/publisher versions in the last hour |
 | Memory headroom | Current serving versions exceed 120 MiB at p99 in the last hour |
-| Unresolved queue processing | A failure in the last day remains unresolved for at least 30 minutes, including destination verification |
+| Unresolved queue processing | A failure remains unresolved for at least 30 minutes, including destination verification; retry age never clears it |
 | Active V2 source stops polling | Last attempt over one hour old, last success over two hours old, or missing/invalid timestamps |
-| Admission stops progressing | Due queued rows unchanged for an hour; processing leases expired for 15 minutes; unacknowledged handoffs over 15 minutes old |
+| Admission stops progressing | Present quarantined rows; due queued rows unchanged for an hour; processing leases expired for 15 minutes; unacknowledged handoffs over 15 minutes old |
 | Watchdog cannot inspect state | Missing credentials, lost API access, malformed required state, or probe timeout |
 
 Paused and disabled sources are excluded from the active-owner progress checks.
@@ -33,6 +33,13 @@ bounded to 10,000 groups, and source inspection to 50 owners, with a four-minute
 overall probe deadline and 20-second request deadlines. Cloudflare analytics
 may be sampled or delayed; durable completion markers provide a separate
 signal for missed work.
+
+Queue failure inspection samples the oldest 200 unresolved records using a
+partial unresolved-state index. Reported queue counts describe that sample,
+not total backlog. An incident stays active until a durable resolution receipt
+clears it. Daily cleanup retains unresolved failures and keeps resolved receipts
+for 30 days after resolution. Quarantined rows remain incidents until recovered or their source is
+intentionally paused/disabled; rows retired by two complete omissions are excluded.
 
 Emails use the existing private `AUTH_FROM_EMAIL` and
 `ADMISSION_SUPPORT_RECIPIENT` environment secrets and the dedicated GitHub

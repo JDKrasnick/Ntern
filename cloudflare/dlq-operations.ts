@@ -483,5 +483,7 @@ export async function cleanupDlqRecords(db: D1Database, now = new Date()): Promi
     .bind(SELECTION_KIND, SELECTION_PK_PREFIX, now.toISOString()).run();
   await db.prepare('DELETE FROM dlq_repair_plans WHERE expires_at < ?').bind(now.toISOString()).run();
   await db.prepare('DELETE FROM dlq_disposition_audit WHERE disposed_at < ?').bind(cutoff).run();
-  await db.prepare('DELETE FROM queue_failure_events WHERE last_failed_at < ?').bind(cutoff).run();
+  // Unresolved incidents must survive exhausted retries and routine retention.
+  // Keep a recovery receipt for 30 days after resolution, even for old failures.
+  await db.prepare('DELETE FROM queue_failure_events WHERE resolved_at < ?').bind(cutoff).run();
 }

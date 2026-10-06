@@ -404,6 +404,45 @@ test('rejects corruption outside the selected batch before leasing or changing a
   }
 });
 
+test('restored immutable snapshot recovers selected work after repeated corruption without charging row attempts', async () => {
+  const { snapshot, rows } = await boardSnapshot();
+  const selected = rows[0];
+  await database.prepare("UPDATE ingestion_rows SET state='pending',attempt_count=0,decision=NULL,retry_at=NULL WHERE source_id=? AND external_id=?")
+    .bind(sourceId, selected.external_id).run();
+  const [message] = buildMessages([selected], snapshot.snapshot_hash, snapshot.admission_version);
+  const original = await (await documentsBucket.get(message.snapshotKey)).text();
+  const corrupted = JSON.parse(original);
+  corrupted.rows.at(-1).posting.title = 'Corrupted peer outside selected work';
+  const peerState = await database.prepare('SELECT external_id,state,attempt_count,decision FROM ingestion_rows WHERE source_id=? AND external_id<>? ORDER BY external_id')
+    .bind(sourceId, selected.external_id).all();
+  await documentsBucket.put(message.snapshotKey, JSON.stringify(corrupted));
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const failed = await deliverAdmission([message]);
+      assert.equal(failed.settled.ack, 0);
+      assert.equal(failed.settled.retries.length, 1);
+      const row = await database.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=? AND external_id=?')
+        .bind(sourceId, selected.external_id).first();
+      assert.equal(row.state, 'pending');
+      assert.equal(row.attempt_count, 0);
+    }
+  } finally {
+    await documentsBucket.put(message.snapshotKey, original);
+  }
+  destinationStatus.clear();
+  const recovered = await deliverAdmission([message]);
+  assert.equal(recovered.settled.ack, 1);
+  const settled = await database.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=? AND external_id=?')
+    .bind(sourceId, selected.external_id).first();
+  assert.equal(settled.state, 'settled');
+  assert.equal(settled.attempt_count, 1);
+  assert.deepEqual((await database.prepare('SELECT external_id,state,attempt_count,decision FROM ingestion_rows WHERE source_id=? AND external_id<>? ORDER BY external_id')
+    .bind(sourceId, selected.external_id).all()).results, peerState.results);
+  await deliverAdmission([message]);
+  assert.deepEqual(await database.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=? AND external_id=?')
+    .bind(sourceId, selected.external_id).first(), settled);
+});
+
 test('returns a stale delivery as a no-op', async () => {
   const { snapshot, rows } = await boardSnapshot();
   // Advance one row's material hash so the original message intent no longer matches.

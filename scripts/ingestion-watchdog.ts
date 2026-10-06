@@ -18,8 +18,8 @@ const descriptions: Record<string, string> = {
   'catalog-projection-unhealthy': 'The R2 catalog is missing, stale, incomplete, corrupt, or differs from the durable D1 manifest. Inspect both publisher phases and D1 fallback.',
   'worker-errors': 'Cloudflare reports a failed execution or runtime error on the active ingestion stack.',
   'worker-memory-headroom': 'An active ingestion isolate has memory p99 above 120 MiB. Inspect resource trends before it silently terminates.',
-  'queue-failures-unresolved': 'An unresolved queue failure has survived at least 30 minutes. Inspect the failure ledger, retries and DLQ; do not purge messages.',
-  'admission-progress-stalled': 'An active V2 source has due rows older than one hour, handoffs older than 15 minutes, or processing leases expired for 15 minutes.',
+  'queue-failures-unresolved': 'An unresolved queue failure has survived at least 30 minutes. It remains an incident until resolved. Inspect the failure ledger, retries and DLQ; do not purge messages.',
+  'admission-progress-stalled': 'An active V2 source has quarantined present rows, due rows older than one hour, handoffs older than 15 minutes, or processing leases expired for 15 minutes.',
   'source-polling-stalled': 'A configured active V2 owner has missed two published polling cadences or has not succeeded for two hours.',
   'test-email': 'This is the requested operator-alert delivery test. No ingestion, catalog, rollout flags or customer notifications were changed.',
 };
@@ -126,10 +126,13 @@ export async function collectWatchdog(environment: 'production' | 'dev', now: Da
   if (isolated) phases.push('maintenance_phase:admission_v2:dispatch');
   const markers = await query<Marker>(`SELECT key,value,updated_at FROM system_state WHERE key IN (${phases.map(() => '?').join(',')})`, phases);
   signals.push(...markerSignals(markers, phases, now));
-  const failures = await query<{ queue_name: string; n: number }>(`SELECT queue_name, COUNT(*) AS n FROM queue_failure_events
-    WHERE resolved_at IS NULL AND last_failed_at >= ? AND first_failed_at <= ? GROUP BY queue_name LIMIT 20`,
-  [new Date(now.getTime() - 24 * 60 * minute).toISOString(), new Date(now.getTime() - 30 * minute).toISOString()]);
-  if (failures.length) signals.push({ id: 'queue-failures-unresolved', detail: JSON.stringify(failures) });
+  // Exhausted deliveries stop retrying, so recency must never clear an incident.
+  // Bound inspection to the oldest 200 unresolved records; counts are samples.
+  const failures = await query<{ queue_name: string; n: number }>(`SELECT queue_name, COUNT(*) AS n FROM (
+    SELECT queue_name FROM queue_failure_events WHERE resolved_at IS NULL AND first_failed_at <= ?
+    ORDER BY first_failed_at, id LIMIT 200) GROUP BY queue_name LIMIT 20`,
+  [new Date(now.getTime() - 30 * minute).toISOString()]);
+  if (failures.length) signals.push({ id: 'queue-failures-unresolved', detail: `oldest unresolved sample (up to 200 records): ${JSON.stringify(failures)}` });
   const publicResponse = await fetch(`${api}/catalog?limit=1`, { signal: requestSignal() });
   let catalog: { groups?: unknown[] } | undefined;
   try { catalog = await publicResponse.json(); } catch { /* Invalid HTTP 200 also alerts. */ }
@@ -199,10 +202,11 @@ export async function collectWatchdog(environment: 'production' | 'dev', now: Da
       || !Number.isFinite(Date.parse(source.lastSuccessAt ?? '')) || now.getTime() - Date.parse(source.lastSuccessAt!) > 120 * minute) signals.push({ id: 'source-polling-stalled', detail: id });
     const rows = await query<{ n: number }>(`SELECT COUNT(*) AS n FROM ingestion_rows WHERE source_id=? AND
       ((state='queued' AND (retry_at IS NULL OR retry_at<=?) AND updated_at<?)
-      OR (state='processing' AND lease_expires_at<?))`,
+      OR (state='processing' AND lease_expires_at<?)
+      OR (state='quarantined' AND consecutive_omissions<2))`,
     [id, now.toISOString(), new Date(now.getTime() - 60 * minute).toISOString(), new Date(now.getTime() - 15 * minute).toISOString()]);
     const handoffs = await query<{ n: number }>('SELECT COUNT(*) AS n FROM ingestion_admission_handoffs WHERE source_id=? AND acknowledged_at IS NULL AND dispatched_at<?', [id, new Date(now.getTime() - 15 * minute).toISOString()]);
-    if (rows[0]?.n || handoffs[0]?.n) signals.push({ id: 'admission-progress-stalled', detail: `${id}: ${rows[0]?.n ?? 0} stalled rows, ${handoffs[0]?.n ?? 0} stale handoffs` });
+    if (rows[0]?.n || handoffs[0]?.n) signals.push({ id: 'admission-progress-stalled', detail: `${id}: ${rows[0]?.n ?? 0} stalled or quarantined rows, ${handoffs[0]?.n ?? 0} stale handoffs` });
   }
   return signals;
 }
