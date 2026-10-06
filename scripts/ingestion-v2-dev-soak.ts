@@ -173,7 +173,10 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
     sourceCheck('no expired admission lease', canary.expiredLeases === 0,
       `${canary.expiredLeases} expired processing lease(s)`);
   }
-  const maintenance = sample.maintenance.find((row) => String(row.key).endsWith(':ingestion_v2_admission_dispatch'));
+  const isolated = (sample.expectedRuntimeWorkers?.length ?? 0) > 1;
+  const maintenance = sample.maintenance.find((row) => isolated
+    ? row.key === 'maintenance_phase:admission_v2:dispatch'
+    : String(row.key).endsWith(':ingestion_v2_admission_dispatch'));
   const maintenanceValue = maintenance?.value ? JSON.parse(String(maintenance.value)) as { status?: string } : undefined;
   const maintenanceAgeMinutes = maintenance?.updated_at
     ? Math.max(0, (now.getTime() - Date.parse(String(maintenance.updated_at))) / 60_000)

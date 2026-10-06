@@ -36,6 +36,13 @@ const healthy = (): DevSoakSample => ({
 });
 
 describe('dev ingestion soak evaluation', () => {
+  it('requires the dedicated dispatch marker after isolation rather than a legacy completion', () => {
+    const sample = healthy();
+    sample.expectedRuntimeWorkers = ['ingestion', 'admission', 'catalog-publisher'];
+    expect(evaluateDevSoak(sample).find((c) => c.name === 'scheduled admission maintenance')?.status).toBe('fail');
+    sample.maintenance[0]!.key = 'maintenance_phase:admission_v2:dispatch';
+    expect(evaluateDevSoak(sample).find((c) => c.name === 'scheduled admission maintenance')?.status).toBe('pass');
+  });
   it('attributes anonymized analytics only to a unique verified active version', () => {
     const names = ['ingestion', 'admission'];
     const versions = ['v1', 'v2'];
