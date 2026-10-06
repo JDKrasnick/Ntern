@@ -82,7 +82,7 @@
     "SHADOW_EXTRACTION_ENABLED": "true",
     "SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS": "1500",
     "SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS": "2000",
-    "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":false,\"version\":\"disabled\",\"allowedFields\":[],\"cohort\":[]}",
+    "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":true,\"version\":\"prospective-provider-poll-2026-10-dev-v1\",\"mode\":\"prospective-provider-poll\",\"startsAt\":\"2026-10-06T04:41:00.000Z\",\"allowedFields\":[\"compensation\",\"locations\"],\"cohort\":[],\"maxReceipts\":null}",
     "ADMISSION_QUEUE_AGE_ALERT_HOURS": "120",
     "GMAIL_CLIENT_ID": "17433524169-4753680goh32205can9g00ijqan3hic5.apps.googleusercontent.com",
     "GMAIL_REDIRECT_URI": "https://intern-notifs-dev.jdkrasnick.workers.dev/oauth/gmail/callback",

@@ -50,7 +50,7 @@
     "INGESTION_V2_ISOLATED_WORKERS_ENABLED": "false",
     "OUTBOUND_NOTIFICATIONS_ENABLED": "false",
     "DEPLOYMENT_ROLE": "catalog-publisher",
-    "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":false,\"version\":\"disabled\",\"allowedFields\":[],\"cohort\":[]}"
+    "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":true,\"version\":\"prospective-provider-poll-2026-10-dev-v1\",\"mode\":\"prospective-provider-poll\",\"startsAt\":\"2026-10-06T04:41:00.000Z\",\"allowedFields\":[\"compensation\",\"locations\"],\"cohort\":[],\"maxReceipts\":null}"
   },
   "queues": {
     "producers": [],

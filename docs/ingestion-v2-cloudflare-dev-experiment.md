@@ -104,7 +104,18 @@ hash, and unsupported-provider observations do not request extraction.
 
 This preserves shadow metadata evidence under V2 catalog ownership. It does
 not grant the model admission authority or enable LLM field publication.
-The independent publication policy remains disabled in this experiment.
+The independent publication policy is enabled in dev from
+`2026-10-06T04:41:00.000Z`, under
+`prospective-provider-poll-2026-10-dev-v1`. Both the extraction Worker and the
+dedicated publisher carry the same policy. Compensation and locations require
+complete, fresh official provider observations, validator-accepted passages,
+and an independent verification pass. Historical artifacts are not backfilled.
+The existing monthly cost guard still bounds calls. Publication does not enable
+model admission authority or change the V2 catalog ownership gates.
+
+Production already uses `prospective-provider-poll-2026-09-v1` for the same
+fields. A live 2026-10-06 check found 211 active receipts, all projected; this
+dev change does not require a production policy change.
 
 ### Dedicated admission and publication isolates
 

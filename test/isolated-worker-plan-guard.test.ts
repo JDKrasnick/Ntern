@@ -32,7 +32,7 @@ describe('isolated Worker release boundaries', () => {
     else Object.assign(binding, { text: 'true' });
     expect(() => validate(r)).toThrow('unsafe');
   });
-  it('rejects extra model secrets, publication enablement, and increased limits', () => {
+  it('rejects extra model secrets, malformed publication policy, and increased limits', () => {
     const secret = create('admission'); secret.change.after.bindings.push({ name: 'OPENAI_API_KEY', type: 'secret_text' });
     expect(() => validate(secret)).toThrow('unsafe');
     const publisher = create('catalog-publisher');
@@ -40,6 +40,19 @@ describe('isolated Worker release boundaries', () => {
     expect(() => validate(publisher)).toThrow('unsafe');
     const enlarged = create('admission'); enlarged.change.after.limits.cpu_ms = 300000;
     expect(() => validate(enlarged)).toThrow('unsafe');
+  });
+  it('stages the existing verified metadata policy without enabling the publisher', () => {
+    const resource = create('catalog-publisher');
+    const binding = resource.change.after.bindings.find((b: { name: string }) => b.name === 'LLM_METADATA_PUBLICATION_POLICY_JSON')!;
+    const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-v1', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T03:20:27.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: null };
+    Object.assign(binding, { text: JSON.stringify(policy) });
+    expect(validate(resource)).toHaveLength(1);
+    Object.assign(binding, { text: JSON.stringify({ ...policy, allowedFields: ['eligibility'] }) });
+    expect(() => validate(resource)).toThrow('unsafe');
+    Object.assign(binding, { text: JSON.stringify(policy) });
+    Object.assign(resource.change.after.bindings.find((b: { name: string }) => b.name === 'INGESTION_V2_ISOLATED_WORKERS_ENABLED')!, { text: 'true' });
+    expect(() => validate(resource)).toThrow('unsafe');
   });
   it('permits only the admission attachment replacement and preserves the existing queue', () => {
     const before = { account_id: 'account', queue_id: 'existing-queue', consumer_id: 'old-consumer',

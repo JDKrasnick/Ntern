@@ -953,7 +953,12 @@ function isIsolatedWorkerCreate(address: string, change: ResourceChange['change'
     } else if (role === 'admission' && isIngestionV2ToggleBinding(binding)) {
       // Existing source and ownership flags are copied; isolation itself remains off.
     } else if (role === 'catalog-publisher' && binding.name === 'LLM_METADATA_PUBLICATION_POLICY_JSON' && binding.type === 'plain_text') {
-      try { if (JSON.parse(String(binding.text)).enabled !== false) return false; } catch { return false; }
+      // Staged Workers have isolation disabled and no cron. They may carry the
+      // already-reviewed production metadata policy without activating it.
+      try {
+        const policy = JSON.parse(String(binding.text)) as unknown;
+        if (!isDeepStrictEqual(policy, disabledMetadataPolicy) && !isProspectiveMetadataPolicy(policy, true)) return false;
+      } catch { return false; }
     } else return false;
   }
   return Object.keys(expected).every((name) => names.has(name));

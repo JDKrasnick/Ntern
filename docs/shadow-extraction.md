@@ -1,8 +1,10 @@
 # Shadow extraction
 
 The shadow extraction queue evaluates exact official posting descriptions.
-Extraction remains separate from publication: only a human-evaluated,
-exact-revision receipt can project an allowlisted field into catalog metadata.
+Extraction remains separate from publication. Exact-cohort publication needs a
+human-evaluated exact-revision receipt. Production's prospective provider-poll
+mode publishes compensation and locations only after an independent model pass
+verifies the same values against a complete, fresh official posting.
 It never changes admission, destination checks, lifecycle, notifications, or
 repair plans.
 
@@ -32,10 +34,11 @@ The consumer validates the message and its artifact hash, deduplicates by
 content hash plus model/prompt/schema/preprocessing versions, and records run
 state in D1. A later artifact revision becomes current before it is queued; a
 late result for an old revision is marked `obsolete` and cannot replace it.
-Results remain in `shadow_extraction_*` tables, separate from deterministic
-role metadata and public catalog tables unless a coordinator creates a receipt
-for one exact completed revision and the deployment policy independently names
-that same `{sourceId, externalId, contentHash}` cohort entry.
+Results remain in `shadow_extraction_*` tables until publication creates a
+receipt for the exact current revision. Exact-cohort mode requires independent
+deployment membership for that `{sourceId, externalId, contentHash}`.
+Prospective mode instead requires a post-activation provider observation and
+verification artifact bound to the active policy version and start time.
 
 The request contract combines classification and extraction. Factual fields
 retain `value` or `null`, `present`/`not-stated`/`conflicting`/`incomplete`,
@@ -46,8 +49,7 @@ a result employer-authoritative.
 
 ## Cost guard and rollout
 
-Production shadow execution uses the pinned `gpt-4o-mini-2024-07-18` snapshot
-through OpenAI Chat Completions schema-backed JSON mode. Store `OPENAI_KEY` as a Worker secret;
+Production shadow execution uses the pinned `gpt-5-mini-2025-08-07` snapshot. Store `OPENAI_KEY` as a Worker secret;
 never put it in Wrangler variables, Terraform state, queue messages, or artifacts.
 `SHADOW_EXTRACTION_ENABLED` controls calls independently from publication.
 
@@ -71,7 +73,9 @@ GET /internal/operations/shadow-extraction
 ```
 
 `LLM_METADATA_PUBLICATION_POLICY_JSON` is a plain Worker variable, not a
-secret. Its committed default is disabled and empty. A valid enabled policy has
+secret. Production templates default to disabled; the deployment environment
+supplies the enabled policy. Dev templates carry their enabled prospective
+policy. A valid enabled exact-cohort policy has
 `version`, a non-empty supported `allowedFields` set, and unique exact cohort
 entries. The authenticated operations endpoint
 `/internal/operations/shadow-publication` reports policy state, versioned field
@@ -138,6 +142,20 @@ records. The queue consumer then records no model calls and leaves the public
 catalog unchanged.
 
 ## Publication scope
+
+Production's active policy is `prospective-provider-poll-2026-09-v1`, starting at
+`2026-09-24T03:20:27.000Z`, with automatic compensation and location publication.
+This policy is separate from V1/V2 admission ownership. It excludes historical
+backfill, incomplete inputs, and artifacts that do not carry the active policy's
+verification identity. The second pass can veto a candidate field but cannot add
+or change its values. A current posting revision and attached open catalog role
+are checked before projection. Each publication creates a durable receipt; the
+initial 25-receipt cap has been removed, while monthly inference cost remains
+bounded. Dev uses the same field scope with an independent activation time and
+policy version, shared by its extraction Worker and dedicated publisher.
+
+The following exact-cohort workflow remains available for human-reviewed
+revisions and is distinct from prospective automatic publication.
 
 The initial production canary allows `locations` and `workMode` only on exact
 reviewed revisions. Every published field needs a human `correct-present`
