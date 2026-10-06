@@ -57,6 +57,22 @@ export function ingestionV2CatalogParitySql(sourceCount: number): string {
 }
 
 interface QueueMetrics { backlog_count: number; backlog_bytes: number }
+/** Sample after the paired minute-1 D1 / minute-4 R2 jobs finish. This changes
+ * observation timing, never the strict publication or resource checks. */
+export function nextDevSoakSampleAt(now: Date): Date {
+  const interval = 10 * 60_000;
+  const candidate = Math.floor(now.getTime() / interval) * interval + 6 * 60_000;
+  return new Date(candidate >= now.getTime() ? candidate : candidate + interval);
+}
+
+export function devSoakCoverage(configured: readonly string[], observed: readonly string[]) {
+  const configuredSourceIds = [...new Set(configured)].sort();
+  const observedSourceIds = [...new Set(observed)].sort();
+  const missingSourceIds = configuredSourceIds.filter((id) => !observedSourceIds.includes(id));
+  return { configuredSourceIds, observedSourceIds, missingSourceIds,
+    fullConfiguredCohort: configuredSourceIds.length > 0 && missingSourceIds.length === 0 };
+}
+
 interface SourceHealth {
   state?: string;
   sourceStatus?: string;
@@ -421,7 +437,9 @@ async function main(): Promise<number> {
     publicCatalogStatus: catalog.status,
   };
   const checks = evaluateDevSoak(sample, capturedAt);
-  const report = { ...sample, checks };
+  const report = { ...sample, checks, coverage: devSoakCoverage(
+    DEV_CONFIG.vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST.split(',').filter(Boolean), sourceIds,
+  ) };
   mkdirSync(dirname(output), { recursive: true });
   writeFileSync(output, `${JSON.stringify(report, null, 2)}\n`);
 

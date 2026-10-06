@@ -153,3 +153,22 @@ has not passed. Production ownership remains unchanged.
 Local repair validation: 2,735 tests passed; typecheck and lint passed. Compiled
 Worker integration validation passed (45 passed, one skipped). Both exact-head
 CI runs for `6b60f0ee` passed, including resource budgets and infrastructure checks.
+
+## Rehearsal progress while a provider is deferred
+
+Do not leave independently reconciled V2 owners idle behind an unrelated
+provider cooldown. A scoped dev rehearsal may validate recovery, rollback, and
+scheduled polling for already-owned, fully settled sources while deferred
+boards retain their paused status and durable retry times. Keep the full
+admission allowlist and outbound suppression intact. Record the observed
+source IDs and missing configured sources; scoped success does not satisfy
+the nine-source production gate. Pause those owners again before later
+ownership deployments or the remaining full-cohort cutover drills.
+
+Observe scheduled publication after the paired D1 and R2 jobs finish, normally
+at minutes 6, 16, 26, 36, 46, and 56 UTC. Changed D1 content deliberately removes
+the stale R2 pointer until the minute-4 publication completes. Sampling inside
+that transition produces an expected missing-pointer failure and prevents a
+clean observation window from starting. Keep the strict pointer, contents,
+completion-marker, freshness, resource, and queue failure checks; adjust the
+observation time rather than treating missing publication as healthy.

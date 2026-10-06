@@ -1,6 +1,22 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { evaluateDevSoak, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
+import { devSoakCoverage, evaluateDevSoak, nextDevSoakSampleAt, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
+
+describe('scheduled soak observation boundaries', () => {
+  it.each([
+    ['2026-10-06T06:12:00.000Z', '2026-10-06T06:16:00.000Z'],
+    ['2026-10-06T06:16:00.000Z', '2026-10-06T06:16:00.000Z'],
+    ['2026-10-06T06:16:01.000Z', '2026-10-06T06:26:00.000Z'],
+    ['2026-10-06T23:59:00.000Z', '2026-10-07T00:06:00.000Z'],
+  ])('samples after publication from %s', (now, expected) => {
+    expect(nextDevSoakSampleAt(new Date(now)).toISOString()).toBe(expected);
+  });
+  it('labels partial healthy-source evidence without claiming full cohort coverage', () => {
+    expect(devSoakCoverage(['healthy', 'deferred'], ['healthy'])).toMatchObject({ missingSourceIds: ['deferred'], fullConfiguredCohort: false });
+    expect(devSoakCoverage(['healthy', 'deferred'], ['deferred', 'healthy', 'healthy']).fullConfiguredCohort).toBe(true);
+    expect(devSoakCoverage([], ['healthy']).fullConfiguredCohort).toBe(false);
+  });
+});
 
 const healthy = (): DevSoakSample => ({
   capturedAt: '2026-10-04T21:00:00.000Z', windowStartedAt: '2026-10-03T21:00:00.000Z', windowHours: 24, soakStartedAt: '2026-10-03T21:00:00.000Z',
