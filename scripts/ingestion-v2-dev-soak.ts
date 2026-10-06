@@ -215,6 +215,16 @@ function requireEnv(name: string): string {
   return value;
 }
 
+export function runtimeWorkerIdentity(
+  reportedName: string, version: string, names: string[], versions: string[],
+): string {
+  const index = versions.indexOf(version);
+  if (index < 0 || versions.lastIndexOf(version) !== index) throw new Error('Unrecognized runtime version');
+  const name = names[index]!;
+  if (reportedName !== '__unknown__' && reportedName !== name) throw new Error('Runtime Worker identity mismatch');
+  return name;
+}
+
 async function main(): Promise<number> {
   const token = requireEnv('CLOUDFLARE_API_TOKEN');
   const accountId = requireEnv('CLOUDFLARE_ACCOUNT_ID');
@@ -331,7 +341,7 @@ async function main(): Promise<number> {
       });
       const body = await response.json() as { errors?: unknown; data?: { viewer: { accounts: Array<{ workersInvocationsAdaptive: Array<{ dimensions: { status: string; scriptName: string; scriptVersion: string }; sum: { requests: number; errors: number }; quantiles: { cpuTimeP99: number; memoryUsageBytesP99: number } }> }> } } };
       if (!response.ok || body.errors) throw new Error('Worker runtime analytics unavailable');
-      return body.data?.viewer.accounts[0]?.workersInvocationsAdaptive.map((row) => ({ worker: row.dimensions.scriptName, version: row.dimensions.scriptVersion, status: row.dimensions.status, ...row.sum, ...row.quantiles })) ?? [];
+      return body.data?.viewer.accounts[0]?.workersInvocationsAdaptive.map((row) => ({ worker: runtimeWorkerIdentity(row.dimensions.scriptName, row.dimensions.scriptVersion, names, versions), version: row.dimensions.scriptVersion, status: row.dimensions.status, ...row.sum, ...row.quantiles })) ?? [];
     })(),
   ]);
 

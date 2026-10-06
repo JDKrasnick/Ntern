@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { evaluateDevSoak, parseDevSoakConfig, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
+import { evaluateDevSoak, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
 
 const healthy = (): DevSoakSample => ({
   capturedAt: '2026-10-04T21:00:00.000Z', windowStartedAt: '2026-10-03T21:00:00.000Z', windowHours: 24, soakStartedAt: '2026-10-03T21:00:00.000Z',
@@ -36,6 +36,14 @@ const healthy = (): DevSoakSample => ({
 });
 
 describe('dev ingestion soak evaluation', () => {
+  it('attributes anonymized analytics only to a unique verified active version', () => {
+    const names = ['ingestion', 'admission'];
+    const versions = ['v1', 'v2'];
+    expect(runtimeWorkerIdentity('__unknown__', 'v2', names, versions)).toBe('admission');
+    expect(() => runtimeWorkerIdentity('__unknown__', 'old', names, versions)).toThrow('Unrecognized');
+    expect(() => runtimeWorkerIdentity('ingestion', 'v2', names, versions)).toThrow('mismatch');
+    expect(() => runtimeWorkerIdentity('__unknown__', 'v2', names, ['v2', 'v2'])).toThrow('Unrecognized');
+  });
   it('requires runtime evidence from every dedicated isolate and keeps memory warnings visible', () => {
     const sample = healthy();
     sample.expectedRuntimeWorkers = ['ingestion', 'admission', 'catalog-publisher'];
