@@ -165,7 +165,7 @@ function buildMessages(rows, snapshotHash, admissionVersion, baseline = false) {
   return messages;
 }
 
-async function deliverAdmission(messages, overrides = {}) {
+async function deliverAdmission(messages, overrides = {}, delivery = {}) {
   const { default: builtWorker } = await import(new URL('../../cloudflare/dist/admission/admission-worker.js', import.meta.url));
   // Mirror the dispatcher's durable handoff receipt, which is recorded before
   // the message is sent and acknowledged by the consumer after all rows settle.
@@ -191,8 +191,8 @@ async function deliverAdmission(messages, overrides = {}) {
   await builtWorker.queue({
     queue: 'intern-notifs-admission-v2',
     messages: messages.map((body, index) => ({
-      id: `v2-admission-${index}-${Date.now()}`,
-      body, attempts: 1, timestamp: new Date(),
+      id: delivery.id ?? `v2-admission-${index}-${Date.now()}`,
+      body, attempts: delivery.attempts ?? 1, timestamp: new Date(),
       ack() { settled.ack += 1; },
       retry(options, error) { settled.retries.push({ options, error: String(error) }); },
     })),
@@ -439,6 +439,50 @@ test('restored immutable snapshot recovers selected work after repeated corrupti
   assert.deepEqual((await database.prepare('SELECT external_id,state,attempt_count,decision FROM ingestion_rows WHERE source_id=? AND external_id<>? ORDER BY external_id')
     .bind(sourceId, selected.external_id).all()).results, peerState.results);
   await deliverAdmission([message]);
+  assert.deepEqual(await database.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=? AND external_id=?')
+    .bind(sourceId, selected.external_id).first(), settled);
+});
+
+test('recovers an exhausted infrastructure delivery and clears its durable incident without touching peers', async () => {
+  const { snapshot, rows } = await boardSnapshot();
+  const selected = rows[0];
+  await database.prepare("UPDATE ingestion_rows SET state='pending',attempt_count=0,decision=NULL,retry_at=NULL WHERE source_id=? AND external_id=?")
+    .bind(sourceId, selected.external_id).run();
+  const [message] = buildMessages([selected], snapshot.snapshot_hash, snapshot.admission_version);
+  const original = await (await documentsBucket.get(message.snapshotKey)).text();
+  const peerState = (await database.prepare('SELECT external_id,state,attempt_count,decision FROM ingestion_rows WHERE source_id=? AND external_id<>? ORDER BY external_id')
+    .bind(sourceId, selected.external_id).all()).results;
+  const deliveryId = 'review-infrastructure-recovery';
+  await documentsBucket.delete(message.snapshotKey);
+  try {
+    for (const attempts of [1, 2, 3]) {
+      const failed = await deliverAdmission([message], {}, { id: deliveryId, attempts });
+      assert.equal(failed.settled.ack, 0);
+      assert.equal(failed.settled.retries.length, 1);
+    }
+    const failures = await database.prepare('SELECT delivery_attempt,resolved_at FROM queue_failure_events WHERE message_id=? ORDER BY delivery_attempt')
+      .bind(deliveryId).all();
+    assert.deepEqual(failures.results, [1, 2, 3].map(delivery_attempt => ({ delivery_attempt, resolved_at: null })));
+    assert.deepEqual(await database.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=? AND external_id=?')
+      .bind(sourceId, selected.external_id).first(), { state: 'pending', attempt_count: 0 });
+  } finally {
+    await documentsBucket.put(message.snapshotKey, original);
+  }
+  const recovered = await deliverAdmission([message], {}, { id: deliveryId, attempts: 4 });
+  assert.equal(recovered.settled.ack, 1);
+  assert.equal(recovered.settled.retries.length, 0);
+  assert.ok((await database.prepare('SELECT resolved_at FROM queue_failure_events WHERE message_id=?')
+    .bind(deliveryId).first()).resolved_at, 'successful replay must resolve the durable incident');
+  assert.equal((await database.prepare('SELECT COUNT(*) AS count FROM queue_failure_events WHERE message_id=? AND resolved_at IS NULL')
+    .bind(deliveryId).first()).count, 0, 'every failed-attempt receipt must resolve');
+  assert.ok((await database.prepare('SELECT acknowledged_at FROM ingestion_admission_handoffs WHERE batch_id=?')
+    .bind(message.batchId).first()).acknowledged_at);
+  assert.deepEqual((await database.prepare('SELECT external_id,state,attempt_count,decision FROM ingestion_rows WHERE source_id=? AND external_id<>? ORDER BY external_id')
+    .bind(sourceId, selected.external_id).all()).results, peerState);
+  const settled = await database.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=? AND external_id=?')
+    .bind(sourceId, selected.external_id).first();
+  assert.deepEqual(settled, { state: 'settled', attempt_count: 1 });
+  await deliverAdmission([message], {}, { id: deliveryId, attempts: 5 });
   assert.deepEqual(await database.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=? AND external_id=?')
     .bind(sourceId, selected.external_id).first(), settled);
 });

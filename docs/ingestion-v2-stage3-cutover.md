@@ -134,6 +134,12 @@ review before promotion. JSON evidence is retained as a workflow artifact for 14
 24-hour dev soak is the pre-production gate; it does not replace the guarded
 production canary or the seven-day production soak.
 
+Unresolved delivery incidents remain a readiness failure regardless of the
+observation window or deployment time. The collector samples the oldest 200
+unresolved records through the partial index, excludes resolved history, and
+labels the sample explicitly. Recovery must write a durable `resolved_at`
+receipt; a new deployment cannot clear an incident.
+
 ## Rollback
 
 Pause the source, disable V2 discovery for it so no new row work is created,

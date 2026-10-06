@@ -209,7 +209,7 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
   check('scheduled R2 publication', Boolean(r2Phase) && r2Age >= 0 && r2Age <= 30 * 60_000,
     r2Phase ? `completed ${r2Phase.updated_at}` : 'missing R2 cron completion');
   check('no unresolved queue failures', sample.unresolvedFailures.length === 0,
-    `${sample.unresolvedFailures.length} unresolved failure group(s) in ${sample.windowHours}h`);
+    `${sample.unresolvedFailures.length} unresolved failure group(s) in the oldest 200 incident sample; recovery required regardless of observation window`);
   check('no exhausted queue deliveries', sample.exhaustedFailures.length === 0,
     `${sample.exhaustedFailures.length} final-delivery failure group(s) in ${sample.windowHours}h`);
 
@@ -340,9 +340,12 @@ async function main(): Promise<number> {
     query<{ source_id: string; expired: number }>(`SELECT source_id, COUNT(*) AS expired FROM ingestion_rows
       WHERE source_id IN (${placeholders}) AND state = 'processing' AND lease_expires_at < ? GROUP BY source_id`, [...sourceIds, capturedAt.toISOString()]),
     query<{ source_id: string; mismatches: number }>(ingestionV2CatalogParitySql(sourceIds.length), sourceIds),
+    // A redeployment or rolling observation boundary cannot resolve durable
+    // failures. Use the partial unresolved-age index and bound the sample.
     query<Record<string, unknown>>(`SELECT queue_name, category, COUNT(*) AS failures, MAX(last_failed_at) AS latest
-      FROM queue_failure_events WHERE resolved_at IS NULL AND last_failed_at >= ?
-      GROUP BY queue_name, category ORDER BY queue_name, category`, [windowStart]),
+      FROM (SELECT queue_name, category, last_failed_at FROM queue_failure_events
+        WHERE resolved_at IS NULL ORDER BY first_failed_at, id LIMIT 200)
+      GROUP BY queue_name, category ORDER BY queue_name, category`),
     query<Record<string, unknown>>(`SELECT queue_name, COALESCE(source_id, '') AS source_id, category,
       COUNT(*) AS failures, MAX(last_failed_at) AS latest
       FROM queue_failure_events WHERE delivery_attempt >= CASE WHEN queue_name = 'intern-notifs-dev-gmail' THEN 6 ELSE 3 END AND last_failed_at >= ?
