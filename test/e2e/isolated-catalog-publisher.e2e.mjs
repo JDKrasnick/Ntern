@@ -187,12 +187,14 @@ test('production-size D1 projection reaches real R2 without hydrating the whole 
   const template = JSON.parse(await (await bucket.get(`public-catalog/v1/${old.pageVersion ?? old.version}/0`)).text())[0];
   const hash = createHash('sha256'), keys = [], pending = [];
   const generatedAt = new Date().toISOString();
+  let totalCardBytes = 0;
   for (let index = 0; index < 5059; index++) {
     const groupId = `scaled-group-${index}`, company = `Scaled Employer ${index}`;
     const role = { ...template.roles[0], jobId: `scaled-job-${index}`, company,
-      compensation: { raw: `USD 30/hour; 開示された給与; ${index}; `.repeat(40) } };
+      compensation: { raw: `USD 30/hour; 開示された給与; ${index}; `.repeat(index < 100 ? 800 : 400) } };
     const group = { group: { ...template.group, groupId, company, featuredRole: role }, roles: [role] };
     const value = JSON.stringify(group), digest = createHash('sha256').update(value).digest('hex').slice(0, 20);
+    totalCardBytes += Buffer.byteLength(value);
     const key = `GROUP#${groupId}#${digest}`;
     hash.update(value).update('\0'); keys.push(key);
     pending.push(db.prepare("INSERT INTO catalog_items(pk,sk,kind,value,catalog_sort_key) VALUES ('CATALOG_PROJECTION#GROUPS',?,'catalog-projection',?,?)")
@@ -205,7 +207,7 @@ test('production-size D1 projection reaches real R2 without hydrating the whole 
     .bind(version, JSON.stringify({ createdAt: generatedAt, keys })).run();
   await db.prepare("UPDATE catalog_items SET value=? WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'")
     .bind(JSON.stringify({ schemaVersion: 6, version, generatedAt, retainedVersions: [] })).run();
-  let hydrated = 0, written = 0, maximumPending = 0;
+  let hydrated = 0, written = 0, maximumPending = 0, maximumPageBytes = 0;
   const boundedDb = { batch: db.batch.bind(db), prepare(sql) {
     const wrap = statement => new Proxy(statement, { get(target, key) {
       if (key === 'bind') return (...values) => wrap(target.bind(...values));
@@ -225,6 +227,7 @@ test('production-size D1 projection reaches real R2 without hydrating the whole 
   } };
   const boundedBucket = { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket), async put(key, value, options) {
     if (/\/[a-f0-9]{20}\/\d+$/.test(key)) {
+      maximumPageBytes = Math.max(maximumPageBytes, value.byteLength);
       const page = JSON.parse(new TextDecoder().decode(value));
       assert.ok(page.length <= 100); written += page.length;
     }
@@ -234,6 +237,9 @@ test('production-size D1 projection reaches real R2 without hydrating the whole 
   const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(pointer.version, version); assert.equal(pointer.count, 5059);
   assert.equal(hydrated, 5059); assert.equal(written, 5059); assert.equal(maximumPending, 100);
+  assert.ok(totalCardBytes >= 128_000_000, 'fixture must match the live serialized catalog volume');
+  assert.ok(maximumPageBytes > 4 * 1024 * 1024, 'fixture must cover valid production pages above 4 MiB');
+  assert.ok(maximumPageBytes <= 8 * 1024 * 1024, 'page allocation must remain bounded');
   for (const [index, expected] of [[0, 100], [50, 59]]) {
     assert.equal(JSON.parse(await (await bucket.get(`public-catalog/v1/${pointer.pageVersion ?? pointer.version}/${index}`)).text()).length, expected);
   }

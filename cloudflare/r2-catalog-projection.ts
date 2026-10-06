@@ -6,7 +6,7 @@ import type { D1Database, R2Bucket } from './types.js';
 
 const prefix = 'public-catalog/v1';
 const pageSize = 100;
-const streamedPageBytes = 4 * 1024 * 1024;
+const streamedPageBytes = 8 * 1024 * 1024;
 const roleReadPageConcurrency = 4;
 const filterReadPageConcurrency = 4;
 const maxAgeMs = 7 * 24 * 60 * 60_000;
