@@ -165,11 +165,21 @@ describe('streamed R2 publication', () => {
     expect((await projection.list(undefined, 500))?.groups).toEqual(values);
   });
 
+  it('publishes production pages above 4 MiB within the bounded 8 MiB allocation', async () => {
+    const values = groups().slice(0, 100).map(value => ({ ...value,
+      roles: value.roles.map(item => ({ ...item, compensation: { raw: 'x'.repeat(50_000) } })) }));
+    const { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
+    expect(Buffer.byteLength(JSON.stringify(values))).toBeGreaterThan(4 * 1024 * 1024);
+    await projection.publishStream(streamed(values));
+    expect(objects.get(pageKey(pointer(objects), 0))!.byteLength).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect((await projection.list(undefined, 100))?.groups).toEqual(values);
+  });
+
   it('rejects an oversized page before activation instead of exhausting the isolate', async () => {
     const values = groups(), { bucket, objects } = fakeBucket(), projection = new R2CatalogProjection(bucket);
     await projection.publish(values.slice(0, 1), new Date(Date.now() - 60_000).toISOString());
     const original = [...objects.entries()];
-    const large = values.map(value => ({ ...value, roles: value.roles.map(item => ({ ...item, compensation: { raw: 'x'.repeat(50_000) } })) }));
+    const large = values.map(value => ({ ...value, roles: value.roles.map(item => ({ ...item, compensation: { raw: 'x'.repeat(90_000) } })) }));
     await expect(projection.publishStream(streamed(large))).rejects.toThrow('page exceeds its memory budget');
     expect([...objects.entries()]).toEqual(original);
   });
