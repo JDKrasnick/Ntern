@@ -90,3 +90,18 @@ repaired implementation retains no measurable extra board heap above the harness
 baseline. A 2 MiB retention guard fails on the prior head and passes on the repair.
 All eight resource-budget tests pass. These are local GC-backed measurements,
 not a replacement for Cloudflare memory analytics or the clean dev soak gate.
+
+### Shadow metadata extraction continuity
+
+V2 catalog reconciliation records the existing provider shadow-verification
+outbox in the same fenced transaction as fresh or changed confirmed, open,
+technical Greenhouse, Lever, and Ashby postings. Maintenance drains that outbox
+to the verification queue; exact official provider acquisition and content-hash
+matching precede the existing cost-reserved LLM extraction. Duplicate commits
+and unchanged historical adoption do not create another handoff. Baseline
+imports remain notification silent. Ineligible, closed, unconfirmed, missing-
+hash, and unsupported-provider observations do not request extraction.
+
+This preserves shadow metadata evidence under V2 catalog ownership. It does
+not grant the model admission authority or enable LLM field publication.
+The independent publication policy remains disabled in this experiment.

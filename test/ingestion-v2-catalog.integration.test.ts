@@ -4,6 +4,7 @@ import { stableSourceOccurrenceJobId } from '../src/identity/registry.js';
 import { MemoryInternshipStore } from '../src/store.js';
 import { processPosting } from '../src/ingestion/processor.js';
 import { catalogPublishable } from '../src/catalog-live.js';
+import { resolvePostingIdentityDecision } from '../src/identity/registry.js';
 import type { AdmissionCatalogCommit } from '../src/ingestion-v2/admission/evaluator.js';
 import type { CatalogAdmission, ProcessedListing } from '../src/types.js';
 
@@ -75,7 +76,79 @@ function commit(overrides: Partial<AdmissionCatalogCommit> = {}): AdmissionCatal
   };
 }
 
+function officialCommit(): AdmissionCatalogCommit {
+  const sourceId = 'lever-acme';
+  const externalId = '95e0d2b0-437a-4096-a5c6-0f247f426c90';
+  const applyUrl = `https://jobs.lever.co/acme/${externalId}/apply`;
+  const resolved = resolvePostingIdentityDecision({ sourceId, externalId, applicationUrl: applyUrl, observedAt });
+  return commit({ sourceId, externalId, jobId: resolved.identity!.canonicalJobId,
+    listing: { ...listing(), sourceId, externalId, applyUrl,
+      postingIdentityDecision: resolved.decision, postingIdentity: resolved.identity,
+      providerIdentity: { provider: 'lever', sourceId, sourceUrl: 'https://api.lever.co/v0/postings/acme', tenant: 'acme', postingId: externalId },
+      shadowContentHash: 'a'.repeat(64) }, baseline: true, notify: false });
+}
+
 describe('ingestion v2 reconciler catalog sink', () => {
+  it('atomically hands fresh and changed official postings to shadow metadata extraction, with duplicate silence', async () => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = officialCommit();
+    const incoming = input.listing;
+    expect(incoming.postingIdentityDecision?.status).toBe('confirmed');
+    await sink.commit(input);
+    const [first] = await store.listPendingProviderShadowVerifications();
+    expect(first).toMatchObject({ sourceId: input.sourceId, externalId: input.externalId, reason: 'first-sight', shadowOrigin: 'provider-poll', shadowContentHash: incoming.shadowContentHash });
+    await store.markProviderShadowVerificationEnqueued(first.idempotencyKey!);
+    await sink.commit(input);
+    expect(await store.listPendingProviderShadowVerifications()).toEqual([]);
+    await sink.commit({ ...input, listing: { ...incoming, shadowContentHash: 'b'.repeat(64) } });
+    expect(await store.listPendingProviderShadowVerifications()).toEqual([expect.objectContaining({
+      reason: 'content-change', shadowContentHash: 'b'.repeat(64),
+    })]);
+    expect(store.notificationEvents.size).toBe(0);
+  });
+  it.each([
+    ['nontechnical', { technical: false }],
+    ['closed', { state: 'closed' as const }],
+    ['missing content hash', { shadowContentHash: undefined }],
+    ['unconfirmed identity', { postingIdentity: undefined, postingIdentityDecision: listing().postingIdentityDecision }],
+    ['unsupported provider', { providerIdentity: undefined }],
+  ])('does not request paid shadow extraction for %s postings', async (_reason, patch) => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = officialCommit();
+    await sink.commit({ ...input, listing: { ...input.listing, ...patch } });
+    expect(await store.listPendingProviderShadowVerifications()).toEqual([]);
+  });
+
+  it('does not request extraction for ineligible admission or unchanged historical adoption', async () => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = officialCommit();
+    await sink.commit({ ...input, admission: { ...input.admission, catalogEligible: false } });
+    expect(await store.listPendingProviderShadowVerifications()).toEqual([]);
+    await sink.commit(input);
+    expect(await store.listPendingProviderShadowVerifications()).toEqual([]);
+  });
+
+  it('retains one durable extraction handoff after an ambiguous successful commit', async () => {
+    class FailAfterCommit extends MemoryInternshipStore {
+      failed = false;
+      override async commitPostingObservation(input: Parameters<MemoryInternshipStore['commitPostingObservation']>[0]) {
+        const result = await super.commitPostingObservation(input);
+        if (!this.failed) { this.failed = true; throw new Error('lost commit response'); }
+        return result;
+      }
+    }
+    const store = new FailAfterCommit();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = officialCommit();
+    await expect(sink.commit(input)).rejects.toThrow('lost commit response');
+    await sink.commit(input);
+    expect(await store.listPendingProviderShadowVerifications()).toHaveLength(1);
+    expect(store.notificationEvents.size).toBe(0);
+  });
+
   it('keeps a graduation-only new-grad role open and browsable after regrading an expired canonical season', async () => {
     const store = new MemoryInternshipStore();
     const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
