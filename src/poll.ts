@@ -1658,6 +1658,19 @@ export class IngestionRunner {
         const githubAdmissionConfigurationVersion = providerFor(connector.id) === 'github'
           ? admissionConfigurationVersion
           : undefined;
+        // The checkpoint keeps unvisited resolution rows before rows already
+        // attempted and found retryable. Admission migrations must honor the
+        // same cursor or their board-order slice can retry one bad prefix on
+        // every scheduled cadence and starve the rest of a large board.
+        const pendingOrder = new Map<string, number>();
+        for (const id of previous?.pendingResolutionRows ?? []) pendingOrder.set(id, pendingOrder.size);
+        const prioritizeResolutionCursor = (left: ProcessedListing, right: ProcessedListing) => {
+          const leftOrder = pendingOrder.get(externalId(left));
+          const rightOrder = pendingOrder.get(externalId(right));
+          if (leftOrder === undefined && rightOrder !== undefined) return -1;
+          if (leftOrder !== undefined && rightOrder === undefined) return 1;
+          return (leftOrder ?? 0) - (rightOrder ?? 0);
+        };
         const boundedMetadataRefresh = Boolean(previous && metadataVersionChanged && githubAdmissionConfigurationVersion
           && options.maxAdmissionMigrationListingsPerSourceRun !== undefined);
         const migrationLimit = (admissionConfigurationChanged || boundedMetadataRefresh) && githubAdmissionConfigurationVersion
@@ -1692,7 +1705,7 @@ export class IngestionRunner {
         const requiredMigrationCandidates = [
           ...requiredAdmissionVersionMigrations,
           ...requiredTrustedMaterialMigrations,
-        ];
+        ].sort(prioritizeResolutionCursor);
         const metadataProgressKey = (row: NonNullable<SourceCheckpoint['pendingMetadataProcessedRows']>[number]) =>
           JSON.stringify([row.externalId, row.sourceMaterialHash, row.extractionVersion, row.processingRevision]);
         const priorMetadataProgress = new Set((previous?.pendingMetadataProcessedRows ?? []).map(metadataProgressKey));
@@ -1786,8 +1799,6 @@ export class IngestionRunner {
         // stopped. Board order would re-select the same retryable prefix on every
         // delivery, starving every later row and re-enqueueing a continuation
         // forever.
-        const pendingOrder = new Map<string, number>();
-        for (const id of pendingResolutionRows) pendingOrder.set(id, pendingOrder.size);
         const trustedOccurrenceHealth = boundedGithubHydration && this.trustedCommunityCatalogEnabled
           ? await this.store.listSourceOccurrenceTrustedCommunityHealth(connector.id)
           : [];
@@ -1823,14 +1834,24 @@ export class IngestionRunner {
         const sliceCapacity = options.maxListingsPerSourceRun === undefined
           ? undefined
           : Math.max(0, options.maxListingsPerSourceRun - obligatedListings.length);
-        const selectedSlice = sliceCapacity === undefined ? resolutionScope : resolutionScope.slice(0, sliceCapacity);
+        // Migration rows already consume delivery capacity. Remove them from
+        // the supplemental resolution frontier before slicing so an attempted
+        // retryable migration row moves behind rows that have not been visited.
+        // Keeping it in `remainingRows` re-selected the same board-order prefix
+        // forever when the migration itself filled the 25-row delivery.
+        const supplementalResolutionScope = obligatedIds.size
+          ? resolutionScope.filter((listing) => !obligatedIds.has(externalId(listing)))
+          : resolutionScope;
+        const selectedSlice = sliceCapacity === undefined
+          ? supplementalResolutionScope
+          : supplementalResolutionScope.slice(0, sliceCapacity);
         const resolvedListings = obligatedListings.length
-          ? [...obligatedListings, ...selectedSlice.filter((listing) => !obligatedIds.has(externalId(listing)))]
+          ? [...obligatedListings, ...selectedSlice]
           : selectedSlice;
         // Rows that left the board between deliveries stop holding the pass
         // open; they have no listing to resolve and are reconciled as omissions.
         const remainingRows = resolutionFullBody
-          ? resolutionScope.slice(sliceCapacity ?? resolutionScope.length).map(externalId)
+          ? supplementalResolutionScope.slice(sliceCapacity ?? supplementalResolutionScope.length).map(externalId)
           : [];
         if (boundedGithubHydration) {
           // A bounded GitHub delivery needs full occurrence JSON only for the
