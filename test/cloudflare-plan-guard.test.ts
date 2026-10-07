@@ -53,6 +53,45 @@ describe('Cloudflare deployment plan guard', () => {
     ]))).toHaveLength(2);
   });
 
+  it('permits only the reviewed Greenhouse concurrency reduction', () => {
+    const settings = {
+      batch_size: 1,
+      max_concurrency: 6,
+      max_retries: 2,
+      max_wait_time_ms: 5_000,
+      retry_delay: 0,
+      visibility_timeout_ms: null,
+    };
+    const consumer = {
+      account_id: 'account',
+      consumer_id: 'consumer',
+      dead_letter_queue: 'intern-notifs-greenhouse-dlq',
+      queue_id: 'queue',
+      script_name: 'intern-notifs-ingestion',
+      settings,
+      type: 'worker',
+    };
+    const reduction = {
+      address: 'cloudflare_queue_consumer.ingestion["greenhouse"]',
+      actions: ['update'],
+      before: consumer,
+      after: {
+        ...consumer,
+        settings: { ...settings, max_concurrency: 2, retry_delay: null },
+      },
+      after_unknown: { settings: { retry_delay: true, visibility_timeout_ms: true } },
+    };
+
+    expect(validateCloudflarePlan(plan([reduction]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...reduction, address: 'cloudflare_queue_consumer.ingestion["lever"]' },
+      { ...reduction, after: { ...reduction.after, settings: { ...reduction.after.settings, max_concurrency: 3 } } },
+      { ...reduction, after: { ...reduction.after, settings: { ...reduction.after.settings, batch_size: 2 } } },
+      { ...reduction, after: { ...reduction.after, script_name: 'other-worker' } },
+      { ...reduction, after_unknown: { settings: { max_retries: true } } },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits only the exact release annotation on the ingestion upload', () => {
     const priorSha = 'a'.repeat(40);
     const deploySha = 'b'.repeat(40);

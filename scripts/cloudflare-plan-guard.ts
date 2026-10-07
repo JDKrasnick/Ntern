@@ -1020,6 +1020,43 @@ function isAdmissionRouteState(address: string, change: ResourceChange['change']
   return ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(change.before.input)) && isDeepStrictEqual(omit(change.before), omit(change.after));
 }
 
+/**
+ * The memory-headroom release lowers only the Greenhouse consumer's parallelism.
+ * Pin every operator-controlled setting so this exception cannot authorize a
+ * queue, worker, retry, batching, or timeout change alongside the reduction.
+ */
+function isGreenhouseMemoryConcurrencyReduction(address: string, change: ResourceChange['change']): boolean {
+  if (address !== 'cloudflare_queue_consumer.ingestion["greenhouse"]'
+    || !isRecord(change.before) || !isRecord(change.after)) return false;
+  const before = change.before;
+  const after = change.after;
+  if (!isRecord(before.settings) || !isRecord(after.settings)) return false;
+  const beforeSettings = before.settings;
+  const afterSettings = after.settings;
+
+  const expected = {
+    batch_size: 1,
+    max_retries: 2,
+    max_wait_time_ms: 5_000,
+  };
+  if (!Object.entries(expected).every(([key, value]) => beforeSettings[key] === value && afterSettings[key] === value)
+    || beforeSettings.max_concurrency !== 6 || afterSettings.max_concurrency !== 2) return false;
+
+  const computedSettings = new Set(['retry_delay', 'visibility_timeout_ms']);
+  const changingSettings = new Set([...computedSettings, 'max_concurrency']);
+  const controlledSettings = (settings: Record<string, unknown>) => Object.fromEntries(
+    Object.entries(settings).filter(([key]) => !changingSettings.has(key)),
+  );
+  if (!isDeepStrictEqual(controlledSettings(beforeSettings), controlledSettings(afterSettings))) return false;
+
+  return isDeepStrictEqual({ ...before, settings: afterSettings }, after)
+    && (!isRecord(change.after_unknown) || Object.entries(change.after_unknown).every(([key, value]) => (
+      key === 'settings' && isRecord(value)
+        && Object.keys(value).every((setting) => computedSettings.has(setting))
+        && Object.values(value).every((unknown) => unknown === true)
+    )));
+}
+
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
   return (plan.resource_changes ?? [])
     .filter(({ change }) => !change.actions.every((action) => action === 'no-op' || action === 'read'))
@@ -1039,7 +1076,8 @@ export function validateCloudflarePlan(plan: Plan, options: PlanValidationOption
           || isReviewedIngestionCronUpdate(address, change)
           || isIsolatedRoutingChange(address, change)
           || isApiPreviewUrlShutdown(address, change)
-          || isAdmissionRouteState(address, change)))
+          || isAdmissionRouteState(address, change)
+          || isGreenhouseMemoryConcurrencyReduction(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
         || isAdmissionV2InfrastructureCreate(address, change)
         || isIsolatedWorkerCreate(address, change, options.expectedDeploySha)
