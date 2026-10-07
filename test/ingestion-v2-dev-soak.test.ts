@@ -39,7 +39,7 @@ const healthy = (): DevSoakSample => ({
     value: '{"status":"complete"}', updated_at: '2026-10-04T20:49:00.000Z',
   }, { key: 'maintenance_phase:catalog_projection_r2:catalog_projection_r2_complete',
     value: '{"status":"complete"}', updated_at: '2026-10-04T20:49:00.000Z' }],
-  publication: { generatedAt: '2026-10-04T20:49:00.000Z', version: 'a'.repeat(20), count: 12 },
+  publication: { schemaVersion: 1, generatedAt: '2026-10-04T20:49:00.000Z', version: 'a'.repeat(20), count: 12 },
   schedules: (JSON.parse(readFileSync(new URL('../wrangler.ingestion.jsonc', import.meta.url), 'utf8')) as { triggers: { crons: string[] } }).triggers.crons,
   controlMismatches: [], unresolvedFailures: [], exhaustedFailures: [], cronCount: 12, publicCatalogStatus: 200,
   queues: Object.fromEntries([
@@ -156,6 +156,16 @@ describe('dev ingestion soak evaluation', () => {
     expect(evaluateDevSoak(sample).filter((check) => check.status === 'fail').map((check) => check.name))
       .toEqual(['fresh R2 catalog publication', 'scheduled R2 publication']);
     sample.publication = { generatedAt: '2026-10-04T18:00:00.000Z', version: 'a'.repeat(20), count: 12 };
+    expect(evaluateDevSoak(sample).find((check) => check.name === 'fresh R2 catalog publication')?.status).toBe('fail');
+  });
+
+  it('accepts only a recent R2 retirement pointer during the bounded D1-to-R2 handoff', () => {
+    const sample = healthy();
+    sample.publication = { schemaVersion: 0, generatedAt: '2026-10-04T20:59:00.000Z' };
+    expect(evaluateDevSoak(sample).find((check) => check.name === 'fresh R2 catalog publication')).toMatchObject({
+      status: 'pass', detail: expect.stringContaining('bounded D1-to-R2 handoff'),
+    });
+    sample.publication.generatedAt = '2026-10-04T20:55:00.000Z';
     expect(evaluateDevSoak(sample).find((check) => check.name === 'fresh R2 catalog publication')?.status).toBe('fail');
   });
 

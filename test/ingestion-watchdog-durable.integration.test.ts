@@ -56,6 +56,24 @@ function setup() {
   return queries;
 }
 
+it('baselines only reconciled failures from before watchdog activation', () => {
+  sqlite = new DatabaseSync(':memory:');
+  const migrations = new URL('../cloudflare/migrations/', import.meta.url);
+  const names = readdirSync(migrations).filter(name => name.endsWith('.sql')).sort();
+  for (const name of names.filter(name => name < '0053_watchdog_failure_baseline.sql')) {
+    sqlite.exec(readFileSync(new URL(name, migrations), 'utf8'));
+  }
+  const insert = sqlite.prepare(`INSERT INTO queue_failure_events(id,queue_name,message_id,delivery_attempt,payload_hash,
+    category,diagnostic,first_failed_at,last_failed_at) VALUES(?,?,?,?,?,?,?,?,?)`);
+  insert.run('historical', 'admission-v2', 'old-message', 3, 'old-hash', 'snapshot-missing', 'reconciled', old, '2026-10-01T12:00:00.000Z');
+  insert.run('current', 'admission-v2', 'new-message', 3, 'new-hash', 'snapshot-missing', 'active', old, '2026-10-07T00:00:00.000Z');
+  sqlite.exec(readFileSync(new URL('0053_watchdog_failure_baseline.sql', migrations), 'utf8'));
+  expect(sqlite.prepare('SELECT id,resolved_at FROM queue_failure_events ORDER BY id').all()).toEqual([
+    { id: 'current', resolved_at: null },
+    { id: 'historical', resolved_at: '2026-10-07T23:10:00.000Z' },
+  ]);
+});
+
 function quarantinedRow() {
   sqlite.prepare(`INSERT INTO ingestion_rows(source_id,external_id,snapshot_hash,material_hash,admission_version,state,
     attempt_count,failure_class,failure_detail,first_observed_at,last_observed_at,updated_at)

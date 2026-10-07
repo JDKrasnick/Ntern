@@ -105,7 +105,7 @@ export interface DevSoakSample {
   schedules: string[];
   expectedRuntimeWorkers?: string[];
   controlMismatches: string[];
-  publication?: { generatedAt?: string; version?: string; count?: number };
+  publication?: { schemaVersion?: number; generatedAt?: string; version?: string; count?: number };
   maintenance: Array<Record<string, unknown>>;
   unresolvedFailures: Array<Record<string, unknown>>;
   exhaustedFailures: Array<Record<string, unknown>>;
@@ -206,10 +206,16 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
   check('scheduled admission maintenance', maintenanceValue?.status === 'complete' && maintenanceAgeMinutes <= 60,
     maintenance ? `${maintenanceValue?.status ?? 'unknown'}, ${maintenanceAgeMinutes.toFixed(1)} minutes ago` : 'missing phase marker');
   const publicationAge = now.getTime() - Date.parse(sample.publication?.generatedAt ?? '');
-  check('fresh R2 catalog publication', /^[a-f0-9]{20}$/.test(sample.publication?.version ?? '')
+  const publicationHandoff = sample.publication?.schemaVersion === 0
+    && publicationAge >= -60_000 && publicationAge < 5 * 60_000;
+  check('fresh R2 catalog publication', publicationHandoff || (/^[a-f0-9]{20}$/.test(sample.publication?.version ?? '')
     && Number.isSafeInteger(sample.publication?.count) && Number(sample.publication?.count) >= 0
-    && publicationAge >= 0 && publicationAge <= 30 * 60_000,
-  sample.publication ? `generated ${sample.publication.generatedAt}, ${sample.publication.count} groups` : 'missing R2 catalog pointer');
+    && publicationAge >= 0 && publicationAge <= 30 * 60_000),
+  sample.publication
+    ? publicationHandoff
+      ? `bounded D1-to-R2 handoff started ${sample.publication.generatedAt}`
+      : `generated ${sample.publication.generatedAt}, ${sample.publication.count} groups`
+    : 'missing R2 catalog pointer');
   const r2Phase = sample.maintenance.find((row) => row.key === 'maintenance_phase:catalog_projection_r2:catalog_projection_r2_complete');
   const r2Age = now.getTime() - Date.parse(String(r2Phase?.updated_at));
   check('scheduled R2 publication', Boolean(r2Phase) && r2Age >= 0 && r2Age <= 30 * 60_000,
@@ -370,7 +376,7 @@ async function main(): Promise<number> {
     }).then(async (response) => {
       if (!response.ok) return undefined;
       const pointer = await response.json() as NonNullable<DevSoakSample['publication']>;
-      return { generatedAt: pointer.generatedAt, version: pointer.version, count: pointer.count };
+      return { schemaVersion: pointer.schemaVersion, generatedAt: pointer.generatedAt, version: pointer.version, count: pointer.count };
     }),
     (async () => {
       const names = runtimeNames;
