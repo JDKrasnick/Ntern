@@ -2020,6 +2020,8 @@ export class IngestionRunner {
           && (unprocessedMissingOccurrences.length > selectedClosureSelection.length
             || metadataMigrationCandidates.length > 0 && unprocessedMissingOccurrences.length > 0);
         admissionMigrationPending ||= lifecycleMigrationPending;
+        const migrationProgressed = migrationLimit !== undefined && migrationCandidates
+          .some((listing) => resolution.handledExternalIds.has(externalId(listing)));
         if (admissionMigrationPending) report.continuationSources.push(connector.id);
         // An open resolution pass also holds the source open: the delivery that
         // empties it reconciles omissions and closures in the same message. A
@@ -2030,7 +2032,7 @@ export class IngestionRunner {
         const resolutionProgressed = pendingResolutionRows.size === 0
           || nextPendingRows.length < pendingResolutionRows.size;
         const resolutionStalled = nextPendingRows.length > 0 && !resolutionProgressed;
-        if (resolutionStalled) {
+        if (resolutionStalled && !migrationProgressed) {
           report.continuationSources = report.continuationSources.filter((sourceId) => sourceId !== connector.id);
           console.error(JSON.stringify({ event: 'github_resolution_stalled', sourceId: connector.id,
             pendingBefore: pendingResolutionRows.size, pendingAfter: nextPendingRows.length,
@@ -2038,6 +2040,9 @@ export class IngestionRunner {
             handled: resolution.handledExternalIds.size,
             automaticEmployerPending: resolution.pendingAutomaticEmployerExternalIds.size,
             retryable: resolution.retryableRowExternalIds.size }));
+        } else if (resolutionStalled) {
+          console.log(JSON.stringify({ event: 'github_resolution_deferred_while_migration_progressed', sourceId: connector.id,
+            pending: nextPendingRows.length, migrated: migrationCandidates.length }));
         }
         if ((remainingRows.length || resolution.pendingAutomaticEmployerExternalIds.size)
           && resolutionProgressed && !report.continuationSources.includes(connector.id)) {
