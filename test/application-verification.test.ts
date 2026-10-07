@@ -47,6 +47,8 @@ describe('reachability', () => {
   it('separates a destination that is gone from one that refused to be read', () => {
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 410'))).toBe('gone');
     expect(reachabilityFromFailure(new Error('Application page returned HTTP 404'))).toBe('gone');
+    expect(reachabilityFromFailure(new Error('Application page redirected to an explicit error destination'))).toBe('gone');
+    expect(reachabilityFromFailure(new Error('Application page reports Not Found'))).toBe('gone');
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 403'))).toBe('blocked');
     expect(reachabilityFromFailure(new Error('Application page returned HTTP 406'))).toBe('blocked');
     expect(reachabilityFromFailure(new Error('Application link returned HTTP 503'))).toBe('unreachable');

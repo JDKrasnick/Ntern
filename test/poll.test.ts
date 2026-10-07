@@ -4,6 +4,7 @@ import { MemoryInternshipStore } from '../src/store.js';
 import { Poller } from '../src/poll.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
 import { ingestionV2AdmissionVersion } from '../src/ingestion-v2/admission/version.js';
+import { ApplicationUrlValidationError } from '../src/core/application-url.js';
 import type { RawListing, SourceAdapter, SourceCheckpoint, SourceFetchResult, SourceSnapshot, SourcedPosting } from '../src/types.js';
 
 const listing = (url: string, sourceId = 'one'): RawListing => ({ sourceId, document: 'README.md', sourceUrl: 'https://github.com/x', row: 5, company: 'Acme', title: 'Software Engineering Intern', location: 'NYC', season: 'summer-2027', applyUrl: url, compensation: { raw: '$40/hr', maxHourlyUSD: 40 }, state: 'open', fetchedAt: '2026-01-01T00:00:00Z' });
@@ -729,6 +730,43 @@ describe('polling', () => {
       occurrence: { admissionConfigurationVersion: 'configuration-v2' },
     });
     expect(await store.getJob(originalJob.jobId)).toEqual(originalJob);
+  });
+  it('completes a bounded metadata refresh when a legacy link is definitively gone', async () => {
+    const store = new MemoryInternshipStore();
+    const resolver = {
+      async configurationVersion() { return 'configuration-v1'; },
+      async resolveCanonicalEmployer() { return undefined; },
+      async resolveDestinationRule() { return undefined; },
+    };
+    const rows = Array.from({ length: 100 }, (_, index) => ({
+      ...listing(`https://jobs.example.com/${index === 0 ? 'closed' : `open-${index}`}`),
+      row: index + 1,
+      title: `Software Engineering Intern ${index}`,
+    }));
+    const row = rows[0]!;
+    await new Poller(
+      [new Adapter('one', rows)], store, undefined,
+      undefined, undefined, undefined, undefined, resolver,
+    ).poll({ maxAdmissionMigrationListingsPerSourceRun: 1 });
+    const checkpoint = (await store.getCheckpoint('one'))!;
+    await store.putCheckpoint({ ...checkpoint, metadataExtractionVersion: 0, metadataProcessingRevision: 0 });
+    const job = [...store.jobs.values()][0]!;
+    delete job.applicationUrlValidatedAt;
+    await store.putInternship(job);
+    const report = await new Poller(
+      [new Adapter('one', rows)], store, undefined, undefined,
+      async (url) => {
+        if (url === row.applyUrl) throw new ApplicationUrlValidationError('Application page redirected to an explicit error destination');
+        return { url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+          recommendation: 'alert-eligible' as const, signals: ['source policy'] } } };
+      },
+      undefined, undefined, resolver,
+    ).poll({ maxAdmissionMigrationListingsPerSourceRun: 1 });
+
+    expect(report.failures).toEqual([]);
+    expect(report.continuationSources).toEqual(['one']);
+    expect((await store.getCheckpoint('one'))?.pendingResolutionRows).toBeUndefined();
+    expect(await store.getJob(job.jobId)).toMatchObject({ open: false, invalidApplicationUrl: row.applyUrl });
   });
   it('keeps a large quiet baseline behind a later normal role and out of new-since results', async () => {
     const store = new MemoryInternshipStore();

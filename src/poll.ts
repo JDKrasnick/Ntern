@@ -1262,10 +1262,12 @@ export class IngestionRunner {
               failedExternalIds.add(id);
               if (existing?.open && reachability === 'gone') await this.quarantine(existing);
               await completeFailedAdmissionMigration();
-              // A durable 404/410 outcome is complete, not a transient retry.
-              // Wait for quarantine and any prior admission record to persist
-              // before allowing this row into the metadata progress ledger.
-              if (stampSourceMetadata && reachability === 'gone' && handledExternalIds.has(id)) {
+              // A durable 404/410 or explicit error destination is a complete
+              // row outcome, not a transient metadata-refresh failure. Once the
+              // prior listing is quarantined, advance the metadata cursor even
+              // when no admission-configuration migration is also in progress.
+              if (stampSourceMetadata && reachability === 'gone') {
+                handledExternalIds.add(id);
                 failedExternalIds.delete(id);
                 failures[slot] = undefined;
               }
