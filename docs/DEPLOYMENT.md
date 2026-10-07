@@ -64,11 +64,11 @@ curl -fsS 'https://intern-notifs-dev.jdkrasnick.workers.dev/catalog?limit=5'
 ```
 
 `cloudflare:dev:provision` reconciles every production-equivalent work queue and
-DLQ, both R2 buckets, the resume Vectorize index, and all D1 migrations. Use
+DLQ, both R2 buckets, the resume Vectorize index, and all D1 migrations.
 `npm run cloudflare:dev:deploy` first checks helper credentials and queue read
-access without mutations. It rejects paused delivery and unknown existing
-consumers before provisioning or deploying any Worker; an absent queue is allowed
-for first-time provisioning. It then provisions and deploys ingestion, admission,
+access without mutations. It rejects paused delivery, unknown existing consumers,
+or a nonzero initial admission delivery delay before provisioning or deploying any
+Worker; an absent queue is allowed for first-time provisioning. It then provisions and deploys ingestion, admission,
 publisher, then API. After ingestion enables isolation, an explicit transfer step
 removes only the legacy dev admission consumer before admission attaches the
 replacement. Wrangler does not delete consumers omitted from a config. The step
@@ -77,7 +77,8 @@ Durable queue deliveries and unacknowledged
 handoffs survive the brief gap. Each command must succeed before the next starts.
 If a deployment fails, correct the failure and rerun the command to finish the
 transfer. The command then verifies all four live control profiles, exact cron
-ownership (including general maintenance), admission routing, unpaused delivery,
+ownership (including general maintenance), live D1, R2, producer queue, and service
+bindings against the checked dev configs, admission routing, unpaused immediate delivery,
 and the sole admission consumer's type, batch size, concurrency, retries, and DLQ.
 The helper loads local `.env` credentials when present and requires
 `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; Wrangler OAuth alone is
@@ -85,6 +86,11 @@ insufficient for its API requests. The preflight checks read access; normal
 deployment and consumer transfer still require write permissions. It does not require an
 elapsed soak. Run `npm run ingestion:v2:dev:soak` separately for source health,
 publication, resource headroom, and the required clean observation window.
+
+Admission uses zero initial queue delay. Provisioning explicitly restores that
+setting on both new and existing admission queues. If preflight detects a delay
+left by a dev experiment, run `npm run cloudflare:dev:provision` to reconcile it,
+then rerun `npm run cloudflare:dev:deploy`.
 
 Verify the public catalog, authentication lifecycle, and protected operations
 boundary there. A successful development run is a prerequisite for, but never

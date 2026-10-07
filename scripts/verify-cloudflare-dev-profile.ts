@@ -2,7 +2,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const roles = ['ingestion', 'admission', 'catalog-publisher', 'api'] as const;
-type Profile = { name: string; vars: Record<string, string>; triggers?: { crons: string[] }; queues?: { consumers: Array<{
+type Profile = { name: string; vars: Record<string, string>; triggers?: { crons: string[] };
+  d1_databases?: Array<{ binding: string; database_id: string }>;
+  r2_buckets?: Array<{ binding: string; bucket_name: string }>;
+  services?: Array<{ binding: string; service: string; environment?: string; entrypoint?: string }>;
+  queues?: { producers?: Array<{ binding: string; queue: string }>; consumers?: Array<{
   queue: string; max_batch_size: number; max_concurrency: number; max_retries: number;
   dead_letter_queue: string; max_batch_timeout?: number; retry_delay?: number;
 }> } };
@@ -10,8 +14,40 @@ type Load = <T>(path: string) => Promise<T>;
 type Consumer = { consumer_id?: string; script_name?: string; script?: string; service?: string; type?: string;
   dead_letter_queue?: string; settings?: { batch_size?: number; max_concurrency?: number | null; max_retries?: number;
     max_wait_time_ms?: number; retry_delay?: number } };
-type DevQueue = { queue_id: string; queue_name: string; settings?: { delivery_paused?: boolean } };
+type DevQueue = { queue_id: string; queue_name: string; settings?: { delivery_paused?: boolean; delivery_delay?: number } };
+type Binding = { name: string; type: string; text?: string; database_id?: string; id?: string;
+  bucket_name?: string; queue_name?: string; service?: string; environment?: string; entrypoint?: string };
 const consumerOwner = (consumer: Consumer) => consumer.script_name ?? consumer.script ?? consumer.service;
+
+function validateAdmissionQueueDelivery(queue: DevQueue): void {
+  if (queue.settings?.delivery_paused === true) throw new Error('Dev admission queue delivery is paused');
+  if (queue.settings?.delivery_delay !== 0) throw new Error('Dev admission queue initial delivery delay must be zero');
+}
+
+function validateResourceBindings(profile: Profile, bindings: Binding[]): void {
+  const requireBinding = (name: string, type: string, matches: (binding: Binding) => boolean): void => {
+    const binding = bindings.find((binding) => binding.name === name);
+    if (!binding || binding.type !== type || !matches(binding)) {
+      throw new Error(`${profile.name}: ${name} resource binding differs from dev profile`);
+    }
+  };
+  for (const expected of profile.d1_databases ?? []) {
+    requireBinding(expected.binding, 'd1', (binding) =>
+      (binding.database_id ?? binding.id) === expected.database_id
+      && (binding.id === undefined || binding.id === expected.database_id));
+  }
+  for (const expected of profile.r2_buckets ?? []) {
+    requireBinding(expected.binding, 'r2_bucket', (binding) => binding.bucket_name === expected.bucket_name);
+  }
+  for (const expected of profile.queues?.producers ?? []) {
+    requireBinding(expected.binding, 'queue', (binding) => binding.queue_name === expected.queue);
+  }
+  for (const expected of profile.services ?? []) {
+    requireBinding(expected.binding, 'service', (binding) => binding.service === expected.service
+      && (binding.environment ?? 'production') === (expected.environment ?? 'production')
+      && (binding.entrypoint ?? 'default') === (expected.entrypoint ?? 'default'));
+  }
+}
 
 async function findAdmissionQueue(load: Load): Promise<DevQueue | undefined> {
   for (let page = 1; ; page++) {
@@ -42,7 +78,7 @@ export async function preflightCloudflareDevTransfer(load: Load): Promise<void> 
   const queue = await findAdmissionQueue(load);
   // First-time provisioning creates this queue after authenticated listing succeeds.
   if (!queue) return;
-  if (queue.settings?.delivery_paused === true) throw new Error('Dev admission queue delivery is paused');
+  validateAdmissionQueueDelivery(queue);
   validateTransferConsumers(await load<Consumer[]>(`/queues/${queue.queue_id}/consumers`));
 }
 
@@ -64,7 +100,7 @@ export async function verifyCloudflareDevProfile(load: Load): Promise<void> {
       throw new Error(`Unsafe dev profile: ${role}`);
     }
     const [settings, schedules] = await Promise.all([
-      load<{ bindings: Array<{ name: string; type: string; text?: string }> }>(`/workers/scripts/${profile.name}/settings`),
+      load<{ bindings: Binding[] }>(`/workers/scripts/${profile.name}/settings`),
       load<{ schedules: Array<{ cron: string }> }>(`/workers/scripts/${profile.name}/schedules`),
     ]);
     for (const [name, expected] of Object.entries(profile.vars).filter(([name]) =>
@@ -73,18 +109,19 @@ export async function verifyCloudflareDevProfile(load: Load): Promise<void> {
         throw new Error(`${profile.name}: ${name} differs from dev profile`);
       }
     }
+    validateResourceBindings(profile, settings.bindings);
     const expectedCrons = [...(profile.triggers?.crons ?? [])].sort();
     const liveCrons = schedules.schedules.map(({ cron }) => cron).sort();
     if (JSON.stringify(expectedCrons) !== JSON.stringify(liveCrons)) throw new Error(`${profile.name}: cron ownership differs`);
   }
   const admissionQueue = await loadAdmissionQueue(load);
-  if (admissionQueue.settings?.delivery_paused === true) throw new Error('Dev admission queue delivery is paused');
+  validateAdmissionQueueDelivery(admissionQueue);
   const consumers = await load<Consumer[]>(`/queues/${admissionQueue.queue_id}/consumers`);
   if (consumers.length !== 1 || consumerOwner(consumers[0]!) !== 'intern-notifs-dev-admission') {
     throw new Error('Dev admission queue must have exactly one dedicated admission consumer');
   }
   const admission = JSON.parse(readFileSync(new URL('../wrangler.dev.admission.jsonc', import.meta.url), 'utf8')) as Profile;
-  const expected = admission.queues?.consumers.find(({ queue }) => queue === admissionQueue.queue_name);
+  const expected = admission.queues?.consumers?.find(({ queue }) => queue === admissionQueue.queue_name);
   if (!expected) throw new Error('Missing checked dev admission consumer');
   const consumer = consumers[0]!;
   if (consumer.type !== 'worker' || consumer.dead_letter_queue !== expected.dead_letter_queue
