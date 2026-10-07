@@ -215,7 +215,7 @@ test('runs V2 shadow discovery for a reviewable source without enqueuing admissi
   assert.equal(metrics.counts.total, boardRows);
 });
 
-test('repeats the delivery with identical durable state', async () => {
+test('reuses identical continuation state without recording another shadow run', async () => {
   installFetchStub();
   const before = await database.prepare('SELECT COUNT(*) AS count FROM ingestion_snapshots WHERE source_id = ?').bind(sourceId).first();
   const beforeRows = await database.prepare('SELECT COUNT(*) AS count FROM ingestion_rows WHERE source_id = ?').bind(sourceId).first();
@@ -231,7 +231,7 @@ test('repeats the delivery with identical durable state', async () => {
   const comparison = await database.prepare(
     'SELECT run_count FROM ingestion_v2_shadow_comparisons WHERE source_id = ?',
   ).bind(sourceId).first();
-  assert.equal(comparison.run_count, 2);
+  assert.equal(comparison.run_count, 1);
 });
 
 test('reactivates an earlier content-addressed snapshot when the board returns to it', async () => {
