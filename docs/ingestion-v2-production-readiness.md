@@ -215,3 +215,29 @@ validators for V2 ownership/discovery and open resolution passes while
 preserving the prior content hash. Provider integration coverage performs two
 unchanged polls with an ETag-aware server and verifies complete discovery and
 healthy source state. The owned-source regression fails against the prior code.
+
+### Greenhouse overlap and catalog hydration (2026-10-07)
+
+Dev ingestion reached 132.4 MiB p99 despite zero runtime errors. Peak-minute
+logs showed disabled Gmail cron calls after a Greenhouse burst; icon rendering
+was off. This points to retained isolate memory, not allocation by those cron
+calls. Reducing Greenhouse concurrency from six to two bounds large-board
+overlap. Seven forced large-board acquisitions completed successfully, and a
+187-message scheduled sweep completed 185 queue deliveries without Worker
+exceptions in under six minutes; one Anduril transport failure backed off.
+The remaining deliveries and sustained resource headroom still require the
+normal exact-version soak, rather than treating one burst as readiness.
+The warm isolate later rose to 125.3 MiB, so concurrency alone was insufficient.
+Greenhouse now maps each posting once instead of parsing every description's
+compensation HTML twice. Compensation rendering also reuses three fixed native
+number formatters. A local 10,000-range comparison reduced RSS growth from
+24.4 to 1.9 MiB and formatting time from 296 to 11 ms; this allocation result
+does not replace the live headroom gate.
+
+The publisher separately reached 121.9 MiB p99. Its catalog scan hydrated
+127.6 MB of stored role JSON before filtering. D1 now excludes nontechnical
+and admission-withheld roles before returning bounded 100-row pages, reducing
+that input to 57.6 MB in dev. Legacy admission, closed roles, season filtering,
+composite-key pagination, and the public catalog order remain covered by
+regressions. These changes restart the 24-hour dev gate; production V2 writer
+ownership remains disabled.

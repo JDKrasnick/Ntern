@@ -135,6 +135,18 @@ describe('Cloudflare deployment configuration', () => {
     ]) expect(devIngestion.vars[name]).toBe(writerCohort);
   });
 
+  it('bounds overlapping Greenhouse boards consistently in dev, production, and OpenTofu', () => {
+    for (const [config, queue] of [
+      [ingestion, 'intern-notifs-greenhouse'],
+      [devIngestion, 'intern-notifs-dev-greenhouse'],
+    ] as const) {
+      expect(config.queues?.consumers?.find((consumer) => consumer.queue === queue)).toMatchObject({
+        max_batch_size: 1, max_concurrency: 2, max_retries: 2,
+      });
+    }
+    expect(read('infra/cloudflare/main.tf')).toMatch(/greenhouse\s+= 2\b/u);
+  });
+
   it('disables API invocation logs while keeping structured logs and ingestion at full sampling', () => {
     const expectedObservability = (invocationLogs: boolean) => ({
       enabled: true,

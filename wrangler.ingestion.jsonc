@@ -44,7 +44,7 @@
       { "binding": "ADMISSION_V2_DLQ", "queue": "intern-notifs-admission-v2-dlq" }
     ],
     "consumers": [
-      { "queue": "intern-notifs-greenhouse", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 6, "dead_letter_queue": "intern-notifs-greenhouse-dlq" },
+      { "queue": "intern-notifs-greenhouse", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-greenhouse-dlq" },
       { "queue": "intern-notifs-lever", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-lever-dlq" },
       { "queue": "intern-notifs-ashby", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-ashby-dlq" },
       { "queue": "intern-notifs-github", "max_batch_size": 1, "max_retries": 2, "max_concurrency": 2, "dead_letter_queue": "intern-notifs-github-dlq" },
