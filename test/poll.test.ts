@@ -1309,6 +1309,56 @@ describe('polling', () => {
     expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(40);
   });
 
+  it('uses the resolution cursor when selecting an admission migration slice', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const retryableUrls = Array.from({ length: 30 }, (_, index) => `https://jobs.example.com/retryable-${index}`);
+    const resolvableUrls = Array.from({ length: 10 }, (_, index) => `https://jobs.example.com/resolvable-${index}`);
+    const rows = [...retryableUrls, ...resolvableUrls]
+      .map((url, index) => ({ ...listing(url, sourceId), row: index + 1, title: `Software Engineering Intern ${index}` }));
+    const validated: string[] = [];
+    const resolver = { async configurationVersion() { return 'fixture-v1'; },
+      async resolveCanonicalEmployer() { return { id: 'acme', displayName: 'Acme' }; },
+      async resolveDestinationRule() { return undefined; } };
+    const poll = (bounded = true) => new Poller([new Adapter(sourceId, rows)], store, undefined, undefined,
+      async (url: string) => {
+        validated.push(url);
+        return { url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+          recommendation: 'alert-eligible' as const, signals: ['source policy'] } } };
+      }, false, undefined, resolver).poll(bounded
+        ? { maxListingsPerSourceRun: 25, maxAdmissionMigrationListingsPerSourceRun: 25 }
+        : {});
+
+    await poll(false);
+    const seededOccurrences = await store.getSourceOccurrences(sourceId);
+    expect(seededOccurrences).toHaveLength(40);
+    const externalIdByUrl = new Map(seededOccurrences
+      .map((occurrence) => [occurrence.occurrence.applyUrl, occurrence.externalId]));
+    for (const occurrence of seededOccurrences) {
+      await store.putSourceOccurrence({ ...occurrence, occurrence: {
+        ...occurrence.occurrence, admissionConfigurationVersion: 'fixture-v0',
+      } });
+    }
+    const checkpoint = (await store.getCheckpoint(sourceId))!;
+    await store.putCheckpoint({ ...checkpoint,
+      admissionConfigurationVersion: 'fixture-v0', pendingAdmissionConfigurationVersion: 'fixture-v1',
+      pendingResolutionRows: [
+        ...rows.slice(25).map((row) => externalIdByUrl.get(row.applyUrl)!),
+        ...rows.slice(0, 25).map((row) => externalIdByUrl.get(row.applyUrl)!),
+      ],
+    });
+
+    validated.length = 0;
+    const report = await poll();
+    const migrated = new Map((await store.getSourceOccurrences(sourceId))
+      .map((occurrence) => [occurrence.occurrence.applyUrl, occurrence.occurrence.admissionConfigurationVersion]));
+
+    expect(report.failures).toEqual([]);
+    expect(migrated.get(rows[30]!.applyUrl)).toBe('fixture-v1');
+    expect(migrated.get(rows[20]!.applyUrl)).toBe('fixture-v0');
+    expect(report.continuationSources).toEqual([sourceId]);
+  });
+
   it('continues a metadata migration even when its separate resolution frontier is unchanged', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'github-example';
