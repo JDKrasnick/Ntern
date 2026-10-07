@@ -71,7 +71,7 @@ it('shares one failed tenant request across 25 simultaneous peer probes', async 
   const results = await Promise.allSettled(Array.from({ length: 25 }, (_, index) => probe(`https://apply.workable.com/acme/j/${String(index).padStart(10, '0')}/`)));
   expect(fetcher).toHaveBeenCalledOnce();
   const failures = results.map(result => { expect(result.status).toBe('rejected'); return classifyAdmissionFailure((result as PromiseRejectedResult).reason); });
-  expect(failures.filter(failure => failure.retryWithoutAttempt)).toHaveLength(24);
+  expect(failures.filter(failure => failure.retryWithoutAttempt)).toHaveLength(25);
   expect(failures.every(failure => failure.classification === 'upstream-server-error')).toBe(true);
 });
 

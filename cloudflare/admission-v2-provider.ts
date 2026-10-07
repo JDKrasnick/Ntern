@@ -106,10 +106,17 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
     let payload;
     try { payload = await cache!.promise; }
     catch (error) {
-      if (shared && error instanceof AdmissionRowTransientError) {
-        throw new AdmissionProviderDeferredError('Shared Workable failed probe; no new destination request made',
-          error.retryAfterMs ?? (error.classification === 'destination-rate-limited' ? 15 * 60_000 : 60_000),
-          error.classification);
+      if (error instanceof AdmissionRowTransientError) {
+        const delay = error.retryAfterMs
+          ?? (error.classification === 'destination-rate-limited' ? 15 * 60_000 : 60_000);
+        if (governor && !(error instanceof AdmissionProviderDeferredError)) {
+          await governor.defer('workable', delay);
+        }
+        throw new AdmissionProviderDeferredError(
+          shared ? 'Shared Workable failed probe; no new destination request made' : error.message,
+          delay,
+          error.classification,
+        );
       }
       throw error;
     }

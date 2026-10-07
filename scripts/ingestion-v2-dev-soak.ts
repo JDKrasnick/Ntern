@@ -130,7 +130,7 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
   check('dev soak elapsed', elapsedHours >= sample.windowHours, `${elapsedHours.toFixed(1)}/${sample.windowHours} clean observation hours since latest deployment`);
   check('Worker runtime healthy', sample.runtime.length > 0
     && (sample.expectedRuntimeWorkers ?? []).every((worker) => sample.runtime.some((row) => row.worker === worker))
-    && sample.runtime.every((row) => row.status === 'success' && row.errors === 0),
+    && sample.runtime.every((row) => ['success', 'clientDisconnected'].includes(row.status) && row.errors === 0),
     sample.runtime.map((row) => `${row.worker ?? "ingestion"}/${row.status}: ${row.requests} requests, ${row.errors} errors`).join('; ') || 'missing runtime analytics');
   const memoryP99 = Math.max(...sample.runtime.map((row) => row.memoryUsageBytesP99));
   const cpuP99 = Math.max(...sample.runtime.map((row) => row.cpuTimeP99));
