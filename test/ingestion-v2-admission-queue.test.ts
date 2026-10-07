@@ -311,7 +311,7 @@ class CountingEvaluator implements AdmissionV2RowEvaluator {
 }
 
 describe('admission v2 queue consumer', () => {
-  it.each(['503', 'timeout', '429', '404', '410', 'incomplete', 'paginated', 'duplicate-ids', 'invalid-id'])('preserves peer retry attempts for a cached Workable %s and recovers on a fresh delivery', async failure => {
+  it.each(['503', 'timeout', '429', '404', '410', 'incomplete', 'paginated', 'duplicate-ids', 'invalid-id'])('preserves all retry attempts for a tenant-wide Workable %s failure and recovers on a fresh delivery', async failure => {
     const ids = ['45A6283F88', 'AAAAAAAAAA'];
     const { ledger, snapshots } = setup(ids);
     for (const id of ids) ledger.seedRow({ ...ledgerRow(id), attemptCount: 2 });
@@ -335,10 +335,9 @@ describe('admission v2 queue consumer', () => {
           return { decision: { kind: 'admitted' as const } };
         } } });
       expect(fetcher).toHaveBeenCalledOnce();
-      expect(result).toMatchObject({ acknowledged: true, quarantined: 1, retried: 1 });
-      expect(await ledger.getRow(SOURCE, ids[0])).toMatchObject({ state: 'quarantined', attemptCount: 3 });
+      expect(result).toMatchObject({ acknowledged: true, quarantined: 0, retried: 2 });
       const retryAt = failure === '429' ? '2026-10-05T02:00:00.000Z' : '2026-10-05T00:01:00.000Z';
-      expect(await ledger.getRow(SOURCE, ids[1])).toMatchObject({ state: 'queued', attemptCount: 2, retryAt,
+      for (const id of ids) expect(await ledger.getRow(SOURCE, id)).toMatchObject({ state: 'queued', attemptCount: 2, retryAt,
         failureClass: failure === 'timeout' ? 'destination-timeout' : failure === '429' ? 'destination-rate-limited' : 'upstream-server-error' });
       fetcher.mockImplementation(async () => Response.json({ name: 'Cogna', jobs: [] }));
       const freshProber = officialAdmissionProviderProbe(resolver);

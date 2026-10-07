@@ -101,6 +101,8 @@ describe('dev ingestion soak evaluation', () => {
     expect(evaluateDevSoak(sample).some((c) => c.name === 'Worker runtime healthy' && c.status === 'fail')).toBe(true);
     sample.runtime.push(...['admission', 'catalog-publisher'].map((worker) => ({ ...sample.runtime[0]!, worker })));
     expect(evaluateDevSoak(sample).find((c) => c.name === 'Worker runtime healthy')?.status).toBe('pass');
+    sample.runtime.push({ ...sample.runtime[0]!, status: 'clientDisconnected', errors: 0 });
+    expect(evaluateDevSoak(sample).find((c) => c.name === 'Worker runtime healthy')?.status).toBe('pass');
     sample.runtime[2]!.memoryUsageBytesP99 = 125 * 1024 * 1024;
     expect(evaluateDevSoak(sample).find((c) => c.name === 'Worker resource headroom')?.status).toBe('warn');
   });
