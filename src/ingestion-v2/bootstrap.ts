@@ -227,6 +227,7 @@ export async function applyIngestionV2Bootstrap(input: {
     activeExternalIds: (await dependencies.snapshots.getSnapshot(input.sourceId, plan.snapshot.hash)).rows.map((row) => row.externalId),
     pendingAdmissionConfigurationVersion: undefined,
     pendingResolutionRows: undefined,
+    pendingResolutionUnvisitedRows: undefined,
   };
   const appliedAt = now.toISOString();
   const receipt: IngestionV2BootstrapReceipt = {

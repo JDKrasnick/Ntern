@@ -1781,6 +1781,12 @@ export class IngestionRunner {
         // `unchangedReason: 'content_hash'`, so an open pass has to keep the
         // full body in scope or it could never resolve its next slice.
         const pendingResolutionRows = new Set(previous?.pendingResolutionRows ?? []);
+        const priorPendingResolutionRows = previous?.pendingResolutionRows ?? [];
+        const priorUnvisitedCount = Math.min(
+          previous?.pendingResolutionUnvisitedRows ?? priorPendingResolutionRows.length,
+          priorPendingResolutionRows.length,
+        );
+        const priorUnvisitedIds = new Set(priorPendingResolutionRows.slice(0, priorUnvisitedCount));
         const resolutionFullBody = options.maxListingsPerSourceRun !== undefined
           && (pendingResolutionRows.size > 0
             || (resolutionDue && batch.processed.listings.length > options.maxListingsPerSourceRun));
@@ -1842,17 +1848,31 @@ export class IngestionRunner {
         const supplementalResolutionScope = obligatedIds.size
           ? resolutionScope.filter((listing) => !obligatedIds.has(externalId(listing)))
           : resolutionScope;
+        const supplementalUnvisitedScope = supplementalResolutionScope.filter((listing) => {
+          const id = externalId(listing);
+          return !pendingResolutionRows.has(id) || priorUnvisitedIds.has(id);
+        });
+        const supplementalRetryableScope = supplementalResolutionScope.filter((listing) => {
+          const id = externalId(listing);
+          return pendingResolutionRows.has(id) && !priorUnvisitedIds.has(id);
+        });
+        const orderedSupplementalScope = [...supplementalUnvisitedScope, ...supplementalRetryableScope];
         const selectedSlice = sliceCapacity === undefined
-          ? supplementalResolutionScope
-          : supplementalResolutionScope.slice(0, sliceCapacity);
+          ? orderedSupplementalScope
+          : orderedSupplementalScope.slice(0, sliceCapacity);
         const resolvedListings = obligatedListings.length
           ? [...obligatedListings, ...selectedSlice]
           : selectedSlice;
         // Rows that left the board between deliveries stop holding the pass
         // open; they have no listing to resolve and are reconciled as omissions.
-        const remainingRows = resolutionFullBody
-          ? supplementalResolutionScope.slice(sliceCapacity ?? supplementalResolutionScope.length).map(externalId)
+        const selectedSliceIds = new Set(selectedSlice.map(externalId));
+        const remainingUnvisitedRows = resolutionFullBody
+          ? supplementalUnvisitedScope.filter((listing) => !selectedSliceIds.has(externalId(listing))).map(externalId)
           : [];
+        const remainingRetryableRows = resolutionFullBody
+          ? supplementalRetryableScope.filter((listing) => !selectedSliceIds.has(externalId(listing))).map(externalId)
+          : [];
+        const remainingRows = [...remainingUnvisitedRows, ...remainingRetryableRows];
         if (boundedGithubHydration) {
           // A bounded GitHub delivery needs full occurrence JSON only for the
           // selected slice. Omission candidates join that set only on the final
@@ -1939,6 +1959,7 @@ export class IngestionRunner {
             contentHash: batch.snapshotHash,
             activeExternalIds: [...batch.activeExternalIds],
             pendingResolutionRows: undefined,
+            pendingResolutionUnvisitedRows: undefined,
             pendingAdmissionConfigurationVersion: undefined,
             ...(admissionConfigurationVersion ? { admissionConfigurationVersion } : {}),
           });
@@ -2051,6 +2072,7 @@ export class IngestionRunner {
         // cadence retries it. The pass's first delivery starts from an empty set,
         // so it always continues.
         const resolutionProgressed = pendingResolutionRows.size === 0
+          || remainingUnvisitedRows.length < priorUnvisitedCount
           || nextPendingRows.length < pendingResolutionRows.size;
         const resolutionStalled = nextPendingRows.length > 0 && !resolutionProgressed;
         if (resolutionStalled && !migrationProgressed) {
@@ -2065,7 +2087,9 @@ export class IngestionRunner {
           console.log(JSON.stringify({ event: 'github_resolution_deferred_while_migration_progressed', sourceId: connector.id,
             pending: nextPendingRows.length, migrated: migrationCandidates.length }));
         }
-        if ((remainingRows.length || resolution.pendingAutomaticEmployerExternalIds.size)
+        const newAutomaticEmployerFollowup = [...resolution.pendingAutomaticEmployerExternalIds]
+          .some((id) => !pendingResolutionRows.has(id));
+        if ((remainingUnvisitedRows.length || newAutomaticEmployerFollowup)
           && resolutionProgressed && !report.continuationSources.includes(connector.id)) {
           report.continuationSources.push(connector.id);
         }
@@ -2445,6 +2469,7 @@ export class IngestionRunner {
             processingRevision: SOURCE_METADATA_PROCESSING_REVISION,
           })),
           pendingResolutionRows: nextPendingRows.length ? nextPendingRows : undefined,
+          pendingResolutionUnvisitedRows: nextPendingRows.length ? remainingUnvisitedRows.length : undefined,
           contentHash: batch.snapshotHash,
           activeExternalIds: [...batch.activeExternalIds],
           pendingAdmissionConfigurationVersion: admissionMigrationPending ? admissionConfigurationVersion : undefined,

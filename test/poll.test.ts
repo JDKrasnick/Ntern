@@ -1307,6 +1307,7 @@ describe('polling', () => {
     const second = await poll();
     expect(second.continuationSources).toEqual([]);
     expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(40);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionUnvisitedRows).toBe(0);
   });
 
   it('uses the resolution cursor when selecting an admission migration slice', async () => {
@@ -1357,6 +1358,7 @@ describe('polling', () => {
     expect(migrated.get(rows[30]!.applyUrl)).toBe('fixture-v1');
     expect(migrated.get(rows[20]!.applyUrl)).toBe('fixture-v0');
     expect(report.continuationSources).toEqual([sourceId]);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionUnvisitedRows).toBe(15);
   });
 
   it('continues a metadata migration even when its separate resolution frontier is unchanged', async () => {

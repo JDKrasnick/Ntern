@@ -205,6 +205,8 @@ export interface SourceCheckpoint {
    * it also reconciles omissions and closures.
    */
   pendingResolutionRows?: string[];
+  /** Number of leading pending-resolution rows not yet attempted in this pass. */
+  pendingResolutionUnvisitedRows?: number;
   lastSuccessAt?: string;
   successfulFetches: number;
   lastRowCount?: number;
