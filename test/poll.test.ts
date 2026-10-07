@@ -1309,6 +1309,30 @@ describe('polling', () => {
     expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(40);
   });
 
+  it('continues a metadata migration even when its separate resolution frontier is unchanged', async () => {
+    const store = new MemoryInternshipStore();
+    const sourceId = 'github-example';
+    const rows = snapshotRows(65, sourceId);
+    const adapter = new SnapshotAdapter(sourceId, rows);
+    const resolver = { async configurationVersion() { return 'fixture-v1'; },
+      async resolveCanonicalEmployer() { return undefined; }, async resolveDestinationRule() { return undefined; } };
+    await new Poller([adapter], store, undefined, undefined, undefined, false, undefined, resolver).poll();
+    const checkpoint = (await store.getCheckpoint(sourceId))!;
+    await store.putCheckpoint({
+      ...checkpoint,
+      metadataExtractionVersion: 0,
+      metadataProcessingRevision: 0,
+      pendingResolutionRows: rows.slice(25).map((row) => row.externalId),
+    });
+
+    const report = await new Poller([adapter], store, undefined, undefined, undefined, false, undefined, resolver)
+      .poll({ maxListingsPerSourceRun: 25, maxAdmissionMigrationListingsPerSourceRun: 25 });
+
+    expect(report.continuationSources).toEqual([sourceId]);
+    expect((await store.getCheckpoint(sourceId))?.pendingResolutionRows).toHaveLength(40);
+    expect((await store.getCheckpoint(sourceId))?.pendingMetadataProcessedRows).toHaveLength(25);
+  });
+
   it('advances omissions after the complete board is attempted when a current row remains retryable', async () => {
     const store = new MemoryInternshipStore();
     const sourceId = 'github-example';
