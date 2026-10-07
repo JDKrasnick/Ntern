@@ -680,6 +680,20 @@ describe('admission v2 dispatcher', () => {
     expect(again.messages).toHaveLength(1);
   });
 
+  it('does not duplicate a queued handoff on the next scheduled cadences', async () => {
+    const { ledger } = setup(['a']);
+    const first = new Date('2026-10-07T06:00:00.000Z');
+    await planAdmissionV2Dispatch(SOURCE, { ledger, now: () => first });
+    const afterTwoCadences = await planAdmissionV2Dispatch(SOURCE, {
+      ledger, now: () => new Date('2026-10-07T06:21:00.000Z'),
+    });
+    expect(afterTwoCadences.messages).toHaveLength(0);
+    const afterLease = await planAdmissionV2Dispatch(SOURCE, {
+      ledger, now: () => new Date('2026-10-07T06:31:00.000Z'),
+    });
+    expect(afterLease.messages).toHaveLength(1);
+  });
+
   it('reclaims an expired lease and redispatches the row', async () => {
     const { ledger } = setup(['a']);
     ledger.seedRow(ledgerRow('a', { state: 'processing', leaseOwner: 'dead', leaseExpiresAt: '2000-01-01T00:00:00.000Z' }));

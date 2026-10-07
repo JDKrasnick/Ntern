@@ -4,8 +4,15 @@ import type { AdmissionV2Ledger } from './ledger.js';
 import { buildAdmissionV2Messages } from './message.js';
 import { ADMISSION_V2_MAX_EXTERNAL_IDS, type AdmissionV2DispatchPlan } from './types.js';
 
-/** How long an unacknowledged handoff suppresses a duplicate send. */
-export const ADMISSION_V2_DISPATCH_LEASE_MS = 10 * 60 * 1000;
+/**
+ * How long an unacknowledged handoff suppresses a duplicate send.
+ *
+ * This must exceed several scheduled dispatch cadences. A large initial board
+ * can legitimately keep the single-consumer queue busy for more than ten
+ * minutes; expiring on the next cadence resends work that is still durable in
+ * the queue and prevents the backlog from converging.
+ */
+export const ADMISSION_V2_DISPATCH_LEASE_MS = 30 * 60 * 1000;
 
 export interface AdmissionV2DispatchDependencies {
   ledger: AdmissionV2Ledger;
