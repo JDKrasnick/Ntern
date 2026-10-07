@@ -146,10 +146,17 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       && existingSnapshot?.state === 'active'
       && existingSnapshot.isComplete
       && existingSnapshot.admissionVersion === envelope.admissionVersion;
-    const pendingOmissionClosures = continuationCanReuseSnapshot && this.dependencies.reconcileOmissions
-      ? await repository.hasPendingOmissionClosures?.(input.sourceId) ?? true
-      : false;
-    if (continuationCanReuseSnapshot && !pendingOmissionClosures) {
+    if (continuationCanReuseSnapshot) {
+      // A bounded legacy continuation repeats the same complete board. Pending
+      // omission effects still need recovery, but that recovery is independent
+      // of recomputing the immutable snapshot diff and comparison metrics.
+      if (this.dependencies.reconcileOmissions
+        && (await repository.hasPendingOmissionClosures?.(input.sourceId) ?? true)) {
+        await this.dependencies.reconcileOmissions({
+          sourceId: input.sourceId, snapshotHash: envelope.snapshotHash,
+          admissionVersion: input.admissionVersion, observedAt: input.observedAt,
+        });
+      }
       this.log({
         event: 'ingestion_v2_shadow_continuation_reused',
         runId: input.runId,
