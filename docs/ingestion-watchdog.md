@@ -38,7 +38,9 @@ Queue failure inspection samples the oldest 200 unresolved records using a
 partial unresolved-state index. Reported queue counts describe that sample,
 not total backlog. An incident stays active until a durable resolution receipt
 clears it. Daily cleanup retains unresolved failures and keeps resolved receipts
-for 30 days after resolution. Quarantined rows remain incidents until recovered or their source is
+for 30 days after resolution. Migration `0053_watchdog_failure_baseline.sql`
+records the reviewed pre-activation queue history as resolved; it does not clear
+failures recorded after the watchdog became active. Quarantined rows remain incidents until recovered or their source is
 intentionally paused/disabled; rows retired by two complete omissions are excluded.
 
 Emails use the existing private `AUTH_FROM_EMAIL` and
