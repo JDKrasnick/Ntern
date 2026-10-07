@@ -141,6 +141,24 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       admissionVersion: input.admissionVersion,
       observedAt: input.observedAt,
     });
+    const existingSnapshot = await repository.getSnapshot(input.sourceId, envelope.snapshotHash);
+    const continuationCanReuseSnapshot = input.completeFetchSequence === undefined
+      && existingSnapshot?.state === 'active'
+      && existingSnapshot.isComplete
+      && existingSnapshot.admissionVersion === envelope.admissionVersion;
+    const pendingOmissionClosures = continuationCanReuseSnapshot && this.dependencies.reconcileOmissions
+      ? await repository.hasPendingOmissionClosures?.(input.sourceId) ?? true
+      : false;
+    if (continuationCanReuseSnapshot && !pendingOmissionClosures) {
+      this.log({
+        event: 'ingestion_v2_shadow_continuation_reused',
+        runId: input.runId,
+        sourceId: input.sourceId,
+        snapshotHash: envelope.snapshotHash,
+        durationMs: this.now().getTime() - started,
+      });
+      return envelope.snapshotHash;
+    }
     const ledger = await repository.listLedger(input.sourceId);
     const diff = planSnapshotDiff({
       sourceId: input.sourceId,
@@ -151,11 +169,10 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       rows: envelope.rows,
       ledger,
     });
-    const existingSnapshot = await repository.getSnapshot(input.sourceId, envelope.snapshotHash);
     // Continuation deliveries repeat the same complete board while the legacy
-    // lane advances through a bounded slice. Keep computing the diff and
-    // comparison, but avoid rewriting the immutable object and every ledger
-    // row when the active snapshot has no omission work left to apply.
+    // lane advances through a bounded slice. A normal cadence or pending
+    // omission recovery can still reach this reuse path, so avoid rewriting
+    // the immutable object and every ledger row after computing their diff.
     const reuseActiveSnapshot = existingSnapshot?.state === 'active'
       && existingSnapshot.isComplete
       && existingSnapshot.admissionVersion === envelope.admissionVersion
