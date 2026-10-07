@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   materialHashFor,
@@ -6,6 +7,7 @@ import {
   serializeEnvelope,
   snapshotObjectKey,
   snapshotHashForRows,
+  snapshotHashForRowsAndAdmissionVersion,
   stableStringify,
 } from '../src/ingestion-v2/normalize.js';
 import { planSnapshotDiff } from '../src/ingestion-v2/diff.js';
@@ -86,6 +88,21 @@ describe('ingestion v2 normalization', () => {
       sourceId: legacy.sourceId,
       snapshotHash: legacy.snapshotHash,
     }).admissionVersion).toBe('v1');
+  });
+
+  it('streams byte-compatible snapshot hashes for sorted and unsorted rows', () => {
+    const rows = [row('role-"b', 'b'.repeat(64)), row('role-a', 'a'.repeat(64))];
+    const canonical = [...rows].sort((left, right) => left.externalId.localeCompare(right.externalId));
+    const legacyHash = createHash('sha256').update(stableStringify(canonical)).digest('hex');
+    const admissionVersion = 'policy-"v2';
+    const versionedHash = createHash('sha256')
+      .update(stableStringify({ admissionVersion, rows: canonical }))
+      .digest('hex');
+
+    expect(snapshotHashForRows(rows)).toBe(legacyHash);
+    expect(snapshotHashForRowsAndAdmissionVersion(rows, admissionVersion)).toBe(versionedHash);
+    expect(snapshotHashForRows(canonical)).toBe(legacyHash);
+    expect(snapshotHashForRowsAndAdmissionVersion(canonical, admissionVersion)).toBe(versionedHash);
   });
 
   it('omits volatile fetch metadata from the material hash', () => {
@@ -218,6 +235,7 @@ describe('ingestion v2 diff planner', () => {
     }));
     expect(diff.counts).toMatchObject({ total: 2, new: 1, unchanged: 1, missing: 1 });
     expect(diff.actionableExternalIds).toEqual(['fresh']);
+    expect(diff.rows.map((entry) => entry.externalId)).toEqual(['fresh', 'known']);
     expect(diff.omissionUpdates).toEqual([{ externalId: 'gone', consecutiveOmissions: 1, becomesAbsent: false }]);
   });
 

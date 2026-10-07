@@ -405,6 +405,56 @@ describe('ingestion resource budgets', () => {
     database.close();
   }, 300_000);
 
+  it('reuses an unchanged production-sized snapshot without projecting persisted rows', async () => {
+    const feed = PRODUCTION_GITHUB_FEEDS.simplify;
+    const fetched = await productionAdapter(sourceId, productionDocuments(feed)).fetch();
+    const database = new DatabaseSync(':memory:');
+    for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql',
+      '0048_ingestion_v2_effect_claim.sql', '0049_ingestion_v2_cost_windows.sql', '0050_ingestion_v2_omission_closure.sql',
+      '0051_ingestion_v2_qualification_cadence.sql']) {
+      database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
+    }
+    const repository = new D1IngestionV2Repository(sqliteD1(database));
+    const snapshots = memorySnapshots();
+    const observedAt = '2026-10-03T00:00:00.000Z';
+    const discovery = new IngestionV2ShadowDiscovery({
+      repository, snapshots, features: { shadowDiscoveryEnabled: true }, now: () => new Date(observedAt), log: () => undefined,
+    });
+    const baseInput = {
+      sourceId,
+      postings: fetched.postings,
+      snapshotHash: fetched.contentHash,
+      admissionVersion: 'standard-v1',
+      baseline: false,
+      observedAt,
+      legacyActionableExternalIds: [] as string[],
+      legacyActiveExternalIds: fetched.postings.map((posting) => posting.externalId),
+      now: observedAt,
+    };
+    await discovery.discover({ ...baseInput, processed: processSnapshot(fetched), completeFetchSequence: 1 });
+
+    const processed = processSnapshot(fetched);
+    Object.defineProperty(processed, 'decisions', {
+      get: () => { throw new Error('unchanged snapshots must not project decisions into persisted rows'); },
+    });
+    exposeGc?.();
+    const baselineMb = process.memoryUsage().heapUsed / (1024 * 1024);
+    const started = process.cpuUsage();
+    await discovery.discover({ ...baseInput, processed, completeFetchSequence: 2 });
+    const cpuMs = cpuMsSince(started);
+    const peakMb = process.memoryUsage().heapUsed / (1024 * 1024);
+
+    const comparison = await repository.getShadowComparison(sourceId);
+    expect(comparison).toMatchObject({ d1RowsWritten: 1, r2Bytes: 0, counts: { unchanged: fetched.postings.length } });
+    expect(cpuMs).toBeLessThan(MESSAGE_CPU_BUDGET_MS);
+    if (exposeGc) {
+      expect(peakMb - baselineMb).toBeLessThan(MESSAGE_HEAP_BUDGET_MB);
+      expect(peakMb).toBeLessThan(MESSAGE_HEAP_CEILING_MB);
+    }
+    console.info('V2 unchanged snapshot resource sample', { rows: fetched.postings.length, baselineMb, peakMb, cpuMs });
+    database.close();
+  }, 300_000);
+
   it('reduces live snapshot parsing allocations while validating a large board', async () => {
     if (!exposeGc) return;
     const feed = PRODUCTION_GITHUB_FEEDS.simplify;

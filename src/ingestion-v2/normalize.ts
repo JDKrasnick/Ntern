@@ -183,10 +183,9 @@ export function normalizeSourceSnapshot(input: {
 
 /** Hash the sorted `(externalId, materialHash)` pairs, never the volatile body. */
 export function snapshotHashForRows(rows: readonly { externalId: string; materialHash: string }[]): string {
-  const canonical = [...rows]
-    .map((row) => ({ externalId: row.externalId, materialHash: row.materialHash }))
-    .sort((left, right) => left.externalId.localeCompare(right.externalId));
-  return createHash('sha256').update(stableStringify(canonical)).digest('hex');
+  const hash = createHash('sha256');
+  updateCanonicalHashRows(hash, canonicalHashRows(rows));
+  return hash.digest('hex');
 }
 
 /**
@@ -198,10 +197,37 @@ export function snapshotHashForRowsAndAdmissionVersion(
   rows: readonly { externalId: string; materialHash: string }[],
   admissionVersion: string,
 ): string {
-  const canonical = [...rows]
-    .map((row) => ({ externalId: row.externalId, materialHash: row.materialHash }))
-    .sort((left, right) => left.externalId.localeCompare(right.externalId));
-  return createHash('sha256').update(stableStringify({ admissionVersion, rows: canonical })).digest('hex');
+  const hash = createHash('sha256');
+  hash.update(`{"admissionVersion":${JSON.stringify(admissionVersion)},"rows":`);
+  updateCanonicalHashRows(hash, canonicalHashRows(rows));
+  hash.update('}');
+  return hash.digest('hex');
+}
+
+type SnapshotHashRow = { externalId: string; materialHash: string };
+
+/** Keep normalized rows zero-copy while retaining deterministic hashes for arbitrary callers. */
+function canonicalHashRows(rows: readonly SnapshotHashRow[]): readonly SnapshotHashRow[] {
+  for (let index = 1; index < rows.length; index += 1) {
+    if (rows[index - 1]!.externalId.localeCompare(rows[index]!.externalId) > 0) {
+      return [...rows].sort((left, right) => left.externalId.localeCompare(right.externalId));
+    }
+  }
+  return rows;
+}
+
+/** Stream the exact stableStringify representation to avoid one whole-board JSON string. */
+function updateCanonicalHashRows(
+  hash: ReturnType<typeof createHash>,
+  rows: readonly SnapshotHashRow[],
+): void {
+  hash.update('[');
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]!;
+    if (index > 0) hash.update(',');
+    hash.update(`{"externalId":${JSON.stringify(row.externalId)},"materialHash":${JSON.stringify(row.materialHash)}}`);
+  }
+  hash.update(']');
 }
 
 /**

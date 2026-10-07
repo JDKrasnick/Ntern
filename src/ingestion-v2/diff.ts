@@ -58,7 +58,7 @@ export function planSnapshotDiff(input: DiffPlannerInput): SnapshotDiff {
   }
 
   const ledger = new Map(input.ledger.map((row) => [row.externalId, row]));
-  const sortedRows = [...input.rows].sort((left, right) => left.externalId.localeCompare(right.externalId));
+  const sortedRows = canonicalRows(input.rows);
   const rows: SnapshotDiffRow[] = [];
   const actionable: string[] = [];
   const counts = { total: sortedRows.length, new: 0, changed: 0, stalePolicy: 0, retryable: 0, unchanged: 0, reappeared: 0, missing: 0 };
@@ -101,4 +101,14 @@ export function planSnapshotDiff(input: DiffPlannerInput): SnapshotDiff {
     omissionUpdates,
     rows,
   };
+}
+
+/** Normalization already orders production snapshots; copy only unordered callers. */
+function canonicalRows<T extends { externalId: string }>(rows: readonly T[]): readonly T[] {
+  for (let index = 1; index < rows.length; index += 1) {
+    if (rows[index - 1]!.externalId.localeCompare(rows[index]!.externalId) > 0) {
+      return [...rows].sort((left, right) => left.externalId.localeCompare(right.externalId));
+    }
+  }
+  return rows;
 }
