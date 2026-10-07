@@ -207,7 +207,24 @@ describe('ingestion v2 shadow discovery integration', () => {
     const subject = harness({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
     await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] }, { completeFetchSequence: 1 });
     const putCalls = subject.snapshots.putCalls;
-    await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] }, { completeFetchSequence: 2 });
+    const snapshot = await subject.fetch();
+    const processed = processSnapshot(snapshot);
+    Object.defineProperty(processed, 'decisions', {
+      get: () => { throw new Error('unchanged snapshots must not project decisions into persisted rows'); },
+    });
+    await subject.discovery.discover({
+      sourceId,
+      postings: snapshot.postings,
+      processed,
+      snapshotHash: snapshot.contentHash,
+      admissionVersion: 'standard-v1',
+      completeFetchSequence: 2,
+      baseline: false,
+      observedAt,
+      legacyActionableExternalIds: [],
+      legacyActiveExternalIds: snapshot.postings.map((posting) => posting.externalId),
+      now: observedAt,
+    });
     const comparison = await subject.repository.getShadowComparison(sourceId);
     expect(comparison?.counts).toMatchObject({ new: 0, changed: 0, missing: 0, unchanged: 3 });
     expect(comparison?.v2Actionable.count).toBe(0);

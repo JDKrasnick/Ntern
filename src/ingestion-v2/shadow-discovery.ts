@@ -202,30 +202,30 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       });
     }
 
-    const decisions = new Map(input.processed.decisions.map((decision) => [decision.externalId, decision]));
-    const classifications = new Map(diff.rows.map((row) => [row.externalId, row.classification]));
-    const rows: IngestionRowRecord[] = envelope.rows.map((row) => {
-      const decision = projectDecision(decisions.get(row.externalId));
-      return {
-        sourceId: input.sourceId,
-        externalId: row.externalId,
-        snapshotHash: envelope.snapshotHash,
-        materialHash: row.materialHash,
-        admissionVersion: input.admissionVersion,
-        // Policy migration must stay silent even when discovery observes the
-        // new version before the scheduled migration pass can fence the row.
-        notificationBaseline: input.baseline || !admissionEnabled || classifications.get(row.externalId) === 'stale-policy',
-        state: 'settled' as const,
-        ...(decision ? { decision } : {}),
-        attemptCount: 0,
-        consecutiveOmissions: 0,
-        firstObservedAt: input.observedAt,
-        lastObservedAt: input.observedAt,
-        updatedAt: input.observedAt,
-        settledAt: input.observedAt,
-      };
-    });
     if (!reuseActiveSnapshot) {
+      const decisions = new Map(input.processed.decisions.map((decision) => [decision.externalId, decision]));
+      const classifications = new Map(diff.rows.map((row) => [row.externalId, row.classification]));
+      const rows: IngestionRowRecord[] = envelope.rows.map((row) => {
+        const decision = projectDecision(decisions.get(row.externalId));
+        return {
+          sourceId: input.sourceId,
+          externalId: row.externalId,
+          snapshotHash: envelope.snapshotHash,
+          materialHash: row.materialHash,
+          admissionVersion: input.admissionVersion,
+          // Policy migration must stay silent even when discovery observes the
+          // new version before the scheduled migration pass can fence the row.
+          notificationBaseline: input.baseline || !admissionEnabled || classifications.get(row.externalId) === 'stale-policy',
+          state: 'settled' as const,
+          ...(decision ? { decision } : {}),
+          attemptCount: 0,
+          consecutiveOmissions: 0,
+          firstObservedAt: input.observedAt,
+          lastObservedAt: input.observedAt,
+          updatedAt: input.observedAt,
+          settledAt: input.observedAt,
+        };
+      });
       await repository.putRows(rows);
       await repository.applyOmissions(input.sourceId, diff.omissionUpdates, input.observedAt);
       await repository.activateSnapshot(input.sourceId, envelope.snapshotHash, input.observedAt);
@@ -276,7 +276,7 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
       v2Only: sample(difference(diff.actionableExternalIds, legacySet)),
       legacyOnly: sample(difference(input.legacyActionableExternalIds, v2Set)),
       d1RowsRead: ledger.length,
-      d1RowsWritten: (reuseActiveSnapshot ? 0 : rows.length + diff.omissionUpdates.length + 1) + reopened + 1,
+      d1RowsWritten: (reuseActiveSnapshot ? 0 : envelope.rowCount + diff.omissionUpdates.length + 1) + reopened + 1,
       r2Bytes: bytes,
       status: 'complete',
     };
