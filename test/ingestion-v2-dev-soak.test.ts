@@ -176,6 +176,14 @@ describe('dev ingestion soak evaluation', () => {
       .toEqual(['dev rollout controls', 'recent shadow comparison', 'snapshot comparison identity']);
   });
 
+  it('accepts a stale comparison when a fresh poll reused its exact active snapshot', () => {
+    const sample = healthy();
+    sample.canary.shadowComparison!.observed_at = '2026-10-04T18:00:00.000Z';
+    expect(evaluateDevSoak(sample).find((check) => check.name === 'recent shadow comparison')).toMatchObject({
+      status: 'pass', detail: expect.stringContaining('current active snapshot reused'),
+    });
+  });
+
   it('does not label a fresh deployment as a completed 24-hour soak', () => {
     const sample = healthy();
     sample.soakStartedAt = '2026-10-04T20:00:00.000Z';
