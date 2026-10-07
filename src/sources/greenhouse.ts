@@ -446,10 +446,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     // Keep that full id set separate from `postings`: emitting the index-only
     // rows would overwrite descriptions saved by an earlier delivery with an
     // empty body.
-    const activeExternalIds = jobs.flatMap((job) => {
-      const posting = mapGreenhouseSourcedPosting(job, this.options.source, fetchedAt);
-      return posting ? [posting.externalId] : [];
-    });
+    const activeExternalIds: string[] = [];
     const digests: string[] = [];
     const rejectedApplicationUrls: Array<{ row: number; url: string; reason: string }> = [];
     for (const [index, job] of jobs.entries()) {
@@ -463,9 +460,12 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       // in separate deliveries, so their temporary presence must not make a
       // stable index look changed on every continuation.
       digests.push(createHash('sha256').update(contentOmitted ? jobProjection({ ...job, content: '' }) : jobProjection(job)).digest('hex'));
-      if (contentOmitted && !selectedDetailIds.has(String(job.id ?? ''))) continue;
       const posting = mapGreenhouseSourcedPosting(job, this.options.source, fetchedAt, index + 1);
       if (!posting) continue;
+      // Use the same mapping for presence and acquisition. Mapping the board
+      // twice also parsed every description's compensation HTML twice.
+      activeExternalIds.push(posting.externalId);
+      if (contentOmitted && !selectedDetailIds.has(String(job.id ?? ''))) continue;
       assertPostingCapacity(posting);
       const rejection = greenhouseApplicationUrlRejection(posting.applyUrl, this.options.source.allowedInitialHosts);
       if (rejection) rejectedApplicationUrls.push({ row: index + 1, url: posting.applyUrl, reason: rejection });

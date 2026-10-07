@@ -7,10 +7,16 @@ export interface DisplayCompensation {
     applicableLocations?: readonly string[]; applicableEducationLevels?: readonly string[]; sourceText?: string }[];
 }
 
+// These options and locale never vary. Reuse the native formatters across
+// reconciliation and projection passes instead of allocating them per amount.
+const decimalNumber = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
+const compactThousands = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+const compactWhole = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+
 export function compensationLabels(value: DisplayCompensation | undefined): string[] {
   const labels = (value?.ranges ?? []).slice(0, 24).flatMap((range) => {
     if (!Number.isFinite(range.minAmount) || !Number.isFinite(range.maxAmount) || range.minAmount <= 0 || range.maxAmount < range.minAmount) return [];
-    const number = (amount: number) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(amount);
+    const number = (amount: number) => decimalNumber.format(amount);
     const isKnownCurrency = /^[A-Z]{3}$/u.test(range.currency) && range.currency !== 'XXX';
     let currencyPrefix = '';
     if (isKnownCurrency) {
@@ -53,8 +59,8 @@ export function compactCompensationLabel(value: DisplayCompensation | undefined)
   const range = ranges[0];
   if (range) {
     const shortNumber = (amount: number) => amount >= 1_000
-      ? `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(amount / 1_000)}K`
-      : new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(amount);
+      ? `${compactThousands.format(amount / 1_000)}K`
+      : compactWhole.format(amount);
     const currency = range.currency === "USD" ? "$" : /^[A-Z]{3}$/u.test(range.currency) && range.currency !== "XXX" ? `${range.currency} ` : "";
     const amount = `${currency}${shortNumber(range.minAmount)}${range.maxAmount !== range.minAmount ? `–${currency}${shortNumber(range.maxAmount)}` : ""}`;
     const period = ({ hourly: "/hr", daily: "/day", weekly: "/wk", monthly: "/mo", annual: "/yr" } as Record<string, string>)[range.period] ?? "";

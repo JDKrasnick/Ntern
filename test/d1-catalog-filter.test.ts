@@ -74,6 +74,39 @@ function sqliteD1(
 describe('D1 filtered catalog projection', () => {
   afterEach(() => vi.useRealTimers());
 
+  it('filters withheld history before hydration and preserves legacy and closed roles across pages', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-07T00:00:00.000Z'));
+    const database = new DatabaseSync(':memory:');
+    database.exec(`CREATE TABLE catalog_items (pk TEXT, sk TEXT, kind TEXT, value TEXT, PRIMARY KEY (pk, sk));
+      CREATE INDEX catalog_items_kind_pk_sk ON catalog_items(kind, pk, sk);`);
+    const insert = database.prepare('INSERT INTO catalog_items VALUES (?, ?, ?, ?)');
+    const put = (value: Internship) => insert.run(`JOB#${value.jobId}`, 'META', 'internship', JSON.stringify(value));
+    const accepted = Array.from({ length: 105 }, (_, index) => ({ ...job(`visible-${index}`, 'Software Intern'), open: index % 2 === 0 }));
+    accepted[0]!.admission = { catalogEligible: true } as Internship['admission'];
+    for (const value of accepted) put(value);
+    put({ ...job('legacy', 'Software Intern'), technical: undefined, admission: undefined });
+    put({ ...job('past', 'Software Intern'), season: 'summer-2020' });
+    for (let index = 0; index < 205; index += 1) {
+      put({ ...job(`withheld-${index}`, 'Software Intern'), technical: false,
+        internshipIdentity: { largeHistory: 'x'.repeat(50_000) } });
+    }
+    // An incomplete admission is withheld, rather than treated as legacy.
+    for (const catalogEligible of [false, undefined]) {
+      put({ ...job(`blocked-${catalogEligible}`, 'Software Intern'), admission: { catalogEligible } as Internship['admission'] });
+    }
+    const hydrated: string[] = [];
+    const store = new D1InternshipStore(sqliteD1(database, (_query, rows) => {
+      expect(rows.length).toBeLessThanOrEqual(100);
+      hydrated.push(...(rows as { pk: string }[]).map(({ pk }) => pk));
+    }));
+    try {
+      expect((await store.listCatalog()).map(({ jobId }) => jobId).sort()).toEqual([...accepted.map(({ jobId }) => jobId), 'legacy'].sort());
+      expect(hydrated).toHaveLength(107); // The season check remains in JS.
+      expect(hydrated.some((pk) => /withheld|blocked/u.test(pk))).toBe(false);
+    } finally { database.close(); }
+  });
+
   it('bounds sparse text/source searches before filtering and continues through the real API', async () => {
     const database = new DatabaseSync(':memory:');
     database.exec(`CREATE TABLE catalog_items (value TEXT, catalog_state TEXT, catalog_sort_key TEXT);
@@ -316,19 +349,18 @@ describe('D1 filtered catalog projection', () => {
     insert.run('JOB#099', 'SECOND', 'internship', JSON.stringify(job('shared-key', 'Data Engineering Intern')));
     insert.run('JOB#filtered', 'META', 'internship', JSON.stringify({ ...job('filtered', 'Software Engineering Intern'), technical: false }));
     insert.run('OTHER', 'META', 'checkpoint', '{}');
-    const pageSizes: number[] = [];
+    const pageSizes: number[] = [], queries: string[] = [];
     try {
       const store = new D1InternshipStore(sqliteD1(database, (query, rows) => {
-        if (/SELECT pk, sk, value FROM catalog_items/iu.test(query)) pageSizes.push(rows.length);
+        if (/SELECT pk, sk, value FROM catalog_items/iu.test(query)) { pageSizes.push(rows.length); queries.push(query); }
       }));
       const listed = await store.listCatalog();
       expect(listed).toHaveLength(206);
       expect(listed.some((item) => item.jobId === 'shared-key')).toBe(true);
       expect(listed.some((item) => item.jobId === 'filtered')).toBe(false);
       expect(listed.every((item) => item.employerCategory === 'normal')).toBe(true);
-      expect(pageSizes).toEqual([100, 100, 7]);
-      const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT pk, sk, value FROM catalog_items
-        WHERE kind = 'internship' AND (pk, sk) > (?, ?) ORDER BY pk, sk LIMIT 100`)
+      expect(pageSizes).toEqual([100, 100, 6]);
+      const plan = database.prepare(`EXPLAIN QUERY PLAN ${queries[1]}`)
         .all('JOB#099', 'META') as Array<{ detail: string }>;
       expect(plan.map((step) => step.detail).join(' '))
         .toContain('catalog_items_kind_pk_sk (kind=? AND (pk,sk)>(?,?))');

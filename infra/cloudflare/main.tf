@@ -12,15 +12,16 @@ locals {
 
   # Sized from the 2026-09-15 drain measurements: published boards per sweep x
   # per-message wall clock / cadence, doubled for the validation, notification,
-  # and D1 work that the recorded fetch duration does not cover. Greenhouse
-  # enqueues ~218 messages per half-hour sweep at ~23s each, which the previous
-  # concurrency of 2 could not retire inside the cadence. Keep in step with
-  # wrangler.ingestion.jsonc; see docs/240-dispatch-backlog-cadence.md.
+  # and D1 work that the recorded fetch duration does not cover. The 2026-10-07
+  # dev headroom rehearsal supersedes Greenhouse's old limit of 6: overlapping
+  # large boards retained >120 MiB. Concurrency 2 must still drain each sweep
+  # inside the half-hour cadence; see docs/ingestion-v2-production-readiness.md.
+  # Keep in step with both Wrangler ingestion profiles.
   # destination-verification is back to its original limits: raised on
   # 2026-09-17 to drain a backlog, then reverted when admission became durable
   # and scheduled re-checks were removed, which is what that backlog was for.
   consumer_max_concurrency = {
-    greenhouse               = 6
+    greenhouse               = 2
     lever                    = 2
     ashby                    = 2
     github                   = 2

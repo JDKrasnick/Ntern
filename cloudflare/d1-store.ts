@@ -1083,12 +1083,18 @@ export class D1InternshipStore implements InternshipStore {
   async listCatalog(): Promise<Internship[]> {
     const jobs: Internship[] = [];
     let cursor: { pk: string; sk: string } | undefined;
+    // Withheld roles can hold most of the stored JSON. Reject them in D1 so
+    // projection refreshes do not hydrate and immediately discard that history.
+    // Missing/null admission remains legacy-visible; an admission object must
+    // explicitly permit the catalog. Keep the JS checks as a second guard.
+    const eligible = `kind = 'internship' AND json_type(value, '$.technical') IS NOT 'false'
+      AND (json_extract(value, '$.admission') IS NULL OR json_type(value, '$.admission.catalogEligible') = 'true')`;
     while (true) {
       const query = cursor
         ? this.db.prepare(`SELECT pk, sk, value FROM catalog_items
-            WHERE kind = 'internship' AND (pk, sk) > (?, ?)
+            WHERE ${eligible} AND (pk, sk) > (?, ?)
             ORDER BY pk, sk LIMIT 100`).bind(cursor.pk, cursor.sk)
-        : this.db.prepare("SELECT pk, sk, value FROM catalog_items WHERE kind = 'internship' ORDER BY pk, sk LIMIT 100");
+        : this.db.prepare(`SELECT pk, sk, value FROM catalog_items WHERE ${eligible} ORDER BY pk, sk LIMIT 100`);
       const page = await query.all<{ pk: string; sk: string; value: string }>();
       for (const row of page.results) {
         const job = JSON.parse(row.value) as Internship;
