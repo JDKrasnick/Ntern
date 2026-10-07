@@ -381,8 +381,10 @@ describe('durable public omission closure', () => {
       },
     };
     let lifecycleCalls = 0;
+    const events: string[] = [];
     const discovery = new IngestionV2ShadowDiscovery({
-      repository: s.repository, snapshots, features: { shadowDiscoveryEnabled: true }, log: () => undefined,
+      repository: s.repository, snapshots, features: { shadowDiscoveryEnabled: true },
+      log: (entry) => events.push(String(entry.event)),
       admissionEnabledForSource: () => true,
       reopenActionableRows: ({ sourceId, externalIds, now }) => s.repository.reopenRows(sourceId, externalIds, now),
       reconcileOmissions: async (args) => {
@@ -403,6 +405,8 @@ describe('durable public omission closure', () => {
     expect(await s.repository.getRow('source', 'new-role')).toMatchObject({ state: 'queued' });
     expect(await discovery.discover(args)).toMatchObject({ completed: true });
     expect(lifecycleCalls).toBe(2);
+    expect(events).toContain('ingestion_v2_shadow_continuation_reused');
+    expect(events.filter((event) => event === 'ingestion_v2_shadow_comparison')).toHaveLength(0);
     expect(await s.repository.getRow('source', 'new-role')).toMatchObject({ state: 'queued' });
     expect((await s.store.getJob('old-role'))?.open).toBe(false);
   });
