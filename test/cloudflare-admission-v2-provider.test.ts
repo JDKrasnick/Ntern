@@ -54,13 +54,18 @@ describe('official admission provider evidence', () => {
   await expect(probe(helsing)).rejects.toMatchObject({classification:'upstream-server-error'});
  });
  it('probes a complete Workable published inventory once per delivery and binds exact posting IDs',async()=>{
-  const fetcher=vi.fn(async()=>Response.json({name:'Cogna',jobs:[job]}));vi.stubGlobal('fetch',fetcher);
+  const fetcher=vi.fn<(url: unknown) => Promise<Response>>(async()=>Response.json({name:'Cogna',jobs:[job]}));vi.stubGlobal('fetch',fetcher);
   const prober=officialAdmissionProviderProbe(resolver);
-  expect(await probe(workable,prober)).toMatchObject({reachability:'live',evidence:{title:job.title,expectedPostingId:job.shortcode}});
-  expect(await probe(workable.replace(job.shortcode,'AAAAAAAAAA'),prober)).toEqual({reachability:'gone'});
-  expect(fetcher).toHaveBeenCalledOnce();
+ expect(await probe(workable,prober)).toMatchObject({reachability:'live',evidence:{title:job.title,expectedPostingId:job.shortcode}});
+ expect(await probe(workable.replace(job.shortcode,'AAAAAAAAAA'),prober)).toEqual({reachability:'gone'});
+ expect(fetcher).toHaveBeenCalledOnce();
+  expect(String(fetcher.mock.calls[0]?.[0])).toBe('https://www.workable.com/api/accounts/cogna');
  });
- it.each([{jobs:[{...job,url:'https://evil.example/j/45A6283F88'}]}, {jobs:[job,job]}, {jobs:[],next_page:2}, {jobs:[],total:5}])('does not turn invalid inventories into live or closed decisions %j',async bad=>{
+ it('accepts consistent duplicate Workable entries used for multi-location postings',async()=>{
+  const fetcher=vi.fn(async()=>Response.json({name:'Cogna',jobs:[job,{...job,city:'New York'}]}));vi.stubGlobal('fetch',fetcher);
+  await expect(probe(workable)).resolves.toMatchObject({reachability:'live',evidence:{expectedPostingId:job.shortcode}});
+ });
+ it.each([{jobs:[{...job,url:'https://evil.example/j/45A6283F88'}]}, {jobs:[job,{...job,title:'Different role'}]}, {jobs:[],next_page:2}, {jobs:[],total:5}])('does not turn invalid inventories into live or closed decisions %j',async bad=>{
   vi.stubGlobal('fetch',vi.fn(async()=>Response.json({name:'Cogna',...bad})));
   await expect(probe(workable)).rejects.toMatchObject({classification:'upstream-server-error'});
  });
