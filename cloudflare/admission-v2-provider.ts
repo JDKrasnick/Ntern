@@ -14,11 +14,16 @@ function validateWorkableInventory(payload: Record<string, unknown> | 'gone' | '
   if (payload === 'blocked') return payload;
   if (typeof payload.name !== 'string' || !payload.name || !Array.isArray(payload.jobs) || payload.jobs.length > 1000
     || payload.next || payload.next_page || (typeof payload.total === 'number' && payload.total !== payload.jobs.length)) unavailable('Workable inventory is incomplete');
-  const seen = new Set<string>();
+  const seen = new Map<string, { title: unknown; url: unknown }>();
   for (const job of payload.jobs) {
     if (!record(job) || typeof job.shortcode !== 'string' || !/^[a-z0-9]{10}$/iu.test(job.shortcode)
-      || seen.has(job.shortcode.toUpperCase())) unavailable('Workable inventory has invalid or duplicate posting IDs');
-    seen.add(job.shortcode.toUpperCase());
+    ) unavailable('Workable inventory has invalid posting IDs');
+    const id = job.shortcode.toUpperCase();
+    const previous = seen.get(id);
+    if (previous && (previous.title !== job.title || previous.url !== job.url)) {
+      unavailable('Workable duplicate posting entries disagree');
+    }
+    seen.set(id, { title: job.title, url: job.url });
   }
   return payload;
 }
@@ -96,7 +101,10 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
     const match = /^\/([a-z0-9_-]{1,100})\/j\/([a-z0-9]{10})(?:\/apply)?\/?$/iu.exec(original.pathname);
     if (original.hostname !== 'apply.workable.com' || !match) return undefined;
     const [, tenant, id] = match;
-    const url = `https://www.workable.com/api/accounts/${tenant}?details=true`;
+    // Workable repeats a posting once per location. The compact official
+    // inventory retains the exact ID, title, and URL without multi-hundred-KiB
+    // descriptions that can push large tenants over the bounded response cap.
+    const url = `https://www.workable.com/api/accounts/${tenant}`;
     const shared = cache?.url === url;
     if (!shared) cache = { url, promise: read(url, final =>
       (final.origin === 'https://www.workable.com' && final.pathname === `/api/accounts/${tenant}`)
@@ -123,9 +131,13 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
     if (typeof payload === 'string') return { reachability: payload };
     // Posting-specific failures remain independent row attempts.
     const jobs = payload.jobs as Record<string, unknown>[];
-    const job = jobs.find(job => record(job) && String(job.shortcode).toUpperCase() === id!.toUpperCase());
+    const matches = jobs.filter(job => record(job) && String(job.shortcode).toUpperCase() === id!.toUpperCase());
+    const job = matches[0];
     if (!job) return { reachability: 'gone' };
     if (!record(job) || typeof job.title !== 'string' || !job.title.trim() || typeof job.url !== 'string') unavailable('Workable posting is malformed');
+    if (matches.some(match => !record(match) || match.title !== job.title || match.url !== job.url)) {
+      unavailable('Workable duplicate posting entries disagree');
+    }
     let published: URL;
     try { published = new URL(job.url); } catch { unavailable('Workable posting URL is invalid'); }
     const path = published!.pathname.replace(/\/$/u, '');

@@ -311,7 +311,7 @@ class CountingEvaluator implements AdmissionV2RowEvaluator {
 }
 
 describe('admission v2 queue consumer', () => {
-  it.each(['503', 'timeout', '429', '404', '410', 'incomplete', 'paginated', 'duplicate-ids', 'invalid-id'])('preserves all retry attempts for a tenant-wide Workable %s failure and recovers on a fresh delivery', async failure => {
+  it.each(['503', 'timeout', '429', '404', '410', 'incomplete', 'paginated', 'conflicting-duplicate-ids', 'invalid-id'])('preserves all retry attempts for a tenant-wide Workable %s failure and recovers on a fresh delivery', async failure => {
     const ids = ['45A6283F88', 'AAAAAAAAAA'];
     const { ledger, snapshots } = setup(ids);
     for (const id of ids) ledger.seedRow({ ...ledgerRow(id), attemptCount: 2 });
@@ -322,7 +322,10 @@ describe('admission v2 queue consumer', () => {
       if (failure === 'incomplete') return Response.json({ name: 'Cogna', jobs: [], total: 2 });
       if (failure === 'paginated') return Response.json({ name: 'Cogna', jobs: [], next_page: 2 });
       if (failure === 'invalid-id') return Response.json({ name: 'Cogna', jobs: [{ shortcode: 'invalid' }] });
-      if (failure === 'duplicate-ids') return Response.json({ name: 'Cogna', jobs: [{ shortcode: ids[0] }, { shortcode: ids[0].toLowerCase() }] });
+      if (failure === 'conflicting-duplicate-ids') return Response.json({ name: 'Cogna', jobs: [
+        { shortcode: ids[0], title: 'Role one', url: `https://apply.workable.com/j/${ids[0]}` },
+        { shortcode: ids[0].toLowerCase(), title: 'Role two', url: `https://apply.workable.com/j/${ids[0]}` },
+      ] });
       return new Response('', { status: Number(failure), headers: { 'Retry-After': '7200' } });
     });
     vi.stubGlobal('fetch', fetcher);
