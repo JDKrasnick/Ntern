@@ -247,6 +247,8 @@ export interface IngestionV2Repository {
   recordCompleteCadence?(sourceId: string, snapshotHash: string, admissionVersion: string, sequence: number, now: string): Promise<number>;
   putSnapshot(record: IngestionSnapshotRecord): Promise<void>;
   getSnapshot(sourceId: string, snapshotHash: string): Promise<IngestionSnapshotRecord | undefined>;
+  /** True while an active snapshot still has bounded lifecycle work to apply. */
+  hasPendingOmissionClosures?(sourceId: string): Promise<boolean>;
   activateSnapshot(sourceId: string, snapshotHash: string, activatedAt: string): Promise<void>;
   putRows(records: readonly IngestionRowRecord[]): Promise<void>;
   /** Apply one-complete-snapshot omission increments without rewriting bodies. */

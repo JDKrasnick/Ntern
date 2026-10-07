@@ -92,7 +92,7 @@ interface Harness {
   discovery: IngestionV2ShadowDiscovery;
   adapter: GitHubMarkdownAdapter;
   reopened: string[][];
-  discover: (documents: Record<string, BoardRow[]>, options?: { admissionVersion?: string }) => Promise<void>;
+  discover: (documents: Record<string, BoardRow[]>, options?: { admissionVersion?: string; completeFetchSequence?: number }) => Promise<void>;
   setAdmissionEnabled: (enabled: boolean) => void;
   fetch: () => Promise<SourceSnapshot>;
 }
@@ -136,7 +136,7 @@ function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false):
     },
   });
   const fetch = async () => await adapter.fetch() as unknown as SourceSnapshot;
-  const discover: (next: Record<string, BoardRow[]>, options?: { admissionVersion?: string }) => Promise<void> = async (next, options = {}) => {
+  const discover: (next: Record<string, BoardRow[]>, options?: { admissionVersion?: string; completeFetchSequence?: number }) => Promise<void> = async (next, options = {}) => {
     documents = next;
     const snapshot = await fetch();
     await discovery.discover({
@@ -145,6 +145,7 @@ function harness(initial: Record<string, BoardRow[]>, admissionEnabled = false):
       processed: processSnapshot(snapshot),
       snapshotHash: snapshot.contentHash,
       admissionVersion: options.admissionVersion ?? 'standard-v1',
+      ...(options.completeFetchSequence !== undefined ? { completeFetchSequence: options.completeFetchSequence } : {}),
       baseline: false,
       observedAt,
       legacyActionableExternalIds: [],
@@ -204,9 +205,9 @@ describe('ingestion v2 shadow discovery integration', () => {
 
   it('creates no actionable work for an unchanged full board', async () => {
     const subject = harness({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
-    await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
+    await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] }, { completeFetchSequence: 1 });
     const putCalls = subject.snapshots.putCalls;
-    await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
+    await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] }, { completeFetchSequence: 2 });
     const comparison = await subject.repository.getShadowComparison(sourceId);
     expect(comparison?.counts).toMatchObject({ new: 0, changed: 0, missing: 0, unchanged: 3 });
     expect(comparison?.v2Actionable.count).toBe(0);
@@ -243,7 +244,7 @@ describe('ingestion v2 shadow discovery integration', () => {
   it('records one omission then reappearance when a row returns', async () => {
     const subject = harness({ 'README.md': [rowA, rowB, rowC], 'SECOND.md': [rowS] });
     await subject.discover({ 'README.md': [rowA, rowB, rowC], 'SECOND.md': [rowS] });
-    await subject.discover({ 'README.md': [rowA, rowC], 'SECOND.md': [rowS] });
+    await subject.discover({ 'README.md': [rowA, rowC], 'SECOND.md': [rowS] }, { completeFetchSequence: 1 });
     const betaId = basePostingId('README.md', rowB.url);
     const afterMissing = await subject.repository.getShadowComparison(sourceId);
     expect(afterMissing?.counts.missing).toBe(1);
@@ -262,12 +263,12 @@ describe('ingestion v2 shadow discovery integration', () => {
     const subject = harness({ 'README.md': [rowA, rowC], 'SECOND.md': [rowS] });
     await subject.discover({ 'README.md': [rowA, rowC], 'SECOND.md': [rowS] });
     const gammaId = basePostingId('README.md', rowC.url);
-    await subject.discover({ 'README.md': [rowA], 'SECOND.md': [rowS] });
+    await subject.discover({ 'README.md': [rowA], 'SECOND.md': [rowS] }, { completeFetchSequence: 2 });
     expect(await subject.repository.getRow(sourceId, gammaId)).toMatchObject({ consecutiveOmissions: 1, state: 'settled' });
-    await subject.discover({ 'README.md': [rowA], 'SECOND.md': [rowS] });
+    await subject.discover({ 'README.md': [rowA], 'SECOND.md': [rowS] }, { completeFetchSequence: 3 });
     expect(await subject.repository.getRow(sourceId, gammaId)).toMatchObject({ consecutiveOmissions: 2, state: 'absent' });
     // An absent row is not re-counted.
-    await subject.discover({ 'README.md': [rowA], 'SECOND.md': [rowS] });
+    await subject.discover({ 'README.md': [rowA], 'SECOND.md': [rowS] }, { completeFetchSequence: 4 });
     expect(await subject.repository.getRow(sourceId, gammaId)).toMatchObject({ consecutiveOmissions: 2, state: 'absent' });
     subject.database.close();
   });
@@ -452,7 +453,7 @@ describe('ingestion v2 shadow discovery integration', () => {
     subject.database.close();
   });
 
-  it('is idempotent across a repeated identical delivery', async () => {
+  it('reuses an active snapshot without recounting a continuation as a shadow run', async () => {
     const subject = harness({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
     await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
     const firstLedger = await subject.repository.listLedger(sourceId);
@@ -464,6 +465,17 @@ describe('ingestion v2 shadow discovery integration', () => {
     // The content-addressed object is never rewritten, and the ledger write is a no-op.
     expect(subject.snapshots.objects.size).toBe(objectCount);
     expect(subject.snapshots.putCalls).toBe(putCalls);
+    const { run_count: runCount } = subject.database.prepare(
+      'SELECT run_count FROM ingestion_v2_shadow_comparisons WHERE source_id = ?',
+    ).get(sourceId) as { run_count: number };
+    expect(runCount).toBe(1);
+    subject.database.close();
+  });
+
+  it('still records a repeated identical complete cadence', async () => {
+    const subject = harness({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] });
+    await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] }, { completeFetchSequence: 1 });
+    await subject.discover({ 'README.md': [rowA, rowB], 'SECOND.md': [rowS] }, { completeFetchSequence: 2 });
     const { run_count: runCount } = subject.database.prepare(
       'SELECT run_count FROM ingestion_v2_shadow_comparisons WHERE source_id = ?',
     ).get(sourceId) as { run_count: number };
