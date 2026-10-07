@@ -80,7 +80,7 @@ export function sourceFailureCategory(error: unknown): SourceFailureCategory {
   if (/application link|application page (?:returned|redirected|reports)|application host|eligible .* link/.test(message)) return 'link';
   if (/shape|schema|malformed json/.test(message)) return 'json';
   if (/quality|suspicious zero-row/.test(message)) return 'quality';
-  if (/exceeded(?: cpu| memory)?|resource limit|too much cpu|out of memory|memory limit|response body too large|too many jobs/i.test(message)) return 'capacity';
+  if (/exceeded(?: cpu| memory)?|resource limit|too much cpu|out of memory|memory limit|response body too large|too many jobs|no browser available/i.test(message)) return 'capacity';
   if (/timeout|timed out|aborted|fetch|network|socket|econn/.test(message)) return 'transport';
   // A statement that outlives resilientD1's per-attempt ceiling carries no D1
   // error text at all (d1-errors.ts classifies it `stalled` and retries it

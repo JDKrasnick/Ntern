@@ -172,7 +172,12 @@ export class R2CatalogProjection {
           const object = await this.bucket.get(`${prefix}/${previous.pageVersion ?? previous.version}/${index}`);
           if (object) {
             saved = await new Response(object.body).text();
-            matches = JSON.stringify(JSON.parse(saved)) === serialized;
+            // Every page in this namespace is written from `serialized` below.
+            // Compare its canonical bytes directly: parsing and re-stringifying a
+            // multi-megabyte page briefly retained the string, object graph, and a
+            // second string at once, pushing the catalog publisher near its
+            // isolate memory ceiling during large-board publication.
+            matches = saved === serialized;
           }
         } catch { /* Repair this page. */ }
         if (matches) {

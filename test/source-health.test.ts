@@ -310,6 +310,12 @@ describe('application link probe failures', () => {
     expect(sourceFailureOutcome(error)).toBe('temporary_provider_error');
   });
 
+  it('classifies unavailable browser capacity as a resource limit', () => {
+    const error = new Error('Unable to create new browser: code: 503: message: No browser available');
+    expect(sourceFailureCategory(error)).toBe('capacity');
+    expect(sourceFailureOutcome(error)).toBe('resource_limit');
+  });
+
   it('does not quarantine a source for two consecutive probe timeouts', () => {
     const first = attempt(undefined, new Error('simplify-summer-2026: row 12685: Application link timed out'), '2026-09-16T08:40:00.000Z');
     expect(first).toMatchObject({ state: 'degraded', failureCategory: 'transport', consecutiveFailures: 1 });
