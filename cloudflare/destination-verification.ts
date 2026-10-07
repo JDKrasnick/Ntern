@@ -21,8 +21,6 @@ import { normalizeExactPostingDescription, type ShadowExtractionOrigin } from '.
 import { safeDiagnostic } from '../src/source-health.js';
 import { recordQueueFailureBestEffort, resolveQueueFailures } from './dlq-operations.js';
 
-const DESTINATION_VERIFICATION_QUEUE_NAME = 'intern-notifs-destination-verification';
-
 export interface DestinationVerificationMessage {
   version: 1;
   jobId: string;
@@ -513,7 +511,7 @@ export async function processDestinationVerificationBatch(
   // retry, so a failure here is logged and the ack still proceeds.
   const acknowledge = async (queued: MessageBatch<unknown>['messages'][number]) => {
     if ((queued.attempts ?? 0) > 1) {
-      try { await resolveQueueFailures(env.DB, DESTINATION_VERIFICATION_QUEUE_NAME, queued.id); }
+      try { await resolveQueueFailures(env.DB, batch.queue, queued.id); }
       catch (error) {
         console.error(JSON.stringify({ command: 'destination-verification-ledger-resolution',
           messageId: queued.id, error: safeDiagnostic(error) }));
@@ -944,7 +942,7 @@ export async function processDestinationVerificationBatch(
         // here left no server-side trace and accumulated in the dead-letter
         // queue as an unclassifiable message. Record it before the retry so a
         // systematic failure is diagnosable instead of invisible.
-        await recordQueueFailureBestEffort({ db: env.DB, queueName: DESTINATION_VERIFICATION_QUEUE_NAME,
+        await recordQueueFailureBestEffort({ db: env.DB, queueName: batch.queue,
           messageId: queued.id, attempts: queued.attempts, timestamp: queued.timestamp, sourceId: message.sourceId,
           sourceKind: message.providerIdentity.provider, body: queued.body, error });
         console.error(JSON.stringify({ command: 'destination-verification', messageId: queued.id,

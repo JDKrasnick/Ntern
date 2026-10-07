@@ -1432,11 +1432,15 @@ export class IngestionRunner {
         if (!(error instanceof DestinationHandoffError)) await completeFailedAdmissionMigration();
       }
     }, workConcurrency);
-    // Only completed negative probes can establish a broken-list failure.
-    const probeFailureShare = listings.length === 0 ? 0 : brokenProbeFailures.length / listings.length;
+    // Only completed negative probes can establish a broken-list failure. A
+    // bounded migration may select a small cluster of stale or closed rows from
+    // a much larger healthy board, so judge that cluster against the complete
+    // observed board rather than the work slice selected for this delivery.
+    const probePopulation = automaticEmployerEvidenceListings.length;
+    const probeFailureShare = probePopulation === 0 ? 0 : brokenProbeFailures.length / probePopulation;
     if (probeFailureShare > MAX_PROBE_FAILURE_SHARE) {
       report.failures.push(
-        `${listings[0]?.sourceId ?? 'source'}: ${brokenProbeFailures.length} of ${listings.length} rows could not be verified `
+        `${listings[0]?.sourceId ?? 'source'}: ${brokenProbeFailures.length} of ${probePopulation} rows could not be verified `
         + `(${(probeFailureShare * 100).toFixed(0)}% above ${MAX_PROBE_FAILURE_SHARE * 100}%)`,
         ...brokenProbeFailures.slice(0, 5),
       );
