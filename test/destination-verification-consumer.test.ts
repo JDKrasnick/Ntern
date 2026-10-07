@@ -275,13 +275,13 @@ describe('destination verification queue consumer', () => {
     // A prior attempt of this exact message failed before it settled, so the
     // consumer ledgered it. This delivery finds the work already complete and
     // acks, which must clear the row instead of leaving it pending forever.
-    await recordQueueFailure({ db, queueName: 'intern-notifs-destination-verification', messageId: 'message-1', attempts: 1,
+    await recordQueueFailure({ db, queueName: 'intern-notifs-dev-destination-verification', messageId: 'message-1', attempts: 1,
       body, error: new Error('Protocol error: Connection closed.'), now: new Date('2026-08-30T00:00:10Z') });
     expect(database.prepare("SELECT resolved_at FROM queue_failure_events WHERE message_id = 'message-1'").get())
       .toMatchObject({ resolved_at: null });
 
     const queued = queueMessage(body, 2);
-    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, environment(db));
+    await processDestinationVerificationBatch({ queue: 'intern-notifs-dev-destination-verification', messages: [queued] }, environment(db));
 
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(queued.retry).not.toHaveBeenCalled();
@@ -663,13 +663,15 @@ describe('destination verification queue consumer', () => {
       }, reason: 'historical-backfill', queuedAt: '2026-08-30T00:00:00Z',
       metadataBackfillToken: 'retry-shadow-handoff' });
 
-    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+    await processDestinationVerificationBatch({ queue: 'intern-notifs-dev-destination-verification', messages: [queued] }, {
       ...environment(db), SHADOW_EXTRACTION_QUEUE: shadowQueue,
       SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn().mockResolvedValue(undefined) } as unknown as R2Bucket,
     }, () => new Date('2026-08-30T00:01:00Z'));
 
     expect(queued.ack).not.toHaveBeenCalled();
     expect(queued.retry).toHaveBeenCalledWith({ delaySeconds: 300 }, expect.any(Error));
+    expect(database.prepare("SELECT queue_name FROM queue_failure_events WHERE message_id = 'message-1'").get())
+      .toMatchObject({ queue_name: 'intern-notifs-dev-destination-verification' });
     expect(JSON.parse(database.prepare('SELECT report FROM role_metadata_acquisition WHERE job_id = ? AND source_id = ?')
       .get(job.jobId, reference.sourceId)!.report as string)).toMatchObject({
       shadowHandoff: { outcome: 'failed', method: 'greenhouse-api' },

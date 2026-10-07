@@ -391,6 +391,45 @@ describe('polling', () => {
     expect([...store.jobs.values()]).toHaveLength(5);
     expect([...store.jobs.values()].every((job) => job.open)).toBe(true);
   });
+  it('does not fail a healthy board when a bounded migration slice contains closed links', async () => {
+    const store = new MemoryInternshipStore();
+    let configurationVersion = 'configuration-v1';
+    const resolver = {
+      async configurationVersion() { return configurationVersion; },
+      async resolveCanonicalEmployer() { return undefined; },
+      async resolveDestinationRule() { return undefined; },
+    };
+    const rows = Array.from({ length: 100 }, (_, index) => ({
+      ...listing(`https://jobs.example.com/migration-${index}`),
+      row: index + 1,
+      title: `Software Engineering Intern ${index}`,
+    }));
+    await new Poller(
+      [new Adapter('one', rows)], store, undefined,
+      undefined, undefined, undefined, undefined, resolver,
+    ).poll();
+    configurationVersion = 'configuration-v2';
+    const attempts = new Map<string, number>();
+
+    const report = await new Poller(
+      [new Adapter('one', rows)], store, undefined, undefined,
+      async (url) => {
+        const attempt = (attempts.get(url) ?? 0) + 1;
+        attempts.set(url, attempt);
+        if (attempt === 1 && rows.slice(0, 4).some((row) => row.applyUrl === url)) {
+          throw new Error('Application page redirected to an explicit error destination');
+        }
+        return { url, evidence: { url, confidence: { score: 100, level: 'high' as const,
+          recommendation: 'alert-eligible' as const, signals: ['source policy'] } } };
+      },
+      undefined, undefined, resolver,
+    ).poll({ maxAdmissionMigrationListingsPerSourceRun: 4 });
+
+    expect(report.failures).toEqual([]);
+    expect(report.continuationSources).toEqual(['one']);
+    expect((await store.getSourceOccurrences('one')).filter((value) =>
+      value.occurrence.admissionConfigurationVersion === 'configuration-v2')).toHaveLength(4);
+  });
   it('fetches and persists every new role before a migration checkpoint can produce a 304', async () => {
     const store = new MemoryInternshipStore();
     let configurationVersion = 'configuration-v1';
