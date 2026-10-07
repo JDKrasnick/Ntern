@@ -213,6 +213,7 @@ describe('full dev ownership evidence', () => {
     expect(admission.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED).toBe('true');
     expect(publisher.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED).toBe('true');
     expect(admission.triggers.crons).toEqual(['9-59/10 * * * *']);
+    expect(ingestion.triggers.crons).toContain('9-59/10 * * * *');
     expect(publisher.triggers.crons).toEqual(['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']);
     expect(ingestion.triggers.crons).not.toContain('1-51/10 * * * *');
     expect(ingestion.triggers.crons).not.toContain('4,14,24,34,44,54 * * * *');

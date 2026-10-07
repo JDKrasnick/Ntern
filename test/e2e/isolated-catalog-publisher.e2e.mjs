@@ -34,6 +34,31 @@ after(async () => { await runtime?.dispose(); });
 const scheduled = (cron) => worker.scheduled({ cron, scheduledTime: Date.now() }, env);
 const marker = (scope) => db.prepare('SELECT value,updated_at FROM system_state WHERE key=?').bind(`maintenance_phase:${scope}:${scope}_complete`).first();
 
+test('the configured shared cron completes general maintenance and isolated admission dispatch', async () => {
+  const cron = '9-59/10 * * * *';
+  const event = { cron, scheduledTime: Date.now() };
+  for (const role of ['ingestion', 'admission']) {
+    const profile = JSON.parse(await readFile(new URL(`../../wrangler.dev.${role}.jsonc`, import.meta.url), 'utf8'));
+    assert.ok(profile.triggers.crons.includes(cron), `${role} must schedule its distinct maintenance workload`);
+    const handler = (await import(`../../cloudflare/dist/${role}/${role}-worker.js`)).default;
+    const queue = { async send() {}, async sendBatch() {} };
+    await handler.scheduled(event, { ...profile.vars, DB: db, DOCUMENTS: bucket,
+      SHADOW_EXTRACTION_ARTIFACTS: bucket, DESTINATION_VERIFICATION_QUEUE: queue,
+      DESTINATION_VERIFICATION_DLQ: queue, ADMISSION_V2_QUEUE: queue,
+    });
+    if (role === 'ingestion') {
+      const general = await marker('maintenance');
+      assert.equal(JSON.parse(general.value).status, 'complete');
+      assert.equal(JSON.parse(general.value).observedAt, new Date(event.scheduledTime).toISOString());
+      const legacyDispatch = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:maintenance:ingestion_v2_admission_dispatch'").first();
+      assert.equal(legacyDispatch, null, 'ingestion must skip V2 dispatch when isolated');
+    }
+  }
+  const dispatch = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:admission_v2:dispatch'").first();
+  assert.equal(JSON.parse(dispatch.value).status, 'complete');
+  assert.equal(JSON.parse(dispatch.value).observedAt, new Date(event.scheduledTime).toISOString());
+});
+
 test('disabled publisher does no database work and exposes no public operations', async () => {
   await worker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected read'); } } });
   assert.equal((await worker.fetch(new globalThis.Request('https://example.com/internal/operations'))).status, 404);

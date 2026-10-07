@@ -97,7 +97,13 @@ describe('Cloudflare deployment configuration', () => {
       .flatMap((config) => config.triggers?.crons ?? []);
     const productionCrons = ingestion.triggers?.crons ?? [];
     expect(new Set(devCrons)).toEqual(new Set(productionCrons));
-    expect(devCrons).toHaveLength(productionCrons.length);
+    // The shared expression runs general maintenance on ingestion and V2
+    // dispatch on admission. All other expressions have exactly one owner.
+    for (const cron of productionCrons) {
+      expect(devCrons.filter((value) => value === cron)).toHaveLength(cron === '9-59/10 * * * *' ? 2 : 1);
+    }
+    expect(devIngestion.triggers?.crons).toEqual(productionCrons.filter((cron) =>
+      !['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'].includes(cron)));
     expect(devIngestion.limits).toEqual(ingestion.limits);
     expect(devIngestion.rules).toEqual(ingestion.rules);
     expect(devIngestion.browser).toEqual(ingestion.browser);

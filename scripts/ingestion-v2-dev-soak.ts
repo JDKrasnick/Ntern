@@ -440,6 +440,7 @@ async function main(): Promise<number> {
     if (consumers.length !== 1 || (consumers[0]?.script_name ?? consumers[0]?.script ?? consumers[0]?.service) !== owner) controlMismatches.push('Admission queue has an unexpected consumer');
   }
   if (isolated && schedules.schedules.some((s) => ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'].includes(s.cron))) controlMismatches.push('Legacy ingestion still owns projection crons');
+  if (isolated && !schedules.schedules.some((s) => s.cron === '9-59/10 * * * *')) controlMismatches.push('Ingestion general maintenance cron is missing');
   const sample: DevSoakSample = {
     capturedAt: capturedAt.toISOString(), windowStartedAt: windowStart, windowHours, runtime,
     soakStartedAt: new Date(Math.max(deploymentAt.getTime(), configuredWindowStart?.getTime() ?? 0)).toISOString(),

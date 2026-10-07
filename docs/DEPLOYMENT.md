@@ -26,25 +26,29 @@ The catalog is public. Accounts, preferences, device tokens, profiles, documents
 
 Every backend change must be deployed and smoke-tested in the isolated Cloudflare
 development environment before a production deployment is considered. The
-development Workers are `intern-notifs-dev` and `intern-notifs-dev-ingestion`;
+development Workers are `intern-notifs-dev`, `intern-notifs-dev-ingestion`,
+`intern-notifs-dev-admission`, and `intern-notifs-dev-catalog-publisher`;
 their public API is `https://intern-notifs-dev.jdkrasnick.workers.dev`.
 
 The development stack has its own D1 database (`intern-notifs-dev-db`), R2
 buckets, queues, Durable Object namespace, and Worker secrets. It must never
-bind a production database, bucket, queue, service, or secret. Its ingestion
-Worker uses the production cron schedule, queue consumers, resource limits, and
-observability settings against those isolated resources. Ingestion-generated
+bind a production database, bucket, queue, service, or secret. The development
+Workers collectively use the production cron schedules and queue consumers
+against those isolated resources. Ingestion retains general maintenance at
+`9-59/10`; admission uses the same expression for V2 dispatch only. Ingestion's
+isolation flag skips V2 dispatch, so these schedules do not duplicate that work.
+The publisher owns the D1 and R2 projection schedules. Ingestion-generated
 email, push, and ntfy delivery is disabled by
 `OUTBOUND_NOTIFICATIONS_ENABLED=false`; delivery attempts and receipts are
 recorded in structured logs and the dev delivery ledger instead of contacting
 external providers.
 
 The bootstrapped `northwestern-fintech-2027-quant` source is the continuous V2
-writer canary in dev. Shadow discovery, admission, catalog ownership, legacy
-write suppression, and trusted-alert intent are enabled for that source only.
+writer canary in dev. Greenhouse Figma, Lever Palantir, and Ashby Mistral AI also
+have V2 catalog ownership, legacy-write suppression, and trusted-alert intent.
 Non-publishing V2 admission also covers SpeedyApply SWE and AI, Vansh, Canadian
-Tech, Simplify, Greenhouse Figma, Lever Palantir, and Ashby Mistral AI. These
-eight sources retain legacy catalog ownership while their V2 snapshots and
+Tech, and Simplify. These five sources retain legacy catalog ownership while
+their V2 snapshots and
 independent admission decisions are verified. The dev API carries identical
 V2 controls so forced provider polls respect the same ownership boundary. Expanding the canary requires a successful guarded
 bootstrap receipt for each added source before its writer and legacy-disable
@@ -52,20 +56,28 @@ allowlists change.
 
 Use the committed, config-specific commands—never a bare Wrangler deploy. The
 API command preserves the existing dev container rollout, so Docker is not
-required to exercise or deploy ingestion:
+required to deploy the four dev Workers:
 
 ```sh
-npm run build:cloudflare
-npm run cloudflare:dev:provision
-npx wrangler deploy --config wrangler.dev.ingestion.jsonc
-npx wrangler deploy --config wrangler.dev.api.jsonc --containers-rollout=none
+npm run cloudflare:dev:deploy
 curl -fsS 'https://intern-notifs-dev.jdkrasnick.workers.dev/catalog?limit=5'
 ```
 
 `cloudflare:dev:provision` reconciles every production-equivalent work queue and
 DLQ, both R2 buckets, the resume Vectorize index, and all D1 migrations. Use
-`npm run cloudflare:dev:deploy` to provision and deploy both dev Workers in the
-required ingestion-first order.
+`npm run cloudflare:dev:deploy` to provision and deploy ingestion, admission,
+publisher, then API. After ingestion enables isolation, an explicit transfer step
+removes only the legacy dev admission consumer before admission attaches the
+replacement. Wrangler does not delete consumers omitted from a config. The step
+preserves an already attached dedicated consumer and refuses unknown owners.
+Durable queue deliveries and unacknowledged
+handoffs survive the brief gap. Each command must succeed before the next starts.
+If a deployment fails, correct the failure and rerun the command to finish the
+transfer. The command then verifies all four live control profiles, exact cron
+ownership (including general maintenance), and the sole admission consumer.
+The verifier loads local `.env` credentials when present and does not require an
+elapsed soak. Run `npm run ingestion:v2:dev:soak` separately for source health,
+publication, resource headroom, and the required clean observation window.
 
 Verify the public catalog, authentication lifecycle, and protected operations
 boundary there. A successful development run is a prerequisite for, but never
