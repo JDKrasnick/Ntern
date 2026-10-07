@@ -455,7 +455,7 @@ describe('Cloudflare maintenance cron', () => {
     } finally { vi.restoreAllMocks(); }
   });
 
-  it('runs the remaining maintenance phases and marks them without rebuilding the projection', async () => {
+  it.each(['false', 'true'])('runs general maintenance without rebuilding the projection with isolation=%s', async (isolated) => {
     // The projection belongs to the `1-51/10` cron now. While a failing
     // verification or alert email may abort its own step, it must not stop the
     // rest of the maintenance phases or the completion signal.
@@ -478,6 +478,7 @@ describe('Cloudflare maintenance cron', () => {
       await cloudflareWorker.scheduled({
         cron: '9-59/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:09:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        INGESTION_V2_ISOLATED_WORKERS_ENABLED: isolated,
         DB: { prepare: (query: string) => {
           maintenanceStatements.push(query);
           const statement = {
@@ -510,6 +511,7 @@ describe('Cloudflare maintenance cron', () => {
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"legacy_posting_identity_incident_drain"'));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"deleted":5000'));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
+      if (isolated === 'true') expect(markers).not.toHaveBeenCalledWith('ingestion_v2_admission_dispatch', 'started');
     } finally {
       vi.restoreAllMocks();
     }

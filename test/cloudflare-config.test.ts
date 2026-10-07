@@ -52,6 +52,8 @@ describe('Cloudflare deployment configuration', () => {
   const ingestion = JSON.parse(read('wrangler.ingestion.jsonc')) as WorkerConfig;
   const devApi = JSON.parse(read('wrangler.dev.api.jsonc')) as WorkerConfig;
   const devIngestion = JSON.parse(read('wrangler.dev.ingestion.jsonc')) as WorkerConfig;
+  const devAdmission = JSON.parse(read('wrangler.dev.admission.jsonc')) as WorkerConfig;
+  const devCatalogPublisher = JSON.parse(read('wrangler.dev.catalog-publisher.jsonc')) as WorkerConfig;
 
   it('keeps Wrangler and OpenTofu cron schedules synchronized', () => {
     const wranglerCrons = ingestion.triggers?.crons ?? [];
@@ -91,13 +93,24 @@ describe('Cloudflare deployment configuration', () => {
       dead_letter_queue: normalizeQueue(consumer.dead_letter_queue),
     }));
 
-    expect(devIngestion.triggers).toEqual(ingestion.triggers);
+    const devCrons = [devIngestion, devAdmission, devCatalogPublisher]
+      .flatMap((config) => config.triggers?.crons ?? []);
+    const productionCrons = ingestion.triggers?.crons ?? [];
+    expect(new Set(devCrons)).toEqual(new Set(productionCrons));
+    // The shared expression runs general maintenance on ingestion and V2
+    // dispatch on admission. All other expressions have exactly one owner.
+    for (const cron of productionCrons) {
+      expect(devCrons.filter((value) => value === cron)).toHaveLength(cron === '9-59/10 * * * *' ? 2 : 1);
+    }
+    expect(devIngestion.triggers?.crons).toEqual(productionCrons.filter((cron) =>
+      !['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'].includes(cron)));
     expect(devIngestion.limits).toEqual(ingestion.limits);
     expect(devIngestion.rules).toEqual(ingestion.rules);
     expect(devIngestion.browser).toEqual(ingestion.browser);
     expect(devIngestion.observability).toEqual(ingestion.observability);
     expect(normalizedProducers(devIngestion)).toEqual(normalizedProducers(ingestion));
-    expect(normalizedConsumers(devIngestion)).toEqual(normalizedConsumers(ingestion));
+    expect([...normalizedConsumers(devIngestion), ...normalizedConsumers(devAdmission)])
+      .toEqual(normalizedConsumers(ingestion));
     expect(devIngestion.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('false');
     expect(devApi.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('false');
     expect(ingestion.vars.OUTBOUND_NOTIFICATIONS_ENABLED).toBe('true');
@@ -114,11 +127,12 @@ describe('Cloudflare deployment configuration', () => {
     for (const [name, value] of Object.entries(devIngestion.vars).filter(([name]) => name.startsWith('INGESTION_V2_') && name !== 'INGESTION_V2_ISOLATED_WORKERS_ENABLED')) {
       expect(devApi.vars[name]).toBe(value);
     }
+    const writerCohort = [canary, 'greenhouse-figma', 'lever-palantir', 'ashby-mistral-ai'].join(',');
     for (const name of [
       'INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST',
       'INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST',
       'INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST',
-    ]) expect(devIngestion.vars[name]).toBe(canary);
+    ]) expect(devIngestion.vars[name]).toBe(writerCohort);
   });
 
   it('disables API invocation logs while keeping structured logs and ingestion at full sampling', () => {

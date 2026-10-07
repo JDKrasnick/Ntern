@@ -20,10 +20,14 @@ queue_suffixes=(
 ensure_queue() {
   local name="$1"
   local retention="$2"
+  local queue_options=(--message-retention-period-secs "$retention")
+  # Admission dispatch expects immediate delivery; retention-only updates
+  # preserve any delay left behind by an earlier dev experiment.
+  if test "$name" = "$dev_prefix-admission-v2"; then queue_options+=(--delivery-delay-secs 0); fi
   if ! npx wrangler queues info "$name" >/dev/null 2>&1; then
-    npx wrangler queues create "$name" --message-retention-period-secs "$retention"
+    npx wrangler queues create "$name" "${queue_options[@]}"
   else
-    npx wrangler queues update "$name" --message-retention-period-secs "$retention" >/dev/null
+    npx wrangler queues update "$name" "${queue_options[@]}" >/dev/null
   fi
 }
 

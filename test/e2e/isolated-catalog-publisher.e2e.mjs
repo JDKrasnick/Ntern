@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import { Miniflare } from 'miniflare';
 import { unstable_splitSqlQuery as splitSqlQuery } from 'wrangler';
@@ -33,6 +37,109 @@ before(async () => {
 after(async () => { await runtime?.dispose(); });
 const scheduled = (cron) => worker.scheduled({ cron, scheduledTime: Date.now() }, env);
 const marker = (scope) => db.prepare('SELECT value,updated_at FROM system_state WHERE key=?').bind(`maintenance_phase:${scope}:${scope}_complete`).first();
+
+test('the configured shared cron completes general maintenance and isolated admission dispatch', async () => {
+  const cron = '9-59/10 * * * *';
+  const event = { cron, scheduledTime: Date.now() };
+  for (const role of ['ingestion', 'admission']) {
+    const profile = JSON.parse(await readFile(new URL(`../../wrangler.dev.${role}.jsonc`, import.meta.url), 'utf8'));
+    assert.ok(profile.triggers.crons.includes(cron), `${role} must schedule its distinct maintenance workload`);
+    const handler = (await import(`../../cloudflare/dist/${role}/${role}-worker.js`)).default;
+    const queue = { async send() {}, async sendBatch() {} };
+    await handler.scheduled(event, { ...profile.vars, DB: db, DOCUMENTS: bucket,
+      SHADOW_EXTRACTION_ARTIFACTS: bucket, DESTINATION_VERIFICATION_QUEUE: queue,
+      DESTINATION_VERIFICATION_DLQ: queue, ADMISSION_V2_QUEUE: queue,
+    });
+    if (role === 'ingestion') {
+      const general = await marker('maintenance');
+      assert.equal(JSON.parse(general.value).status, 'complete');
+      assert.equal(JSON.parse(general.value).observedAt, new Date(event.scheduledTime).toISOString());
+      const legacyDispatch = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:maintenance:ingestion_v2_admission_dispatch'").first();
+      assert.equal(legacyDispatch, null, 'ingestion must skip V2 dispatch when isolated');
+    }
+  }
+  const dispatch = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:admission_v2:dispatch'").first();
+  assert.equal(JSON.parse(dispatch.value).status, 'complete');
+  assert.equal(JSON.parse(dispatch.value).observedAt, new Date(event.scheduledTime).toISOString());
+});
+
+test('the real profile CLI rejects broken routes and delayed delivery before validated compiled dispatch', async () => {
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const directory = await mkdtemp(join(tmpdir(), 'dev-profile-e2e-'));
+  const responsesFile = join(directory, 'responses.json');
+  const source = 'greenhouse-figma';
+  const hash = 'a'.repeat(64);
+  const policy = 'review-policy';
+  const now = new Date().toISOString();
+  const profile = JSON.parse(await readFile(join(root, 'wrangler.dev.admission.jsonc'), 'utf8'));
+  const handler = (await import('../../cloudflare/dist/admission/admission-worker.js')).default;
+  try {
+    const responses = {
+      '/queues?per_page=100&page=1': [{ queue_id: 'review-queue', queue_name: 'intern-notifs-dev-admission-v2', settings: { delivery_delay: 0 } }],
+      '/queues/review-queue/consumers': [{ script_name: 'intern-notifs-dev-admission', type: 'worker',
+        dead_letter_queue: 'intern-notifs-dev-admission-v2-dlq', settings: { batch_size: 1, max_concurrency: 1, max_retries: 2 } }],
+    };
+    for (const role of ['ingestion', 'admission', 'catalog-publisher', 'api']) {
+      const config = JSON.parse(await readFile(join(root, `wrangler.dev.${role}.jsonc`), 'utf8'));
+      responses[`/workers/scripts/${config.name}/settings`] = { bindings: [
+        ...Object.entries(config.vars).map(([name, text]) => ({ name, text, type: 'plain_text' })),
+        ...(config.d1_databases ?? []).map(b => ({ name: b.binding, type: 'd1', database_id: b.database_id })),
+        ...(config.r2_buckets ?? []).map(b => ({ name: b.binding, type: 'r2_bucket', bucket_name: b.bucket_name })),
+        ...(config.queues?.producers ?? []).map(b => ({ name: b.binding, type: 'queue', queue_name: b.queue })),
+        ...(config.services ?? []).map(b => ({ name: b.binding, type: 'service', service: b.service })),
+      ] };
+      responses[`/workers/scripts/${config.name}/schedules`] = { schedules: (config.triggers?.crons ?? []).map(cron => ({ cron })) };
+    }
+    for (const fault of ['missing-producer', 'production-producer', 'delayed', 'healthy']) {
+      const fixture = globalThis.structuredClone(responses);
+      const bindings = fixture['/workers/scripts/intern-notifs-dev-admission/settings'].bindings;
+      const producer = bindings.findIndex(b => b.name === 'ADMISSION_V2_QUEUE');
+      if (fault === 'missing-producer') bindings.splice(producer, 1);
+      if (fault === 'production-producer') bindings[producer].queue_name = 'intern-notifs-admission-v2';
+      if (fault === 'delayed') fixture['/queues?per_page=100&page=1'][0].settings.delivery_delay = 86400;
+      await writeFile(responsesFile, JSON.stringify(fixture));
+      await db.batch([
+        db.prepare('DELETE FROM ingestion_admission_handoffs WHERE source_id=?').bind(source),
+        db.prepare('DELETE FROM ingestion_rows WHERE source_id=?').bind(source),
+        db.prepare('DELETE FROM ingestion_snapshots WHERE source_id=?').bind(source),
+        db.prepare("INSERT INTO ingestion_snapshots (source_id,snapshot_hash,object_key,admission_version,document_count,row_count,state,is_complete,baseline,created_at,activated_at) VALUES (?,?,?,?,1,1,'active',1,0,?,?)").bind(source, hash, `ingestion-v2/snapshots/${source}/${hash}.json`, policy, now, now),
+        db.prepare("INSERT INTO ingestion_rows (source_id,external_id,snapshot_hash,material_hash,admission_version,state,first_observed_at,last_observed_at,updated_at) VALUES (?,?,?,?,?,'pending',?,?,?)").bind(source, 'review-row', hash, 'b'.repeat(64), policy, now, now, now),
+      ]);
+      const verified = spawnSync(process.execPath, ['--import', join(root, 'test/fixtures/dev-profile-fetch.mjs'),
+        '--import', join(root, 'node_modules/tsx/dist/loader.mjs'), join(root, 'scripts/verify-cloudflare-dev-profile.ts')], {
+        cwd: directory, encoding: 'utf8', env: { ...process.env, CLOUDFLARE_API_TOKEN: 'review-token',
+          CLOUDFLARE_ACCOUNT_ID: 'review-account', DEV_PROFILE_TEST_RESPONSES: responsesFile },
+      });
+      const sends = [];
+      if (verified.status === 0) await handler.scheduled({ cron: '9-59/10 * * * *', scheduledTime: Date.now() }, {
+        ...profile.vars, DB: db, ADMISSION_V2_QUEUE: { async sendBatch(messages) { sends.push(...messages); } },
+      });
+      const row = await db.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=?').bind(source).first();
+      const handoffs = await db.prepare('SELECT external_ids,acknowledged_at FROM ingestion_admission_handoffs WHERE source_id=?').bind(source).all();
+      if (fault === 'healthy') {
+        assert.equal(verified.status, 0, verified.stderr);
+        assert.equal(sends.length, 1);
+        assert.deepEqual(sends[0].body.externalIds, ['review-row']);
+        assert.equal(row.state, 'queued');
+        assert.equal(handoffs.results.length, 1);
+        assert.equal(handoffs.results[0].acknowledged_at, null);
+      } else {
+        assert.equal(verified.status, 1, `${fault}: ${verified.stdout} ${verified.stderr}`);
+        assert.match(verified.stderr, fault === 'delayed' ? /initial delivery delay/ : /ADMISSION_V2_QUEUE resource binding differs/);
+        assert.deepEqual(row, { state: 'pending', attempt_count: 0 });
+        assert.equal(sends.length, 0);
+        assert.equal(handoffs.results.length, 0);
+      }
+    }
+  } finally {
+    await db.batch([
+      db.prepare('DELETE FROM ingestion_admission_handoffs WHERE source_id=?').bind(source),
+      db.prepare('DELETE FROM ingestion_rows WHERE source_id=?').bind(source),
+      db.prepare('DELETE FROM ingestion_snapshots WHERE source_id=?').bind(source),
+    ]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('disabled publisher does no database work and exposes no public operations', async () => {
   await worker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected read'); } } });
