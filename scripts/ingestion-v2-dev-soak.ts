@@ -154,9 +154,16 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
     sourceCheck('complete active snapshot', canary.activeSnapshot?.is_complete === 1,
       canary.activeSnapshot ? `snapshot ${canary.activeSnapshot.snapshot_hash}` : 'missing active snapshot');
     const comparisonAge = now.getTime() - Date.parse(String(canary.shadowComparison?.observed_at));
+    const comparisonMatchesActiveSnapshot = canary.activeSnapshot?.is_complete === 1
+      && canary.activeSnapshot?.snapshot_hash === canary.shadowComparison?.snapshot_hash
+      && canary.activeSnapshot?.admission_version === canary.shadowComparison?.admission_version;
+    // Bounded legacy resolution can reuse an immutable V2 snapshot for many
+    // deliveries. A fresh successful source poll plus exact snapshot identity
+    // keeps that comparison current without paying to recompute its full diff.
+    const currentBySnapshotReuse = comparisonMatchesActiveSnapshot && successAgeMinutes <= 60;
     sourceCheck('recent shadow comparison', canary.shadowComparison?.complete === 1
-      && comparisonAge >= 0 && comparisonAge <= 60 * 60_000,
-      canary.shadowComparison ? `observed ${canary.shadowComparison.observed_at}` : 'missing comparison');
+      && ((comparisonAge >= 0 && comparisonAge <= 60 * 60_000) || currentBySnapshotReuse),
+    canary.shadowComparison ? `observed ${canary.shadowComparison.observed_at}${currentBySnapshotReuse && comparisonAge > 60 * 60_000 ? '; current active snapshot reused' : ''}` : 'missing comparison');
     const costWindow = canary.shadowComparison;
     const windowRunCount = Number(costWindow?.window_run_count ?? 0);
     const windowD1RowsWritten = Number(costWindow?.window_d1_rows_written ?? 0);
@@ -168,8 +175,7 @@ export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.cap
       `${windowD1RowsWritten}/${INGESTION_V2_D1_WRITE_LIMIT} rows in current one-hour window`);
     sourceCheck('R2 snapshot integrity', canary.r2SnapshotValid, 'immutable R2 envelope matches D1 hash, policy, and row count');
     sourceCheck('snapshot comparison identity', Boolean(canary.activeSnapshot?.snapshot_hash)
-      && canary.activeSnapshot?.snapshot_hash === canary.shadowComparison?.snapshot_hash
-      && canary.activeSnapshot?.admission_version === canary.shadowComparison?.admission_version, 'active snapshot and comparison hash/policy match');
+      && comparisonMatchesActiveSnapshot, 'active snapshot and comparison hash/policy match');
     const rowCount = canary.rows.reduce((sum, row) => sum + Number(row.rows ?? 0), 0);
     const quarantined = canary.rows
       .filter((row) => row.state === 'quarantined')
