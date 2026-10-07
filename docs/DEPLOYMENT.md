@@ -65,7 +65,10 @@ curl -fsS 'https://intern-notifs-dev.jdkrasnick.workers.dev/catalog?limit=5'
 
 `cloudflare:dev:provision` reconciles every production-equivalent work queue and
 DLQ, both R2 buckets, the resume Vectorize index, and all D1 migrations. Use
-`npm run cloudflare:dev:deploy` to provision and deploy ingestion, admission,
+`npm run cloudflare:dev:deploy` first checks helper credentials and queue read
+access without mutations. It rejects paused delivery and unknown existing
+consumers before provisioning or deploying any Worker; an absent queue is allowed
+for first-time provisioning. It then provisions and deploys ingestion, admission,
 publisher, then API. After ingestion enables isolation, an explicit transfer step
 removes only the legacy dev admission consumer before admission attaches the
 replacement. Wrangler does not delete consumers omitted from a config. The step
@@ -74,8 +77,12 @@ Durable queue deliveries and unacknowledged
 handoffs survive the brief gap. Each command must succeed before the next starts.
 If a deployment fails, correct the failure and rerun the command to finish the
 transfer. The command then verifies all four live control profiles, exact cron
-ownership (including general maintenance), and the sole admission consumer.
-The verifier loads local `.env` credentials when present and does not require an
+ownership (including general maintenance), admission routing, unpaused delivery,
+and the sole admission consumer's type, batch size, concurrency, retries, and DLQ.
+The helper loads local `.env` credentials when present and requires
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; Wrangler OAuth alone is
+insufficient for its API requests. The preflight checks read access; normal
+deployment and consumer transfer still require write permissions. It does not require an
 elapsed soak. Run `npm run ingestion:v2:dev:soak` separately for source health,
 publication, resource headroom, and the required clean observation window.
 

@@ -2,29 +2,56 @@ import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const roles = ['ingestion', 'admission', 'catalog-publisher', 'api'] as const;
-type Profile = { name: string; vars: Record<string, string>; triggers?: { crons: string[] } };
+type Profile = { name: string; vars: Record<string, string>; triggers?: { crons: string[] }; queues?: { consumers: Array<{
+  queue: string; max_batch_size: number; max_concurrency: number; max_retries: number;
+  dead_letter_queue: string; max_batch_timeout?: number; retry_delay?: number;
+}> } };
 type Load = <T>(path: string) => Promise<T>;
-type Consumer = { consumer_id?: string; script_name?: string; script?: string; service?: string };
+type Consumer = { consumer_id?: string; script_name?: string; script?: string; service?: string; type?: string;
+  dead_letter_queue?: string; settings?: { batch_size?: number; max_concurrency?: number | null; max_retries?: number;
+    max_wait_time_ms?: number; retry_delay?: number } };
+type DevQueue = { queue_id: string; queue_name: string; settings?: { delivery_paused?: boolean } };
 const consumerOwner = (consumer: Consumer) => consumer.script_name ?? consumer.script ?? consumer.service;
 
-async function loadAdmissionQueue(load: Load): Promise<{ queue_id: string }> {
+async function findAdmissionQueue(load: Load): Promise<DevQueue | undefined> {
   for (let page = 1; ; page++) {
-    const queues = await load<Array<{ queue_name: string; queue_id: string }>>(`/queues?per_page=100&page=${page}`);
+    const queues = await load<DevQueue[]>(`/queues?per_page=100&page=${page}`);
     const queue = queues.find((queue) => queue.queue_name === 'intern-notifs-dev-admission-v2');
     if (queue) return queue;
-    if (queues.length < 100) throw new Error('Missing dev admission queue');
+    if (queues.length < 100) return undefined;
   }
+}
+
+async function loadAdmissionQueue(load: Load): Promise<DevQueue> {
+  const queue = await findAdmissionQueue(load);
+  if (!queue) throw new Error('Missing dev admission queue');
+  return queue;
+}
+
+function validateTransferConsumers(consumers: Consumer[]): void {
+  if (consumers.some((consumer) => consumer.type !== 'worker' || !['intern-notifs-dev-ingestion', 'intern-notifs-dev-admission'].includes(consumerOwner(consumer) ?? ''))) {
+    throw new Error('Refusing to transfer an unexpected dev admission consumer');
+  }
+  if (consumers.some((consumer) => consumerOwner(consumer) === 'intern-notifs-dev-ingestion' && !consumer.consumer_id)) {
+    throw new Error('Missing legacy dev consumer identity');
+  }
+}
+
+/** Check credentials and queue read access before any provisioning or deployment. */
+export async function preflightCloudflareDevTransfer(load: Load): Promise<void> {
+  const queue = await findAdmissionQueue(load);
+  // First-time provisioning creates this queue after authenticated listing succeeds.
+  if (!queue) return;
+  if (queue.settings?.delivery_paused === true) throw new Error('Dev admission queue delivery is paused');
+  validateTransferConsumers(await load<Consumer[]>(`/queues/${queue.queue_id}/consumers`));
 }
 
 /** Wrangler adds declared consumers but does not delete omitted consumers. */
 export async function releaseLegacyDevAdmissionConsumer(load: Load, remove: (path: string) => Promise<void>): Promise<void> {
   const queue = await loadAdmissionQueue(load);
   const consumers = await load<Consumer[]>(`/queues/${queue.queue_id}/consumers`);
-  if (consumers.some((consumer) => !['intern-notifs-dev-ingestion', 'intern-notifs-dev-admission'].includes(consumerOwner(consumer) ?? ''))) {
-    throw new Error('Refusing to transfer an unexpected dev admission consumer');
-  }
+  validateTransferConsumers(consumers);
   const legacy = consumers.filter((consumer) => consumerOwner(consumer) === 'intern-notifs-dev-ingestion');
-  if (legacy.some((consumer) => !consumer.consumer_id)) throw new Error('Missing legacy dev consumer identity');
   for (const consumer of legacy) await remove(`/queues/${queue.queue_id}/consumers/${consumer.consumer_id}`);
 }
 
@@ -41,7 +68,7 @@ export async function verifyCloudflareDevProfile(load: Load): Promise<void> {
       load<{ schedules: Array<{ cron: string }> }>(`/workers/scripts/${profile.name}/schedules`),
     ]);
     for (const [name, expected] of Object.entries(profile.vars).filter(([name]) =>
-      name.startsWith('INGESTION_V2_') || ['OUTBOUND_NOTIFICATIONS_ENABLED', 'DEPLOYMENT_ROLE', 'LLM_METADATA_PUBLICATION_POLICY_JSON'].includes(name))) {
+      name.startsWith('INGESTION_V2_') || ['OUTBOUND_NOTIFICATIONS_ENABLED', 'DEPLOYMENT_ROLE', 'LLM_METADATA_PUBLICATION_POLICY_JSON', 'ADMISSION_V2_QUEUE_NAME'].includes(name))) {
       if (settings.bindings.find((binding) => binding.name === name && binding.type === 'plain_text')?.text !== expected) {
         throw new Error(`${profile.name}: ${name} differs from dev profile`);
       }
@@ -51,9 +78,22 @@ export async function verifyCloudflareDevProfile(load: Load): Promise<void> {
     if (JSON.stringify(expectedCrons) !== JSON.stringify(liveCrons)) throw new Error(`${profile.name}: cron ownership differs`);
   }
   const admissionQueue = await loadAdmissionQueue(load);
+  if (admissionQueue.settings?.delivery_paused === true) throw new Error('Dev admission queue delivery is paused');
   const consumers = await load<Consumer[]>(`/queues/${admissionQueue.queue_id}/consumers`);
   if (consumers.length !== 1 || consumerOwner(consumers[0]!) !== 'intern-notifs-dev-admission') {
     throw new Error('Dev admission queue must have exactly one dedicated admission consumer');
+  }
+  const admission = JSON.parse(readFileSync(new URL('../wrangler.dev.admission.jsonc', import.meta.url), 'utf8')) as Profile;
+  const expected = admission.queues?.consumers.find(({ queue }) => queue === admissionQueue.queue_name);
+  if (!expected) throw new Error('Missing checked dev admission consumer');
+  const consumer = consumers[0]!;
+  if (consumer.type !== 'worker' || consumer.dead_letter_queue !== expected.dead_letter_queue
+    || consumer.settings?.batch_size !== expected.max_batch_size
+    || consumer.settings?.max_concurrency !== expected.max_concurrency
+    || consumer.settings?.max_retries !== expected.max_retries
+    || (expected.max_batch_timeout !== undefined && consumer.settings?.max_wait_time_ms !== expected.max_batch_timeout * 1000)
+    || (expected.retry_delay !== undefined && consumer.settings?.retry_delay !== expected.retry_delay)) {
+    throw new Error('Dev admission consumer delivery settings differ from checked profile');
   }
 }
 
@@ -70,6 +110,11 @@ async function main(): Promise<void> {
     if (!response.ok || !body.success) throw new Error(`Dev profile request failed: ${path} (${response.status})`);
     return body.result;
   };
+  if (process.argv.includes('--preflight')) {
+    await preflightCloudflareDevTransfer(request);
+    console.log('Dev transfer credentials, queue read access, and existing ownership checked.');
+    return;
+  }
   if (process.argv.includes('--release-legacy-consumer')) {
     await releaseLegacyDevAdmissionConsumer(request, async (path) => { await request(path, 'DELETE'); });
     console.log('Legacy dev admission consumer released; any dedicated consumer is preserved.');

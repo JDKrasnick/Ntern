@@ -74,7 +74,7 @@
     "cloudflare:migrate:local": "wrangler d1 migrations apply intern-notifs-db --local --config wrangler.api.jsonc",
     "cloudflare:migrate:remote": "wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc",
     "cloudflare:dev:provision": "bash scripts/provision-cloudflare-dev.sh",
-    "cloudflare:dev:deploy": "npm run cloudflare:dev:provision && wrangler deploy --config wrangler.dev.ingestion.jsonc && tsx scripts/verify-cloudflare-dev-profile.ts --release-legacy-consumer && wrangler deploy --config wrangler.dev.admission.jsonc && wrangler deploy --config wrangler.dev.catalog-publisher.jsonc && wrangler deploy --config wrangler.dev.api.jsonc --containers-rollout=none && tsx scripts/verify-cloudflare-dev-profile.ts",
+    "cloudflare:dev:deploy": "tsx scripts/verify-cloudflare-dev-profile.ts --preflight && npm run cloudflare:dev:provision && wrangler deploy --config wrangler.dev.ingestion.jsonc && tsx scripts/verify-cloudflare-dev-profile.ts --release-legacy-consumer && wrangler deploy --config wrangler.dev.admission.jsonc && wrangler deploy --config wrangler.dev.catalog-publisher.jsonc && wrangler deploy --config wrangler.dev.api.jsonc --containers-rollout=none && tsx scripts/verify-cloudflare-dev-profile.ts",
     "terraform:fmt": "tofu -chdir=infra/cloudflare fmt -check -recursive",
     "terraform:validate": "tofu -chdir=infra/cloudflare validate",
     "deploy:cloudflare": "npm run build:cloudflare && tsx scripts/deploy-cloudflare.ts",
