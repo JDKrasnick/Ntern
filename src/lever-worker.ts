@@ -6,7 +6,7 @@ import { reviewedLeverSources, type ReviewedLeverSource } from './sources/lever-
 import { LeverPostingsAdapter } from './sources/lever.js';
 import { qualityPolicyFor, verifySourceQuality } from './sources/quality.js';
 import { SourceFetchError } from './sources/source-error.js';
-import { ApplicationLinkValidationError, failedSourceHealth, failureFromPollReport, PollReportFailure, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
+import { ApplicationLinkValidationError, failedSourceHealth, failureFromPollReport, PollReportFailure, safeDiagnostic, sourceDeliveryPaused, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
 import { SOURCE_RETRY_DELAY_CAP_MS } from './source-poll-cadence.js';
 import { type InternshipStore, type UserStore } from './store.js';
 import type { SourceCheckpoint, SourceFetchResult } from './types.js';
@@ -62,6 +62,8 @@ function parseWorkMessage(body: string): LeverWorkMessage {
     throw new Error('Invalid Lever work message');
   }
   if (!Number.isFinite(Date.parse(parsed.scheduledAt))) throw new Error('Invalid Lever work message timestamp');
+  if (parsed.force !== undefined && typeof parsed.force !== 'boolean') throw new Error('Invalid Lever work message force flag');
+  if (parsed.forceRequestedAt !== undefined && (typeof parsed.forceRequestedAt !== 'string' || !Number.isFinite(Date.parse(parsed.forceRequestedAt)) || Date.parse(parsed.forceRequestedAt) > Date.parse(parsed.scheduledAt))) throw new Error('Invalid Lever work message force request timestamp');
   return parsed as LeverWorkMessage;
 }
 
@@ -164,7 +166,7 @@ export async function runLeverBoard(
   if (!source) throw new Error(`Unknown reviewed Lever source ${JSON.stringify(message.sourceId)}`);
   const mode = source.status;
   const sourceHealth = await dependencies.store.getSourceHealth(source.id);
-  if (!message.force && (sourceHealth?.sourceStatus === 'paused' || sourceHealth?.state === 'quarantined')) {
+  if (sourceDeliveryPaused(sourceHealth, message)) {
     return { sourceId: source.id, mode, skipped: 'paused', notModified: true, listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };
   }
   if (!message.force && sourceHealth?.backoffUntil && Date.parse(sourceHealth.backoffUntil) > Date.now()) {

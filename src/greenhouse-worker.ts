@@ -7,7 +7,7 @@ import { GreenhouseBoardAdapter } from './sources/greenhouse.js';
 import { greenhouseQualityPolicy, verifySourceQuality } from './sources/quality.js';
 import { type InternshipStore, type UserStore } from './store.js';
 import type { GreenhouseWorkMessage } from './greenhouse-dispatch.js';
-import { ApplicationLinkValidationError, failedSourceHealth, failureFromPollReport, PollReportFailure, safeDiagnostic, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
+import { ApplicationLinkValidationError, failedSourceHealth, failureFromPollReport, PollReportFailure, safeDiagnostic, sourceDeliveryPaused, sourceFailureCategory, successfulSourceHealth } from './source-health.js';
 import { processFifoBatch } from './sqs-fifo-batch.js';
 import { legacyDeliveryExclusions, type GroupedNotificationCohort } from './grouped-notification-cohort.js';
 import type { CatalogAdmissionResolver, DestinationVerificationRequest } from './destination-verification.js';
@@ -62,6 +62,8 @@ function parseWorkMessage(body: string): GreenhouseWorkMessage {
     throw new Error('Invalid Greenhouse work message');
   }
   if (!Number.isFinite(Date.parse(parsed.scheduledAt))) throw new Error('Invalid Greenhouse work message timestamp');
+  if (parsed.force !== undefined && typeof parsed.force !== 'boolean') throw new Error('Invalid Greenhouse work message force flag');
+  if (parsed.forceRequestedAt !== undefined && (typeof parsed.forceRequestedAt !== 'string' || !Number.isFinite(Date.parse(parsed.forceRequestedAt)) || Date.parse(parsed.forceRequestedAt) > Date.parse(parsed.scheduledAt))) throw new Error('Invalid Greenhouse work message force request timestamp');
   return parsed as GreenhouseWorkMessage;
 }
 
@@ -100,7 +102,7 @@ export async function runGreenhouseBoard(
   if (!source) throw new Error(`Unknown reviewed Greenhouse source ${JSON.stringify(message.sourceId)}`);
   const mode = source.status;
   const sourceHealth = await dependencies.store.getSourceHealth(source.id);
-  if (!message.force && (sourceHealth?.sourceStatus === 'paused' || sourceHealth?.state === 'quarantined')) {
+  if (sourceDeliveryPaused(sourceHealth, message)) {
     return { sourceId: source.id, mode, skipped: 'paused', notModified: true, listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };
   }
   if (!message.force && sourceHealth?.backoffUntil && Date.parse(sourceHealth.backoffUntil) > Date.now()) {
@@ -155,7 +157,7 @@ export async function runGreenhouseBoard(
     if (!dependencies.enqueueContinuation) {
       throw new Error(`${source.id}: oversized Greenhouse detail pass needs a continuation queue`);
     }
-    await dependencies.enqueueContinuation({ version: 1, sourceId: source.id, scheduledAt: new Date().toISOString(), ...(message.force ? { force: true } : {}) });
+    await dependencies.enqueueContinuation({ version: 1, sourceId: source.id, scheduledAt: new Date().toISOString(), ...(message.force ? { force: true, forceRequestedAt: message.forceRequestedAt ?? message.scheduledAt } : {}) });
   }
   return {
     sourceId: source.id,

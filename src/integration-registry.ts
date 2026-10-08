@@ -73,6 +73,7 @@ const atsReplayMessage = (provider: string, sourceId: string, scheduledAt: strin
   sourceId,
   scheduledAt,
   force: true,
+  forceRequestedAt: scheduledAt,
   ...(provider === 'greenhouse' ? {} : { runId }),
 });
 
