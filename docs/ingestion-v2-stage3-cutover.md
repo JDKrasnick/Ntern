@@ -98,7 +98,10 @@ Drain admission work and reconcile terminal row totals to the planned active
 count. Confirm baseline notification count remains unchanged, pending legacy
 fields are absent, the active checkpoint version matches the V2 snapshot,
 eligible roles remain visible, and queue/DLQ return to zero. Resume the source
-and observe at least three complete cadences, including one unchanged cadence
+only after each admitted ledger job ID matches its persisted occurrence and
+resolves to the open canonical job. Catalog reconciliation returns its committed
+identity to the admission consumer; a proposed ID is not proof of persistence.
+Then observe at least three complete cadences, including one unchanged cadence
 with zero reopened work and one expected change. Compare row decisions,
 visibility, omissions, notifications, retry/quarantine, source health, Worker
 errors, and D1/R2 pressure before adding another source.

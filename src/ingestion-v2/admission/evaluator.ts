@@ -85,7 +85,7 @@ export function admissionRowShouldNotify(
 
 export interface AdmissionV2CatalogSink {
   /** Commit the row's decision and catalog effects idempotently. */
-  commit(input: AdmissionCatalogCommit): Promise<void>;
+  commit(input: AdmissionCatalogCommit): Promise<{ jobId: string } | void>;
   revoke?(input: {
     sourceId: string; externalId: string; reason: string; admissionVersion: string;
     effectFence?: PostingObservationAdmissionFence;

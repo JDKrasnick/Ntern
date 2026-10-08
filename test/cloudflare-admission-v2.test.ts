@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cloudflareAdmissionProber, processAdmissionV2Batch, stage2AdmissionEvaluator } from '../cloudflare/admission-v2.js';
@@ -7,6 +7,9 @@ import type { D1Database, D1PreparedStatement, MessageBatch, R2Bucket } from '..
 import type { IngestionRowRecord } from '../src/ingestion-v2/types.js';
 import { buildAdmissionV2Messages } from '../src/ingestion-v2/admission/message.js';
 import { ingestionV2AdmissionVersion } from '../src/ingestion-v2/admission/version.js';
+import { D1IngestionV2Repository } from '../cloudflare/ingestion-v2-store.js';
+import { normalizeSourceSnapshot } from '../src/ingestion-v2/normalize.js';
+import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 
 afterEach(() => vi.unstubAllGlobals());
 const observedAt = '2026-10-03T00:00:00.000Z';
@@ -31,6 +34,45 @@ function row(): IngestionRowRecord {
 }
 
 describe('Cloudflare admission v2 boundary', () => {
+  it('passes the committed catalog identity through the default live sink router to D1 settlement', async () => {
+    const database = new DatabaseSync(':memory:');
+    for (const file of readdirSync(new URL('../cloudflare/migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
+      database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
+    }
+    const db = sqliteD1(database);
+    const repository = new D1IngestionV2Repository(db);
+    const envelope = normalizeSourceSnapshot({ sourceId: 'source', admissionVersion: 'standard-v1', observedAt,
+      postings: [{ sourceId: 'source', externalId: 'role', sourceUrl: 'https://careers.example.com/opportunities',
+        fetchedAt: observedAt, employer: { id: 'acme', name: 'Acme', authority: 'reviewed-registry' },
+        title: 'Software Engineering Intern', content: [{ kind: 'description', format: 'plain', value: 'Build distributed systems.' }],
+        locations: ['Remote'], applyUrl: 'https://careers.example.com/opportunities/software-intern', sourceState: 'open', lifecycleAuthority: 'title' }],
+    });
+    await repository.putSnapshot({ sourceId: 'source', snapshotHash: envelope.snapshotHash, objectKey: 'snapshot',
+      admissionVersion: 'standard-v1', documentCount: 1, rowCount: 1, state: 'active', isComplete: true,
+      baseline: true, createdAt: observedAt, activatedAt: observedAt });
+    await repository.putRows([{ ...row(), state: 'queued', snapshotHash: envelope.snapshotHash,
+      materialHash: envelope.rows[0]!.materialHash, notificationBaseline: true }]);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<title>Software Engineering Intern</title><main>Build distributed systems.</main><form><input type="file" name="resume"></form>',
+      { headers: { 'Content-Type': 'text/html' } })));
+    const committed = vi.spyOn(ReconcilerAdmissionV2CatalogSink.prototype, 'commit').mockResolvedValue({ jobId: 'retained-catalog-job' });
+    try {
+      const [body] = buildAdmissionV2Messages({ sourceId: 'source', snapshotHash: envelope.snapshotHash, snapshotKey: 'snapshot',
+        admissionVersion: 'standard-v1', baseline: true, externalIds: ['role'] });
+      let acknowledged = 0;
+      await processAdmissionV2Batch({ queue: 'intern-notifs-admission-v2', messages: [{ id: 'canonical-receipt', body,
+        attempts: 1, timestamp: new Date(observedAt), ack() { acknowledged++; }, retry() {} }] }, {
+        DB: db, DOCUMENTS: { async get() { return { body: new Response(JSON.stringify(envelope)).body }; } } as unknown as R2Bucket,
+        INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: 'source',
+        INGESTION_V2_ADMISSION_ENABLED: 'true', INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: 'source',
+        INGESTION_V2_CATALOG_WRITER_ENABLED: 'true', INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: 'source',
+        INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: 'source',
+      }, { resolver: { async resolve() { return ['93.184.216.34']; } }, now: () => new Date(observedAt) });
+      expect(acknowledged).toBe(1);
+      expect(committed).toHaveBeenCalledOnce();
+      expect(database.prepare('SELECT state,job_id,notification_baseline FROM ingestion_rows').get())
+        .toMatchObject({ state: 'settled', job_id: 'retained-catalog-job', notification_baseline: 1 });
+    } finally { committed.mockRestore(); database.close(); }
+  });
   it('retains a provider Retry-After minimum without interpreting a 429 as a closed job', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('Throttled', { status: 429, headers: { 'Retry-After': '7200' } })));
     const prober = cloudflareAdmissionProber({ async resolve() { return ['93.184.216.34']; } });

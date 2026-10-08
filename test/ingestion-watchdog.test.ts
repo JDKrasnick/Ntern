@@ -45,6 +45,10 @@ function mockCloudflare(fault = 'healthy') {
   const vars = { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true', INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true',
     INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: 'source', INGESTION_V2_ADMISSION_ENABLED: 'true', INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: 'source',
     INGESTION_V2_CATALOG_WRITER_ENABLED: 'true', INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: 'source', INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: 'source' };
+  if (fault === 'large-cohort') {
+    const owners = Array.from({ length: 230 }, (_, index) => `source-${index}`).join(',');
+    vars.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST = vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST = vars.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST = vars.INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST = owners;
+  }
   const queryHistory: Array<{ sql: string; params: unknown[] }> = [];
   const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -59,9 +63,9 @@ function mockCloudflare(fault = 'healthy') {
       else if (query.sql.includes("sk='CURRENT'")) rows = [{ value: JSON.stringify({ ...pointer, schemaVersion: 6,
         generatedAt: fault === 'future-generation' ? '2026-10-07T18:31:00Z' : fault === 'publication-grace' ? '2026-10-06T18:37:00Z' : generatedAt }) }];
       else if (query.sql.includes('MANIFESTS')) rows = fault === 'missing-manifest' ? [] : [{ value: JSON.stringify({ keys: manifest }) }];
-      else if (query.sql.includes("sk='HEALTH'")) rows = [{ value: JSON.stringify({ sourceStatus: fault === 'paused' ? 'paused' : 'active', lastAttemptAt: generatedAt,
-        lastSuccessAt: fault === 'stale-source' ? 'invalid' : generatedAt }) }];
-      else if (query.sql.includes('ingestion_rows') || query.sql.includes('ingestion_admission_handoffs')) rows = [{ n: fault === 'stuck-admission' ? 1 : 0 }];
+      else if (query.sql.includes("sk='HEALTH'")) rows = query.params.map(pk => ({ pk, value: JSON.stringify({ sourceStatus: fault === 'paused' ? 'paused' : 'active', lastAttemptAt: generatedAt,
+        lastSuccessAt: fault === 'stale-source' ? 'invalid' : generatedAt }) }));
+      else if (query.sql.includes('ingestion_rows') || query.sql.includes('ingestion_admission_handoffs')) rows = [{ source_id: 'source', n: fault === 'stuck-admission' ? 1 : 0 }];
       return result([{ results: rows }]);
     }
     if (url.includes('/catalog?')) return fault === 'invalid-public-response' ? Response.json({ message: 'not a catalog' }) : Response.json({ groups: [groups[0]] });
@@ -75,8 +79,8 @@ function mockCloudflare(fault = 'healthy') {
     if (url.endsWith('/graphql')) {
       const request = JSON.parse(String(init?.body));
       expect(request.variables.versions).toEqual(['active-version', 'active-version', 'active-version']);
-      return Response.json({ data: { viewer: { accounts: [{ workersInvocationsAdaptive: [{ dimensions: { status: fault === 'oom' ? 'exceededMemory' : 'success' },
-        sum: { errors: fault === 'oom' ? 1 : 0 }, quantiles: { memoryUsageBytesP99: (fault === 'headroom' ? 121 : 80) * 1024 * 1024 } }] }] } } });
+      return Response.json({ data: { viewer: { accounts: [{ workersInvocationsAdaptive: [{ dimensions: { status: fault === 'oom' ? 'exceededMemory' : fault.startsWith('client-disconnect') ? 'clientDisconnected' : fault === 'canceled' ? 'canceled' : 'success' },
+        sum: { errors: ['oom', 'client-disconnect-error'].includes(fault) ? 1 : 0 }, quantiles: { memoryUsageBytesP99: (fault === 'headroom' ? 121 : 80) * 1024 * 1024 } }] }] } } });
     }
     throw new Error(`Unexpected monitor request ${url}`);
   });
@@ -88,12 +92,20 @@ it.each([
   ['healthy', undefined], ['streamed-pointer', undefined], ['queue-failure', 'queue-failures-unresolved'], ['invalid-public-response', 'public-catalog-unavailable'],
   ['missing-pointer', 'catalog-projection-unhealthy'], ['stale-source', 'source-polling-stalled'], ['stuck-admission', 'admission-progress-stalled'],
   ['oom', 'worker-errors'], ['headroom', 'worker-memory-headroom'],
+  ['client-disconnect', undefined], ['client-disconnect-error', 'worker-errors'], ['canceled', 'worker-errors'],
+  ['large-cohort', undefined],
   ['publication-grace', undefined], ['future-generation', 'catalog-projection-unhealthy'],
 ])('checks the full independent read path: %s', async (fault, expected) => {
   const queries = mockCloudflare(fault);
   const signals = await collectWatchdog('dev', now);
   expect(signals.map(signal => signal.id)).toEqual(expected ? [expected] : []);
   expect(queries.every(query => !/^\s*(INSERT|UPDATE|DELETE)/i.test(query.sql))).toBe(true);
+  if (fault === 'large-cohort') {
+    const healthReads = queries.filter(query => query.sql.includes("sk='HEALTH'"));
+    expect(healthReads).toHaveLength(10);
+    expect(healthReads.every(query => query.params.length <= 25)).toBe(true);
+    expect(healthReads.flatMap(query => query.params)).toHaveLength(230);
+  }
 });
 
 it.each(['../current', 'A'.repeat(20)])('rejects an invalid private page namespace: %s', pageVersion => {

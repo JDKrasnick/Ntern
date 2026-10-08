@@ -19,7 +19,7 @@ existing workflow can also be dispatched against a reviewed PR branch.
 | Missed or failed scheduled work | Maintenance, D1 catalog, R2 catalog, or enabled V2 dispatch completion missing, invalid, failed, or over 30 minutes old |
 | Broken catalog publication | Missing/retired R2 pointer outside the five-minute D1-to-R2 handoff; generation over 30 minutes old; corrupt/missing pages, hash, page map, or durable manifest; mismatch against a stable D1 generation |
 | Public catalog failure | HTTP failure or a response without a catalog groups array |
-| Worker failure | Any non-success invocation or recorded error on currently serving ingestion/admission/publisher versions in the last hour |
+| Worker failure | A failed invocation or recorded error on currently serving ingestion/admission/publisher versions in the last hour; a `clientDisconnected` invocation with zero errors does not trigger this signal |
 | Memory headroom | Current serving versions exceed 120 MiB at p99 in the last hour |
 | Unresolved queue processing | A failure remains unresolved for at least 30 minutes, including destination verification; retry age never clears it |
 | Active V2 source stops polling | Last attempt over one hour old, last success over two hours old, or missing/invalid timestamps |
@@ -29,7 +29,7 @@ existing workflow can also be dispatched against a reviewed PR branch.
 Paused and disabled sources are excluded from the active-owner progress checks.
 Provider retry cooldowns are respected. Polling/progress checks apply only to
 sources whose current flags authorize V2 catalog ownership. R2 inspection is
-bounded to 10,000 groups, and source inspection to 50 owners, with a four-minute
+bounded to 10,000 groups, and source inspection to 500 owners in batches of 25, with a four-minute
 overall probe deadline and 20-second request deadlines. Cloudflare analytics
 may be sampled or delayed; durable completion markers provide a separate
 signal for missed work.

@@ -92,7 +92,7 @@ export interface AdmissionRowEvaluation {
    * Deferred idempotent catalog/notification effect. The consumer invokes it
    * only after atomically claiming the evaluated row identity in D1.
    */
-  commitEffect?: () => Promise<void>;
+  commitEffect?: () => Promise<{ jobId: string } | void>;
 }
 
 /** Context handed to a row evaluator for one message. */

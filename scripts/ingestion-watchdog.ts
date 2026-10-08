@@ -191,25 +191,37 @@ export async function collectWatchdog(environment: 'production' | 'dev', now: Da
   const runtime = await analytics.json() as { errors?: unknown; data?: { viewer: { accounts: Array<{ workersInvocationsAdaptive: Array<{ dimensions: { status: string }; sum: { errors: number }; quantiles: { memoryUsageBytesP99: number } }> }> } } };
   if (!analytics.ok || runtime.errors || !runtime.data?.viewer.accounts[0]) throw new Error('Worker analytics unavailable');
   for (const row of runtime.data.viewer.accounts[0].workersInvocationsAdaptive) {
-    if (row.dimensions.status !== 'success' || row.sum.errors) signals.push({ id: 'worker-errors', detail: `${row.dimensions.status}: ${row.sum.errors} errors` });
+    if ((row.dimensions.status !== 'success' && row.dimensions.status !== 'clientDisconnected') || row.sum.errors) signals.push({ id: 'worker-errors', detail: `${row.dimensions.status}: ${row.sum.errors} errors` });
     if (row.quantiles.memoryUsageBytesP99 > 120 * 1024 * 1024) signals.push({ id: 'worker-memory-headroom', detail: `${(row.quantiles.memoryUsageBytesP99 / 1024 / 1024).toFixed(1)} MiB p99` });
   }
   const owners = [...new Set((vars.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST ?? vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST ?? '').split(',').map(id => id.trim()).filter(Boolean))]
     .filter(id => admissionV2OwnsCatalogWrites(vars, id));
-  if (owners.length > 50) throw new Error('Owner monitoring exceeds bounded source budget');
-  for (const id of owners) {
-    const health = await query<{ value: string }>("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'", [`SOURCE#${id}`]);
-    const source = health[0] ? JSON.parse(health[0].value) as { sourceStatus?: string; lastAttemptAt?: string; lastSuccessAt?: string } : undefined;
-    if (source?.sourceStatus === 'paused' || source?.sourceStatus === 'disabled') continue;
-    if (!source || !Number.isFinite(Date.parse(source.lastAttemptAt ?? '')) || now.getTime() - Date.parse(source.lastAttemptAt!) > SOURCE_CADENCE_SLIP_MS
-      || !Number.isFinite(Date.parse(source.lastSuccessAt ?? '')) || now.getTime() - Date.parse(source.lastSuccessAt!) > 120 * minute) signals.push({ id: 'source-polling-stalled', detail: id });
-    const rows = await query<{ n: number }>(`SELECT COUNT(*) AS n FROM ingestion_rows WHERE source_id=? AND
+  if (owners.length > 500) throw new Error('Owner monitoring exceeds bounded source budget');
+  for (let offset = 0; offset < owners.length; offset += 25) {
+    const batch = owners.slice(offset, offset + 25);
+    const placeholders = batch.map(() => '?').join(',');
+    const health = await query<{ pk: string; value: string }>(`SELECT pk,value FROM catalog_items WHERE pk IN (${placeholders}) AND sk='HEALTH'`, batch.map(id => `SOURCE#${id}`));
+    const active = batch.filter(id => {
+      const row = health.find(row => row.pk === `SOURCE#${id}`);
+      const source = row ? JSON.parse(row.value) as { sourceStatus?: string; lastAttemptAt?: string; lastSuccessAt?: string } : undefined;
+      if (source?.sourceStatus === 'paused' || source?.sourceStatus === 'disabled') return false;
+      if (!source || !Number.isFinite(Date.parse(source.lastAttemptAt ?? '')) || now.getTime() - Date.parse(source.lastAttemptAt!) > SOURCE_CADENCE_SLIP_MS
+        || !Number.isFinite(Date.parse(source.lastSuccessAt ?? '')) || now.getTime() - Date.parse(source.lastSuccessAt!) > 120 * minute) signals.push({ id: 'source-polling-stalled', detail: id });
+      return true;
+    });
+    if (!active.length) continue;
+    const activePlaceholders = active.map(() => '?').join(',');
+    const rows = await query<{ source_id: string; n: number }>(`SELECT source_id,COUNT(*) AS n FROM ingestion_rows WHERE source_id IN (${activePlaceholders}) AND
       ((state='queued' AND (retry_at IS NULL OR retry_at<=?) AND updated_at<?)
       OR (state='processing' AND lease_expires_at<?)
-      OR (state='quarantined' AND consecutive_omissions<2))`,
-    [id, now.toISOString(), new Date(now.getTime() - 60 * minute).toISOString(), new Date(now.getTime() - 15 * minute).toISOString()]);
-    const handoffs = await query<{ n: number }>('SELECT COUNT(*) AS n FROM ingestion_admission_handoffs WHERE source_id=? AND acknowledged_at IS NULL AND dispatched_at<?', [id, new Date(now.getTime() - 15 * minute).toISOString()]);
-    if (rows[0]?.n || handoffs[0]?.n) signals.push({ id: 'admission-progress-stalled', detail: `${id}: ${rows[0]?.n ?? 0} stalled or quarantined rows, ${handoffs[0]?.n ?? 0} stale handoffs` });
+      OR (state='quarantined' AND consecutive_omissions<2)) GROUP BY source_id`,
+    [...active, now.toISOString(), new Date(now.getTime() - 60 * minute).toISOString(), new Date(now.getTime() - 15 * minute).toISOString()]);
+    const handoffs = await query<{ source_id: string; n: number }>(`SELECT source_id,COUNT(*) AS n FROM ingestion_admission_handoffs WHERE source_id IN (${activePlaceholders}) AND acknowledged_at IS NULL AND dispatched_at<? GROUP BY source_id`, [...active, new Date(now.getTime() - 15 * minute).toISOString()]);
+    for (const id of active) {
+      const rowCount = rows.find(row => row.source_id === id)?.n ?? 0;
+      const handoffCount = handoffs.find(row => row.source_id === id)?.n ?? 0;
+      if (rowCount || handoffCount) signals.push({ id: 'admission-progress-stalled', detail: `${id}: ${rowCount} stalled or quarantined rows, ${handoffCount} stale handoffs` });
+    }
   }
   return signals;
 }
