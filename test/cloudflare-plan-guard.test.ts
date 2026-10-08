@@ -72,6 +72,8 @@ describe('Cloudflare deployment plan guard', () => {
       { ...transfer, after: { ...after, settings: { ...after.settings, batch_size: 2 } } },
       { ...transfer, after: { ...after, settings: { ...after.settings, max_wait_time_ms: 1000 } } },
       { ...transfer, after: { ...after, settings: { ...after.settings, visibility_timeout_ms: 1000 } } },
+      { ...transfer, before: { ...before, settings: { ...before.settings, retry_delay: 10 } } },
+      { ...transfer, before: { ...before, settings: { ...before.settings, visibility_timeout_ms: 1000 } } },
       { ...transfer, after_unknown: { ...transfer.after_unknown, queue_id: true } },
       { ...transfer, after_unknown: { ...transfer.after_unknown, settings: { max_retries: true } } },
       { ...transfer, after_unknown: {} },

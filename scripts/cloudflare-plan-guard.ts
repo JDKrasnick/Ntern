@@ -985,6 +985,7 @@ function isIsolatedRoutingChange(address: string, change: ResourceChange['change
       && isDeepStrictEqual({ ...b, script_name: a.script_name }, a);
   }
   if (address === 'cloudflare_workers_cron_trigger.ingestion' && b && Array.isArray(b.schedules) && Array.isArray(a.schedules)) {
+    if (a.script_name !== 'intern-notifs-ingestion') return false;
     const projection = new Set(['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']);
     const omit = (rows: unknown[]) => rows.filter((row) => !isRecord(row) || !projection.has(String(row.cron)))
       .map((row) => String((row as Record<string, unknown>).cron)).sort();
@@ -1011,7 +1012,8 @@ function isAdmissionAttachmentReplacement(address: string, change: ResourceChang
     .filter(([key]) => !(computedSettings.has(key) && settingsUnknown[key] === true)));
   // Cloudflare recomputes these defaults when the consumer attachment is
   // replaced. An explicit value change is still refused.
-  if ([...computedSettings].some((key) => settingsUnknown[key] === true && afterSettings[key] != null)
+  if ((b.settings.retry_delay != null && b.settings.retry_delay !== 0) || b.settings.visibility_timeout_ms != null
+    || [...computedSettings].some((key) => settingsUnknown[key] === true && afterSettings[key] != null)
     || (b.queue_name != null && b.queue_name !== 'intern-notifs-admission-v2')
     || (a.queue_name != null && a.queue_name !== 'intern-notifs-admission-v2')) return false;
   const stable = (value: Record<string, unknown>) => ({ ...Object.fromEntries(Object.entries(value)
