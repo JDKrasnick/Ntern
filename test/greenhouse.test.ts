@@ -3,6 +3,7 @@ import { GREENHOUSE_DETAILS_PER_DELIVERY, GREENHOUSE_RESPONSE_MAX_BYTES, Greenho
 import { reconcileRoleMetadata } from '../src/role-metadata.js';
 import { enabledGreenhouseQualityPolicies, greenhouseQualityPolicy, verifySourceQuality } from '../src/sources/quality.js';
 import { defaultSources } from '../src/sources/index.js';
+import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
 import { validateApplicationUrl, ApplicationUrlValidationError } from '../src/core/application-url.js';
 import {
   acmeJobsResponse,
@@ -376,6 +377,19 @@ describe('isGreenhouseJobShape', () => {
 });
 
 describe('greenhouse source quality policy', () => {
+  it('accepts Lucid official careers URLs while retaining source-specific host enforcement', () => {
+    const source = reviewedGreenhouseSources.find(({ id }) => id === 'greenhouse-lucidmotors')!;
+    const job = { ...technicalInternship, absolute_url: 'https://lucidmotors.com/careers/search/5001?gh_jid=5001' };
+    const listing = mapGreenhouseJob(job, source, '2026-10-08T00:00:00.000Z', 1);
+    expect(listing?.applyUrl).toBe(job.absolute_url);
+    expect(source.hostExceptionReason).toContain('lucidmotors.com');
+    expect(source.allowedFinalHosts).toContain('lucidmotors.com');
+    const result = { sourceId: source.id, listings: [listing!], notModified: false };
+    expect(verifySourceQuality([{ policy: greenhouseQualityPolicy(source), result }]).sources[0]?.rejectedUrls).toEqual([]);
+    const offHost = { ...result, listings: [{ ...listing!, applyUrl: 'https://apply.evil.test/5001' }] };
+    expect(verifySourceQuality([{ policy: greenhouseQualityPolicy(source), result: offHost }]).sources[0]?.rejectedUrls).toHaveLength(1);
+    expect(verifySourceQuality([{ policy: greenhouseQualityPolicy(acmeSource), result }]).sources[0]?.rejectedUrls).toHaveLength(1);
+  });
   const policy = greenhouseQualityPolicy(acmeSource);
   it('withholds an off-allowlist destination per role without failing the source', () => {
     const good = mapGreenhouseJob(technicalInternship, acmeSource, '2026-07-25T00:00:00.000Z', 1)!;
