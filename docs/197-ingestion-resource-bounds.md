@@ -681,3 +681,24 @@ cannot expand a source delivery or block a valid peer. The Stage 3 E2E rehearsal
 asserts silent baseline, a single new-role receipt, duplicate suppression,
 unchanged zero work, two-cadence closure, rollback, and re-enable through the
 built Worker with local D1, R2, and queues.
+
+## 2026-10-07 catalog projection retention
+
+Production memory p99 reached 126.9 MiB after enabling discovery for Figma,
+Palantir, and Mistral AI. Catalog and admission checks passed, but the 120 MiB
+headroom gate blocked further fleet expansion.
+
+`refreshCatalogProjection` retained its raw job array in a suspended async frame
+through D1 publication and R2 pointer validation. Those objects carry admission
+and identity data that the projected cards do not need. Grouping now finishes in
+a separate helper before either publication await, so the raw objects can be
+collected while the projected roles retain their required source references.
+
+A local 4,500-role fixture built from 100 current production samples retained
+159.6 MiB with the old scope and 109.8 MiB after releasing it. Both runs produced
+the same ordered catalog digest. The GC-enabled resource regression fails on the
+old implementation with 1,000 live raw job objects and checks collection during
+both the D1 write and R2 validation, while preserving all role IDs and provenance.
+These local measurements do not establish Cloudflare headroom: the repaired
+exact-version runtime still needs independent production observation before the
+expedited source cohorts advance.

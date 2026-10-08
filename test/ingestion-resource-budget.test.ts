@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
+import { refreshCatalogProjectionD1 } from '../cloudflare/catalog-projection-maintenance.js';
+import type { CatalogGroupDetails } from '../src/catalog-groups.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
 import { processSnapshot, SOURCE_METADATA_PROCESSING_REVISION } from '../src/ingestion/processor.js';
@@ -18,7 +20,7 @@ import { GITHUB_ADMISSION_MIGRATION_ROWS_PER_DELIVERY, GITHUB_RESOLUTION_ROWS_PE
 import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import { GitHubMarkdownAdapter } from '../src/sources/github.js';
 import { SourceFetchError } from '../src/sources/source-error.js';
-import type { SourceOccurrenceState } from '../src/types.js';
+import type { Internship, SourceOccurrenceState } from '../src/types.js';
 import {
   PRODUCTION_GITHUB_DOCUMENT,
   PRODUCTION_GITHUB_FEEDS,
@@ -49,6 +51,53 @@ const MESSAGE_HEAP_CEILING_MB = 112;
 
 /** `--expose-gc` is required for a stable heap sample; `npm run test:budget` sets it. */
 const exposeGc = globalThis.gc;
+
+describe('catalog projection resource retention', () => {
+  it('releases raw job objects before D1 writes and R2 pointer validation', async () => {
+    if (!exposeGc) return;
+    const references: Array<WeakRef<Internship>> = [];
+    const collected = async () => {
+      // WeakRef targets stay alive until their creation task ends. Sample a
+      // suspended publication after a new task, as a network write would.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      exposeGc();
+      expect(references.filter((reference) => reference.deref()).length).toBe(0);
+    };
+    let written: CatalogGroupDetails[] = [];
+    const store = {
+      async listCatalog() {
+        return Array.from({ length: 1_000 }, (_, index): Internship => {
+          const jobId = `projection-job-${index}`;
+          const observed = '2026-10-01T00:00:00.000Z';
+          const job: Internship = {
+            jobId, company: `Projection Employer ${index}`, title: 'Software Intern', location: 'Remote', season: 'summer-2027',
+            applyUrl: `https://example.test/jobs/${index}`, normalizedUrl: `https://example.test/jobs/${index}`,
+            fingerprint: jobId, compensation: { raw: '' }, technical: true, open: true,
+            firstSeenAt: observed, catalogVisibleAt: observed, lastSeenAt: observed,
+            notification: { smsPending: false, digestPending: false },
+            internshipIdentity: { unusedMetadata: 'x'.repeat(4_096) },
+            sourceReferences: [{ sourceId: 'projection-source', document: 'jobs.json', sourceUrl: 'https://example.test/jobs', row: index,
+              externalId: `posting-${index}`, company: `Projection Employer ${index}`, title: 'Software Intern', location: 'Remote',
+              season: 'summer-2027', applyUrl: `https://example.test/jobs/${index}`, compensation: { raw: '' }, state: 'open' }],
+          };
+          references.push(new WeakRef(job));
+          return job;
+        });
+      },
+      async putCatalogProjection(groups: CatalogGroupDetails[]) { await collected(); written = groups; },
+    } as unknown as D1InternshipStore;
+    let validated = false;
+    const bucket = {
+      async get() { await collected(); validated = true; return null; },
+      async put() { return { etag: 'retired' }; },
+    } as unknown as R2Bucket;
+    const result = await refreshCatalogProjectionD1(store, bucket);
+    expect(validated).toBe(true);
+    expect(result).toMatchObject({ groups: 1_000, roles: 1_000 });
+    expect(new Set(written.flatMap((group) => group.roles.map((role) => role.jobId))).size).toBe(1_000);
+    expect(written.every((group) => group.roles[0].sourceReferences[0].sourceId === 'projection-source')).toBe(true);
+  });
+});
 const sourceId = 'simplify-summer-2026';
 const migrations = ['0001_initial.sql', '0007_catalog_admission.sql', '0008_catalog_admission_occurrence_repair.sql',
   '0010_posting_identity.sql', '0012_destination_verification_schedule.sql', '0015_role_metadata_enrichment.sql',

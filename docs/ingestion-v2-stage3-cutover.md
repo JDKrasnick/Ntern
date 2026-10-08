@@ -111,6 +111,12 @@ Store timestamped evidence under
 writer cohort remains a canary. Production expansion and legacy removal require
 the seven-day clean soak in the approved plan.
 
+Owner decision on 2026-10-07 authorizes expedited source-by-source production
+writer expansion before that waiting period. Current snapshot integrity, signed
+silent bootstrap, durable catalog parity, queue drain, cost, and resource
+headroom checks still gate each cohort. Report the seven-day soak as pending;
+this exception does not authorize post-soak legacy removal.
+
 The isolated dev stack runs a read-only checkpoint every hour after the workflow
 lands on the default branch. Run the same checkpoint on a feature branch with
 the workflow dispatch or locally with Cloudflare credentials:

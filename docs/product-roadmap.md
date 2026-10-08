@@ -41,7 +41,7 @@
 | Trust and release readiness | In progress | Approved public policies and support routes are live, and the disclosure worksheet, consent, retention enforcement, and release checks are deployed; store-console entry, final archive reconciliation, and physical-device acceptance remain |
 | Cloudflare platform migration | Complete | Cloudflare infrastructure is live, the source backfill and grouped D1 projection are verified, every EAS environment targets the Worker, and retired AWS deployment paths are removed |
 | D1-protected pipeline | In progress | Observation-only Durable Object permit controller and additive resumable-run schema are covered by local tests; owner-reviewed infrastructure, alerts, queue lanes, and R2 read-model parity remain pending |
-| Fault-isolated ingestion V2 | Stage 3 implementation ready | Guarded bootstrap, source-scoped live writer ownership, alert fencing, and automated cutover/rollback rehearsal are implemented; production cohorts, seven-day soak, and post-soak legacy removal remain |
+| Fault-isolated ingestion V2 | Production canary live | Northwestern owns V2 catalog writes; discovery covers six community feeds and three ATS sources. Expedited production cohorts are authorized; seven-day soak and post-soak legacy removal remain pending |
 | Closed beta | Planned | 30–50 student test cohort and agreed success metrics |
 | Public release | Planned | TestFlight/Play validation complete and catalog reliability meets target |
 
