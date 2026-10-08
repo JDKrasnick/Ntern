@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { forwardIsolatedSchedule, isolatedScheduleRequest } from '../cloudflare/isolated-schedule.js';
 import publisher from '../cloudflare/catalog-publisher-worker.js';
 import admission from '../cloudflare/admission-worker.js';
+import * as dispatch from '../cloudflare/admission-v2-dispatch.js';
 
 const event = { cron: '9-59/10 * * * *', scheduledTime: 1791440000000 };
 const request = (body: unknown, method = 'POST') => new Request('https://isolated.internal/internal/scheduled', {
@@ -9,6 +10,58 @@ const request = (body: unknown, method = 'POST') => new Request('https://isolate
 });
 
 describe('private scheduled delivery', () => {
+  it.each(['D1_ERROR: internal error; reference = test', 'D1_ERROR: database busy'])('defers %s and completes on the next cadence', async (message) => {
+    const result = { enabled: true, sources: 1, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
+    for (const manual of [false, true]) {
+      const spy = vi.spyOn(dispatch, 'runAdmissionV2Dispatch').mockRejectedValueOnce(new Error(message)).mockResolvedValueOnce(result);
+      const markers: Array<{ scope: string; status: string }> = [];
+      const DB = { prepare() {
+        let values: unknown[] = [];
+        const statement = { bind(...args: unknown[]) { values = args; return statement; }, async first() { return null; },
+          async run() { markers.push(JSON.parse(String(values[1]))); return {}; } };
+        return statement;
+      } };
+      const env = { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true', INGESTION_V2_ADMISSION_ENABLED: 'true',
+        INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: 'greenhouse-figma',
+        INGESTION_V2_CATALOG_WRITER_ENABLED: 'true', INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: 'greenhouse-figma',
+        INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: 'greenhouse-figma', INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: 'greenhouse-figma' } as never;
+      const next = () => manual ? new Request('https://isolated.internal/internal/dispatch', { method: 'POST', body: JSON.stringify({ sourceId: 'greenhouse-figma' }) }) : request(event);
+      try {
+        const deferred = await admission.fetch(next(), env);
+        expect(deferred.status).toBe(503);
+        expect(deferred.headers.get('Retry-After')).toBe('600');
+        expect(await deferred.json()).toMatchObject({ completed: false, deferred: true });
+        expect(spy).toHaveBeenCalledOnce();
+        expect(markers.at(-1)).toMatchObject({ status: 'failed', scope: manual ? 'admission_v2_manual:greenhouse-figma' : 'admission_v2' });
+        expect((await admission.fetch(manual ? next() : request({ ...event, scheduledTime: event.scheduledTime + 600_000 }), env)).status).toBe(200);
+        expect(spy).toHaveBeenCalledTimes(2);
+        expect(markers.at(-1)?.status).toBe('complete');
+      } finally { spy.mockRestore(); }
+    }
+  });
+  it('keeps unexpected dispatcher failures visible', async () => {
+    const spy = vi.spyOn(dispatch, 'runAdmissionV2Dispatch').mockRejectedValue(new Error('SQLITE_ERROR: malformed query'));
+    const DB = { prepare() { const statement = { bind() { return statement; }, async first() { return null; }, async run() { return {}; } }; return statement; } };
+    try { await expect(admission.fetch(request(event), { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true' } as never)).rejects.toThrow('malformed query'); }
+    finally { spy.mockRestore(); }
+  });
+  it.each(['D1_ERROR: Network connection lost.', 'D1_ERROR: internal error; reference = billing'])('handles a billing read failure: %s', async (message) => {
+    let reads = 0;
+    const markers: Array<{ status: string }> = [];
+    const spy = vi.spyOn(dispatch, 'runAdmissionV2Dispatch').mockResolvedValue({ enabled: false, sources: 0, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 });
+    const DB = { prepare() {
+      let values: unknown[] = [];
+      const statement = { bind(...args: unknown[]) { values = args; return statement; },
+        async first() { if (reads++ === 0) throw new Error(message); return null; },
+        async run() { markers.push(JSON.parse(String(values[1]))); return {}; } };
+      return statement;
+    } };
+    try {
+      const response = await admission.fetch(request(event), { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true' } as never);
+      if (message.includes('Network')) { expect(response.status).toBe(200); expect(reads).toBe(2); expect(spy).toHaveBeenCalledOnce(); expect(markers.at(-1)?.status).toBe('complete'); }
+      else { expect(response.status).toBe(503); expect(reads).toBe(1); expect(spy).not.toHaveBeenCalled(); expect(markers.at(-1)?.status).toBe('failed'); }
+    } finally { spy.mockRestore(); }
+  });
   it('rejects unscoped manual dispatch and incomplete ownership before database work', async () => {
     const DB = { prepare() { throw Error('unexpected database work'); } };
     const manual = (body: unknown) => new Request('https://isolated.internal/internal/dispatch', { method: 'POST', body: JSON.stringify(body) });

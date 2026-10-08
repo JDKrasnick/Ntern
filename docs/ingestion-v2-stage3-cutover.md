@@ -189,6 +189,13 @@ scheduled completion markers unchanged; its own phase markers identify manual
 work. It does not bootstrap or resume a source. Verify resource/cost headroom,
 queue drain, baseline silence, and catalog parity before each advance.
 
+Private admission requests retry D1 connection resets through the bounded
+statement retry helper. D1 overload and internal errors return HTTP 503 with
+`Retry-After: 600`, record a failed dispatch phase, and defer pending work to the
+next natural ten-minute cadence. They do not retry pressure immediately or
+report completion. A later completed phase and fresh queue, parity, cost, and
+resource evidence are still required before advancing ownership.
+
 ## Rollback
 
 Pause the source, disable V2 discovery for it so no new row work is created,
