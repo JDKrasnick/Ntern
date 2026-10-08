@@ -248,6 +248,17 @@ describe('admitGreenhouseSource', () => {
     expect(result.ok).toBe(true);
     expect(result.diagnostics).toMatchObject({ sourceId: acme.id, returnedName: 'Acme Robotics', matchedName: true });
   });
+  it('accepts GenScript’s current exact board identity while retaining its catalog label', async () => {
+    const source = reviewedGreenhouseSources.find((candidate) => candidate.id === 'greenhouse-genscript')!;
+    expect(source.displayName).toBe('GenScript/ProBio');
+    expect(source.expectedBoardNames).toEqual(['GenScript']);
+    const boardUrl = 'https://boards-api.greenhouse.io/v1/boards/genscript';
+    const accepted = await admitGreenhouseSource(source, async () => jsonResponse({ name: 'GenScript' }, boardUrl));
+    expect(accepted.ok).toBe(true);
+    const rejected = await admitGreenhouseSource(source, async () => jsonResponse({ name: 'Unrelated GenScript Employer' }, boardUrl));
+    expect(rejected).toMatchObject({ ok: false, reason: 'name-mismatch' });
+  });
+
   it('rejects a board-name mismatch', async () => {
     const result = await admitGreenhouseSource(acme, async () => jsonResponse({ name: 'Initech' }, url));
     expect(result).toMatchObject({ ok: false, reason: 'name-mismatch' });
