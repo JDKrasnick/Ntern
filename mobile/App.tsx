@@ -3266,7 +3266,6 @@ function launchInterval(previousOpenedAt: string | null) {
 function LaunchInbox({
   inbox,
   update,
-  onAcknowledgeUpdate,
   highlightedJobIds,
   loading = false,
   error,
@@ -3294,7 +3293,6 @@ function LaunchInbox({
 }: {
   inbox: LaunchInbox;
   update?: LaunchInbox;
-  onAcknowledgeUpdate?: () => void;
   highlightedJobIds?: Set<string>;
   /** The standalone Roles feed must not look empty while its public page is loading. */
   loading?: boolean;
@@ -3375,9 +3373,6 @@ function LaunchInbox({
                 <Text style={styles.roleUpdateTitle}>{update.total} new {update.total === 1 ? "role" : "roles"}</Text>
                 <Text style={styles.roleUpdateInterval}>Since {launchInterval(update.previousOpenedAt)}</Text>
               </View>
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Acknowledge new roles" onPress={onAcknowledgeUpdate} style={styles.roleUpdateDismiss}>
-                <Text style={styles.roleUpdateDismissText}>Got it</Text>
-              </TouchableOpacity>
             </View>
           ) : null}
         </View>
@@ -5810,7 +5805,6 @@ function AppContent() {
               <LaunchInbox
                 inbox={{ jobs: latestCatalogJobs, groups: [], total: latestCatalogJobs.length, hasMore: false, previousOpenedAt: null, openedAt: "" }}
                 update={roleUpdateAcknowledged ? undefined : launchInbox}
-                onAcknowledgeUpdate={acknowledgeRoleUpdate}
                 highlightedJobIds={newCatalogJobIds}
                 loading={roleFeedLoading}
                 error={roleFeedError}
@@ -6487,7 +6481,6 @@ function GuestExperience({
                 <LaunchInbox
                   inbox={{ jobs: latestJobs, groups: [], total: latestJobs.length, hasMore: false, previousOpenedAt: null, openedAt: "" }}
                   update={inbox}
-                  onAcknowledgeUpdate={onAcknowledgeRoleUpdate}
                   highlightedJobIds={newJobIds}
                   loading={latestLoading}
                   error={latestError}
@@ -10299,8 +10292,6 @@ const styles = StyleSheet.create({
   roleUpdateCopy: { flex: 1 },
   roleUpdateTitle: { color: colors.ink, fontSize: 15, fontWeight: "600" },
   roleUpdateInterval: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 2 },
-  roleUpdateDismiss: { minHeight: 44, minWidth: 52, alignItems: "center", justifyContent: "center" },
-  roleUpdateDismissText: { color: colors.signal, fontSize: 14, fontWeight: "600" },
   inboxHeader: { paddingTop: 28, paddingBottom: 20 },
   // The wide Roles rows inset their content by 20, so the heading that sits above
   // them insets by the same amount instead of hanging back at the column edge.

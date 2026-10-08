@@ -231,7 +231,7 @@ Every screen follows these rules. They are as important as colors and type.
 
 ### New roles
 
-- An unseen new-role update appears as a compact inline strip in the normal Catalog browse feed on mobile and web. A small sparkle accompanies the role count and time interval; **Got it** acknowledges the update without leaving the catalog or opening Search. New and older roles share the catalog's existing rows and actions.
+- An unseen new-role update appears as a compact inline strip in the normal Catalog browse feed on mobile and web. A small sparkle accompanies the role count and time interval. The strip is informational, with no acknowledgement button. New and older roles share the catalog's existing rows and actions.
 - Leaving the feed acknowledges the update on this device. The same update does not reappear after a refresh; an explicit release notification can still reopen its requested release.
 - Rows retain the existing role-detail sheet, official-form handoff, queue and local hide actions. Pale teal surfaces and a small sparkle beside **New here** identify the update's roles without relying on color alone or adding decorative motion.
 - The latest update's exact role IDs remain cached after acknowledgement and across app openings until a newer update replaces them. Both the browse feed and searchable catalog carry those highlights forward; acknowledgement never clears the catalog's New lens.
