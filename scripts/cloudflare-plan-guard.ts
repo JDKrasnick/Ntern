@@ -1000,13 +1000,23 @@ function isIsolatedRoutingChange(address: string, change: ResourceChange['change
   }
   if (address === 'cloudflare_workers_cron_trigger.ingestion' && b && Array.isArray(b.schedules) && Array.isArray(a.schedules)) {
     if (a.script_name !== 'intern-notifs-ingestion') return false;
-    const projection = new Set(['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']);
+    const priorProjection = ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'];
+    const freshProjection = ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *'];
+    const projection = new Set([...priorProjection, ...freshProjection]);
     const projectionCount = (rows: unknown[]) => rows.filter((row) => isRecord(row) && projection.has(String(row.cron))).length;
     const beforeProjection = projectionCount(b.schedules), afterProjection = projectionCount(a.schedules);
-    if (!((beforeProjection === 2 && afterProjection === 0) || (beforeProjection === 0 && afterProjection === 2))) return false;
+    const selected = (rows: unknown[]) => rows.map((row) => String((row as Record<string, unknown>).cron))
+      .filter((cron) => projection.has(cron)).sort();
+    const validPair = (rows: unknown[]) => selected(rows).length === 0
+      || isDeepStrictEqual(selected(rows), [...priorProjection].sort())
+      || isDeepStrictEqual(selected(rows), [...freshProjection].sort());
+    if (!validPair(b.schedules) || !validPair(a.schedules)) return false;
+    const recreatesProjection = isDeepStrictEqual(selected(b.schedules), [...priorProjection].sort())
+      && isDeepStrictEqual(selected(a.schedules), [...freshProjection].sort());
+    if (!recreatesProjection && !((beforeProjection === 2 && afterProjection === 0) || (beforeProjection === 0 && afterProjection === 2))) return false;
     const omit = (rows: unknown[]) => rows.map((row) => String((row as Record<string, unknown>).cron))
       .filter((cron) => !projection.has(cron)).sort();
-    // Only the two reviewed projection crons may transfer in either direction.
+    // Only the complete reviewed projection pair may transfer or be recreated.
     const valid = (rows: unknown[]) => rows.every((row) => isRecord(row) && typeof row.cron === 'string'
       && Object.entries(row).every(([key, value]) => key === 'cron'
         || (['created_on', 'modified_on'].includes(key) && (value == null || typeof value === 'string'))));
