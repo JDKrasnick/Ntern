@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { devSoakCoverage, evaluateDevSoak, loadDevSoakDeployments, nextDevSoakSampleAt, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
+import { DEV_SOAK_EXHAUSTED_FAILURES_SQL, devSoakCoverage, evaluateDevSoak, loadDevSoakDeployments, nextDevSoakSampleAt, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
 
 describe('scheduled soak observation boundaries', () => {
   it.each([
@@ -52,6 +53,24 @@ const healthy = (): DevSoakSample => ({
 });
 
 describe('dev ingestion soak evaluation', () => {
+  it('counts final deliveries for active or unknown sources but excludes intentionally paused owners', () => {
+    const sqlite = new DatabaseSync(':memory:');
+    sqlite.exec(`CREATE TABLE queue_failure_events(queue_name TEXT, source_id TEXT, delivery_attempt INTEGER,
+      category TEXT, last_failed_at TEXT); CREATE TABLE catalog_items(pk TEXT, sk TEXT, value TEXT);`);
+    const health = sqlite.prepare('INSERT INTO catalog_items(pk,sk,value) VALUES(?,?,?)');
+    health.run('SOURCE#active', 'HEALTH', '{"sourceStatus":"active"}');
+    health.run('SOURCE#paused', 'HEALTH', '{"sourceStatus":"paused"}');
+    const failure = sqlite.prepare('INSERT INTO queue_failure_events VALUES(?,?,?,?,?)');
+    failure.run('intern-notifs-dev-greenhouse', 'active', 3, 'transport', '2026-10-04T20:00:00.000Z');
+    failure.run('intern-notifs-dev-greenhouse', 'paused', 3, 'transport', '2026-10-04T20:00:00.000Z');
+    failure.run('intern-notifs-dev-greenhouse', 'missing', 3, 'transport', '2026-10-04T20:00:00.000Z');
+    expect(sqlite.prepare(DEV_SOAK_EXHAUSTED_FAILURES_SQL).all('2026-10-03T21:00:00.000Z')).toEqual([
+      { queue_name: 'intern-notifs-dev-greenhouse', source_id: 'active', category: 'transport', failures: 1, latest: '2026-10-04T20:00:00.000Z' },
+      { queue_name: 'intern-notifs-dev-greenhouse', source_id: 'missing', category: 'transport', failures: 1, latest: '2026-10-04T20:00:00.000Z' },
+    ]);
+    sqlite.close();
+  });
+
   it.each(['admission', 'catalog-publisher'])('resets the full-stack soak after a %s-only redeployment', async (repaired) => {
     const sample = healthy();
     const now = new Date(sample.capturedAt);

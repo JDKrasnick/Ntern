@@ -114,6 +114,15 @@ export interface DevSoakSample {
   publicCatalogStatus: number;
 }
 
+export const DEV_SOAK_EXHAUSTED_FAILURES_SQL = `SELECT f.queue_name, COALESCE(f.source_id, '') AS source_id, f.category,
+  COUNT(*) AS failures, MAX(f.last_failed_at) AS latest
+  FROM queue_failure_events f
+  LEFT JOIN catalog_items h ON h.pk = 'SOURCE#' || f.source_id AND h.sk = 'HEALTH'
+  WHERE f.delivery_attempt >= CASE WHEN f.queue_name = 'intern-notifs-dev-gmail' THEN 6 ELSE 3 END
+    AND f.last_failed_at >= ?
+    AND COALESCE(CASE WHEN json_valid(h.value) THEN json_extract(h.value, '$.sourceStatus') END, 'active') NOT IN ('paused', 'disabled')
+  GROUP BY f.queue_name, f.source_id, f.category ORDER BY f.queue_name, f.source_id, f.category`;
+
 export function evaluateDevSoak(sample: DevSoakSample, now = new Date(sample.capturedAt)): Check[] {
   const checks: Check[] = [];
   const check = (name: string, ok: boolean, detail: string): void => {
@@ -358,10 +367,7 @@ async function main(): Promise<number> {
       FROM (SELECT queue_name, category, last_failed_at FROM queue_failure_events
         WHERE resolved_at IS NULL ORDER BY first_failed_at, id LIMIT 200)
       GROUP BY queue_name, category ORDER BY queue_name, category`),
-    query<Record<string, unknown>>(`SELECT queue_name, COALESCE(source_id, '') AS source_id, category,
-      COUNT(*) AS failures, MAX(last_failed_at) AS latest
-      FROM queue_failure_events WHERE delivery_attempt >= CASE WHEN queue_name = 'intern-notifs-dev-gmail' THEN 6 ELSE 3 END AND last_failed_at >= ?
-      GROUP BY queue_name, source_id, category ORDER BY queue_name, source_id, category`, [windowStart]),
+    query<Record<string, unknown>>(DEV_SOAK_EXHAUSTED_FAILURES_SQL, [windowStart]),
     query<Record<string, unknown>>(`SELECT key, value, updated_at FROM system_state
       WHERE key IN ('maintenance_phase:maintenance:ingestion_v2_admission_dispatch', 'maintenance_phase:admission_v2:dispatch',
       'maintenance_phase:maintenance:maintenance_complete',
