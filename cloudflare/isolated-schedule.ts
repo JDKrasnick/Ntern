@@ -7,7 +7,19 @@ export async function forwardIsolatedSchedule(binding: ServiceBinding | undefine
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cron: event.cron, scheduledTime: event.scheduledTime }),
   }));
-  if (!response.ok) throw new Error(`Isolated scheduled service failed (${response.status})`);
+  if (!response.ok) {
+    if (response.status === 503 && response.headers.get('Retry-After') === '600'
+      && ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *', '1-51/10 * * * *', '4,14,24,34,44,54 * * * *', '4-54/10 * * * *'].includes(event.cron)) {
+      let deferred: { completed?: unknown; deferred?: unknown; failureClass?: unknown } | null;
+      try { deferred = await response.json() as typeof deferred; } catch { deferred = null; }
+      if (deferred?.completed === false && deferred.deferred === true && deferred.failureClass === 'r2-internal') {
+        console.warn(JSON.stringify({ event: 'isolated_catalog_projection_deferred', cron: event.cron,
+          failureClass: 'r2-internal', retryAfterSeconds: 600 }));
+        return;
+      }
+    }
+    throw new Error(`Isolated scheduled service failed (${response.status})`);
+  }
   const result = await response.json() as { completed?: boolean };
   if (result.completed !== true) throw new Error('Isolated scheduled service did not complete');
 }

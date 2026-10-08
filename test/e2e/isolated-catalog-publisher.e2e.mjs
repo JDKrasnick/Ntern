@@ -302,6 +302,75 @@ test('R2 failure invalidates the old pointer and does not advance the completion
   assert.ok(await bucket.get('public-catalog/v1/current'));
 });
 
+test('compiled publication defers an internal R2 page failure without claiming completion or retrying in the delivery', async () => {
+  const cron = '5,15,25,35,45,55 * * * *';
+  const before = await marker('catalog_projection_r2');
+  const generation = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first()).value).generatedAt;
+  await bucket.put('public-catalog/v1/current', JSON.stringify({ schemaVersion: 0, generatedAt: generation }));
+  let pageAttempts = 0;
+  const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket), async put(key, value, options) {
+    if (!key.endsWith('/current')) { pageAttempts++; throw new Error('put: We encountered an internal error. Please try again. (10001)'); }
+    return bucket.put(key, value, options);
+  } } };
+  const response = await worker.fetch(scheduleRequest({ cron, scheduledTime: Date.now() }), failing);
+  assert.equal(response.status, 503); assert.equal(response.headers.get('Retry-After'), '600');
+  assert.deepEqual(await response.json(), { completed: false, deferred: true, failureClass: 'r2-internal' });
+  assert.equal(pageAttempts, 1); assert.deepEqual(await marker('catalog_projection_r2'), before);
+  const failure = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:catalog_projection_r2:catalog_projection_r2'").first();
+  assert.equal(JSON.parse(failure.value).status, 'failed');
+  assert.equal(await db.prepare("SELECT count(*) n FROM system_state WHERE key='maintenance_lease:catalog_publisher'").first('n'), 0);
+  assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
+  await runPublisher({ cron, scheduledTime: Date.now() + 600_000 }, env);
+  assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 1);
+  assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
+});
+
+for (const committed of [false, true]) test(`compiled ingestion preserves staged pages when R2 activation acknowledgement fails (committed=${committed})`, async () => {
+  const cron = '5,15,25,35,45,55 * * * *';
+  const before = await marker('catalog_projection_r2');
+  const generation = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first()).value).generatedAt;
+  await bucket.put('public-catalog/v1/current', JSON.stringify({ schemaVersion: 0, generatedAt: generation }));
+  let activationAttempts = 0, attemptedPointer;
+  const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket), async put(key, value, options) {
+    const payload = key.endsWith('/current') ? JSON.parse(new TextDecoder().decode(value)) : undefined;
+    if (payload?.schemaVersion === 1) {
+      activationAttempts++; attemptedPointer = payload;
+      if (committed) await bucket.put(key, value, options);
+      throw new Error('put: We encountered an internal error. Please try again. (10001)');
+    }
+    return bucket.put(key, value, options);
+  } } };
+  const ingestion = (await import('../../cloudflare/dist/ingestion/ingestion-worker.js')).default;
+  const event = { cron, scheduledTime: Date.now() };
+  await ingestion.scheduled(event, { ...failing, CATALOG_PUBLISHER: { fetch: request => worker.fetch(request, failing) } });
+  assert.equal(activationAttempts, 1); assert.deepEqual(await marker('catalog_projection_r2'), before);
+  for (let page = 0; page * 100 < attemptedPointer.count; page++) {
+    assert.ok(await bucket.get(`public-catalog/v1/${attemptedPointer.pageVersion}/${page}`), 'uncertain activation pages must remain retained');
+  }
+  assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
+  await runPublisher({ cron, scheduledTime: Date.now() + 600_000 }, env);
+  const recovered = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  const d1 = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first()).value);
+  assert.equal(recovered.version, d1.version); assert.equal(recovered.schemaVersion, 1);
+  assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
+});
+
+test('compiled D1 refresh and native publication defer only the documented R2 internal failure', async () => {
+  const cron = '1,11,21,31,41,51 * * * *';
+  const before = await marker('catalog_projection');
+  const failing = { ...env, DOCUMENTS: { get() { throw new Error('get: We encountered an internal error. Please try again. (10001)'); } } };
+  const response = await worker.fetch(scheduleRequest({ cron, scheduledTime: Date.now() }), failing);
+  assert.equal(response.status, 503); assert.equal(response.headers.get('Retry-After'), '600');
+  assert.deepEqual(await marker('catalog_projection'), before);
+  await worker.scheduled({ cron, scheduledTime: Date.now() }, failing);
+  assert.deepEqual(await marker('catalog_projection'), before);
+  await assert.rejects(worker.fetch(scheduleRequest({ cron, scheduledTime: Date.now() }), { ...env,
+    DOCUMENTS: { get() { throw new Error('get: Precondition failed. (10031)'); } } }), /D1 catalog projection failed/);
+  await runPublisher({ cron, scheduledTime: Date.now() + 600_000 }, env);
+  await scheduled('5,15,25,35,45,55 * * * *');
+  assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
+});
+
 test('legacy scheduled expression repairs real R2 pages without double ownership or notifications', async () => {
   const old = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   await bucket.delete(`public-catalog/v1/${old.pageVersion ?? old.version}/0`);

@@ -243,3 +243,11 @@ The production size audit measured 128,437,276 serialized bytes across 4,840 cur
 A schema-1 pointer can include `pageVersion`, a private immutable page namespace; `version` continues to identify the catalog content. Read pages through `pageVersion ?? version`. Existing pointers remain readable. Unchanged streams retain verified pages. Repairs copy validated pages into a new private namespace, so partial scans and concurrent publications cannot overwrite pages already visible to readers. Proven unpublished candidates are cleaned up; an uncertain final pointer-write acknowledgement preserves its pages because a newer writer may already retain them. Completion markers advance only after successful publication or yielding to a newer pointer.
 
 The compiled 5,059-group regression verifies real migrated D1-to-R2 publication while enforcing a maximum of 100 fetched-but-unpublished groups. Also verify the natural scheduled event, durable completion marker, valid pointer, all page/content hashes, queue drain, and current-version memory/error samples after deployment.
+
+### Transient R2 publication failures
+
+A documented R2 Workers `InternalError` (`10001`) defers the publisher to its next ten-minute cadence. Private scheduling returns `503`, `Retry-After: 600`, and `completed: false`; the caller records that deferral instead of claiming publication completed. Unknown failures remain fatal.
+
+Conditional activation writes are not retried inside the delivery: a lost acknowledgement can mean the pointer already committed. Existing ETag fences, staged-page retention, and D1 fallback remain in effect. A failed phase remains durable, and ownership advancement still requires successful current-version phase evidence plus complete matching D1/R2/public catalog verification. Reject an older completion marker when a newer publication attempt failed.
+
+[Cloudflare R2 error codes](https://developers.cloudflare.com/r2/api/error-codes/)
