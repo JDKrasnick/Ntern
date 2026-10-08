@@ -2312,7 +2312,11 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       console.log(JSON.stringify({ event: 'dev_notification_recorded', channel: 'digest', count: 1 }));
       return;
     }
-    if (!env.RESEND_API_KEY || !env.AUTH_FROM_EMAIL || !env.DIGEST_TO_EMAIL) throw new Error('Digest email is not configured');
+    if (!env.DIGEST_TO_EMAIL?.trim()) {
+      console.log(JSON.stringify({ event: 'digest_skipped', reason: 'no-recipient' }));
+      return;
+    }
+    if (!env.RESEND_API_KEY || !env.AUTH_FROM_EMAIL) throw new Error('Digest email is not configured');
     await runRuntimeCommand('digest', {
       store,
       config: { sesFrom: env.AUTH_FROM_EMAIL, sesTo: env.DIGEST_TO_EMAIL },

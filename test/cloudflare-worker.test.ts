@@ -303,6 +303,43 @@ describe('Cloudflare scheduled dispatch leases', () => {
 });
 
 describe('Cloudflare maintenance cron', () => {
+  it.each([undefined, '', '   '])('skips an optional digest with recipient %j', async (recipient) => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const before = runtime.runRuntimeCommand.mock.calls.length;
+    try {
+      await cloudflareWorker.scheduled({ cron: '0 * * * *',
+        scheduledTime: Date.parse('2026-10-08T13:00:00.000Z'),
+      } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+        DB: { prepare: () => ({ async first() { return null; } }) },
+        DIGEST_TO_EMAIL: recipient,
+      } as unknown as Environment);
+      expect(logs).toHaveBeenCalledWith(JSON.stringify({ event: 'digest_skipped', reason: 'no-recipient' }));
+      expect(runtime.runRuntimeCommand.mock.calls.length).toBe(before);
+    } finally { logs.mockRestore(); }
+  });
+
+  it.each([{ DIGEST_TO_EMAIL: 'digest@example.test' },
+    { DIGEST_TO_EMAIL: 'digest@example.test', RESEND_API_KEY: 'test-key' }])('rejects a configured digest without its mailer', async (config) => {
+    await expect(cloudflareWorker.scheduled({ cron: '0 * * * *',
+      scheduledTime: Date.parse('2026-10-08T13:00:00.000Z'),
+    } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+      DB: { prepare: () => ({ async first() { return null; } }) }, ...config,
+    } as unknown as Environment)).rejects.toThrow('Digest email is not configured');
+  });
+
+  it('dispatches a configured digest', async () => {
+    runtime.runRuntimeCommand.mockResolvedValueOnce(undefined);
+    await cloudflareWorker.scheduled({ cron: '0 * * * *',
+      scheduledTime: Date.parse('2026-10-08T21:00:00.000Z'),
+    } as Parameters<typeof cloudflareWorker.scheduled>[0], {
+      DB: { prepare: () => ({ async first() { return null; } }) },
+      DIGEST_TO_EMAIL: 'digest@example.test', AUTH_FROM_EMAIL: 'sender@example.test', RESEND_API_KEY: 'test-key',
+    } as unknown as Environment);
+    expect(runtime.runRuntimeCommand).toHaveBeenLastCalledWith('digest', expect.objectContaining({
+      config: { sesFrom: 'sender@example.test', sesTo: 'digest@example.test' },
+    }));
+  });
+
   it('reuses the projection refresh performed by prospective shadow publication', async () => {
     let refreshes = 0;
     const result = await runCatalogProjectionMaintenance(async (refresh) => {
