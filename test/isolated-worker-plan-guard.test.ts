@@ -56,14 +56,15 @@ describe('isolated Worker release boundaries', () => {
   });
   it('permits only the admission attachment replacement and preserves the existing queue', () => {
     const before = { account_id: 'account', queue_id: 'existing-queue', consumer_id: 'old-consumer',
-      script_name: 'intern-notifs-ingestion', type: 'worker', dead_letter_queue: 'intern-notifs-admission-v2-dlq', settings: { max_retries: 2 } };
+      script_name: 'intern-notifs-ingestion', type: 'worker', dead_letter_queue: 'intern-notifs-admission-v2-dlq',
+      settings: { batch_size: 1, max_concurrency: 1, max_retries: 2, max_wait_time_ms: 5000 } };
     const after = { ...before, consumer_id: null, script_name: 'intern-notifs-admission' };
     const resource = { address: 'cloudflare_queue_consumer.admission', change: { actions: ['delete', 'create'], before, after, after_unknown: { consumer_id: true } } };
     expect(validateCloudflarePlan({ resource_changes: [resource] })).toHaveLength(1);
     expect(() => validateCloudflarePlan({ resource_changes: [{ ...resource, address: 'cloudflare_queue_consumer.ingestion["greenhouse"]' }] })).toThrow('unsafe');
     after.queue_id = 'another-queue';
     expect(() => validateCloudflarePlan({ resource_changes: [resource] })).toThrow('unsafe');
-    after.queue_id = before.queue_id; after.settings = { max_retries: 0 };
+    after.queue_id = before.queue_id; after.settings = { ...before.settings, max_retries: 0 };
     expect(() => validateCloudflarePlan({ resource_changes: [resource] })).toThrow('unsafe');
   });
 
