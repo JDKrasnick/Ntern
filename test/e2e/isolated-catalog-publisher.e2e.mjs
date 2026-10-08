@@ -164,9 +164,38 @@ test('the real profile CLI rejects broken routes and delayed delivery before val
 });
 
 test('disabled publisher does no database work and exposes no public operations', async () => {
-  await worker.scheduled();
+  await worker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, {
+    INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected read'); } },
+  });
   assert.equal((await worker.fetch(scheduleRequest({ cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() }), { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected read'); } } })).status, 404);
   assert.equal((await worker.fetch(new globalThis.Request('https://example.com/internal/operations'))).status, 404);
+});
+
+test('native legacy deliveries and delegated publication share a lease and converge without notifications', async () => {
+  const event = { cron: '1-51/10 * * * *', scheduledTime: Date.now() };
+  await Promise.all([worker.scheduled(event, env), scheduled('1,11,21,31,41,51 * * * *')]);
+  await Promise.all([
+    worker.scheduled({ ...event, cron: '4,14,24,34,44,54 * * * *' }, env),
+    scheduled('5,15,25,35,45,55 * * * *'),
+  ]);
+  const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  const d1 = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first()).value);
+  assert.equal(pointer.version, d1.version); assert.equal(pointer.count, 1);
+  assert.equal(await db.prepare("SELECT count(*) n FROM system_state WHERE key='maintenance_lease:catalog_publisher'").first('n'), 0);
+  assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
+});
+
+test('a busy publisher lease does not advance completion markers', async () => {
+  const before = await marker('catalog_projection');
+  await db.prepare("INSERT INTO system_state(key,value,updated_at) VALUES('maintenance_lease:catalog_publisher',?,?)")
+    .bind(JSON.stringify({ owner: 'busy-holder', expiresAt: Date.now() + 60_000 }), new Date().toISOString()).run();
+  try {
+    await worker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, env);
+    await scheduled('1,11,21,31,41,51 * * * *');
+    assert.deepEqual(await marker('catalog_projection'), before);
+  } finally {
+    await db.prepare("DELETE FROM system_state WHERE key='maintenance_lease:catalog_publisher'").run();
+  }
 });
 
 test('publishes the matching D1 generation to real local R2 without notification events', async () => {
@@ -297,18 +326,33 @@ test('a paused unchanged D1 renewal cannot resurrect a pointer after a newer clo
   } } };
   const staleRenewal = runPublisher({ cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() }, delayed);
   await Promise.race([entered, new Promise((_, reject) => setTimeout(() => reject(Error('renewal did not reach a page read')), 5000))]);
-  const row = await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#isolated-role'").first();
-  const job = JSON.parse(row.value); job.open = false;
-  await db.prepare("UPDATE catalog_items SET value=? WHERE pk='JOB#isolated-role'").bind(JSON.stringify(job)).run();
-  await scheduled('1,11,21,31,41,51 * * * *');
-  await scheduled('5,15,25,35,45,55 * * * *');
-  const freshPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
-  assert.notEqual(freshPointer.version, oldPointer.version);
-  release(); await staleRenewal;
-  const finalPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
-  assert.equal(finalPointer.version, freshPointer.version, 'stale renewal must not overwrite the newer published generation');
-  const finalPage = JSON.parse(await (await bucket.get(`public-catalog/v1/${finalPointer.pageVersion ?? finalPointer.version}/0`)).text());
-  assert.equal(finalPage[0].roles[0].open, false, 'the public projection must keep the role closed');
+  let freshPointer;
+  try {
+    const row = await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#isolated-role'").first();
+    const job = JSON.parse(row.value); job.open = false;
+    await db.prepare("UPDATE catalog_items SET value=? WHERE pk='JOB#isolated-role'").bind(JSON.stringify(job)).run();
+    // Simulate an expired holder so the newer generation can proceed while the
+    // old request remains paused. Its eventual release must preserve a new owner.
+    await db.prepare("UPDATE system_state SET value=json_set(value,'$.expiresAt',0) WHERE key='maintenance_lease:catalog_publisher'").run();
+    await scheduled('1,11,21,31,41,51 * * * *');
+    await scheduled('5,15,25,35,45,55 * * * *');
+    freshPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+    assert.notEqual(freshPointer.version, oldPointer.version);
+    await db.prepare("INSERT INTO system_state(key,value,updated_at) VALUES('maintenance_lease:catalog_publisher',?,?)")
+      .bind(JSON.stringify({ owner: 'new-holder', expiresAt: Date.now() + 60_000 }), new Date().toISOString()).run();
+    release(); await staleRenewal;
+    const held = JSON.parse((await db.prepare("SELECT value FROM system_state WHERE key='maintenance_lease:catalog_publisher'").first()).value);
+    assert.equal(held.owner, 'new-holder', 'an expired holder must not release its successor');
+    const finalPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+    assert.equal(finalPointer.version, freshPointer.version, 'stale renewal must not overwrite the newer published generation');
+    const finalPage = JSON.parse(await (await bucket.get(`public-catalog/v1/${finalPointer.pageVersion ?? finalPointer.version}/0`)).text());
+    assert.equal(finalPage[0].roles[0].open, false, 'the public projection must keep the role closed');
+  } finally {
+    release();
+    try { await staleRenewal; } finally {
+      await db.prepare("DELETE FROM system_state WHERE key='maintenance_lease:catalog_publisher'").run();
+    }
+  }
 });
 
 

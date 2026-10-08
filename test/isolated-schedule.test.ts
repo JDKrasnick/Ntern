@@ -31,13 +31,13 @@ describe('private scheduled delivery', () => {
   ])('rejects malformed or unexpected private work: %j', async (body) => {
     expect(await isolatedScheduleRequest(request(body), [event.cron])).toBeUndefined();
   });
-  it('keeps other paths, GET requests, disabled isolates, and stale native cron delivery inert', async () => {
+  it('keeps other paths, GET requests, and disabled isolates inert', async () => {
     expect(await isolatedScheduleRequest(request(event, 'GET'), [event.cron])).toBeUndefined();
     const db = { prepare() { throw Error('unexpected database work'); } };
     const env = { DB: db, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false' } as never;
     expect((await admission.fetch(request(event), env)).status).toBe(404);
     expect((await publisher.fetch(request({ ...event, cron: '1-51/10 * * * *' }), env)).status).toBe(404);
     await admission.scheduled();
-    await publisher.scheduled();
+    await publisher.scheduled({ ...event, cron: '1-51/10 * * * *' }, env);
   });
 });

@@ -19,12 +19,38 @@ export default {
     const event = await isolatedScheduleRequest(request, ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *', '1-51/10 * * * *', '4,14,24,34,44,54 * * * *', '4-54/10 * * * *']);
     if (!event || !isolationEnabled(env)) return new Response('Not found', { status: 404 });
     if (await billingStopped(env.DB)) return new Response('Billing stopped', { status: 503 });
-    await runScheduled(event, env);
+    await runProtectedSchedule(event, env);
     return Response.json({ completed: true });
   },
-  // Old registrations must not duplicate the established ingestion cron's call.
-  async scheduled(): Promise<void> {},
+  // Cloudflare may retain native deliveries after the registration moves. Keep
+  // publication live through that transition; a shared phase lease and existing
+  // pointer fences protect both native and private-binding invocations.
+  async scheduled(event: ScheduledController, env: CatalogPublisherEnvironment): Promise<void> {
+    if (!isolationEnabled(env) || await billingStopped(env.DB)) return;
+    await runProtectedSchedule(event, env);
+  },
 };
+
+async function runProtectedSchedule(event: ScheduledController, env: CatalogPublisherEnvironment): Promise<void> {
+  const key = 'maintenance_lease:catalog_publisher';
+  const owner = crypto.randomUUID();
+  const now = Date.now();
+  // Both entry points originate from cron work with a 15-minute wall limit.
+  // Keep the lease beyond that limit so a killed invocation expires safely.
+  const lease = await env.DB.prepare(`INSERT INTO system_state (key,value,updated_at) VALUES (?,?,?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
+    WHERE json_extract(system_state.value,'$.expiresAt') <= ?`)
+    .bind(key, JSON.stringify({ owner, expiresAt: now + 16 * 60_000 }), new Date(now).toISOString(), now).run();
+  if (lease.meta.changes !== 1) {
+    console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_lease_busy', cron: event.cron }));
+    return;
+  }
+  try {
+    await runScheduled(event, env);
+  } finally {
+    await env.DB.prepare("DELETE FROM system_state WHERE key=? AND json_extract(value,'$.owner')=?").bind(key, owner).run();
+  }
+}
 
 async function runScheduled(event: ScheduledController, env: CatalogPublisherEnvironment): Promise<void> {
   const observedAt = new Date(event.scheduledTime);

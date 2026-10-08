@@ -519,6 +519,28 @@ describe('D1 role metadata evidence and guarded repair', () => {
     expect(projectRoleMetadata({ ...repaired!, sourceReferences: [merged] }).job.compensation.ranges)
       .toMatchObject([{ minAmount: 4500, maxAmount: 5800, period: 'weekly' }]);
   });
+  it('selects metadata candidates through small projected pages without changing stored role payloads', async () => {
+    const current = subject();
+    const padding = 'unused role detail '.repeat(4000);
+    for (let index = 0; index < 30; index++) {
+      const original = jobWithVerifiedDestination();
+      await current.jobs.putInternship({ ...original, jobId: `large-${String(index).padStart(2, '0')}`,
+        compensation: { raw: padding }, sourceReferences: [{ ...original.sourceReferences[0]!, compensation: { raw: padding } }] });
+    }
+    const pages: Array<Array<{ value: string }>> = [];
+    const db = sqliteD1(current.database, (query, rows) => {
+      if (query.includes('FROM catalog_items') && query.includes('AS reference')) pages.push(rows as Array<{ value: string }>);
+    });
+    const candidates = await new D1CatalogAdmissionStore(db).metadataVerificationCandidates(30, { after: '' });
+    expect(candidates.map(row => row.jobId)).toEqual(Array.from({ length: 30 }, (_, index) => `large-${String(index).padStart(2, '0')}`));
+    expect(candidates.every(row => row.candidateUrl === job().applyUrl && row.sourceId === 'community-acme')).toBe(true);
+    expect(candidates[0]?.providerIdentity).toEqual({ provider: 'github', sourceId: 'community-acme',
+      sourceUrl: 'https://github.test/jobs', tenant: undefined, postingId: undefined });
+    expect(pages.map(page => page.length)).toEqual([25, 5, 0]);
+    expect(pages.flat().every(row => row.value.length < 1000 && !row.value.includes(padding))).toBe(true);
+    expect((await current.jobs.getJob('large-00'))?.sourceReferences[0]?.compensation.raw).toBe(padding);
+  });
+
   it('reserves disjoint resumable batches, revisits old versions and expires abandoned leases', async () => {
     const current = subject();
     for (const id of ['a', 'b', 'c']) await current.jobs.putInternship({ ...jobWithVerifiedDestination(), jobId: id });

@@ -20,7 +20,7 @@ import type {
   RoleMetadataEvidence,
   RoleMetadataOmission,
 } from '../src/types.js';
-import { projectRoleMetadata, reconcileRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceContent, roleMetadataEvidenceHasFields, roleMetadataReviewFingerprint, ROLE_METADATA_EXTRACTION_VERSION, unsupportedMetadataCurrencies, unsupportedMetadataPeriods, withoutObservationTimestamps } from '../src/role-metadata.js';
+import { projectRoleMetadata, reconcileRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceContent, roleMetadataReviewFingerprint, ROLE_METADATA_EXTRACTION_VERSION, unsupportedMetadataCurrencies, unsupportedMetadataPeriods, withoutObservationTimestamps } from '../src/role-metadata.js';
 import { metadataApiRoute } from '../src/metadata-acquisition.js';
 import { boundedAutomaticEmployerIdentityScopeEvidence,
   type AutomaticEmployerIdentityObservation, type AutomaticEmployerIdentityObservationResult } from '../src/employer/automatic-identity.js';
@@ -131,7 +131,9 @@ function roleMetadataSchemaMissing(error: unknown): boolean {
   return error instanceof Error && /no such table:\s*role_metadata_/iu.test(error.message);
 }
 
-function metadataCollectionTarget(reference: SourceOccurrence): { candidateUrl: string; providerIdentity: ProviderIdentity } | undefined {
+type MetadataCollectionReference = Pick<SourceOccurrence, 'sourceId' | 'sourceUrl' | 'externalId' | 'applyUrl' | 'admission' | 'postingIdentityDecision'>;
+
+function metadataCollectionTarget(reference: MetadataCollectionReference): { candidateUrl: string; providerIdentity: ProviderIdentity } | undefined {
   if (!reference.externalId) return undefined;
   const destination = reference.admission?.destination;
   if (destination) {
@@ -318,10 +320,49 @@ function preserveDurableFields(current: Internship, change: RepairChange): Inter
 export class D1CatalogAdmissionStore {
   constructor(private readonly db: D1Database) {}
 
-  private async *catalogInternshipPages(limit = 100, openOnly = false): AsyncGenerator<Array<{ pk: string; sk: string; value: string }>> {
+  private async *catalogInternshipPages(limit = 100, openOnly = false, metadataInput = false): AsyncGenerator<Array<{ pk: string; sk: string; value: string }>> {
     let after = ['', ''];
+    // Candidate selection needs identity and evidence flags, not complete role
+    // text or occurrence snapshots. Project before D1 serializes each page so
+    // retained candidate strings cannot pin the full catalog response buffers.
+    const value = metadataInput ? `json_object('jobId', json_extract(value, '$.jobId'), 'sourceReferences', json((
+      SELECT json_group_array(json_patch('{}', json_object(
+        'sourceId', json_extract(reference.value, '$.sourceId'),
+        'sourceUrl', json_extract(reference.value, '$.sourceUrl'),
+        'externalId', json_extract(reference.value, '$.externalId'),
+        'applyUrl', json_extract(reference.value, '$.applyUrl'),
+        'admission', json_object('destination', CASE WHEN json_type(reference.value, '$.admission.destination') = 'object' THEN json_object(
+          'classification', json_extract(reference.value, '$.admission.destination.classification'),
+          'candidateUrl', json_extract(reference.value, '$.admission.destination.candidateUrl'),
+          'finalUrl', json_extract(reference.value, '$.admission.destination.finalUrl'),
+          'provider', json_extract(reference.value, '$.admission.destination.provider'),
+          'tenant', json_extract(reference.value, '$.admission.destination.tenant'),
+          'expectedPostingId', json_extract(reference.value, '$.admission.destination.expectedPostingId')
+        ) END),
+        'postingIdentityDecision', json_object(
+          'status', json_extract(reference.value, '$.postingIdentityDecision.status'),
+          'exactKey', json_extract(reference.value, '$.postingIdentityDecision.exactKey')),
+        'metadataSelection', json_object(
+          'currentPage', EXISTS (SELECT 1 FROM json_each(reference.value, '$.metadataEvidence') AS evidence
+            WHERE json_extract(evidence.value, '$.sourceClass') IN ('official-page', 'official-json-ld')
+              AND json_extract(evidence.value, '$.extractionVersion') = ${ROLE_METADATA_EXTRACTION_VERSION}),
+          'providerApi', EXISTS (SELECT 1 FROM json_each(reference.value, '$.metadataEvidence') AS evidence
+            WHERE json_extract(evidence.value, '$.sourceClass') IN ('official-api', 'official-ats')),
+          'hasFields', EXISTS (SELECT 1 FROM json_each(reference.value, '$.metadataEvidence') AS evidence
+            WHERE coalesce(json_array_length(json_extract(evidence.value, '$.compensationRanges')), 0) > 0
+              OR coalesce(json_array_length(json_extract(evidence.value, '$.housing')), 0) > 0
+              OR coalesce(json_array_length(json_extract(evidence.value, '$.locations')), 0) > 0
+              OR coalesce(json_extract(evidence.value, '$.education'), '') NOT IN ('', 0)
+              OR coalesce(json_extract(evidence.value, '$.season'), '') NOT IN ('', 0)
+              OR coalesce(json_extract(evidence.value, '$.workMode'), '') NOT IN ('', 0)
+              OR coalesce(json_extract(evidence.value, '$.applicationDeadline'), '') NOT IN ('', 0)
+              OR coalesce(json_extract(evidence.value, '$.employerPublishedAt'), '') NOT IN ('', 0)
+              OR coalesce(json_extract(evidence.value, '$.employerUpdatedAt'), '') NOT IN ('', 0))
+        )
+      ))) FROM json_each(catalog_items.value, '$.sourceReferences') AS reference
+    ))) AS value` : 'value';
     while (true) {
-      const page = await this.db.prepare(`SELECT pk, sk, value FROM catalog_items
+      const page = await this.db.prepare(`SELECT pk, sk, ${value} FROM catalog_items
         WHERE kind = 'internship' ${openOnly ? "AND json_extract(value, '$.open') = 1" : ''}
           AND (pk, sk) > (?, ?) ORDER BY pk, sk LIMIT ?`)
         .bind(...after, limit).all<{ pk: string; sk: string; value: string }>();
@@ -721,22 +762,22 @@ export class D1CatalogAdmissionStore {
       providerIdentity: ProviderIdentity; metadataArtifactHash?: string; bypassDeferral?: true }> = [];
     // Match collectionCoverage's open-role cohort, including withheld roles.
     // Metadata collection must not require or grant catalog admission.
-    for await (const page of this.catalogInternshipPages(100, true)) {
+    for await (const page of this.catalogInternshipPages(25, true, true)) {
       for (const row of page) {
-        const job = JSON.parse(row.value) as Internship;
+        const job = JSON.parse(row.value) as { jobId: string; sourceReferences: Array<MetadataCollectionReference & {
+          metadataSelection: { currentPage: number; providerApi: number; hasFields: number };
+        }> };
         for (const reference of job.sourceReferences) {
           const key = `${job.jobId}\0${reference.sourceId}`;
           if (options.after && key <= options.after) continue;
           const target = metadataCollectionTarget(reference);
           if (!target || !reference.externalId) continue;
-          const current = reference.metadataEvidence?.some((item) => ['official-page', 'official-json-ld'].includes(item.sourceClass)
-            && item.extractionVersion === ROLE_METADATA_EXTRACTION_VERSION) === true;
+          const current = reference.metadataSelection.currentPage === 1;
           if (options.requireProjectedEvidence && !current) continue;
           const observation = latest.get(key);
           if (!observation && options.includeUnobserved === false) continue;
-          const evidence = reference.metadataEvidence ?? [];
-          const providerApiUnused = !evidence.some((item) => item.sourceClass === 'official-api' || item.sourceClass === 'official-ats')
-            && !evidence.some(roleMetadataEvidenceHasFields)
+          const providerApiUnused = reference.metadataSelection.providerApi === 0
+            && reference.metadataSelection.hasFields === 0
             && Boolean(metadataApiRoute(target.providerIdentity, target.candidateUrl));
           const reservation = reservationsByKey.get(key);
           if (reservation?.lease_until && reservation.lease_until > now) continue;
