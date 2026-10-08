@@ -1022,6 +1022,7 @@ function JobCard({
             {desktopVariant === "simplify" ? (
               <View style={styles.simplifyRoleContent}>
                 <View style={styles.simplifyRoleTopline}>
+                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
                   <View style={styles.desktopRoleIdentity}>
                     <CompanyMark company={display.company} employerId={employerId} />
                     <View style={styles.simplifyRoleCopy}>
@@ -1047,6 +1048,7 @@ function JobCard({
                     <Text style={styles.ycRoleCompany} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text>
                     <Text style={styles.ycRoleSource} numberOfLines={1}>{source.primary}</Text>
                   </View>
+                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
                 </View>
                 <Text style={styles.ycRoleTitle} numberOfLines={2}>{display.title}</Text>
                 <Text style={styles.ycRoleMeta} numberOfLines={2}>
@@ -1065,6 +1067,7 @@ function JobCard({
             ) : desktopVariant === "blend" ? (
               <View style={styles.blendRoleContent}>
                 <View style={styles.blendRoleTopline}>
+                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
                   <View style={styles.desktopRoleIdentity}>
                     <CompanyMark company={display.company} employerId={employerId} />
                     <Text style={styles.blendRoleCompany} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text>
