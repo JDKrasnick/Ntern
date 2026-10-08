@@ -57,6 +57,7 @@ import { type EducationLevel } from "../shared/education-display";
 import { allDisciplineStyles, disciplineStyleFor } from "../shared/discipline-display";
 import { createLatestRequestGuard } from "./src/latest-request";
 import { uploadDocumentContent } from "./src/document-upload";
+import { roleUpdateKey } from "./src/role-update";
 import { publicConfig } from "./src/public-config";
 import { installationApi } from "./src/installation";
 import { migrateLegacyAccountAlerts } from "./src/legacy-alert-migration";
@@ -1014,12 +1015,14 @@ function JobCard({
               roleTable && styles.roleTableRow,
               roleTable && wideEditorialRow && styles.roleTableRowWide,
               compactMobile && styles.mobileEditorialRoleRow,
+              isNew && styles.catalogListRowFresh,
             ]}
             onPress={onOpen}
           >
             {desktopVariant === "simplify" ? (
               <View style={styles.simplifyRoleContent}>
                 <View style={styles.simplifyRoleTopline}>
+                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
                   <View style={styles.desktopRoleIdentity}>
                     <CompanyMark company={display.company} employerId={employerId} />
                     <View style={styles.simplifyRoleCopy}>
@@ -1045,6 +1048,7 @@ function JobCard({
                     <Text style={styles.ycRoleCompany} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text>
                     <Text style={styles.ycRoleSource} numberOfLines={1}>{source.primary}</Text>
                   </View>
+                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
                 </View>
                 <Text style={styles.ycRoleTitle} numberOfLines={2}>{display.title}</Text>
                 <Text style={styles.ycRoleMeta} numberOfLines={2}>
@@ -1063,6 +1067,7 @@ function JobCard({
             ) : desktopVariant === "blend" ? (
               <View style={styles.blendRoleContent}>
                 <View style={styles.blendRoleTopline}>
+                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
                   <View style={styles.desktopRoleIdentity}>
                     <CompanyMark company={display.company} employerId={employerId} />
                     <Text style={styles.blendRoleCompany} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text>
@@ -1440,6 +1445,15 @@ function CatalogListSkeleton({ count = 5 }: { count?: number }) {
  * swipe behaviour every role card carries, composed compactly so several roles
  * share one screen instead of one tall card per row.
  */
+function CatalogFreshnessLabel({ label, isNew }: { label: string; isNew: boolean }) {
+  return (
+    <View style={styles.catalogFreshnessLabel}>
+      {isNew ? <Ionicons name="sparkles-outline" size={12} color={colors.signal} /> : null}
+      <Text style={styles.catalogListFreshness} numberOfLines={1}>{label}</Text>
+    </View>
+  );
+}
+
 function CatalogTile({
   job,
   presentation,
@@ -1595,7 +1609,7 @@ function CatalogTile({
               <View style={styles.catalogListPrimary}>
                 <View style={styles.catalogListMobileTopline}>
                   {!wideRow ? <Text style={styles.catalogListCompanyMobile} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text> : null}
-                  {!wideRow && recencyBadge ? <Text style={styles.catalogListFreshness}>{recencyBadge}</Text> : null}
+                  {!wideRow && recencyBadge ? <CatalogFreshnessLabel label={recencyBadge} isNew={isNew} /> : null}
                 </View>
                 <Text style={styles.catalogListTitle} numberOfLines={2}>{compactTitle}</Text>
                 {wideRow ? <Text style={styles.catalogListSource} numberOfLines={1}>{source.primary}</Text> : null}
@@ -1607,7 +1621,7 @@ function CatalogTile({
               </View> : null}
               <View style={[styles.catalogListActivity, !wideRow && styles.catalogListActivityMobile]}>
                 {wideRow ? <>
-                  <Text style={styles.catalogListFreshness} numberOfLines={1}>{recencyBadge ?? timing.summary}</Text>
+                  <CatalogFreshnessLabel label={recencyBadge ?? timing.summary} isNew={isNew} />
                   <View style={styles.catalogListInlineActions}>
                     {canHideLocally ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={styles.catalogListIconAction}><Ionicons name="eye-off-outline" size={16} color={colors.muted} /></TouchableOpacity> : null}
                     {queuing ? <ActivityIndicator size="small" color={colors.muted} /> : null}
@@ -1714,7 +1728,7 @@ function CatalogGroupTile({
               <View style={styles.catalogTileIdentity}>
                 <CompanyMark company={groupCompany} employerId={featuredRole?.canonicalEmployerId} size={30} />
                 <Text style={styles.catalogTileCompany} numberOfLines={1}>{employerName(groupCompany, group.featuredRole?.employerCategory)}</Text>
-                {recencyBadge ? <Text style={styles.catalogListFreshness}>{recencyBadge}</Text> : null}
+                {recencyBadge ? <CatalogFreshnessLabel label={recencyBadge} isNew={hasNewRole} /> : null}
               </View>
               <Text style={[styles.catalogTileTitle, styles.catalogTileTitleLane]} numberOfLines={2}>{compactGroupTitle}</Text>
               <Text style={styles.catalogTileMeta} numberOfLines={2}>
@@ -1738,13 +1752,13 @@ function CatalogGroupTile({
                 {wideRow ? <Text style={styles.catalogListCompany} numberOfLines={2}>{employerName(groupCompany, group.featuredRole?.employerCategory)}</Text> : null}
               </View>
               <View style={styles.catalogListPrimary}>
-                {!wideRow ? <View style={styles.catalogListMobileTopline}><Text style={styles.catalogListCompanyMobile} numberOfLines={1}>{employerName(groupCompany, group.featuredRole?.employerCategory)}</Text>{recencyBadge ? <Text style={styles.catalogListFreshness}>{recencyBadge}</Text> : null}</View> : null}
+                {!wideRow ? <View style={styles.catalogListMobileTopline}><Text style={styles.catalogListCompanyMobile} numberOfLines={1}>{employerName(groupCompany, group.featuredRole?.employerCategory)}</Text>{recencyBadge ? <CatalogFreshnessLabel label={recencyBadge} isNew={hasNewRole} /> : null}</View> : null}
                 <Text style={styles.catalogListTitle} numberOfLines={2}>{compactGroupTitle}</Text>
                 {wideRow ? <Text style={styles.catalogListSource} numberOfLines={1}>{source.primary}</Text> : <Text style={styles.catalogListMeta} numberOfLines={2}>{groupLocation} · {group.seasons.map(seasonLabel).join(" · ")} · {group.roleCount} {group.roleCount === 1 ? "role" : "roles"}</Text>}
               </View>
               {wideRow ? <View style={styles.catalogListDetails}><Text style={styles.catalogListLocation} numberOfLines={1}>{groupLocation}</Text><Text style={styles.catalogListMeta} numberOfLines={2}>{group.seasons.map(seasonLabel).join(" · ")} · {group.roleCount} {group.roleCount === 1 ? "role" : "roles"}</Text></View> : null}
               <View style={[styles.catalogListActivity, !wideRow && styles.catalogListActivityMobile]}>
-                {wideRow ? <><Text style={styles.catalogListFreshness} numberOfLines={1}>{recencyBadge ?? timing?.summary ?? availability}</Text><View style={styles.catalogListInlineActions}>{canHideLocally ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={styles.catalogListIconAction}><Ionicons name="eye-off-outline" size={16} color={colors.muted} /></TouchableOpacity> : null}{queuing ? <ActivityIndicator size="small" color={colors.muted} /> : null}{!queuing && inQueue && onRemoveFromQueue ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Remove from queue" onPress={handleRemoveFromQueue} style={styles.catalogListIconAction}><Ionicons name="bookmark" size={16} color={colors.signal} /></TouchableOpacity> : null}{canAddToQueue ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" onPress={handleQueue} style={styles.catalogListIconAction}><Ionicons name="bookmark-outline" size={16} color={colors.ink} /></TouchableOpacity> : null}<Text style={styles.catalogListOpen}>View roles</Text><Ionicons name="chevron-forward" size={15} color={colors.signal} /></View></> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}
+                {wideRow ? <><CatalogFreshnessLabel label={recencyBadge ?? timing?.summary ?? availability} isNew={hasNewRole} /><View style={styles.catalogListInlineActions}>{canHideLocally ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Hide on this device" onPress={handleHide} style={styles.catalogListIconAction}><Ionicons name="eye-off-outline" size={16} color={colors.muted} /></TouchableOpacity> : null}{queuing ? <ActivityIndicator size="small" color={colors.muted} /> : null}{!queuing && inQueue && onRemoveFromQueue ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Remove from queue" onPress={handleRemoveFromQueue} style={styles.catalogListIconAction}><Ionicons name="bookmark" size={16} color={colors.signal} /></TouchableOpacity> : null}{canAddToQueue ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Add to apply queue" onPress={handleQueue} style={styles.catalogListIconAction}><Ionicons name="bookmark-outline" size={16} color={colors.ink} /></TouchableOpacity> : null}<Text style={styles.catalogListOpen}>View roles</Text><Ionicons name="chevron-forward" size={15} color={colors.signal} /></View></> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}
               </View>
             </>}
           </TouchableOpacity>
@@ -3251,7 +3265,8 @@ function launchInterval(previousOpenedAt: string | null) {
 
 function LaunchInbox({
   inbox,
-  kind = "new",
+  update,
+  highlightedJobIds,
   loading = false,
   error,
   onRetry,
@@ -3277,8 +3292,8 @@ function LaunchInbox({
   onRetryLoadMore,
 }: {
   inbox: LaunchInbox;
-  /** The Roles tab falls back to the current catalog when there is no release. */
-  kind?: "new" | "latest";
+  update?: LaunchInbox;
+  highlightedJobIds?: Set<string>;
   /** The standalone Roles feed must not look empty while its public page is loading. */
   loading?: boolean;
   error?: string;
@@ -3307,12 +3322,10 @@ function LaunchInbox({
   onRetryLoadMore?: () => void;
 }) {
   const { width } = useWindowDimensions();
-  const isLatest = kind === "latest";
-  const showRolesTable = isLatest && Platform.OS === "web" && width >= 900;
+  const showRolesTable = Platform.OS === "web" && catalogListUsesColumns(width);
   const visibleJobs = inbox.jobs.filter(
     (job) => !hiddenJobIds.has(job.jobId) || hiddenFeedbackJob?.jobId === job.jobId,
   );
-  const groupedRows = inbox.groups?.map((details) => details.group) ?? [];
   // The browse feed keeps loading more as the reader moves, so the next page is
   // already in place before the bottom edge is reached.
   const prefetch = useProactivePrefetch(onLoadMore, {
@@ -3329,94 +3342,12 @@ function LaunchInbox({
       onRetry={() => onRetryLoadMore?.()}
     />
   ) : null;
-  if (groupedRows.length) return (
-    <>
-    <FlatList
-      style={[styles.list, styles.webScrollbarHidden]}
-      data={groupedRows}
-      extraData={[applicationStatuses, queuingJobIds]}
-      keyExtractor={(group) => group.groupId}
-      contentContainerStyle={[styles.feedListContent, styles.rolesFeedListContent]}
-      onScroll={prefetch.onScroll}
-      onContentSizeChange={prefetch.onContentSizeChange}
-      onLayout={prefetch.onLayout}
-      scrollEventThrottle={100}
-      onEndReached={onLoadMore}
-      onEndReachedThreshold={0.5}
-      ListHeaderComponent={
-        <View style={[styles.inboxHeader, showRolesTable && styles.inboxHeaderWide]}>
-          <Text accessibilityLabel={`${inbox.total} new matches`} style={styles.inboxCount}>{inbox.total}</Text>
-          <Text style={styles.inboxTitle}>new matches</Text>
-          <Text style={styles.inboxDescription}>Grouped by employer release and verified program details</Text>
-          <View style={styles.inboxActions}>
-            <TouchableOpacity accessibilityRole="button" onPress={onViewAll} style={[styles.inboxViewAll, styles.inboxViewAllInline]}>
-              <Text style={styles.inboxViewAllText}>Search all roles</Text>
-            </TouchableOpacity>
-            {onStartSwipe ? <SwipePillButton onPress={onStartSwipe} /> : null}
-            {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
-              <QueuePillButton count={queueCount} onPress={onOpenQueue} />
-            ) : null}
-          </View>
-        </View>
-      }
-      renderItem={({ item, index }) => {
-        const role = catalogCardKind(item) === "role"
-          ? visibleJobs.find((job) => job.jobId === item.featuredRole.jobId)
-          : undefined;
-        if (role) {
-          return (
-            <JobCard
-              job={role}
-              onOpen={() => onOpen(role)}
-              applicationStatus={applicationStatuses.get(role.jobId)}
-              isQueued={queuedJobIds?.has(role.jobId)}
-              isNew
-              onAddToQueue={() => onAddToQueue(role)}
-              isAddingToQueue={queuingJobIds.has(role.jobId)}
-              onHideLocally={() => onHideLocally(role)}
-              onRemoveFromQueue={onRemoveFromQueue ? () => onRemoveFromQueue(role) : undefined}
-              roleTable={showRolesTable}
-              roleFeed={isLatest}
-            />
-          );
-        }
-        return (
-          <CatalogGroupCard
-            group={item}
-            onOpenGroup={() => onOpenGroup(item, inbox.groups?.[index])}
-            onOpenRole={onOpen}
-            onAddToQueue={item.featuredRole ? () => onAddToQueue(catalogRoleJob(item.featuredRole)) : undefined}
-            isAddingToQueue={item.featuredRole ? queuingJobIds.has(item.featuredRole.jobId) : false}
-            onHideLocally={item.featuredRole ? () => onHideLocally(catalogRoleJob(item.featuredRole)) : undefined}
-            applicationStatus={item.featuredRole ? applicationStatuses.get(item.featuredRole.jobId) : undefined}
-            isQueued={item.featuredRole ? queuedJobIds?.has(item.featuredRole.jobId) : undefined}
-            onRemoveFromQueue={item.featuredRole && onRemoveFromQueue ? () => onRemoveFromQueue(catalogRoleJob(item.featuredRole)) : undefined}
-            roleTable={showRolesTable}
-          />
-        );
-      }}
-      ListFooterComponent={
-        <View>
-          {paginationFooter}
-          <TouchableOpacity
-            accessibilityRole="button"
-            onPress={onViewAll}
-            style={[styles.inboxViewAll, styles.inboxViewAllFooter]}
-          >
-            <Text style={styles.inboxViewAllText}>Search all roles</Text>
-          </TouchableOpacity>
-        </View>
-      }
-    />
-    <WebAboutLink />
-    </>
-  );
   return (
     <>
     <FlatList
       style={[styles.list, styles.webScrollbarHidden]}
       data={visibleJobs}
-      extraData={[applicationStatuses, queuingJobIds]}
+      extraData={[applicationStatuses, queuedJobIds, queuingJobIds, highlightedJobIds, hiddenJobIds]}
       keyExtractor={(job) => job.jobId}
       contentContainerStyle={[styles.feedListContent, styles.rolesFeedListContent]}
       onScroll={prefetch.onScroll}
@@ -3427,46 +3358,26 @@ function LaunchInbox({
       onEndReachedThreshold={0.5}
       ListHeaderComponent={
         <View style={[styles.inboxHeader, showRolesTable && styles.inboxHeaderWide]}>
-          {isLatest ? (
-            <Text accessibilityLabel={`${visibleJobs.length} latest roles`} style={styles.inboxLatestTitle}>Latest roles</Text>
-          ) : (
-            <>
-              <Text accessibilityLabel={`${visibleJobs.length} new matches`} style={styles.inboxCount}>
-                {visibleJobs.length}
-              </Text>
-              <Text style={styles.inboxTitle}>new matches</Text>
-            </>
-          )}
-          <Text style={styles.inboxDescription}>
-            {isLatest ? "The newest verified roles in the catalog" : `Matched your alerts since ${launchInterval(inbox.previousOpenedAt)}`}
-          </Text>
-          {inbox.hasMore ? (
-            <Text style={styles.inboxOverflow}>Showing the newest 50.</Text>
-          ) : null}
-          {isLatest ? (
-            <View style={styles.inboxActions}>
-              {onStartSwipe ? <SwipePillButton onPress={onStartSwipe} /> : null}
-              {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
-                <QueuePillButton count={queueCount} onPress={onOpenQueue} />
-              ) : null}
-            </View>
-          ) : null}
-          {!isLatest ? <View style={styles.inboxActions}>
-            <TouchableOpacity
-              accessibilityRole="button"
-              onPress={onViewAll}
-              style={[styles.inboxViewAll, styles.inboxViewAllInline]}
-            >
-              <Text style={styles.inboxViewAllText}>Search all roles</Text>
-            </TouchableOpacity>
+          <Text accessibilityRole="header" style={styles.inboxLatestTitle}>Catalog</Text>
+          <Text style={styles.inboxDescription}>The newest verified roles in the catalog</Text>
+          <View style={styles.inboxActions}>
+            {onStartSwipe ? <SwipePillButton onPress={onStartSwipe} /> : null}
             {Platform.OS === "web" && onOpenQueue && queueCount !== undefined ? (
               <QueuePillButton count={queueCount} onPress={onOpenQueue} />
             ) : null}
-          </View> : null}
-          {!isLatest ? <Text style={styles.inboxSectionLabel}>New matches</Text> : null}
+          </View>
+          {update ? (
+            <View style={styles.roleUpdateStrip}>
+              <Ionicons name="sparkles-outline" size={18} color={colors.signal} />
+              <View style={styles.roleUpdateCopy}>
+                <Text style={styles.roleUpdateTitle}>{update.total} new {update.total === 1 ? "role" : "roles"}</Text>
+                <Text style={styles.roleUpdateInterval}>Since {launchInterval(update.previousOpenedAt)}</Text>
+              </View>
+            </View>
+          ) : null}
         </View>
       }
-      renderItem={({ item, index }) =>
+      renderItem={({ item }) =>
         hiddenFeedbackJob?.jobId === item.jobId ? (
           <HiddenRolePlaceholder onUndo={onUndoHide} />
         ) : (
@@ -3475,17 +3386,17 @@ function LaunchInbox({
             onOpen={() => onOpen(item)}
             applicationStatus={applicationStatuses.get(item.jobId)}
             isQueued={queuedJobIds?.has(item.jobId)}
-            isNew={!isLatest}
+            isNew={highlightedJobIds?.has(item.jobId)}
             onAddToQueue={() => onAddToQueue(item)}
             isAddingToQueue={queuingJobIds.has(item.jobId)}
             onHideLocally={() => onHideLocally(item)}
             onRemoveFromQueue={onRemoveFromQueue ? () => onRemoveFromQueue(item) : undefined}
             roleTable={showRolesTable}
-            roleFeed={isLatest}
+            roleFeed
           />
         )}
       ListEmptyComponent={
-        loading && isLatest ? (
+        loading ? (
           // Ghost the rows the feed is about to draw. A "Loading roles…" line here
           // flashed between the boot skeleton and the first page and read as a
           // failure rather than as loading.
@@ -3494,7 +3405,7 @@ function LaunchInbox({
               <LoadingRoleCard key={`latest-role-skeleton-${index}`} index={index} wide={showRolesTable} />
             ))}
           </View>
-        ) : error && isLatest ? (
+        ) : error ? (
           <View accessibilityRole="alert" style={styles.emptyState}>
             <Text style={styles.eyebrow}>Latest roles</Text>
             <Text style={styles.emptyTitle}>We couldn’t load roles.</Text>
@@ -3503,9 +3414,9 @@ function LaunchInbox({
           </View>
         ) : (
           <EmptyState
-            eyebrow={isLatest ? "Latest roles" : "New matches"}
-            title={isLatest ? "No roles are available right now." : "Those roles are hidden on this device."}
-            description={isLatest ? "The catalog is up to date. Check back soon." : "You can restore them from Profile whenever you want."}
+            eyebrow="Catalog"
+            title="No roles are available right now."
+            description="The catalog is up to date. Check back soon."
           />
         )
       }
@@ -4873,6 +4784,14 @@ function AppContent() {
   const returnToGroupedRoles = useRef(false);
   const pendingDestination = useRef<AppDestination | undefined>(undefined);
   const [launchInbox, setLaunchInbox] = useState<LaunchInbox>();
+  const [latestRoleUpdate, setLatestRoleUpdate] = useState<{ jobIds: string[]; since: string | null }>();
+  const [roleUpdateAcknowledged, setRoleUpdateAcknowledged] = useState(true);
+  const roleUpdateSkipped = useRef(false);
+  const acknowledgeRoleUpdate = () => {
+    roleUpdateSkipped.current = true;
+    setRoleUpdateAcknowledged(true);
+    if (launchInbox) void responseCache.set("internnotifs.role-update-seen.v1", roleUpdateKey(launchInbox));
+  };
   const [launchLoaded, setLaunchLoaded] = useState(false);
   const launchRequestToken = useRef<string | undefined>(undefined);
   const launchRequestId = useRef(0);
@@ -4887,6 +4806,7 @@ function AppContent() {
   const catalogRequestInFlight = useRef(false);
   const groupRequestGuard = useRef(createLatestRequestGuard());
   const changeTab = (nextTab: AppTab) => {
+    if (nextTab !== "roles") acknowledgeRoleUpdate();
     setTab(nextTab);
   };
   const clearPrivateState = () => {
@@ -5214,9 +5134,22 @@ function AppContent() {
     launchRequestToken.current = "installation";
     const requestId = ++launchRequestId.current;
     void installationApi<LaunchInbox>("/opening", { method: "POST" })
-      .then((inbox) => {
+      .then(async (inbox) => {
+        const [seen, latest] = await Promise.all([
+          responseCache.get<string>("internnotifs.role-update-seen.v1"),
+          responseCache.get<{ jobIds: string[]; since: string | null }>("internnotifs.role-update-latest.v1"),
+        ]);
         if (launchRequestId.current === requestId) {
           setLaunchInbox(inbox.total ? inbox : undefined);
+          if (inbox.total) {
+            const update = { jobIds: inbox.jobs.map((job) => job.jobId), since: inbox.previousOpenedAt };
+            setLatestRoleUpdate(update);
+            void responseCache.set("internnotifs.role-update-latest.v1", update);
+          } else if (latest && Array.isArray(latest.jobIds)) {
+            setLatestRoleUpdate(latest);
+          }
+          setRoleUpdateAcknowledged(roleUpdateSkipped.current || !inbox.total || seen === roleUpdateKey(inbox));
+          if (roleUpdateSkipped.current && inbox.total) void responseCache.set("internnotifs.role-update-seen.v1", roleUpdateKey(inbox));
           if (inbox.jobs.length) {
             setJobs((current) => [
               ...inbox.jobs,
@@ -5248,6 +5181,11 @@ function AppContent() {
       )
         .then((release) => {
           const openedAt = new Date().toISOString();
+          roleUpdateSkipped.current = false;
+          setRoleUpdateAcknowledged(false);
+          const update = { jobIds: release.jobs.map((job) => job.jobId), since: null };
+          setLatestRoleUpdate(update);
+          void responseCache.set("internnotifs.role-update-latest.v1", update);
           setLaunchInbox({ jobs: release.jobs, groups: release.groups, total: release.total ?? release.jobs.length, hasMore: false, previousOpenedAt: null, openedAt });
           setJobs((current) => [...release.jobs, ...current.filter((job) => !release.jobs.some((released) => released.jobId === job.jobId))]);
         })
@@ -5494,17 +5432,20 @@ function AppContent() {
   // owns an unfiltered public page, rather than borrowing Catalog's current
   // search/filter state, so it stays a scrollable browse surface.
   const latestCatalogJobs = useMemo(
-    () => roleFeedGroups.flatMap((group) => group.featuredRole ? [catalogRoleJob(group.featuredRole)] : []),
-    [roleFeedGroups],
+    () => {
+      const recent = launchInbox?.jobs ?? [];
+      const recentIds = new Set(recent.map((job) => job.jobId));
+      return [...recent, ...roleFeedGroups.flatMap((group) => group.featuredRole && !recentIds.has(group.featuredRole.jobId) ? [catalogRoleJob(group.featuredRole)] : [])];
+    },
+    [roleFeedGroups, launchInbox],
   );
-  const hasLaunchRoles = Boolean(launchInbox && (launchInbox.jobs.length || launchInbox.groups?.length));
   // The catalog's newness lane reads the same release the Roles tab shows, so
   // "new" means one thing across both surfaces.
   const newCatalogJobIds = useMemo(
-    () => new Set(catalogFilters.jobStatus === "open" ? launchInbox?.jobs.map((job) => job.jobId) ?? [] : []),
-    [catalogFilters.jobStatus, launchInbox],
+    () => new Set(latestRoleUpdate?.jobIds ?? []),
+    [latestRoleUpdate],
   );
-  const newSinceLabel = launchInbox ? launchInterval(launchInbox.previousOpenedAt) : "your last visit";
+  const newSinceLabel = latestRoleUpdate?.since ? launchInterval(latestRoleUpdate.since) : "the latest update";
   const applicationStatuses = useMemo(
     () => new Map(applications.map((application) => [application.jobId, application.status])),
     [applications],
@@ -5571,7 +5512,8 @@ function AppContent() {
         onFiltersChange={setCatalogFilters}
         query={query}
         onQueryChange={setQuery}
-        inbox={launchInbox}
+        inbox={roleUpdateAcknowledged ? undefined : launchInbox}
+        onAcknowledgeRoleUpdate={acknowledgeRoleUpdate}
         applicationStatuses={applicationStatuses}
         queuingJobIds={queuingJobIds}
         newJobIds={newCatalogJobIds}
@@ -5860,29 +5802,10 @@ function AppContent() {
         <View style={styles.appMain}>
           {tab === "roles" ? (
             <View style={styles.pageColumn}>
-            {hasLaunchRoles && launchInbox ? (
-              <LaunchInbox
-                inbox={launchInbox}
-                onOpen={openCatalogJob}
-                onOpenGroup={openCatalogGroup}
-                onViewAll={() => changeTab("catalog")}
-                applicationStatuses={applicationStatuses}
-                queuedJobIds={queuedJobIds}
-                onAddToQueue={addToQueue}
-                queuingJobIds={queuingJobIds}
-                hiddenJobIds={hiddenJobIds}
-                onHideLocally={hideLocally}
-                onRemoveFromQueue={removeFromQueue}
-                hiddenFeedbackJob={hiddenFeedbackJob}
-                onUndoHide={undoHideLocally}
-                queueCount={applyQueue.length}
-                onOpenQueue={() => setQueueSheetVisible(true)}
-                onStartSwipe={() => changeTab("swipe")}
-              />
-            ) : (
               <LaunchInbox
                 inbox={{ jobs: latestCatalogJobs, groups: [], total: latestCatalogJobs.length, hasMore: false, previousOpenedAt: null, openedAt: "" }}
-                kind="latest"
+                update={roleUpdateAcknowledged ? undefined : launchInbox}
+                highlightedJobIds={newCatalogJobIds}
                 loading={roleFeedLoading}
                 error={roleFeedError}
                 onRetry={() => setCatalogRefresh((value) => value + 1)}
@@ -5907,7 +5830,6 @@ function AppContent() {
                 onOpenQueue={() => setQueueSheetVisible(true)}
                 onStartSwipe={() => changeTab("swipe")}
               />
-            )}
             </View>
           ) : tab === "swipe" ? (
             <SwipeScreen
@@ -6390,6 +6312,7 @@ function GuestExperience({
   query,
   onQueryChange,
   inbox,
+  onAcknowledgeRoleUpdate,
   applicationStatuses,
   queuingJobIds,
   newJobIds,
@@ -6439,6 +6362,7 @@ function GuestExperience({
   query: string;
   onQueryChange: (value: string) => void;
   inbox?: LaunchInbox;
+  onAcknowledgeRoleUpdate: () => void;
   applicationStatuses: Map<string, string>;
   queuingJobIds: Set<string>;
   newJobIds?: Set<string>;
@@ -6477,6 +6401,10 @@ function GuestExperience({
   // Browse-first: the app opens on the feed of roles for everyone, not on the
   // search surface. The old `rolesVariant` preview switch no longer decides it.
   const [tab, setTab] = useState<AppTab>("roles");
+  const changeTab = (next: AppTab) => {
+    if (next !== "roles") onAcknowledgeRoleUpdate();
+    setTab(next);
+  };
   const [showAccount, setShowAccount] = useState(false);
   const openAccount = () => {
     setShowAccount(true);
@@ -6513,7 +6441,7 @@ function GuestExperience({
         accessibilityElementsHidden={showAccount}        importantForAccessibility={showAccount ? "no-hide-descendants" : "auto"}
       >
         <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
-          {usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} rail resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
+          {usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} rail resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
           <View style={styles.appMain}>
             <View
               style={[styles.appMain, tab !== "catalog" && styles.hiddenScreen]}
@@ -6550,25 +6478,10 @@ function GuestExperience({
             </View>
             {tab === "roles" ? (
               <View style={styles.pageColumn}>
-              {inbox ? (
-                <LaunchInbox
-                  inbox={inbox}
-                  onOpen={onOpenJob}
-                  onOpenGroup={onOpenGroup}
-                  onViewAll={() => setTab("catalog")}
-                  applicationStatuses={applicationStatuses}
-                  onAddToQueue={() => { openAccount(); }}
-                  queuingJobIds={queuingJobIds}
-                  hiddenJobIds={hiddenJobIds}
-                  onHideLocally={onHideLocally}
-                  hiddenFeedbackJob={hiddenFeedbackJob}
-                  onUndoHide={onUndoHide}
-                  onStartSwipe={() => setTab("swipe")}
-                />
-              ) : (
                 <LaunchInbox
                   inbox={{ jobs: latestJobs, groups: [], total: latestJobs.length, hasMore: false, previousOpenedAt: null, openedAt: "" }}
-                  kind="latest"
+                  update={inbox}
+                  highlightedJobIds={newJobIds}
                   loading={latestLoading}
                   error={latestError}
                   onRetry={onRetryLatest}
@@ -6579,7 +6492,7 @@ function GuestExperience({
                   onRetryLoadMore={onRetryLoadMoreLatest}
                   onOpen={onOpenJob}
                   onOpenGroup={onOpenGroup}
-                  onViewAll={() => setTab("catalog")}
+                  onViewAll={() => changeTab("catalog")}
                   applicationStatuses={applicationStatuses}
                   onAddToQueue={() => { openAccount(); }}
                   queuingJobIds={queuingJobIds}
@@ -6587,9 +6500,8 @@ function GuestExperience({
                   onHideLocally={onHideLocally}
                   hiddenFeedbackJob={hiddenFeedbackJob}
                   onUndoHide={onUndoHide}
-                  onStartSwipe={() => setTab("swipe")}
+                  onStartSwipe={() => changeTab("swipe")}
                 />
-              )}
               </View>
             ) : tab === "swipe" ? (
               <SwipeScreen
@@ -6627,7 +6539,7 @@ function GuestExperience({
               </View>
             ) : null}
           </View>
-          {!usesNavigationRail ? <TabNavigation active={tab} onChange={setTab} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
+          {!usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
         </View>
         <JobDetailSheet
           job={routedJob}
@@ -10376,6 +10288,10 @@ const styles = StyleSheet.create({
   navIconWrap: { alignItems: "center", justifyContent: "center" },
   navBadgeText: { color: colors.onDark, fontSize: 11, fontWeight: "700" },
   navBadge: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 9, justifyContent: "center", minWidth: 18, paddingHorizontal: 4, position: "absolute", right: -12, top: -6 },
+  roleUpdateStrip: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20, paddingVertical: 12, borderTopWidth: 1, borderBottomWidth: 1, borderColor: colors.separator },
+  roleUpdateCopy: { flex: 1 },
+  roleUpdateTitle: { color: colors.ink, fontSize: 15, fontWeight: "600" },
+  roleUpdateInterval: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 2 },
   inboxHeader: { paddingTop: 28, paddingBottom: 20 },
   // The wide Roles rows inset their content by 20, so the heading that sits above
   // them insets by the same amount instead of hanging back at the column edge.
@@ -10661,6 +10577,7 @@ const styles = StyleSheet.create({
   catalogListPrimary: { flex: 1, minWidth: 0, paddingRight: 12 },
   catalogListMobileTopline: { alignItems: "center", flexDirection: "row", gap: 8, marginBottom: 2 },
   catalogListCompanyMobile: { color: colors.signal, flex: 1, fontSize: 12, fontWeight: "700", lineHeight: 16, minWidth: 0 },
+  catalogFreshnessLabel: { flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 },
   catalogListFreshness: { color: colors.signal, flexShrink: 0, fontSize: 10, fontWeight: "800", letterSpacing: 0.35, textTransform: "uppercase" },
   catalogListTitle: { color: colors.ink, fontSize: 15, fontWeight: "700", lineHeight: 20 },
   catalogListSource: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },

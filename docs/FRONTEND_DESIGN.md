@@ -169,8 +169,8 @@ Every screen follows these rules. They are as important as colors and type.
 
 ### Freshness lens
 
-- New roles stay in the main divider list instead of appearing in a second horizontal scroller. A pale signal tint and the existing **New** activity label distinguish them without changing row height or reading order.
-- A compact **New / Last day / Last week / All** control sits above the column header or mobile gesture hint. **All** is the default. **New** means roles added since the previous app opening; **Last day** and **Last week** are rolling 24-hour and seven-day views based on each group's latest catalog timestamp.
+- New roles stay in the main divider list instead of appearing in a second horizontal scroller. A pale signal tint and the **New here** activity label distinguish them without changing row height or reading order.
+- A compact **New / Last day / Last week / All** control sits above the column header or mobile gesture hint. **All** is the default. **New** means the exact roles in the latest new-role update on this device, retained until a newer update arrives; **Last day** and **Last week** are rolling 24-hour and seven-day views based on each group's latest catalog timestamp.
 - The supporting line reports exact role counts for **New** and group counts for the rolling time ranges. Group language is deliberate: a grouped result can contain roles from more than one timestamp. Empty options are disabled until the selected view itself becomes empty after another filter changes.
 - Search, facets, release-day filtering, pagination, grouping, queue actions, and local hide all continue to operate on this one list. If a selected freshness lens becomes empty after the view changes, the empty state offers **Show all roles**.
 - **Size the lane cards so the next one reads as a card, not as a sliver.** The band is the content column, so on a phone a card of about 232 pt leaves roughly a third of its neighbour in view; at 300 pt that neighbour was a strip of clipped words. The band plus its heading is the largest single block above the grid, and every point it gives back is another row the reader can see — measured at 393×852, trimming tile padding and the lane's own gaps moved the grid from 1.0 to about 1.25 visible rows.
@@ -231,11 +231,10 @@ Every screen follows these rules. They are as important as colors and type.
 
 ### New roles
 
-- The Roles tab is the new-matches surface: it renders the launch inbox itself when the release contains roles, and a quiet empty state that links to the Catalog when it does not. Do not re-open the catalog behind the inbox or split the feed into new and seen sections.
-- Cards use the existing role-detail sheet and official-form handoff, and the one secondary action is **Browse the catalog**.
-- Give each new card a small, one-time arrival moment: an 8 pt lift, a soft teal sheen that fades within 420 ms, and a compact sparkle-plus-**New** marker. Stagger only the first five cards by 80 ms; never loop, pulse, or use a full-card neon treatment. The marker closes the employer's row, after any discipline pills, so its position never depends on how long the employer's name is — a marker that rides the name is the one ragged edge a reader notices.
-- Honor the device Reduce Motion preference by showing the card and static **New** marker without movement. The treatment uses opacity and transforms so it stays smooth without making the list feel busy.
-- The Catalog tab carries the same release forward in its newness lane, so "new" means one thing across both surfaces.
+- An unseen new-role update appears as a compact inline strip in the normal Catalog browse feed on mobile and web. A small sparkle accompanies the role count and time interval. The strip is informational, with no acknowledgement button. New and older roles share the catalog's existing rows and actions.
+- Leaving the feed acknowledges the update on this device. The same update does not reappear after a refresh; an explicit release notification can still reopen its requested release.
+- Rows retain the existing role-detail sheet, official-form handoff, queue and local hide actions. Pale teal surfaces and a small sparkle beside **New here** identify the update's roles without relying on color alone or adding decorative motion.
+- The latest update's exact role IDs remain cached after acknowledgement and across app openings until a newer update replaces them. Both the browse feed and searchable catalog carry those highlights forward; acknowledgement never clears the catalog's New lens.
 
 ### Posting identity certainty
 
