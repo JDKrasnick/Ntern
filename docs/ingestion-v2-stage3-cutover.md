@@ -173,6 +173,22 @@ unresolved records through the partial index, excludes resolved history, and
 labels the sample explicitly. Recovery must write a durable `resolved_at`
 receipt; a new deployment cannot clear an incident.
 
+## Bounded operations dispatch
+
+`POST /internal/operations/ingestion/dispatch` with `{"sourceId":"<owned-source-id>"}`
+uses the operations key to forward one source to the private admission Worker.
+Use it after queues drain to advance baseline work without waiting for the next
+ten-minute dispatch. It retains the existing 500-row limit, message sizing, and
+consumer concurrency. Requests cannot supply a larger limit or a source list.
+
+Matched discovery, admission, writer, and legacy-disable controls are required.
+The Worker rejects incomplete active snapshots and outstanding queued,
+processing, quarantined, or unacknowledged source work. Billing and isolation
+guards remain active. Manual dispatch leaves the natural source cursor and
+scheduled completion markers unchanged; its own phase markers identify manual
+work. It does not bootstrap or resume a source. Verify resource/cost headroom,
+queue drain, baseline silence, and catalog parity before each advance.
+
 ## Rollback
 
 Pause the source, disable V2 discovery for it so no new row work is created,

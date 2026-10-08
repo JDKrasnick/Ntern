@@ -34,6 +34,30 @@ const queue = (metrics: Queue['metrics']): Queue => ({
   metrics,
 });
 
+describe('V2 operations dispatch', () => {
+  it('requires operations authorization and forwards only one explicit source to the private binding', async () => {
+    const fetch = vi.fn(async (request: Request) => {
+      expect(new URL(request.url).pathname).toBe('/internal/dispatch');
+      expect(await request.json()).toEqual({ sourceId: 'greenhouse-figma' });
+      expect(request.headers.has('X-Operations-Key')).toBe(false);
+      return Response.json({ completed: true, sources: 1, rows: 500 });
+    });
+    const env = { OPERATIONS_SHARED_SECRET: 'secret', INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true', ADMISSION_WORKER: { fetch },
+      DB: { prepare: () => ({ async first() { return null; } }) } } as unknown as Environment;
+    const request = (body: unknown, authorized = true) => new Request('https://example.test/internal/operations/ingestion/dispatch', {
+      method: 'POST', headers: authorized ? { 'X-Operations-Key': 'secret' } : {}, body: JSON.stringify(body),
+    });
+    expect((await cloudflareWorker.fetch(request({ sourceId: 'greenhouse-figma' }, false), env)).status).toBe(404);
+    expect((await cloudflareWorker.fetch(request({ sourceId: '*' }), env)).status).toBe(400);
+    expect((await cloudflareWorker.fetch(request({ sourceId: 'greenhouse-figma' }), { ...env, ADMISSION_WORKER: undefined })).status).toBe(503);
+    expect(fetch).not.toHaveBeenCalled();
+    const response = await cloudflareWorker.fetch(request({ sourceId: 'greenhouse-figma' }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ completed: true, sources: 1, rows: 500 });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+});
+
 describe('Resume compiler transport', () => {
   it('sends an explicit UTF-8 byte length to the bounded compiler server', async () => {
     const request = resumeCompilerRequest('Résumé – PDF');

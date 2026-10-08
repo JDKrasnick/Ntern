@@ -1345,6 +1345,23 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     ]);
     return withCors(Response.json({ ...page, overview }, { headers: { 'Cache-Control': 'no-store' } }));
   }
+  if (request.method === 'POST' && url.pathname === '/internal/operations/ingestion/dispatch') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    let body: { sourceId?: unknown };
+    try { body = await request.json() as typeof body; }
+    catch { return withCors(Response.json({ message: 'Invalid JSON body' }, { status: 400 })); }
+    if (!body || typeof body.sourceId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,199}$/u.test(body.sourceId)
+      || Object.keys(body).length !== 1) return withCors(Response.json({ message: 'Explicit sourceId required' }, { status: 400 }));
+    if (!env.ADMISSION_WORKER || env.INGESTION_V2_ISOLATED_WORKERS_ENABLED !== 'true') {
+      return withCors(Response.json({ message: 'Isolated admission binding required' }, { status: 503 }));
+    }
+    const response = await env.ADMISSION_WORKER.fetch(new Request('https://isolated.internal/internal/dispatch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }));
+    console.log(JSON.stringify({ event: 'ingestion_v2_manual_dispatch_requested', sourceId: body.sourceId,
+      actor: request.headers.get('X-Operations-Actor') ?? 'operator', status: response.status }));
+    return withCors(response);
+  }
   if (request.method === 'POST' && url.pathname === '/internal/operations/ingestion/rows/replay') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     let body: { sourceId?: string; externalId?: string; replayToken?: string };
