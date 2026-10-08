@@ -119,6 +119,13 @@ describe('D1 filtered catalog projection', () => {
           destination: { diagnostic }, metadata: { diagnostic }, reasonCodes: [diagnostic] },
         postingIdentity: { diagnostic }, notification: { diagnostic },
         roleMetadata: { educationAudience: { kind: 'stated-education-audience', explicitlyExcluded: ['phd'], evidenceStatus: 'explicit' }, diagnostic },
+        sourceReferences: [{ sourceId: 'greenhouse-figma', sourceUrl: 'https://boards.greenhouse.io/figma',
+          externalId: String(i), applyUrl: `https://boards.greenhouse.io/figma/jobs/${i}`,
+          provenance: 'official-ats', state: 'open', postedAt: '2026-10-06', workMode: 'hybrid',
+          providerTimestamp: { value: '2026-10-06T12:00:00Z', semantics: 'published' },
+          metadataEvidence: [{ diagnostic }], admission: { diagnostic }, postingIdentityDecision: { diagnostic },
+          trustedCommunityAlertQualification: { diagnostic }, metadataExtraction: { diagnostic }, sourceMetadataProcessing: { diagnostic },
+        }],
       };
       insert.run(`JOB#${value.jobId}`, 'META', 'internship', JSON.stringify(value));
     }
@@ -133,7 +140,14 @@ describe('D1 filtered catalog projection', () => {
       const compact = await store.listCatalog({ projectionInput: true });
       expect(compact).toHaveLength(full.length);
       expect(hydratedBytes).toBeLessThan(fullBytes / 100);
-      expect(compact[0]?.sourceReferences).toEqual(full[0]?.sourceReferences);
+      expect(compact[0]?.sourceReferences[0]).toMatchObject({ provenance: 'official-ats', state: 'open',
+        postedAt: '2026-10-06', workMode: 'hybrid', providerTimestamp: { semantics: 'published' } });
+      expect(compact[0]?.sourceReferences[0]?.sourceUrl).toBe(full[0]?.sourceReferences[0]?.sourceUrl);
+      for (const field of ['metadataEvidence', 'admission', 'postingIdentityDecision', 'trustedCommunityAlertQualification',
+        'metadataExtraction', 'sourceMetadataProcessing']) {
+        expect(compact[0]?.sourceReferences[0]).not.toHaveProperty(field);
+        expect(full[0]?.sourceReferences[0]).toHaveProperty(field);
+      }
       expect(compact[0]?.admission?.canonicalEmployer).toEqual(full[0]?.admission?.canonicalEmployer);
       expect(compact[0]?.roleMetadata).toEqual({ educationAudience: (full[0]?.roleMetadata as unknown as { educationAudience: unknown }).educationAudience });
       expect(full[0]?.admission?.destination).toHaveProperty('diagnostic', diagnostic);

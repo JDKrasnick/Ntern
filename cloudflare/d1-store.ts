@@ -1098,7 +1098,11 @@ export class D1InternshipStore implements InternshipStore {
       '$.employerMetadataAttribution', '$.applicationPageMetadataVersion',
       '$.admission.destination', '$.admission.metadata',
       '$.admission.reasonCodes', '$.admission.evidenceCodes', '$.roleMetadata'),
-      '$.roleMetadata.educationAudience', json_extract(value, '$.roleMetadata.educationAudience')) AS value` : 'value';
+      '$.roleMetadata.educationAudience', json_extract(value, '$.roleMetadata.educationAudience'),
+      '$.sourceReferences', json((SELECT json_group_array(json_remove(reference.value,
+        '$.metadataEvidence', '$.admission', '$.postingIdentityDecision',
+        '$.trustedCommunityAlertQualification', '$.metadataExtraction', '$.sourceMetadataProcessing'))
+        FROM json_each(catalog_items.value, '$.sourceReferences') AS reference))) AS value` : 'value';
     const pageSize = options.projectionInput ? 25 : 100;
     while (true) {
       const query = cursor

@@ -85,6 +85,39 @@ test('the native private service binding reaches the compiled publisher and acti
   assert.equal(r2.count, 1);
 });
 
+test('compiled publication retains public provenance without hydrating internal occurrence diagnostics', async () => {
+  const row = await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#isolated-role'").first();
+  const diagnostic = 'private occurrence diagnostic '.repeat(1200);
+  const fields = ['metadataEvidence', 'admission', 'postingIdentityDecision', 'trustedCommunityAlertQualification', 'metadataExtraction', 'sourceMetadataProcessing'];
+  const reference = { sourceId: 'greenhouse-figma', sourceUrl: 'https://boards.greenhouse.io/figma', externalId: 'reference-role',
+    provenance: 'official-ats', state: 'open', postedAt: '2026-10-06', providerTimestamp: { value: '2026-10-06T12:00:00Z', semantics: 'published' },
+    ...Object.fromEntries(fields.map(field => [field, { diagnostic }])) };
+  const job = { ...JSON.parse(row.value), jobId: 'reference-role', sourceReferences: [reference] };
+  await db.prepare("INSERT INTO catalog_items(pk,sk,kind,value) VALUES ('JOB#reference-role','INTERNSHIP','internship',?)").bind(JSON.stringify(job)).run();
+  const caller = await runtime.getWorker('scheduled-caller-e2e');
+  const publish = async () => {
+    for (const cron of ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *']) {
+      const response = await caller.fetch('https://isolated.internal/internal/scheduled', { method: 'POST', body: JSON.stringify({ cron, scheduledTime: Date.now() }) });
+      assert.equal(response.status, 200);
+    }
+  };
+  try {
+    await publish();
+    const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+    const groups = JSON.parse(await (await bucket.get(`public-catalog/v1/${pointer.pageVersion ?? pointer.version}/0`)).text());
+    const role = groups.flatMap(group => group.roles).find(role => role.jobId === 'reference-role');
+    assert.ok(role);
+    assert.deepEqual(role.sourceReferences, [{ sourceId: reference.sourceId, sourceUrl: reference.sourceUrl, externalId: reference.externalId,
+      provenance: reference.provenance, state: reference.state, postedAt: reference.postedAt, providerTimestamp: reference.providerTimestamp }]);
+    const stored = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#reference-role'").first()).value);
+    for (const field of fields) assert.equal(stored.sourceReferences[0][field].diagnostic, diagnostic);
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
+  } finally {
+    await db.prepare("DELETE FROM catalog_items WHERE pk='JOB#reference-role'").run();
+    await publish();
+  }
+});
+
 test('the real profile CLI rejects broken routes and delayed delivery before validated compiled dispatch', async () => {
   const root = fileURLToPath(new URL('../../', import.meta.url));
   const directory = await mkdtemp(join(tmpdir(), 'dev-profile-e2e-'));

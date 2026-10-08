@@ -6,6 +6,21 @@ The bounds are deployed and the stranded dead-letter messages are replayed by th
 guarded operations path; the post-deploy observations are recorded at the end of
 this document.
 
+## 2026-10-08 catalog reference follow-up
+
+A single isolated publisher invocation reached 141.6 MiB. Read-only production
+sizing found 77.5 MB of projection input, including 54.6 MB of source references.
+Six internal reference fields account for 46.9 MB: metadata evidence, admission
+diagnostics, posting-identity decisions, trusted-community alert qualification,
+metadata extraction, and source-metadata processing.
+
+Projection reads remove those fields in D1 before serialization; catalog cards
+apply the same boundary for projected and live roles. Source identity, official
+links, provenance, posting timestamps, work mode, and other public role fields
+remain available. Complete stored jobs and normal job reads retain all evidence.
+The projected references measure 7.6 MB; post-deploy resource verification is
+still required before expanding V2 writer ownership.
+
 ## 2026-09-28 retained-history follow-up
 
 The original bound limited resolution work but still hydrated the complete source
