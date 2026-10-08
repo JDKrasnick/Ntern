@@ -16,6 +16,7 @@ import type { D1Database, MessageBatch, R2Bucket } from './types.js';
 import { officialAdmissionProviderProbe } from './admission-v2-provider.js';
 import { D1AdmissionProviderGovernor, type AdmissionProviderGovernor } from './admission-v2-provider-governor.js';
 import { providerPostingReference } from '../src/identity/posting.js';
+import { reviewedIdentityApplicationUrl } from './posting-source-corrections.js';
 
 export const ADMISSION_V2_QUEUE_NAME = 'intern-notifs-admission-v2';
 
@@ -132,11 +133,13 @@ export function stage2AdmissionEvaluator(
     trustedCommunityCatalogEnabled?: boolean;
     trustedCommunityAlertsEnabledForSource?: (sourceId: string) => boolean;
     providerGovernor?: AdmissionProviderGovernor;
+    resolveIdentityApplicationUrl?: (applyUrl: string) => Promise<string | undefined>;
   } = {},
 ): AdmissionV2RowEvaluator {
   return new RuleBasedAdmissionV2Evaluator({
     prober: cloudflareAdmissionProber(resolver, options.providerGovernor),
     sink,
+    ...(options.resolveIdentityApplicationUrl ? { resolveIdentityApplicationUrl: options.resolveIdentityApplicationUrl } : {}),
     ...(resolveCanonicalEmployer ? { resolveCanonicalEmployer } : {}),
     ...(options.resolvePriorContext ? { resolvePriorContext: options.resolvePriorContext } : {}),
     trustedCommunityCatalogEnabled: options.trustedCommunityCatalogEnabled ?? false,
@@ -193,6 +196,7 @@ export async function processAdmissionV2Batch(
       : undefined,
     {
       providerGovernor: new D1AdmissionProviderGovernor(env.DB, now),
+      resolveIdentityApplicationUrl: (applyUrl) => reviewedIdentityApplicationUrl(env.DB, applyUrl),
       trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
       trustedCommunityAlertsEnabledForSource: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
       resolvePriorContext: async (sourceId, externalId) => {
