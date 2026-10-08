@@ -185,7 +185,7 @@ export async function processAdmissionV2Batch(
         const sink = admissionV2OwnsCatalogWrites(env, input.sourceId)
           ? new ReconcilerAdmissionV2CatalogSink(internshipStore, now)
           : new D1RecordingAdmissionV2CatalogSink(env.DB, now);
-        await sink.commit(input);
+        return sink.commit(input);
       },
     },
     async (listing) => listing.providerIdentity

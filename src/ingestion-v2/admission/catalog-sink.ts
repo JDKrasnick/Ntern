@@ -94,7 +94,7 @@ export class ReconcilerAdmissionV2CatalogSink implements AdmissionV2CatalogSink 
     }
   }
 
-  async commit(input: AdmissionCatalogCommit): Promise<void> {
+  async commit(input: AdmissionCatalogCommit): Promise<{ jobId: string } | void> {
     const observedAt = this.now().toISOString();
     const prior = await this.store.getSourceOccurrence(input.sourceId, input.externalId);
     const existing = prior ? await this.store.getJob(prior.jobId) : await this.store.getJob(input.jobId);
@@ -161,5 +161,6 @@ export class ReconcilerAdmissionV2CatalogSink implements AdmissionV2CatalogSink 
     if (result.outcome !== 'committed') {
       throw new AdmissionInfrastructureError('internal', 'catalog observation was quarantined at the identity boundary');
     }
+    return { jobId: result.canonicalJobId };
   }
 }

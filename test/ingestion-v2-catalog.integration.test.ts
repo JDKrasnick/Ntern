@@ -89,6 +89,23 @@ function officialCommit(): AdmissionCatalogCommit {
 }
 
 describe('ingestion v2 reconciler catalog sink', () => {
+  it('returns the persisted job identity when reconciliation retains an existing catalog job', async () => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = commit({ baseline: true, notify: false });
+    await sink.commit(input);
+    const original = [...store.jobs.values()][0]!;
+    const prior = (await store.getSourceOccurrence(sourceId, externalId))!;
+    const retainedJobId = 'historical-catalog-job';
+    store.jobs.delete(original.jobId);
+    await store.putInternship({ ...original, jobId: retainedJobId });
+    await store.putSourceOccurrence({ ...prior, jobId: retainedJobId });
+
+    expect(await sink.commit(input)).toEqual({ jobId: retainedJobId });
+    expect((await store.getSourceOccurrence(sourceId, externalId))?.jobId).toBe(retainedJobId);
+    expect(store.jobs.size).toBe(1);
+    expect(store.notificationEvents.size).toBe(0);
+  });
   it('atomically hands fresh and changed official postings to shadow metadata extraction, with duplicate silence', async () => {
     const store = new MemoryInternshipStore();
     const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
@@ -255,7 +272,7 @@ describe('ingestion v2 reconciler catalog sink', () => {
     const store = new FailAfterFirstCommitStore();
     const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
     await expect(sink.commit(commit())).rejects.toThrow('connection lost after commit');
-    await expect(sink.commit(commit())).resolves.toBeUndefined();
+    await expect(sink.commit(commit())).resolves.toEqual({ jobId: [...store.jobs.keys()][0] });
     expect(store.jobs.size).toBe(1);
     expect(store.occurrences.size).toBe(1);
     expect(store.notificationEvents.size).toBe(1);

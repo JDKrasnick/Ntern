@@ -157,7 +157,7 @@ export async function processAdmissionV2Message(
         qualificationCompleteSnapshots: lease.row.qualificationCompleteSnapshots,
       });
       const decision = evaluation.decision;
-      const jobId = evaluation.jobId ?? (decision.kind === 'admitted' ? decision.jobId : undefined);
+      let jobId = evaluation.jobId ?? (decision.kind === 'admitted' ? decision.jobId : undefined);
       if (evaluation.commitEffect) {
         const claimed = await dependencies.ledger.claimRowEffect({
           sourceId: message.sourceId,
@@ -172,7 +172,8 @@ export async function processAdmissionV2Message(
           dependencies.log?.({ event: 'ingestion_v2_admission_lease_lost', batchId: message.batchId, sourceId: message.sourceId, externalId, phase: 'effect-claim' });
           continue;
         }
-        await evaluation.commitEffect();
+        const committed = await evaluation.commitEffect();
+        if (committed) jobId = committed.jobId;
       }
       const settled = await dependencies.ledger.settleRow({
         sourceId: message.sourceId,

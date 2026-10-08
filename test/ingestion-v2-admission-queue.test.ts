@@ -706,6 +706,19 @@ describe('admission v2 dispatcher', () => {
 });
 
 describe('admission v2 resource and contention', () => {
+  it('settles with the committed canonical identity and does not repeat the effect on duplicate delivery', async () => {
+    const { ledger, snapshots } = setup(['a']);
+    const commitEffect = vi.fn(async () => ({ jobId: 'retained-catalog-job' }));
+    const evaluator = { async evaluate() {
+      return { decision: { kind: 'admitted' as const, jobId: 'candidate-job' }, jobId: 'candidate-job', commitEffect };
+    } };
+    const [message] = messagesFor(['a']);
+    expect(await processAdmissionV2Message(message, { ledger, snapshots, evaluator })).toMatchObject({ settled: 1 });
+    expect(await ledger.getRow(SOURCE, 'a')).toMatchObject({ state: 'settled', jobId: 'retained-catalog-job', attemptCount: 1 });
+    await processAdmissionV2Message(message, { ledger, snapshots, evaluator });
+    expect(commitEffect).toHaveBeenCalledTimes(1);
+    expect(await ledger.getRow(SOURCE, 'a')).toMatchObject({ jobId: 'retained-catalog-job', attemptCount: 1 });
+  });
   it('publishes 24 peers once while one poison row retries and quarantines', async () => {
     const ids = Array.from({ length: 25 }, (_, index) => index === 12 ? 'poison' : `valid-${String(index).padStart(2, '0')}`);
     const { ledger, snapshots } = setup(ids);
