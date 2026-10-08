@@ -3,6 +3,7 @@ import { forwardIsolatedSchedule, isolatedScheduleRequest } from '../cloudflare/
 import publisher from '../cloudflare/catalog-publisher-worker.js';
 import admission from '../cloudflare/admission-worker.js';
 import * as dispatch from '../cloudflare/admission-v2-dispatch.js';
+import { isR2InternalFailure } from '../cloudflare/r2-errors.js';
 
 const event = { cron: '9-59/10 * * * *', scheduledTime: 1791440000000 };
 const request = (body: unknown, method = 'POST') => new Request('https://isolated.internal/internal/scheduled', {
@@ -10,6 +11,34 @@ const request = (body: unknown, method = 'POST') => new Request('https://isolate
 });
 
 describe('private scheduled delivery', () => {
+  it.each(['put: We encountered an internal error. Please try again. (10001)', 'get: An internal error occurred. (10001)'])('recognizes the R2 transport failure: %s', message => {
+    expect(isR2InternalFailure(new Error(message))).toBe(true);
+  });
+  it.each(['put: Precondition failed. (10031)', 'put: Access denied. (10003)', 'D1_ERROR: internal error (10001)', 'R2 unavailable', null])('keeps unrelated failures fatal: %s', message => {
+    expect(isR2InternalFailure(message === null ? null : new Error(message))).toBe(false);
+  });
+  it.each(['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *'])('defers only an acknowledged R2 failure on publication cron %s', async cron => {
+    const fetch = vi.fn(async () => Response.json({ completed: false, deferred: true, failureClass: 'r2-internal' },
+      { status: 503, headers: { 'Retry-After': '600' } }));
+    await expect(forwardIsolatedSchedule({ fetch }, { ...event, cron })).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it.each([
+    { completed: true, deferred: true, failureClass: 'r2-internal' },
+    { completed: false, deferred: false, failureClass: 'r2-internal' },
+    { completed: false, deferred: true, failureClass: 'internal' },
+    null,
+  ])('rejects malformed deferral acknowledgements: %j', async body => {
+    await expect(forwardIsolatedSchedule({ fetch: async () => Response.json(body,
+      { status: 503, headers: { 'Retry-After': '600' } }) }, { ...event, cron: '5,15,25,35,45,55 * * * *' })).rejects.toThrow('503');
+  });
+  it('requires the publication cadence and retry interval for a deferral', async () => {
+    const body = { completed: false, deferred: true, failureClass: 'r2-internal' };
+    await expect(forwardIsolatedSchedule({ fetch: async () => Response.json(body,
+      { status: 503, headers: { 'Retry-After': '600' } }) }, event)).rejects.toThrow('503');
+    await expect(forwardIsolatedSchedule({ fetch: async () => Response.json(body,
+      { status: 503 }) }, { ...event, cron: '5,15,25,35,45,55 * * * *' })).rejects.toThrow('503');
+  });
   it.each(['D1_ERROR: internal error; reference = test', 'D1_ERROR: database busy'])('defers %s and completes on the next cadence', async (message) => {
     const result = { enabled: true, sources: 1, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
     for (const manual of [false, true]) {

@@ -4,6 +4,7 @@ import { recordPhase, refreshCatalogProjectionD1, refreshCatalogProjectionR2, ru
 import { publishProspectiveShadowMetadata } from './shadow-publication.js';
 import { billingStopped, isolationEnabled } from './isolated-work.js';
 import { isolatedScheduleRequest } from './isolated-schedule.js';
+import { isR2InternalFailure } from './r2-errors.js';
 import type { D1Database, R2Bucket, ScheduledController } from './types.js';
 
 export interface CatalogPublisherEnvironment {
@@ -19,7 +20,13 @@ export default {
     const event = await isolatedScheduleRequest(request, ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *', '1-51/10 * * * *', '4,14,24,34,44,54 * * * *', '4-54/10 * * * *']);
     if (!event || !isolationEnabled(env)) return new Response('Not found', { status: 404 });
     if (await billingStopped(env.DB)) return new Response('Billing stopped', { status: 503 });
-    await runProtectedSchedule(event, env);
+    try {
+      await runProtectedSchedule(event, env);
+    } catch (error) {
+      if (!deferR2Failure(error, event)) throw error;
+      return Response.json({ completed: false, deferred: true, failureClass: 'r2-internal' },
+        { status: 503, headers: { 'Retry-After': '600' } });
+    }
     return Response.json({ completed: true });
   },
   // Cloudflare may retain native deliveries after the registration moves. Keep
@@ -27,9 +34,22 @@ export default {
   // pointer fences protect both native and private-binding invocations.
   async scheduled(event: ScheduledController, env: CatalogPublisherEnvironment): Promise<void> {
     if (!isolationEnabled(env) || await billingStopped(env.DB)) return;
-    await runProtectedSchedule(event, env);
+    try {
+      await runProtectedSchedule(event, env);
+    } catch (error) {
+      if (!deferR2Failure(error, event)) throw error;
+    }
   },
 };
+
+function deferR2Failure(error: unknown, event: ScheduledController): boolean {
+  if (!isR2InternalFailure(error)) return false;
+  // Rebuild on the next cadence. Retrying a conditional pointer write here
+  // could turn a lost successful acknowledgement into a precondition miss.
+  console.warn(JSON.stringify({ event: 'cloudflare_catalog_projection_deferred',
+    cron: event.cron, failureClass: 'r2-internal', retryAfterSeconds: 600 }));
+  return true;
+}
 
 async function runProtectedSchedule(event: ScheduledController, env: CatalogPublisherEnvironment): Promise<void> {
   const key = 'maintenance_lease:catalog_publisher';
@@ -57,10 +77,17 @@ async function runScheduled(event: ScheduledController, env: CatalogPublisherEnv
   const store = new D1InternshipStore(env.DB);
   if (event.cron === '1-51/10 * * * *' || event.cron === '1,11,21,31,41,51 * * * *') {
     const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection');
+    let projectionFailure: unknown;
     const result = await runCatalogProjectionMaintenance(
       (refresh) => publishProspectiveShadowMetadata(env, refresh),
-      () => refreshCatalogProjectionD1(store, env.DOCUMENTS, phases), phases);
-    if (!result.projection) throw new Error('D1 catalog projection failed');
+      () => refreshCatalogProjectionD1(store, env.DOCUMENTS, phases).catch(error => {
+        projectionFailure = error;
+        throw error;
+      }), phases);
+    if (!result.projection) {
+      if (isR2InternalFailure(projectionFailure)) throw projectionFailure;
+      throw new Error('D1 catalog projection failed');
+    }
     await recordPhase(phases, 'catalog_projection_complete', 'complete', observedAt);
     console.log(JSON.stringify({ event: 'cloudflare_catalog_projection_complete', observedAt: observedAt.toISOString(), ...result }));
   } else if (event.cron === '5,15,25,35,45,55 * * * *' || event.cron === '4,14,24,34,44,54 * * * *' || event.cron === '4-54/10 * * * *') {
