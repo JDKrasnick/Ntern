@@ -136,7 +136,8 @@ export async function runGreenhouseBoard(
 
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
-    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({ naturalProviderPoll: !message.force });
+    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({
+    naturalProviderPoll: !message.force, forceFullAcquisition: message.force === true });
   const pollFailure = failureFromPollReport(poll, sourceHealth);
   if (pollFailure) throw pollFailure;
   const checkpoint = await dependencies.store.getCheckpoint(source.id);

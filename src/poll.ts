@@ -1472,6 +1472,7 @@ export class IngestionRunner {
     maxAdmissionMigrationListingsPerSourceRun?: number;
     maxListingsPerSourceRun?: number;
     naturalProviderPoll?: boolean;
+    forceFullAcquisition?: boolean;
   } = {}): Promise<PollReport> {
     const report: PollReport = {
       fetchedSources: 0,
@@ -1518,7 +1519,8 @@ export class IngestionRunner {
           && prefetched.admissionConfigurationVersion !== prefetched.previous.admissionConfigurationVersion));
         const metadataVersionChanged = prefetched.previous?.metadataExtractionVersion !== ROLE_METADATA_EXTRACTION_VERSION
           || prefetched.previous?.metadataProcessingRevision !== SOURCE_METADATA_PROCESSING_REVISION;
-        const fullBoardRequired = this.shadowDiscovery?.isEnabledForSource(connector.id) === true
+        const fullBoardRequired = options.forceFullAcquisition === true
+          || this.shadowDiscovery?.isEnabledForSource(connector.id) === true
           || this.v2CatalogWriteOwner?.(connector.id) === true
           || Boolean(prefetched.previous?.pendingResolutionRows?.length);
         const fetchCheckpoint = fullBoardRequired && prefetched.previous ? {
@@ -1612,7 +1614,8 @@ export class IngestionRunner {
         // Only the validators are cleared: the content hash still labels the
         // re-read as unchanged instead of reporting a spurious source change.
         const resolutionPassOpen = Boolean(previous?.pendingResolutionRows?.length);
-        const shadowFullBoardRequired = this.shadowDiscovery?.isEnabledForSource(connector.id) === true
+        const shadowFullBoardRequired = options.forceFullAcquisition === true
+          || this.shadowDiscovery?.isEnabledForSource(connector.id) === true
           || v2OwnsCatalogWrites;
         const fetchCheckpoint = (resolutionPassOpen || shadowFullBoardRequired) && previous ? {
           ...previous,
@@ -2544,6 +2547,7 @@ export class Poller extends IngestionRunner {
     maxAdmissionMigrationListingsPerSourceRun?: number;
     maxListingsPerSourceRun?: number;
     naturalProviderPoll?: boolean;
+    forceFullAcquisition?: boolean;
   } = {}) {
     return this.run(options);
   }
