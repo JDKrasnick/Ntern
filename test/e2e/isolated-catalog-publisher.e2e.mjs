@@ -305,7 +305,8 @@ test('R2 failure invalidates the old pointer and does not advance the completion
 test('compiled publication defers an internal R2 page failure without claiming completion or retrying in the delivery', async () => {
   const cron = '5,15,25,35,45,55 * * * *';
   const before = await marker('catalog_projection_r2');
-  await bucket.put('public-catalog/v1/current', JSON.stringify({ schemaVersion: 0, generatedAt: new Date().toISOString() }));
+  const generation = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first()).value).generatedAt;
+  await bucket.put('public-catalog/v1/current', JSON.stringify({ schemaVersion: 0, generatedAt: generation }));
   let pageAttempts = 0;
   const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket), async put(key, value, options) {
     if (!key.endsWith('/current')) { pageAttempts++; throw new Error('put: We encountered an internal error. Please try again. (10001)'); }
@@ -327,7 +328,8 @@ test('compiled publication defers an internal R2 page failure without claiming c
 for (const committed of [false, true]) test(`compiled ingestion preserves staged pages when R2 activation acknowledgement fails (committed=${committed})`, async () => {
   const cron = '5,15,25,35,45,55 * * * *';
   const before = await marker('catalog_projection_r2');
-  await bucket.put('public-catalog/v1/current', JSON.stringify({ schemaVersion: 0, generatedAt: new Date().toISOString() }));
+  const generation = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first()).value).generatedAt;
+  await bucket.put('public-catalog/v1/current', JSON.stringify({ schemaVersion: 0, generatedAt: generation }));
   let activationAttempts = 0, attemptedPointer;
   const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket), async put(key, value, options) {
     const payload = key.endsWith('/current') ? JSON.parse(new TextDecoder().decode(value)) : undefined;
