@@ -38,6 +38,8 @@ import { reconcileIngestionV2Omissions } from '../src/ingestion-v2/omission-clos
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
 import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState } from '../src/ingestion-v2/types.js';
 import { runAdmissionV2Dispatch } from './admission-v2-dispatch.js';
+import { forwardIsolatedSchedule } from './isolated-schedule.js';
+import type { ServiceBinding } from './split.js';
 export { ADMISSION_V2_SOURCE_LIMIT } from './admission-v2-dispatch.js';
 import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import { applyIngestionV2Bootstrap, planIngestionV2Bootstrap } from '../src/ingestion-v2/bootstrap.js';
@@ -145,6 +147,8 @@ export interface Environment extends AuthEnvironment,
   BILLING_WEBHOOK_SECRET?: string;
   CLOUDFLARE_SHUTDOWN_TOKEN?: string;
   INGESTION_V2_ISOLATED_WORKERS_ENABLED?: string;
+  ADMISSION_WORKER?: ServiceBinding;
+  CATALOG_PUBLISHER?: ServiceBinding;
   CLOUDFLARE_ACCOUNT_ID: string;
   WORKER_NAME: string;
   GREENHOUSE_QUEUE_ID: string;
@@ -2126,7 +2130,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     return;
   }
   if (event.cron === '1-51/10 * * * *') {
-    if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') return;
+    if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') {
+      await forwardIsolatedSchedule(env.CATALOG_PUBLISHER, event);
+      return;
+    }
     const observedAt = new Date(event.scheduledTime);
     // The catalog projection is the Roles feed's whole source of truth, and it is
     // the memory-heaviest scheduled work. This invocation groups and writes D1;
@@ -2153,7 +2160,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   // Cloudflare can continue delivering the prior expression after its schedule
   // API reports the replacement. Both expressions describe the same phase.
   if (event.cron === '4,14,24,34,44,54 * * * *' || event.cron === '4-54/10 * * * *') {
-    if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') return;
+    if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') {
+      await forwardIsolatedSchedule(env.CATALOG_PUBLISHER, event);
+      return;
+    }
     const observedAt = new Date(event.scheduledTime);
     const phases = new D1MaintenancePhaseStore(env.DB, 'catalog_projection_r2');
     const projection = await runScheduledStep(
@@ -2186,7 +2196,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const recentOverloads = await step('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const admissionVerificationRetries = await step('admission_verification_warnings', () => enqueueDueDestinationVerifications(env, observedAt));
     const admissionV2Dispatch = env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true'
-      ? { enabled: false, isolated: true, batches: 0 }
+      ? await step('ingestion_v2_admission_dispatch', async () => {
+        await forwardIsolatedSchedule(env.ADMISSION_WORKER, event);
+        return { enabled: false, isolated: true, batches: 0 };
+      })
       : await step('ingestion_v2_admission_dispatch', () => runAdmissionV2Dispatch(env, observedAt));
     if (admissionV2Dispatch?.enabled && admissionV2Dispatch.batches > 0) {
       console.log(JSON.stringify({ event: 'ingestion_v2_admission_dispatch', observedAt: observedAt.toISOString(), ...admissionV2Dispatch }));

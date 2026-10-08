@@ -1,9 +1,19 @@
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { DEV_SOAK_EXHAUSTED_FAILURES_SQL, devSoakCoverage, evaluateDevSoak, loadDevSoakDeployments, nextDevSoakSampleAt, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
+import { DEV_SOAK_EXHAUSTED_FAILURES_SQL, devSoakCoverage, evaluateDevSoak, isolatedScheduledServiceMismatches, loadDevSoakDeployments, nextDevSoakSampleAt, parseDevSoakConfig, runtimeWorkerIdentity, type DevSoakSample } from '../scripts/ingestion-v2-dev-soak.js';
 
 describe('scheduled soak observation boundaries', () => {
+  it('rejects missing or production service targets in the dev scheduled handoff', () => {
+    const worker = 'intern-notifs-dev-ingestion';
+    const bindings = [
+      { name: 'ADMISSION_WORKER', type: 'service', service: 'intern-notifs-dev-admission' },
+      { name: 'CATALOG_PUBLISHER', type: 'service', service: 'intern-notifs-dev-catalog-publisher' },
+    ];
+    expect(isolatedScheduledServiceMismatches(worker, bindings)).toEqual([]);
+    expect(isolatedScheduledServiceMismatches(worker, bindings.slice(0, 1))).toHaveLength(1);
+    expect(isolatedScheduledServiceMismatches(worker, [bindings[0]!, { ...bindings[1]!, service: 'intern-notifs-catalog-publisher' }])).toHaveLength(1);
+  });
   it.each([
     ['2026-10-06T06:12:00.000Z', '2026-10-06T06:16:00.000Z'],
     ['2026-10-06T06:16:00.000Z', '2026-10-06T06:16:00.000Z'],
@@ -251,11 +261,15 @@ describe('full dev ownership evidence', () => {
     expect(ingestion.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED).toBe('true');
     expect(admission.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED).toBe('true');
     expect(publisher.vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED).toBe('true');
-    expect(admission.triggers.crons).toEqual(['9-59/10 * * * *']);
+    expect(admission.triggers.crons).toEqual([]);
     expect(ingestion.triggers.crons).toContain('9-59/10 * * * *');
-    expect(publisher.triggers.crons).toEqual(['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']);
-    expect(ingestion.triggers.crons).not.toContain('1-51/10 * * * *');
-    expect(ingestion.triggers.crons).not.toContain('4,14,24,34,44,54 * * * *');
+    expect(publisher.triggers.crons).toEqual([]);
+    expect(ingestion.triggers.crons).toContain('1-51/10 * * * *');
+    expect(ingestion.triggers.crons).toContain('4,14,24,34,44,54 * * * *');
+    expect(ingestion.services).toEqual([
+      { binding: 'ADMISSION_WORKER', service: admission.name },
+      { binding: 'CATALOG_PUBLISHER', service: publisher.name },
+    ]);
     expect(ingestion.queues.consumers.some((consumer: { queue: string }) => consumer.queue === 'intern-notifs-dev-admission-v2')).toBe(false);
     expect(admission.queues.consumers).toEqual([
       expect.objectContaining({ queue: 'intern-notifs-dev-admission-v2', max_batch_size: 1, max_concurrency: 1 }),

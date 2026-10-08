@@ -44,6 +44,28 @@ const contentUpdate = {
   },
 };
 
+describe('isolated scheduled service bindings', () => {
+  const services = [
+    { name: 'ADMISSION_WORKER', type: 'service', service: 'intern-notifs-admission', environment: null, entrypoint: null },
+    { name: 'CATALOG_PUBLISHER', type: 'service', service: 'intern-notifs-catalog-publisher', environment: null, entrypoint: null },
+  ];
+  const before = { ...worker, script_name: 'intern-notifs-ingestion' };
+  const resource = (bindings: unknown[]) => ({ address: 'cloudflare_workers_script.ingestion', actions: ['update'],
+    before, after: { ...before, content_sha256: 'new-sha', bindings } });
+  it('allows both exact private services without changing another binding', () => {
+    expect(validateCloudflarePlan(plan([resource([...before.bindings, ...services])]))).toHaveLength(1);
+  });
+  it.each(['partial', 'wrong-target', 'environment', 'other-binding', 'duplicate'])('rejects %s service routing', (fault) => {
+    const bindings = structuredClone([...before.bindings, ...services]);
+    if (fault === 'partial') bindings.pop();
+    if (fault === 'wrong-target') Object.assign(bindings[1]!, { service: 'external-service' });
+    if (fault === 'environment') Object.assign(bindings[1]!, { environment: 'staging' });
+    if (fault === 'other-binding') Object.assign(bindings[0]!, { id: 'another-db' });
+    if (fault === 'duplicate') bindings.push(services[0]!);
+    expect(() => validateCloudflarePlan(plan([resource(bindings)]))).toThrow('unsafe');
+  });
+});
+
 describe('Cloudflare deployment plan guard', () => {
   it('accepts the captured provider cron transfer with timestamp metadata but rejects unknown schedule values', () => {
     const captured = JSON.parse(readFileSync(new URL('./fixtures/cloudflare-isolation-cron-plan.json', import.meta.url), 'utf8'));

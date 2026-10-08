@@ -21,6 +21,13 @@ export function parseDevSoakConfig(text: string): { name: string; vars: Record<s
   }
   return config;
 }
+
+export function isolatedScheduledServiceMismatches(worker: string, bindings: Array<{ name: string; type: string; service?: string }>): string[] {
+  return [['ADMISSION_WORKER', 'admission'], ['CATALOG_PUBLISHER', 'catalog-publisher']]
+    .filter(([name, role]) => bindings.filter(b => b.name === name && b.type === 'service'
+      && b.service === worker.replace(/-ingestion$/u, `-${role}`)).length !== 1)
+    .map(([name]) => `${worker}: ${name} has an unexpected private target`);
+}
 const DEV_CONFIG = parseDevSoakConfig(readFileSync(process.env.INGESTION_V2_DEV_CONFIG
   ?? new URL('../wrangler.dev.ingestion.jsonc', import.meta.url), 'utf8'));
 const EXPECTED_CRONS = (JSON.parse(readFileSync(new URL('../wrangler.ingestion.jsonc', import.meta.url), 'utf8')) as { triggers: { crons: string[] } }).triggers.crons;
@@ -445,8 +452,7 @@ async function main(): Promise<number> {
       .filter(([name, expected]) => live.bindings.find((binding) => binding.name === name && binding.type === 'plain_text')?.text !== expected)
       .map(([name]) => `${worker}: ${name} differs from selected dev profile`));
   for (const row of extraSettings) {
-    const expected = row.role === 'admission' ? ['9-59/10 * * * *'] : ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'];
-    if (row.schedules.length !== expected.length || expected.some((cron) => !row.schedules.includes(cron))) controlMismatches.push(`${row.worker}: cron ownership differs`);
+    if (row.schedules.length) controlMismatches.push(`${row.worker}: private Worker still has cron registrations`);
     if (row.live.bindings.find((b) => b.name === 'INGESTION_V2_ISOLATED_WORKERS_ENABLED')?.text !== 'true') controlMismatches.push(`${row.worker}: isolation disabled`);
     if (row.live.bindings.find((b) => b.name === 'OUTBOUND_NOTIFICATIONS_ENABLED')?.text !== 'false') controlMismatches.push(`${row.worker}: outbound suppression differs`);
     if (row.role === 'catalog-publisher' && row.live.bindings.find((b) => b.name === 'LLM_METADATA_PUBLICATION_POLICY_JSON')?.text !== DEV_CONFIG.vars.LLM_METADATA_PUBLICATION_POLICY_JSON) controlMismatches.push(`${row.worker}: metadata publication policy differs`);
@@ -457,7 +463,7 @@ async function main(): Promise<number> {
     const owner = workerName.replace(/-ingestion$/u, '-admission');
     if (consumers.length !== 1 || (consumers[0]?.script_name ?? consumers[0]?.script ?? consumers[0]?.service) !== owner) controlMismatches.push('Admission queue has an unexpected consumer');
   }
-  if (isolated && schedules.schedules.some((s) => ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'].includes(s.cron))) controlMismatches.push('Legacy ingestion still owns projection crons');
+  if (isolated) controlMismatches.push(...isolatedScheduledServiceMismatches(workerName, settings.bindings));
   if (isolated && !schedules.schedules.some((s) => s.cron === '9-59/10 * * * *')) controlMismatches.push('Ingestion general maintenance cron is missing');
   const sample: DevSoakSample = {
     capturedAt: capturedAt.toISOString(), windowStartedAt: windowStart, windowHours, runtime,

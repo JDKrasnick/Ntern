@@ -449,6 +449,7 @@ describe('Cloudflare maintenance cron', () => {
       await cloudflareWorker.scheduled({ cron, scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         DB: { prepare: () => ({ async first() { return null; } }) },
         INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true',
+        CATALOG_PUBLISHER: { async fetch() { return Response.json({ completed: true }); } },
         DOCUMENTS: { get() { throw new Error('unexpected second publisher'); } },
       } as unknown as Environment);
       expect(snapshot).not.toHaveBeenCalled();
@@ -479,6 +480,7 @@ describe('Cloudflare maintenance cron', () => {
         cron: '9-59/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:09:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         INGESTION_V2_ISOLATED_WORKERS_ENABLED: isolated,
+        ADMISSION_WORKER: { async fetch() { return Response.json({ completed: true }); } },
         DB: { prepare: (query: string) => {
           maintenanceStatements.push(query);
           const statement = {
@@ -511,7 +513,7 @@ describe('Cloudflare maintenance cron', () => {
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"legacy_posting_identity_incident_drain"'));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"deleted":5000'));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
-      if (isolated === 'true') expect(markers).not.toHaveBeenCalledWith('ingestion_v2_admission_dispatch', 'started');
+      if (isolated === 'true') expect(markers).toHaveBeenCalledWith('ingestion_v2_admission_dispatch', 'complete');
     } finally {
       vi.restoreAllMocks();
     }

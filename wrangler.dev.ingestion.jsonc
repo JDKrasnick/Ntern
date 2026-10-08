@@ -54,8 +54,12 @@
       { "queue": "intern-notifs-dev-resume-job-import", "max_batch_size": 1, "max_concurrency": 1, "max_retries": 2, "dead_letter_queue": "intern-notifs-dev-resume-job-import-dlq" }
     ]
   },
+  "services": [
+    { "binding": "ADMISSION_WORKER", "service": "intern-notifs-dev-admission" },
+    { "binding": "CATALOG_PUBLISHER", "service": "intern-notifs-dev-catalog-publisher" }
+  ],
   "triggers": {
-    "crons": ["*/5 * * * *", "7-57/10 * * * *", "9-59/10 * * * *", "6-56/10 * * * *", "12,42 * * * *", "22,52 * * * *", "2,32 * * * *", "0 * * * *", "34 8 * * *", "17 9 * * *"]
+    "crons": ["*/5 * * * *", "7-57/10 * * * *", "9-59/10 * * * *", "1-51/10 * * * *", "4,14,24,34,44,54 * * * *", "6-56/10 * * * *", "12,42 * * * *", "22,52 * * * *", "2,32 * * * *", "0 * * * *", "34 8 * * *", "17 9 * * *"]
   },
   "version_metadata": { "binding": "VERSION_METADATA" },
   "vars": {
