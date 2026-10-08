@@ -73,14 +73,16 @@ export function processPosting(
   }
   const sourceTitle = htmlToText(posting.title);
   const title = repairTitle(sourceTitle, employerTitles);
+  // This scope decision uses only the title. Avoid converting large employer
+  // descriptions that cannot affect the rejection.
+  if (posting.lifecycleAuthority !== 'source' && posting.lifecycleAuthority !== 'posting' && !hasLifecycleTitleSignal(title)) {
+    return { decision: { externalId: posting.externalId, outcome: 'filtered', reason: 'not-early-career' } };
+  }
   const content = contentText(posting);
   const shadowDescription = posting.content.map(part => metadataDescriptionText(part.format === 'markdown'
     ? part.value.replace(/!\[[^\]]*\]\([^)]*\)/gu, ' ')
       .replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1').replace(/[*`>#]/gu, ' ')
     : part.value)).join('\n');
-  if (posting.lifecycleAuthority !== 'source' && posting.lifecycleAuthority !== 'posting' && !hasLifecycleTitleSignal(title)) {
-    return { decision: { externalId: posting.externalId, outcome: 'filtered', reason: 'not-early-career' } };
-  }
   const company = htmlToText(posting.employer.name);
   const sourceLocations = posting.locations.map(htmlToText).filter(Boolean);
   const locations = normalizeLocations(sourceLocations);

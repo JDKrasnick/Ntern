@@ -17,6 +17,26 @@ const posting = (overrides: Partial<SourcedPosting> = {}): SourcedPosting => ({
 });
 
 describe('shared posting processor', () => {
+  it('rejects a role outside early-career scope without reading its description', () => {
+    const row = posting({ title: 'Senior Software Engineer' });
+    let descriptionReads = 0;
+    Object.defineProperty(row, 'content', { get: () => {
+      descriptionReads += 1;
+      return [{ kind: 'description', format: 'html', value: '<p>Senior engineering responsibilities.</p>' }];
+    } });
+    expect(processPosting(row)).toEqual({ decision: {
+      externalId: 'role-1', outcome: 'filtered', reason: 'not-early-career',
+    } });
+    expect(descriptionReads).toBe(0);
+  });
+
+  it.each(['source', 'posting'] as const)('keeps description evidence for an authoritative %s lifecycle', lifecycleAuthority => {
+    const result = processPosting(posting({ title: 'Software Engineer', lifecycleAuthority }));
+    expect(result.listing).toMatchObject({ compensation: { maxHourlyUSD: 50 },
+      requirements: { requiresUsCitizenship: true }, technical: true });
+    expect(result.decision.outcome).toBe('included');
+  });
+
   it.each([
     'Applicants must be graduating from a degree program in Spring 2028.',
     'Applicants must complete their degree program in Spring 2028 before graduation.',

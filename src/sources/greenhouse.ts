@@ -40,12 +40,13 @@ export interface GreenhouseAdapterOptions {
 
 /**
  * Board ceiling measured against the isolate: a `content=true` board is held as
- * UTF-16, and `JSON.parse` plus the mapped postings peak near 3.7× the body
- * bytes, so 16 MB leaves roughly a third of the memory limit for the occurrence
- * set, the reconciliation plan, and notification fanout. Boards above it fail
- * as `capacity` before `JSON.parse` instead of exhausting the isolate.
+ * UTF-16, and parsing, metadata extraction, and snapshot serialization retain
+ * additional copies. Use bounded index/detail acquisition above 8 MB to leave
+ * headroom for reconciliation and notification fanout in the same isolate.
+ * The oversized response stops before JSON.parse; its postings arrive through
+ * the existing resumable detail batches instead.
  */
-export const GREENHOUSE_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+export const GREENHOUSE_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
 export const GREENHOUSE_JOB_MAX_BYTES = 512 * 1024;
 export const GREENHOUSE_BOARD_MAX_JOBS = 5_000;
 export const GREENHOUSE_CONTENT_HASH_VERSION = 2;

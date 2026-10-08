@@ -250,9 +250,9 @@ describe('GreenhouseBoardAdapter', () => {
     });
     await expect(adapter.fetch()).rejects.toMatchObject({ category: 'capacity', message: expect.stringContaining('listing') });
   });
-  // Both sizes below are the measured production boards: `spacex` at 27,849,116 B
-  // and `andurilindustries` at 40,679,935 B, each now over the response ceiling.
+  // Measured production bodies, including Lucid below the former 16 MB ceiling.
   it.each([
+    ['lucidmotors', 11_342_607],
     ['spacex', PRODUCTION_GREENHOUSE_BOARD_BYTES.spacex],
     ['andurilindustries', PRODUCTION_GREENHOUSE_BOARD_BYTES.anduril],
   ])('stops reading the measured %s board early, then reads its listing', async (_board, boardBytes) => {
