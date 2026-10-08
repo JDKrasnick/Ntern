@@ -271,11 +271,12 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
     const checklistPeriod = monitoringPeriod(new Date(timestamp));
     const [healthRecords, checkpoints, storedChecklist] = await Promise.all([
       dependencies.store.getSourceHealthMany(ids),
-      Promise.all(sources.map((source) => dependencies.store.getCheckpoint(source.checkpointId))),
+      dependencies.store.getCheckpointsMany(sources.map((source) => source.checkpointId)),
       dependencies.store.getMonitoringChecklist(checklistPeriod),
     ]);
     const health = new Map(healthRecords.map((record) => [record.sourceId, record]));
-    const rows = sources.map((source, index) => publicSource(source, health.get(source.sourceId), checkpoints[index], timestamp));
+    const checkpointById = new Map(checkpoints.map((checkpoint) => [checkpoint.sourceId, checkpoint]));
+    const rows = sources.map((source) => publicSource(source, health.get(source.sourceId), checkpointById.get(source.checkpointId), timestamp));
 
     const checklistMatch = path.match(/^\/operations\/checklist\/([^/]+)$/);
     if (checklistMatch && method === 'POST') {
