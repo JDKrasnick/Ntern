@@ -948,6 +948,13 @@ describe('Cloudflare deployment plan guard', () => {
     });
     // The canary the rollout depends on: turn admission on and scope it.
     expect(validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: 'vanshb03-summer-2027' })]))).toHaveLength(1);
+    // A full registry is larger than the old 1,000-character canary bound.
+    const fleet = Array.from({ length: 344 }, (_, i) => `greenhouse-reviewed-${i}`).join(',');
+    expect(fleet.length).toBeGreaterThan(1000);
+    expect(fleet.length).toBeLessThanOrEqual(8192);
+    expect(validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: fleet })]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: 'x'.repeat(8193) })]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: '*' })]))).toThrow('Refusing unsafe Cloudflare plan');
     // And it can be turned back off.
     expect(validateCloudflarePlan(plan([admissionUpdate({ enabled: 'false', allowlist: '' })]))).toHaveLength(1);
     // An invalid enablement value is still refused.

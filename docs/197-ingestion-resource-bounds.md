@@ -702,3 +702,26 @@ both the D1 write and R2 validation, while preserving all role IDs and provenanc
 These local measurements do not establish Cloudflare headroom: the repaired
 exact-version runtime still needs independent production observation before the
 expedited source cohorts advance.
+
+### Projection input hydration and fleet control bounds
+
+PR #514 released raw catalog jobs before D1/R2 publication awaits, but the next
+production projection still reported 137.4 MiB memory p99 on its minute sample
+with no runtime errors. That leaves the resource-headroom gate pending.
+
+The projection-only D1 read now removes unused top-level destination diagnostics,
+posting-identity evidence, notification state, and non-audience role metadata
+before hydration, and reads 25 composite-key rows per page. Normal job/API reads
+still return their complete records. Catalog grouping keeps its original inputs
+for employer identity, eligibility, education, posting status, and all source
+references; output ordering and public card content must remain unchanged.
+
+A representative 4,500-role local fixture measured grouped heap at 133.3 MiB
+instead of 158.0 MiB (about 24.7 MiB less), with identical ordered catalog hashes.
+This is a local comparison, not proof of live Worker headroom. Require a completed
+natural projection and producer/R2 cycle on the deployed revision before expansion.
+
+Explicit V2 source allowlists are limited to 8 KiB by the deployment guard. The
+344-source production list is approximately 6.8 KiB and exceeded the old 1,000
+character canary limit. Wildcards, invalid source-list characters, unrelated
+binding changes, and values above the bound remain refused.
