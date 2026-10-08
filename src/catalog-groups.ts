@@ -516,11 +516,22 @@ function catalogGroupRole(job: Internship): CatalogGroupRole {
     ...(job.graduationWindow ? { graduationWindow: job.graduationWindow } : {}),
     ...(job.programType ?? identityProgramType ? { programType: job.programType ?? identityProgramType } : {}),
     firstSeenAt: job.firstSeenAt, lastSeenAt: job.lastSeenAt,
-    sourceReferences: job.sourceReferences,
+    sourceReferences: job.sourceReferences.map(publicCatalogReference),
     ...(job.applicationUrlValidatedAt ? { applicationUrlValidatedAt: job.applicationUrlValidatedAt } : {}),
     ...(job.invalidApplicationUrl ? { invalidApplicationUrl: job.invalidApplicationUrl } : {}),
     ...(job.postingIdentityStatus ? { postingIdentityStatus: job.postingIdentityStatus } : {}),
   };
+}
+
+function publicCatalogReference(reference: Internship['sourceReferences'][number]): Internship['sourceReferences'][number] {
+  const publicReference = { ...reference };
+  delete publicReference.metadataEvidence;
+  delete publicReference.admission;
+  delete publicReference.postingIdentityDecision;
+  delete publicReference.trustedCommunityAlertQualification;
+  delete publicReference.metadataExtraction;
+  delete publicReference.sourceMetadataProcessing;
+  return publicReference;
 }
 
 function includesFolded(values: string[], requested: string[]) {
