@@ -248,7 +248,7 @@ export async function planDlq(input: {
 
 interface PlanRow {
   plan_id: string; repair_token_hash: string; queue_name: DlqName; operation: 'replay' | 'discard'; reason: string;
-  expected_count: number; expires_at: string; applying_at: string | null; applied_at: string | null;
+  expected_count: number; created_at: string; expires_at: string; applying_at: string | null; applied_at: string | null;
 }
 interface ItemRow {
   message_id: string; payload_hash: string; message_body: string; logical_key: string; source_id: string | null;
@@ -366,9 +366,14 @@ export async function applyDlq(input: { planId?: unknown; repairToken?: unknown;
         // pending: resolve it with the disposition. Otherwise a reconciled DLQ
         // leaves rows unresolved until the 30-day cleanup and the operator
         // "unresolved" signal keeps counting work a human already handled.
+        // Cloudflare may assign a new ID during the DLQ transfer. Correlate
+        // those original deliveries by the exact payload and source as well,
+        // but never resolve failures created by this repair's replay.
         dependencies.db.prepare(`UPDATE queue_failure_events SET resolved_at = ?
-          WHERE queue_name = ? AND message_id = ? AND resolved_at IS NULL`)
-          .bind(now.toISOString(), queueName(plan.queue_name, false), item.message_id),
+          WHERE queue_name = ? AND resolved_at IS NULL AND last_failed_at <= ?
+            AND (message_id = ? OR (payload_hash = ? AND source_id IS ?))`)
+          .bind(now.toISOString(), queueName(plan.queue_name, false), plan.created_at,
+            item.message_id, item.payload_hash, item.source_id),
       ]);
     }
     const conflicts = pending.filter((entry) => failed.has(entry.selection.ref)).map((entry) => entry.item.message_id);

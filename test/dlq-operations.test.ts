@@ -314,6 +314,31 @@ describe('protected DLQ operations', () => {
     database.close();
   });
 
+  it.each(['replay', 'discard'])('resolves transferred delivery IDs after %s without clearing new or unrelated failures', async action => {
+    const [body] = buildAdmissionV2Messages({ sourceId: 'canadian-tech-2027', snapshotHash: 'a'.repeat(64),
+      snapshotKey: 'snapshot', admissionVersion: 'v1', baseline: true, externalIds: ['reviewed-row'] });
+    const message: PeekedMessage = { id: 'dlq-transfer-id', attempts: 0, body, ref: 'private-transfer-ref' };
+    const { database, dependencies } = subject([message]);
+    const failure = { db: dependencies.db, queueName: 'intern-notifs-admission-v2', sourceId: body!.sourceId,
+      body, error: new Error('D1 unavailable'), now: new Date('2026-09-04T10:00:00.000Z') };
+    try {
+      await recordQueueFailure({ ...failure, messageId: 'original-delivery-id', attempts: 3 });
+      await recordQueueFailure({ ...failure, messageId: 'different-source', sourceId: 'other-source' });
+      await recordQueueFailure({ ...failure, messageId: 'different-payload', body: { ...body, baseline: false } });
+      await recordQueueFailure({ ...failure, messageId: 'different-queue', queueName: 'intern-notifs-destination-verification' });
+      const plan = await planDlq({ queue: 'admission-v2', action, messageIds: [message.id], expectedCount: 1,
+        reason: 'Exact reviewed baseline delivery was transferred with a new ID' }, dependencies);
+      await recordQueueFailure({ ...failure, messageId: 'new-replay-failure', now: new Date('2026-09-04T12:00:00.001Z') });
+      dependencies.now = () => new Date('2026-09-04T12:01:00.000Z');
+      expect(await applyDlq({ planId: plan.planId, repairToken: plan.repairToken, expectedCount: 1 }, dependencies))
+        .toMatchObject({ appliedCount: 1, conflicts: [] });
+      expect(database.prepare('SELECT resolved_at FROM queue_failure_events WHERE message_id = ?').get('original-delivery-id'))
+        .toMatchObject({ resolved_at: '2026-09-04T12:01:00.000Z' });
+      expect(database.prepare('SELECT message_id FROM queue_failure_events WHERE resolved_at IS NULL ORDER BY message_id').all())
+        .toEqual(['different-payload', 'different-queue', 'different-source', 'new-replay-failure'].map(message_id => ({ message_id })));
+    } finally { database.close(); }
+  });
+
   it('does not throw when failure-ledger persistence is unavailable', async () => {
     const run = vi.fn(async () => { throw new Error('D1 unavailable'); });
     const db = {
