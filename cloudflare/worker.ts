@@ -970,6 +970,9 @@ function edgeIconCache(): EdgeCache | undefined {
 async function fetchHandler(request: Request, env: Environment): Promise<Response> {
   if (request.method === 'OPTIONS') return withCors(new Response(null, { status: 204 }));
   const url = new URL(request.url);
+  if (request.method === 'GET' && url.pathname === '/internal/operations/sources') {
+    env = { ...env, DB: resilientD1(env.DB, { attempts: 3, attemptTimeoutMs: 5_000 }) };
+  }
   const credentials = logoDevCredentials(env);
   const imageToken = credentials.logoDevImageToken;
   if (url.pathname === '/internal/billing-shutdown') return billingShutdown(request, env);

@@ -34,6 +34,35 @@ const queue = (metrics: Queue['metrics']): Queue => ({
   metrics,
 });
 
+describe('source inspection reconnects', () => {
+  it.each([
+    ['D1_ERROR: Network connection lost.', 1, true],
+    ['D1_ERROR: Network connection lost.', 3, false],
+    ['SQLITE_ERROR: malformed query', 1, false],
+  ])('bounds retries for %s (%i failures)', async (message, failures, recovered) => {
+    let failed = 0;
+    const run = vi.fn();
+    const db = { prepare(sql: string) {
+      const statement = {
+        bind() { return statement; },
+        async first() { return null; },
+        async all() {
+          if (sql.includes("sk = 'CHECKPOINT'") && failed < failures) { failed++; throw new Error(message); }
+          return { results: [] };
+        },
+        run,
+      };
+      return statement;
+    } };
+    const env = { DB: db, OPERATIONS_SHARED_SECRET: 'secret' } as unknown as Environment;
+    const request = new Request('https://example.test/internal/operations/sources', { headers: { 'X-Operations-Key': 'secret' } });
+    if (recovered) expect((await cloudflareWorker.fetch(request, env)).status).toBe(200);
+    else await expect(cloudflareWorker.fetch(request, env)).rejects.toThrow(message);
+    expect(failed).toBe(failures);
+    expect(run).not.toHaveBeenCalled();
+  });
+});
+
 describe('V2 operations dispatch', () => {
   it('requires operations authorization and forwards only one explicit source to the private binding', async () => {
     const fetch = vi.fn(async (request: Request) => {

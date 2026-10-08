@@ -100,7 +100,8 @@ const apiProbedBoards: Array<{
   { token: "later", name: "Later", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "liberate", name: "Liberate", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "lilasciences", name: "Lila Sciences", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
-  { token: "lucidmotors", name: "Lucid Motors", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
+  // The board API now returns Lucid's official /careers/search/<id>?gh_jid=<id> pages.
+  { token: "lucidmotors", name: "Lucid Motors", initialHosts: ["job-boards.greenhouse.io", "lucidmotors.com"], finalHosts: ["job-boards.greenhouse.io", "lucidmotors.com"] },
   { token: "mixpanel", name: "Mixpanel", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "moloco", name: "Moloco", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "momentenergy", name: "Moment Energy", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
