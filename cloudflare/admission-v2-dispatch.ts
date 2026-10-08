@@ -1,6 +1,6 @@
 import { D1IngestionV2Repository } from './ingestion-v2-store.js';
 import { admissionSourceAllowed, type AdmissionV2Environment } from './admission-v2.js';
-import { admissionV2FeatureConfig } from '../src/ingestion-v2/admission/types.js';
+import { admissionV2FeatureConfig, admissionV2OwnsCatalogWrites } from '../src/ingestion-v2/admission/types.js';
 import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
 import { bootstrapAdmissionSnapshot, migrateAdmissionPolicy } from '../src/ingestion-v2/admission/migration.js';
 import type { Queue } from './types.js';
@@ -14,18 +14,25 @@ async function sendQueueMessages(queue: Queue, messages: unknown[]): Promise<voi
 }
 
 export const ADMISSION_V2_SOURCE_LIMIT = 500;
+export class AdmissionDispatchNotReady extends Error {}
 
-export async function runAdmissionV2Dispatch(env: AdmissionDispatchEnvironment, observedAt: Date): Promise<{ enabled: boolean; sources: number; bootstrapped: number; migrated: number; batches: number; rows: number }> {
+export async function runAdmissionV2Dispatch(env: AdmissionDispatchEnvironment, observedAt: Date, requestedSourceId?: string): Promise<{ enabled: boolean; sources: number; bootstrapped: number; migrated: number; batches: number; rows: number }> {
   const features = admissionV2FeatureConfig(env);
   if (!features.admissionEnabled) return { enabled: false, sources: 0, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
   const ledger = new D1IngestionV2Repository(env.DB);
-  const cursor = await ledger.getDispatchSourceCursor();
-  let selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT, cursor);
-  if (!selectedSourceIds.length && cursor) selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT);
-  const nextCursor = selectedSourceIds.length === ADMISSION_V2_SOURCE_LIMIT
-    ? selectedSourceIds[selectedSourceIds.length - 1]
-    : undefined;
-  await ledger.setDispatchSourceCursor(nextCursor, observedAt.toISOString());
+  let selectedSourceIds: string[];
+  if (requestedSourceId !== undefined) {
+    if (!admissionV2OwnsCatalogWrites(env, requestedSourceId)) throw new AdmissionDispatchNotReady('Source lacks matched V2 writer ownership');
+    selectedSourceIds = [requestedSourceId];
+  } else {
+    const cursor = await ledger.getDispatchSourceCursor();
+    selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT, cursor);
+    if (!selectedSourceIds.length && cursor) selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT);
+    const nextCursor = selectedSourceIds.length === ADMISSION_V2_SOURCE_LIMIT
+      ? selectedSourceIds[selectedSourceIds.length - 1]
+      : undefined;
+    await ledger.setDispatchSourceCursor(nextCursor, observedAt.toISOString());
+  }
   const sourceIds = selectedSourceIds.filter((sourceId) => admissionSourceAllowed(env, sourceId));
   let bootstrapped = 0;
   let migrated = 0;
@@ -37,8 +44,16 @@ export async function runAdmissionV2Dispatch(env: AdmissionDispatchEnvironment, 
     // it never hides a visible role or sets a source-wide suppression, so a new
     // eligible role still publishes while stale peers are regraded.
     const overview = await ledger.overview(sourceId);
+    if (requestedSourceId !== undefined && (overview.queued || overview.processing || overview.quarantined)) {
+      throw new AdmissionDispatchNotReady('Source admission work must drain before manual dispatch');
+    }
+    if (requestedSourceId !== undefined && await env.DB.prepare(
+      'SELECT 1 AS pending FROM ingestion_admission_handoffs WHERE source_id=? AND acknowledged_at IS NULL LIMIT 1',
+    ).bind(sourceId).first()) throw new AdmissionDispatchNotReady('Source admission handoffs must drain before manual dispatch');
+    if (requestedSourceId !== undefined && !overview.currentSnapshotHash) throw new AdmissionDispatchNotReady('Complete active snapshot required');
     if (overview.currentSnapshotHash) {
       const snapshot = await ledger.getSnapshot(sourceId, overview.currentSnapshotHash);
+      if (requestedSourceId !== undefined && !snapshot?.isComplete) throw new AdmissionDispatchNotReady('Complete active snapshot required');
       if (snapshot?.isComplete) {
         bootstrapped += await bootstrapAdmissionSnapshot(sourceId, snapshot.snapshotHash, snapshot.admissionVersion, { ledger, now: () => observedAt });
         const migration = await migrateAdmissionPolicy(sourceId, snapshot.admissionVersion, { ledger, now: () => observedAt });
@@ -53,4 +68,3 @@ export async function runAdmissionV2Dispatch(env: AdmissionDispatchEnvironment, 
   }
   return { enabled: true, sources: sourceIds.length, bootstrapped, migrated, batches, rows };
 }
-

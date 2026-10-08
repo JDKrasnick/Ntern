@@ -9,6 +9,16 @@ const request = (body: unknown, method = 'POST') => new Request('https://isolate
 });
 
 describe('private scheduled delivery', () => {
+  it('rejects unscoped manual dispatch and incomplete ownership before database work', async () => {
+    const DB = { prepare() { throw Error('unexpected database work'); } };
+    const manual = (body: unknown) => new Request('https://isolated.internal/internal/dispatch', { method: 'POST', body: JSON.stringify(body) });
+    expect((await admission.fetch(manual({ sourceId: 'greenhouse-figma' }), { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false' } as never)).status).toBe(404);
+    const env = { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true' } as never;
+    for (const body of [null, {}, { sourceId: '*' }, { sourceId: ['greenhouse-figma'] }, { sourceId: 'greenhouse-figma', limit: 9999 }]) {
+      expect((await admission.fetch(manual(body), env)).status).toBe(400);
+    }
+    expect((await admission.fetch(manual({ sourceId: 'greenhouse-figma' }), env)).status).toBe(409);
+  });
   it('preserves the natural cron and time and waits for acknowledged completion', async () => {
     const fetch = vi.fn(async (r: Request) => {
       expect(r.method).toBe('POST');

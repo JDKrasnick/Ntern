@@ -118,6 +118,53 @@ test('compiled publication retains public provenance without hydrating internal 
   }
 });
 
+test('compiled manual admission dispatch stays source-scoped, bounded, and separate from cron completion', async () => {
+  const admission = (await import('../../cloudflare/dist/admission/admission-worker.js')).default;
+  const source = 'greenhouse-manual-fixture', other = 'lever-other-fixture', hash = 'c'.repeat(64), policy = 'manual-policy', now = new Date().toISOString();
+  const cursor = await db.prepare('SELECT source_cursor FROM ingestion_v2_dispatch_state WHERE singleton=1').first();
+  const naturalMarker = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:admission_v2:dispatch'").first();
+  const sends = [];
+  const environment = { ...env, INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: `${source},${other}`,
+    INGESTION_V2_ADMISSION_ENABLED: 'true', INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: `${source},${other}`,
+    INGESTION_V2_CATALOG_WRITER_ENABLED: 'true', INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: `${source},${other}`,
+    INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: `${source},${other}`,
+    ADMISSION_V2_QUEUE: { async sendBatch(messages) { sends.push(...messages); } } };
+  const dispatch = () => admission.fetch(new globalThis.Request('https://isolated.internal/internal/dispatch', { method: 'POST', body: JSON.stringify({ sourceId: source }) }), environment);
+  try {
+    for (const id of [source, other]) await db.prepare("INSERT INTO ingestion_snapshots(source_id,snapshot_hash,object_key,admission_version,document_count,row_count,state,is_complete,baseline,created_at,activated_at) VALUES (?,?,?,?,1,?,'active',1,1,?,?)")
+      .bind(id, hash, `ingestion-v2/snapshots/${id}/${hash}.json`, policy, id === source ? 501 : 1, now, now).run();
+    for (let start = 0; start < 501; start += 25) await db.batch(Array.from({ length: Math.min(25, 501 - start) }, (_, offset) =>
+      db.prepare("INSERT INTO ingestion_rows(source_id,external_id,snapshot_hash,material_hash,admission_version,state,notification_baseline,first_observed_at,last_observed_at,updated_at) VALUES (?,?,?,?,?,'pending',1,?,?,?)")
+        .bind(source, `row-${String(start + offset).padStart(4, '0')}`, hash, hash, policy, now, now, now)));
+    await db.prepare("INSERT INTO ingestion_rows(source_id,external_id,snapshot_hash,material_hash,admission_version,state,notification_baseline,first_observed_at,last_observed_at,updated_at) VALUES (?,?,?,?,?,'pending',1,?,?,?)")
+      .bind(other, 'other-row', hash, hash, policy, now, now, now).run();
+    const response = await dispatch(); assert.equal(response.status, 200);
+    const result = await response.json(); assert.equal(result.rows, 500); assert.equal(result.sources, 1);
+    assert.equal(sends.reduce((n, message) => n + message.body.externalIds.length, 0), 500);
+    assert.ok(sends.every(message => message.body.sourceId === source && message.body.baseline === true));
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM ingestion_rows WHERE source_id=? AND state='pending'").bind(source).first()).n, 1);
+    assert.equal((await db.prepare("SELECT state FROM ingestion_rows WHERE source_id=?").bind(other).first()).state, 'pending');
+    const count = sends.length; assert.equal((await dispatch()).status, 409); assert.equal(sends.length, count);
+    await db.prepare("UPDATE ingestion_rows SET state='settled' WHERE source_id=?").bind(source).run();
+    const unacknowledged = await dispatch(); assert.equal(unacknowledged.status, 409);
+    assert.match((await unacknowledged.json()).message, /handoffs must drain/);
+    await db.prepare('UPDATE ingestion_admission_handoffs SET acknowledged_at=? WHERE source_id=?').bind(now, source).run();
+    await db.prepare('UPDATE ingestion_snapshots SET is_complete=0 WHERE source_id=?').bind(source).run();
+    const incomplete = await dispatch(); assert.equal(incomplete.status, 409);
+    assert.match((await incomplete.json()).message, /Complete active snapshot/);
+    assert.equal(sends.length, count);
+    assert.deepEqual(await db.prepare('SELECT source_cursor FROM ingestion_v2_dispatch_state WHERE singleton=1').first(), cursor);
+    assert.deepEqual(await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:admission_v2:dispatch'").first(), naturalMarker);
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
+  } finally {
+    for (const id of [source, other]) {
+      await db.prepare('DELETE FROM ingestion_admission_handoffs WHERE source_id=?').bind(id).run();
+      await db.prepare('DELETE FROM ingestion_rows WHERE source_id=?').bind(id).run();
+      await db.prepare('DELETE FROM ingestion_snapshots WHERE source_id=?').bind(id).run();
+    }
+  }
+});
+
 test('the real profile CLI rejects broken routes and delayed delivery before validated compiled dispatch', async () => {
   const root = fileURLToPath(new URL('../../', import.meta.url));
   const directory = await mkdtemp(join(tmpdir(), 'dev-profile-e2e-'));
