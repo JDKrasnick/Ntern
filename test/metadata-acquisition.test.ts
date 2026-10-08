@@ -250,6 +250,35 @@ describe('identity-bound public metadata APIs', () => {
       expect(result?.artifact?.text, `chunk ${chunkSize}`).toContain('backslash');
     }
   });
+  it('preserves the exact Ashby element ceiling and recovers after an oversized match', async () => {
+    const make = (length: number) => {
+      const job = { id: uuid, title: 'Boundary Intern', descriptionPlain: '', jobUrl: `https://jobs.ashbyhq.com/acme/${uuid}` };
+      job.descriptionPlain = 'x'.repeat(length - JSON.stringify(job).length);
+      expect(JSON.stringify(job).length).toBe(length);
+      return job;
+    };
+    const ceiling = 512 * 1024 + 1; // Existing ceiling excludes the closing brace.
+    const accepted = await createMetadataAcquirer(async () => streamed(ashbyBoard([make(ceiling)]), 8_192))(identity('ashby'));
+    expect(accepted?.outcome).toBe('acquired');
+    const recovered = await createMetadataAcquirer(async () => streamed(ashbyBoard([
+      make(ceiling + 1), { id: uuid, title: 'Real Intern', descriptionPlain: 'The later exact posting.' },
+    ]), 8_192))(identity('ashby'));
+    expect(recovered?.artifact?.text).toBe('The later exact posting.');
+  });
+  it('reuses a streamed board for backward and concurrent exact-posting lookups', async () => {
+    const first = '00000000-0000-4000-8000-000000000001';
+    const board = ashbyBoard([
+      { id: first, title: 'First Intern', descriptionPlain: 'First posting with é and "quotes".' },
+      ...Array.from({ length: 12 }, (_, index) => ({ id: `filler-${index}`, title: 'Other', descriptionPlain: 'x'.repeat(40_000) })),
+      { id: uuid, title: 'Last Intern', descriptionPlain: 'Last posting.' },
+    ]);
+    const fetcher = vi.fn(async () => streamed(board, 4_093));
+    const acquire = createMetadataAcquirer(fetcher);
+    const results = await Promise.all([acquire(identity('ashby')), acquire(identity('ashby', first))]);
+    expect(results[0]?.artifact?.text).toBe('Last posting.');
+    expect(results[1]?.artifact?.text).toContain('First posting with é');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it('reports identity-mismatch when the board does not publish the posting', async () => {
     const board = ashbyBoard([{ id: '00000000-0000-4000-8000-000000000000', title: 'Other', descriptionPlain: 'zzz' }]);
     const result = await createMetadataAcquirer(async () => streamed(board, 32))(identity('ashby'));

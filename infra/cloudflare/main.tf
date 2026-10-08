@@ -17,9 +17,8 @@ locals {
   # large boards retained >120 MiB. Concurrency 2 must still drain each sweep
   # inside the half-hour cadence; see docs/ingestion-v2-production-readiness.md.
   # Keep in step with both Wrangler ingestion profiles.
-  # destination-verification is back to its original limits: raised on
-  # 2026-09-17 to drain a backlog, then reverted when admission became durable
-  # and scheduled re-checks were removed, which is what that backlog was for.
+  # Destination verification retains board metadata until a delivery ends.
+  # One message per delivery bounds that working set; concurrency stays at one.
   consumer_max_concurrency = {
     greenhouse               = 2
     lever                    = 2
@@ -313,10 +312,10 @@ resource "cloudflare_queue_consumer" "ingestion" {
   dead_letter_queue = cloudflare_queue.dead_letter[each.key].queue_name
 
   settings = {
-    batch_size       = each.key == "destination-verification" ? 5 : 1
+    batch_size       = 1
     max_concurrency  = lookup(local.consumer_max_concurrency, each.key, 1)
     max_retries      = each.key == "gmail" ? 5 : 2
-    max_wait_time_ms = contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000
+    max_wait_time_ms = each.key == "shadow-extraction" ? 60000 : 5000
     retry_delay      = each.key == "shadow-extraction" ? 300 : null
   }
 }

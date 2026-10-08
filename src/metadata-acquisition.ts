@@ -305,13 +305,24 @@ type AshbyScan = {
  * whose `id` matches, and the position just past it, so a candidate a caller
  * rejects can be followed by a resumed walk instead of a restart. */
 function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected: string | undefined): { job: unknown; position: number } | undefined {
-  const append = (char: string) => {
-    if (!scan.parts || scan.oversized) return;
-    scan.parts.push(char);
-    scan.retained += char.length;
-    // A single posting is far below this; an oversized element is dropped rather
-    // than parsed, so one pathological row cannot blow the isolate's memory.
-    if (scan.retained > ASHBY_ELEMENT_BYTE_LIMIT) { scan.oversized = true; scan.parts = undefined; }
+  // Retain one slice per chunk instead of one array slot per character. A
+  // near-ceiling posting otherwise allocates hundreds of thousands of slots
+  // each time a later posting requires another walk through the cached board.
+  let segmentStart: number | undefined = scan.parts ? position : undefined;
+  const retainUntil = (end: number, closesElement = false) => {
+    if (!scan.parts || segmentStart === undefined) return;
+    const length = end - segmentStart;
+    // The closing brace was never counted against the existing element limit.
+    if (scan.retained + length - (closesElement ? 1 : 0) > ASHBY_ELEMENT_BYTE_LIMIT) {
+      scan.oversized = true; scan.parts = undefined;
+    } else {
+      // A sliced string can retain the entire growing board at every chunk.
+      // Copy only this decoded span so old flattened board strings can collect.
+      const span = text.slice(segmentStart, end);
+      scan.parts.push(new TextDecoder().decode(new TextEncoder().encode(span)));
+      scan.retained += length;
+    }
+    segmentStart = undefined;
   };
   const takeElement = (): unknown => {
     const element = scan.parts?.join('') ?? '';
@@ -329,7 +340,8 @@ function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected:
       scan.inString = true;
     } else if (char === '{') {
       if (scan.containers.length === 2 && scan.containers[0] === 'object' && scan.containers[1] === 'array' && !scan.parts) {
-        scan.parts = ['{']; scan.retained = 1; scan.oversized = false;
+        scan.parts = []; scan.retained = 0; scan.oversized = false;
+        segmentStart = index;
         scan.containers.push('object');
         continue;
       }
@@ -340,15 +352,19 @@ function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected:
       const closesElement = char === '}' && scan.parts !== undefined && scan.containers.length === 3;
       scan.containers.pop();
       if (closesElement) {
-        scan.parts!.push('}');
         const next = index + 1;
+        retainUntil(next, true);
         const job = takeElement();
         if (record(job) && job.id === expected) return { job, position: next };
         continue;
       }
     }
-    append(char);
+    if (scan.parts && segmentStart !== undefined
+      && scan.retained + index + 1 - segmentStart > ASHBY_ELEMENT_BYTE_LIMIT) {
+      scan.oversized = true; scan.parts = undefined; segmentStart = undefined;
+    }
   }
+  retainUntil(text.length);
   return undefined;
 }
 

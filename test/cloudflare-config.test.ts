@@ -193,8 +193,8 @@ describe('Cloudflare deployment configuration', () => {
     expect(ingestion.vars.DESTINATION_VERIFICATION_QUEUE_ID).toBe('9b48a594d06a441e8b8ed45de0c430af');
     expect(consumer).toEqual({
       queue: 'intern-notifs-destination-verification',
-      max_batch_size: 5,
-      max_batch_timeout: 60,
+      max_batch_size: 1,
+      max_batch_timeout: 5,
       max_concurrency: 1,
       max_retries: 2,
       dead_letter_queue: 'intern-notifs-destination-verification-dlq',
@@ -207,9 +207,9 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('{ name = "DESTINATION_VERIFICATION_QUEUE_ID", type = "plain_text"');
     // `tofu fmt` owns the alignment of this block, so match the assignment, not
     // its padding.
-    expect(terraform).toMatch(/batch_size\s+= each\.key == "destination-verification" \? 5 : 1/);
+    expect(terraform).toMatch(/batch_size\s+= 1/);
     expect(terraform).toContain('max_retries      = each.key == "gmail" ? 5 : 2');
-    expect(terraform).toContain('max_wait_time_ms = contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000');
+    expect(terraform).toContain('max_wait_time_ms = each.key == "shadow-extraction" ? 60000 : 5000');
   });
 
   it('keeps the admission queue-age alert threshold synchronized across Wrangler and OpenTofu', () => {
@@ -443,7 +443,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform).toContain('{ name = "SHADOW_EXTRACTION_QUEUE_ID", type = "plain_text"');
     expect(terraform).toContain('{ name = "SHADOW_EXTRACTION_QUEUE_NAME", type = "plain_text"');
     expect(terraform).toContain('{ name = "RESUME_TUNER_ENABLED", type = "plain_text", text = tostring(var.resume_tuner_enabled) }');
-    expect(terraform).toContain('contains(["destination-verification", "shadow-extraction"], each.key) ? 60000 : 5000');
+    expect(terraform).toContain('each.key == "shadow-extraction" ? 60000 : 5000');
     expect(terraform).toContain('retry_delay      = each.key == "shadow-extraction" ? 300 : null');
     expect(worker).toContain('env.SHADOW_EXTRACTION_QUEUE_ID');
   });
