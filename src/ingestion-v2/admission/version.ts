@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
  * The derived version lets shadow discovery reopen existing rows through the
  * normal bounded policy-migration path instead of requiring a manual replay.
  */
-export const INGESTION_V2_EVALUATOR_REVISION = 7;
+export const INGESTION_V2_EVALUATOR_REVISION = 8;
 
 export function ingestionV2AdmissionVersion(
   baseAdmissionVersion: string,

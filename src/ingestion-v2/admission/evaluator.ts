@@ -109,6 +109,7 @@ export function gradeAdmissionRow(input: {
   sourceId: string;
   externalId: string;
   posting: SourcedPosting;
+  identityApplicationUrl?: string;
   canonicalEmployer?: Pick<CanonicalEmployer, 'id' | 'displayName'>;
   prior?: AdmissionV2PriorContext;
   trustedCommunityCatalogEnabled?: boolean;
@@ -130,7 +131,7 @@ export function gradeAdmissionRow(input: {
   const identity = resolvePostingIdentityDecision({
     sourceId: input.sourceId,
     externalId: input.externalId,
-    applicationUrl: processed.applyUrl,
+    applicationUrl: input.identityApplicationUrl ?? processed.applyUrl,
     observedAt: input.evaluatedAt,
     ...(input.posting.providerEvidence ? { providerEvidence: input.posting.providerEvidence } : {}),
     ...(input.prior?.postingIdentityDecision ? { previousDecision: input.prior.postingIdentityDecision } : {}),
@@ -228,6 +229,7 @@ export interface RuleBasedAdmissionEvaluatorDependencies {
   sink: AdmissionV2CatalogSink;
   resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver;
   resolvePriorContext?: AdmissionV2PriorContextResolver;
+  resolveIdentityApplicationUrl?: (applyUrl: string) => Promise<string | undefined>;
   trustedCommunityCatalogEnabled?: boolean;
   trustedCommunityAlertsEnabledForSource?: (sourceId: string) => boolean;
   now?: () => Date;
@@ -265,6 +267,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
     const prior = this.dependencies.resolvePriorContext
       ? await this.dependencies.resolvePriorContext(context.sourceId, context.externalId)
       : undefined;
+    const identityApplicationUrl = await this.dependencies.resolveIdentityApplicationUrl?.(context.posting.applyUrl);
     const probe = await this.dependencies.prober.probe({
       sourceId: context.sourceId,
       externalId: context.externalId,
@@ -275,6 +278,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       sourceId: context.sourceId,
       externalId: context.externalId,
       posting: context.posting,
+      ...(identityApplicationUrl ? { identityApplicationUrl } : {}),
       ...(canonicalEmployer ? { canonicalEmployer } : {}),
       ...(prior ? { prior } : {}),
       trustedCommunityCatalogEnabled: this.dependencies.trustedCommunityCatalogEnabled ?? false,
