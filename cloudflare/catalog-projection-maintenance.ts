@@ -56,7 +56,7 @@ async function buildCatalogProjection(store: D1InternshipStore) {
   // The newest open role this publish can see becomes the readers' watermark: a
   // role published after it is grouped live until the next tick, so an alert and
   // the catalog never disagree about a role that already exists.
-  const jobs = await store.listCatalog();
+  const jobs = await store.listCatalog({ projectionInput: true });
   const liveWatermark = jobs.reduce<string | undefined>((newest, job) => {
     if (!job.open || catalogRecency(job) !== 'normal') return newest;
     const key = openCatalogSortKey(job);

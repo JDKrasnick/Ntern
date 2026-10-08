@@ -1080,7 +1080,7 @@ export class D1InternshipStore implements InternshipStore {
         && catalogVisibleAt(job) > after && catalogVisibleAt(job) <= before && !isPastSeason(job.season))
       .sort(compareCatalogRecency).map(withEmployerCategory);
   }
-  async listCatalog(): Promise<Internship[]> {
+  async listCatalog(options: { projectionInput?: boolean } = {}): Promise<Internship[]> {
     const jobs: Internship[] = [];
     let cursor: { pk: string; sk: string } | undefined;
     // Withheld roles can hold most of the stored JSON. Reject them in D1 so
@@ -1089,18 +1089,29 @@ export class D1InternshipStore implements InternshipStore {
     // explicitly permit the catalog. Keep the JS checks as a second guard.
     const eligible = `kind = 'internship' AND json_type(value, '$.technical') IS NOT 'false'
       AND (json_extract(value, '$.admission') IS NULL OR json_type(value, '$.admission.catalogEligible') = 'true')`;
+    // Grouping needs the admission verdict/employer and education audience,
+    // but not destination diagnostics, identity evidence, or notification work.
+    // Trim before JSON reaches the isolate, rather than after retaining a whole
+    // catalog of those objects. Public reads keep the complete stored records.
+    const value = options.projectionInput ? `json_set(json_remove(value,
+      '$.postingIdentity', '$.notification', '$.metadataOmission',
+      '$.employerMetadataAttribution', '$.applicationPageMetadataVersion',
+      '$.admission.destination', '$.admission.metadata',
+      '$.admission.reasonCodes', '$.admission.evidenceCodes', '$.roleMetadata'),
+      '$.roleMetadata.educationAudience', json_extract(value, '$.roleMetadata.educationAudience')) AS value` : 'value';
+    const pageSize = options.projectionInput ? 25 : 100;
     while (true) {
       const query = cursor
-        ? this.db.prepare(`SELECT pk, sk, value FROM catalog_items
+        ? this.db.prepare(`SELECT pk, sk, ${value} FROM catalog_items
             WHERE ${eligible} AND (pk, sk) > (?, ?)
-            ORDER BY pk, sk LIMIT 100`).bind(cursor.pk, cursor.sk)
-        : this.db.prepare(`SELECT pk, sk, value FROM catalog_items WHERE ${eligible} ORDER BY pk, sk LIMIT 100`);
+            ORDER BY pk, sk LIMIT ${pageSize}`).bind(cursor.pk, cursor.sk)
+        : this.db.prepare(`SELECT pk, sk, ${value} FROM catalog_items WHERE ${eligible} ORDER BY pk, sk LIMIT ${pageSize}`);
       const page = await query.all<{ pk: string; sk: string; value: string }>();
       for (const row of page.results) {
         const job = JSON.parse(row.value) as Internship;
         if (job.technical !== false && catalogEligible(job) && !isPastSeason(job.season)) jobs.push(job);
       }
-      if (page.results.length < 100) break;
+      if (page.results.length < pageSize) break;
       const last = page.results.at(-1)!;
       cursor = { pk: last.pk, sk: last.sk };
     }

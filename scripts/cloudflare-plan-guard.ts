@@ -516,7 +516,7 @@ function isIngestionV2ToggleBinding(binding: unknown): boolean {
   if (!Object.entries(binding).every(([key, value]) => ['name', 'type', 'text'].includes(key) || value === null)) return false;
   return ingestionV2BooleanToggles.has(name)
     ? binding.text === 'true' || binding.text === 'false'
-    : binding.text.length <= 1000 && /^[a-z0-9._,-]*$/iu.test(binding.text);
+    : binding.text.length <= 8192 && /^[a-z0-9._,-]*$/iu.test(binding.text);
 }
 
 function isIngestionV2BindingUpdate(before: unknown, after: unknown): boolean {

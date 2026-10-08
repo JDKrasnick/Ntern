@@ -107,6 +107,41 @@ describe('D1 filtered catalog projection', () => {
     } finally { database.close(); }
   });
 
+  it('trims projection-only diagnostics in D1 while preserving the complete ordered catalog and public jobs', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT, sk TEXT, kind TEXT, value TEXT, PRIMARY KEY(pk, sk))');
+    const insert = database.prepare('INSERT INTO catalog_items VALUES (?, ?, ?, ?)');
+    const diagnostic = 'retained private diagnostic '.repeat(1200);
+    for (let i = 0; i < 105; i += 1) {
+      const value = { ...job(`projection-${i}`, 'Software Intern'),
+        open: i % 2 === 0,
+        admission: { catalogEligible: true, canonicalEmployer: { id: 'employer-acme', displayName: 'Acme' },
+          destination: { diagnostic }, metadata: { diagnostic }, reasonCodes: [diagnostic] },
+        postingIdentity: { diagnostic }, notification: { diagnostic },
+        roleMetadata: { educationAudience: { kind: 'stated-education-audience', explicitlyExcluded: ['phd'], evidenceStatus: 'explicit' }, diagnostic },
+      };
+      insert.run(`JOB#${value.jobId}`, 'META', 'internship', JSON.stringify(value));
+    }
+    let hydratedBytes = 0;
+    const store = new D1InternshipStore(sqliteD1(database, (sql, rows) => {
+      if (sql.includes('json_remove')) expect(rows.length).toBeLessThanOrEqual(25);
+      hydratedBytes += (rows as { value: string }[]).reduce((n, row) => n + row.value.length, 0);
+    }));
+    try {
+      const full = await store.listCatalog();
+      const fullBytes = hydratedBytes; hydratedBytes = 0;
+      const compact = await store.listCatalog({ projectionInput: true });
+      expect(compact).toHaveLength(full.length);
+      expect(hydratedBytes).toBeLessThan(fullBytes / 100);
+      expect(compact[0]?.sourceReferences).toEqual(full[0]?.sourceReferences);
+      expect(compact[0]?.admission?.canonicalEmployer).toEqual(full[0]?.admission?.canonicalEmployer);
+      expect(compact[0]?.roleMetadata).toEqual({ educationAudience: (full[0]?.roleMetadata as unknown as { educationAudience: unknown }).educationAudience });
+      expect(full[0]?.admission?.destination).toHaveProperty('diagnostic', diagnostic);
+      const project = (jobs: Internship[]) => groupCatalogJobs(jobs, { includeClosed: true }).map(catalogGroupDetails);
+      expect(project(compact)).toEqual(project(full));
+    } finally { database.close(); }
+  });
+
   it('bounds sparse text/source searches before filtering and continues through the real API', async () => {
     const database = new DatabaseSync(':memory:');
     database.exec(`CREATE TABLE catalog_items (value TEXT, catalog_state TEXT, catalog_sort_key TEXT);
