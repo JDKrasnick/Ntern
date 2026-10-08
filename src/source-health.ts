@@ -133,6 +133,7 @@ function operationalFields(previous: SourceHealth | undefined) {
     ...(previous.configVersion !== undefined ? { configVersion: previous.configVersion } : {}),
     ...(previous.changedAt ? { changedAt: previous.changedAt } : {}),
     ...(previous.changedBy ? { changedBy: previous.changedBy } : {}),
+    ...(previous.incidentAcknowledgedAt ? { incidentAcknowledgedAt: previous.incidentAcknowledgedAt } : {}),
   };
 }
 

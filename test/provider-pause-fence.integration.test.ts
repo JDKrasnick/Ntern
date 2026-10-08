@@ -68,7 +68,7 @@ describe.each(['greenhouse', 'lever', 'ashby'] as const)('%s pause fences queued
   });
 });
 
-it.each([undefined, earlier])('retains force authorization across a Greenhouse continuation (%s)', async (origin) => {
+it.each([[undefined, false], [earlier, false], [earlier, true]] as const)('retains force authorization across a Greenhouse continuation (%s, recovery=%s)', async (origin, recovery) => {
   const store = new MemoryInternshipStore();
   const source = { ...acmeSource, status: 'published' as const };
   const jobs = Array.from({ length: 25 }, (_, index) => ({ ...technicalInternship, id: 5000 + index,
@@ -86,10 +86,18 @@ it.each([undefined, earlier])('retains force authorization across a Greenhouse c
   const continuations: GreenhouseWorkMessage[] = [];
   const dependencies = { store, sources: [source], fetchImpl, linkValidator: async (url: string) => url,
     enqueueContinuation: async (message: GreenhouseWorkMessage) => { continuations.push(message); } };
+  if (recovery) await store.putSourceHealth({ ...health(source.id), state: 'quarantined',
+    changedAt: earlier, incidentAcknowledgedAt: earlier });
   await runGreenhouseBoard({ version: 1, sourceId: source.id, scheduledAt: earlier, force: true,
     forceRequestedAt: origin }, dependencies);
   expect(continuations).toHaveLength(1);
   expect(continuations[0]).toMatchObject({ force: true, forceRequestedAt: earlier });
+  if (recovery) {
+    await expect(runGreenhouseBoard(continuations[0]!, dependencies)).resolves.not.toHaveProperty('skipped');
+    expect(await store.getSourceHealth(source.id)).toMatchObject({ sourceStatus: 'paused', state: 'healthy', incidentAcknowledgedAt: earlier });
+    expect((await store.getCheckpoint(source.id))?.pendingGreenhousePostingIds ?? []).toHaveLength(0);
+    return;
+  }
   await store.putSourceHealth(health(source.id));
   const checkpoint = await store.getCheckpoint(source.id);
   const fetches = fetchImpl.mock.calls.length;
