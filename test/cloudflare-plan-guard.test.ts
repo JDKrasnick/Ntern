@@ -209,6 +209,31 @@ describe('Cloudflare deployment plan guard', () => {
     ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits only the reviewed destination batch and wait reduction', () => {
+    const before = {
+      account_id: 'account', consumer_id: 'consumer', queue_id: 'queue', type: 'worker',
+      script_name: 'intern-notifs-ingestion', dead_letter_queue: 'intern-notifs-destination-verification-dlq',
+      settings: { batch_size: 5, max_wait_time_ms: 60_000, max_concurrency: 1, max_retries: 2, retry_delay: 0, visibility_timeout_ms: null },
+    };
+    const after = { ...before, settings: { ...before.settings, batch_size: 1, max_wait_time_ms: 5_000, retry_delay: null } };
+    const reduction = {
+      address: 'cloudflare_queue_consumer.ingestion["destination-verification"]', actions: ['update'], before, after,
+      after_unknown: { settings: { retry_delay: true, visibility_timeout_ms: true } },
+    };
+    expect(validateCloudflarePlan(plan([reduction]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...reduction, actions: ['delete', 'create'] },
+      { ...reduction, address: 'cloudflare_queue_consumer.ingestion["ashby"]' },
+      { ...reduction, before: { ...before, script_name: 'other-worker' }, after: { ...after, script_name: 'other-worker' } },
+      ...['queue_id', 'consumer_id', 'account_id', 'script_name', 'dead_letter_queue', 'type'].map(key => ({ ...reduction, after: { ...after, [key]: 'changed' } })),
+      ...[{ batch_size: 2 }, { max_wait_time_ms: 60_000 }, { max_concurrency: 2 }, { max_retries: 3 }].map(settings => ({ ...reduction, after: { ...after, settings: { ...after.settings, ...settings } } })),
+      { ...reduction, before: { ...before, settings: { ...before.settings, batch_size: 10 } } },
+      { ...reduction, after_unknown: { settings: { batch_size: true } } },
+      { ...reduction, after_unknown: { queue_id: true } },
+      { ...reduction, after_unknown: true },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits only the exact release annotation on the ingestion upload', () => {
     const priorSha = 'a'.repeat(40);
     const deploySha = 'b'.repeat(40);
