@@ -15,7 +15,15 @@ before(async () => {
   runtime = new Miniflare({ workers: [{ config: {
     name: 'isolated-publisher-e2e', type: 'worker', compatibilityDate: '2026-08-27', compatibilityFlags: ['nodejs_compat'],
     manifest: { mainModule: 'publisher.js', modules: { 'publisher.js': { type: 'esm', contents } } },
-    env: { DB: { type: 'd1', id: 'isolated-publisher-e2e' }, DOCUMENTS: { type: 'r2', name: 'isolated-publisher-e2e' } },
+    env: { DB: { type: 'd1', id: 'isolated-publisher-e2e' }, DOCUMENTS: { type: 'r2', name: 'isolated-publisher-e2e' },
+      SHADOW_EXTRACTION_ARTIFACTS: { type: 'r2', name: 'isolated-publisher-e2e' },
+      INGESTION_V2_ISOLATED_WORKERS_ENABLED: { type: 'text', value: 'true' },
+      LLM_METADATA_PUBLICATION_POLICY_JSON: { type: 'text', value: '{"enabled":false}' } },
+  } }, { config: {
+    name: 'scheduled-caller-e2e', type: 'worker', compatibilityDate: '2026-08-27',
+    manifest: { mainModule: 'caller.js', modules: { 'caller.js': { type: 'esm',
+      contents: 'export default { fetch(request,env) { return env.CATALOG_PUBLISHER.fetch(request); } };' } } },
+    env: { CATALOG_PUBLISHER: { type: 'worker', workerName: 'isolated-publisher-e2e' } },
   } }] });
   await runtime.ready;
   db = await runtime.getD1Database('DB', 'isolated-publisher-e2e');
@@ -35,32 +43,46 @@ before(async () => {
   await db.prepare("INSERT INTO catalog_items (pk,sk,kind,value) VALUES ('JOB#isolated-role','INTERNSHIP','internship',?)").bind(JSON.stringify(job)).run();
 });
 after(async () => { await runtime?.dispose(); });
-const scheduled = (cron) => worker.scheduled({ cron, scheduledTime: Date.now() }, env);
+async function runPublisher(event, environment) {
+  const response = await worker.fetch(scheduleRequest(event), environment);
+  assert.equal(response.status, 200, `isolated publication failed: ${response.status}`);
+  assert.deepEqual(await response.json(), { completed: true });
+}
+const scheduleRequest = (event) => new Request('https://isolated.internal/internal/scheduled', { method: 'POST', body: JSON.stringify(event) });
+const scheduled = (cron) => runPublisher({ cron, scheduledTime: Date.now() }, env);
 const marker = (scope) => db.prepare('SELECT value,updated_at FROM system_state WHERE key=?').bind(`maintenance_phase:${scope}:${scope}_complete`).first();
 
-test('the configured shared cron completes general maintenance and isolated admission dispatch', async () => {
-  const cron = '9-59/10 * * * *';
-  const event = { cron, scheduledTime: Date.now() };
-  for (const role of ['ingestion', 'admission']) {
-    const profile = JSON.parse(await readFile(new URL(`../../wrangler.dev.${role}.jsonc`, import.meta.url), 'utf8'));
-    assert.ok(profile.triggers.crons.includes(cron), `${role} must schedule its distinct maintenance workload`);
-    const handler = (await import(`../../cloudflare/dist/${role}/${role}-worker.js`)).default;
-    const queue = { async send() {}, async sendBatch() {} };
-    await handler.scheduled(event, { ...profile.vars, DB: db, DOCUMENTS: bucket,
-      SHADOW_EXTRACTION_ARTIFACTS: bucket, DESTINATION_VERIFICATION_QUEUE: queue,
-      DESTINATION_VERIFICATION_DLQ: queue, ADMISSION_V2_QUEUE: queue,
-    });
-    if (role === 'ingestion') {
-      const general = await marker('maintenance');
-      assert.equal(JSON.parse(general.value).status, 'complete');
-      assert.equal(JSON.parse(general.value).observedAt, new Date(event.scheduledTime).toISOString());
-      const legacyDispatch = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:maintenance:ingestion_v2_admission_dispatch'").first();
-      assert.equal(legacyDispatch, null, 'ingestion must skip V2 dispatch when isolated');
-    }
-  }
+test('the established ingestion cron completes general maintenance and private admission dispatch', async () => {
+  const event = { cron: '9-59/10 * * * *', scheduledTime: Date.now() };
+  const profile = JSON.parse(await readFile(new URL('../../wrangler.dev.ingestion.jsonc', import.meta.url), 'utf8'));
+  const admission = (await import('../../cloudflare/dist/admission/admission-worker.js')).default;
+  const ingestion = (await import('../../cloudflare/dist/ingestion/ingestion-worker.js')).default;
+  const queue = { async send() {}, async sendBatch() {} };
+  const environment = { ...profile.vars, DB: db, DOCUMENTS: bucket, SHADOW_EXTRACTION_ARTIFACTS: bucket,
+    DESTINATION_VERIFICATION_QUEUE: queue, DESTINATION_VERIFICATION_DLQ: queue, ADMISSION_V2_QUEUE: queue };
+  assert.ok(profile.triggers.crons.includes(event.cron));
+  assert.deepEqual(JSON.parse(await readFile(new URL('../../wrangler.dev.admission.jsonc', import.meta.url), 'utf8')).triggers.crons, []);
+  await ingestion.scheduled(event, { ...environment, ADMISSION_WORKER: { fetch: request => admission.fetch(request, environment) } });
+  const general = await marker('maintenance');
+  assert.equal(JSON.parse(general.value).status, 'complete');
   const dispatch = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:admission_v2:dispatch'").first();
   assert.equal(JSON.parse(dispatch.value).status, 'complete');
   assert.equal(JSON.parse(dispatch.value).observedAt, new Date(event.scheduledTime).toISOString());
+});
+
+test('the native private service binding reaches the compiled publisher and activates matching real D1/R2 pointers', async () => {
+  const caller = await runtime.getWorker('scheduled-caller-e2e');
+  for (const cron of ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']) {
+    const response = await caller.fetch('https://isolated.internal/internal/scheduled', {
+      method: 'POST', body: JSON.stringify({ cron, scheduledTime: Date.now() }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { completed: true });
+  }
+  const d1 = await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first();
+  const r2 = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
+  assert.equal(JSON.parse(d1.value).version, r2.version);
+  assert.equal(r2.count, 1);
 });
 
 test('the real profile CLI rejects broken routes and delayed delivery before validated compiled dispatch', async () => {
@@ -111,7 +133,7 @@ test('the real profile CLI rejects broken routes and delayed delivery before val
           CLOUDFLARE_ACCOUNT_ID: 'review-account', DEV_PROFILE_TEST_RESPONSES: responsesFile },
       });
       const sends = [];
-      if (verified.status === 0) await handler.scheduled({ cron: '9-59/10 * * * *', scheduledTime: Date.now() }, {
+      if (verified.status === 0) await handler.fetch(scheduleRequest({ cron: '9-59/10 * * * *', scheduledTime: Date.now() }), {
         ...profile.vars, DB: db, ADMISSION_V2_QUEUE: { async sendBatch(messages) { sends.push(...messages); } },
       });
       const row = await db.prepare('SELECT state,attempt_count FROM ingestion_rows WHERE source_id=?').bind(source).first();
@@ -142,7 +164,8 @@ test('the real profile CLI rejects broken routes and delayed delivery before val
 });
 
 test('disabled publisher does no database work and exposes no public operations', async () => {
-  await worker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected read'); } } });
+  await worker.scheduled();
+  assert.equal((await worker.fetch(scheduleRequest({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }), { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected read'); } } })).status, 404);
   assert.equal((await worker.fetch(new globalThis.Request('https://example.com/internal/operations'))).status, 404);
 });
 
@@ -163,7 +186,7 @@ test('R2 failure invalidates the old pointer and does not advance the completion
     if (key.endsWith('/current') && JSON.parse(new TextDecoder().decode(value)).schemaVersion === 0) return bucket.put(key, value, options);
     throw new Error('R2 unavailable');
   } } };
-  await assert.rejects(worker.scheduled({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /R2 unavailable/);
+  await assert.rejects(runPublisher({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /R2 unavailable/);
   assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
   assert.deepEqual(await marker('catalog_projection_r2'), before);
   await scheduled('4,14,24,34,44,54 * * * *');
@@ -174,15 +197,15 @@ test('legacy scheduled expression repairs real R2 pages without double ownership
   const old = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   await bucket.delete(`public-catalog/v1/${old.pageVersion ?? old.version}/0`);
   const scheduledTime = Date.now();
-  await worker.scheduled({ cron: '4-54/10 * * * *', scheduledTime }, env);
+  await runPublisher({ cron: '4-54/10 * * * *', scheduledTime }, env);
   const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(pointer.schemaVersion, 1);
   assert.equal(pointer.version, old.version);
   assert.ok(await bucket.get(`public-catalog/v1/${pointer.pageVersion ?? pointer.version}/0`));
   assert.equal(JSON.parse((await marker('catalog_projection_r2')).value).observedAt, new Date(scheduledTime).toISOString());
-  await worker.scheduled({ cron: '4-54/10 * * * *', scheduledTime }, {
+  assert.equal((await worker.fetch(scheduleRequest({ cron: '4-54/10 * * * *', scheduledTime }), {
     INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected disabled publisher read'); } },
-  });
+  })).status, 404);
   assert.equal((await db.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
 });
 
@@ -232,7 +255,7 @@ test('repairs a corrupt later page across a failed repair without exposing a par
       if (/\/[a-f0-9]{20}\/1$/.test(key)) throw new Error('second page write failed');
       return bucket.put(key, value);
     } } };
-  await assert.rejects(worker.scheduled({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /second page write failed/);
+  await assert.rejects(runPublisher({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /second page write failed/);
   assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
   assert.deepEqual(await marker('catalog_projection_r2'), completion);
   await scheduled('4,14,24,34,44,54 * * * *');
@@ -246,7 +269,7 @@ test('repairs a corrupt later page across a failed repair without exposing a par
 test('billing shutdown preserves the published catalog', async () => {
   await db.prepare("INSERT OR REPLACE INTO system_state(key,value,updated_at) VALUES ('billing_shutdown','stopped',?)").bind(new Date().toISOString()).run();
   const before = await marker('catalog_projection');
-  await scheduled('1-51/10 * * * *'); assert.deepEqual(await marker('catalog_projection'), before);
+  await assert.rejects(scheduled('1-51/10 * * * *'), /503/); assert.deepEqual(await marker('catalog_projection'), before);
 });
 
 test('retains a healthy unchanged multi-page catalog across the D1 refresh', async () => {
@@ -272,7 +295,7 @@ test('a paused unchanged D1 renewal cannot resurrect a pointer after a newer clo
     if (/\/[^/]+\/\d+$/.test(key) && !intercepted) { intercepted = true; enter(); await released; }
     return object;
   } } };
-  const staleRenewal = worker.scheduled({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, delayed);
+  const staleRenewal = runPublisher({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, delayed);
   await Promise.race([entered, new Promise((_, reject) => setTimeout(() => reject(Error('renewal did not reach a page read')), 5000))]);
   const row = await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#isolated-role'").first();
   const job = JSON.parse(row.value); job.open = false;
@@ -340,7 +363,7 @@ test('production-size D1 projection reaches real R2 without hydrating the whole 
     }
     return bucket.put(key, value, options);
   } };
-  await worker.scheduled({ cron: '4-54/10 * * * *', scheduledTime: Date.now() }, { ...env, DB: boundedDb, DOCUMENTS: boundedBucket });
+  await runPublisher({ cron: '4-54/10 * * * *', scheduledTime: Date.now() }, { ...env, DB: boundedDb, DOCUMENTS: boundedBucket });
   const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(pointer.version, version); assert.equal(pointer.count, 5059);
   assert.equal(hydrated, 5059); assert.equal(written, 5059); assert.equal(maximumPending, 100);

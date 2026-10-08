@@ -40,7 +40,7 @@
     "binding": "VERSION_METADATA"
   },
   "triggers": {
-    "crons": ["9-59/10 * * * *"]
+    "crons": []
   },
   "vars": {
     "INGESTION_V2_ISOLATED_WORKERS_ENABLED": "true",

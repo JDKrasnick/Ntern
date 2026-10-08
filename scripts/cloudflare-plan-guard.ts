@@ -577,6 +577,19 @@ function isAdmissionV2WorkerBindingUpdate(before: unknown, after: unknown): bool
   return after.filter(isIngestionV2Toggle).every(isIngestionV2ToggleBinding);
 }
 
+function isIsolatedScheduleBindingAddition(before: unknown, after: unknown): boolean {
+  if (!Array.isArray(before) || !Array.isArray(after)) return false;
+  const targets = new Map([['ADMISSION_WORKER', 'intern-notifs-admission'], ['CATALOG_PUBLISHER', 'intern-notifs-catalog-publisher']]);
+  const isService = (b: unknown) => isRecord(b) && targets.has(String(b.name));
+  if (before.some(isService)) return false;
+  const added = after.filter(isService);
+  if (added.length !== targets.size || new Set(added.map(b => String(b.name))).size !== targets.size) return false;
+  if (!added.every(b => b.type === 'service' && b.service === targets.get(String(b.name))
+    && Object.entries(b).every(([key, value]) => ['name', 'type', 'service'].includes(key) || value == null))) return false;
+  const stripped = after.filter(b => !isService(b));
+  return bindingsMatchByName(before, stripped) || isIngestionV2BindingUpdate(before, stripped);
+}
+
 function isResumeTunerEnablement(before: unknown, after: unknown): boolean {
   if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return false;
   const name = 'RESUME_TUNER_ENABLED';
@@ -636,6 +649,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change'], e
     || isResumeTunerEnablement(before.bindings, candidate)
     || ((address === 'cloudflare_workers_script.ingestion' || isolatedAddresses.has(address)) && isIngestionV2BindingUpdate(before.bindings, candidate))
     || (address === 'cloudflare_workers_script.ingestion' && isAdmissionV2WorkerBindingUpdate(before.bindings, candidate))
+    || (address === 'cloudflare_workers_script.ingestion' && isIsolatedScheduleBindingAddition(before.bindings, candidate))
     || (address === 'cloudflare_workers_script.application' && isCatalogR2ReadToggle(before.bindings, candidate))
     || (withoutOutboundAddition !== undefined
       && Array.isArray(before.bindings)

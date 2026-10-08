@@ -170,6 +170,8 @@ resource "cloudflare_workers_script" "ingestion" {
       { name = "DESTINATION_BROWSER", type = "browser" },
       { name = "D1_TRAFFIC_CONTROLLER", type = "durable_object_namespace", class_name = "D1TrafficController" },
       { name = "VERSION_METADATA", type = "version_metadata" },
+      { name = "ADMISSION_WORKER", type = "service", service = cloudflare_workers_script.isolated["admission"].script_name },
+      { name = "CATALOG_PUBLISHER", type = "service", service = cloudflare_workers_script.isolated["catalog-publisher"].script_name },
     ],
     [for queue in local.asynchronous_queues : { name = "${upper(replace(queue, "-", "_"))}_QUEUE", type = "queue", queue_name = cloudflare_queue.work[queue].queue_name }],
     [for queue in local.asynchronous_queues : { name = "${upper(replace(queue, "-", "_"))}_DLQ", type = "queue", queue_name = cloudflare_queue.dead_letter[queue].queue_name }],
@@ -235,9 +237,8 @@ resource "cloudflare_workers_cron_trigger" "isolated" {
   for_each    = local.isolated_worker_bundles
   account_id  = var.cloudflare_account_id
   script_name = cloudflare_workers_script.isolated[each.key].script_name
-  schedules = var.ingestion_v2_isolated_workers_enabled ? (
-    each.key == "admission" ? [{ cron = "9-59/10 * * * *" }] : [{ cron = "1-51/10 * * * *" }, { cron = "4,14,24,34,44,54 * * * *" }]
-  ) : []
+  # The established ingestion cron delegates over private service bindings.
+  schedules = []
 }
 
 resource "cloudflare_workers_script_subdomain" "ingestion" {
@@ -345,7 +346,7 @@ resource "cloudflare_workers_cron_trigger" "ingestion" {
     { cron = "6-56/10 * * * *" },
     { cron = "12,42 * * * *" }, { cron = "22,52 * * * *" }, { cron = "2,32 * * * *" },
     { cron = "0 * * * *" }, { cron = "34 8 * * *" }, { cron = "17 9 * * *" },
-  ] : schedule if !var.ingestion_v2_isolated_workers_enabled || !contains(["1-51/10 * * * *", "4,14,24,34,44,54 * * * *"], schedule.cron)]
+  ] : schedule]
 }
 
 resource "cloudflare_workers_custom_domain" "api" {

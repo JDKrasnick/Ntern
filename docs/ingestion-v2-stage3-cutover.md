@@ -63,6 +63,21 @@ idempotent.
 
 ## Verification and cohort advance
 
+Keep all 12 production cron expressions on the established ingestion Worker.
+With `INGESTION_V2_ISOLATED_WORKERS_ENABLED=true`, it forwards the `:01` D1 and
+`:04` R2 phases to `CATALOG_PUBLISHER` and the `:09` admission dispatch to
+`ADMISSION_WORKER` through private service bindings. The dedicated Workers have
+no public routes, previews, or cron registrations. Their retained native
+scheduled handlers are inert while old registrations propagate, preventing
+duplicate execution. Admission queue consumption stays on the dedicated Worker.
+
+The production schedule API reported the earlier ownership transfer on
+2026-10-08, but live tails still delivered those events to ingestion more than
+30 minutes later. Check actual delegated invocations, current-version resource
+samples, fresh durable admission/D1/R2 completion markers, and matching valid
+catalog pointers/pages before advancing. Registered schedules and a drained
+duplicate-delivery probe alone do not prove scheduled work or writer ownership.
+
 Before a cutover, replay the pinned historical snapshots through the production
 GitHub adapters and V2 normalization/diff path:
 
