@@ -987,13 +987,24 @@ function isIsolatedRoutingChange(address: string, change: ResourceChange['change
   if (address === 'cloudflare_workers_cron_trigger.ingestion' && b && Array.isArray(b.schedules) && Array.isArray(a.schedules)) {
     if (a.script_name !== 'intern-notifs-ingestion') return false;
     const projection = new Set(['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']);
-    const omit = (rows: unknown[]) => rows.filter((row) => !isRecord(row) || !projection.has(String(row.cron)))
-      .map((row) => String((row as Record<string, unknown>).cron)).sort();
+    const projectionCount = (rows: unknown[]) => rows.filter((row) => isRecord(row) && projection.has(String(row.cron))).length;
+    const beforeProjection = projectionCount(b.schedules), afterProjection = projectionCount(a.schedules);
+    if (!((beforeProjection === 2 && afterProjection === 0) || (beforeProjection === 0 && afterProjection === 2))) return false;
+    const omit = (rows: unknown[]) => rows.map((row) => String((row as Record<string, unknown>).cron))
+      .filter((cron) => !projection.has(cron)).sort();
     // Only the two reviewed projection crons may transfer in either direction.
-    const valid = (rows: unknown[]) => rows.every((row) => isRecord(row) && Object.keys(row).length === 1 && typeof row.cron === 'string');
+    const valid = (rows: unknown[]) => rows.every((row) => isRecord(row) && typeof row.cron === 'string'
+      && Object.entries(row).every(([key, value]) => key === 'cron'
+        || (['created_on', 'modified_on'].includes(key) && (value == null || typeof value === 'string'))));
+    const unknown = change.after_unknown;
+    const scheduleCount = a.schedules.length;
+    const validUnknown = !unknown || (isRecord(unknown) && Object.entries(unknown).every(([key, value]) => value === false
+      || (key === 'schedules' && Array.isArray(value) && value.length === scheduleCount
+        && value.every((row) => isRecord(row) && Object.entries(row).every(([field, value]) => value === false
+          || (['created_on', 'modified_on'].includes(field) && value === true))))));
     return valid(b.schedules) && valid(a.schedules)
       && [b.schedules, a.schedules].every((rows) => new Set(rows.map((row) => String((row as Record<string, unknown>).cron))).size === rows.length)
-      && isDeepStrictEqual(omit(b.schedules), omit(a.schedules)) && isDeepStrictEqual({ ...b, schedules: a.schedules }, a);
+      && validUnknown && isDeepStrictEqual(omit(b.schedules), omit(a.schedules)) && isDeepStrictEqual({ ...b, schedules: a.schedules }, a);
   }
   return false;
 }
