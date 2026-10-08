@@ -1112,6 +1112,33 @@ function isGreenhouseMemoryConcurrencyReduction(address: string, change: Resourc
     )));
 }
 
+/** Allow only the reviewed reduction of the destination delivery working set. */
+function isDestinationMemoryBatchReduction(address: string, change: ResourceChange['change']): boolean {
+  if (address !== 'cloudflare_queue_consumer.ingestion["destination-verification"]'
+    || !isRecord(change.before) || !isRecord(change.after)) return false;
+  const before = change.before, after = change.after;
+  if (before.script_name !== 'intern-notifs-ingestion'
+    || before.dead_letter_queue !== 'intern-notifs-destination-verification-dlq'
+    || !isRecord(before.settings) || !isRecord(after.settings)) return false;
+  const prior = before.settings, next = after.settings;
+  if (prior.batch_size !== 5 || next.batch_size !== 1
+    || prior.max_wait_time_ms !== 60_000 || next.max_wait_time_ms !== 5_000
+    || prior.max_concurrency !== 1 || next.max_concurrency !== 1
+    || prior.max_retries !== 2 || next.max_retries !== 2) return false;
+  const computed = new Set(['retry_delay', 'visibility_timeout_ms']);
+  const changing = new Set([...computed, 'batch_size', 'max_wait_time_ms']);
+  const stable = (settings: Record<string, unknown>) => Object.fromEntries(
+    Object.entries(settings).filter(([key]) => !changing.has(key)),
+  );
+  if (!isDeepStrictEqual(stable(prior), stable(next))) return false;
+  return isDeepStrictEqual({ ...before, settings: next }, after)
+    && (change.after_unknown === undefined || isRecord(change.after_unknown) && Object.entries(change.after_unknown).every(([key, value]) => (
+      key === 'settings' && isRecord(value)
+        && Object.keys(value).every((setting) => computed.has(setting))
+        && Object.values(value).every((unknown) => unknown === true)
+    )));
+}
+
 export function actionableChanges(plan: Plan): Array<{ address: string; actions: string[] }> {
   return (plan.resource_changes ?? [])
     .filter(({ change }) => !change.actions.every((action) => action === 'no-op' || action === 'read'))
@@ -1132,7 +1159,8 @@ export function validateCloudflarePlan(plan: Plan, options: PlanValidationOption
           || isIsolatedRoutingChange(address, change)
           || isApiPreviewUrlShutdown(address, change)
           || isAdmissionRouteState(address, change)
-          || isGreenhouseMemoryConcurrencyReduction(address, change)))
+          || isGreenhouseMemoryConcurrencyReduction(address, change)
+          || isDestinationMemoryBatchReduction(address, change)))
       || (change.actions[0] === 'create' && (isResumeInfrastructureCreate(address, change)
         || isAdmissionV2InfrastructureCreate(address, change)
         || isIsolatedWorkerCreate(address, change, options.expectedDeploySha)
