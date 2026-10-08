@@ -49,7 +49,7 @@ export async function runCatalogProjectionMaintenance<T>(
   return { prospectiveShadowMetadata, projection };
 }
 
-export async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket, phases?: MaintenancePhaseRecorder, revalidateOnly = false) {
+async function buildCatalogProjection(store: D1InternshipStore) {
   // One order for both read models: the card's own `updatedAt` (with its group id
   // breaking ties) is stored on each D1 row as its sort key, and R2 pages are
   // written in the same order, so a reader of either sees the same sequence.
@@ -64,6 +64,13 @@ export async function refreshCatalogProjection(store: D1InternshipStore, bucket?
   }, undefined);
   const groups = groupCatalogJobs(jobs, { includeClosed: true })
     .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
+  return { groups, liveWatermark };
+}
+
+export async function refreshCatalogProjection(store: D1InternshipStore, bucket?: R2Bucket, phases?: MaintenancePhaseRecorder, revalidateOnly = false) {
+  // Finish the raw-job scope before publication awaits. Keeping that array in
+  // this suspended frame retains admission/identity data absent from the cards.
+  const { groups, liveWatermark } = await buildCatalogProjection(store);
   const generatedAt = new Date().toISOString();
   await recordPhase(phases, 'catalog_projection_d1', 'started');
   try {
