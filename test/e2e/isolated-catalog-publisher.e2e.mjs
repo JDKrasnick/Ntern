@@ -72,7 +72,7 @@ test('the established ingestion cron completes general maintenance and private a
 
 test('the native private service binding reaches the compiled publisher and activates matching real D1/R2 pointers', async () => {
   const caller = await runtime.getWorker('scheduled-caller-e2e');
-  for (const cron of ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']) {
+  for (const cron of ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *']) {
     const response = await caller.fetch('https://isolated.internal/internal/scheduled', {
       method: 'POST', body: JSON.stringify({ cron, scheduledTime: Date.now() }),
     });
@@ -165,14 +165,14 @@ test('the real profile CLI rejects broken routes and delayed delivery before val
 
 test('disabled publisher does no database work and exposes no public operations', async () => {
   await worker.scheduled();
-  assert.equal((await worker.fetch(scheduleRequest({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }), { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected read'); } } })).status, 404);
+  assert.equal((await worker.fetch(scheduleRequest({ cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() }), { INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'false', DB: { prepare() { throw Error('unexpected read'); } } })).status, 404);
   assert.equal((await worker.fetch(new globalThis.Request('https://example.com/internal/operations'))).status, 404);
 });
 
 test('publishes the matching D1 generation to real local R2 without notification events', async () => {
-  await scheduled('1-51/10 * * * *');
+  await scheduled('1,11,21,31,41,51 * * * *');
   assert.equal(JSON.parse((await marker('catalog_projection')).value).status, 'complete');
-  await scheduled('4,14,24,34,44,54 * * * *');
+  await scheduled('5,15,25,35,45,55 * * * *');
   const pointer = await bucket.get('public-catalog/v1/current'); assert.ok(pointer);
   const value = JSON.parse(await pointer.text()); assert.equal(value.count, 1);
   assert.equal(JSON.parse((await marker('catalog_projection_r2')).value).status, 'complete');
@@ -186,10 +186,10 @@ test('R2 failure invalidates the old pointer and does not advance the completion
     if (key.endsWith('/current') && JSON.parse(new TextDecoder().decode(value)).schemaVersion === 0) return bucket.put(key, value, options);
     throw new Error('R2 unavailable');
   } } };
-  await assert.rejects(runPublisher({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /R2 unavailable/);
+  await assert.rejects(runPublisher({ cron: '5,15,25,35,45,55 * * * *', scheduledTime: Date.now() }, failing), /R2 unavailable/);
   assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
   assert.deepEqual(await marker('catalog_projection_r2'), before);
-  await scheduled('4,14,24,34,44,54 * * * *');
+  await scheduled('5,15,25,35,45,55 * * * *');
   assert.ok(await bucket.get('public-catalog/v1/current'));
 });
 
@@ -221,9 +221,9 @@ test('unchanged catalog cycles retire and repair missing or corrupt active pages
       altered[0].roles[0].title = 'Corrupted title';
       await bucket.put(pageKey, JSON.stringify(altered));
     }
-    await scheduled('1-51/10 * * * *');
+    await scheduled('1,11,21,31,41,51 * * * *');
     assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0, `${fault} page must retire its pointer`);
-    await scheduled('4,14,24,34,44,54 * * * *');
+    await scheduled('5,15,25,35,45,55 * * * *');
     const repaired = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
     assert.equal(repaired.version, pointer.version);
     assert.equal(await (await bucket.get(`public-catalog/v1/${repaired.pageVersion ?? repaired.version}/0`)).text(), original);
@@ -240,14 +240,14 @@ test('repairs a corrupt later page across a failed repair without exposing a par
     return db.prepare("INSERT INTO catalog_items(pk,sk,kind,value) VALUES (?,'INTERNSHIP','internship',?)")
       .bind(`JOB#${jobId}`, JSON.stringify(job));
   }));
-  await scheduled('1-51/10 * * * *');
-  await scheduled('4,14,24,34,44,54 * * * *');
+  await scheduled('1,11,21,31,41,51 * * * *');
+  await scheduled('5,15,25,35,45,55 * * * *');
   const pointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(pointer.count, 102);
   const keys = [0, 1].map(index => `public-catalog/v1/${pointer.pageVersion ?? pointer.version}/${index}`);
   const pages = await Promise.all(keys.map(async key => (await bucket.get(key)).text()));
   await bucket.put(keys[1], '[]');
-  await scheduled('1-51/10 * * * *');
+  await scheduled('1,11,21,31,41,51 * * * *');
   assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
   const completion = await marker('catalog_projection_r2');
   const failing = { ...env, DOCUMENTS: { get: bucket.get.bind(bucket), delete: bucket.delete.bind(bucket),
@@ -255,10 +255,10 @@ test('repairs a corrupt later page across a failed repair without exposing a par
       if (/\/[a-f0-9]{20}\/1$/.test(key)) throw new Error('second page write failed');
       return bucket.put(key, value);
     } } };
-  await assert.rejects(runPublisher({ cron: '4,14,24,34,44,54 * * * *', scheduledTime: Date.now() }, failing), /second page write failed/);
+  await assert.rejects(runPublisher({ cron: '5,15,25,35,45,55 * * * *', scheduledTime: Date.now() }, failing), /second page write failed/);
   assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 0);
   assert.deepEqual(await marker('catalog_projection_r2'), completion);
-  await scheduled('4,14,24,34,44,54 * * * *');
+  await scheduled('5,15,25,35,45,55 * * * *');
   const repaired = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.equal(repaired.version, pointer.version);
   for (let index = 0; index < keys.length; index++) assert.equal(await (await bucket.get(`public-catalog/v1/${repaired.pageVersion ?? repaired.version}/${index}`)).text(), pages[index]);
@@ -269,13 +269,13 @@ test('repairs a corrupt later page across a failed repair without exposing a par
 test('billing shutdown preserves the published catalog', async () => {
   await db.prepare("INSERT OR REPLACE INTO system_state(key,value,updated_at) VALUES ('billing_shutdown','stopped',?)").bind(new Date().toISOString()).run();
   const before = await marker('catalog_projection');
-  await assert.rejects(scheduled('1-51/10 * * * *'), /503/); assert.deepEqual(await marker('catalog_projection'), before);
+  await assert.rejects(scheduled('1,11,21,31,41,51 * * * *'), /503/); assert.deepEqual(await marker('catalog_projection'), before);
 });
 
 test('retains a healthy unchanged multi-page catalog across the D1 refresh', async () => {
   await db.prepare("DELETE FROM system_state WHERE key='billing_shutdown'").run();
   const before = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
-  await scheduled('1-51/10 * * * *');
+  await scheduled('1,11,21,31,41,51 * * * *');
   const after = await bucket.get('public-catalog/v1/current');
   assert.ok(after, 'unchanged healthy multi-page pointer must remain readable');
   assert.equal(JSON.parse(await after.text()).version, before.version);
@@ -283,8 +283,8 @@ test('retains a healthy unchanged multi-page catalog across the D1 refresh', asy
 
 test('a paused unchanged D1 renewal cannot resurrect a pointer after a newer closed-role generation publishes', async () => {
   await db.prepare("DELETE FROM catalog_items WHERE pk LIKE 'JOB#multi-page-%'").run();
-  await scheduled('1-51/10 * * * *');
-  await scheduled('4,14,24,34,44,54 * * * *');
+  await scheduled('1,11,21,31,41,51 * * * *');
+  await scheduled('5,15,25,35,45,55 * * * *');
   const oldPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   let enter, release;
   const entered = new Promise(resolve => { enter = resolve; });
@@ -295,13 +295,13 @@ test('a paused unchanged D1 renewal cannot resurrect a pointer after a newer clo
     if (/\/[^/]+\/\d+$/.test(key) && !intercepted) { intercepted = true; enter(); await released; }
     return object;
   } } };
-  const staleRenewal = runPublisher({ cron: '1-51/10 * * * *', scheduledTime: Date.now() }, delayed);
+  const staleRenewal = runPublisher({ cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() }, delayed);
   await Promise.race([entered, new Promise((_, reject) => setTimeout(() => reject(Error('renewal did not reach a page read')), 5000))]);
   const row = await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#isolated-role'").first();
   const job = JSON.parse(row.value); job.open = false;
   await db.prepare("UPDATE catalog_items SET value=? WHERE pk='JOB#isolated-role'").bind(JSON.stringify(job)).run();
-  await scheduled('1-51/10 * * * *');
-  await scheduled('4,14,24,34,44,54 * * * *');
+  await scheduled('1,11,21,31,41,51 * * * *');
+  await scheduled('5,15,25,35,45,55 * * * *');
   const freshPointer = JSON.parse(await (await bucket.get('public-catalog/v1/current')).text());
   assert.notEqual(freshPointer.version, oldPointer.version);
   release(); await staleRenewal;

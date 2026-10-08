@@ -172,7 +172,7 @@ describe('dev ingestion soak evaluation', () => {
   });
   it('rejects the old cron topology and a same-count incorrect trigger', () => {
     const sample = healthy();
-    sample.schedules = sample.schedules.filter((cron) => cron !== '4,14,24,34,44,54 * * * *');
+    sample.schedules = sample.schedules.filter((cron) => cron !== '5,15,25,35,45,55 * * * *');
     expect(evaluateDevSoak(sample).find((check) => check.name === 'production cron parity')?.status).toBe('fail');
     sample.schedules.push('4-54/10 * * * *');
     expect(evaluateDevSoak(sample).find((check) => check.name === 'production cron parity')?.status).toBe('fail');
@@ -264,8 +264,8 @@ describe('full dev ownership evidence', () => {
     expect(admission.triggers.crons).toEqual([]);
     expect(ingestion.triggers.crons).toContain('9-59/10 * * * *');
     expect(publisher.triggers.crons).toEqual([]);
-    expect(ingestion.triggers.crons).toContain('1-51/10 * * * *');
-    expect(ingestion.triggers.crons).toContain('4,14,24,34,44,54 * * * *');
+    expect(ingestion.triggers.crons).toContain('1,11,21,31,41,51 * * * *');
+    expect(ingestion.triggers.crons).toContain('5,15,25,35,45,55 * * * *');
     expect(ingestion.services).toEqual([
       { binding: 'ADMISSION_WORKER', service: admission.name },
       { binding: 'CATALOG_PUBLISHER', service: publisher.name },

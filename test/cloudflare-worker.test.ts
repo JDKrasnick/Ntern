@@ -330,7 +330,7 @@ describe('Cloudflare maintenance cron', () => {
     ]);
   });
 
-  it('refreshes the D1 catalog projection on its dedicated cron when R2 is missing', async () => {
+  it.each(['1-51/10 * * * *', '1,11,21,31,41,51 * * * *'])('refreshes the D1 catalog projection for %s when R2 is missing', async (cron) => {
     // The projection is the Roles feed's whole source of truth, and it is now the
     // only memory-heavy step on this cron so the `9-59/10` phases cannot pile up
     // beside it and cross the isolate limit.
@@ -340,7 +340,7 @@ describe('Cloudflare maintenance cron', () => {
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       await cloudflareWorker.scheduled({
-        cron: '1-51/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:01:00.000Z'),
+        cron, scheduledTime: Date.parse('2026-09-17T17:01:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         DB: { prepare: () => ({ async first() { return null; } }) },
         DOCUMENTS: {
@@ -397,7 +397,7 @@ describe('Cloudflare maintenance cron', () => {
     } finally { vi.restoreAllMocks(); }
   });
 
-  it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('publishes the R2 catalog projection for %s in a separate invocation', async (cron) => {
+  it.each(['5,15,25,35,45,55 * * * *', '4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('publishes the R2 catalog projection for %s in a separate invocation', async (cron) => {
     const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
     const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionStream').mockResolvedValue({
       version: 'e3b0c44298fc1c149afb', groups: (async function* () {})(), generatedAt: '2026-09-17T17:01:00.000Z',
@@ -427,7 +427,7 @@ describe('Cloudflare maintenance cron', () => {
     }
   });
 
-  it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('does not report a successful R2 publication when %s fails', async (cron) => {
+  it.each(['5,15,25,35,45,55 * * * *', '4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('does not report a successful R2 publication when %s fails', async (cron) => {
     vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionStream').mockResolvedValue({ version: 'e3b0c44298fc1c149afb', groups: (async function* () {})(), generatedAt: new Date().toISOString() });
     const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -443,7 +443,7 @@ describe('Cloudflare maintenance cron', () => {
     } finally { vi.restoreAllMocks(); }
   });
 
-  it.each(['4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('leaves %s to the isolated publisher when isolation is enabled', async (cron) => {
+  it.each(['5,15,25,35,45,55 * * * *', '4,14,24,34,44,54 * * * *', '4-54/10 * * * *'])('leaves %s to the isolated publisher when isolation is enabled', async (cron) => {
     const snapshot = vi.spyOn(D1InternshipStore.prototype, 'catalogProjectionStream');
     try {
       await cloudflareWorker.scheduled({ cron, scheduledTime: Date.now() } as Parameters<typeof cloudflareWorker.scheduled>[0], {

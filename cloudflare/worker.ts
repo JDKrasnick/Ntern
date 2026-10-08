@@ -2129,7 +2129,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     console.log(JSON.stringify({ event: 'company_icon_resolution_schedule_complete', companyIconResolution }));
     return;
   }
-  if (event.cron === '1-51/10 * * * *') {
+  if (event.cron === '1-51/10 * * * *' || event.cron === '1,11,21,31,41,51 * * * *') {
     if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') {
       await forwardIsolatedSchedule(env.CATALOG_PUBLISHER, event);
       return;
@@ -2159,7 +2159,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
   }
   // Cloudflare can continue delivering the prior expression after its schedule
   // API reports the replacement. Both expressions describe the same phase.
-  if (event.cron === '4,14,24,34,44,54 * * * *' || event.cron === '4-54/10 * * * *') {
+  if (event.cron === '5,15,25,35,45,55 * * * *' || event.cron === '4,14,24,34,44,54 * * * *' || event.cron === '4-54/10 * * * *') {
     if (env.INGESTION_V2_ISOLATED_WORKERS_ENABLED === 'true') {
       await forwardIsolatedSchedule(env.CATALOG_PUBLISHER, event);
       return;

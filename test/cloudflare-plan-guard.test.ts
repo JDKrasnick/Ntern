@@ -67,6 +67,25 @@ describe('isolated scheduled service bindings', () => {
 });
 
 describe('Cloudflare deployment plan guard', () => {
+  it('recreates the complete projection pair while pinning other crons and unknown fields', () => {
+    const retained = ['*/5 * * * *', '9-59/10 * * * *'];
+    const prior = ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'];
+    const fresh = ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *'];
+    const schedules = (crons: string[]) => crons.map(cron => ({ cron, created_on: null }));
+    const before = { account_id: 'account', script_name: 'intern-notifs-ingestion', schedules: schedules([...retained, ...prior]) };
+    const after = { ...before, schedules: schedules([...fresh, ...retained].reverse()) };
+    const change = { address: 'cloudflare_workers_cron_trigger.ingestion', actions: ['update'], before, after,
+      after_unknown: { schedules: after.schedules.map(() => ({ created_on: true, modified_on: true })) } };
+    expect(validateCloudflarePlan(plan([change]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...change, after: { ...after, schedules: schedules([...retained, prior[0], fresh[1]]) } },
+      { ...change, after: { ...after, schedules: schedules([...retained, fresh[0]]) } },
+      { ...change, after: { ...after, schedules: schedules([retained[0], ...fresh]) } },
+      { ...change, after: { ...after, schedules: [...after.schedules, after.schedules[0]] } },
+      { ...change, after_unknown: { schedules: after.schedules.map(() => ({ cron: true })) } },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('unsafe');
+  });
+
   it('accepts the captured provider cron transfer with timestamp metadata but rejects unknown schedule values', () => {
     const captured = JSON.parse(readFileSync(new URL('./fixtures/cloudflare-isolation-cron-plan.json', import.meta.url), 'utf8'));
     expect(validateCloudflarePlan(captured)).toHaveLength(1);
