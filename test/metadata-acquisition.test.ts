@@ -279,6 +279,14 @@ describe('identity-bound public metadata APIs', () => {
     expect(results[1]?.artifact?.text).toContain('First posting with é');
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it('preserves a literal BOM inside a posting at the start of a streamed chunk', async () => {
+    const row = { id: uuid, title: 'BOM Intern', descriptionPlain: 'Before\uFEFFafter.' };
+    const board = ashbyBoard([row]);
+    const chunkSize = new TextEncoder().encode(board.slice(0, board.indexOf('\uFEFF'))).byteLength;
+    const result = await createMetadataAcquirer(async () => streamed(board, chunkSize))(identity('ashby'));
+    const direct = parseMetadataApiResponse(identity('ashby'), 'ashby-api', JSON.parse(board));
+    expect(result?.artifact).toEqual(direct);
+  });
   it('reports identity-mismatch when the board does not publish the posting', async () => {
     const board = ashbyBoard([{ id: '00000000-0000-4000-8000-000000000000', title: 'Other', descriptionPlain: 'zzz' }]);
     const result = await createMetadataAcquirer(async () => streamed(board, 32))(identity('ashby'));

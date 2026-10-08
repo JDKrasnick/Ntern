@@ -319,7 +319,7 @@ function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected:
       // A sliced string can retain the entire growing board at every chunk.
       // Copy only this decoded span so old flattened board strings can collect.
       const span = text.slice(segmentStart, end);
-      scan.parts.push(new TextDecoder().decode(new TextEncoder().encode(span)));
+      scan.parts.push(new TextDecoder('utf-8', { ignoreBOM: true }).decode(new TextEncoder().encode(span)));
       scan.retained += length;
     }
     segmentStart = undefined;
