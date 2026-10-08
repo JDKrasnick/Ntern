@@ -740,3 +740,10 @@ Projection transfer compares retained cron membership, rejecting duplicates and
 any unrelated addition or removal. This permits the reviewed split in either
 direction without changing polling cadence or recreating queues. Activation and
 all three active-version resource gates still need production verification.
+
+The follow-up isolation attempt also stopped before apply because retained cron
+entries carry computed `created_on`/`modified_on` metadata. A captured OpenTofu
+cron plan now supplies the regression fixture. Only a complete transfer of both
+projection crons accepts this metadata; previous single-cron migrations retain
+their stricter guards. Unknown cron expressions, duplicates, and unrelated
+schedule changes remain refused. The five captured routing changes pass locally.

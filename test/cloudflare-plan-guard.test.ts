@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { actionableChanges, validateCloudflarePlan } from '../scripts/cloudflare-plan-guard.js';
 
 type TestChange = {
@@ -44,6 +45,25 @@ const contentUpdate = {
 };
 
 describe('Cloudflare deployment plan guard', () => {
+  it('accepts the captured provider cron transfer with timestamp metadata but rejects unknown schedule values', () => {
+    const captured = JSON.parse(readFileSync(new URL('./fixtures/cloudflare-isolation-cron-plan.json', import.meta.url), 'utf8'));
+    expect(validateCloudflarePlan(captured)).toHaveLength(1);
+    const nullable = structuredClone(captured);
+    nullable.resource_changes[0].change.after.schedules[0].modified_on = null;
+    expect(validateCloudflarePlan(nullable)).toHaveLength(1);
+    for (const mutate of [
+      (change: typeof captured.resource_changes[0]['change']) => { change.after_unknown.schedules[0].cron = true; },
+      (change: typeof captured.resource_changes[0]['change']) => { change.after_unknown.schedules[0].extra = true; },
+      (change: typeof captured.resource_changes[0]['change']) => { change.after_unknown.extra = true; },
+      (change: typeof captured.resource_changes[0]['change']) => { change.after_unknown.schedules.pop(); },
+      (change: typeof captured.resource_changes[0]['change']) => { change.after.schedules[0].modified_on = {}; },
+      (change: typeof captured.resource_changes[0]['change']) => { change.after.schedules[0].cron = '*/1 * * * *'; },
+    ]) {
+      const unsafe = structuredClone(captured); mutate(unsafe.resource_changes[0].change);
+      expect(() => validateCloudflarePlan(unsafe)).toThrow('Refusing unsafe Cloudflare plan');
+    }
+  });
+
   it('accepts only the existing admission attachment transfer with computed Cloudflare defaults', () => {
     const before = {
       account_id: 'account', queue_id: 'existing-admission-queue', queue_name: 'intern-notifs-admission-v2',
