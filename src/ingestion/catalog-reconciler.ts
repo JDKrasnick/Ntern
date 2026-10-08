@@ -223,7 +223,26 @@ function merge(existing: Internship, listing: ProcessedListing, externalId: stri
     && listing.admission?.catalogEligible === true
     && listing.admission.evidenceCodes?.includes('trusted-community-source')
     && !existing.sourceReferences.some(isOfficialOccurrence));
-  const canRevive = existing.open || preferIncoming || trustedReappearance;
+  // A newly attached community occurrence can verify an already-known posting
+  // too. URL variants or a different feed must not keep that exact posting
+  // closed after a fresh employer-page inspection. Display-field matches and
+  // older evidence cannot establish this permission to reopen.
+  const incomingInspectionTime = Date.parse(listing.admission?.destination.inspectedAt ?? '');
+  const verifiedTrustedArrival = Boolean(listing.state === 'open'
+    && listing.admission?.catalogEligible === true
+    && listing.admission.evidenceCodes?.includes('trusted-community-source')
+    && ['posting-detail', 'application-form'].includes(listing.admission.destination.classification)
+    && listing.postingIdentityDecision?.status === 'confirmed'
+    && listing.postingIdentityDecision.evidenceKind === 'immutable-provider-id'
+    && listing.postingIdentity?.providerPostingId
+    && listing.postingIdentity.provider === existing.postingIdentity?.provider
+    && listing.postingIdentity.tenant === existing.postingIdentity?.tenant
+    && listing.postingIdentity.providerPostingId === existing.postingIdentity?.providerPostingId
+    && Number.isFinite(incomingInspectionTime) && incomingInspectionTime <= Date.parse(now)
+    && !existing.sourceReferences.some(isOfficialOccurrence)
+    && existing.sourceReferences.every(reference => reference.admission?.destination.classification !== 'gone'
+      || Date.parse(reference.admission.destination.inspectedAt) <= incomingInspectionTime));
+  const canRevive = existing.open || preferIncoming || trustedReappearance || verifiedTrustedArrival;
   const merged = normalizeInternship({
     ...base,
     company: canonicalCompany ?? company,
