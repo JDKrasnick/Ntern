@@ -725,3 +725,18 @@ Explicit V2 source allowlists are limited to 8 KiB by the deployment guard. The
 344-source production list is approximately 6.8 KiB and exceeded the old 1,000
 character canary limit. Wildcards, invalid source-list characters, unrelated
 binding changes, and values above the bound remain refused.
+
+### Isolated Worker activation guard
+
+The guarded production isolation attempt on 2026-10-08 stopped before apply.
+Cloudflare/OpenTofu represents admission attachment transfer as replacement and
+recomputes `queue_name`, retry delay, and visibility timeout. The guard now accepts
+only those computed defaults while pinning the original queue, DLQ, reviewed
+Worker targets, and batch/concurrency/retry/wait settings. Explicit default
+changes and unknown operator-controlled settings remain refused.
+
+Cloudflare also returns ingestion crons in a different order than configuration.
+Projection transfer compares retained cron membership, rejecting duplicates and
+any unrelated addition or removal. This permits the reviewed split in either
+direction without changing polling cadence or recreating queues. Activation and
+all three active-version resource gates still need production verification.

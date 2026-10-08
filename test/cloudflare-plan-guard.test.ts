@@ -44,6 +44,60 @@ const contentUpdate = {
 };
 
 describe('Cloudflare deployment plan guard', () => {
+  it('accepts only the existing admission attachment transfer with computed Cloudflare defaults', () => {
+    const before = {
+      account_id: 'account', queue_id: 'existing-admission-queue', queue_name: 'intern-notifs-admission-v2',
+      consumer_id: 'existing-consumer', created_on: '2026-10-03T19:55:29Z', type: 'worker',
+      script_name: 'intern-notifs-ingestion', dead_letter_queue: 'intern-notifs-admission-v2-dlq',
+      settings: { batch_size: 1, max_concurrency: 1, max_retries: 2, max_wait_time_ms: 5000, retry_delay: 0 },
+    };
+    const after = { ...before, consumer_id: null, created_on: null, queue_name: null,
+      script_name: 'intern-notifs-admission', settings: { ...before.settings, retry_delay: null, visibility_timeout_ms: null } };
+    const transfer = { address: 'cloudflare_queue_consumer.admission', actions: ['delete', 'create'], before, after,
+      after_unknown: { consumer_id: true, created_on: true, queue_name: true,
+        settings: { retry_delay: true, visibility_timeout_ms: true } } };
+    expect(validateCloudflarePlan(plan([transfer]))).toHaveLength(1);
+    const rollback = { ...transfer, before: { ...before, script_name: 'intern-notifs-admission' },
+      after: { ...after, script_name: 'intern-notifs-ingestion' } };
+    expect(validateCloudflarePlan(plan([rollback]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...transfer, address: 'cloudflare_queue_consumer.ingestion["greenhouse"]' },
+      { ...transfer, actions: ['delete'] },
+      { ...transfer, after: { ...after, queue_id: 'replacement-queue' } },
+      { ...transfer, after: { ...after, queue_name: 'other-queue' } },
+      { ...transfer, after: { ...after, script_name: 'unreviewed-worker' } },
+      { ...transfer, after: { ...after, dead_letter_queue: 'other-dlq' } },
+      { ...transfer, after: { ...after, settings: { ...after.settings, max_concurrency: 2 } } },
+      { ...transfer, after: { ...after, settings: { ...after.settings, max_retries: 3 } } },
+      { ...transfer, after: { ...after, settings: { ...after.settings, batch_size: 2 } } },
+      { ...transfer, after: { ...after, settings: { ...after.settings, max_wait_time_ms: 1000 } } },
+      { ...transfer, after: { ...after, settings: { ...after.settings, visibility_timeout_ms: 1000 } } },
+      { ...transfer, after_unknown: { ...transfer.after_unknown, queue_id: true } },
+      { ...transfer, after_unknown: { ...transfer.after_unknown, settings: { max_retries: true } } },
+      { ...transfer, after_unknown: {} },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
+  it('compares retained ingestion crons as a set during projection transfer', () => {
+    const retained = ['0 * * * *', '9-59/10 * * * *', '12,42 * * * *'];
+    const projection = ['1-51/10 * * * *', '4,14,24,34,44,54 * * * *'];
+    const schedules = (crons: string[]) => crons.map((cron) => ({ cron }));
+    const before = { account_id: 'account', script_name: 'intern-notifs-ingestion',
+      schedules: schedules([retained[0], projection[0], retained[1], projection[1], retained[2]]) };
+    const after = { ...before, schedules: schedules([...retained].reverse()) };
+    const transfer = { address: 'cloudflare_workers_cron_trigger.ingestion', actions: ['update'], before, after };
+    expect(validateCloudflarePlan(plan([transfer]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([{ ...transfer, before: after, after: before }]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...transfer, after: { ...after, schedules: schedules(retained.slice(1)) } },
+      { ...transfer, after: { ...after, schedules: schedules([...retained, '*/1 * * * *']) } },
+      { ...transfer, after: { ...after, schedules: schedules([...retained, retained[0]]) } },
+      { ...transfer, before: { ...before, schedules: [...before.schedules, before.schedules[0]] } },
+      { ...transfer, after: { ...after, script_name: 'unreviewed-worker' } },
+      { ...transfer, after: { ...after, schedules: [...after.schedules, { cron: projection[0], extra: true }] } },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('accepts no-op plans and in-place Worker script updates', () => {
     expect(validateCloudflarePlan(plan([]))).toEqual([]);
     expect(validateCloudflarePlan(plan([

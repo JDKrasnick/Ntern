@@ -986,11 +986,12 @@ function isIsolatedRoutingChange(address: string, change: ResourceChange['change
   }
   if (address === 'cloudflare_workers_cron_trigger.ingestion' && b && Array.isArray(b.schedules) && Array.isArray(a.schedules)) {
     const projection = new Set(['1-51/10 * * * *', '4,14,24,34,44,54 * * * *']);
-    const omit = (rows: unknown[]) => rows.filter((row) => !isRecord(row) || !projection.has(String(row.cron)));
+    const omit = (rows: unknown[]) => rows.filter((row) => !isRecord(row) || !projection.has(String(row.cron)))
+      .map((row) => String((row as Record<string, unknown>).cron)).sort();
     // Only the two reviewed projection crons may transfer in either direction.
     const valid = (rows: unknown[]) => rows.every((row) => isRecord(row) && Object.keys(row).length === 1 && typeof row.cron === 'string');
     return valid(b.schedules) && valid(a.schedules)
-      && new Set(a.schedules.map((row) => String((row as Record<string, unknown>).cron))).size === a.schedules.length
+      && [b.schedules, a.schedules].every((rows) => new Set(rows.map((row) => String((row as Record<string, unknown>).cron))).size === rows.length)
       && isDeepStrictEqual(omit(b.schedules), omit(a.schedules)) && isDeepStrictEqual({ ...b, schedules: a.schedules }, a);
   }
   return false;
@@ -1000,15 +1001,32 @@ function isAdmissionAttachmentReplacement(address: string, change: ResourceChang
   if (address !== 'cloudflare_queue_consumer.admission' || !isDeepStrictEqual(change.actions, ['delete', 'create'])
     || !isRecord(change.before) || !isRecord(change.after)) return false;
   const b = change.before, a = change.after;
-  const generated = new Set(['consumer_id', 'id', 'created_on']);
-  const stable = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([key]) => !generated.has(key) && key !== 'script_name'));
+  const generated = new Set(['consumer_id', 'id', 'created_on', 'queue_name']);
+  const computedSettings = new Set(['retry_delay', 'visibility_timeout_ms']);
+  const unknown = isRecord(change.after_unknown) ? change.after_unknown : {};
+  if (!isRecord(b.settings) || !isRecord(a.settings)) return false;
+  const afterSettings = a.settings;
+  const settingsUnknown = isRecord(unknown.settings) ? unknown.settings : {};
+  const stableSettings = (settings: Record<string, unknown>) => Object.fromEntries(Object.entries(settings)
+    .filter(([key]) => !(computedSettings.has(key) && settingsUnknown[key] === true)));
+  // Cloudflare recomputes these defaults when the consumer attachment is
+  // replaced. An explicit value change is still refused.
+  if ([...computedSettings].some((key) => settingsUnknown[key] === true && afterSettings[key] != null)
+    || (b.queue_name != null && b.queue_name !== 'intern-notifs-admission-v2')
+    || (a.queue_name != null && a.queue_name !== 'intern-notifs-admission-v2')) return false;
+  const stable = (value: Record<string, unknown>) => ({ ...Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !generated.has(key) && key !== 'script_name')), settings: stableSettings(value.settings as Record<string, unknown>) });
   return typeof b.queue_id === 'string' && b.queue_id.length > 0 && b.queue_id === a.queue_id
     && b.type === 'worker' && a.type === 'worker'
     && b.dead_letter_queue === 'intern-notifs-admission-v2-dlq'
     && ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(b.script_name))
     && ['intern-notifs-ingestion', 'intern-notifs-admission'].includes(String(a.script_name))
+    && b.settings.batch_size === 1 && b.settings.max_concurrency === 1
+    && b.settings.max_retries === 2 && b.settings.max_wait_time_ms === 5_000
     && isDeepStrictEqual(stable(b), stable(a))
-    && (!isRecord(change.after_unknown) || Object.entries(change.after_unknown).every(([key, value]) => value === false || generated.has(key)));
+    && Object.entries(unknown).every(([key, value]) => value === false || (generated.has(key) && value === true)
+      || (key === 'settings' && isRecord(value) && Object.entries(value)
+        .every(([setting, unknown]) => unknown === false || (computedSettings.has(setting) && unknown === true))));
 }
 
 function isAdmissionRouteState(address: string, change: ResourceChange['change']): boolean {
