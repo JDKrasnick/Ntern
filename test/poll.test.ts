@@ -56,6 +56,25 @@ class SnapshotAdapter implements SourceAdapter {
   }
 }
 describe('polling', () => {
+  it('forces acquisition without losing content identity or bounded detail progress', async () => {
+    const source = 'forced-board';
+    const adapter = new SnapshotAdapter(source, snapshotRows(1, source));
+    const store = new MemoryInternshipStore();
+    const poller = new Poller([adapter], store);
+    await poller.poll();
+    const checkpoint = (await store.getCheckpoint(source))!;
+    await store.putCheckpoint({ ...checkpoint, contentOmitted: true,
+      pendingGreenhousePostingIds: ['role-0'], greenhousePostingRevisions: { 'role-0': 'revision-1' } });
+    await poller.poll({ forceFullAcquisition: true });
+    expect(adapter.received[1]).toMatchObject({ contentHash: checkpoint.contentHash,
+      contentOmitted: true, pendingGreenhousePostingIds: ['role-0'],
+      greenhousePostingRevisions: { 'role-0': 'revision-1' } });
+    expect(adapter.received[1]?.etag).toBeUndefined();
+    expect(adapter.received[1]?.documentEtags).toBeUndefined();
+    await poller.poll();
+    expect(adapter.received[2]?.etag).toBe('board-etag');
+  });
+
   it('fetches a complete board for an allowlisted V2 shadow cadence while preserving unchanged identity', async () => {
     const source = 'github-shadow';
     const postings = snapshotRows(1, source);
