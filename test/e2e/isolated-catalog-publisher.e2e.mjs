@@ -48,7 +48,7 @@ async function runPublisher(event, environment) {
   assert.equal(response.status, 200, `isolated publication failed: ${response.status}`);
   assert.deepEqual(await response.json(), { completed: true });
 }
-const scheduleRequest = (event) => new Request('https://isolated.internal/internal/scheduled', { method: 'POST', body: JSON.stringify(event) });
+const scheduleRequest = (event) => new globalThis.Request('https://isolated.internal/internal/scheduled', { method: 'POST', body: JSON.stringify(event) });
 const scheduled = (cron) => runPublisher({ cron, scheduledTime: Date.now() }, env);
 const marker = (scope) => db.prepare('SELECT value,updated_at FROM system_state WHERE key=?').bind(`maintenance_phase:${scope}:${scope}_complete`).first();
 
