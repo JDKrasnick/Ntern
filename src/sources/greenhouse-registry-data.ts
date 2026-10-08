@@ -75,7 +75,7 @@ const apiProbedBoards: Array<{
   { token: "fspco-op012325", name: "Flagship Pioneering Co-Op Program", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "gardacp", name: "Garda Capital Partners", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "gemini", name: "Gemini", initialHosts: ["boards.greenhouse.io"], finalHosts: ["boards.greenhouse.io","job-boards.greenhouse.io"] },
-  { token: "genscript", name: "GenScript/ProBio", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
+  { token: "genscript", name: "GenScript/ProBio", boardName: "GenScript", admittedAt: "2026-10-08T15:51:00.000Z", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "ginkgobioworks", name: "Ginkgo Bioworks Inc.", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "gitlab", name: "GitLab", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
   { token: "gleanwork", name: "Glean", initialHosts: ["job-boards.greenhouse.io"], finalHosts: ["job-boards.greenhouse.io"] },
