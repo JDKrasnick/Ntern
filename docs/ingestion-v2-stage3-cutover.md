@@ -27,6 +27,27 @@ visibility, suppression, and notification counts. Enable the source-scoped V2
 configuration, run one forced recovery so the active snapshot carries the current
 evaluator version, and confirm the source remains paused.
 
+A shared provider queue can contain healthy work for unrelated sources throughout
+the cutover. After the pause fence is deployed, target-source quiescence can
+establish drain without requiring that entire queue to become empty. Forced ATS
+messages carry `forceRequestedAt`; Greenhouse continuations preserve that original
+request time. A paused source rejects missing or stale force authorization.
+Explicit recovery records its validation request with the pause and remains
+allowed. Legacy forced messages without an authorization timestamp are skipped
+while paused; issue a new recovery if such a request still needs validation.
+
+For this source-scoped drain proof, keep the target healthy and paused, prohibit
+further replay/recovery requests, and wait at least 16 minutes after both its final
+pause and deployment of the fence. This exceeds the [15-minute queue invocation
+wall limit](https://developers.cloudflare.com/queues/platform/limits/). Capture
+two identical observations at least 30 seconds apart of the pause/configuration
+version, checkpoint (including zero pending Greenhouse detail IDs), complete
+active snapshot/hash, and notification count. Provider and V2 DLQs must be empty,
+and current-version resource/error, catalog, and cost gates must still pass.
+Recheck the exact signed bootstrap preview before applying. Do not use this
+alternative with an older Worker or a source that is quarantined, changing,
+receiving new forced work, or missing complete acquisition evidence.
+
 The scheduled dev-soak checkpoint must also show an initialized one-hour cost
 window below both production alert boundaries: fewer than 60 V2 shadow runs and
 fewer than 100,000 D1 rows written. A breach blocks cohort promotion even when

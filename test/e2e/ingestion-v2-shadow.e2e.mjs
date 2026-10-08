@@ -134,7 +134,7 @@ function recorder() {
   return { sent: [], async send(message) { this.sent.push(message); } };
 }
 
-function deliver(body, overrides = {}) {
+function deliver(body, overrides = {}, queueName = 'intern-notifs-github') {
   const queues = { github: recorder(), destinationVerification: recorder(), admission: recorder() };
   const deadLetters = { github: recorder(), destinationVerification: recorder(), admission: recorder() };
   const settled = { ack: 0, retries: [] };
@@ -156,7 +156,7 @@ function deliver(body, overrides = {}) {
   return (async () => {
     const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
     await builtWorker.queue({
-      queue: 'intern-notifs-github',
+      queue: queueName,
       messages: [{
         id: `v2-delivery-${Date.now()}`,
         body,
@@ -302,3 +302,41 @@ test('reopens a board larger than one D1 bind-limited statement', async () => {
   ).bind(sourceId).first();
   assert.ok(queued.count > 96, `expected more than one bind-limited chunk, got ${queued.count}`);
 });
+
+
+for (const origin of [undefined, '2026-10-08T11:59:59.000Z']) {
+  test(`compiled ATS delivery fences a paused forced request (${origin ?? 'legacy'})`, async () => {
+    const sourceId = 'greenhouse-figma';
+    const health = { sourceId, sourceStatus: 'paused', state: 'healthy', configVersion: 123,
+      changedAt: '2026-10-08T12:00:00.000Z', lastAttemptAt: '2026-10-08T11:58:00.000Z',
+      consecutiveFailures: 0, durationMs: 0 };
+    const pk = `SOURCE#${sourceId}`;
+    const previous = await database.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(pk).first();
+    const previousFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = async () => { requests++; throw new Error('paused source unexpectedly fetched'); };
+    try {
+      await database.prepare("INSERT INTO catalog_items(pk,sk,kind,value) VALUES(?,'HEALTH','source-health',?) ON CONFLICT(pk,sk) DO UPDATE SET value=excluded.value")
+        .bind(pk, JSON.stringify(health)).run();
+      const before = await database.prepare('SELECT COUNT(*) n FROM ingestion_snapshots WHERE source_id=?').bind(sourceId).first();
+      const result = await deliver({ version: 1, sourceId, scheduledAt: '2026-10-08T12:01:00.000Z',
+        force: true, ...(origin ? { forceRequestedAt: origin } : {}) }, {
+        INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: sourceId, INGESTION_V2_ADMISSION_ENABLED: 'true',
+        INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: sourceId, INGESTION_V2_CATALOG_WRITER_ENABLED: 'true',
+        INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: sourceId,
+        INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: sourceId,
+      }, 'intern-notifs-greenhouse');
+      assert.equal(result.settled.ack, 1);
+      assert.deepEqual(result.settled.retries, []);
+      assert.equal(requests, 0);
+      assert.equal(result.queues.admission.sent.length, 0);
+      assert.equal(result.queues.destinationVerification.sent.length, 0);
+      assert.deepEqual(JSON.parse((await database.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(pk).first()).value), health);
+      assert.deepEqual(await database.prepare('SELECT COUNT(*) n FROM ingestion_snapshots WHERE source_id=?').bind(sourceId).first(), before);
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previous) await database.prepare("UPDATE catalog_items SET value=? WHERE pk=? AND sk='HEALTH'").bind(previous.value, pk).run();
+      else await database.prepare("DELETE FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(pk).run();
+    }
+  });
+}

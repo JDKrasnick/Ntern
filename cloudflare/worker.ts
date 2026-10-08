@@ -1463,10 +1463,10 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!source) return withCors(Response.json({ message: 'Source not found' }, { status: 404 }));
     const now = new Date();
     const message = atsProvider === 'greenhouse'
-      ? { ...greenhouseWorkMessages([source as typeof reviewedGreenhouseSources[number]], now)[0]!, force: true }
+      ? { ...greenhouseWorkMessages([source as typeof reviewedGreenhouseSources[number]], now)[0]!, force: true, forceRequestedAt: now.toISOString() }
       : atsProvider === 'lever'
-        ? { ...leverWorkMessages([source as typeof reviewedLeverSources[number]], now, crypto.randomUUID())[0]!, force: true }
-        : { ...ashbyWorkMessages([source as typeof reviewedAshbySources[number]], now, crypto.randomUUID())[0]!, force: true };
+        ? { ...leverWorkMessages([source as typeof reviewedLeverSources[number]], now, crypto.randomUUID())[0]!, force: true, forceRequestedAt: now.toISOString() }
+        : { ...ashbyWorkMessages([source as typeof reviewedAshbySources[number]], now, crypto.randomUUID())[0]!, force: true, forceRequestedAt: now.toISOString() };
     const event = { Records: [{ messageId: crypto.randomUUID(), body: JSON.stringify(message) }] };
     const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env),
       shadowDiscovery: ingestionV2ShadowDiscovery(env),

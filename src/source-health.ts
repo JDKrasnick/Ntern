@@ -7,6 +7,23 @@ const QUALITY_FAILURES_BEFORE_QUARANTINE = 2;
 const CAPACITY_FAILURES_BEFORE_QUARANTINE = 2;
 const MAX_PROVIDER_BACKOFF_MS = 30 * 60_000;
 
+/** A pause fences queued force requests too; continuations retain their origin. */
+export function sourceDeliveryPaused(
+  health: SourceHealth | undefined,
+  message: { force?: boolean; forceRequestedAt?: string },
+): boolean {
+  if (health?.sourceStatus !== 'paused' && health?.state !== 'quarantined') return false;
+  if (!message.force) return true;
+  const requestedAt = Date.parse(message.forceRequestedAt ?? '');
+  const pausedAt = Date.parse(health.changedAt ?? '');
+  // Legacy forced messages cannot prove authorization after the current pause.
+  if (!Number.isFinite(requestedAt)) return true;
+  if (!Number.isFinite(pausedAt)) return false;
+  if (requestedAt > pausedAt) return false;
+  // recover persists the pause and its explicit validation request together.
+  return !(requestedAt === pausedAt && health.incidentAcknowledgedAt === health.changedAt);
+}
+
 export class ApplicationLinkValidationError extends Error {
   readonly samples: Array<{ category: SourceFailureCategory; diagnostic: string }>;
 
