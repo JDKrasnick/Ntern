@@ -41,10 +41,10 @@ const postingB = '22222222-2222-4222-8222-222222222222';
 const jobId = (postingId) => `${sourceId}-${postingId}`;
 const applyUrl = (postingId) => `https://jobs.ashbyhq.com/${tenant}/${postingId}`;
 
-/** A real-shaped board, padded past the old 2 MB buffering ceiling. */
+/** A real-shaped board, padded past 36 MB to exercise bounded destination-batch retention. */
 function boardBytes() {
   const filler = 'x'.repeat(20_000);
-  const rows = Array.from({ length: 150 }, (_, index) => ({
+  const rows = Array.from({ length: 1_800 }, (_, index) => ({
     id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, title: `Role ${index}`, descriptionPlain: filler,
   }));
   return new TextEncoder().encode(JSON.stringify({
@@ -122,7 +122,7 @@ function collectionMessage(postingId, token) {
 
 before(async () => {
   board = boardBytes();
-  assert.ok(board.byteLength > 2_000_000, 'the fabricated board must exceed the buffering ceiling');
+  assert.ok(board.byteLength > 36_000_000, 'the fabricated board must exercise a large prefix before the late posting');
   const bundleDirectory = join(repositoryRoot, 'cloudflare/dist/ingestion');
   runtime = new Miniflare({
     workers: [await createWorkerConfig(workerName, bundleDirectory, 'ingestion-worker.js', {

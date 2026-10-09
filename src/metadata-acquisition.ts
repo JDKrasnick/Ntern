@@ -284,6 +284,9 @@ type AshbyBoard = {
   bytes: number;
   done: boolean;
   truncated: boolean;
+  targets?: Map<string, ProviderIdentity>;
+  artifacts?: Map<string, RoleMetadataArtifact>;
+  scan?: AshbyScan;
 };
 
 /** Scanner state that survives a chunk boundary, so an appended chunk continues
@@ -304,7 +307,7 @@ type AshbyScan = {
  * nor mask the real element that follows it. Returns the next completed element
  * whose `id` matches, and the position just past it, so a candidate a caller
  * rejects can be followed by a resumed walk instead of a restart. */
-function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected: string | undefined): { job: unknown; position: number } | undefined {
+function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected: string | undefined, visit?: (job: unknown) => void): { job: unknown; position: number } | undefined {
   // Retain one slice per chunk instead of one array slot per character. A
   // near-ceiling posting otherwise allocates hundreds of thousands of slots
   // each time a later posting requires another walk through the cached board.
@@ -355,6 +358,7 @@ function scanAshbyJob(scan: AshbyScan, text: string, position: number, expected:
         const next = index + 1;
         retainUntil(next, true);
         const job = takeElement();
+        if (job) visit?.(job);
         if (record(job) && job.id === expected) return { job, position: next };
         continue;
       }
@@ -387,17 +391,31 @@ async function extendAshbyBoard(board: AshbyBoard): Promise<void> {
  * requested `id` but fails identity validation (a look-alike in a stray array) is
  * rejected and the walk resumes, so it cannot mask the real posting behind it. */
 async function findAshbyJob(board: AshbyBoard, expected: string | undefined, accept: (job: unknown) => RoleMetadataArtifact | undefined): Promise<{ artifact?: RoleMetadataArtifact; truncated: boolean; bytes: number }> {
-  const scan: AshbyScan = { containers: [], inString: false, escaped: false, parts: undefined, retained: 0, oversized: false };
+  if (expected && board.artifacts?.has(expected)) return { artifact: board.artifacts.get(expected), truncated: false, bytes: board.bytes };
+  const scan: AshbyScan = board.scan ?? { containers: [], inString: false, escaped: false, parts: undefined, retained: 0, oversized: false };
+  if (board.targets) board.scan = scan;
+  const visit = board.targets ? (job: unknown) => {
+    if (!record(job) || typeof job.id !== 'string' || board.artifacts!.has(job.id)) return;
+    const identity = board.targets!.get(job.id);
+    if (!identity) return;
+    const artifact = parseMetadataApiResponse(identity, 'ashby-api', { jobs: [job] });
+    if (artifact) board.artifacts!.set(job.id, artifact);
+  } : undefined;
   let position = 0;
   for (;;) {
-    const found = scanAshbyJob(scan, board.text, position, expected);
+    const found = scanAshbyJob(scan, board.text, position, expected, visit);
     if (found !== undefined) {
       position = found.position;
       const artifact = accept(found.job);
+      if (board.targets) {
+        // The scanner state and target artifacts replace the growing board prefix.
+        board.text = board.text.slice(position); position = 0;
+      }
       if (artifact) return { artifact, truncated: false, bytes: board.bytes };
       continue;
     }
     position = board.text.length;
+    if (board.targets) { board.text = ''; position = 0; }
     if (board.done) return { truncated: board.truncated, bytes: board.bytes };
     await extendAshbyBoard(board);
   }
@@ -431,10 +449,22 @@ function jsonLdPageFallback(
 export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
   canRequest?: (host: string) => Promise<boolean>;
   deferHost?: (host: string, retryAfter: string) => Promise<void>;
+  /** Complete identities for this destination batch. Retain only these artifacts
+   * instead of the board prefix, including targets encountered out of order. */
+  ashbyBatch?: ReadonlyArray<{ identity: ProviderIdentity; candidateUrl?: string }>;
 } = {}) {
   type RequestResult = { payload?: unknown; status?: number; bytes?: number; outcome: MetadataAcquisition['outcome'] };
   const requests = new Map<string, Promise<RequestResult>>();
   const boards = new Map<string, AshbyBoard>();
+  const targetsByBoard = new Map<string, Map<string, ProviderIdentity>>();
+  for (const item of hooks.ashbyBatch ?? []) {
+    const route = metadataApiRoute(item.identity, item.candidateUrl);
+    if (route?.method !== 'ashby-api') continue;
+    const identity = route.identity ?? item.identity;
+    if (!identity.postingId) continue;
+    const targets = targetsByBoard.get(route.url) ?? new Map<string, ProviderIdentity>();
+    targets.set(identity.postingId, identity); targetsByBoard.set(route.url, targets);
+  }
   const boardTails = new Map<string, Promise<unknown>>();
   let cleanup: Promise<void> | undefined;
   /** Serializes work per board so concurrent identities do not race the reader. */
@@ -484,7 +514,8 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
       // An Ashby board is read lazily across the batch's postings, so its
       // reader stays open here instead of being released with the others.
       if (keepBoard) {
-        boards.set(url, { reader, decoder: new TextDecoder(), text: '', bytes: 0, done: false, truncated: false });
+        boards.set(url, { reader, decoder: new TextDecoder(), text: '', bytes: 0, done: false, truncated: false,
+          ...(hooks.ashbyBatch ? { targets: targetsByBoard.get(url) ?? new Map(), artifacts: new Map() } : {}) });
         return { outcome: 'acquired', status: response.status };
       }
       try {
@@ -513,6 +544,9 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
     // serialized per board because callers may request postings concurrently.
     if (route.method === 'ashby-api' && boards.has(route.url)) {
       const board = boards.get(route.url)!;
+      if (board.targets && (!identity.postingId || !board.targets.has(identity.postingId))) {
+        throw new Error('Ashby posting was not declared in the metadata batch');
+      }
       try {
         return await serialize(route.url, async () => {
           const boardIdentity = route.identity ?? identity;
@@ -550,10 +584,10 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
           await Promise.all([...boards.values()].map(async (board) => {
             try { await board.reader.cancel(); }
             catch { /* An aborted or exhausted response still needs its lock released. */ }
-            finally { board.text = ''; board.reader.releaseLock(); }
+            finally { board.text = ''; board.artifacts?.clear(); board.reader.releaseLock(); }
           }));
         } finally {
-          boards.clear(); requests.clear(); boardTails.clear(); throttled.clear();
+          boards.clear(); targetsByBoard.clear(); requests.clear(); boardTails.clear(); throttled.clear();
         }
       })();
       return cleanup;

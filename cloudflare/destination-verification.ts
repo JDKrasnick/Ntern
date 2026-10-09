@@ -581,6 +581,7 @@ export async function processDestinationVerificationBatch(
   }
   if (!pending.length) return;
   const acquireMetadata = createMetadataAcquirer(fetch, {
+    ashbyBatch: pending.map(({ message }) => ({ identity: message.providerIdentity, candidateUrl: message.candidateUrl })),
     canRequest: (host) => operations.metadataHostAvailable(host),
     deferHost: (host, until) => operations.deferMetadataHost(host, until),
   });

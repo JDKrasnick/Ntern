@@ -286,3 +286,5 @@ no pending details, healthy paused state, complete immutable snapshots where V2
 discovery is enabled, and unchanged notification-event counts. Then use the normal
 signed bootstrap and source-by-source ownership gates. Silent acquisition does not
 waive admission, identity, URL, or catalog parity checks.
+
+Destination batches must declare their Ashby posting identities before acquisition. The scanner then retains only the current decoded chunk, one bounded posting element, and identity-validated artifacts for that batch; consumed board prefixes are discarded. A 36 MB compiled board regression verifies late and backward posting lookups from one fetch. This repair addresses board-prefix retention after the 2026-10-09 17:34 UTC ingestion sample reached 130.9 MiB despite reader cleanup. The correlated destination/shadow deliveries had no native exceptions; fresh natural production resource evidence remains required before continuing expansion.
