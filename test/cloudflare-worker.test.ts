@@ -332,6 +332,21 @@ describe('Cloudflare scheduled dispatch leases', () => {
 });
 
 describe('Cloudflare maintenance cron', () => {
+  it.each(['D1_ERROR: D1 DB is overloaded. Requests queued for too long.', 'D1_ERROR: internal error; reference = shutdown'])('defers a scheduled D1 failure without retrying: %s', async message => {
+    const first = vi.fn().mockRejectedValue(new Error(message));
+    const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
+    try {
+      await expect(cloudflareWorker.scheduled({ cron: '9-59/10 * * * *', scheduledTime: Date.now() } as never,
+        { DB: { prepare: () => ({ first }) } } as unknown as Environment)).resolves.toBeUndefined();
+      expect(first).toHaveBeenCalledOnce();
+      expect(markers).toHaveBeenCalledWith('maintenance_complete', 'failed', expect.any(Date));
+      expect(markers).not.toHaveBeenCalledWith('maintenance_complete', 'complete', expect.any(Date));
+    } finally { vi.restoreAllMocks(); }
+  });
+  it('keeps unexpected scheduled database failures fatal', async () => {
+    await expect(cloudflareWorker.scheduled({ cron: '2,32 * * * *', scheduledTime: Date.now() } as never,
+      { DB: { prepare: () => ({ first: async () => { throw new Error('SQLITE_ERROR: malformed query'); } }) } } as unknown as Environment)).rejects.toThrow('malformed query');
+  });
   it.each([undefined, '', '   '])('skips an optional digest with recipient %j', async (recipient) => {
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const before = runtime.runRuntimeCommand.mock.calls.length;
@@ -549,7 +564,7 @@ describe('Cloudflare maintenance cron', () => {
   it.each(['false', 'true'])('runs general maintenance without rebuilding the projection with isolation=%s', async (isolated) => {
     // The projection belongs to the `1-51/10` cron now. While a failing
     // verification or alert email may abort its own step, it must not stop the
-    // rest of the maintenance phases or the completion signal.
+    // rest of the maintenance phases. A partial pass retains a failed signal.
     const listCatalog = vi.spyOn(D1InternshipStore.prototype, 'listCatalog').mockResolvedValue([]);
     const projection = vi.spyOn(D1InternshipStore.prototype, 'putCatalogProjection').mockResolvedValue();
     const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
@@ -599,10 +614,10 @@ describe('Cloudflare maintenance cron', () => {
       expect(markers).toHaveBeenCalledWith('legacy_posting_identity_incidents', 'complete');
       expect(markers).toHaveBeenCalledWith('admission_verification_warnings', 'started');
       expect(markers).toHaveBeenCalledWith('admission_verification_warnings', 'failed');
-      expect(markers).toHaveBeenCalledWith('maintenance_complete', 'complete', expect.any(Date));
+      expect(markers).toHaveBeenCalledWith('maintenance_complete', 'failed', expect.any(Date));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"legacy_posting_identity_incident_drain"'));
       expect(logs).toHaveBeenCalledWith(expect.stringContaining('"deleted":5000'));
-      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_complete"'));
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining('"event":"cloudflare_maintenance_partial"'));
       if (isolated === 'true') expect(markers).toHaveBeenCalledWith('ingestion_v2_admission_dispatch', 'complete');
     } finally {
       vi.restoreAllMocks();

@@ -12,9 +12,11 @@ export async function forwardIsolatedSchedule(binding: ServiceBinding | undefine
       && ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *', '1-51/10 * * * *', '4,14,24,34,44,54 * * * *', '4-54/10 * * * *'].includes(event.cron)) {
       let deferred: { completed?: unknown; deferred?: unknown; failureClass?: unknown } | null;
       try { deferred = await response.json() as typeof deferred; } catch { deferred = null; }
-      if (deferred?.completed === false && deferred.deferred === true && deferred.failureClass === 'r2-internal') {
+      if (deferred?.completed === false && deferred.deferred === true
+        && typeof deferred.failureClass === 'string'
+        && ['r2-internal', 'd1-overloaded', 'd1-internal'].includes(deferred.failureClass)) {
         console.warn(JSON.stringify({ event: 'isolated_catalog_projection_deferred', cron: event.cron,
-          failureClass: 'r2-internal', retryAfterSeconds: 600 }));
+          failureClass: deferred.failureClass, retryAfterSeconds: 600 }));
         return;
       }
     }

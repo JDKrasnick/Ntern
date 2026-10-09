@@ -5,6 +5,7 @@ import { publishProspectiveShadowMetadata } from './shadow-publication.js';
 import { billingStopped, isolationEnabled } from './isolated-work.js';
 import { isolatedScheduleRequest } from './isolated-schedule.js';
 import { isR2InternalFailure } from './r2-errors.js';
+import { classifyD1Failure } from './d1-errors.js';
 import type { D1Database, R2Bucket, ScheduledController } from './types.js';
 
 export interface CatalogPublisherEnvironment {
@@ -19,12 +20,13 @@ export default {
   async fetch(request: Request, env: CatalogPublisherEnvironment): Promise<Response> {
     const event = await isolatedScheduleRequest(request, ['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *', '1-51/10 * * * *', '4,14,24,34,44,54 * * * *', '4-54/10 * * * *']);
     if (!event || !isolationEnabled(env)) return new Response('Not found', { status: 404 });
-    if (await billingStopped(env.DB)) return new Response('Billing stopped', { status: 503 });
     try {
+      if (await billingStopped(env.DB)) return new Response('Billing stopped', { status: 503 });
       await runProtectedSchedule(event, env);
     } catch (error) {
-      if (!deferR2Failure(error, event)) throw error;
-      return Response.json({ completed: false, deferred: true, failureClass: 'r2-internal' },
+      const failureClass = await deferPublicationFailure(error, event, env);
+      if (!failureClass) throw error;
+      return Response.json({ completed: false, deferred: true, failureClass },
         { status: 503, headers: { 'Retry-After': '600' } });
     }
     return Response.json({ completed: true });
@@ -33,22 +35,29 @@ export default {
   // publication live through that transition; a shared phase lease and existing
   // pointer fences protect both native and private-binding invocations.
   async scheduled(event: ScheduledController, env: CatalogPublisherEnvironment): Promise<void> {
-    if (!isolationEnabled(env) || await billingStopped(env.DB)) return;
+    if (!isolationEnabled(env)) return;
     try {
+      if (await billingStopped(env.DB)) return;
       await runProtectedSchedule(event, env);
     } catch (error) {
-      if (!deferR2Failure(error, event)) throw error;
+      if (!await deferPublicationFailure(error, event, env)) throw error;
     }
   },
 };
 
-function deferR2Failure(error: unknown, event: ScheduledController): boolean {
-  if (!isR2InternalFailure(error)) return false;
+async function deferPublicationFailure(error: unknown, event: ScheduledController, env: CatalogPublisherEnvironment): Promise<string | undefined> {
+  const d1 = classifyD1Failure(error);
+  const failureClass = isR2InternalFailure(error) ? 'r2-internal'
+    : d1 === 'overloaded' ? 'd1-overloaded' : d1 === 'internal' ? 'd1-internal' : undefined;
+  if (!failureClass) return undefined;
+  const scope = ['1-51/10 * * * *', '1,11,21,31,41,51 * * * *'].includes(event.cron)
+    ? 'catalog_projection' : 'catalog_projection_r2';
+  await recordPhase(new D1MaintenancePhaseStore(env.DB, scope), scope, 'failed');
   // Rebuild on the next cadence. Retrying a conditional pointer write here
   // could turn a lost successful acknowledgement into a precondition miss.
   console.warn(JSON.stringify({ event: 'cloudflare_catalog_projection_deferred',
-    cron: event.cron, failureClass: 'r2-internal', retryAfterSeconds: 600 }));
-  return true;
+    cron: event.cron, failureClass, retryAfterSeconds: 600 }));
+  return failureClass;
 }
 
 async function runProtectedSchedule(event: ScheduledController, env: CatalogPublisherEnvironment): Promise<void> {
@@ -85,7 +94,7 @@ async function runScheduled(event: ScheduledController, env: CatalogPublisherEnv
         throw error;
       }), phases);
     if (!result.projection) {
-      if (isR2InternalFailure(projectionFailure)) throw projectionFailure;
+      if (isR2InternalFailure(projectionFailure) || ['overloaded', 'internal'].includes(classifyD1Failure(projectionFailure))) throw projectionFailure;
       throw new Error('D1 catalog projection failed');
     }
     await recordPhase(phases, 'catalog_projection_complete', 'complete', observedAt);
