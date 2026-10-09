@@ -64,6 +64,7 @@ function parseWorkMessage(body: string): GreenhouseWorkMessage {
   if (!Number.isFinite(Date.parse(parsed.scheduledAt))) throw new Error('Invalid Greenhouse work message timestamp');
   if (parsed.force !== undefined && typeof parsed.force !== 'boolean') throw new Error('Invalid Greenhouse work message force flag');
   if (parsed.forceRequestedAt !== undefined && (typeof parsed.forceRequestedAt !== 'string' || !Number.isFinite(Date.parse(parsed.forceRequestedAt)) || Date.parse(parsed.forceRequestedAt) > Date.parse(parsed.scheduledAt))) throw new Error('Invalid Greenhouse work message force request timestamp');
+  if (parsed.seedOnly !== undefined && (typeof parsed.seedOnly !== 'boolean' || (parsed.seedOnly && parsed.force !== true))) throw new Error('Silent Greenhouse backfill requires a forced delivery');
   return parsed as GreenhouseWorkMessage;
 }
 
@@ -105,6 +106,10 @@ export async function runGreenhouseBoard(
   if (sourceDeliveryPaused(sourceHealth, message)) {
     return { sourceId: source.id, mode, skipped: 'paused', notModified: true, listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };
   }
+  if (message.seedOnly && (message.force !== true || mode !== 'published' || sourceHealth?.sourceStatus !== 'paused'
+    || sourceHealth.state !== 'healthy' || dependencies.v2CatalogWriteOwner?.(source.id))) {
+    throw new Error('Silent Greenhouse backfill requires a healthy paused published source without V2 ownership');
+  }
   if (!message.force && sourceHealth?.backoffUntil && Date.parse(sourceHealth.backoffUntil) > Date.now()) {
     return { sourceId: source.id, mode, skipped: 'backoff', notModified: true, listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };
   }
@@ -139,7 +144,7 @@ export async function runGreenhouseBoard(
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
     dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({
-    naturalProviderPoll: !message.force, forceFullAcquisition: message.force === true });
+    naturalProviderPoll: !message.force, forceFullAcquisition: message.force === true, seedOnly: message.seedOnly === true });
   const pollFailure = failureFromPollReport(poll, sourceHealth);
   if (pollFailure) throw pollFailure;
   const checkpoint = await dependencies.store.getCheckpoint(source.id);
@@ -157,7 +162,7 @@ export async function runGreenhouseBoard(
     if (!dependencies.enqueueContinuation) {
       throw new Error(`${source.id}: oversized Greenhouse detail pass needs a continuation queue`);
     }
-    await dependencies.enqueueContinuation({ version: 1, sourceId: source.id, scheduledAt: new Date().toISOString(), ...(message.force ? { force: true, forceRequestedAt: message.forceRequestedAt ?? message.scheduledAt } : {}) });
+    await dependencies.enqueueContinuation({ version: 1, sourceId: source.id, scheduledAt: new Date().toISOString(), ...(message.force ? { force: true, forceRequestedAt: message.forceRequestedAt ?? message.scheduledAt, ...(message.seedOnly ? { seedOnly: true } : {}) } : {}) });
   }
   return {
     sourceId: source.id,

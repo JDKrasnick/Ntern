@@ -377,6 +377,24 @@ describe('isGreenhouseJobShape', () => {
 });
 
 describe('greenhouse source quality policy', () => {
+  it.each([
+    ['greenhouse-voloridgeinvestmentmanagement', 'https://job-boards.greenhouse.io/voloridgeinvestmentmanagement/jobs/5001'],
+    ['greenhouse-janestreet', 'https://www.janestreet.com/join-jane-street/position/5001/'],
+  ])('retains reviewed application URLs for %s without allowing sibling hosts', async (id, url) => {
+    const source = reviewedGreenhouseSources.find(source => source.id === id)!;
+    const jobs = [{ ...technicalInternship, absolute_url: url }];
+    const result = await new GreenhouseBoardAdapter({ source, fetchImpl: async () => jsonResponse({ jobs }) }).fetch();
+    expect(result.listings).toHaveLength(1);
+    expect(result.checkpoint.activeExternalIds).toEqual(['5001']);
+    const policy = greenhouseQualityPolicy(source);
+    expect(verifySourceQuality([{ policy, result }]).sources[0]?.rejectedUrls).toEqual([]);
+    expect(source.allowedFinalHosts).toContain(new URL(url).hostname);
+    for (const host of ['evil.test', `${new URL(url).hostname}.evil.test`]) {
+      const bad = { ...result, listings: [{ ...result.listings[0]!, applyUrl: `https://${host}/jobs/5001` }] };
+      expect(verifySourceQuality([{ policy, result: bad }]).sources[0]?.rejectedUrls).toHaveLength(1);
+    }
+  });
+
   it('accepts Lucid official careers URLs while retaining source-specific host enforcement', () => {
     const source = reviewedGreenhouseSources.find(({ id }) => id === 'greenhouse-lucidmotors')!;
     const job = { ...technicalInternship, absolute_url: 'https://lucidmotors.com/careers/search/5001?gh_jid=5001' };
