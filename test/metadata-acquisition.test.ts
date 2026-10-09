@@ -279,6 +279,34 @@ describe('identity-bound public metadata APIs', () => {
     expect(results[1]?.artifact?.text).toContain('First posting with é');
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it('keeps only declared batch artifacts while streaming a large board out of order', async () => {
+    const first = '00000000-0000-4000-8000-000000000001';
+    const filler = ashbyBoard([{ id: 'filler', title: 'Other', descriptionPlain: 'x'.repeat(100_000) }]).slice(9, -2);
+    const early = ashbyBoard([{ id: first, title: 'First Intern', descriptionPlain: 'First exact posting.' }]).slice(9, -2);
+    const late = ashbyBoard([{ id: uuid, title: 'Last Intern', descriptionPlain: 'Last exact posting.' }]).slice(9, -2);
+    let index = 0;
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({ pull(controller) {
+      if (index === 0) controller.enqueue(encoder.encode('{"jobs":[' + early + ','));
+      else if (index <= 360) controller.enqueue(encoder.encode(filler + ','));
+      else if (index === 361) controller.enqueue(encoder.encode(late + ']}'));
+      else controller.close();
+      index += 1;
+    } });
+    const fetcher = vi.fn(async () => new Response(body, { headers: { 'content-type': 'application/json' } }));
+    const acquire = createMetadataAcquirer(fetcher, { ashbyBatch: [
+      { identity: identity('ashby', first) }, { identity: identity('ashby') },
+    ] });
+    const last = await acquire(identity('ashby'));
+    expect(last?.artifact?.text).toBe('Last exact posting.');
+    expect(last?.bytes).toBeGreaterThan(36_000_000);
+    expect((await acquire(identity('ashby', first)))?.artifact?.text).toBe('First exact posting.');
+    expect((await acquire(identity('ashby')))?.artifact?.text).toBe('Last exact posting.');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await acquire.close();
+    expect(body.locked).toBe(false);
+  });
+
   it('cancels an unread board tail and releases its lock when the batch closes', async () => {
     const cancel = vi.fn();
     const prefix = ashbyBoard([{ id: uuid, title: 'Target Intern', descriptionPlain: 'Exact posting.' }]).slice(0, -2) + ',';
