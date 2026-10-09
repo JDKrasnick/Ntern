@@ -171,16 +171,25 @@ describe('silent Greenhouse backfill', () => {
     expect(store.jobs.size).toBe(25);
     expect(store.notificationEvents.size).toBe(0);
     await store.putSourceHealth({ ...health(source.id), sourceStatus: 'active' });
-    await expect(runGreenhouseBoard(continuations[0]!, dependencies)).rejects.toThrow('Silent Greenhouse backfill');
+    const fetches = (await store.getCheckpoint(source.id))?.successfulFetches;
+    await expect(runGreenhouseBoard(continuations[0]!, dependencies)).resolves.toMatchObject({ skipped: 'silent-backfill-ineligible' });
+    expect((await store.getCheckpoint(source.id))?.successfulFetches).toBe(fetches);
   });
-  it.each(['active', 'quarantined', 'owned', 'shadow'] as const)('rejects %s before fetching', async (kind) => {
+  it.each(['active', 'quarantined', 'owned', 'shadow'] as const)('acknowledges obsolete quiet work for %s without source effects', async (kind) => {
     const store = new MemoryInternshipStore();
     await store.putSourceHealth({ ...health(source.id), ...(kind === 'active' ? { sourceStatus: 'active' as const } : {}),
       ...(kind === 'quarantined' ? { state: 'quarantined' as const } : {}) });
     const fetchImpl = vi.fn<typeof fetch>();
-    await expect(runGreenhouseBoard(work, { store, sources: [{ ...source, status: kind === 'shadow' ? 'shadow' : 'published' }],
-      fetchImpl, v2CatalogWriteOwner: () => kind === 'owned' })).rejects.toThrow('Silent Greenhouse backfill');
+    const before = await store.getSourceHealth(source.id);
+    const result = await processGreenhouseQueue({ Records: [{ messageId: 'late-quiet', body: JSON.stringify(work) }] },
+      { store, sources: [{ ...source, status: kind === 'shadow' ? 'shadow' : 'published' }],
+        fetchImpl, v2CatalogWriteOwner: () => kind === 'owned' });
+    expect(result.batchItemFailures).toEqual([]);
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(await store.getSourceHealth(source.id)).toEqual(before);
+    expect(await store.getCheckpoint(source.id)).toBeUndefined();
+    expect(store.jobs.size).toBe(0);
+    expect(store.notificationEvents.size).toBe(0);
   });
   it.each([{ seedOnly: 'true', force: true }, { seedOnly: true }])('rejects malformed authorization (%j)', async (flags) => {
     const fetchImpl = vi.fn<typeof fetch>();

@@ -48,7 +48,7 @@ export interface GreenhouseBoardDependencies {
 export interface GreenhouseBoardResult {
   sourceId: string;
   mode: 'shadow' | 'published';
-  skipped?: 'paused' | 'backoff';
+  skipped?: 'paused' | 'backoff' | 'silent-backfill-ineligible';
   notModified: boolean;
   listings: number;
   rawRows?: number;
@@ -108,7 +108,11 @@ export async function runGreenhouseBoard(
   }
   if (message.seedOnly && (message.force !== true || mode !== 'published' || sourceHealth?.sourceStatus !== 'paused'
     || sourceHealth.state !== 'healthy' || dependencies.v2CatalogWriteOwner?.(source.id))) {
-    throw new Error('Silent Greenhouse backfill requires a healthy paused published source without V2 ownership');
+    // Queue delivery is at least once. A duplicate quiet continuation can arrive
+    // after the operator resumes or transfers this source; acknowledge it without
+    // fetching or changing source health, rather than retrying obsolete work.
+    return { sourceId: source.id, mode, skipped: 'silent-backfill-ineligible', notModified: true,
+      listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };
   }
   if (!message.force && sourceHealth?.backoffUntil && Date.parse(sourceHealth.backoffUntil) > Date.now()) {
     return { sourceId: source.id, mode, skipped: 'backoff', notModified: true, listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };

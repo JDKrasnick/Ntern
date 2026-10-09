@@ -62,7 +62,9 @@ for (const [token, name, applyUrl] of [
         lastAttemptAt: pausedAt, consecutiveFailures: 0, durationMs: 0 }],
       ['CHECKPOINT', 'source-checkpoint', { sourceId: id, successfulFetches: 3, lastRowCount: 0 }],
     ]) await DB.prepare('INSERT INTO catalog_items(pk,sk,kind,value) VALUES (?,?,?,?)').bind(`SOURCE#${id}`, sk, kind, JSON.stringify(value)).run();
+    let fetches = 0;
     globalThis.fetch = async (input) => {
+      fetches++;
       const url = new URL(typeof input === 'string' ? input : input.url ?? String(input));
       if (url.hostname === 'boards-api.greenhouse.io') return Response.json(url.pathname.endsWith('/jobs') ? { jobs: [{
         id: 5001, internal_job_id: 5001, title: 'Software Engineering Intern, Summer 2027', absolute_url: applyUrl,
@@ -87,5 +89,18 @@ for (const [token, name, applyUrl] of [
     const health = JSON.parse((await DB.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(`SOURCE#${id}`).first()).value);
     assert.equal(health.sourceStatus, 'paused');
     assert.equal(health.state, 'healthy');
+    const activeHealth = { ...health, sourceStatus: 'active', changedAt: new Date().toISOString() };
+    await DB.prepare("UPDATE catalog_items SET value=? WHERE pk=? AND sk='HEALTH'").bind(JSON.stringify(activeHealth), `SOURCE#${id}`).run();
+    const beforeFetches = fetches, settled = { ack: 0, retries: 0 };
+    await worker.queue({ queue: 'intern-notifs-greenhouse', messages: [{ id: 'late-quiet-continuation', attempts: 1,
+      timestamp: new Date(), body: { version: 1, sourceId: id, scheduledAt: new Date().toISOString(),
+        force: true, forceRequestedAt: new Date(Date.now() - 1000).toISOString(), seedOnly: true },
+      ack() { settled.ack++; }, retry() { settled.retries++; },
+    }] }, { DB, DOCUMENTS, GREENHOUSE_QUEUE: { async send() {} } });
+    assert.deepEqual(settled, { ack: 1, retries: 0 });
+    assert.equal(fetches, beforeFetches, 'obsolete quiet delivery must never reach the provider');
+    const after = JSON.parse((await DB.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(`SOURCE#${id}`).first()).value);
+    assert.deepEqual(after, activeHealth, 'obsolete quiet work must not degrade or mutate source health');
+    assert.equal((await DB.prepare("SELECT COUNT(*) n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
   } finally { globalThis.fetch = realFetch; await runtime.dispose(); }
 });
