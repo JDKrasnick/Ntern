@@ -155,19 +155,23 @@ after(async () => {
 });
 
 /** Serves the fabricated board as a chunked JSON stream. */
-function boardServer(calls) {
+function boardServer(calls, streams = []) {
   return async (request) => {
     const url = typeof request === 'string' ? request : request.url;
     calls.push(url);
     if (url !== boardUrl) return new Response('unexpected outbound request', { status: 502 });
     let index = 0;
-    return new Response(new ReadableStream({
+    const observation = { cancelled: 0, stream: undefined };
+    const stream = new ReadableStream({
       pull(controller) {
         if (index >= board.byteLength) return controller.close();
         controller.enqueue(board.slice(index, index + 65_536));
         index += 65_536;
       },
-    }, { highWaterMark: 0 }), { headers: { 'content-type': 'application/json' } });
+      cancel() { observation.cancelled += 1; },
+    }, { highWaterMark: 0 });
+    observation.stream = stream; streams.push(observation);
+    return new Response(stream, { headers: { 'content-type': 'application/json' } });
   };
 }
 
@@ -201,10 +205,13 @@ async function deliver(bodies, injectedFetch) {
 
 test('streams a fabricated multi-megabyte board and persists the posting artifact', async () => {
   const calls = [];
-  const [settled] = await deliver([collectionMessage(postingA, 'ashby-single')], boardServer(calls));
+  const streams = [];
+  const [settled] = await deliver([collectionMessage(postingA, 'ashby-single')], boardServer(calls, streams));
   assert.deepEqual(settled.retry, [], JSON.stringify(settled.retry));
   assert.equal(settled.ack, 1);
   assert.deepEqual(calls, [boardUrl], 'the consumer reads the provider board once');
+  assert.equal(streams[0].cancelled, 1, 'the matched posting must not leave its large board tail open');
+  assert.equal(streams[0].stream.locked, false, 'the response reader must release its lock after the batch');
   const objects = (await shadowArtifacts.list()).objects;
   assert.equal(objects.length, 1, 'the streamed artifact must reach the shadow handoff');
   console.log(`ashby e2e single: board=${board.byteLength}B artifacts=${objects.length}`);

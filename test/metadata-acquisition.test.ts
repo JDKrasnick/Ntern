@@ -279,6 +279,34 @@ describe('identity-bound public metadata APIs', () => {
     expect(results[1]?.artifact?.text).toContain('First posting with é');
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it('cancels an unread board tail and releases its lock when the batch closes', async () => {
+    const cancel = vi.fn();
+    const prefix = ashbyBoard([{ id: uuid, title: 'Target Intern', descriptionPlain: 'Exact posting.' }]).slice(0, -2) + ',';
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(prefix)); },
+      cancel,
+    });
+    const acquire = createMetadataAcquirer(async () => new Response(body, { headers: { 'content-type': 'application/json' } }));
+    expect((await acquire(identity('ashby')))?.artifact?.text).toBe('Exact posting.');
+    expect(body.locked).toBe(true);
+    expect(cancel).not.toHaveBeenCalled();
+    await Promise.all([acquire.close(), acquire.close()]);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
+    await expect(acquire(identity('ashby'))).rejects.toThrow('batch is closed');
+  });
+  it('releases every retained board even when one stream rejects cancellation', async () => {
+    const bodies = ['acme', 'other'].map((tenant) => new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify({ jobs: [{ id: uuid,
+        title: 'Intern', descriptionPlain: 'Exact posting.', jobUrl: `https://jobs.ashbyhq.com/${tenant}/${uuid}` }] }).slice(0, -2) + ',')); },
+      cancel() { if (tenant === 'acme') throw new Error('upstream already aborted'); },
+    }));
+    const acquire = createMetadataAcquirer(async (url) => new Response(bodies[String(url).includes('/acme?') ? 0 : 1], { headers: { 'content-type': 'application/json' } }));
+    expect((await acquire(identity('ashby')))?.outcome).toBe('acquired');
+    expect((await acquire({ ...identity('ashby'), tenant: 'other' }))?.outcome).toBe('acquired');
+    await acquire.close();
+    expect(bodies.map((body) => body.locked)).toEqual([false, false]);
+  });
   it('preserves a literal BOM inside a posting at the start of a streamed chunk', async () => {
     const row = { id: uuid, title: 'BOM Intern', descriptionPlain: 'Before\uFEFFafter.' };
     const board = ashbyBoard([row]);

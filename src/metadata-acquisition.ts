@@ -436,6 +436,7 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
   const requests = new Map<string, Promise<RequestResult>>();
   const boards = new Map<string, AshbyBoard>();
   const boardTails = new Map<string, Promise<unknown>>();
+  let cleanup: Promise<void> | undefined;
   /** Serializes work per board so concurrent identities do not race the reader. */
   const serialize = <T>(key: string, task: () => Promise<T>): Promise<T> => {
     const prior = boardTails.get(key) ?? Promise.resolve();
@@ -500,7 +501,8 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
       } finally { reader.releaseLock(); }
     } catch { return { outcome: 'failed' }; }
   };
-  return async (identity: ProviderIdentity, candidateUrl?: string): Promise<MetadataAcquisition | undefined> => {
+  const acquire = async (identity: ProviderIdentity, candidateUrl?: string): Promise<MetadataAcquisition | undefined> => {
+    if (cleanup) throw new Error('Metadata acquisition batch is closed');
     const route = metadataApiRoute(identity, candidateUrl);
     if (!route) return undefined;
     if (!requests.has(route.url)) requests.set(route.url,
@@ -538,4 +540,23 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
       ? { method: 'json-ld-page', sourceUrl: fallback, status: page.status, bytes: page.bytes, outcome: 'acquired', artifact: pageArtifact }
       : acquisition;
   };
+  return Object.assign(acquire, {
+    /** Called after the batch's acquisitions settle. A matched posting may leave
+     * most of its board unread; cancel that body instead of retaining its stream
+     * until the fetch timeout or isolate garbage collection. */
+    close(): Promise<void> {
+      cleanup ??= (async () => {
+        try {
+          await Promise.all([...boards.values()].map(async (board) => {
+            try { await board.reader.cancel(); }
+            catch { /* An aborted or exhausted response still needs its lock released. */ }
+            finally { board.text = ''; board.reader.releaseLock(); }
+          }));
+        } finally {
+          boards.clear(); requests.clear(); boardTails.clear(); throttled.clear();
+        }
+      })();
+      return cleanup;
+    },
+  });
 }
