@@ -355,6 +355,46 @@ for (const committed of [false, true]) test(`compiled ingestion preserves staged
   assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
 });
 
+for (const location of ['billing', 'lease-acquire', 'projection', 'lease-release']) test(`compiled publication retains failure evidence and recovers after D1 pressure at ${location}`, async () => {
+  const cron = '1,11,21,31,41,51 * * * *';
+  const ingestion = (await import('../../cloudflare/dist/ingestion/ingestion-worker.js')).default;
+  let attempts = 0;
+  const failingDB = { prepare(sql) {
+    const wrap = (statement, values = []) => new Proxy(statement, { get(target, key) {
+      if (key === 'bind') return (...args) => wrap(target.bind(...args), args);
+      const value = target[key];
+      if (typeof value !== 'function') return value;
+      return (...args) => {
+        const selected = location === 'billing' ? key === 'first' && sql.includes('system_state')
+          : location === 'lease-acquire' ? key === 'run' && values[0] === 'maintenance_lease:catalog_publisher' && sql.startsWith('INSERT')
+          : location === 'lease-release' ? key === 'run' && sql.startsWith('DELETE FROM system_state')
+          : key === 'all' && sql.includes('catalog_items') && sql.includes('internship');
+        if (selected) { attempts++; throw new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'); }
+        return value.apply(target, args);
+      };
+    } });
+    return wrap(db.prepare(sql));
+  } };
+  const failing = { ...env, DB: failingDB };
+  const event = { cron, scheduledTime: Date.now() };
+  const response = await worker.fetch(scheduleRequest(event), failing);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.clone().json(), { completed: false, deferred: true, failureClass: 'd1-overloaded' });
+  assert.equal(attempts, 1, 'D1 pressure must not be retried inside the delivery');
+  const phase = await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:catalog_projection:catalog_projection'").first();
+  assert.equal(JSON.parse(phase.value).status, 'failed');
+  await ingestion.scheduled(event, { ...env, CATALOG_PUBLISHER: { fetch: async () => response } });
+  if (location === 'lease-release') {
+    assert.equal(await db.prepare("SELECT count(*) n FROM system_state WHERE key='maintenance_lease:catalog_publisher'").first('n'), 1);
+    // Model the lease's natural sixteen-minute expiry without a production mutation.
+    await db.prepare("UPDATE system_state SET value=json_set(value,'$.expiresAt',0) WHERE key='maintenance_lease:catalog_publisher'").run();
+  }
+  await runPublisher({ cron, scheduledTime: Date.now() + 600000 }, env);
+  await scheduled('5,15,25,35,45,55 * * * *');
+  assert.equal(JSON.parse(await (await bucket.get('public-catalog/v1/current')).text()).schemaVersion, 1);
+  assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
+});
+
 test('compiled D1 refresh and native publication defer only the documented R2 internal failure', async () => {
   const cron = '1,11,21,31,41,51 * * * *';
   const before = await marker('catalog_projection');

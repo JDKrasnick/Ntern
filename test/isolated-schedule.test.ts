@@ -4,6 +4,7 @@ import publisher from '../cloudflare/catalog-publisher-worker.js';
 import admission from '../cloudflare/admission-worker.js';
 import * as dispatch from '../cloudflare/admission-v2-dispatch.js';
 import { isR2InternalFailure } from '../cloudflare/r2-errors.js';
+import * as projection from '../cloudflare/catalog-projection-maintenance.js';
 
 const event = { cron: '9-59/10 * * * *', scheduledTime: 1791440000000 };
 const request = (body: unknown, method = 'POST') => new Request('https://isolated.internal/internal/scheduled', {
@@ -27,6 +28,7 @@ describe('private scheduled delivery', () => {
     { completed: true, deferred: true, failureClass: 'r2-internal' },
     { completed: false, deferred: false, failureClass: 'r2-internal' },
     { completed: false, deferred: true, failureClass: 'internal' },
+    { completed: false, deferred: true, failureClass: ['d1-internal'] },
     null,
   ])('rejects malformed deferral acknowledgements: %j', async body => {
     await expect(forwardIsolatedSchedule({ fetch: async () => Response.json(body,
@@ -39,6 +41,36 @@ describe('private scheduled delivery', () => {
     await expect(forwardIsolatedSchedule({ fetch: async () => Response.json(body,
       { status: 503 }) }, { ...event, cron: '5,15,25,35,45,55 * * * *' })).rejects.toThrow('503');
   });
+  it.each(['billing', 'lease-acquire', 'lease-release'])('defers publication D1 pressure at %s without retrying the delivery', async location => {
+    const spy = vi.spyOn(projection, 'runCatalogProjectionMaintenance').mockResolvedValue({ prospectiveShadowMetadata: {}, projection: {} });
+    const markers: Array<{ phase: string; status: string }> = [];
+    let failed = false;
+    const DB = { prepare(sql: string) {
+      let values: unknown[] = [];
+      const fail = () => { failed = true; throw new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'); };
+      const statement = { bind(...args: unknown[]) { values = args; return statement; },
+        async first() { if (!failed && location === 'billing') fail(); return null; },
+        async run() {
+          if (!failed && ((location === 'lease-acquire' && values[0] === 'maintenance_lease:catalog_publisher') || (location === 'lease-release' && sql.startsWith('DELETE')))) fail();
+          if (sql.startsWith('INSERT') && values[0] !== 'maintenance_lease:catalog_publisher') markers.push(JSON.parse(String(values[1])));
+          return { meta: { changes: 1 } };
+        } };
+      return statement;
+    } };
+    const env = { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true' } as never;
+    const cron = '1,11,21,31,41,51 * * * *';
+    try {
+      const response = await publisher.fetch(request({ ...event, cron }), env);
+      expect(response.status).toBe(503);
+      expect(await response.clone().json()).toEqual({ completed: false, deferred: true, failureClass: 'd1-overloaded' });
+      expect(markers.at(-1)).toMatchObject({ phase: 'catalog_projection', status: 'failed' });
+      expect(spy).toHaveBeenCalledTimes(location === 'lease-release' ? 1 : 0);
+      await expect(forwardIsolatedSchedule({ fetch: async () => response }, { ...event, cron })).resolves.toBeUndefined();
+      expect((await publisher.fetch(request({ ...event, cron, scheduledTime: event.scheduledTime + 600000 }), env)).status).toBe(200);
+      expect(markers.at(-1)).toMatchObject({ phase: 'catalog_projection_complete', status: 'complete' });
+    } finally { spy.mockRestore(); }
+  });
+
   it.each(['D1_ERROR: internal error; reference = test', 'D1_ERROR: database busy'])('defers %s and completes on the next cadence', async (message) => {
     const result = { enabled: true, sources: 1, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
     for (const manual of [false, true]) {

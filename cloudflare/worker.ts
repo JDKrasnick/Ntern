@@ -2270,17 +2270,17 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
         + (ingestionHealth?.details ? `\n\n${ingestionHealth.details}` : ''),
     }));
     if (dlqGrowth?.changed && (!Object.keys(dlqGrowth.increases).length || alertSent)) {
-      await runScheduledStep('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts), phases);
+      await step('dlq_growth_baseline', () => recordDlqBaseline(env.DB, dlqGrowth.counts));
     }
-    const shadowBudget = await runScheduledStep('shadow_budget_status', () => providerShadowBudgetStatus(env.DB, observedAt, env), phases);
+    const shadowBudget = await step('shadow_budget_status', () => providerShadowBudgetStatus(env.DB, observedAt, env));
     if (shadowBudget?.exhausted) {
-      await runScheduledStep('shadow_budget_alert', () => sendShadowBudgetAlert(new D1CatalogAdmissionStore(env.DB), env, {
+      await step('shadow_budget_alert', () => sendShadowBudgetAlert(new D1CatalogAdmissionStore(env.DB), env, {
         ...shadowBudget, observedAt: observedAt.toISOString(),
-      }), phases);
+      }));
     }
-    const notifications = await runScheduledStep('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), notificationPublisher(env), undefined, new D1ReleaseStore(env.DB)), phases);
-    await recordPhase(phases, 'maintenance_complete', 'complete', observedAt);
-    console.log(JSON.stringify({ event: 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), legacyPostingIdentityIncidents, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
+    const notifications = await step('expo_notifications', () => drainPendingExpoNotifications(store, new D1UserStore(env.DB), notificationPublisher(env), undefined, new D1ReleaseStore(env.DB)));
+    await recordPhase(phases, 'maintenance_complete', maintenanceFailures.length ? 'failed' : 'complete', observedAt);
+    console.log(JSON.stringify({ event: maintenanceFailures.length ? 'cloudflare_maintenance_partial' : 'cloudflare_maintenance_complete', observedAt: observedAt.toISOString(), failedSteps: maintenanceFailures, legacyPostingIdentityIncidents, notifications, admissionVerificationRetries, providerShadowRecovery, metadataCollection }));
     return;
   }
   if (event.cron === '*/5 * * * *') {
@@ -3057,6 +3057,17 @@ export async function sendQueueMessageWithin(queue: Queue, message: unknown, tim
 
 export default {
   fetch: fetchHandler,
-  scheduled: scheduledHandler,
+  scheduled: async (event: ScheduledController, env: Environment): Promise<void> => {
+    try {
+      await scheduledHandler(event, env);
+    } catch (error) {
+      const failureClass = classifyD1Failure(error);
+      if (failureClass !== 'overloaded' && failureClass !== 'internal') throw error;
+      if (event.cron === '9-59/10 * * * *') {
+        await recordPhase(new D1MaintenancePhaseStore(env.DB, 'maintenance'), 'maintenance_complete', 'failed', new Date(event.scheduledTime));
+      }
+      console.warn(JSON.stringify({ event: 'cloudflare_scheduled_d1_deferred', cron: event.cron, failureClass, retry: 'next-cadence' }));
+    }
+  },
   queue: queueHandler,
 };
