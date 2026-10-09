@@ -1446,6 +1446,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!sourceId || (provider !== 'structured' && !atsProvider)) {
       return withCors(Response.json({ message: 'provider and sourceId are required' }, { status: 400 }));
     }
+    const seedOnly = url.searchParams.get('seedOnly');
+    if (seedOnly !== null && seedOnly !== 'true') return withCors(Response.json({ message: 'seedOnly must be true when supplied' }, { status: 400 }));
+    if (seedOnly === 'true' && atsProvider !== 'greenhouse') return withCors(Response.json({ message: 'Silent backfill is available only for Greenhouse' }, { status: 409 }));
     const employerStore = new D1EmployerStore(env.DB);
     if (provider === 'structured') {
       const source = (await reviewedStructuredRegistry(employerStore)).find((candidate) => candidate.id === sourceId);
@@ -1461,14 +1464,22 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     const registry = atsProvider === 'greenhouse' ? providers.greenhouse : atsProvider === 'lever' ? providers.lever : providers.ashby;
     const source = registry.find((candidate) => candidate.id === sourceId);
     if (!source) return withCors(Response.json({ message: 'Source not found' }, { status: 404 }));
+    if (seedOnly === 'true') {
+      const health = await new D1InternshipStore(env.DB).getSourceHealth(sourceId);
+      if (atsProvider !== 'greenhouse' || source.status !== 'published' || health?.sourceStatus !== 'paused'
+        || health.state !== 'healthy' || admissionV2OwnsCatalogWrites(env, sourceId)) {
+        return withCors(Response.json({ message: 'Silent backfill requires a healthy paused published Greenhouse source without V2 ownership' }, { status: 409 }));
+      }
+    }
     const now = new Date();
     const message = atsProvider === 'greenhouse'
-      ? { ...greenhouseWorkMessages([source as typeof reviewedGreenhouseSources[number]], now)[0]!, force: true, forceRequestedAt: now.toISOString() }
+      ? { ...greenhouseWorkMessages([source as typeof reviewedGreenhouseSources[number]], now)[0]!, force: true, forceRequestedAt: now.toISOString(), ...(seedOnly === 'true' ? { seedOnly: true } : {}) }
       : atsProvider === 'lever'
         ? { ...leverWorkMessages([source as typeof reviewedLeverSources[number]], now, crypto.randomUUID())[0]!, force: true, forceRequestedAt: now.toISOString() }
         : { ...ashbyWorkMessages([source as typeof reviewedAshbySources[number]], now, crypto.randomUUID())[0]!, force: true, forceRequestedAt: now.toISOString() };
     const event = { Records: [{ messageId: crypto.randomUUID(), body: JSON.stringify(message) }] };
     const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env),
+      catalogAdmissionResolver: catalogAdmissionResolver(env),
       shadowDiscovery: ingestionV2ShadowDiscovery(env),
       v2CatalogWriteOwner: (sourceId: string) => admissionV2OwnsCatalogWrites(env, sourceId),
       v2TrustedCommunityAlertsEnabled: (sourceId: string) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId) };

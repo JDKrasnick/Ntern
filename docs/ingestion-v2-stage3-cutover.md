@@ -260,3 +260,19 @@ A documented R2 Workers `InternalError` (`10001`) defers the publisher to its ne
 Conditional activation writes are not retried inside the delivery: a lost acknowledgement can mean the pointer already committed. Existing ETag fences, staged-page retention, and D1 fallback remain in effect. A failed phase remains durable, and ownership advancement still requires successful current-version phase evidence plus complete matching D1/R2/public catalog verification. Reject an older completion marker when a newer publication attempt failed.
 
 [Cloudflare R2 error codes](https://developers.cloudflare.com/r2/api/error-codes/)
+
+### Repairing application hosts before ownership
+
+If an official provider changes its application host, keep the source paused while
+deploying the reviewed exact host. An authenticated `POST /internal/poll-source`
+with `provider=greenhouse`, the explicit `sourceId`, and `seedOnly=true` performs a
+forced full acquisition with a quiet historical baseline. This mode requires a
+healthy, paused, published Greenhouse source without V2 writer ownership. Bounded
+detail continuations retain quiet mode and the original force authorization;
+resuming or transferring ownership invalidates further quiet continuations.
+
+Before restoring the source, independently verify complete checkpoint coverage,
+no pending details, healthy paused state, complete immutable snapshots where V2
+discovery is enabled, and unchanged notification-event counts. Then use the normal
+signed bootstrap and source-by-source ownership gates. Silent acquisition does not
+waive admission, identity, URL, or catalog parity checks.

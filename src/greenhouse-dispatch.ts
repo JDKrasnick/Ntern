@@ -4,7 +4,7 @@ import type { SourceCheckpoint, SourceHealth } from './types.js';
 
 export const GREENHOUSE_POLL_INTERVAL_MS = SOURCE_POLL_CADENCE.publishedIntervalMs;
 export const GREENHOUSE_SHADOW_POLL_INTERVAL_MS = SOURCE_POLL_CADENCE.shadowIntervalMs;
-export interface GreenhouseWorkMessage { version: 1; sourceId: string; scheduledAt: string; force?: boolean; forceRequestedAt?: string; }
+export interface GreenhouseWorkMessage { version: 1; sourceId: string; scheduledAt: string; force?: boolean; forceRequestedAt?: string; seedOnly?: boolean; }
 export function greenhouseWorkMessages(sources: ReviewedGreenhouseSource[] = reviewedGreenhouseSources, scheduledAt = new Date(), recoveryProbeSourceIds = new Set<string>()): GreenhouseWorkMessage[] {
   return sources.map((source) => ({ version: 1, sourceId: source.id, scheduledAt: scheduledAt.toISOString(), ...(recoveryProbeSourceIds.has(source.id) ? { force: true, forceRequestedAt: scheduledAt.toISOString() } : {}) }));
 }
