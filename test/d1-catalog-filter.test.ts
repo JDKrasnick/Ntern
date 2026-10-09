@@ -1004,6 +1004,7 @@ describe('D1 filtered catalog projection', () => {
     for (const value of [a, b, c, o2, o1]) insertJob.run(`JOB#${value.jobId}`, JSON.stringify(value), openCatalogSortKey(value));
 
     const store = new D1InternshipStore(sqliteD1(database));
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-02T15:42:00.000Z'));
     try {
       const watermark = [a, b, c, o2, o1].map(openCatalogSortKey).sort().at(-1)!;
       await store.putCatalogProjection(groupCatalogJobs([a, b, c, o2, o1]).map(catalogGroupDetails), '2026-10-02T15:41:56.000Z', watermark);
@@ -1025,6 +1026,7 @@ describe('D1 filtered catalog projection', () => {
       expect(second!.groupOffsets).toEqual([1]);
       expect(second!.cursor).toBe('4');
     } finally {
+      clock.mockRestore();
       database.close();
     }
   });

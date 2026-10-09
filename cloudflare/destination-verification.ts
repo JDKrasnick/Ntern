@@ -955,7 +955,8 @@ export async function processDestinationVerificationBatch(
       messageIds: pending.map(({ queued }) => queued.id), error: safeDiagnostic(error) }));
     for (const { queued } of pending) queued.retry({ delaySeconds: 300 }, error);
   } finally {
-    if (browser) await browser.close();
+    try { await acquireMetadata.close(); }
+    finally { if (browser) await browser.close(); }
   }
   const groups = new Map<string, { sourceId: string; host: string; reason: string; incidents: string[]; messageType: 'incident-opened' | 'quarantine' }>();
   for (const item of opened) {

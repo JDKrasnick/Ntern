@@ -165,6 +165,43 @@ describe('destination verification queue consumer', () => {
         destination: { classification: 'posting-detail' } }, metadataExtraction: { outcome: 'no-explicit-metadata' } }] });
   });
 
+  it.each([false, true])('closes the retained Ashby stream after a batch (storage failure: %s)', async (storageFailure) => {
+    const { db, jobs } = subject();
+    const { job, reference } = role();
+    const postingId = 'ef725594-42dd-4f0d-ba8e-df8179dbc6cb';
+    Object.assign(reference, { sourceId: 'ashby-acme', externalId: postingId,
+      sourceUrl: 'https://api.ashbyhq.com/posting-api/job-board/acme',
+      applyUrl: `https://jobs.ashbyhq.com/acme/${postingId}` });
+    await jobs.putInternship(job);
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify({ jobs: [{ id: postingId,
+        title: reference.title, descriptionPlain: 'Build software as an intern.', jobUrl: reference.applyUrl }] }).slice(0, -2) + ',')); },
+      cancel,
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { headers: { 'content-type': 'application/json' } })));
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId,
+      externalId: postingId, candidateUrl: reference.applyUrl, providerIdentity: {
+        provider: 'ashby', sourceId: reference.sourceId, sourceUrl: reference.sourceUrl, tenant: 'acme', postingId,
+      }, reason: 'historical-backfill', metadataBackfillToken: 'staging-only-shadow-handoff', queuedAt: '2026-08-30T00:00:00Z' });
+    const put = storageFailure ? vi.fn().mockRejectedValue(new Error('artifact storage unavailable')) : vi.fn().mockResolvedValue(undefined);
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: { send: vi.fn(), sendBatch: vi.fn() },
+      SHADOW_EXTRACTION_ARTIFACTS: { put } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
+    expect(put).toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+    if (storageFailure) {
+      expect(queued.retry).toHaveBeenCalledOnce();
+      expect(queued.ack).not.toHaveBeenCalled();
+    } else {
+      expect(queued.ack).toHaveBeenCalledOnce();
+      expect(queued.retry).not.toHaveBeenCalled();
+    }
+  });
+
   it('keeps a seen API-verified role independent of an unseen role cached browser failure', async () => {
     const { db, jobs } = subject();
     const { job, reference } = role();

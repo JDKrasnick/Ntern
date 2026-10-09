@@ -254,6 +254,15 @@ A schema-1 pointer can include `pageVersion`, a private immutable page namespace
 
 The compiled 5,059-group regression verifies real migrated D1-to-R2 publication while enforcing a maximum of 100 fetched-but-unpublished groups. Also verify the natural scheduled event, durable completion marker, valid pointer, all page/content hashes, queue drain, and current-version memory/error samples after deployment.
 
+Destination verification must close its batch-scoped metadata acquirer in a
+`finally` block. An Ashby match can leave most of the board response unread;
+closing the batch cancels retained response bodies, releases reader locks, and
+clears parsed-response caches while preserving posting reuse within the batch.
+Production exceeded the 120 MiB ingestion gate at 124.7 MiB on 2026-10-09 during
+successful destination/shadow activity. Treat stream cleanup as a tested repair,
+not proof of the peak's cause: require fresh natural production memory evidence
+before advancing ownership, and retain the pre-repair peak in rollout evidence.
+
 ### Transient R2 publication failures
 
 A documented R2 Workers `InternalError` (`10001`) defers the publisher to its next ten-minute cadence. Private scheduling returns `503`, `Retry-After: 600`, and `completed: false`; the caller records that deferral instead of claiming publication completed. Unknown failures remain fatal.
