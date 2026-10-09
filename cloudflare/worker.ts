@@ -3073,7 +3073,7 @@ export default {
       await scheduledHandler(event, env);
     } catch (error) {
       const failureClass = classifyD1Failure(error);
-      if (failureClass !== 'overloaded' && failureClass !== 'internal') throw error;
+      if (failureClass !== 'overloaded' && failureClass !== 'internal' && failureClass !== 'stalled') throw error;
       if (event.cron === '9-59/10 * * * *') {
         await recordPhase(new D1MaintenancePhaseStore(env.DB, 'maintenance'), 'maintenance_complete', 'failed', new Date(event.scheduledTime));
       }
