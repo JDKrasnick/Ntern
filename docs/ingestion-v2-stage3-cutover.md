@@ -211,16 +211,17 @@ work. It does not bootstrap or resume a source. Verify resource/cost headroom,
 queue drain, baseline silence, and catalog parity before each advance.
 
 Private admission requests retry D1 connection resets through the bounded
-statement retry helper. D1 overload and internal errors return HTTP 503 with
+statement retry helper. D1 overload, internal errors, and typed statement stalls
+after bounded retries return HTTP 503 with
 `Retry-After: 600`, record a failed dispatch phase, and defer pending work to the
 next natural ten-minute cadence. They do not retry pressure immediately or
 report completion. A later completed phase and fresh queue, parity, cost, and
 resource evidence are still required before advancing ownership.
 
-The catalog publisher uses the same deferral for D1 overload or internal errors
+The catalog publisher uses the same deferral for D1 overload, internal errors, or typed stalls
 in billing checks, lease acquisition or release, and projection work. Its private
 response retains `completed: false`, with `failureClass: d1-overloaded` or
-`d1-internal`, and a failed publication-attempt marker. Scheduled ingestion work
+`d1-internal` or `d1-stalled`, and a failed publication-attempt marker. Scheduled ingestion work
 also defers these D1 failures to its next cadence without an immediate retry.
 Partial maintenance passes retain failed steps and a failed overall completion
 marker. Neither a typed deferral nor an earlier successful marker proves that

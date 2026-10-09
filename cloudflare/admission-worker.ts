@@ -63,7 +63,7 @@ export default {
 
 async function deferD1Pressure(error: unknown, env: AdmissionWorkerEnvironment, observedAt: Date, sourceId?: string): Promise<Response | undefined> {
   const failureClass = classifyD1Failure(error);
-  if (failureClass !== 'internal' && failureClass !== 'overloaded') return undefined;
+  if (failureClass !== 'internal' && failureClass !== 'overloaded' && failureClass !== 'stalled') return undefined;
   // Preserve the failure signal and let the next ten-minute cadence retry;
   // immediate retries of D1 pressure would amplify contention.
   await recordPhase(new D1MaintenancePhaseStore(env.DB, sourceId ? `admission_v2_manual:${sourceId}` : 'admission_v2'), 'dispatch', 'failed', observedAt);

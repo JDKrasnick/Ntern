@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { forwardIsolatedSchedule, isolatedScheduleRequest } from '../cloudflare/isolated-schedule.js';
 import publisher from '../cloudflare/catalog-publisher-worker.js';
 import admission from '../cloudflare/admission-worker.js';
+import { D1StatementStallError } from '../cloudflare/d1-errors.js';
 import * as dispatch from '../cloudflare/admission-v2-dispatch.js';
 import { isR2InternalFailure } from '../cloudflare/r2-errors.js';
 import * as projection from '../cloudflare/catalog-projection-maintenance.js';
@@ -18,11 +19,47 @@ describe('private scheduled delivery', () => {
   it.each(['put: Precondition failed. (10031)', 'put: Access denied. (10003)', 'D1_ERROR: internal error (10001)', 'R2 unavailable', null])('keeps unrelated failures fatal: %s', message => {
     expect(isR2InternalFailure(message === null ? null : new Error(message))).toBe(false);
   });
-  it.each(['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *'])('defers only an acknowledged R2 failure on publication cron %s', async cron => {
-    const fetch = vi.fn(async () => Response.json({ completed: false, deferred: true, failureClass: 'r2-internal' },
-      { status: 503, headers: { 'Retry-After': '600' } }));
-    await expect(forwardIsolatedSchedule({ fetch }, { ...event, cron })).resolves.toBeUndefined();
-    expect(fetch).toHaveBeenCalledOnce();
+  it.each(['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *'])('defers only acknowledged publication pressure on cron %s', async cron => {
+    for (const failureClass of ['r2-internal', 'd1-stalled']) {
+      const fetch = vi.fn(async () => Response.json({ completed: false, deferred: true, failureClass },
+        { status: 503, headers: { 'Retry-After': '600' } }));
+      await expect(forwardIsolatedSchedule({ fetch }, { ...event, cron })).resolves.toBeUndefined();
+      expect(fetch).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('retains an exhausted D1 projection stall and recovers on the next cadence', async () => {
+    const stall = new D1StatementStallError(20_000);
+    const refresh = vi.spyOn(projection, 'refreshCatalogProjectionD1').mockRejectedValueOnce(stall).mockResolvedValueOnce({} as never);
+    const maintenance = vi.spyOn(projection, 'runCatalogProjectionMaintenance').mockImplementation(async (_publish, build) => {
+      try { return { prospectiveShadowMetadata: {}, projection: await build() }; }
+      catch { return { prospectiveShadowMetadata: {}, projection: undefined }; }
+    });
+    const markers: Array<{ phase: string; status: string }> = [];
+    const DB = { prepare() {
+      let values: unknown[] = [];
+      const statement = { bind(...args: unknown[]) { values = args; return statement; }, async first() { return null; },
+        async run() {
+          if (String(values[0]).startsWith('maintenance_phase:')) markers.push(JSON.parse(String(values[1])));
+          return { meta: { changes: 1 } };
+        } };
+      return statement;
+    } };
+    const env = { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true' } as never;
+    const cron = '1,11,21,31,41,51 * * * *';
+    try {
+      const response = await publisher.fetch(request({ ...event, cron }), env);
+      expect(response.status).toBe(503);
+      expect(response.headers.get('Retry-After')).toBe('600');
+      expect(await response.clone().json()).toEqual({ completed: false, deferred: true, failureClass: 'd1-stalled' });
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(markers.at(-1)).toMatchObject({ phase: 'catalog_projection', status: 'failed' });
+      expect(markers).not.toContainEqual(expect.objectContaining({ phase: 'catalog_projection_complete', status: 'complete' }));
+      await expect(forwardIsolatedSchedule({ fetch: async () => response }, { ...event, cron })).resolves.toBeUndefined();
+      expect((await publisher.fetch(request({ ...event, cron, scheduledTime: event.scheduledTime + 600_000 }), env)).status).toBe(200);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      expect(markers.at(-1)).toMatchObject({ phase: 'catalog_projection_complete', status: 'complete' });
+    } finally { refresh.mockRestore(); maintenance.mockRestore(); }
   });
   it.each([
     { completed: true, deferred: true, failureClass: 'r2-internal' },
@@ -71,10 +108,10 @@ describe('private scheduled delivery', () => {
     } finally { spy.mockRestore(); }
   });
 
-  it.each(['D1_ERROR: internal error; reference = test', 'D1_ERROR: database busy'])('defers %s and completes on the next cadence', async (message) => {
+  it.each([new Error('D1_ERROR: internal error; reference = test'), new Error('D1_ERROR: database busy'), new D1StatementStallError(20_000)])('defers %s and completes on the next cadence', async (error) => {
     const result = { enabled: true, sources: 1, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
     for (const manual of [false, true]) {
-      const spy = vi.spyOn(dispatch, 'runAdmissionV2Dispatch').mockRejectedValueOnce(new Error(message)).mockResolvedValueOnce(result);
+      const spy = vi.spyOn(dispatch, 'runAdmissionV2Dispatch').mockRejectedValueOnce(error).mockResolvedValueOnce(result);
       const markers: Array<{ scope: string; status: string }> = [];
       const DB = { prepare() {
         let values: unknown[] = [];
@@ -100,10 +137,10 @@ describe('private scheduled delivery', () => {
       } finally { spy.mockRestore(); }
     }
   });
-  it('keeps unexpected dispatcher failures visible', async () => {
-    const spy = vi.spyOn(dispatch, 'runAdmissionV2Dispatch').mockRejectedValue(new Error('SQLITE_ERROR: malformed query'));
+  it.each(['SQLITE_ERROR: malformed query', 'D1 statement did not settle within 20000 ms'])('keeps untyped dispatcher failures visible: %s', async message => {
+    const spy = vi.spyOn(dispatch, 'runAdmissionV2Dispatch').mockRejectedValue(new Error(message));
     const DB = { prepare() { const statement = { bind() { return statement; }, async first() { return null; }, async run() { return {}; } }; return statement; } };
-    try { await expect(admission.fetch(request(event), { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true' } as never)).rejects.toThrow('malformed query'); }
+    try { await expect(admission.fetch(request(event), { DB, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true' } as never)).rejects.toThrow(message); }
     finally { spy.mockRestore(); }
   });
   it.each(['D1_ERROR: Network connection lost.', 'D1_ERROR: internal error; reference = billing'])('handles a billing read failure: %s', async (message) => {

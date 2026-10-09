@@ -14,7 +14,7 @@ export async function forwardIsolatedSchedule(binding: ServiceBinding | undefine
       try { deferred = await response.json() as typeof deferred; } catch { deferred = null; }
       if (deferred?.completed === false && deferred.deferred === true
         && typeof deferred.failureClass === 'string'
-        && ['r2-internal', 'd1-overloaded', 'd1-internal'].includes(deferred.failureClass)) {
+        && ['r2-internal', 'd1-overloaded', 'd1-internal', 'd1-stalled'].includes(deferred.failureClass)) {
         console.warn(JSON.stringify({ event: 'isolated_catalog_projection_deferred', cron: event.cron,
           failureClass: deferred.failureClass, retryAfterSeconds: 600 }));
         return;

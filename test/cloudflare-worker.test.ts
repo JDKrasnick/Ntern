@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cloudflareOperationsFleets, cloudflareOperationsQueueClient, d1QueueRetryDelay, d1TrafficWorkloadForQueue, dispatchProviders, documentContent, dnsJson, failedStructuredRecoveryHealth, githubSourceRunBlocked, isLowImpactPostingIdentityRequest, overduePublishedSourceIds, readDocumentUpload, recoveredStructuredSourceHealth, resumeCompilerLineBoxes, resumeCompilerPoolName, resumeCompilerRequest, runCatalogProjectionMaintenance, runScheduledPostingIdentityAudit, sendQueueMessageWithin, structuredSourceRunBlocked, validBackfillProvider, admissionOperationalSignals, catalogStarvationSignal } from '../cloudflare/worker.js';
 import cloudflareWorker from '../cloudflare/worker.js';
+import { D1StatementStallError } from '../cloudflare/d1-errors.js';
 import { R2CatalogProjection } from '../cloudflare/r2-catalog-projection.js';
 import type { Environment } from '../cloudflare/worker.js';
 import type { PostingIdentityRepairPlan } from '../src/posting-identity-repair.js';
@@ -334,8 +335,8 @@ describe('Cloudflare scheduled dispatch leases', () => {
 });
 
 describe('Cloudflare maintenance cron', () => {
-  it.each(['D1_ERROR: D1 DB is overloaded. Requests queued for too long.', 'D1_ERROR: internal error; reference = shutdown'])('defers a scheduled D1 failure without retrying: %s', async message => {
-    const first = vi.fn().mockRejectedValue(new Error(message));
+  it.each([new Error('D1_ERROR: D1 DB is overloaded. Requests queued for too long.'), new Error('D1_ERROR: internal error; reference = shutdown'), new D1StatementStallError(20_000)])('defers a scheduled D1 failure without retrying: %s', async error => {
+    const first = vi.fn().mockRejectedValue(error);
     const markers = vi.spyOn(D1MaintenancePhaseStore.prototype, 'record').mockResolvedValue();
     try {
       await expect(cloudflareWorker.scheduled({ cron: '9-59/10 * * * *', scheduledTime: Date.now() } as never,

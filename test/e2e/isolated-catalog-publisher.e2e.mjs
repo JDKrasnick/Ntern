@@ -4,7 +4,7 @@ import { readdir, readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { after, before, test } from 'node:test';
 import { Miniflare } from 'miniflare';
 import { unstable_splitSqlQuery as splitSqlQuery } from 'wrangler';
@@ -51,6 +51,84 @@ async function runPublisher(event, environment) {
 const scheduleRequest = (event) => new globalThis.Request('https://isolated.internal/internal/scheduled', { method: 'POST', body: JSON.stringify(event) });
 const scheduled = (cron) => runPublisher({ cron, scheduledTime: Date.now() }, env);
 const marker = (scope) => db.prepare('SELECT value,updated_at FROM system_state WHERE key=?').bind(`maintenance_phase:${scope}:${scope}_complete`).first();
+
+// Expose the bundle's own error constructor only in a temporary test module.
+// A same-text Error cannot model the instanceof fence used in production.
+async function withCompiledStall(role, run) {
+  const directory = await mkdtemp(join(tmpdir(), 'ingestion-d1-stall-'));
+  try {
+    const contents = await readFile(new URL(`../../cloudflare/dist/${role}/${role === 'catalog-publisher' ? 'catalog-publisher' : role}-worker.js`, import.meta.url), 'utf8');
+    const path = join(directory, 'worker.mjs');
+    await writeFile(path, `${contents}\nexport { D1StatementStallError };\n`);
+    await run(await import(pathToFileURL(path).href));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+function exhaustedStallDb(ErrorType, selected) {
+  let attempts = 0;
+  return { attempts: () => attempts, DB: { prepare(sql) {
+    const wrap = (statement) => new Proxy(statement, { get(target, key) {
+      if (key === 'bind') return (...args) => wrap(target.bind(...args));
+      const value = target[key];
+      if (typeof value !== 'function') return value;
+      return (...args) => {
+        if (attempts < 5 && selected(sql, key)) { attempts++; throw new ErrorType(20_000); }
+        return value.apply(target, args);
+      };
+    } });
+    return wrap(db.prepare(sql));
+  } } };
+}
+
+test('compiled admission retains an exhausted statement stall and recovers without changing catalog or alerts', async () => {
+  await withCompiledStall('admission', async ({ default: admission, D1StatementStallError }) => {
+    const fault = exhaustedStallDb(D1StatementStallError, (sql, key) => key === 'first' && sql.includes('system_state'));
+    const event = { cron: '9-59/10 * * * *', scheduledTime: Date.now() };
+    const before = await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first();
+    const environment = { ...env, DB: fault.DB, INGESTION_V2_ADMISSION_ENABLED: 'false' };
+    const response = await admission.fetch(scheduleRequest(event), environment);
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('Retry-After'), '600');
+    assert.deepEqual(await response.json(), { completed: false, deferred: true, failureClass: 'stalled' });
+    assert.equal(fault.attempts(), 5, 'the boundary must not retry after exhausted D1 attempts');
+    const phase = () => db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:admission_v2:dispatch'").first();
+    assert.equal(JSON.parse((await phase()).value).status, 'failed');
+    const next = await admission.fetch(scheduleRequest({ ...event, scheduledTime: event.scheduledTime + 600_000 }), environment);
+    assert.equal(next.status, 200);
+    assert.equal(JSON.parse((await phase()).value).status, 'complete');
+    assert.deepEqual(await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first(), before);
+    assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
+  });
+});
+
+test('compiled publisher preserves the projection stall class through private scheduling and next-cadence recovery', async () => {
+  await withCompiledStall('catalog-publisher', async ({ default: publisher, D1StatementStallError }) => {
+    const fault = exhaustedStallDb(D1StatementStallError, (sql, key) => key === 'all' && sql.includes('catalog_items') && sql.includes('internship'));
+    const event = { cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() };
+    const before = await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first();
+    const response = await publisher.fetch(scheduleRequest(event), { ...env, DB: fault.DB });
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('Retry-After'), '600');
+    assert.deepEqual(await response.clone().json(), { completed: false, deferred: true, failureClass: 'd1-stalled' });
+    assert.equal(fault.attempts(), 5);
+    assert.equal(JSON.parse((await db.prepare("SELECT value FROM system_state WHERE key='maintenance_phase:catalog_projection:catalog_projection'").first()).value).status, 'failed');
+    assert.deepEqual(await db.prepare("SELECT value FROM catalog_items WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'").first(), before);
+    const ingestion = (await import('../../cloudflare/dist/ingestion/ingestion-worker.js')).default;
+    await ingestion.scheduled(event, { ...env, CATALOG_PUBLISHER: { fetch: async () => response } });
+    assert.equal((await publisher.fetch(scheduleRequest({ ...event, scheduledTime: event.scheduledTime + 600_000 }), env)).status, 200);
+    assert.equal(JSON.parse((await marker('catalog_projection')).value).status, 'complete');
+    assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
+  });
+});
+
+test('compiled ingestion defers an exhausted typed statement stall on its native cron', async () => {
+  await withCompiledStall('ingestion', async ({ default: ingestion, D1StatementStallError }) => {
+    const fault = exhaustedStallDb(D1StatementStallError, (sql, key) => key === 'first' && sql.includes('system_state'));
+    await ingestion.scheduled({ cron: '2,32 * * * *', scheduledTime: Date.now() }, { ...env, DB: fault.DB });
+    assert.equal(fault.attempts(), 5);
+    assert.equal(await db.prepare("SELECT count(*) n FROM catalog_items WHERE kind='notification-event'").first('n'), 0);
+  });
+});
 
 test('the established ingestion cron completes general maintenance and private admission dispatch', async () => {
   const event = { cron: '9-59/10 * * * *', scheduledTime: Date.now() };
