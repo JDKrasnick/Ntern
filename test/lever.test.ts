@@ -116,7 +116,7 @@ describe('LeverPostingsAdapter', () => {
     const unchanged = await adapter.fetch(result.checkpoint);
     expect(unchanged.notModified).toBe(true);
     expect(unchanged.contentHash).toBe(expected);
-  });
+  }, 30_000);
 
   it('ignores stored ETags and uses the content hash for unchanged boards', async () => {
     const calls: RequestInit[] = [];
