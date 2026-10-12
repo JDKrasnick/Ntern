@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { inferLeverSeason, LEVER_BOARD_MAX_BYTES, LEVER_REQUEST_TIMEOUT_MS, LeverPostingsAdapter, leverRequirements, mapLeverPosting, mapLeverSourcedPosting } from '../src/sources/lever.js';
 import { extractPostingMetadataEvidence } from '../src/role-metadata.js';
@@ -92,6 +93,29 @@ describe('LeverPostingsAdapter', () => {
     } finally {
       timeout.mockRestore();
     }
+  });
+
+  it('preserves the existing whole-array hash on a multi-megabyte paginated board', async () => {
+    const rows = Array.from({ length: 350 }, (_, index) => ({
+      ...posting, id: postingId(349 - index),
+      hostedUrl: `https://jobs.lever.co/acme/${postingId(349 - index)}`,
+      applyUrl: `https://jobs.lever.co/acme/${postingId(349 - index)}/apply`,
+      descriptionPlain: `Build systems with é, \uFEFF, \\ and "quotes". ${'x'.repeat(20_000)}`,
+      optional: index % 2 ? null : { text: '\uD800', list: [null, true, 1.25] },
+    }));
+    const expected = createHash('sha256').update(JSON.stringify([...rows]
+      .sort((a, b) => a.id.localeCompare(b.id)))).digest('hex');
+    const adapter = new LeverPostingsAdapter({ ...options, fetchImpl: async (url) => {
+      const skip = Number(new URL(String(url)).searchParams.get('skip'));
+      return Response.json(rows.slice(skip, skip + 100));
+    } });
+    const result = await adapter.fetch();
+    expect(result.contentHash).toBe(expected);
+    expect(result.checkpoint.contentHash).toBe(expected);
+    expect(result.rawCount).toBe(350);
+    const unchanged = await adapter.fetch(result.checkpoint);
+    expect(unchanged.notModified).toBe(true);
+    expect(unchanged.contentHash).toBe(expected);
   });
 
   it('ignores stored ETags and uses the content hash for unchanged boards', async () => {

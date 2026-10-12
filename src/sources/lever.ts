@@ -186,8 +186,16 @@ export function mapLeverSourcedPosting(
   };
 }
 
-function normalizedProjection(postings: LeverPosting[]): string {
-  return JSON.stringify([...postings].sort((a, b) => String(a.id ?? '').localeCompare(String(b.id ?? ''))));
+function normalizedProjectionHash(postings: LeverPosting[]): string {
+  // Preserve the exact existing JSON-array digest without materializing a
+  // second whole board string while the parsed and sourced postings are live.
+  const hash = createHash('sha256').update('[');
+  const ordered = [...postings].sort((a, b) => String(a.id ?? '').localeCompare(String(b.id ?? '')));
+  for (const [index, posting] of ordered.entries()) {
+    if (index) hash.update(',');
+    hash.update(JSON.stringify(posting) ?? 'null');
+  }
+  return hash.update(']').digest('hex');
 }
 
 function retryAfterMs(response: Response, now: Date): number | undefined {
@@ -266,7 +274,7 @@ export class LeverPostingsAdapter implements SourceAdapter, SourceConnector {
     if (new Set(sourced.map((posting) => posting.externalId)).size !== sourced.length) {
       throw new SourceFetchError(`${this.id}: Lever returned duplicate posting IDs`, 'identity');
     }
-    const contentHash = createHash('sha256').update(normalizedProjection(postings)).digest('hex');
+    const contentHash = normalizedProjectionHash(postings);
     const neutral: SourceSnapshot = {
       sourceId: this.id,
       outcome: contentHash === previous?.contentHash ? 'unchanged' : 'changed',
