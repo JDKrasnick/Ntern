@@ -196,6 +196,15 @@ receipt; a new deployment cannot clear an incident.
 
 ## Bounded operations dispatch
 
+Scheduled admission dispatch visits at most 100 active snapshot sources per
+pass and stops between sources after 60 seconds of elapsed time. It finishes
+the current source and saves the durable cursor only after its plan and queue
+send complete. Sources outside the admission allowlist also advance the cursor.
+An interrupted or failed pass resumes after the last completed source; a short
+final page wraps to the start of the fleet. A completed dispatch marker proves
+that bounded pass finished, not that every source or admission row drained.
+These bounds retain the ten-minute cadence and existing consumer concurrency.
+
 `POST /internal/operations/ingestion/dispatch` with `{"sourceId":"<owned-source-id>"}`
 uses the operations key to forward one source to the private admission Worker.
 Use it after queues drain to advance baseline work without waiting for the next

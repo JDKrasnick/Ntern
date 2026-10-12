@@ -13,12 +13,16 @@ async function sendQueueMessages(queue: Queue, messages: unknown[]): Promise<voi
   }
 }
 
-export const ADMISSION_V2_SOURCE_LIMIT = 500;
+// Rotate through the fleet without exhausting a scheduled invocation. Finish
+// the current source before yielding; its durable handoffs remain retry-safe.
+export const ADMISSION_V2_SOURCE_LIMIT = 100;
+export const ADMISSION_V2_DISPATCH_BUDGET_MS = 60_000;
 export class AdmissionDispatchNotReady extends Error {}
 
 export async function runAdmissionV2Dispatch(env: AdmissionDispatchEnvironment, observedAt: Date, requestedSourceId?: string): Promise<{ enabled: boolean; sources: number; bootstrapped: number; migrated: number; batches: number; rows: number }> {
   const features = admissionV2FeatureConfig(env);
   if (!features.admissionEnabled) return { enabled: false, sources: 0, bootstrapped: 0, migrated: 0, batches: 0, rows: 0 };
+  const startedAt = performance.now();
   const ledger = new D1IngestionV2Repository(env.DB);
   let selectedSourceIds: string[];
   if (requestedSourceId !== undefined) {
@@ -28,43 +32,56 @@ export async function runAdmissionV2Dispatch(env: AdmissionDispatchEnvironment, 
     const cursor = await ledger.getDispatchSourceCursor();
     selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT, cursor);
     if (!selectedSourceIds.length && cursor) selectedSourceIds = await ledger.listActiveSourceIds(ADMISSION_V2_SOURCE_LIMIT);
-    const nextCursor = selectedSourceIds.length === ADMISSION_V2_SOURCE_LIMIT
-      ? selectedSourceIds[selectedSourceIds.length - 1]
-      : undefined;
-    await ledger.setDispatchSourceCursor(nextCursor, observedAt.toISOString());
+    if (!selectedSourceIds.length) await ledger.setDispatchSourceCursor(undefined, observedAt.toISOString());
   }
-  const sourceIds = selectedSourceIds.filter((sourceId) => admissionSourceAllowed(env, sourceId));
+  let sources = 0;
+  let considered = 0;
   let bootstrapped = 0;
   let migrated = 0;
   let batches = 0;
   let rows = 0;
-  for (const sourceId of sourceIds) {
-    // Regrade a bounded batch of active rows settled under an older policy
-    // version before dispatching their fresh work. Migration only reopens rows;
-    // it never hides a visible role or sets a source-wide suppression, so a new
-    // eligible role still publishes while stale peers are regraded.
-    const overview = await ledger.overview(sourceId);
-    if (requestedSourceId !== undefined && (overview.queued || overview.processing || overview.quarantined)) {
-      throw new AdmissionDispatchNotReady('Source admission work must drain before manual dispatch');
-    }
-    if (requestedSourceId !== undefined && await env.DB.prepare(
-      'SELECT 1 AS pending FROM ingestion_admission_handoffs WHERE source_id=? AND acknowledged_at IS NULL LIMIT 1',
-    ).bind(sourceId).first()) throw new AdmissionDispatchNotReady('Source admission handoffs must drain before manual dispatch');
-    if (requestedSourceId !== undefined && !overview.currentSnapshotHash) throw new AdmissionDispatchNotReady('Complete active snapshot required');
-    if (overview.currentSnapshotHash) {
-      const snapshot = await ledger.getSnapshot(sourceId, overview.currentSnapshotHash);
-      if (requestedSourceId !== undefined && !snapshot?.isComplete) throw new AdmissionDispatchNotReady('Complete active snapshot required');
-      if (snapshot?.isComplete) {
-        bootstrapped += await bootstrapAdmissionSnapshot(sourceId, snapshot.snapshotHash, snapshot.admissionVersion, { ledger, now: () => observedAt });
-        const migration = await migrateAdmissionPolicy(sourceId, snapshot.admissionVersion, { ledger, now: () => observedAt });
-        migrated += migration.reopened;
+  for (const sourceId of selectedSourceIds) {
+    if (requestedSourceId === undefined && considered > 0
+      && performance.now() - startedAt >= ADMISSION_V2_DISPATCH_BUDGET_MS) break;
+    if (admissionSourceAllowed(env, sourceId)) {
+      // Regrade a bounded batch of active rows settled under an older policy
+      // version before dispatching their fresh work. Migration only reopens rows;
+      // it never hides a visible role or sets a source-wide suppression, so a new
+      // eligible role still publishes while stale peers are regraded.
+      const overview = await ledger.overview(sourceId);
+      if (requestedSourceId !== undefined && (overview.queued || overview.processing || overview.quarantined)) {
+        throw new AdmissionDispatchNotReady('Source admission work must drain before manual dispatch');
       }
+      if (requestedSourceId !== undefined && await env.DB.prepare(
+        'SELECT 1 AS pending FROM ingestion_admission_handoffs WHERE source_id=? AND acknowledged_at IS NULL LIMIT 1',
+      ).bind(sourceId).first()) throw new AdmissionDispatchNotReady('Source admission handoffs must drain before manual dispatch');
+      if (requestedSourceId !== undefined && !overview.currentSnapshotHash) throw new AdmissionDispatchNotReady('Complete active snapshot required');
+      if (overview.currentSnapshotHash) {
+        const snapshot = await ledger.getSnapshot(sourceId, overview.currentSnapshotHash);
+        if (requestedSourceId !== undefined && !snapshot?.isComplete) throw new AdmissionDispatchNotReady('Complete active snapshot required');
+        if (snapshot?.isComplete) {
+          bootstrapped += await bootstrapAdmissionSnapshot(sourceId, snapshot.snapshotHash, snapshot.admissionVersion, { ledger, now: () => observedAt });
+          const migration = await migrateAdmissionPolicy(sourceId, snapshot.admissionVersion, { ledger, now: () => observedAt });
+          migrated += migration.reopened;
+        }
+      }
+      const plan = await planAdmissionV2Dispatch(sourceId, { ledger, now: () => observedAt });
+      if (plan.messages.length) {
+        await sendQueueMessages(env.ADMISSION_V2_QUEUE, plan.messages as unknown[]);
+        batches += plan.messages.length;
+        rows += plan.messages.reduce((sum, message) => sum + message.externalIds.length, 0);
+      }
+      sources += 1;
     }
-    const plan = await planAdmissionV2Dispatch(sourceId, { ledger, now: () => observedAt });
-    if (!plan.messages.length) continue;
-    await sendQueueMessages(env.ADMISSION_V2_QUEUE, plan.messages as unknown[]);
-    batches += plan.messages.length;
-    rows += plan.messages.reduce((sum, message) => sum + message.externalIds.length, 0);
+    considered += 1;
+    if (requestedSourceId === undefined) {
+      // Never skip a source whose plan or send failed. Save each completed source
+      // so interruption preserves progress, including non-owner sources skipped
+      // by the allowlist. Only wrap after reaching the actual end of the fleet.
+      const reachedEnd = considered === selectedSourceIds.length
+        && selectedSourceIds.length < ADMISSION_V2_SOURCE_LIMIT;
+      await ledger.setDispatchSourceCursor(reachedEnd ? undefined : sourceId, observedAt.toISOString());
+    }
   }
-  return { enabled: true, sources: sourceIds.length, bootstrapped, migrated, batches, rows };
+  return { enabled: true, sources, bootstrapped, migrated, batches, rows };
 }
