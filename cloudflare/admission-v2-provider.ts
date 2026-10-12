@@ -3,6 +3,8 @@ import { providerPostingReference, customGreenhouseReference } from '../src/iden
 import { extractGreenhouseCompensationBands, metadataApiRoute, parseMetadataApiResponse } from '../src/metadata-acquisition.js';
 import { metadataDescriptionText } from '../src/core/metadata-text.js';
 import { htmlToText } from '../src/core/early-career.js';
+import { canonicalApplicationUrl } from '../src/core/application-url.js';
+import { findReviewedGreenhouseSource, hostMatchesAllowlist } from '../src/sources/greenhouse-config.js';
 import type { SourcedPosting } from '../src/types.js';
 import type { AdmissionDestinationProbe } from '../src/ingestion-v2/admission/evaluator.js';
 import { AdmissionProviderDeferredError, AdmissionRowTransientError, admissionRetryAfterMs } from '../src/ingestion-v2/admission/taxonomy.js';
@@ -78,11 +80,39 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
   return async (applyUrl: string, posting?: SourcedPosting): Promise<AdmissionDestinationProbe | undefined> => {
     const original = new URL(applyUrl);
     if (original.protocol !== 'https:' || original.username || original.password || original.port) return undefined;
-    const identity = customGreenhouseReference(original, original.hostname.replace(/^www\./u, '')) ?? providerPostingReference(applyUrl);
+    let identity = customGreenhouseReference(original, original.hostname.replace(/^www\./u, '')) ?? providerPostingReference(applyUrl);
+    const embeddedIndex = posting?.contentCompleteness === 'index-only'
+      && ['boards.greenhouse.io', 'job-boards.greenhouse.io'].includes(original.hostname)
+      && /^\/embed\/job_app\/?$/u.test(original.pathname)
+      && original.searchParams.getAll('for').length === 1
+      && original.searchParams.get('for') === posting.providerIdentity?.tenant
+      && original.searchParams.getAll('token').length === 1
+      && original.searchParams.get('token') === posting.externalId
+      && (!original.searchParams.has('gh_jid') || (original.searchParams.getAll('gh_jid').length === 1
+        && original.searchParams.get('gh_jid') === posting.externalId));
+    if (posting?.contentCompleteness === 'index-only'
+      && posting.providerIdentity?.provider === 'greenhouse'
+      && (embeddedIndex || !hostMatchesAllowlist(original.hostname, ['greenhouse.io', 'grnh.se']))) {
+      // Employer-hosted application URLs can have no provider route, or a
+      // historical URL alias unlike the actual board token. The reviewed index
+      // owns that token; the exact official API response must still prove the
+      // captured application URL, posting ID, title, revision, and description.
+      const reviewed = findReviewedGreenhouseSource(posting.sourceId);
+      if (reviewed.status !== 'found' || reviewed.source.id !== posting.sourceId
+        || reviewed.source.boardToken !== posting.providerIdentity.tenant
+        || reviewed.source.employerId !== posting.employer.id
+        || posting.employer.authority !== 'reviewed-registry' || posting.provenance !== 'official-ats'
+        || !hostMatchesAllowlist(original.hostname, reviewed.source.allowedInitialHosts)
+        || !/^\d+$/u.test(posting.externalId)) {
+        unavailable('Greenhouse index lacks a reviewed employer application route');
+      }
+      identity = { provider: 'greenhouse', tenant: reviewed.source.boardToken, postingId: posting.externalId };
+    }
     if (identity.provider === 'greenhouse' && identity.tenant && identity.postingId) {
       if (posting && (posting.contentCompleteness !== 'index-only'
         || posting.providerIdentity?.provider !== 'greenhouse'
         || posting.providerIdentity.tenant?.toLowerCase() !== identity.tenant.toLowerCase()
+        || posting.sourceId !== `greenhouse-${identity.tenant}`
         || posting.externalId !== identity.postingId || posting.applyUrl !== applyUrl)) {
         unavailable('Greenhouse index identity does not match its official detail route');
       }
@@ -102,8 +132,9 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
       } catch { unavailable('Greenhouse application URL is invalid'); }
       const published = new URL(payload.absolute_url);
       if (published.protocol !== 'https:' || published.username || published.password || published.port
-        || publishedIdentity!.provider !== identity.provider || publishedIdentity!.tenant !== identity.tenant
-        || publishedIdentity!.postingId !== identity.postingId) unavailable('Greenhouse application URL identity mismatch');
+        || (posting ? canonicalApplicationUrl(payload.absolute_url) !== canonicalApplicationUrl(applyUrl)
+          : publishedIdentity!.provider !== identity.provider || publishedIdentity!.tenant !== identity.tenant
+            || publishedIdentity!.postingId !== identity.postingId)) unavailable('Greenhouse application URL identity mismatch');
       const result = evidence(applyUrl, identity.postingId, artifact.title ?? '', artifact.text ?? '');
       if (posting) {
         const revision = posting.providerTimestamp?.semantics === 'updated' ? posting.providerTimestamp.value : undefined;
