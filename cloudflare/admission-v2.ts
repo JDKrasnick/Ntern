@@ -43,7 +43,12 @@ export function cloudflareAdmissionProber(resolver: HostResolver, governor?: Adm
   const maximumEvidenceBytes = 128 * 1024;
   const providerProbe = officialAdmissionProviderProbe(resolver, governor);
   return {
-    async probe({ applyUrl }) {
+    async probe({ applyUrl, posting }) {
+      if (posting?.contentCompleteness === 'index-only') {
+        const result = await providerProbe(applyUrl, posting);
+        if (!result) throw new AdmissionRowTransientError('upstream-server-error', 'Exact official provider details required for index admission');
+        return result;
+      }
       const url = new URL(applyUrl);
       const workday = url.protocol === 'https:' && !url.username && !url.password && !url.port
         && providerPostingReference(applyUrl).provider === 'workday';

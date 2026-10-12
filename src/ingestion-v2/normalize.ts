@@ -50,6 +50,7 @@ function materialView(posting: SourcedPosting) {
     },
     title: posting.title,
     content: posting.content.map((part) => ({ kind: part.kind, format: part.format, value: part.value })),
+    ...(posting.contentCompleteness !== undefined ? { contentCompleteness: posting.contentCompleteness } : {}),
     locations: posting.locations,
     applyUrl,
     hostedUrl: posting.hostedUrl,
@@ -93,6 +94,7 @@ function canonicalPosting(posting: SourcedPosting): SourcedPosting {
     ...(posting.providerIdentity !== undefined ? { providerIdentity: posting.providerIdentity } : {}),
     title: posting.title,
     content: posting.content.map((part) => ({ kind: part.kind, format: part.format, value: part.value })),
+    ...(posting.contentCompleteness !== undefined ? { contentCompleteness: posting.contentCompleteness } : {}),
     locations: [...posting.locations],
     applyUrl: posting.applyUrl,
     ...(posting.hostedUrl !== undefined ? { hostedUrl: posting.hostedUrl } : {}),
@@ -292,7 +294,7 @@ export function parseEnvelope(raw: string, expected: { sourceId: string; snapsho
 export function validateSnapshotHeader(
   envelope: Record<string, unknown>, expected: { sourceId: string; snapshotHash: string },
 ): asserts envelope is Record<string, unknown> & Omit<NormalizedSnapshotEnvelope, 'rows'> {
-  if (envelope.schemaVersion !== 1 && envelope.schemaVersion !== INGESTION_V2_SNAPSHOT_SCHEMA_VERSION) {
+  if (envelope.schemaVersion !== 1 && envelope.schemaVersion !== 2 && envelope.schemaVersion !== INGESTION_V2_SNAPSHOT_SCHEMA_VERSION) {
     throw new Error(`Unsupported ingestion snapshot schema ${String(envelope.schemaVersion)}`);
   }
   if (envelope.sourceId !== expected.sourceId) throw new Error('Ingestion snapshot source mismatch');
@@ -320,6 +322,11 @@ export function validateSnapshotRow(value: unknown, sourceId: string): asserts v
   if (!/^[a-f0-9]{64}$/u.test(row.materialHash)) throw new Error('Ingestion snapshot row material hash is malformed');
   if (row.posting.sourceId !== sourceId) throw new Error('Ingestion snapshot posting source mismatch');
   if (row.posting.externalId !== row.externalId) throw new Error('Ingestion snapshot row identity mismatch');
+  if (row.posting.contentCompleteness !== undefined && (row.posting.contentCompleteness !== 'index-only'
+    || row.posting.providerIdentity?.provider !== 'greenhouse'
+    || row.posting.content.some(part => part.value.length !== 0))) {
+    throw new Error('Ingestion snapshot index material is malformed');
+  }
   if ((row.posting.document ?? row.externalId) !== row.document || (row.posting.row ?? 0) !== row.row) {
     throw new Error('Ingestion snapshot row provenance mismatch');
   }

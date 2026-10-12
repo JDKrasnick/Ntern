@@ -121,6 +121,7 @@ export async function runGreenhouseBoard(
   const adapter = new GreenhouseBoardAdapter({
     source,
     checkpointId,
+    captureDiscoveryIndex: dependencies.shadowDiscovery?.isEnabledForSource?.(source.id) === true,
     ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
   });
   const validate = dependencies.linkValidator ?? validatorFor(source, dependencies.fetchImpl);

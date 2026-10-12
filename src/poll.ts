@@ -1908,12 +1908,13 @@ export class IngestionRunner {
             completeFetchSequence: resolutionPassOpen || previous?.pendingAdmissionConfigurationVersion
               ? undefined : result.checkpoint.successfulFetches,
             sourceId: connector.id,
-            postings: result.postings,
-            processed: batch.processed,
+            postings: result.discoveryPostings ?? result.postings,
+            processed: result.discoveryProcessed ?? batch.processed,
             snapshotHash: batch.snapshotHash,
             admissionVersion: ingestionV2AdmissionVersion(
               githubAdmissionConfigurationVersion ?? admissionConfigurationVersion ?? 'standard-v1',
-              { trustedCommunityAlertsEnabled: this.v2TrustedCommunityAlertsEnabled?.(connector.id) === true },
+              { trustedCommunityAlertsEnabled: this.v2TrustedCommunityAlertsEnabled?.(connector.id) === true,
+                greenhouseIndexMaterial: result.discoveryPostings !== undefined },
             ),
             baseline,
             observedAt: now,

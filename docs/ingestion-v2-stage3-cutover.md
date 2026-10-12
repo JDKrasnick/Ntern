@@ -290,3 +290,38 @@ waive admission, identity, URL, or catalog parity checks.
 Destination batches must declare their Ashby posting identities before acquisition. The scanner then retains only the current decoded chunk, one bounded posting element, and identity-validated artifacts for that batch; consumed board prefixes are discarded. A 36 MB compiled board regression verifies late and backward posting lookups from one fetch. This repair addresses board-prefix retention after the 2026-10-09 17:34 UTC ingestion sample reached 130.9 MiB despite reader cleanup. The correlated destination/shadow deliveries had no native exceptions; fresh natural production resource evidence remains required before continuing expansion.
 
 Lever computes its existing sorted-JSON-array board digest incrementally, one posting at a time, instead of serializing a second whole board while parsed and sourced postings remain live. A multi-megabyte paginated regression compares the digest directly with the previous whole-array implementation and verifies unchanged-board detection. The repaired Ashby release still recorded a 121.7 MiB ingestion peak on 2026-10-11 at 21:52 UTC; this hash allocation is a definite avoidable cost, but its causal role in that sample is not proven. Keep that failure evidence and require fresh production workload, memory, durable phases, and full catalog verification before advancing the paused cohort.
+
+
+### Oversized Greenhouse boards and complete discovery
+
+Lucid's production preparation stopped when its checkpoint contained 450 active
+IDs but its newly active snapshot contained one detail row. An oversized board
+uses a complete index plus bounded detail batches; those batches must never
+replace the complete V2 board or count their missing peers as omissions.
+
+V2 Greenhouse discovery now retains every index row separately from legacy
+description writes, including boards whose full response fits the legacy cap.
+This also avoids retaining and serializing a second whole board of descriptions.
+Schema 3 marks these rows as `contentCompleteness: index-only`. Admission fetches
+the exact official Greenhouse detail before description-dependent grading and
+requires the retained tenant, posting ID, title, and provider revision to match.
+Missing or mismatched material cannot publish or notify. Existing schema-1 and
+schema-2 envelopes remain readable. The Greenhouse-specific admission version
+reopens retained rows through silent policy migration; other providers keep
+their existing version. Legacy full descriptions and bounded detail updates
+retain their existing behavior and resource limits. V2-enabled sources bypass
+an older conditional validator once to capture the complete index before
+returning to normal conditional polls. The source pause guard runs before
+this refresh option is passed to the adapter.
+
+Validation must cover full D1/R2 row coverage across detail continuations and an
+unchanged poll, stable index hashes, no false omissions, preserved legacy
+content, exact provider material, compensation, and silent baseline effects.
+Production cohort expansion remains gated on a guarded deployment, fresh
+runtime and catalog evidence, and source-by-source durable settlement. The
+seven-day clean production soak remains pending under the expedited cutover.
+
+The pre-release production audit also recorded ingestion at 135.5 MiB during
+Greenhouse polling, above the 120 MiB hard stop. The failing sample is retained;
+the exact responsible request is not proven. Expansion stays stopped until the
+repaired release establishes fresh memory, runtime, queue, and catalog proof.

@@ -85,7 +85,10 @@ for (const [token, name, applyUrl] of [
     assert.equal((await DB.prepare("SELECT COUNT(*) n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
     const snapshot = await DB.prepare('SELECT * FROM ingestion_snapshots WHERE source_id=? AND is_complete=1').bind(id).first();
     assert.equal(snapshot.row_count, 1);
-    assert.ok(await DOCUMENTS.get(snapshot.object_key));
+    const envelope = await (await DOCUMENTS.get(snapshot.object_key)).json();
+    assert.equal(envelope.schemaVersion, 3);
+    assert.ok(envelope.rows.every(row => row.posting.contentCompleteness === 'index-only'
+      && row.posting.content.every(part => part.value === '')));
     const health = JSON.parse((await DB.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(`SOURCE#${id}`).first()).value);
     assert.equal(health.sourceStatus, 'paused');
     assert.equal(health.state, 'healthy');
@@ -101,6 +104,64 @@ for (const [token, name, applyUrl] of [
     assert.equal(fetches, beforeFetches, 'obsolete quiet delivery must never reach the provider');
     const after = JSON.parse((await DB.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(`SOURCE#${id}`).first()).value);
     assert.deepEqual(after, activeHealth, 'obsolete quiet work must not degrade or mutate source health');
+    assert.equal((await DB.prepare("SELECT COUNT(*) n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
+  } finally { globalThis.fetch = realFetch; await runtime.dispose(); }
+});
+
+
+test('compiled oversized Greenhouse discovery retains the whole index across detail and unchanged deliveries', async () => {
+  const token = 'lucidmotors', id = `greenhouse-${token}`, workerName = 'oversized-index';
+  const runtime = new Miniflare({ workers: [await createWorkerConfig(workerName,
+    join(repositoryRoot, 'cloudflare/dist/ingestion'), 'ingestion-worker.js', {
+      DB: { type: 'd1', id: workerName }, DOCUMENTS: { type: 'r2', name: workerName },
+    })] });
+  const realFetch = globalThis.fetch;
+  try {
+    await runtime.ready;
+    const DB = await runtime.getD1Database('DB', workerName), DOCUMENTS = await runtime.getR2Bucket('DOCUMENTS', workerName);
+    await applyMigrations(DB);
+    const jobs = Array.from({ length: 21 }, (_, i) => ({
+      id: 70000 + i, internal_job_id: 70000 + i,
+      title: 'Software Engineering Intern, Summer 2027',
+      absolute_url: `https://job-boards.greenhouse.io/${token}/jobs/${70000 + i}`,
+      location: { name: 'New York, NY' }, updated_at: '2026-10-12T12:00:00.000Z',
+      content: `<p>Unique description ${i}. Software internship. Summer 2027. Pays $50/hour.</p>`,
+      departments: [], offices: [],
+    }));
+    let fullRequests = 0, detailRequests = 0;
+    globalThis.fetch = async input => {
+      const url = new URL(typeof input === 'string' ? input : input.url ?? String(input));
+      if (url.hostname !== 'boards-api.greenhouse.io') return new Response('<html><title>Software Engineering Intern, Summer 2027</title><body>Software internship application</body></html>');
+      const detail = /\/jobs\/(\d+)$/.exec(url.pathname);
+      if (detail) { detailRequests++; return Response.json(jobs.find(job => String(job.id) === detail[1])); }
+      if (!url.pathname.endsWith('/jobs')) return Response.json({ name: 'Lucid Motors' });
+      if (url.searchParams.get('content') === 'false') return Response.json({ jobs: jobs.map(job => ({ ...job, content: undefined })) });
+      fullRequests++;
+      return new Response('x'.repeat(8 * 1024 * 1024 + 1));
+    };
+    const { default: worker } = await import('../../cloudflare/dist/ingestion/ingestion-worker.js');
+    const env = { DB, DOCUMENTS, OPERATIONS_SHARED_SECRET: 'test-operations', INTERNAL_SERVICE_SECRET: 'test-internal',
+      INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: id,
+      GREENHOUSE_QUEUE: { async send() {} } };
+    let firstHash;
+    for (let delivery = 0; delivery < 3; delivery++) {
+      const response = await worker.fetch(new Request(`https://ingestion.test/internal/poll-source?provider=greenhouse&sourceId=${id}`, {
+        method: 'POST', headers: { 'X-Operations-Key': 'test-operations', 'X-InternNotifs-Service-Key': 'test-internal' },
+      }), env);
+      assert.equal(response.status, 200, JSON.stringify(await response.json()));
+      const cp = JSON.parse((await DB.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='CHECKPOINT'").bind(`SOURCE#${id}`).first()).value);
+      assert.equal(cp.activeExternalIds.length, jobs.length);
+      const snapshot = await DB.prepare("SELECT * FROM ingestion_snapshots WHERE source_id=? AND state='active'").bind(id).first();
+      assert.equal(snapshot.row_count, jobs.length);
+      const envelope = await (await DOCUMENTS.get(snapshot.object_key)).json();
+      assert.deepEqual(envelope.rows.map(row => row.externalId).sort(), jobs.map(job => String(job.id)).sort());
+      assert.ok(envelope.rows.every(row => row.posting.contentCompleteness === 'index-only' && row.posting.content.every(part => part.value === '')));
+      firstHash ??= snapshot.snapshot_hash;
+      assert.equal(snapshot.snapshot_hash, firstHash, 'detail slices must not change the index snapshot');
+    }
+    assert.equal(fullRequests, 1);
+    assert.equal(detailRequests, jobs.length);
+    assert.equal((await DB.prepare("SELECT COUNT(*) n FROM ingestion_rows WHERE source_id=? AND state='absent'").bind(id).first()).n, 0);
     assert.equal((await DB.prepare("SELECT COUNT(*) n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
   } finally { globalThis.fetch = realFetch; await runtime.dispose(); }
 });

@@ -177,6 +177,8 @@ export interface SourceCheckpoint {
   /** Greenhouse listing revisions from the lightweight board index. Kept only
    * for boards whose descriptions are acquired one posting at a time. */
   greenhousePostingRevisions?: Record<string, string>;
+  /** Complete index captured under the V2 material contract. */
+  greenhouseDiscoveryIndexVersion?: 1;
   /** Detail documents still owed by an oversized Greenhouse board. The worker
    * continues this set in bounded queue deliveries. */
   pendingGreenhousePostingIds?: string[];
@@ -1084,6 +1086,8 @@ export interface SourcedPosting {
     format: 'plain' | 'html' | 'markdown';
     value: string;
   }>;
+  /** A complete provider index whose candidate descriptions must be fetched before admission. */
+  contentCompleteness?: 'index-only';
   locations: string[];
   applyUrl: string;
   hostedUrl?: string;
@@ -1118,6 +1122,9 @@ export interface SourceSnapshot {
   outcome: 'changed' | 'unchanged';
   complete: true;
   postings: SourcedPosting[];
+  /** Complete discovery material when legacy writes use bounded detail slices. */
+  discoveryPostings?: SourcedPosting[];
+  discoveryProcessed?: ProcessedSnapshot;
   rawCount: number;
   contentHash: string;
   checkpoint: SourceCheckpoint;

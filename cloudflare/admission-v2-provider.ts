@@ -1,7 +1,9 @@
 import { safeFetchText, PublicNetworkPolicyError } from '../src/employer/index.js';
 import { providerPostingReference, customGreenhouseReference } from '../src/identity/posting.js';
-import { metadataApiRoute, parseMetadataApiResponse } from '../src/metadata-acquisition.js';
+import { extractGreenhouseCompensationBands, metadataApiRoute, parseMetadataApiResponse } from '../src/metadata-acquisition.js';
 import { metadataDescriptionText } from '../src/core/metadata-text.js';
+import { htmlToText } from '../src/core/early-career.js';
+import type { SourcedPosting } from '../src/types.js';
 import type { AdmissionDestinationProbe } from '../src/ingestion-v2/admission/evaluator.js';
 import { AdmissionProviderDeferredError, AdmissionRowTransientError, admissionRetryAfterMs } from '../src/ingestion-v2/admission/taxonomy.js';
 import type { AdmissionProviderGovernor } from './admission-v2-provider-governor.js';
@@ -73,11 +75,17 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
     if (!record(payload)) unavailable('Official provider API returned an invalid object');
     return payload;
   }
-  return async (applyUrl: string): Promise<AdmissionDestinationProbe | undefined> => {
+  return async (applyUrl: string, posting?: SourcedPosting): Promise<AdmissionDestinationProbe | undefined> => {
     const original = new URL(applyUrl);
     if (original.protocol !== 'https:' || original.username || original.password || original.port) return undefined;
     const identity = customGreenhouseReference(original, original.hostname.replace(/^www\./u, '')) ?? providerPostingReference(applyUrl);
     if (identity.provider === 'greenhouse' && identity.tenant && identity.postingId) {
+      if (posting && (posting.contentCompleteness !== 'index-only'
+        || posting.providerIdentity?.provider !== 'greenhouse'
+        || posting.providerIdentity.tenant?.toLowerCase() !== identity.tenant.toLowerCase()
+        || posting.externalId !== identity.postingId || posting.applyUrl !== applyUrl)) {
+        unavailable('Greenhouse index identity does not match its official detail route');
+      }
       const providerIdentity = { provider: 'greenhouse' as const, tenant: identity.tenant, postingId: identity.postingId,
         sourceId: 'admission-v2-probe', sourceUrl: applyUrl };
       const route = metadataApiRoute(providerIdentity, applyUrl);
@@ -96,7 +104,25 @@ export function officialAdmissionProviderProbe(resolver: { resolve(host: string)
       if (published.protocol !== 'https:' || published.username || published.password || published.port
         || publishedIdentity!.provider !== identity.provider || publishedIdentity!.tenant !== identity.tenant
         || publishedIdentity!.postingId !== identity.postingId) unavailable('Greenhouse application URL identity mismatch');
-      return evidence(applyUrl, identity.postingId, artifact.title ?? '', artifact.text ?? '');
+      const result = evidence(applyUrl, identity.postingId, artifact.title ?? '', artifact.text ?? '');
+      if (posting) {
+        const revision = posting.providerTimestamp?.semantics === 'updated' ? posting.providerTimestamp.value : undefined;
+        if (!revision || typeof payload.updated_at !== 'string'
+          || !Number.isFinite(Date.parse(payload.updated_at)) || Date.parse(payload.updated_at) !== Date.parse(revision)
+          || htmlToText(artifact.title) !== htmlToText(posting.title) || typeof payload.content !== 'string') {
+          unavailable('Greenhouse detail material no longer matches the retained index revision');
+        }
+        const hydratedPosting: SourcedPosting = {
+          ...posting,
+          content: [{ kind: 'description', format: 'html', value: payload.content }],
+          compensationBands: extractGreenhouseCompensationBands(payload.content),
+          ...(payload.internal_job_id === null ? { sourceState: 'prospect' as const } : {}),
+        };
+        delete hydratedPosting.contentCompleteness;
+        if (!hydratedPosting.compensationBands?.length) delete hydratedPosting.compensationBands;
+        result.hydratedPosting = hydratedPosting;
+      }
+      return result;
     }
     const match = /^\/([a-z0-9_-]{1,100})\/j\/([a-z0-9]{10})(?:\/apply)?\/?$/iu.exec(original.pathname);
     if (original.hostname !== 'apply.workable.com' || !match) return undefined;

@@ -9,11 +9,12 @@ export const INGESTION_V2_EVALUATOR_REVISION = 8;
 
 export function ingestionV2AdmissionVersion(
   baseAdmissionVersion: string,
-  options: { trustedCommunityAlertsEnabled?: boolean } = {},
+  options: { trustedCommunityAlertsEnabled?: boolean; greenhouseIndexMaterial?: boolean } = {},
 ): string {
   return createHash('sha256').update(JSON.stringify({
     baseAdmissionVersion,
     evaluatorRevision: INGESTION_V2_EVALUATOR_REVISION,
     trustedCommunityAlertsEnabled: options.trustedCommunityAlertsEnabled ?? false,
+    ...(options.greenhouseIndexMaterial ? { greenhouseIndexMaterial: 1 } : {}),
   })).digest('hex');
 }

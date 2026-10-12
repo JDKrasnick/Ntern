@@ -15,12 +15,15 @@ import type {
   TrustedCommunityAlertQualification,
 } from '../../types.js';
 import { admissionShouldNotify } from './migration.js';
+import { AdmissionRowTransientError } from './taxonomy.js';
 import type { AdmissionRowContext, AdmissionRowEvaluation, AdmissionV2RowEvaluator } from './types.js';
 
 /** Reachability and page evidence produced by a bounded destination probe. */
 export interface AdmissionDestinationProbe {
   reachability: Reachability;
   evidence?: ApplicationPageEvidence;
+  /** Exact official material for a candidate retained from a bounded provider index. */
+  hydratedPosting?: SourcedPosting;
 }
 
 export interface AdmissionDestinationProber {
@@ -28,7 +31,7 @@ export interface AdmissionDestinationProber {
    * Probe one destination. Must reject with an `AdmissionRowTransientError` for
    * timeouts, 429s, and 5xx responses so the consumer retries that row only.
    */
-  probe(input: { sourceId: string; externalId: string; applyUrl: string; observedAt: string }): Promise<AdmissionDestinationProbe>;
+  probe(input: { sourceId: string; externalId: string; applyUrl: string; observedAt: string; posting?: SourcedPosting }): Promise<AdmissionDestinationProbe>;
 }
 
 export type AdmissionCanonicalEmployerResolver = (
@@ -253,7 +256,34 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
     // Deterministic posting decisions do not need network evidence. Running
     // these first keeps invalid URLs, nontechnical roles, and policy shelves
     // terminal instead of spending the row's transient retry budget.
-    const deterministic = processPosting(context.posting);
+    let posting = context.posting;
+    let deterministic = processPosting(posting);
+    let probe: AdmissionDestinationProbe | undefined;
+    // Title/lifecycle and invalid-URL decisions remain terminal without I/O.
+    // Other index-only candidates need their description before technical,
+    // season, requirements, or compensation decisions can be trusted.
+    if (posting.contentCompleteness === 'index-only' && ![
+      'prospect', 'not-early-career', 'invalid-application-url', 'aggregator-destination',
+    ].includes(deterministic.decision.reason)) {
+      probe = await this.dependencies.prober.probe({
+        sourceId: context.sourceId, externalId: context.externalId,
+        applyUrl: posting.applyUrl, observedAt, posting,
+      });
+      if (probe.reachability === 'live') {
+        const hydrated = probe.hydratedPosting;
+        if (!hydrated || hydrated.contentCompleteness !== undefined
+          || hydrated.sourceId !== context.sourceId || hydrated.externalId !== context.externalId
+          || hydrated.employer.id !== posting.employer.id || hydrated.applyUrl !== posting.applyUrl
+          || hydrated.providerIdentity?.provider !== posting.providerIdentity?.provider
+          || hydrated.providerIdentity?.tenant !== posting.providerIdentity?.tenant
+          || hydrated.provenance !== posting.provenance || hydrated.sourceUrl !== posting.sourceUrl
+          || !hydrated.content.some(part => part.value.trim().length > 0)) {
+          throw new AdmissionRowTransientError('upstream-server-error', 'Complete exact provider material required for index admission');
+        }
+        posting = hydrated;
+        deterministic = processPosting(posting);
+      }
+    }
     if (deterministic.decision.outcome !== 'included') {
       return this.terminal(context, {
         kind: deterministic.decision.outcome === 'shelved' ? 'shelved' : 'blocked',
@@ -268,7 +298,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       ? await this.dependencies.resolvePriorContext(context.sourceId, context.externalId)
       : undefined;
     const identityApplicationUrl = await this.dependencies.resolveIdentityApplicationUrl?.(context.posting.applyUrl);
-    const probe = await this.dependencies.prober.probe({
+    probe ??= await this.dependencies.prober.probe({
       sourceId: context.sourceId,
       externalId: context.externalId,
       applyUrl: context.posting.applyUrl,
@@ -277,7 +307,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
     const graded = gradeAdmissionRow({
       sourceId: context.sourceId,
       externalId: context.externalId,
-      posting: context.posting,
+      posting,
       ...(identityApplicationUrl ? { identityApplicationUrl } : {}),
       ...(canonicalEmployer ? { canonicalEmployer } : {}),
       ...(prior ? { prior } : {}),
