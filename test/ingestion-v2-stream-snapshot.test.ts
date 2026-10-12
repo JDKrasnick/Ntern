@@ -68,6 +68,12 @@ describe('bounded immutable snapshot reader', () => {
     expect(result.rows.get('b')).toEqual(envelope.rows[1]);
     expect(result.bytes).toBe(new TextEncoder().encode(serializeEnvelope(envelope)).length);
   });
+  it('reads previously stored schema-2 envelopes after the schema-3 upgrade', async () => {
+    const retained = { ...fixture(), schemaVersion: 2 };
+    const result = await readSnapshotRows(stream(serializeEnvelope(retained)), retained, ['b']);
+    expect(result.rows.get('b')).toEqual(retained.rows.find(row => row.externalId === 'b'));
+  });
+
   it('accepts legacy hashes and rows before headers', async () => {
     const envelope = fixture();
     const { rows, ...header } = envelope;

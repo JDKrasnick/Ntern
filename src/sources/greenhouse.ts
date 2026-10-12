@@ -34,6 +34,8 @@ export interface GreenhouseAdapterOptions {
   source: ReviewedGreenhouseSource;
   /** Shadow polling uses a separate checkpoint so promotion always starts quietly. */
   checkpointId?: string;
+  /** Refresh once before reusing validators from an older discovery contract. */
+  captureDiscoveryIndex?: boolean;
   fetchImpl?: typeof fetch;
   now?: () => Date;
 }
@@ -342,7 +344,9 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     const indexOnly = previous?.contentOmitted === true;
     const url = greenhouseJobsUrl(this.options.source.boardToken, { content: !indexOnly });
     const detailPassOpen = Boolean(previous?.pendingGreenhousePostingIds?.length);
-    const conditionalRequestAttempted = Boolean(previous?.etag) && !detailPassOpen;
+    const refreshDiscoveryIndex = this.options.captureDiscoveryIndex === true
+      && previous?.greenhouseDiscoveryIndexVersion !== 1;
+    const conditionalRequestAttempted = Boolean(previous?.etag) && !detailPassOpen && !refreshDiscoveryIndex;
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
@@ -405,6 +409,13 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
     }
     const returnedEtag = response.headers.get('etag');
     const fetchedAt = this.now().toISOString();
+    // Keep the authoritative index separate from legacy detail updates. Mixing
+    // the selected descriptions into this view would change row material on
+    // every continuation, then erase it again on the next index-only poll.
+    const discoveryPostings = jobs.flatMap((job, index) => {
+      const posting = mapGreenhouseSourcedPosting({ ...job, content: '' }, this.options.source, fetchedAt, index + 1);
+      return posting ? [{ ...posting, contentCompleteness: 'index-only' as const }] : [];
+    });
     const revisions = Object.fromEntries(jobs.flatMap((job) => job.id === undefined || job.id === null
       ? [] : [[String(job.id), listingRevision(job)] as const]));
     let selectedDetailIds = new Set<string>();
@@ -498,6 +509,7 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
         successfulFetches: (previous?.successfulFetches ?? 0) + 1,
         contentOmitted,
         ...(contentOmitted ? { greenhousePostingRevisions: revisions, pendingGreenhousePostingIds } : {}),
+        ...(this.options.captureDiscoveryIndex ? { greenhouseDiscoveryIndexVersion: 1 as const } : {}),
         lastRowCount: 0,
         lastRawCount: jobs.length,
         activeExternalIds,
@@ -506,6 +518,11 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       },
     };
     const processed = processSnapshot(neutral);
+    if (discoveryPostings) {
+      neutral.discoveryPostings = discoveryPostings;
+      neutral.discoveryProcessed = contentOmitted
+        ? processSnapshot({ ...neutral, postings: discoveryPostings }) : processed;
+    }
     const listings = processed.listings.filter((listing) => listing.technical !== false);
     neutral.checkpoint.lastRowCount = listings.length;
     return {

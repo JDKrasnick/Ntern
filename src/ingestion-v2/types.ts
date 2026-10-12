@@ -9,7 +9,7 @@ import type { ProcessedSnapshot, SourcedPosting } from '../types.js';
  */
 
 /** Bumped only when the stored normalized snapshot shape changes incompatibly. */
-export const INGESTION_V2_SNAPSHOT_SCHEMA_VERSION = 2;
+export const INGESTION_V2_SNAPSHOT_SCHEMA_VERSION = 3;
 
 export type IngestionSnapshotState = 'staged' | 'active' | 'terminal' | 'expired';
 /** The full row-state domain; also validated at the operations boundary. */
