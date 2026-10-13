@@ -2,10 +2,10 @@
   "provider": "ashby",
   "boardKey": "snowflake",
   "apiRegion": "global",
-  "careersUrl": "https://www.snowflake.com/",
-  "firstPartyEvidenceUrl": "https://www.snowflake.com/",
+  "careersUrl": "https://careers.snowflake.com/us/en/search-results",
+  "firstPartyEvidenceUrl": "https://careers.snowflake.com/us/en/search-results",
   "exactBoardUrl": "https://jobs.ashbyhq.com/snowflake",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://www.snowflake.com/ identifies Snowflake and links to https://jobs.ashbyhq.com/snowflake (exact tenant).",
+  "evidenceExcerpt": "uo-ku\",\"latitude\":\"35.6895\",\"industry\":\"Software\",\"multi_location\":[\"Chuo-ku, Tokyo, Japan\"],\"hiringManagerName\":\"Makoto Tamaoki\",\"applyUrl\":\"https://jobs.ashbyhq.com/snowflake/435f1357-2f89-4b5f-bc33-b79b0a8355f2\",\"ml_job_parser\":{\"descriptionTeaser_keyword\":\"At Snowflake, we are powering the era of the agentic enterprise. To usher in this new era, we seek AI-native thinkers across every function who are energized by the opportunity to reinvent how they wo...\",\"descriptionTeaser_first200\":\"At Snowflake, we are powering the era of the agentic e",
   "observedJobUrl": "https://jobs.ashbyhq.com/snowflake/fc1923c1-b151-4458-a792-40d58331a5be",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

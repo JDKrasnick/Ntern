@@ -2,10 +2,10 @@
   "provider": "ashby",
   "boardKey": "georgian",
   "apiRegion": "global",
-  "careersUrl": "https://georgian.io/",
-  "firstPartyEvidenceUrl": "https://georgian.io/",
+  "careersUrl": "https://georgian.io/careers",
+  "firstPartyEvidenceUrl": "https://georgian.io/careers",
   "exactBoardUrl": "https://jobs.ashbyhq.com/georgian",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://georgian.io/ identifies Georgian Partners Growth and links to https://jobs.ashbyhq.com/georgian (exact tenant).",
+  "evidenceExcerpt": "ic/chunks/0i2g413c_b-1h.js\" async=\"\"></script><script src=\"/_next/static/chunks/022ykj2nqt~w~.js\" async=\"\"></script><link rel=\"preload\" href=\"https://jobs.ashbyhq.com/georgian/embed?version=2\" as=\"script\"/><meta name=\"next-size-adjust\" content=\"\"/><meta name=\"theme-color\" content=\"#2746DA\"/><meta name=\"format-detection\" content=\"telephone=no\"/><title>Georgian | Careers | Georgian \u2013 Build Your Career With Us</title><meta name=\"description\" content=\"Build your career at Georgian. We are hiring investors, operators, and AI practitioners. Join a te",
   "observedJobUrl": "https://jobs.ashbyhq.com/georgian/2ae71a4b-dd9d-4068-8ef2-81351ee74cab/",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

@@ -2,10 +2,10 @@
   "provider": "ashby",
   "boardKey": "gritt",
   "apiRegion": "global",
-  "careersUrl": "https://gritt.ai",
-  "firstPartyEvidenceUrl": "https://gritt.ai",
+  "careersUrl": "https://www.gritt.ai/team",
+  "firstPartyEvidenceUrl": "https://www.gritt.ai/team",
   "exactBoardUrl": "https://jobs.ashbyhq.com/gritt",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://gritt.ai identifies Gritt Robotics and links to https://jobs.ashbyhq.com/gritt (exact tenant).",
+  "evidenceExcerpt": "ra, Google, and Tesla. Backed by Obvious Ventures, Union Square Ventures, First Round Capital, Congruent Ventures, and Climactic.</p><a href=\"https://jobs.ashbyhq.com/gritt\" target=\"_blank\" rel=\"noreferrer noopener\" style=\"--reveal-delay:300ms\" class=\"c-launch-reveal c-launch-button c-launch-button--outline c-launch-button--wide\">See open roles</a></section><section class=\"c-launch-statement\"><h2 class=\"c-launch-reveal c-launch-statement__heading c-launch-statement__heading--gradient\">How we work.</h2></section><section class=\"c-launch-feature ",
   "observedJobUrl": "https://jobs.ashbyhq.com/gritt/46af6e69-40fc-4e53-940e-a99757137523",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

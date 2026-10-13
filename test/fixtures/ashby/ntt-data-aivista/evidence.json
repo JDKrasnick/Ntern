@@ -2,10 +2,10 @@
   "provider": "ashby",
   "boardKey": "ntt-data-aivista",
   "apiRegion": "global",
-  "careersUrl": "https://nttdata-aivista.com/",
-  "firstPartyEvidenceUrl": "https://nttdata-aivista.com/",
+  "careersUrl": "https://nttdata-aivista.com/company#careers",
+  "firstPartyEvidenceUrl": "https://nttdata-aivista.com/company#careers",
   "exactBoardUrl": "https://jobs.ashbyhq.com/ntt-data-aivista",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://nttdata-aivista.com/ identifies NTT DATA AIVista and links to https://jobs.ashbyhq.com/ntt-data-aivista (exact tenant).",
+  "evidenceExcerpt": "-id=\"af66c86\" data-element_type=\"widget\" data-e-type=\"widget\" data-widget_type=\"html.default\">\n\t\t\t\t\t<div id=\"ashby_embed\"></div>\n<script src=\"https://jobs.ashbyhq.com/ntt-data-aivista/embed?version=2\"></script>\t\t\t\t</div>\n\t\t\t\t</section>\n\t\t<div class=\"elementor-element elementor-element-70b2385 e-con-full e-flex e-con e-parent\" data-id=\"70b2385\" data-element_type=\"container\" data-e-type=\"container\">\n\t\t\t\t<div class=\"elementor-element elementor-element-b8a2efc elementor-widget elementor-widget-template\" data-id=\"b8a2efc\" data-element_type=\"widget\" ",
   "observedJobUrl": "https://jobs.ashbyhq.com/ntt-data-aivista/75f9f312-1cf9-4141-b352-60cb2fac8fe9/application",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

@@ -100,7 +100,7 @@ export const reviewedAshbyOwnerApprovedExpansionSources: ReviewedSourceRecord[] 
       "boardKey": "gritt",
       "apiRegion": "global"
     },
-    "careersUrl": "https://gritt.ai",
+    "careersUrl": "https://www.gritt.ai/team",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [
@@ -118,7 +118,7 @@ export const reviewedAshbyOwnerApprovedExpansionSources: ReviewedSourceRecord[] 
       "boardKey": "ntt-data-aivista",
       "apiRegion": "global"
     },
-    "careersUrl": "https://nttdata-aivista.com/",
+    "careersUrl": "https://nttdata-aivista.com/company#careers",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [
@@ -136,7 +136,7 @@ export const reviewedAshbyOwnerApprovedExpansionSources: ReviewedSourceRecord[] 
       "boardKey": "snowflake",
       "apiRegion": "global"
     },
-    "careersUrl": "https://www.snowflake.com/",
+    "careersUrl": "https://careers.snowflake.com/us/en/search-results",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [
@@ -154,7 +154,7 @@ export const reviewedAshbyOwnerApprovedExpansionSources: ReviewedSourceRecord[] 
       "boardKey": "valstad",
       "apiRegion": "global"
     },
-    "careersUrl": "https://valstad.com/",
+    "careersUrl": "https://valstad.com/careers/operations-lead/",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [
@@ -321,7 +321,7 @@ export const reviewedAshbyOwnerApprovedExpansionSources: ReviewedSourceRecord[] 
       "boardKey": "georgian",
       "apiRegion": "global"
     },
-    "careersUrl": "https://georgian.io/",
+    "careersUrl": "https://georgian.io/careers",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [
@@ -357,7 +357,7 @@ export const reviewedAshbyOwnerApprovedExpansionSources: ReviewedSourceRecord[] 
       "boardKey": "k-id",
       "apiRegion": "global"
     },
-    "careersUrl": "https://www.k-id.com/",
+    "careersUrl": "https://k-id.com/careers",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [
@@ -411,7 +411,7 @@ export const reviewedAshbyOwnerApprovedExpansionSources: ReviewedSourceRecord[] 
       "boardKey": "limetax",
       "apiRegion": "global"
     },
-    "careersUrl": "https://www.limetax.de/en/company/about-us",
+    "careersUrl": "https://www.limetax.de/en/group/careers/founding-engineer-m-f-d",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [
@@ -465,7 +465,7 @@ export const reviewedAshbyOwnerApprovedExpansionSources: ReviewedSourceRecord[] 
       "boardKey": "serval",
       "apiRegion": "global"
     },
-    "careersUrl": "https://www.serval.com/",
+    "careersUrl": "https://www.serval.com/careers",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [

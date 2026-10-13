@@ -5,7 +5,7 @@
   "careersUrl": "https://kastle.ai",
   "firstPartyEvidenceUrl": "https://kastle.ai",
   "exactBoardUrl": "https://jobs.ashbyhq.com/kastle",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://kastle.ai identifies Kastle and links to https://jobs.ashbyhq.com/kastle (exact tenant).",
+  "evidenceExcerpt": "iner\"><!--$--><a class=\"framer-ZxYUw framer-16o8trd framer-v-16o8trd framer-1s0so98\" data-framer-name=\"Variant 1\" data-highlight=\"true\" href=\"https://jobs.ashbyhq.com/Kastle\" target=\"_blank\" tabindex=\"0\"><div class=\"framer-x0n5za\" data-framer-component-type=\"RichTextContainer\" style=\"--extracted-r6o4lv:rgba(38, 38, 38, 0.5);--framer-paragraph-spacing:0px;transform:none\"><p class=\"framer-text\" style=\"--font-selector:RlM7SmV0QnJhaW5zIE1vbm8tbGlnaHQ=;--framer-font-family:&quot;JetBrains Mono&quot;, &quot;JetBrains Mono Placeholder&quot;, sans-seri\nCanonical API board verified with matching posting IDs: https://jobs.ashbyhq.com/kastle",
   "observedJobUrl": "https://jobs.ashbyhq.com/kastle/6f32db51-de45-472f-a9c8-d9419d3634ee",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

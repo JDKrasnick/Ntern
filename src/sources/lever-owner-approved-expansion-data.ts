@@ -36,7 +36,7 @@ export const reviewedLeverOwnerApprovedExpansionSources: ReviewedLeverSource[] =
     "id": "lever-ifm-us",
     "company": "Institute for Foundation Models",
     "site": "ifm-us",
-    "careersUrl": "https://careers.mbzuai.ac.ae/",
+    "careersUrl": "https://careers.mbzuai.ac.ae/vacancies/",
     "admittedAt": "2026-08-18T11:55:00.000Z",
     "status": "shadow",
     "region": "global",

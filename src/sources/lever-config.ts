@@ -126,6 +126,7 @@ const productionExpansionIds = new Set([
   "lever-evrealty-us",
   "lever-fluxergy-2",
   "lever-kepler",
+  "lever-ifm-us",
   "lever-layup",
   "lever-mactores",
   "lever-malt",

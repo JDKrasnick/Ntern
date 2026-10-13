@@ -429,7 +429,7 @@ export const reviewedAshbyExpansionSources: ReviewedSourceRecord[] = [
       "boardKey": "phonic",
       "apiRegion": "global"
     },
-    "careersUrl": "https://phonic.ai/",
+    "careersUrl": "https://phonic.ai/about#job-openings",
     "admittedAt": "2026-08-18T01:40:08.842Z",
     "evidenceState": "ownership-verified",
     "allowedApplicationHosts": [

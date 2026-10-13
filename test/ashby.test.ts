@@ -184,8 +184,8 @@ describe('Ashby offline manifest and reverification', () => {
       'Circleback', 'Eragon', 'Modal', 'Yotta Labs', 'Anthelion Capital', 'Saronic', 'First Order Effects',
       'Junior', 'Airwallex', 'Netic', 'Retell AI', 'Quadrillion', 'Pylon', 'NationGraph',
     ]));
-    expect(reviewedAshbySources.filter(({ status }) => status === 'published')).toHaveLength(69);
-    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(30);
+    expect(reviewedAshbySources.filter(({ status }) => status === 'published')).toHaveLength(81);
+    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(18);
     // The clock must sit after the newest admittedAt so fresh admissions are not
     // read as future-dated; bump it alongside the next admission.
     expect(collectAshbyManifestViolations(reviewedAshbySources, { fs: nodeAshbyManifestFs(), now: new Date('2026-10-14T00:00:00Z') })).toEqual([]);
@@ -363,6 +363,13 @@ describe('Ashby offline manifest and reverification', () => {
     expect(await recheckAshbyEvidence(evidence(), fetchImpl)).toMatchObject({ state: 'ok', stillProven: true });
     const missing = (async () => new Response('<p>No board here</p>', { status: 200 })) as typeof fetch;
     expect(await recheckAshbyEvidence(evidence(), missing)).toMatchObject({ state: 'ok', stillProven: false });
+  });
+
+  it('recognizes Ashby board casing without accepting another tenant or a board prefix', async () => {
+    for (const [board, proven] of [['Acme.IO', true], ['acme.io-other', false], ['other.io', false]] as const) {
+      const fetchImpl = (async () => new Response(`<a href="https://jobs.ashbyhq.com/${board}">Jobs</a>`, { status: 200 })) as typeof fetch;
+      expect(await recheckAshbyEvidence(evidence(), fetchImpl)).toMatchObject({ state: 'ok', stillProven: proven });
+    }
   });
 
   it('accepts an employer careers redirect only when it lands on the exact reviewed board', async () => {

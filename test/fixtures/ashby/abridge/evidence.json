@@ -5,7 +5,7 @@
   "careersUrl": "https://www.abridge.com/",
   "firstPartyEvidenceUrl": "https://www.abridge.com/",
   "exactBoardUrl": "https://jobs.ashbyhq.com/abridge",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://www.abridge.com/ identifies Abridge and links to https://jobs.ashbyhq.com/abridge (exact tenant).",
+  "evidenceExcerpt": "u-body-small\">Vision</div><div class=\"nav_dropdown_lb-description u-body-small\">The future we&#x27;re building toward</div></div></a><a href=\"https://jobs.ashbyhq.com/Abridge\" class=\"nav_dropdown_linkblock w-inline-block\"><div class=\"nav_dropdown_lb-image\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" viewBox=\"0 0 56 56\" fill=\"none\"><rect width=\"56\" height=\"56\" rx=\"11.2\" fill=\"#EEE5DD\"></rect><mask id=\"mask0_484_4165\" STYLE=\"mask-type:alpha\" maskUnits=\"userSpaceOnUse\" x=\"17\" y=\"17\" width=\"22\" height=\"22\"><rect x=\"17\" y=\"17\" width=\"22\" he\nCanonical API board verified with matching posting IDs: https://jobs.ashbyhq.com/abridge",
   "observedJobUrl": "https://jobs.ashbyhq.com/abridge/3f07a457-dc14-4238-bf4e-5c33b5c1f883/application",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

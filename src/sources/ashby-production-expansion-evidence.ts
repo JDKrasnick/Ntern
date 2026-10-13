@@ -50,6 +50,54 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
       }
     ]
   },
+  "ashby-abridge": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "1b5d5e6b-37d6-46b9-8db9-4050930e207d",
+        "completedAt": "2026-10-13T19:32:45.645Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 46,
+        "eligibleRows": 3,
+        "withheldRows": 0,
+        "applicationLinksChecked": 3,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "c463eeb1-1977-4d1b-9ef6-0c54f8a6ef07",
+        "completedAt": "2026-10-13T16:32:42.309Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 46,
+        "eligibleRows": 3,
+        "withheldRows": 0,
+        "applicationLinksChecked": 3,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "96383b26-f18f-4980-aa4b-371335c83727",
+        "completedAt": "2026-10-12T16:33:08.240Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 46,
+        "eligibleRows": 3,
+        "withheldRows": 0,
+        "applicationLinksChecked": 3,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
   "ashby-amplitude": {
     "approvedAt": "2026-10-13T20:11:33.635Z",
     "approvedBy": "JDKrasnick",
@@ -722,6 +770,102 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
       }
     ]
   },
+  "ashby-georgian": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "1b5d5e6b-37d6-46b9-8db9-4050930e207d",
+        "completedAt": "2026-10-13T19:34:18.433Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 2,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "c463eeb1-1977-4d1b-9ef6-0c54f8a6ef07",
+        "completedAt": "2026-10-13T16:33:23.924Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 2,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "8710186d-f89a-4e2c-98a3-666c38b0b3fb",
+        "completedAt": "2026-10-12T19:33:43.084Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 2,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
+  "ashby-gritt": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "1b5d5e6b-37d6-46b9-8db9-4050930e207d",
+        "completedAt": "2026-10-13T19:34:20.758Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 17,
+        "eligibleRows": 4,
+        "withheldRows": 0,
+        "applicationLinksChecked": 4,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "c463eeb1-1977-4d1b-9ef6-0c54f8a6ef07",
+        "completedAt": "2026-10-13T16:33:23.851Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 17,
+        "eligibleRows": 4,
+        "withheldRows": 0,
+        "applicationLinksChecked": 4,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "8710186d-f89a-4e2c-98a3-666c38b0b3fb",
+        "completedAt": "2026-10-12T19:33:43.098Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 17,
+        "eligibleRows": 4,
+        "withheldRows": 0,
+        "applicationLinksChecked": 4,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
   "ashby-hypercubic": {
     "approvedAt": "2026-10-13T20:11:33.635Z",
     "approvedBy": "JDKrasnick",
@@ -763,6 +907,102 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
         "eligibleRows": 0,
         "withheldRows": 0,
         "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
+  "ashby-k-id": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "1b5d5e6b-37d6-46b9-8db9-4050930e207d",
+        "completedAt": "2026-10-13T19:34:30.135Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 10,
+        "eligibleRows": 3,
+        "withheldRows": 0,
+        "applicationLinksChecked": 3,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "c463eeb1-1977-4d1b-9ef6-0c54f8a6ef07",
+        "completedAt": "2026-10-13T16:33:28.070Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 10,
+        "eligibleRows": 3,
+        "withheldRows": 0,
+        "applicationLinksChecked": 3,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "8710186d-f89a-4e2c-98a3-666c38b0b3fb",
+        "completedAt": "2026-10-12T19:33:51.980Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 10,
+        "eligibleRows": 3,
+        "withheldRows": 0,
+        "applicationLinksChecked": 3,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
+  "ashby-kastle": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "1b5d5e6b-37d6-46b9-8db9-4050930e207d",
+        "completedAt": "2026-10-13T19:34:34.585Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 14,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "c463eeb1-1977-4d1b-9ef6-0c54f8a6ef07",
+        "completedAt": "2026-10-13T16:33:29.441Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 14,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "8710186d-f89a-4e2c-98a3-666c38b0b3fb",
+        "completedAt": "2026-10-12T19:33:52.629Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 14,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
         "applicationLinkFailures": 0,
         "complete": true,
         "identityVerified": true,
@@ -859,6 +1099,54 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
         "eligibleRows": 0,
         "withheldRows": 0,
         "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
+  "ashby-limetax": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "1b5d5e6b-37d6-46b9-8db9-4050930e207d",
+        "completedAt": "2026-10-13T19:34:40.206Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 11,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "c463eeb1-1977-4d1b-9ef6-0c54f8a6ef07",
+        "completedAt": "2026-10-13T16:33:32.183Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 11,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "8710186d-f89a-4e2c-98a3-666c38b0b3fb",
+        "completedAt": "2026-10-12T19:33:55.307Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 11,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
         "applicationLinkFailures": 0,
         "complete": true,
         "identityVerified": true,
@@ -1058,6 +1346,54 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
       }
     ]
   },
+  "ashby-ntt-data-aivista": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "57603746-a4c9-4057-8dfb-d383b070c529",
+        "completedAt": "2026-10-13T20:04:22.382Z",
+        "outcome": "success_changed",
+        "rawRows": 6,
+        "eligibleRows": 0,
+        "withheldRows": 0,
+        "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "e92a94a5-5d76-44d8-bde7-fed4c0666c4a",
+        "completedAt": "2026-10-13T17:04:22.049Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 5,
+        "eligibleRows": 0,
+        "withheldRows": 0,
+        "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "92b52308-8ccb-46ec-b8e4-b8f15bacdcf5",
+        "completedAt": "2026-10-12T20:04:02.122Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 5,
+        "eligibleRows": 0,
+        "withheldRows": 0,
+        "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
   "ashby-phonely": {
     "approvedAt": "2026-10-13T20:11:33.635Z",
     "approvedBy": "JDKrasnick",
@@ -1096,6 +1432,54 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
         "completedAt": "2026-10-10T20:03:01.058Z",
         "outcome": "success_unchanged_hash",
         "rawRows": 19,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
+  "ashby-phonic": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "57603746-a4c9-4057-8dfb-d383b070c529",
+        "completedAt": "2026-10-13T20:05:00.434Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 8,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "e92a94a5-5d76-44d8-bde7-fed4c0666c4a",
+        "completedAt": "2026-10-13T17:04:33.617Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 8,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "92b52308-8ccb-46ec-b8e4-b8f15bacdcf5",
+        "completedAt": "2026-10-12T20:04:13.994Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 8,
         "eligibleRows": 1,
         "withheldRows": 0,
         "applicationLinksChecked": 1,
@@ -1250,6 +1634,54 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
       }
     ]
   },
+  "ashby-rho": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "57603746-a4c9-4057-8dfb-d383b070c529",
+        "completedAt": "2026-10-13T20:05:30.875Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 44,
+        "eligibleRows": 0,
+        "withheldRows": 0,
+        "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "e92a94a5-5d76-44d8-bde7-fed4c0666c4a",
+        "completedAt": "2026-10-13T17:04:47.442Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 44,
+        "eligibleRows": 0,
+        "withheldRows": 0,
+        "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "92b52308-8ccb-46ec-b8e4-b8f15bacdcf5",
+        "completedAt": "2026-10-12T20:04:33.135Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 44,
+        "eligibleRows": 0,
+        "withheldRows": 0,
+        "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
   "ashby-sentry": {
     "approvedAt": "2026-10-13T20:11:33.635Z",
     "approvedBy": "JDKrasnick",
@@ -1298,6 +1730,54 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
       }
     ]
   },
+  "ashby-serval": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "1582c427-a147-43de-b94a-6c9784bd1431",
+        "completedAt": "2026-10-13T19:04:38.977Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 59,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "0821782b-dbb3-4bd8-bc43-59a22e22e8e6",
+        "completedAt": "2026-10-13T16:03:54.030Z",
+        "outcome": "success_changed",
+        "rawRows": 59,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "165c4ea1-e2dc-48fd-bab5-799023575283",
+        "completedAt": "2026-10-12T19:03:41.652Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 58,
+        "eligibleRows": 1,
+        "withheldRows": 0,
+        "applicationLinksChecked": 1,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
   "ashby-simular": {
     "approvedAt": "2026-10-13T20:11:33.635Z",
     "approvedBy": "JDKrasnick",
@@ -1339,6 +1819,54 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
         "eligibleRows": 4,
         "withheldRows": 0,
         "applicationLinksChecked": 4,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
+  "ashby-snowflake": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "1582c427-a147-43de-b94a-6c9784bd1431",
+        "completedAt": "2026-10-13T19:04:43.140Z",
+        "outcome": "success_changed",
+        "rawRows": 354,
+        "eligibleRows": 4,
+        "withheldRows": 0,
+        "applicationLinksChecked": 4,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "0821782b-dbb3-4bd8-bc43-59a22e22e8e6",
+        "completedAt": "2026-10-13T16:03:56.647Z",
+        "outcome": "success_changed",
+        "rawRows": 354,
+        "eligibleRows": 4,
+        "withheldRows": 0,
+        "applicationLinksChecked": 4,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "165c4ea1-e2dc-48fd-bab5-799023575283",
+        "completedAt": "2026-10-12T19:03:43.516Z",
+        "outcome": "success_changed",
+        "rawRows": 356,
+        "eligibleRows": 5,
+        "withheldRows": 0,
+        "applicationLinksChecked": 5,
         "applicationLinkFailures": 0,
         "complete": true,
         "identityVerified": true,
@@ -1579,6 +2107,54 @@ export const ashbyProductionExpansionEvidence: Readonly<Record<string, SourcePro
         "eligibleRows": 0,
         "withheldRows": 0,
         "applicationLinksChecked": 0,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      }
+    ]
+  },
+  "ashby-valstad": {
+    "approvedAt": "2026-10-13T21:55:32.160Z",
+    "approvedBy": "JDKrasnick",
+    "quietBaselineApproved": true,
+    "stableIdentity": true,
+    "stableApplicationHosts": true,
+    "snapshots": [
+      {
+        "runId": "57603746-a4c9-4057-8dfb-d383b070c529",
+        "completedAt": "2026-10-13T20:06:18.982Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 10,
+        "eligibleRows": 2,
+        "withheldRows": 0,
+        "applicationLinksChecked": 2,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "e92a94a5-5d76-44d8-bde7-fed4c0666c4a",
+        "completedAt": "2026-10-13T17:05:08.949Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 10,
+        "eligibleRows": 2,
+        "withheldRows": 0,
+        "applicationLinksChecked": 2,
+        "applicationLinkFailures": 0,
+        "complete": true,
+        "identityVerified": true,
+        "schemaValid": true
+      },
+      {
+        "runId": "92b52308-8ccb-46ec-b8e4-b8f15bacdcf5",
+        "completedAt": "2026-10-12T20:04:47.063Z",
+        "outcome": "success_unchanged_hash",
+        "rawRows": 10,
+        "eligibleRows": 2,
+        "withheldRows": 0,
+        "applicationLinksChecked": 2,
         "applicationLinkFailures": 0,
         "complete": true,
         "identityVerified": true,

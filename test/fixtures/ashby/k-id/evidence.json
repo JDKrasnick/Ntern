@@ -2,10 +2,10 @@
   "provider": "ashby",
   "boardKey": "k-id",
   "apiRegion": "global",
-  "careersUrl": "https://www.k-id.com/",
-  "firstPartyEvidenceUrl": "https://www.k-id.com/",
+  "careersUrl": "https://k-id.com/careers",
+  "firstPartyEvidenceUrl": "https://k-id.com/careers",
   "exactBoardUrl": "https://jobs.ashbyhq.com/k-id",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://www.k-id.com/ identifies k-ID and links to https://jobs.ashbyhq.com/k-id (exact tenant).",
+  "evidenceExcerpt": "c-categories=\"analytics\" src=\"//js.hs-scripts.com/44536342.js\" id=\"hs-script-loader\"></script>\n<!-- End of HubSpot Embed Code --><script src=\"https://jobs.ashbyhq.com/k-ID/embed\"></script>\n\n<script>\ndocument.addEventListener(\"DOMContentLoaded\", function () {\n  lenis.destroy();\n});\n</script><script src=\"https://hubspotv2.use1-marketplace-1p-apps-prod-red.if.webflow.services/static/loader.js\" type=\"text/javascript\" async=\"\" defer=\"\"></script><script src=\"https://hubspotv2.use1-marketplace-1p-apps-prod-red.if.webflow.services/static/disable-hubspo\nCanonical API board verified with matching posting IDs: https://jobs.ashbyhq.com/k-id",
   "observedJobUrl": "https://jobs.ashbyhq.com/k-id/18619df2-45d8-4732-8815-9a340d498d48/application",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

@@ -39,7 +39,7 @@ function blocked(host: string): boolean {
 
 export function excerptProvesAshbyBoard(excerpt: string, boardName: string): boolean {
   const escaped = boardName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`jobs\\.ashbyhq\\.com/${escaped}(?:[/?#"'\\s<]|$)`).test(excerpt);
+  return new RegExp(`jobs\\.ashbyhq\\.com/${escaped}(?:[/?#"'\\s<]|$)`, 'i').test(excerpt);
 }
 
 export function ashbyEvidenceViolations(evidence: AshbyOwnershipEvidence): string[] {
