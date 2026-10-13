@@ -165,3 +165,75 @@ test('compiled oversized Greenhouse discovery retains the whole index across det
     assert.equal((await DB.prepare("SELECT COUNT(*) n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
   } finally { globalThis.fetch = realFetch; await runtime.dispose(); }
 });
+
+
+for (const [provider, token] of [['lever', 'acds'], ['ashby', 'sentry']]) {
+  test(`compiled ${provider} quiet backfill preserves an established checkpoint without alerts`, async () => {
+    const id = `${provider}-${token}`, workerName = `quiet-${provider}`;
+    const runtime = new Miniflare({ workers: [await createWorkerConfig(workerName,
+      join(repositoryRoot, 'cloudflare/dist/ingestion'), 'ingestion-worker.js', {
+        DB: { type: 'd1', id: workerName }, DOCUMENTS: { type: 'r2', name: workerName },
+      })] });
+    const realFetch = globalThis.fetch;
+    try {
+      await runtime.ready;
+      const DB = await runtime.getD1Database('DB', workerName), DOCUMENTS = await runtime.getR2Bucket('DOCUMENTS', workerName);
+      await applyMigrations(DB);
+      const pausedAt = new Date(Date.now() - 60000).toISOString();
+      for (const [sk, kind, value] of [
+        ['HEALTH', 'source-health', { sourceId: id, sourceStatus: 'paused', state: 'healthy', changedAt: pausedAt,
+          lastAttemptAt: pausedAt, consecutiveFailures: 0, durationMs: 0 }],
+        ['CHECKPOINT', 'source-checkpoint', { sourceId: id, successfulFetches: 865, activeExternalIds: [], lastRowCount: 0 }],
+      ]) await DB.prepare('INSERT INTO catalog_items(pk,sk,kind,value) VALUES (?,?,?,?)')
+        .bind(`SOURCE#${id}`, sk, kind, JSON.stringify(value)).run();
+      const postingId = '11111111-1111-4111-8111-111111111111';
+      const applyUrl = provider === 'lever' ? `https://jobs.lever.co/${token}/${postingId}/apply`
+        : `https://jobs.ashbyhq.com/${token}/${postingId}/application`;
+      let fetches = 0;
+      globalThis.fetch = async input => {
+        fetches++;
+        const url = new URL(typeof input === 'string' ? input : input.url ?? String(input));
+        if (url.hostname === 'api.lever.co') return Response.json([{
+          id: postingId, text: 'Software Engineering Intern, Summer 2027', descriptionPlain: 'Build software systems.',
+          createdAt: 1783072000000, categories: { location: 'New York, NY', commitment: 'Internship' },
+          hostedUrl: `https://jobs.lever.co/${token}/${postingId}`, applyUrl,
+        }]);
+        if (url.hostname === 'api.ashbyhq.com') return Response.json({ apiVersion: '1', jobs: [{
+          id: postingId, title: 'Software Engineering Intern, Summer 2027', location: 'New York, NY',
+          isListed: true, employmentType: 'Intern', publishedAt: '2026-08-09T12:00:00Z',
+          descriptionPlain: 'Build software systems.', jobUrl: `https://jobs.ashbyhq.com/${token}/${postingId}`, applyUrl,
+        }] });
+        return new Response('<html><title>Software Engineering Intern, Summer 2027</title><body>Apply for this internship</body></html>',
+          { headers: { 'content-type': 'text/html' } });
+      };
+      const { default: worker } = await import('../../cloudflare/dist/ingestion/ingestion-worker.js');
+      const response = await worker.fetch(new Request(`https://ingestion.test/internal/poll-source?provider=${provider}&sourceId=${id}&seedOnly=true`, {
+        method: 'POST', headers: { 'X-Operations-Key': 'test-operations', 'X-InternNotifs-Service-Key': 'test-internal' },
+      }), { DB, DOCUMENTS, OPERATIONS_SHARED_SECRET: 'test-operations', INTERNAL_SERVICE_SECRET: 'test-internal',
+        INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: id,
+        LEVER_QUEUE: { async send() {} }, ASHBY_QUEUE: { async send() {} } });
+      assert.equal(response.status, 200, JSON.stringify(await response.json()));
+      const cp = JSON.parse((await DB.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='CHECKPOINT'").bind(`SOURCE#${id}`).first()).value);
+      assert.deepEqual(cp.activeExternalIds, [postingId]);
+      assert.equal((await DB.prepare("SELECT COUNT(*) n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
+      const snapshot = await DB.prepare('SELECT * FROM ingestion_snapshots WHERE source_id=? AND is_complete=1').bind(id).first();
+      assert.equal(snapshot.row_count, 1);
+      const envelope = await (await DOCUMENTS.get(snapshot.object_key)).json();
+      assert.equal(envelope.rows[0].externalId, postingId);
+      const health = JSON.parse((await DB.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(`SOURCE#${id}`).first()).value);
+      assert.equal(health.sourceStatus, 'paused');
+      const activeHealth = { ...health, sourceStatus: 'active', changedAt: new Date().toISOString() };
+      await DB.prepare("UPDATE catalog_items SET value=? WHERE pk=? AND sk='HEALTH'").bind(JSON.stringify(activeHealth), `SOURCE#${id}`).run();
+      const beforeFetches = fetches, delivered = { ack: 0, retries: 0 };
+      await worker.queue({ queue: `intern-notifs-${provider}`, messages: [{ id: 'late-quiet-delivery', attempts: 1,
+        timestamp: new Date(), body: { version: 1, sourceId: id, scheduledAt: new Date().toISOString(),
+          force: true, forceRequestedAt: new Date(Date.now() - 1000).toISOString(), seedOnly: true },
+        ack() { delivered.ack++; }, retry() { delivered.retries++; },
+      }] }, { DB, DOCUMENTS, LEVER_QUEUE: { async send() {} }, ASHBY_QUEUE: { async send() {} } });
+      assert.deepEqual(delivered, { ack: 1, retries: 0 });
+      assert.equal(fetches, beforeFetches);
+      const after = JSON.parse((await DB.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'").bind(`SOURCE#${id}`).first()).value);
+      assert.deepEqual(after, activeHealth);
+    } finally { globalThis.fetch = realFetch; await runtime.dispose(); }
+  });
+}

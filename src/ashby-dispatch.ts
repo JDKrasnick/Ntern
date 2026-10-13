@@ -4,7 +4,7 @@ import type { SourceCheckpoint, SourceHealth } from './types.js';
 
 export const ASHBY_POLL_INTERVAL_MS = SOURCE_POLL_CADENCE.publishedIntervalMs;
 export const ASHBY_SHADOW_POLL_INTERVAL_MS = SOURCE_POLL_CADENCE.shadowIntervalMs;
-export interface AshbyWorkMessage { version: 1; sourceId: string; scheduledAt: string; runId?: string; force?: boolean; forceRequestedAt?: string; }
+export interface AshbyWorkMessage { version: 1; sourceId: string; scheduledAt: string; runId?: string; force?: boolean; forceRequestedAt?: string; seedOnly?: boolean; }
 export function ashbyWorkMessages(sources: ReviewedAshbySource[] = reviewedAshbySources, scheduledAt = new Date(), runId?: string, recoveryProbeSourceIds = new Set<string>()): AshbyWorkMessage[] {
   return sources.map((source) => ({ version: 1, sourceId: source.id, scheduledAt: scheduledAt.toISOString(), ...(runId ? { runId } : {}), ...(recoveryProbeSourceIds.has(source.id) ? { force: true, forceRequestedAt: scheduledAt.toISOString() } : {}) }));
 }
