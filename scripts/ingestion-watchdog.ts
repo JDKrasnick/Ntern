@@ -1,3 +1,4 @@
+import { decodeSourceAllowlist } from '../src/ingestion-v2/source-allowlist.js';
 /** Independent operator alerts: never depend on the ingestion cron to report its own death. */
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -194,7 +195,7 @@ export async function collectWatchdog(environment: 'production' | 'dev', now: Da
     if ((row.dimensions.status !== 'success' && row.dimensions.status !== 'clientDisconnected') || row.sum.errors) signals.push({ id: 'worker-errors', detail: `${row.dimensions.status}: ${row.sum.errors} errors` });
     if (row.quantiles.memoryUsageBytesP99 > 120 * 1024 * 1024) signals.push({ id: 'worker-memory-headroom', detail: `${(row.quantiles.memoryUsageBytesP99 / 1024 / 1024).toFixed(1)} MiB p99` });
   }
-  const owners = [...new Set((vars.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST ?? vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST ?? '').split(',').map(id => id.trim()).filter(Boolean))]
+  const owners = [...new Set(decodeSourceAllowlist(vars.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST ?? vars.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST))]
     .filter(id => admissionV2OwnsCatalogWrites(vars, id));
   if (owners.length > 500) throw new Error('Owner monitoring exceeds bounded source budget');
   for (let offset = 0; offset < owners.length; offset += 25) {

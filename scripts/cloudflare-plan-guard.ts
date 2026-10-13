@@ -1,3 +1,4 @@
+import { sourceAllowlistBindingValid } from '../src/ingestion-v2/source-allowlist.js';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -516,7 +517,7 @@ function isIngestionV2ToggleBinding(binding: unknown): boolean {
   if (!Object.entries(binding).every(([key, value]) => ['name', 'type', 'text'].includes(key) || value === null)) return false;
   return ingestionV2BooleanToggles.has(name)
     ? binding.text === 'true' || binding.text === 'false'
-    : binding.text.length <= 8192 && /^[a-z0-9._,-]*$/iu.test(binding.text);
+    : sourceAllowlistBindingValid(binding.text);
 }
 
 function isIngestionV2BindingUpdate(before: unknown, after: unknown): boolean {
