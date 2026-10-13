@@ -103,9 +103,8 @@ export class ReconcilerAdmissionV2CatalogSink implements AdmissionV2CatalogSink 
     const resolved = !prior && input.listing.postingIdentity
       ? await this.store.resolvePostingIdentity(input.listing.postingIdentity)
       : undefined;
-    if (resolved?.outcome === 'quarantine') {
-      throw new AdmissionInfrastructureError('internal', 'catalog posting aliases resolve to conflicting jobs');
-    }
+    // Contradictory aliases follow the atomic commit's existing quarantine
+    // path, including its durable incident; they never choose a merged job.
     const existing = await this.store.getJob(prior?.jobId
       ?? (resolved?.outcome === 'merge' ? resolved.canonicalJobId : input.jobId));
     if (resolved?.outcome === 'merge' && !existing) {

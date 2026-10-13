@@ -133,9 +133,10 @@ describe('ingestion v2 reconciler catalog sink', () => {
     store.postingAliases.set(identity.aliases[0]!.value, 'first-job');
     store.postingAliases.set(identity.aliases.at(-1)!.value, 'second-job');
     await expect(sink.commit({ ...input, listing: { ...input.listing, postingIdentity: identity } }))
-      .rejects.toThrow('conflicting jobs');
+      .rejects.toThrow('identity boundary');
     expect(store.jobs.size).toBe(0);
     expect(store.occurrences.size).toBe(0);
+    expect(store.postingIdentityIncidents.size).toBe(1);
     expect(new Set(store.postingAliases.values())).toEqual(new Set(['first-job', 'second-job']));
   });
 
