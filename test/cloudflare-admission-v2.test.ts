@@ -273,6 +273,8 @@ describe('Cloudflare admission v2 boundary', () => {
     expect(database.prepare('SELECT source_id, delivery_attempt, resolved_at FROM queue_failure_events WHERE message_id = ?').get('systemic-1'))
       .toMatchObject({ source_id: 'source', delivery_attempt: 2, resolved_at: null });
     expect(database.prepare('SELECT COUNT(*) AS count FROM ingestion_rows').get()).toEqual({ count: 0 });
+    expect(database.prepare('SELECT diagnostic FROM queue_failure_events WHERE message_id = ?').get('systemic-1'))
+      .toMatchObject({ diagnostic: 'snapshot-missing: snapshot record not found' });
   });
 
   it('resolves a prior failure-ledger row when a disabled canary drains safely', async () => {
