@@ -267,16 +267,22 @@ export function createSourceOperationsHandler(dependencies: SourceOperationsDepe
       }
     }
     const sources: OperationsSource[] = operationsSources({ leverAdmissions: dynamicAdmissions });
-    const ids = sources.map((source) => source.sourceId);
+    const requestedSourceMatch = method === 'GET'
+      ? path.match(/^\/operations\/sources\/([^/]+)$/)
+      : method === 'POST' ? path.match(/^\/operations\/sources\/([^/]+)\/actions$/) : null;
+    const requestedSourceId = requestedSourceMatch ? decodeURIComponent(requestedSourceMatch[1]) : undefined;
+    const loadedSources = requestedSourceId === undefined
+      ? sources : sources.filter(source => source.sourceId === requestedSourceId);
+    const ids = loadedSources.map((source) => source.sourceId);
     const checklistPeriod = monitoringPeriod(new Date(timestamp));
     const [healthRecords, checkpoints, storedChecklist] = await Promise.all([
       dependencies.store.getSourceHealthMany(ids),
-      dependencies.store.getCheckpointsMany(sources.map((source) => source.checkpointId)),
-      dependencies.store.getMonitoringChecklist(checklistPeriod),
+      dependencies.store.getCheckpointsMany(loadedSources.map((source) => source.checkpointId)),
+      requestedSourceId === undefined ? dependencies.store.getMonitoringChecklist(checklistPeriod) : Promise.resolve(undefined),
     ]);
     const health = new Map(healthRecords.map((record) => [record.sourceId, record]));
     const checkpointById = new Map(checkpoints.map((checkpoint) => [checkpoint.sourceId, checkpoint]));
-    const rows = sources.map((source) => publicSource(source, health.get(source.sourceId), checkpointById.get(source.checkpointId), timestamp));
+    const rows = loadedSources.map((source) => publicSource(source, health.get(source.sourceId), checkpointById.get(source.checkpointId), timestamp));
 
     const checklistMatch = path.match(/^\/operations\/checklist\/([^/]+)$/);
     if (checklistMatch && method === 'POST') {
