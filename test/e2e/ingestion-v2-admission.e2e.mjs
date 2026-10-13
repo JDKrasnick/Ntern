@@ -11,7 +11,7 @@ import { unstable_splitSqlQuery as splitSqlQuery } from 'wrangler';
 
 register('./wasm-module-loader.mjs', import.meta.url);
 
-const { Response } = globalThis;
+const { Request, Response } = globalThis;
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const ingestionWorkerName = 'intern-notifs-e2e-admission-ingestion';
 const internalServiceSecret = 'e2e-internal-service-secret';
@@ -568,6 +568,10 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
   };
   // Repair state intentionally dirtied by the preceding boundary probes, then
   // take a fresh complete snapshot before planning the guarded bootstrap.
+  // Failure-boundary fixtures deliberately retain unacknowledged receipts.
+  // Resolve those fixture receipts before rehearsing a healthy paused source.
+  await database.prepare('UPDATE ingestion_admission_handoffs SET acknowledged_at=? WHERE source_id=? AND acknowledged_at IS NULL')
+    .bind(new Date().toISOString(), sourceId).run();
   await database.prepare('DELETE FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
     .bind(sourceId, 'ghost-not-in-snapshot').run();
   documentBodies.set(
@@ -636,6 +640,36 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
   assert.equal(baselineDelivery.settled.ack, 1, JSON.stringify(baselineDelivery.settled.retries));
   const notificationsAfterBaseline = await database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind = 'notification-event'").first();
   assert.equal(notificationsAfterBaseline.count, notificationsBeforeBaseline.count, 'bootstrap baseline must stay silent');
+  // A refreshed paused source can have queued work before any queue handoff.
+  // Exercise the compiled private dispatcher and its real durable D1 receipts.
+  await database.prepare("UPDATE ingestion_rows SET state='queued', lease_owner=NULL, lease_expires_at=NULL WHERE source_id=? AND external_id=?")
+    .bind(sourceId, current.rows[0].external_id).run();
+  const queuedMessages = [];
+  const { default: compiledAdmission } = await import(new URL('../../cloudflare/dist/admission/admission-worker.js', import.meta.url));
+  const manualEnvironment = {
+    DB: database, DOCUMENTS: documentsBucket, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true',
+    INGESTION_V2_ADMISSION_ENABLED: 'true', ...ownershipOverrides,
+    ADMISSION_V2_QUEUE: { async sendBatch(entries) { queuedMessages.push(...entries.map(entry => entry.body)); } },
+  };
+  const requestDispatch = () => compiledAdmission.fetch(new Request('https://isolated.internal/internal/dispatch', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceId }),
+  }), manualEnvironment);
+  const cursorBeforeManual = await database.prepare('SELECT source_cursor FROM ingestion_v2_dispatch_state WHERE singleton=1').first();
+  const dispatched = await requestDispatch();
+  const dispatchResult = await dispatched.json();
+  assert.equal(dispatched.status, 200, JSON.stringify(dispatchResult));
+  assert.equal(dispatchResult.rows, 1);
+  assert.equal(queuedMessages.length, 1);
+  assert.equal(queuedMessages[0].baseline, true);
+  const undrained = await requestDispatch();
+  assert.equal(undrained.status, 409, 'a live durable handoff still fences manual dispatch');
+  assert.equal(queuedMessages.length, 1, 'refusing undrained work must not send again');
+  const cursorAfterManual = await database.prepare('SELECT source_cursor FROM ingestion_v2_dispatch_state WHERE singleton=1').first();
+  assert.deepEqual(cursorAfterManual, cursorBeforeManual, 'source dispatch must not move the scheduled fleet cursor');
+  const manualDelivery = await deliverAdmission(queuedMessages, { ...ownershipOverrides, TRUSTED_COMMUNITY_CATALOG_ENABLED: 'true' });
+  assert.equal(manualDelivery.settled.ack, 1, JSON.stringify(manualDelivery.settled.retries));
+  const manualNotifications = await database.prepare("SELECT COUNT(*) AS count FROM catalog_items WHERE kind='notification-event'").first();
+  assert.equal(manualNotifications.count, notificationsBeforeBaseline.count, 'queued baseline dispatch must remain silent');
   const pausedHealthRow = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'HEALTH'")
     .bind(`SOURCE#${sourceId}`).first();
   const pausedHealth = JSON.parse(pausedHealthRow.value);
