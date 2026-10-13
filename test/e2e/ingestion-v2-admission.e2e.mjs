@@ -568,6 +568,10 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
   };
   // Repair state intentionally dirtied by the preceding boundary probes, then
   // take a fresh complete snapshot before planning the guarded bootstrap.
+  // Failure-boundary fixtures deliberately retain unacknowledged receipts.
+  // Resolve those fixture receipts before rehearsing a healthy paused source.
+  await database.prepare('UPDATE ingestion_admission_handoffs SET acknowledged_at=? WHERE source_id=? AND acknowledged_at IS NULL')
+    .bind(new Date().toISOString(), sourceId).run();
   await database.prepare('DELETE FROM ingestion_rows WHERE source_id = ? AND external_id = ?')
     .bind(sourceId, 'ghost-not-in-snapshot').run();
   documentBodies.set(
@@ -652,8 +656,9 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
   }), manualEnvironment);
   const cursorBeforeManual = await database.prepare('SELECT source_cursor FROM ingestion_v2_dispatch_state WHERE singleton=1').first();
   const dispatched = await requestDispatch();
-  assert.equal(dispatched.status, 200);
-  assert.equal((await dispatched.json()).rows, 1);
+  const dispatchResult = await dispatched.json();
+  assert.equal(dispatched.status, 200, JSON.stringify(dispatchResult));
+  assert.equal(dispatchResult.rows, 1);
   assert.equal(queuedMessages.length, 1);
   assert.equal(queuedMessages[0].baseline, true);
   const undrained = await requestDispatch();
