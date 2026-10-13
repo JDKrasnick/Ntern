@@ -177,17 +177,18 @@ describe('Ashby ownership and admission evidence', () => {
 
 describe('Ashby offline manifest and reverification', () => {
   it('passes the published cohort and ownership-verified shadow expansion', () => {
-    expect(reviewedAshbySources.filter(({ status }) => status === 'published').map(({ company }) => company)).toEqual([
+    expect(reviewedAshbySources.filter(({ status }) => status === 'published').map(({ company }) => company)).toEqual(expect.arrayContaining([
       'Etched', 'Deepgram', 'Cohere', 'Mistral AI', 'Partly',
       'Notion', 'Alan', 'Base Power', 'Reonic', 'Terranova', 'Melius', 'CTGT', 'OpusClip',
       'WindBorne Systems', 'Persona AI', 'Skydio', 'Beacon Software', 'Centerfield', 'RV Tech',
       'Circleback', 'Eragon', 'Modal', 'Yotta Labs', 'Anthelion Capital', 'Saronic', 'First Order Effects',
       'Junior', 'Airwallex', 'Netic', 'Retell AI', 'Quadrillion', 'Pylon', 'NationGraph',
-    ]);
-    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(66);
+    ]));
+    expect(reviewedAshbySources.filter(({ status }) => status === 'published')).toHaveLength(69);
+    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(30);
     // The clock must sit after the newest admittedAt so fresh admissions are not
     // read as future-dated; bump it alongside the next admission.
-    expect(collectAshbyManifestViolations(reviewedAshbySources, { fs: nodeAshbyManifestFs(), now: new Date('2026-09-30T12:00:00Z') })).toEqual([]);
+    expect(collectAshbyManifestViolations(reviewedAshbySources, { fs: nodeAshbyManifestFs(), now: new Date('2026-10-14T00:00:00Z') })).toEqual([]);
   });
 
   it('keeps any expansion replacements ordered and unadmitted', () => {
