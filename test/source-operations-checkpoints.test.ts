@@ -5,6 +5,42 @@ import { MemoryInternshipStore } from '../src/store.js';
 import type { SourceCheckpoint } from '../src/types.js';
 
 describe('source operations checkpoint batches', () => {
+  it.each(['detail', 'pause'] as const)('loads only the requested source for %s', async action => {
+    const store = new MemoryInternshipStore();
+    const source = operationsSources({ leverAdmissions: [] }).find(s => s.sourceId === 'greenhouse-figma')!;
+    const health = vi.spyOn(store, 'getSourceHealthMany');
+    const checkpoints = vi.spyOn(store, 'getCheckpointsMany').mockImplementation(async ids => {
+      if (ids.length !== 1 || ids[0] !== source.checkpointId) throw new Error('Unrelated fleet checkpoint loaded');
+      return [];
+    });
+    const checklist = vi.spyOn(store, 'getMonitoringChecklist');
+    const handler = createSourceOperationsHandler({ store, sharedSecret: 'test-operations-key', fleets: {} });
+    const result = await handler({
+      rawPath: `/internal/operations/sources/${source.sourceId}${action === 'pause' ? '/actions' : ''}`,
+      headers: { 'x-operations-key': 'test-operations-key' },
+      requestContext: { http: { method: action === 'pause' ? 'POST' : 'GET' } },
+      ...(action === 'pause' ? { body: JSON.stringify({ action: 'pause' }) } : {}),
+    });
+    expect(result.statusCode).toBe(200);
+    expect(health).toHaveBeenCalledExactlyOnceWith([source.sourceId]);
+    expect(checkpoints).toHaveBeenCalledExactlyOnceWith([source.checkpointId]);
+    expect(checklist).not.toHaveBeenCalled();
+    if (action === 'pause') expect((await store.getSourceHealth(source.sourceId))?.sourceStatus).toBe('paused');
+    else expect(JSON.parse(result.body).source.sourceId).toBe(source.sourceId);
+  });
+
+  it('does not load the fleet for an unknown source', async () => {
+    const store = new MemoryInternshipStore();
+    const health = vi.spyOn(store, 'getSourceHealthMany');
+    const checkpoints = vi.spyOn(store, 'getCheckpointsMany');
+    const handler = createSourceOperationsHandler({ store, sharedSecret: 'test-operations-key', fleets: {} });
+    const result = await handler({ rawPath: '/internal/operations/sources/unknown-source',
+      headers: { 'x-operations-key': 'test-operations-key' }, requestContext: { http: { method: 'GET' } } });
+    expect(result.statusCode).toBe(404);
+    expect(health).toHaveBeenCalledExactlyOnceWith([]);
+    expect(checkpoints).toHaveBeenCalledExactlyOnceWith([]);
+  });
+
   it('joins sparse, unordered batches by checkpoint identity without one read per source', async () => {
     const store = new MemoryInternshipStore();
     const sources = operationsSources({ leverAdmissions: [] });
