@@ -27,4 +27,4 @@ jobs:
       - run: npm run typecheck
       - run: npm run ashby:manifest
       - run: npx vitest run test/ashby.test.ts test/ashby-adapter.test.ts test/processor.test.ts
-      - run: npm run test:unit
+      - run: npm run test:unit -- --maxWorkers=1
