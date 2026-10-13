@@ -49,8 +49,24 @@ export async function runAdmissionV2Dispatch(env: AdmissionDispatchEnvironment, 
       // it never hides a visible role or sets a source-wide suppression, so a new
       // eligible role still publishes while stale peers are regraded.
       const overview = await ledger.overview(sourceId);
-      if (requestedSourceId !== undefined && (overview.queued || overview.processing || overview.quarantined)) {
+      if (requestedSourceId !== undefined && (overview.processing || overview.quarantined)) {
         throw new AdmissionDispatchNotReady('Source admission work must drain before manual dispatch');
+      }
+      if (requestedSourceId !== undefined && overview.queued) {
+        // Discovery and due retries can be queued without a live delivery. A
+        // paused source may dispatch that work through the normal durable plan;
+        // active sources, row leases, and unacknowledged handoffs stay fenced.
+        const record = await env.DB.prepare(
+          "SELECT value FROM catalog_items WHERE pk=? AND sk='HEALTH'",
+        ).bind(`SOURCE#${sourceId}`).first<{ value: string }>();
+        let health: { sourceStatus?: string; state?: string } | undefined;
+        try { health = record ? JSON.parse(record.value) as typeof health : undefined; } catch { /* Fail closed below. */ }
+        if (health?.sourceStatus !== 'paused' || health.state !== 'healthy') {
+          throw new AdmissionDispatchNotReady('Queued manual dispatch requires a healthy paused source');
+        }
+        if (await env.DB.prepare(
+          "SELECT 1 AS leased FROM ingestion_rows WHERE source_id=? AND state='queued' AND (lease_owner IS NOT NULL OR lease_expires_at IS NOT NULL) LIMIT 1",
+        ).bind(sourceId).first()) throw new AdmissionDispatchNotReady('Source row leases must drain before manual dispatch');
       }
       if (requestedSourceId !== undefined && await env.DB.prepare(
         'SELECT 1 AS pending FROM ingestion_admission_handoffs WHERE source_id=? AND acknowledged_at IS NULL LIMIT 1',

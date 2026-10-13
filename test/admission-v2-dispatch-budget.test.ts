@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { D1IngestionV2Repository } from '../cloudflare/ingestion-v2-store.js';
 import { runAdmissionV2Dispatch, ADMISSION_V2_DISPATCH_BUDGET_MS, ADMISSION_V2_SOURCE_LIMIT, type AdmissionDispatchEnvironment } from '../cloudflare/admission-v2-dispatch.js';
 import * as dispatcher from '../src/ingestion-v2/admission/dispatcher.js';
+import * as migration from '../src/ingestion-v2/admission/migration.js';
 
 const observedAt = new Date('2026-10-12T20:00:00Z');
 
@@ -101,4 +102,90 @@ describe('scheduled admission dispatch progress', () => {
     expect(repository.getDispatchSourceCursor).not.toHaveBeenCalled();
     expect(repository.setDispatchSourceCursor).not.toHaveBeenCalled();
   });
+
+  describe('manual dispatch of queued work without a live delivery', () => {
+    let status: string;
+    let healthState: string;
+    let leased: boolean;
+    let handoff: boolean;
+    let malformed: boolean;
+
+    beforeEach(() => {
+      status = 'paused'; healthState = 'healthy'; leased = false; handoff = false; malformed = false;
+      cursor = 'a';
+      Object.assign(env, { INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: 'b',
+        INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: 'b', INGESTION_V2_CATALOG_WRITER_ENABLED: 'true',
+        INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: 'b', INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: 'b',
+        DB: { prepare: (sql: string) => ({ bind: () => ({ first: async () => {
+          if (sql.includes('catalog_items')) return { value: malformed ? '{invalid' : JSON.stringify({ sourceStatus: status, state: healthState }) };
+          if (sql.includes('lease_owner')) return leased ? { leased: 1 } : null;
+          if (sql.includes('ingestion_admission_handoffs')) return handoff ? { pending: 1 } : null;
+          throw new Error('Unexpected readiness query');
+        } }) }) } });
+      vi.mocked(repository.overview).mockResolvedValue({ sourceId: 'b', pending: 0, queued: 2, processing: 0, settled: 0,
+        quarantined: 0, absent: 0, currentSnapshotHash: 'hash' });
+      vi.spyOn(repository, 'getSnapshot').mockResolvedValue({ sourceId: 'b', snapshotHash: 'hash', objectKey: 'key',
+        admissionVersion: 'version', documentCount: 1, rowCount: 2, state: 'active', isComplete: true, baseline: true, createdAt: observedAt.toISOString() });
+      vi.spyOn(migration, 'bootstrapAdmissionSnapshot').mockResolvedValue(0);
+      vi.spyOn(migration, 'migrateAdmissionPolicy').mockResolvedValue({ sourceId: 'b', admissionVersion: 'version', reopened: 0, remaining: false });
+      vi.mocked(dispatcher.planAdmissionV2Dispatch).mockResolvedValue({ sourceId: 'b', snapshotHash: 'hash', snapshotKey: 'key', admissionVersion: 'version', baseline: true,
+        messages: [{ externalIds: ['one', 'two'] }] as never });
+    });
+
+    it('sends a bounded paused-source plan without reading or moving the scheduled cursor', async () => {
+      const result = await runAdmissionV2Dispatch(env, observedAt, 'b');
+      expect(result).toMatchObject({ sources: 1, rows: 2, batches: 1 });
+      expect(dispatcher.planAdmissionV2Dispatch).toHaveBeenCalledOnce();
+      expect(dispatcher.planAdmissionV2Dispatch).toHaveBeenCalledWith('b', expect.anything());
+      expect(env.ADMISSION_V2_QUEUE.sendBatch).toHaveBeenCalledWith([{ body: { externalIds: ['one', 'two'] } }]);
+      expect(repository.getDispatchSourceCursor).not.toHaveBeenCalled();
+      expect(repository.setDispatchSourceCursor).not.toHaveBeenCalled();
+      expect(cursor).toBe('a');
+    });
+
+    it.each(['active', 'unknown'])('rejects queued work for a %s source', async sourceStatus => {
+      status = sourceStatus;
+      await expect(runAdmissionV2Dispatch(env, observedAt, 'b')).rejects.toThrow('healthy paused source');
+      expect(dispatcher.planAdmissionV2Dispatch).not.toHaveBeenCalled();
+      expect(env.ADMISSION_V2_QUEUE.sendBatch).not.toHaveBeenCalled();
+    });
+
+    it.each(['degraded', 'quarantined'])('rejects a %s source health record', async state => {
+      healthState = state;
+      await expect(runAdmissionV2Dispatch(env, observedAt, 'b')).rejects.toThrow('healthy paused source');
+      expect(env.ADMISSION_V2_QUEUE.sendBatch).not.toHaveBeenCalled();
+    });
+
+    it('rejects malformed source health without dispatch effects', async () => {
+      malformed = true;
+      await expect(runAdmissionV2Dispatch(env, observedAt, 'b')).rejects.toThrow('healthy paused source');
+      expect(env.ADMISSION_V2_QUEUE.sendBatch).not.toHaveBeenCalled();
+    });
+
+    it('rejects a queued row lease', async () => {
+      leased = true;
+      await expect(runAdmissionV2Dispatch(env, observedAt, 'b')).rejects.toThrow('row leases must drain');
+      expect(env.ADMISSION_V2_QUEUE.sendBatch).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unacknowledged handoff even with unleased queued rows', async () => {
+      handoff = true;
+      await expect(runAdmissionV2Dispatch(env, observedAt, 'b')).rejects.toThrow('handoffs must drain');
+      expect(env.ADMISSION_V2_QUEUE.sendBatch).not.toHaveBeenCalled();
+    });
+
+    it.each(['processing', 'quarantined'] as const)('rejects %s peers before making a plan', async state => {
+      vi.mocked(repository.overview).mockResolvedValue({ sourceId: 'b', pending: 0, queued: 2, processing: state === 'processing' ? 1 : 0,
+        settled: 0, quarantined: state === 'quarantined' ? 1 : 0, absent: 0, currentSnapshotHash: 'hash' });
+      await expect(runAdmissionV2Dispatch(env, observedAt, 'b')).rejects.toThrow('work must drain');
+      expect(env.ADMISSION_V2_QUEUE.sendBatch).not.toHaveBeenCalled();
+    });
+
+    it('requires a complete retained snapshot for queued work', async () => {
+      vi.mocked(repository.getSnapshot).mockResolvedValue(undefined);
+      await expect(runAdmissionV2Dispatch(env, observedAt, 'b')).rejects.toThrow('Complete active snapshot');
+      expect(env.ADMISSION_V2_QUEUE.sendBatch).not.toHaveBeenCalled();
+    });
+  });
+
 });
