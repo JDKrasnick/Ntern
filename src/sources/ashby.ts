@@ -125,7 +125,14 @@ function canonical(value: unknown): unknown {
 
 function contentHash(rows: AshbyPosting[]): string {
   const sorted = [...rows].sort((a, b) => a.id.localeCompare(b.id));
-  return createHash('sha256').update(JSON.stringify(canonical(sorted))).digest('hex');
+  // Preserve the canonical array bytes without retaining a second full board
+  // and its serialized JSON alongside the parsed provider response.
+  const hash = createHash('sha256').update('[');
+  for (let index = 0; index < sorted.length; index++) {
+    if (index) hash.update(',');
+    hash.update(JSON.stringify(canonical(sorted[index])) ?? 'null');
+  }
+  return hash.update(']').digest('hex');
 }
 
 function uniqueLocations(row: AshbyPosting): string[] {

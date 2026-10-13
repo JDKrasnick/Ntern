@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { IngestionRunner } from '../src/poll.js';
 import { ASHBY_BOARD_MAX_POSTINGS, ASHBY_RESPONSE_MAX_BYTES, AshbyPostingsAdapter, type AshbyPosting } from '../src/sources/ashby.js';
@@ -228,5 +229,21 @@ describe('Ashby public posting adapter', () => {
 
     await expect(adapter(syntheticAshbyBoard({ postings: ASHBY_BOARD_MAX_POSTINGS + 1, bytesPerPosting: 200 }).jobs).fetch())
       .rejects.toMatchObject({ category: 'capacity', message: expect.stringContaining('postings') });
+  });
+});
+
+describe('Ashby checkpoint hash compatibility', () => {
+  it('matches the prior whole-board canonical digest for nested Unicode data and reordered postings', async () => {
+    const rows = [row(ids[1], { title: 'Software Engineer Intern 🌏', descriptionHtml: '<p>é 中文 "quoted"</p>', secondaryLocations: [{ location: 'Zürich' }] }), row(ids[0], { descriptionPlain: 'line one\nline two', department: 'R&D' })];
+    const canonical = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonical);
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonical(child)]));
+    };
+    const expected = createHash('sha256').update(JSON.stringify(canonical([...rows].sort((a, b) => a.id.localeCompare(b.id))))).digest('hex');
+    const first = await adapter(rows).fetch();
+    const reordered = await adapter([...rows].reverse()).fetch();
+    expect(first.contentHash).toBe(expected);
+    expect(reordered.contentHash).toBe(expected);
   });
 });
