@@ -89,6 +89,57 @@ function officialCommit(): AdmissionCatalogCommit {
 }
 
 describe('ingestion v2 reconciler catalog sink', () => {
+  it('attaches a new URL occurrence to the historical job claimed by its exact provider alias', async () => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = officialCommit();
+    await sink.commit(input);
+    const original = [...store.jobs.values()][0]!;
+    const retainedJobId = 'historical-catalog-job';
+    store.jobs.delete(original.jobId);
+    await store.putInternship({ ...original, jobId: retainedJobId });
+    for (const occurrence of store.occurrences.values()) {
+      await store.putSourceOccurrence({ ...occurrence, jobId: retainedJobId });
+    }
+    for (const alias of input.listing.postingIdentity!.aliases) store.postingAliases.set(alias.value, retainedJobId);
+    const next = { ...input, sourceId: 'community-peer', externalId: 'README.md:alternate-url', baseline: false, notify: true,
+      listing: { ...input.listing, sourceId: 'community-peer', externalId: 'README.md:alternate-url' } };
+    expect(await sink.commit(next)).toEqual({ jobId: retainedJobId });
+    expect(await sink.commit(next)).toEqual({ jobId: retainedJobId });
+    expect((await store.getSourceOccurrence(next.sourceId, next.externalId))?.jobId).toBe(retainedJobId);
+    expect(store.jobs.size).toBe(1);
+    expect(store.postingIdentityIncidents.size).toBe(0);
+    expect(store.notificationEvents.size).toBe(0);
+  });
+
+  it('keeps a claimed identity with a missing canonical job behind the identity fence', async () => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = officialCommit();
+    for (const alias of input.listing.postingIdentity!.aliases) store.postingAliases.set(alias.value, 'missing-job');
+    await expect(sink.commit(input)).rejects.toThrow('no canonical job');
+    expect(store.jobs.size).toBe(0);
+    expect(store.occurrences.size).toBe(0);
+    expect(store.postingAliases.values().next().value).toBe('missing-job');
+  });
+
+  it('does not merge contradictory exact alias claims', async () => {
+    const store = new MemoryInternshipStore();
+    const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = officialCommit();
+    const identity = { ...input.listing.postingIdentity!, aliases: [
+      ...input.listing.postingIdentity!.aliases, { kind: 'provider-route' as const, value: 'provider:lever:acme:other-id' },
+    ] };
+    store.postingAliases.set(identity.aliases[0]!.value, 'first-job');
+    store.postingAliases.set(identity.aliases.at(-1)!.value, 'second-job');
+    await expect(sink.commit({ ...input, listing: { ...input.listing, postingIdentity: identity } }))
+      .rejects.toThrow('identity boundary');
+    expect(store.jobs.size).toBe(0);
+    expect(store.occurrences.size).toBe(0);
+    expect(store.postingIdentityIncidents.size).toBe(1);
+    expect(new Set(store.postingAliases.values())).toEqual(new Set(['first-job', 'second-job']));
+  });
+
   it('returns the persisted job identity when reconciliation retains an existing catalog job', async () => {
     const store = new MemoryInternshipStore();
     const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));

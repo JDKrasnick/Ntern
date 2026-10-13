@@ -97,7 +97,19 @@ export class ReconcilerAdmissionV2CatalogSink implements AdmissionV2CatalogSink 
   async commit(input: AdmissionCatalogCommit): Promise<{ jobId: string } | void> {
     const observedAt = this.now().toISOString();
     const prior = await this.store.getSourceOccurrence(input.sourceId, input.externalId);
-    const existing = prior ? await this.store.getJob(prior.jobId) : await this.store.getJob(input.jobId);
+    // A new document/URL occurrence may name a posting already attached to a
+    // historical catalog job. Resolve its exact aliases before reconciliation
+    // chooses a job ID; the derived identity ID need not be the persisted ID.
+    const resolved = !prior && input.listing.postingIdentity
+      ? await this.store.resolvePostingIdentity(input.listing.postingIdentity)
+      : undefined;
+    // Contradictory aliases follow the atomic commit's existing quarantine
+    // path, including its durable incident; they never choose a merged job.
+    const existing = await this.store.getJob(prior?.jobId
+      ?? (resolved?.outcome === 'merge' ? resolved.canonicalJobId : input.jobId));
+    if (resolved?.outcome === 'merge' && !existing) {
+      throw new AdmissionInfrastructureError('internal', 'claimed catalog posting identity has no canonical job');
+    }
     const listing = {
       ...input.listing,
       externalId: input.externalId,
