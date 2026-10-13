@@ -365,10 +365,12 @@ describe('Ashby offline manifest and reverification', () => {
     expect(await recheckAshbyEvidence(evidence(), missing)).toMatchObject({ state: 'ok', stillProven: false });
   });
 
-  it('recognizes Ashby board casing without accepting another tenant or a board prefix', async () => {
-    for (const [board, proven] of [['Acme.IO', true], ['acme.io-other', false], ['other.io', false]] as const) {
+  it('recognizes reviewed Ashby spellings without accepting arbitrary casing or a board prefix', async () => {
+    const reviewed = evidence({ boardKey: 'abridge', exactBoardUrl: 'https://jobs.ashbyhq.com/abridge',
+      observedJobUrl: 'https://jobs.ashbyhq.com/abridge/role-1', evidenceExcerpt: '<a href="https://jobs.ashbyhq.com/abridge">Jobs</a>' });
+    for (const [board, proven] of [['Abridge', true], ['aBrIdGe', false], ['abridge-other', false], ['other.io', false]] as const) {
       const fetchImpl = (async () => new Response(`<a href="https://jobs.ashbyhq.com/${board}">Jobs</a>`, { status: 200 })) as typeof fetch;
-      expect(await recheckAshbyEvidence(evidence(), fetchImpl)).toMatchObject({ state: 'ok', stillProven: proven });
+      expect(await recheckAshbyEvidence(reviewed, fetchImpl)).toMatchObject({ state: 'ok', stillProven: proven });
     }
   });
 

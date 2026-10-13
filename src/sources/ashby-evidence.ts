@@ -38,8 +38,15 @@ function blocked(host: string): boolean {
 }
 
 export function excerptProvesAshbyBoard(excerpt: string, boardName: string): boolean {
-  const escaped = boardName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`jobs\\.ashbyhq\\.com/${escaped}(?:[/?#"'\\s<]|$)`, 'i').test(excerpt);
+  // These employer-linked spellings returned the same posting IDs and titles
+  // as the registered API keys during the 2026-10-13 ownership review.
+  // Other board spellings retain the exact tenant comparison.
+  const reviewedSpellings: Readonly<Record<string, string>> = {
+    abridge: 'Abridge', 'k-id': 'K-ID', kastle: 'Kastle',
+  };
+  const names = [...new Set([boardName, reviewedSpellings[boardName]])].filter((name): name is string => Boolean(name));
+  const escaped = names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return new RegExp(`jobs\\.ashbyhq\\.com/(?:${escaped})(?:[/?#"'\\s<]|$)`).test(excerpt);
 }
 
 export function ashbyEvidenceViolations(evidence: AshbyOwnershipEvidence): string[] {
