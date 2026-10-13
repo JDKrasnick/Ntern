@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { actionableChanges, validateCloudflarePlan } from '../scripts/cloudflare-plan-guard.js';
+import { encodeSourceAllowlist } from '../src/ingestion-v2/source-allowlist.js';
 
 type TestChange = {
   address: string;
@@ -1093,9 +1094,11 @@ describe('Cloudflare deployment plan guard', () => {
     // A full registry is larger than the old 1,000-character canary bound.
     const fleet = Array.from({ length: 344 }, (_, i) => `greenhouse-reviewed-${i}`).join(',');
     expect(fleet.length).toBeGreaterThan(1000);
-    expect(fleet.length).toBeLessThanOrEqual(8192);
-    expect(validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: fleet })]))).toHaveLength(1);
-    expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: 'x'.repeat(8193) })]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(fleet.length).toBeGreaterThan(5120);
+    expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: fleet })]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: encodeSourceAllowlist(fleet.split(',')) })]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: 'x'.repeat(5121) })]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: 'prefixes-v1:{}' })]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([admissionUpdate({ enabled: 'true', allowlist: '*' })]))).toThrow('Refusing unsafe Cloudflare plan');
     // And it can be turned back off.
     expect(validateCloudflarePlan(plan([admissionUpdate({ enabled: 'false', allowlist: '' })]))).toHaveLength(1);

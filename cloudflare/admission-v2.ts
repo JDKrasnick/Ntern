@@ -18,6 +18,7 @@ import { D1AdmissionProviderGovernor, type AdmissionProviderGovernor } from './a
 import { providerPostingReference } from '../src/identity/posting.js';
 import { reviewedIdentityApplicationUrl } from './posting-source-corrections.js';
 import { safeDiagnostic } from '../src/source-health.js';
+import { decodeSourceAllowlist } from '../src/ingestion-v2/source-allowlist.js';
 
 export const ADMISSION_V2_QUEUE_NAME = 'intern-notifs-admission-v2';
 
@@ -275,7 +276,7 @@ export async function processAdmissionV2Batch(
 }
 
 /** Whether the admission consumer should process a source's messages. */
-export function admissionSourceAllowed(env: AdmissionV2Environment, sourceId: string): boolean {
-  const allowlist = env.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST?.split(',').map((entry) => entry.trim()).filter(Boolean);
+export function admissionSourceAllowed(env: Pick<AdmissionV2Environment, 'INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST'>, sourceId: string): boolean {
+  const allowlist = decodeSourceAllowlist(env.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST);
   return !allowlist?.length || allowlist.includes(sourceId);
 }

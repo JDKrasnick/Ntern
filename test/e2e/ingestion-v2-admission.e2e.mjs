@@ -803,10 +803,10 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
 
 test('reuses an exact provider alias for a new document occurrence of a historical job', async () => {
   const live = {
-    INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: sourceId,
-    INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: sourceId, INGESTION_V2_CATALOG_WRITER_ENABLED: 'true',
-    INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: sourceId,
-    INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: sourceId,
+    INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: `prefixes-v1:${JSON.stringify({ '': [sourceId] })}`,
+    INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: `prefixes-v1:${JSON.stringify({ '': [sourceId] })}`, INGESTION_V2_CATALOG_WRITER_ENABLED: 'true',
+    INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: `prefixes-v1:${JSON.stringify({ '': [sourceId] })}`,
+    INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: `prefixes-v1:${JSON.stringify({ '': [sourceId] })}`,
     TRUSTED_COMMUNITY_CATALOG_ENABLED: 'true',
   };
   const documentUrl = 'https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md';

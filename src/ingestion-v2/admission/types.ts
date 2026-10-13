@@ -1,3 +1,4 @@
+import { decodeSourceAllowlist } from '../source-allowlist.js';
 import { ingestionV2FeatureConfig, type IngestionDecision, type IngestionRowRecord, type IngestionRowState } from '../types.js';
 import type { SourcedPosting } from '../../types.js';
 
@@ -203,22 +204,10 @@ export function admissionV2FeatureConfig(env: {
   INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST?: string;
   INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST?: string;
 }): AdmissionV2FeatureConfig {
-  const allowlist = env.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST
-    ?.split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  const catalogWriterAllowlist = env.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST
-    ?.split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  const legacyCatalogWriteDisabledAllowlist = env.INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST
-    ?.split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  const trustedCommunityAlertAllowlist = env.INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST
-    ?.split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  const allowlist = decodeSourceAllowlist(env.INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST);
+  const catalogWriterAllowlist = decodeSourceAllowlist(env.INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST);
+  const legacyCatalogWriteDisabledAllowlist = decodeSourceAllowlist(env.INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST);
+  const trustedCommunityAlertAllowlist = decodeSourceAllowlist(env.INGESTION_V2_TRUSTED_COMMUNITY_ALERT_SOURCE_ALLOWLIST);
   return {
     admissionEnabled: env.INGESTION_V2_ADMISSION_ENABLED === 'true',
     ...(allowlist?.length ? { sourceAllowlist: allowlist } : {}),

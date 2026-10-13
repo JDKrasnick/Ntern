@@ -1,3 +1,4 @@
+import { decodeSourceAllowlist } from './source-allowlist.js';
 import type { ProcessedSnapshot, SourcedPosting } from '../types.js';
 
 /**
@@ -198,10 +199,7 @@ export function ingestionV2FeatureConfig(env: {
   INGESTION_V2_SHADOW_DISCOVERY_ENABLED?: string;
   INGESTION_V2_SHADOW_SOURCE_ALLOWLIST?: string;
 }): IngestionV2FeatureConfig {
-  const allowlist = env.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST
-    ?.split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  const allowlist = decodeSourceAllowlist(env.INGESTION_V2_SHADOW_SOURCE_ALLOWLIST);
   return {
     shadowDiscoveryEnabled: env.INGESTION_V2_SHADOW_DISCOVERY_ENABLED === 'true',
     ...(allowlist?.length ? { sourceAllowlist: allowlist } : {}),
