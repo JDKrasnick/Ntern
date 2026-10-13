@@ -801,7 +801,7 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
 });
 
 
-test('reuses an exact provider alias for a new URL occurrence of a historical job', async () => {
+test('reuses an exact provider alias for a new document occurrence of a historical job', async () => {
   const live = {
     INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: sourceId,
     INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: sourceId, INGESTION_V2_CATALOG_WRITER_ENABLED: 'true',
@@ -828,15 +828,15 @@ test('reuses an exact provider alias for a new URL occurrence of a historical jo
   await database.prepare("UPDATE catalog_items SET value=json_set(value,'$.jobId',?) WHERE kind='source-occurrence' AND json_extract(value,'$.jobId')=?")
     .bind(historicalJobId, oldJobId).run();
   const before = (await database.prepare("SELECT COUNT(*) count FROM catalog_items WHERE kind='notification-event'").first()).count;
-  const variantUrl = `${applyUrl(4)}?source=alternate`;
-  const variantId = `README.md:${variantUrl}`;
-  documentBodies.set(documentUrl, markdownTable(5)
-    + `| Acme 4 | Software Engineering Intern 4 | Remote | [Apply](${variantUrl}) | $50/hr |\n`);
+  const variantId = `OFFSEASON_README.md:${applyUrl(4)}`;
+  documentBodies.set(documentUrl, markdownTable(4));
+  documentBodies.set('https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/OFFSEASON_README.md',
+    markdownTable(5).split('\n').filter((_, index) => index < 2 || index === 6).join('\n') + '\n');
   assert.equal((await deliverGithub(live)).retries.length, 0);
   current = await boardSnapshot();
   const messages = buildMessages(current.rows.filter(row => row.external_id === variantId),
     current.snapshot.snapshot_hash, current.snapshot.admission_version);
-  assert.equal(messages.length, 1);
+  assert.equal(messages.length, 1, JSON.stringify(current.rows.map(row => row.external_id)));
   const delivery = await deliverAdmission(messages, live);
   assert.equal(delivery.settled.ack, 1, JSON.stringify(delivery.settled.retries));
   assert.equal(delivery.settled.retries.length, 0);
