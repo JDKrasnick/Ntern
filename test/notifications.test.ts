@@ -114,7 +114,8 @@ describe('notifications', () => {
     expect(notificationSourceLabel(withSource(listing, 'greenhouse-vardaspace'))).toBe('Greenhouse');
     expect(notificationSourceLabel(withSource(listing, 'lever-palantir'))).toBe('Lever');
     expect(notificationSourceLabel(withSource(listing, 'ashby-etched'))).toBe('Ashby');
-    expect(notificationSourceLabel(withSource(listing, 'lever-acds'))).toBe('Job board');
+    expect(notificationSourceLabel(withSource(listing, 'lever-acds'))).toBe('Lever');
+    expect(notificationSourceLabel(withSource(listing, 'lever-field-ai'))).toBe('Job board');
     expect(notificationSourceLabel(withSource(listing, 'greenhouse-unreviewed'))).toBe('Job board');
     expect(notificationSourceLabel(withSource(listing, 'greenhouse-vardaspace', 'closed'))).toBe('Greenhouse');
     expect(notificationSourceLabel(withSource(withSource(listing, 'greenhouse-vardaspace'), 'greenhouse-figma'))).toBe('Greenhouse');

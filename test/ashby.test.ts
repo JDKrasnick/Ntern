@@ -177,17 +177,18 @@ describe('Ashby ownership and admission evidence', () => {
 
 describe('Ashby offline manifest and reverification', () => {
   it('passes the published cohort and ownership-verified shadow expansion', () => {
-    expect(reviewedAshbySources.filter(({ status }) => status === 'published').map(({ company }) => company)).toEqual([
+    expect(reviewedAshbySources.filter(({ status }) => status === 'published').map(({ company }) => company)).toEqual(expect.arrayContaining([
       'Etched', 'Deepgram', 'Cohere', 'Mistral AI', 'Partly',
       'Notion', 'Alan', 'Base Power', 'Reonic', 'Terranova', 'Melius', 'CTGT', 'OpusClip',
       'WindBorne Systems', 'Persona AI', 'Skydio', 'Beacon Software', 'Centerfield', 'RV Tech',
       'Circleback', 'Eragon', 'Modal', 'Yotta Labs', 'Anthelion Capital', 'Saronic', 'First Order Effects',
       'Junior', 'Airwallex', 'Netic', 'Retell AI', 'Quadrillion', 'Pylon', 'NationGraph',
-    ]);
-    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(66);
+    ]));
+    expect(reviewedAshbySources.filter(({ status }) => status === 'published')).toHaveLength(81);
+    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(18);
     // The clock must sit after the newest admittedAt so fresh admissions are not
     // read as future-dated; bump it alongside the next admission.
-    expect(collectAshbyManifestViolations(reviewedAshbySources, { fs: nodeAshbyManifestFs(), now: new Date('2026-09-30T12:00:00Z') })).toEqual([]);
+    expect(collectAshbyManifestViolations(reviewedAshbySources, { fs: nodeAshbyManifestFs(), now: new Date('2026-10-14T00:00:00Z') })).toEqual([]);
   });
 
   it('keeps any expansion replacements ordered and unadmitted', () => {
@@ -362,6 +363,15 @@ describe('Ashby offline manifest and reverification', () => {
     expect(await recheckAshbyEvidence(evidence(), fetchImpl)).toMatchObject({ state: 'ok', stillProven: true });
     const missing = (async () => new Response('<p>No board here</p>', { status: 200 })) as typeof fetch;
     expect(await recheckAshbyEvidence(evidence(), missing)).toMatchObject({ state: 'ok', stillProven: false });
+  });
+
+  it('recognizes reviewed Ashby spellings without accepting arbitrary casing or a board prefix', async () => {
+    const reviewed = evidence({ boardKey: 'abridge', exactBoardUrl: 'https://jobs.ashbyhq.com/abridge',
+      observedJobUrl: 'https://jobs.ashbyhq.com/abridge/role-1', evidenceExcerpt: '<a href="https://jobs.ashbyhq.com/abridge">Jobs</a>' });
+    for (const [board, proven] of [['Abridge', true], ['aBrIdGe', false], ['abridge-other', false], ['other.io', false]] as const) {
+      const fetchImpl = (async () => new Response(`<a href="https://jobs.ashbyhq.com/${board}">Jobs</a>`, { status: 200 })) as typeof fetch;
+      expect(await recheckAshbyEvidence(reviewed, fetchImpl)).toMatchObject({ state: 'ok', stillProven: proven });
+    }
   });
 
   it('accepts an employer careers redirect only when it lands on the exact reviewed board', async () => {

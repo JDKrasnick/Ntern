@@ -71,7 +71,7 @@ const admittedAshbySources: ReviewedAshbySource[] = [
   },
   {
     id: 'ashby-rho', company: 'Rho', identity: { provider: 'ashby', boardKey: 'rho', apiRegion: 'global' },
-    careersUrl: 'https://www.rho.co/careers', admittedAt: '2026-08-09T15:55:23Z', evidenceState: 'ownership-verified',
+    careersUrl: 'https://www.rho.co/careers/8bde2063-84aa-4753-a0c1-eb5c7929b07b', admittedAt: '2026-08-09T15:55:23Z', evidenceState: 'ownership-verified',
     allowedApplicationHosts: [{ host: 'jobs.ashbyhq.com' }], status: 'shadow',
   },
   {

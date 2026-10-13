@@ -2,10 +2,10 @@
   "provider": "ashby",
   "boardKey": "phonic",
   "apiRegion": "global",
-  "careersUrl": "https://phonic.ai/",
-  "firstPartyEvidenceUrl": "https://phonic.ai/",
+  "careersUrl": "https://phonic.ai/about#job-openings",
+  "firstPartyEvidenceUrl": "https://phonic.ai/about#job-openings",
   "exactBoardUrl": "https://jobs.ashbyhq.com/phonic",
-  "evidenceExcerpt": "ss=\"space-y-6\"><p class=\"font-bold\">Company</p><ul class=\"text-sm space-y-2\"><li><a href=\"/company\">About</a></li><li><a href=\"/blog\">Blog</a></li><li><a href=\"https://jobs.ashbyhq.com/phonic\" target=\"_blank\" rel=\"noreferrer noopener\">Careers</a></li></ul></div><div class=\"space-y-6\"><p class=\"font-bold\">Legal</p><ul class=\"text-sm space-y-2\"><li><a href=\"/legal/privacy-policy\">Privacy Policy</a></li><li><a href=\"/legal/terms-of-service\">Terms of Service</a></li><li><a href=\"/legal/subprocessors\">Subproces",
+  "evidenceExcerpt": "->\n<div id=\"ashby_embed\"></div>\n\n<!-- 1) Define Ashby settings -->\n<script>\n  window.__Ashby = {\n    settings: {\n      ashbyBaseJobBoardUrl: \"https://jobs.ashbyhq.com/phonic\",\n      displayMode: \"full-job-board\",\n      customCssUrl: \"https://static-assets.phonic.ai/css/ashby-embed.css\"\n    }\n  };\n</script>\n\n<!-- 2) Load Ashby embed script -->\n<script\n  id=\"ashby-script\"\n  src=\"https://jobs.ashbyhq.com/phonic/embed?version=2\">\n</script></div></div></div></div></section><div aria-hidden=\"true\" class=\"about-label-style-helper\"><div class=\"about-un",
   "observedJobUrl": "https://jobs.ashbyhq.com/phonic/a6c8c3d2-250a-4c2f-8a20-e4667ca38e41",
   "verifiedAt": "2026-08-18T01:40:08.842Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

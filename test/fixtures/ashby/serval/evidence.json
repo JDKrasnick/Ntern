@@ -2,10 +2,10 @@
   "provider": "ashby",
   "boardKey": "serval",
   "apiRegion": "global",
-  "careersUrl": "https://www.serval.com/",
-  "firstPartyEvidenceUrl": "https://www.serval.com/",
+  "careersUrl": "https://www.serval.com/careers",
+  "firstPartyEvidenceUrl": "https://www.serval.com/careers",
   "exactBoardUrl": "https://jobs.ashbyhq.com/serval",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://www.serval.com/ identifies Serval and links to https://jobs.ashbyhq.com/serval (exact tenant).",
+  "evidenceExcerpt": "lex-1 flex-col\" id=\"roles-engineering\"><li class=\"open-roles-view-module__ee9zua__roleItem flex tablet-lg:min-h-20 tablet-lg:flex-1\"><a href=\"https://jobs.ashbyhq.com/serval/9e529850-07ca-4317-817e-21630f63192e\" target=\"_blank\" rel=\"noopener noreferrer\" data-external=\"true\" class=\"open-roles-view-module__ee9zua__roleRow open-roles-view-module__ee9zua__hoverableRoleRow group/role relative isolate flex flex-1 scroll-mt-[calc(var(--header-offset)+var(--roles-header-h))] mobile:flex-row flex-col mobile:items-center gap-1 mobile:gap-2 p-6 outline-no",
   "observedJobUrl": "https://jobs.ashbyhq.com/serval/d7fb089c-db8a-4877-a5f3-73a09e67f54b",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

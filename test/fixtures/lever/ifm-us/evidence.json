@@ -1,9 +1,9 @@
 {
   "site": "ifm-us",
   "displayName": "Institute for Foundation Models",
-  "careersUrl": "https://careers.mbzuai.ac.ae/",
-  "firstPartyEvidenceUrl": "https://careers.mbzuai.ac.ae/",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://careers.mbzuai.ac.ae/ identifies Institute for Foundation Models and links to https://jobs.lever.co/ifm-us.",
+  "careersUrl": "https://careers.mbzuai.ac.ae/vacancies/",
+  "firstPartyEvidenceUrl": "https://careers.mbzuai.ac.ae/vacancies/",
+  "evidenceExcerpt": "ls</span><span data-vgroup-count=\"\">45</span></h4><a class=\"mf-h8\" data-row=\"\" data-id=\"1323\" data-title=\"Admin Operations Coordinator\" href=\"https://jobs.lever.co/ifm-us/51bb158c-d47f-4455-8ff1-d9ef0d79dfc2\" target=\"_blank\" rel=\"noopener\" style=\"display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;padding:22px 28px;border-bottom:1px solid #C5D1DD;background:#fff;transition:background 250ms,padding 250ms cubic-bezier(0.2,0,0,1)\">\n  <span style=\"display:flex;flex-direction:column;gap:8px;min-width:0;flex:1 1 320p",
   "observedJobUrl": "https://jobs.lever.co/ifm-us/5342e333-61b9-406d-bfea-61a687a94d1f",
   "initialHosts": [
     "jobs.lever.co"
@@ -11,5 +11,6 @@
   "region": "global",
   "state": "ownership-verified",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
-  "notes": "Owner-approved mapping, independently checked against the exact live Lever tenant and hiringOrganization identity."
+  "notes": "Owner-approved mapping, independently checked against the exact live Lever tenant and hiringOrganization identity.",
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }

@@ -12,6 +12,8 @@ import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import { D1EmployerStore } from '../cloudflare/employer-store.js';
 import * as employerRegistry from '../cloudflare/employer-registry.js';
 import * as greenhouseWorker from '../src/greenhouse-worker.js';
+import * as leverWorker from '../src/lever-worker.js';
+import * as ashbyWorker from '../src/ashby-worker.js';
 import { D1MaintenancePhaseStore } from '../cloudflare/maintenance-phases.js';
 import { CATALOG_DELIVERY_MAX_ATTEMPTS, isQuarantinedRecoveryProbeDue, SOURCE_POLL_CADENCE } from '../src/source-poll-cadence.js';
 import { GITHUB_RESOLUTION_ROWS_PER_DELIVERY } from '../src/poll.js';
@@ -1872,33 +1874,37 @@ describe('catalog starvation signal', () => {
 
 describe('authenticated silent Greenhouse backfill', () => {
   const source = reviewedGreenhouseSources.find(source => source.id === 'greenhouse-voloridgeinvestmentmanagement')!;
-  const request = (provider = 'greenhouse', value = 'true', authorized = true) => new Request(
-    `https://example.test/internal/poll-source?provider=${provider}&sourceId=${source.id}&seedOnly=${value}`,
+  const request = (provider = 'greenhouse', value = 'true', authorized = true, sourceId = source.id) => new Request(
+    `https://example.test/internal/poll-source?provider=${provider}&sourceId=${sourceId}&seedOnly=${value}`,
     { method: 'POST', headers: authorized ? { 'X-Operations-Key': 'secret' } : {} });
   const env = { OPERATIONS_SHARED_SECRET: 'secret', DB: { prepare: () => ({ bind() { return this; }, async first() { return null; } }) } } as unknown as Environment;
-  it('rejects unauthenticated, malformed, and non-Greenhouse requests before accessing data', async () => {
+  it('rejects unauthenticated, malformed, and non-ATS requests before accessing data', async () => {
     expect((await cloudflareWorker.fetch(request('greenhouse', 'true', false), env)).status).toBe(404);
     expect((await cloudflareWorker.fetch(request('greenhouse', 'false'), env)).status).toBe(400);
-    for (const provider of ['structured', 'lever', 'ashby']) {
+    for (const provider of ['structured']) {
       expect((await cloudflareWorker.fetch(request(provider), env)).status).toBe(409);
     }
   });
-  it('requires healthy paused legacy ownership and carries quiet authorization into the poll', async () => {
-    const registry = vi.spyOn(employerRegistry, 'reviewedProviderRegistry').mockResolvedValue({ greenhouse: [source], lever: [], ashby: [] });
+  it.each(['greenhouse', 'lever', 'ashby'] as const)('requires healthy paused legacy ownership for %s and carries quiet authorization into the poll', async provider => {
+    const registries = { greenhouse: reviewedGreenhouseSources, lever: reviewedLeverSources, ashby: reviewedAshbySources };
+    const source = registries[provider].find(source => source.status === 'published')!;
+    const registry = vi.spyOn(employerRegistry, 'reviewedProviderRegistry').mockResolvedValue(registries);
     const getHealth = vi.spyOn(D1InternshipStore.prototype, 'getSourceHealth');
-    const consume = vi.spyOn(greenhouseWorker, 'processGreenhouseQueue').mockResolvedValue({ batchItemFailures: [] });
+    const consume = (provider === 'greenhouse' ? vi.spyOn(greenhouseWorker, 'processGreenhouseQueue')
+      : provider === 'lever' ? vi.spyOn(leverWorker, 'processLeverQueue') : vi.spyOn(ashbyWorker, 'processAshbyQueue'))
+      .mockResolvedValue({ batchItemFailures: [] });
     try {
       for (const [state, sourceStatus] of [['healthy', 'active'], ['quarantined', 'paused'], ['degraded', 'paused']] as const) {
         getHealth.mockResolvedValue({ sourceId: source.id, state, sourceStatus, lastAttemptAt: '2026-10-09T03:00:00.000Z', consecutiveFailures: 0, durationMs: 0 });
-        expect((await cloudflareWorker.fetch(request(), env)).status).toBe(409);
+        expect((await cloudflareWorker.fetch(request(provider, 'true', true, source.id), env)).status).toBe(409);
       }
       getHealth.mockResolvedValue({ sourceId: source.id, state: 'healthy', sourceStatus: 'paused', lastAttemptAt: '2026-10-09T03:00:00.000Z', consecutiveFailures: 0, durationMs: 0 });
-      expect((await cloudflareWorker.fetch(request(), { ...env, INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: source.id,
+      expect((await cloudflareWorker.fetch(request(provider, 'true', true, source.id), { ...env, INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: source.id,
         INGESTION_V2_ADMISSION_ENABLED: 'true', INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: source.id,
         INGESTION_V2_CATALOG_WRITER_ENABLED: 'true', INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: source.id,
         INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: source.id })).status).toBe(409);
       expect(consume).not.toHaveBeenCalled();
-      expect((await cloudflareWorker.fetch(request(), env)).status).toBe(200);
+      expect((await cloudflareWorker.fetch(request(provider, 'true', true, source.id), env)).status).toBe(200);
       const event = consume.mock.calls[0]![0];
       expect(JSON.parse(event.Records[0]!.body)).toMatchObject({ sourceId: source.id, force: true, seedOnly: true,
         forceRequestedAt: expect.any(String) });

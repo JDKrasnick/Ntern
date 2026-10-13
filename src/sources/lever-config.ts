@@ -51,7 +51,7 @@ export interface ReviewedLeverSource {
   emptyBoardAcknowledged?: EmptyBoardAcknowledgement;
 }
 
-export const reviewedLeverSources: ReviewedLeverSource[] = [
+const admittedLeverSources: ReviewedLeverSource[] = [
   {
     id: 'lever-palantir',
     company: 'Palantir Technologies',
@@ -115,6 +115,30 @@ export const reviewedLeverSources: ReviewedLeverSource[] = [
   ...reviewedLeverExpansionSources,
   ...reviewedLeverOwnerApprovedExpansionSources,
 ];
+
+/** Owner-approved publication after fresh first-party and production health checks. */
+const productionExpansionIds = new Set([
+  "lever-acds",
+  "lever-belvederetrading",
+  "lever-bigblue",
+  "lever-certik",
+  "lever-deuna",
+  "lever-evrealty-us",
+  "lever-fluxergy-2",
+  "lever-kepler",
+  "lever-ifm-us",
+  "lever-layup",
+  "lever-mactores",
+  "lever-malt",
+  "lever-merklescience",
+  "lever-pivotal",
+  "lever-shyftlabs",
+  "lever-solopulseco"
+]);
+
+export const reviewedLeverSources: ReviewedLeverSource[] = admittedLeverSources.map(source =>
+  productionExpansionIds.has(source.id) ? { ...source, status: 'published' } : source,
+);
 
 export function publishedLeverSources(sources = reviewedLeverSources): ReviewedLeverSource[] {
   return sources.filter((source) => source.status === 'published');

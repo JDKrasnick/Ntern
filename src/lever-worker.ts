@@ -50,7 +50,7 @@ export interface LeverBoardDependencies {
 export interface LeverBoardResult {
   sourceId: string;
   mode: 'shadow' | 'published';
-  skipped?: 'paused' | 'backoff';
+  skipped?: 'paused' | 'backoff' | 'silent-backfill-ineligible';
   notModified: boolean;
   listings: number;
   notifications: { sent: number; skipped: number; failed: number };
@@ -64,6 +64,7 @@ function parseWorkMessage(body: string): LeverWorkMessage {
   if (!Number.isFinite(Date.parse(parsed.scheduledAt))) throw new Error('Invalid Lever work message timestamp');
   if (parsed.force !== undefined && typeof parsed.force !== 'boolean') throw new Error('Invalid Lever work message force flag');
   if (parsed.forceRequestedAt !== undefined && (typeof parsed.forceRequestedAt !== 'string' || !Number.isFinite(Date.parse(parsed.forceRequestedAt)) || Date.parse(parsed.forceRequestedAt) > Date.parse(parsed.scheduledAt))) throw new Error('Invalid Lever work message force request timestamp');
+  if (parsed.seedOnly !== undefined && (typeof parsed.seedOnly !== 'boolean' || (parsed.seedOnly && parsed.force !== true))) throw new Error('Silent Lever backfill requires a forced delivery');
   return parsed as LeverWorkMessage;
 }
 
@@ -168,6 +169,11 @@ export async function runLeverBoard(
   const sourceHealth = await dependencies.store.getSourceHealth(source.id);
   if (sourceDeliveryPaused(sourceHealth, message)) {
     return { sourceId: source.id, mode, skipped: 'paused', notModified: true, listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };
+  }
+  if (message.seedOnly && (message.force !== true || mode !== 'published' || sourceHealth?.sourceStatus !== 'paused'
+    || sourceHealth.state !== 'healthy' || dependencies.v2CatalogWriteOwner?.(source.id))) {
+    return { sourceId: source.id, mode, skipped: 'silent-backfill-ineligible', notModified: true,
+      listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };
   }
   if (!message.force && sourceHealth?.backoffUntil && Date.parse(sourceHealth.backoffUntil) > Date.now()) {
     return { sourceId: source.id, mode, skipped: 'backoff', notModified: true, listings: 0, notifications: { sent: 0, skipped: 0, failed: 0 } };
@@ -293,6 +299,7 @@ export async function runLeverBoard(
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
     dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({ runId: message.runId,
+      seedOnly: message.seedOnly === true, forceFullAcquisition: message.seedOnly === true,
       naturalProviderPoll: !message.force });
   const pollFailure = failureFromPollReport(poll, sourceHealth);
   if (pollFailure) throw pollFailure;

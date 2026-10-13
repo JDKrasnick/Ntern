@@ -1,3 +1,4 @@
+import { ashbyProductionExpansionEvidence } from './ashby-production-expansion-evidence.js';
 import type { SourcePromotionEvidence } from './reviewed-source.js';
 
 /**
@@ -978,4 +979,5 @@ export const ashbyFollowUpPromotionEvidence: Readonly<Record<string, SourcePromo
 /** Current promotion records, including owner-approved sources still in their follow-up window. */
 export const ashbyPromotionEvidence: Readonly<Record<string, SourcePromotionEvidence>> = {
   ...ashbyFollowUpPromotionEvidence,
+  ...ashbyProductionExpansionEvidence,
 };

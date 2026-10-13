@@ -2,10 +2,10 @@
   "provider": "ashby",
   "boardKey": "limetax",
   "apiRegion": "global",
-  "careersUrl": "https://www.limetax.de/en/company/about-us",
-  "firstPartyEvidenceUrl": "https://www.limetax.de/en/company/about-us",
+  "careersUrl": "https://www.limetax.de/en/group/careers/founding-engineer-m-f-d",
+  "firstPartyEvidenceUrl": "https://www.limetax.de/en/group/careers/founding-engineer-m-f-d",
   "exactBoardUrl": "https://jobs.ashbyhq.com/limetax",
-  "evidenceExcerpt": "Owner JDKrasnick verified that https://www.limetax.de/en/company/about-us identifies Limetax and links to https://jobs.ashbyhq.com/limetax (exact tenant).",
+  "evidenceExcerpt": "ontainer\"><!--$--><div class=\"ssr-variant hidden-b8m9jc\"><div style=\"width:100%;height:1400px;position:relative;overflow:hidden\"><iframe src=\"https://jobs.ashbyhq.com/limetax/337989a9-e743-4215-b743-9aa43528fd03\" style=\"position:absolute;top:-178px;left:0;width:100%;height:calc(100% + 178px);border:none;display:block\" allow=\"clipboard-write\" title=\"Stellenanzeige\"></iframe></div></div><div class=\"ssr-variant hidden-62jn25 hidden-1gngnin\"><div style=\"width:100%;height:1400px;position:relative;overflow:hidden\"><iframe src=\"https://jobs.ashbyhq.co",
   "observedJobUrl": "https://jobs.ashbyhq.com/limetax/87f6edc7-c60f-4bd5-9991-75bca022d43e",
   "verifiedAt": "2026-08-18T11:55:00.000Z",
   "state": "ownership-verified",
@@ -14,5 +14,6 @@
     {
       "host": "jobs.ashbyhq.com"
     }
-  ]
+  ],
+  "reverifiedAt": "2026-10-13T21:50:47.611Z"
 }
