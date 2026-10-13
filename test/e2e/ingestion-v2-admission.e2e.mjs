@@ -799,3 +799,55 @@ test('rehearses guarded bootstrap, live publication, closure, rollback, and re-e
     destinationStatus.clear();
   }
 });
+
+
+test('reuses an exact provider alias for a new URL occurrence of a historical job', async () => {
+  const live = {
+    INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: sourceId,
+    INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: sourceId, INGESTION_V2_CATALOG_WRITER_ENABLED: 'true',
+    INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: sourceId,
+    INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: sourceId,
+    TRUSTED_COMMUNITY_CATALOG_ENABLED: 'true',
+  };
+  const documentUrl = 'https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md';
+  documentBodies.set(documentUrl, markdownTable(5));
+  assert.equal((await deliverGithub(live)).retries.length, 0);
+  let current = await boardSnapshot();
+  const originalId = `README.md:${applyUrl(4)}`;
+  const seed = await deliverAdmission(buildMessages(current.rows.filter(row => row.external_id === originalId),
+    current.snapshot.snapshot_hash, current.snapshot.admission_version), live);
+  assert.equal(seed.settled.retries.length, 0, JSON.stringify(seed.settled.retries));
+  const original = JSON.parse((await database.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk=?")
+    .bind(`SOURCE#${sourceId}`, `OCCURRENCE#${originalId}`).first()).value);
+  const oldJobId = original.jobId;
+  const historicalJobId = 'e2e-historical-provider-job';
+  await database.prepare("UPDATE catalog_items SET pk=?,value=json_set(value,'$.jobId',?) WHERE pk=? AND sk='META'")
+    .bind(`JOB#${historicalJobId}`, historicalJobId, `JOB#${oldJobId}`).run();
+  await database.prepare("UPDATE catalog_items SET value=json_set(value,'$.canonicalJobId',?) WHERE kind='posting-alias' AND json_extract(value,'$.canonicalJobId')=?")
+    .bind(historicalJobId, oldJobId).run();
+  await database.prepare("UPDATE catalog_items SET value=json_set(value,'$.jobId',?) WHERE kind='source-occurrence' AND json_extract(value,'$.jobId')=?")
+    .bind(historicalJobId, oldJobId).run();
+  const before = (await database.prepare("SELECT COUNT(*) count FROM catalog_items WHERE kind='notification-event'").first()).count;
+  const variantUrl = `${applyUrl(4)}?source=alternate`;
+  const variantId = `README.md:${variantUrl}`;
+  documentBodies.set(documentUrl, markdownTable(5)
+    + `| Acme 4 | Software Engineering Intern 4 | Remote | [Apply](${variantUrl}) | $50/hr |\n`);
+  assert.equal((await deliverGithub(live)).retries.length, 0);
+  current = await boardSnapshot();
+  const messages = buildMessages(current.rows.filter(row => row.external_id === variantId),
+    current.snapshot.snapshot_hash, current.snapshot.admission_version);
+  assert.equal(messages.length, 1);
+  const delivery = await deliverAdmission(messages, live);
+  assert.equal(delivery.settled.ack, 1, JSON.stringify(delivery.settled.retries));
+  assert.equal(delivery.settled.retries.length, 0);
+  const row = await database.prepare('SELECT state,decision,job_id FROM ingestion_rows WHERE source_id=? AND external_id=?')
+    .bind(sourceId, variantId).first();
+  assert.deepEqual(row, { state: 'settled', decision: 'admitted', job_id: historicalJobId });
+  const next = JSON.parse((await database.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk=?")
+    .bind(`SOURCE#${sourceId}`, `OCCURRENCE#${variantId}`).first()).value);
+  assert.equal(next.jobId, historicalJobId);
+  assert.equal((await database.prepare("SELECT COUNT(*) count FROM catalog_items WHERE pk=? AND sk='META'")
+    .bind(`JOB#${oldJobId}`).first()).count, 0);
+  assert.equal((await database.prepare("SELECT COUNT(*) count FROM catalog_items WHERE kind='notification-event'").first()).count, before);
+  assert.equal((await deliverAdmission(messages, live)).settled.ack, 1);
+});
