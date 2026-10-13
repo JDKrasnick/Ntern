@@ -61,6 +61,7 @@ function subject(messages: PeekedMessage[], health: DlqDependencies['sourceHealt
   const database = new DatabaseSync(':memory:');
   database.exec(readFileSync('cloudflare/migrations/0001_initial.sql', 'utf8'));
   database.exec(readFileSync('cloudflare/migrations/0015_dlq_recovery.sql', 'utf8'));
+  database.exec(readFileSync('cloudflare/migrations/0054_queue_failure_payload.sql', 'utf8'));
   const fake = dlqFake(messages, leaseSize);
   const send = vi.fn(async (message: unknown) => { void message; fake.events.push('send'); });
   const queue: Queue = { send, async sendBatch() {} };
@@ -99,6 +100,16 @@ const admissionMessage = (id: string): PeekedMessage => ({
   })[0],
 });
 
+it('uses the payload index when a queue move replaces the delivery ID', () => {
+  const { database } = subject([]);
+  const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT category, diagnostic, message_id
+    FROM queue_failure_events WHERE queue_name = ? AND payload_hash = ?
+    ORDER BY last_failed_at DESC LIMIT 1`).all('intern-notifs-admission-v2', 'payload');
+  expect(plan.map((row) => row.detail).join(' ')).toContain('queue_failure_payload');
+  expect(plan.map((row) => row.detail).join(' ')).not.toMatch(/SCAN|TEMP B-TREE/);
+  database.close();
+});
+
 describe('protected DLQ operations', () => {
   it('inspects sanitized summaries without consuming or exposing bodies and refs', async () => {
     const { database, dependencies, purge } = subject([catalogMessage('m1')], async () => ({
@@ -131,6 +142,29 @@ describe('protected DLQ operations', () => {
     expect(result.messages[0]).toMatchObject({ messageId: 'historical', failureProvenance: 'missing-ledger' });
     expect(result.messages[0]).not.toHaveProperty('failureCategory');
     expect(result.classificationCounts).toEqual({ ledgered: 0, 'missing-ledger': 1, 'not-applicable': 0 });
+    database.close();
+  });
+
+  it('finds an admission failure by exact payload when the DLQ assigns a new message ID', async () => {
+    const message = admissionMessage('moved-delivery');
+    const { database, dependencies } = subject([message]);
+    await recordQueueFailure({ db: dependencies.db, queueName: 'intern-notifs-admission-v2',
+      messageId: 'original-delivery', attempts: 3, sourceId: 'source', sourceKind: 'ingestion-v2-admission',
+      body: message.body, error: new Error('snapshot-missing: snapshot record not found') });
+    const result = await inspectDlq({ queue: 'admission-v2', limit: 100 }, dependencies);
+    expect(result.messages[0]).toMatchObject({ messageId: 'moved-delivery', failureProvenance: 'ledgered',
+      failureMatch: 'payload-hash', latestDiagnostic: 'snapshot-missing: snapshot record not found' });
+    database.close();
+  });
+
+  it('does not borrow an admission failure from a different payload', async () => {
+    const message = admissionMessage('unrelated-delivery');
+    const { database, dependencies } = subject([message]);
+    await recordQueueFailure({ db: dependencies.db, queueName: 'intern-notifs-admission-v2',
+      messageId: 'original-delivery', body: { version: 99 }, error: new Error('unrelated failure') });
+    const result = await inspectDlq({ queue: 'admission-v2', limit: 100 }, dependencies);
+    expect(result.messages[0]).toMatchObject({ failureProvenance: 'missing-ledger' });
+    expect(result.messages[0]).not.toHaveProperty('failureCategory');
     database.close();
   });
 

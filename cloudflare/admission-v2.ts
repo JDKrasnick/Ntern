@@ -17,6 +17,7 @@ import { officialAdmissionProviderProbe } from './admission-v2-provider.js';
 import { D1AdmissionProviderGovernor, type AdmissionProviderGovernor } from './admission-v2-provider-governor.js';
 import { providerPostingReference } from '../src/identity/posting.js';
 import { reviewedIdentityApplicationUrl } from './posting-source-corrections.js';
+import { safeDiagnostic } from '../src/source-health.js';
 
 export const ADMISSION_V2_QUEUE_NAME = 'intern-notifs-admission-v2';
 
@@ -255,12 +256,14 @@ export async function processAdmissionV2Batch(
       await resolveQueueFailures(env.DB, ADMISSION_V2_QUEUE_NAME, message.id, now());
       message.ack();
     } else {
+      const detail = safeDiagnostic(result.infrastructureFailure?.detail ?? 'Admission infrastructure failure');
       console.warn(JSON.stringify({
         event: 'ingestion_v2_admission_infrastructure_retry',
         messageId: message.id, batchId: validated.message.batchId,
         classification: result.infrastructureFailure?.classification,
+        detail,
       }));
-      const failure = new Error(result.infrastructureFailure?.classification ?? 'admission-v2 infrastructure failure');
+      const failure = new Error(`${result.infrastructureFailure?.classification ?? 'internal'}: ${detail}`);
       await recordQueueFailureBestEffort({
         db: env.DB, queueName: ADMISSION_V2_QUEUE_NAME, messageId: message.id,
         attempts: message.attempts, timestamp: message.timestamp, sourceId: validated.message.sourceId,
