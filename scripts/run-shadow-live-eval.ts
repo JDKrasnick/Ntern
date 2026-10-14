@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { inferOpenAIShadowExtraction } from '../cloudflare/openai-shadow-inference.js';
+import { inferShadowExtraction, shadowModelDefaults } from '../cloudflare/shadow-model-inference.js';
+import { SHADOW_EXTRACTION_MODEL_ID } from '../src/shadow-extraction.js';
+import { localShadowApiKey } from './shadow-model-cli.js';
 import { evaluateShadowCase, summarizeShadowEval, type ShadowEvalCaseResult, type ShadowEvalExpected } from '../src/shadow-extraction-eval.js';
 import { normalizeExactPostingDescription, shadowExtractionPrompt, validateShadowExtraction, type ShadowExtraction } from '../src/shadow-extraction.js';
 import { postprocessRoleScopedExtraction } from '../src/shadow-extraction-postprocess.js';
@@ -14,10 +15,11 @@ const has = (name: string) => process.argv.includes(name);
 const manifestPath = option('--manifest') ?? '.context/shadow-production-eval-manifest.json';
 const artifactsPath = option('--artifacts') ?? '.context/pr324-artifacts';
 const split = option('--split') ?? 'audited';
-const model = option('--model') ?? 'gpt-5-mini-2025-08-07';
+const model = option('--model') ?? SHADOW_EXTRACTION_MODEL_ID;
+const defaults = shadowModelDefaults(model);
 const maxCostCents = Number(option('--max-cost-cents') ?? 300);
-const maxOutputTokens = Number(option('--max-output-tokens') ?? 1400);
-const reasoningEffort = option('--reasoning-effort') ?? 'minimal';
+const maxOutputTokens = Number(option('--max-output-tokens') ?? defaults.maxOutputTokens);
+const reasoningEffort = option('--reasoning-effort') ?? defaults.reasoningEffort;
 const reportPath = option('--report') ?? 'eval/shadow-live-eval.json';
 const offset = Number(option('--offset') ?? 0);
 const limit = Number(option('--limit') ?? 50);
@@ -25,12 +27,6 @@ if (!Number.isSafeInteger(maxCostCents) || maxCostCents < 1 || !Number.isSafeInt
   || !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Cost, output, offset, and limit values are invalid');
 if (!['minimal', 'low', 'medium', 'high'].includes(reasoningEffort)) throw new Error('reasoning effort must be minimal, low, medium, or high');
 
-function apiKey(): string {
-  if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
-  const match = readFileSync('.env', 'utf8').match(/^OPENAI_KEY=(.+)$/mu);
-  if (!match) throw new Error('OPENAI_API_KEY or OPENAI_KEY in .env is required');
-  return match[1]!.trim();
-}
 const notStated = { status: 'not-stated' as const };
 const forcePresent = { status: 'present' as const, value: true };
 function humanExpected(run: Run, extraction: ShadowExtraction, description: string): ShadowEvalExpected {
@@ -52,7 +48,7 @@ const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Manifest;
 const cases = manifest.cases.filter((entry) => entry.split === split).slice(offset, offset + limit);
 if (cases.length === 0 || cases.length > 50) throw new Error(`Expected 1-50 ${split} cases, got ${cases.length}`);
 if (maxCostCents < cases.length) throw new Error(`At least one accounted cent is reserved for each of ${cases.length} cases`);
-const key = apiKey();
+const key = localShadowApiKey(model);
 let spentCents = 0;
 const baseline: ShadowEvalCaseResult[] = [];
 const guarded: ShadowEvalCaseResult[] = [];
@@ -65,8 +61,8 @@ async function runCase(entry: (typeof cases)[number]) {
   const input = normalizeExactPostingDescription(inputArtifact.normalized.title, inputArtifact.normalized.description, inputArtifact.normalized.completeness === 'incomplete');
   const expected = humanExpected(entry.run, recordedArtifact.validation.accepted, input.description);
   try {
-    const inference = await inferOpenAIShadowExtraction(key, input, shadowExtractionPrompt(input), fetch, { model, maxOutputTokens,
-      reasoningEffort: model.startsWith('gpt-5-') ? reasoningEffort as 'minimal' | 'low' | 'medium' | 'high' : undefined });
+    const inference = await inferShadowExtraction(key, input, shadowExtractionPrompt(input), fetch, { model, maxOutputTokens,
+      reasoningEffort: reasoningEffort as 'minimal' | 'low' | 'medium' | 'high' });
     spentCents += inference.actualCostCents;
     const validation = validateShadowExtraction(inference.response, input);
     records.push({ id: entry.run.run_key, inputTokens: inference.inputTokens, outputTokens: inference.outputTokens, actualCostCents: inference.actualCostCents, validationFailures: validation.failures, response: inference.response });

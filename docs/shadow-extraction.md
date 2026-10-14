@@ -49,9 +49,38 @@ a result employer-authoritative.
 
 ## Cost guard and rollout
 
-Production shadow execution uses the pinned `gpt-5-mini-2025-08-07` snapshot. Store `OPENAI_KEY` as a Worker secret;
-never put it in Wrangler variables, Terraform state, queue messages, or artifacts.
+The next-release extraction candidate is `claude-haiku-5-5`, at medium effort,
+with a 8192-token cap that includes thinking. Extraction, the bounded repair,
+and prospective verification use the same provider adapter. The model and
+prompt revision are included in cache identities. Revision v41 shares one
+schema definition across the five list-valued fields to keep Claude's grammar
+within its compilation limit, requests the canonical string-list form, and
+constrains currency to three uppercase letters. The domain validator still
+checks statuses, quotes, currency evidence, and numeric consistency. Prior
+GPT-5 mini accuracy results do not establish Haiku accuracy.
+
+For local evaluations, paste the Claude key into `ANTHROPIC_API_KEY=` in the
+gitignored root `.env`. The three evaluation runners select credentials by
+model; `--model gpt-5-mini-2025-08-07` preserves the baseline comparison.
+Missing Claude credentials fail closed, with no OpenAI fallback. Existing
+OpenAI icon and other features continue to use their own adapter and secret.
+`npm run test:anthropic:live` performs an opt-in real API contract check using
+the same adapter, schema, effort, and token limit as the Worker. The normal
+suite skips this check and never needs a real credential.
+
+At release, provision `ANTHROPIC_API_KEY` as a secret on the ingestion Worker
+(and its dev counterpart for dev validation), using the repository's secret
+provisioning procedure. Never put it in Wrangler variables, Terraform state,
+queue messages, artifacts, or the public/mobile environment. The existing
+OpenTofu `keep_bindings = ["secret_text"]` preserves Worker secrets.
 `SHADOW_EXTRACTION_ENABLED` controls calls independently from publication.
+
+Before production, run the unseen extraction holdout and housing/deadline
+challenge cases against independently checked labels. Measure precision,
+recall, unsupported claims, invalid outputs, latency, and actual billed tokens
+including thinking and repairs. All-field publication and the scoped historical
+backfill still require the contracts and conversions in the release proposal;
+changing the inference provider does not implement those changes.
 
 Enabled execution must provide both
 `SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS` (the forecast for all existing
@@ -62,6 +91,12 @@ slightly above its conservative reservation, but that actual usage reduces later
 capacity. It retries one transient delivery
 with a five-minute delay; malformed output is a visible `invalid-output` state,
 not a repair loop.
+
+When a requested model call fails without trustworthy usage, its reservation
+stays held: the provider may still bill a timeout or truncated response. A failed
+optional repair or verification records known usage and keeps the remaining
+reservation. Operations must reconcile those unknown costs against provider
+billing before releasing headroom; they are not reported as measured token cost.
 
 Use the authenticated, read-only endpoint below for aggregate run states,
 latency, cost totals, version distribution, input completeness by origin and

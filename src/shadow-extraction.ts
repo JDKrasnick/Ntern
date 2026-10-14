@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
 
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v34';
+// v41 retains v34 prompt wording and v36 filtering, and uses a shared Claude
+// schema definition and ISO currency grammar. Cache identity covers
+// the Haiku candidate's medium effort / 8192 total output-token configuration.
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v41';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v5';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v2';
-export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-5-mini-2025-08-07';
+export const SHADOW_EXTRACTION_MODEL_ID = 'claude-haiku-5-5';
 export const SHADOW_EXTRACTION_MAX_INPUT_BYTES = 40_000;
 
 export const shadowStatuses = ['present', 'not-stated', 'conflicting', 'incomplete'] as const;
@@ -185,13 +188,14 @@ function words(value: string): string[] {
 }
 
 function compensationNumberPresent(passage: string, value: number): boolean {
-  return [...passage.matchAll(/(?:^|[^0-9.])([0-9]+(?:[,.][0-9]{3})*(?:[,.][0-9]+)?)(?![0-9])/gu)]
+  return [...passage.matchAll(/(?:^|[^0-9.])([0-9]{1,3}(?:[ \u00a0\u202f][0-9]{3})+(?:[,.][0-9]{1,2})?|[0-9]+(?:[,.][0-9]{3})*(?:[,.][0-9]+)?)(?![0-9])/gu)]
     .some((match) => {
-      const token = match[1]!;
+      const token = match[1]!.replace(/[ \u00a0\u202f]/gu, '');
       const direct = Number(token.replace(/,/gu, ''));
+      const decimalComma = /^\d+(?:\.\d{3})*,\d{1,2}$/u.test(token) ? Number(token.replace(/\./gu, '').replace(',', '.')) : Number.NaN;
       // European job posts use `.` as a thousands separator, e.g. 43.456,--.
       const europeanThousands = /^\d{1,3}(?:\.\d{3})+$/u.test(token) ? Number(token.replace(/\./gu, '')) : Number.NaN;
-      return direct === value || europeanThousands === value;
+      return Number.isFinite(decimalComma) ? decimalComma === value : direct === value || europeanThousands === value;
     });
 }
 
@@ -201,6 +205,7 @@ function compensationCurrencyPresent(passage: string, currency: string): boolean
     CAD: /(?:\bCAD\b|CA\$|C\$|\bCanadian dollars?\b)/iu,
     EUR: /(?:\bEUR\b|€|\beuros?\b)/iu,
     GBP: /(?:\bGBP\b|£|\b(?:British )?pounds?\b)/iu,
+    PLN: /(?:\bPLN\b|zł|\bzloty\b)/iu,
   };
   return (aliases[currency] ?? new RegExp(`\\b${currency}\\b`, 'u')).test(passage);
 }

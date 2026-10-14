@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { SHADOW_EXTRACTION_MODEL_ID, normalizeExactPostingDescription, shadowExtractionPrompt, validateShadowExtraction } from '../src/shadow-extraction.js';
-import { inferOpenAIShadowExtraction, shadowModelPricingCents } from '../cloudflare/openai-shadow-inference.js';
+import { inferShadowExtraction, shadowModelDefaults } from '../cloudflare/shadow-model-inference.js';
+import { localShadowApiKey } from './shadow-model-cli.js';
 import {
   evaluateShadowCase,
   parseShadowEvalCases,
@@ -38,17 +38,7 @@ if (recordPath !== undefined && !live) {
   console.error('--record is only valid with --live'); process.exit(1);
 }
 const model = option('--model') ?? SHADOW_EXTRACTION_MODEL_ID;
-if (live && !shadowModelPricingCents[model]) {
-  console.error(`Unknown model ${model}; supported: ${Object.keys(shadowModelPricingCents).join(', ')}`); process.exit(1);
-}
-
-function apiKey(): string {
-  const direct = process.env.OPENAI_API_KEY;
-  if (direct) return direct;
-  const dotenv = readFileSync('.env', 'utf8').match(/^OPENAI_KEY=(.+)$/mu);
-  if (dotenv) return dotenv[1]!.trim();
-  console.error('OPENAI_API_KEY is required for live evaluation (or OPENAI_KEY in .env)'); process.exit(1);
-}
+if (live) shadowModelDefaults(model);
 
 const golden = parseShadowEvalCases(JSON.parse(await readFile(casesPath, 'utf8')) as unknown);
 
@@ -66,13 +56,13 @@ const results: ShadowEvalCaseResult[] = [];
 const recorded: ShadowRecordedRun[] = [];
 
 if (live) {
-  const key = apiKey();
+  const key = localShadowApiKey(model);
   for (const goldenCase of golden) {
     if (limit > 0 && results.length >= limit) break;
     const input = normalizeExactPostingDescription(goldenCase.title, goldenCase.description);
     const prompt = shadowExtractionPrompt(input);
     try {
-      const inference = await inferOpenAIShadowExtraction(key, input, prompt, fetch, { model });
+      const inference = await inferShadowExtraction(key, input, prompt, fetch, shadowModelDefaults(model));
       const validation = validateShadowExtraction(inference.response, input);
       results.push(resultFor(goldenCase, validation, inference));
       if (recordPath !== undefined) recorded.push({ id: goldenCase.id, contentHash: input.contentHash, result: inference });

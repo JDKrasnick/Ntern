@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { inferOpenAIShadowExtraction } from '../cloudflare/openai-shadow-inference.js';
+import { inferShadowExtraction, shadowModelDefaults } from '../cloudflare/shadow-model-inference.js';
+import { SHADOW_EXTRACTION_MODEL_ID } from '../src/shadow-extraction.js';
+import { localShadowApiKey } from './shadow-model-cli.js';
 import { normalizeExactPostingDescription, shadowExtractionPrompt, validateShadowExtraction } from '../src/shadow-extraction.js';
 import { postprocessRoleScopedExtraction } from '../src/shadow-extraction-postprocess.js';
 
@@ -10,11 +11,12 @@ type Run = { run_key: string; source_id: string; external_id: string; content_ha
 const option = (name: string) => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
 const runsPath = option('--runs') ?? '.context/shadow-fresh50-unique-runs.json';
 const artifactsPath = option('--artifacts') ?? '.context/shadow-fresh50-unique-artifacts';
-const reportPath = option('--report') ?? '.context/shadow-fresh50-gpt5mini-v9.json';
-const model = option('--model') ?? 'gpt-5-mini-2025-08-07';
-const maxOutputTokens = Number(option('--max-output-tokens') ?? 1400);
+const reportPath = option('--report') ?? '.context/shadow-fresh50-candidate.json';
+const model = option('--model') ?? SHADOW_EXTRACTION_MODEL_ID;
+const defaults = shadowModelDefaults(model);
+const maxOutputTokens = Number(option('--max-output-tokens') ?? defaults.maxOutputTokens);
 const maxCostCents = Number(option('--max-cost-cents') ?? 100);
-const reasoningEffort = option('--reasoning-effort') ?? 'minimal';
+const reasoningEffort = option('--reasoning-effort') ?? defaults.reasoningEffort;
 const offset = Number(option('--offset') ?? 0);
 const limit = Number(option('--limit') ?? 50);
 const concurrency = Number(option('--concurrency') ?? 1);
@@ -23,17 +25,11 @@ if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || !Number.isS
   || !Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 10) throw new Error('Invalid token, cost, offset, limit, or concurrency');
 if (!['minimal', 'low', 'medium', 'high'].includes(reasoningEffort)) throw new Error('Invalid reasoning effort');
 
-function apiKey(): string {
-  if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
-  const match = readFileSync('.env', 'utf8').match(/^OPENAI_KEY=(.+)$/mu);
-  if (!match) throw new Error('OPENAI_API_KEY or OPENAI_KEY in .env is required');
-  return match[1]!.trim();
-}
 
 const allRuns = JSON.parse(await readFile(runsPath, 'utf8')) as Run[];
 const runs = allRuns.slice(offset, offset + limit);
 if (runs.length === 0 || runs.length > 50 || new Set(runs.map((run) => run.content_hash)).size !== runs.length) throw new Error('Runs must be 1-50 unique posting contents');
-const key = apiKey();
+const key = localShadowApiKey(model);
 let spentCents = 0;
 const records: Array<Record<string, unknown>> = [];
 const rawPresent: Record<string, number> = {};
@@ -44,8 +40,8 @@ async function processRun(run: Run) {
   const input = normalizeExactPostingDescription(artifact.normalized.title, artifact.normalized.description, artifact.normalized.completeness === 'incomplete');
   if (spentCents >= maxCostCents) throw new Error(`Cost ceiling reached before ${run.run_key}`);
   try {
-    const inference = await inferOpenAIShadowExtraction(key, input, shadowExtractionPrompt(input), fetch, { model, maxOutputTokens,
-      reasoningEffort: model.startsWith('gpt-5-') ? reasoningEffort as 'minimal' | 'low' | 'medium' | 'high' : undefined });
+    const inference = await inferShadowExtraction(key, input, shadowExtractionPrompt(input), fetch, { model, maxOutputTokens,
+      reasoningEffort: reasoningEffort as 'minimal' | 'low' | 'medium' | 'high' });
     spentCents += inference.actualCostCents;
     const validation = validateShadowExtraction(inference.response, input);
     if (!validation.accepted) {

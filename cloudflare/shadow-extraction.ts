@@ -22,7 +22,7 @@ import { parseShadowPublicationPolicy } from '../src/shadow-publication.js';
 import { shadowVerificationPrompt, verifiedProspectiveFields } from '../src/shadow-verification.js';
 import type { ProviderIdentity } from '../src/types.js';
 import type { D1Database, D1PreparedStatement, MessageBatch, Queue, R2Bucket } from './types.js';
-import { inferOpenAIShadowExtraction } from './openai-shadow-inference.js';
+import { inferShadowExtraction, shadowModelApiKey } from './shadow-model-inference.js';
 
 export interface ShadowExtractionMessage {
   version: 1;
@@ -57,6 +57,7 @@ export interface ShadowExtractionEnvironment {
   SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS?: string;
   SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS?: string;
   OPENAI_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
   LLM_METADATA_PUBLICATION_POLICY_JSON?: string;
 }
 
@@ -281,15 +282,15 @@ async function finishRun(db: D1Database, message: ShadowExtractionMessage, lease
 }
 
 async function reconcileUsage(db: D1Database, message: ShadowExtractionMessage, leaseToken: string, startedAt: Date,
-  response: Pick<ShadowInferenceResult, 'inputTokens' | 'outputTokens' | 'actualCostCents'>, now: Date): Promise<void> {
+  response: Pick<ShadowInferenceResult, 'inputTokens' | 'outputTokens' | 'actualCostCents'>, now: Date, usageUncertain = false): Promise<void> {
   await db.batch([
     db.prepare(`INSERT OR IGNORE INTO shadow_extraction_usage (lease_token, run_key, input_tokens, output_tokens, actual_cost_cents, recorded_at)
       SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM shadow_extraction_claims WHERE lease_token = ? AND run_key = ?)`)
       .bind(leaseToken, message.runKey, response.inputTokens, response.outputTokens, response.actualCostCents, now.toISOString(), leaseToken, message.runKey),
-    db.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = ?, state = 'reconciled', updated_at = ?
+    db.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = ?, state = ?, updated_at = ?
       WHERE period = ? AND lease_token = ? AND run_key = ?
         AND EXISTS (SELECT 1 FROM shadow_extraction_usage WHERE lease_token = ? AND run_key = ?)`)
-      .bind(response.actualCostCents, now.toISOString(), month(startedAt), leaseToken, message.runKey, leaseToken, message.runKey),
+      .bind(response.actualCostCents, usageUncertain ? 'reserved' : 'reconciled', now.toISOString(), month(startedAt), leaseToken, message.runKey, leaseToken, message.runKey),
   ]);
 }
 
@@ -384,17 +385,17 @@ export async function shadowExtractionSummary(db: D1Database): Promise<Record<st
 }
 
 export async function processShadowExtractionBatch(batch: MessageBatch<unknown>, env: ShadowExtractionEnvironment, now = () => new Date(), infer?: (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => Promise<ShadowInferenceResult>): Promise<void> {
-  const apiKey = env.OPENAI_KEY;
+  const apiKey = shadowModelApiKey(env);
   const inference = infer ?? (apiKey
-    ? (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => inferOpenAIShadowExtraction(apiKey, input, prompt, fetch, {
-      model: SHADOW_EXTRACTION_MODEL_ID, maxOutputTokens: 1400, reasoningEffort: 'minimal',
-    })
+    ? (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => inferShadowExtraction(apiKey, input, prompt)
     : undefined);
   for (const queued of batch.messages) {
     let message: ShadowExtractionMessage;
     try { message = readJson(queued.body); } catch { queued.ack(); continue; }
     const startedAt = now();
     let leaseToken: string | undefined;
+    let inferenceStarted = false;
+    let usageUncertain = false;
     try {
       leaseToken = await claimRun(env.DB, message, startedAt);
       if (!leaseToken) { queued.ack(); continue; }
@@ -453,6 +454,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       const usageValid = (response: ShadowInferenceResult) => Number.isSafeInteger(response.inputTokens) && response.inputTokens >= 0
         && Number.isSafeInteger(response.outputTokens) && response.outputTokens >= 0
         && Number.isSafeInteger(response.actualCostCents) && response.actualCostCents >= 0;
+      inferenceStarted = true;
       const response = await inference(normalized, shadowExtractionPrompt(normalized));
       if (!usageValid(response)) {
         throw new Error('model usage is invalid');
@@ -485,6 +487,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
             repairedFields = malformedFields.filter((field) => retryProjection.accepted!.fields[field].status === 'present');
           }
         } catch (error) {
+          usageUncertain = true;
           // The initial projection is already contract-valid and billed. Do
           // not requeue it merely because the optional repair was unavailable.
           repairError = error instanceof Error ? error.message.slice(0, 500) : 'model repair failed';
@@ -496,7 +499,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
           actualCostCents: response.actualCostCents + repairedResponse.actualCostCents }
         : response;
       if (!await currentRevision(env.DB, message)) {
-        await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now());
+        await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now(), usageUncertain);
         await finishRun(env.DB, message, leaseToken, 'obsolete', now(), { error: 'a newer posting revision arrived during inference', inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens, actualCostCents: usage.actualCostCents }); queued.ack(); continue;
       }
@@ -520,10 +523,11 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
             response: checked.response, inputTokens: checked.inputTokens, outputTokens: checked.outputTokens,
             actualCostCents: checked.actualCostCents };
         } catch (error) {
+          usageUncertain = true;
           verificationError = error instanceof Error ? error.message.slice(0, 500) : 'verifier failed';
         }
       }
-      await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now());
+      await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now(), usageUncertain);
       const responseKey = `shadow-response/${message.runKey}/${leaseToken}.json`;
       await env.SHADOW_EXTRACTION_ARTIFACTS.put(responseKey, new TextEncoder().encode(JSON.stringify({ response: response.response, validation, rawValidation,
         projection: initialProjection ? { removedFields: initialProjection.removedFields, failures: initialProjection.failures } : undefined,
@@ -544,7 +548,11 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       // write is fenced, so a late failure cannot replace the newer result.
       if (leaseToken) {
         const failedAt = now();
-        await releaseShadowCost(env.DB, failedAt, message.runKey, leaseToken);
+        // A transport error or truncated response can still be billable. Hold
+        // its bounded reservation when usage is unknown, including failures
+        // in optional repair/verification calls. Never turn an unknown bill
+        // into free headroom for another attempt.
+        if (!inferenceStarted) await releaseShadowCost(env.DB, failedAt, message.runKey, leaseToken);
         await finishRun(env.DB, message, leaseToken, 'transient-failure', failedAt, { error: error instanceof Error ? error.message.slice(0, 500) : 'unknown failure' });
       }
       if ((queued.attempts ?? 1) >= 2) queued.ack(); else queued.retry({ delaySeconds: 300 }, error);

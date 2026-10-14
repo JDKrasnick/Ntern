@@ -8,6 +8,7 @@ export const shadowDefaultModelId = 'gpt-4o-mini-2024-07-18';
 export const shadowModelPricingCents: Record<string, { input: number; output: number }> = {
   'gpt-4o-mini-2024-07-18': { input: 15, output: 60 },
   'gpt-5-mini-2025-08-07': { input: 25, output: 200 },
+  'gpt-6-luna': { input: 10, output: 50 },
   'gpt-4o-2024-08-06': { input: 250, output: 1000 },
 };
 
@@ -44,13 +45,14 @@ const compensation = {
   items: {
     type: 'object', additionalProperties: false, required: ['min', 'max', 'currency', 'period'],
     properties: {
-      min: { type: 'number' }, max: { type: 'number' }, currency: { type: 'string' },
+      min: { type: 'number' }, max: { type: 'number' },
+      currency: { type: 'string', pattern: '^[A-Z]{3}$', description: 'Three-letter ISO currency code such as USD, EUR, or PLN; never a currency symbol.' },
       period: { type: 'string', enum: ['hour', 'day', 'week', 'month', 'year', 'one-time', 'unknown'] },
     },
   },
 };
 
-const responseSchema = {
+export const shadowResponseSchema = {
   type: 'object',
   additionalProperties: false,
   required: ['classification', 'fields'],
@@ -67,7 +69,10 @@ const responseSchema = {
       type: 'object', additionalProperties: false,
       required: ['compensation', 'locations', 'workMode', 'housing', 'timing', 'education', 'eligibility'],
       properties: {
-        compensation: fieldSchema(compensation),
+        compensation: {
+          ...fieldSchema(compensation),
+          description: 'Each pay band needs ONE contiguous evidence string containing its amounts, currency, and period together. If a pay-period label and the amount are separated, quote the full intervening source span including newlines; separate evidence strings do not combine.',
+        },
         locations: fieldSchema({ type: 'array', items: { type: 'string' } }),
         workMode: fieldSchema(workMode), housing: fieldSchema(strings), timing: fieldSchema(strings),
         education: fieldSchema(strings), eligibility: fieldSchema(strings),
@@ -135,9 +140,10 @@ export async function inferOpenAIJson(
   // GPT-5 Chat Completions rejects the legacy cap name used by the pinned
   // GPT-4o-mini production snapshot. Preserve backwards compatibility while
   // allowing bounded evaluation runs on newer models.
-  const outputLimit = model.startsWith('gpt-5-') ? { max_completion_tokens: outputCap } : { max_tokens: outputCap };
-  const sampling = model.startsWith('gpt-5-') ? {} : { temperature: 0 };
-  const reasoning = model.startsWith('gpt-5-') && options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {};
+  const reasoningModel = /^gpt-[56]-/u.test(model);
+  const outputLimit = reasoningModel ? { max_completion_tokens: outputCap } : { max_tokens: outputCap };
+  const sampling = reasoningModel ? {} : { temperature: 0 };
+  const reasoning = reasoningModel && options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {};
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? requestTimeoutMs);
   let completion: OpenAIChatCompletion;
@@ -199,7 +205,7 @@ export async function inferOpenAIShadowExtraction(
   options: ShadowInferenceOptions = {},
 ): Promise<ShadowInferenceResult> {
   const result = await inferOpenAIJson(apiKey, {
-    prompt, schemaName: 'shadow_metadata_extraction', schema: responseSchema,
+    prompt, schemaName: 'shadow_metadata_extraction', schema: shadowResponseSchema,
     ...(options.model ? { model: options.model } : {}),
     ...(options.maxOutputTokens === undefined ? {} : { maxOutputTokens: options.maxOutputTokens }),
     ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),

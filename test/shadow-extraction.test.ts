@@ -145,6 +145,26 @@ describe('shadow extraction contract', () => {
     expect(validateShadowExtraction(value, input).accepted?.fields.compensation).toMatchObject({ status: 'present' });
   });
 
+  it.each(['68 880,00 zł', '68\u00a0880,00 PLN', '68\u202f880,00 zł'])('accepts grouped Polish amounts without dropping currency evidence: %s', amount => {
+    const passage = `The minimum Annual Salary for this role in Poland is ${amount}.`;
+    const input = normalizeExactPostingDescription('Intern', passage);
+    const value = output();
+    value.fields.locations = { value: null as never, status: 'not-stated', evidence: [], qualifiers: [] };
+    value.fields.compensation = { value: [{ min: 68880, max: 68880, currency: 'PLN', period: 'year' }], status: 'present', evidence: [passage], qualifiers: [] };
+    expect(validateShadowExtraction(value, input).accepted?.fields.compensation.status).toBe('present');
+    value.fields.compensation.value[0]!.min = 68881;
+    value.fields.compensation.value[0]!.max = 68881;
+    expect(validateShadowExtraction(value, input).failures).toContain('compensation: numeric or unit inconsistency');
+    value.fields.compensation.value[0]!.min = 68880;
+    value.fields.compensation.value[0]!.max = 68880;
+    value.fields.compensation.value[0]!.currency = 'USD';
+    expect(validateShadowExtraction(value, input).failures).toContain('compensation: numeric or unit inconsistency');
+    value.fields.compensation.value[0]!.currency = 'PLN';
+    value.fields.compensation.value[0]!.min = 6888000;
+    value.fields.compensation.value[0]!.max = 6888000;
+    expect(validateShadowExtraction(value, input).failures).toContain('compensation: numeric or unit inconsistency');
+  });
+
   it('keeps unknown classifications and incomplete/conflicting fields distinct from silence', () => {
     const input = normalizeExactPostingDescription('Intern', source, true);
     const value = output();
@@ -329,6 +349,8 @@ describe('shadow extraction queue and cost ledger', () => {
     const artifact = await new Response((await artifacts.get(key))!.body).json() as { validation: { accepted?: unknown }; repair: { error: string } };
     expect(artifact.validation.accepted).toBeDefined();
     expect(artifact.repair.error).toBe('repair service unavailable');
+    expect(await DB.prepare('SELECT state, reserved_cents, actual_cents FROM shadow_extraction_cost_ledger WHERE run_key = ?').bind(message!.runKey).first())
+      .toEqual({ state: 'reserved', reserved_cents: 10, actual_cents: 2 });
   });
 
   it('keeps historical runs unknown and survives unreadable validator JSON', async () => {
@@ -469,7 +491,7 @@ describe('shadow extraction queue and cost ledger', () => {
     })).toMatchObject({ allowanceCents: 900, spentCents: 0, exhausted: false });
   });
 
-  it('reuses a reservation for one transient retry and records deterministic baseline differences', async () => {
+  it('holds unknown billed usage across a transient retry and records deterministic baseline differences', async () => {
     const DB = schema(); const artifacts = new MemoryR2(); const messages: unknown[] = [];
     const queue: Queue = { async send(body) { messages.push(body); }, async sendBatch() {} };
     const message = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts }, {
@@ -497,7 +519,7 @@ describe('shadow extraction queue and cost ledger', () => {
       .toEqual({ state: 'completed', attempts: 2 });
     expect(await DB.prepare('SELECT state, reserved_cents, actual_cents FROM shadow_extraction_cost_ledger WHERE run_key = ? ORDER BY rowid').bind(message!.runKey).all())
       .toEqual({ results: [
-        { state: 'released', reserved_cents: 10, actual_cents: 0 },
+        { state: 'reserved', reserved_cents: 10, actual_cents: 0 },
         { state: 'reconciled', reserved_cents: 10, actual_cents: 6 },
       ] });
     expect(await DB.prepare('SELECT field, baseline_state, shadow_state, differs FROM shadow_extraction_baseline_differences ORDER BY field').all())

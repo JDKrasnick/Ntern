@@ -185,6 +185,7 @@ export interface Environment extends AuthEnvironment,
   /** Brandfetch client ID; corroboration only, never persisted or fetched. */
   BRANDFETCH_CLIENT_ID?: string;
   OPENAI_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
   /** Stage 1 ingestion V2 shadow discovery. Both default off. */
   INGESTION_V2_SHADOW_DISCOVERY_ENABLED?: string;
   INGESTION_V2_SHADOW_SOURCE_ALLOWLIST?: string;

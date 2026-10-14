@@ -74,6 +74,7 @@ npx wrangler secret put GMAIL_MESSAGE_HMAC_KEY --config wrangler.ingestion.jsonc
 npx wrangler secret put INTERNAL_SERVICE_SECRET --config wrangler.ingestion.jsonc
 npx wrangler secret put BILLING_WEBHOOK_SECRET --config wrangler.ingestion.jsonc
 npx wrangler secret put CLOUDFLARE_SHUTDOWN_TOKEN --config wrangler.ingestion.jsonc
+npx wrangler secret put ANTHROPIC_API_KEY --config wrangler.ingestion.jsonc
 ```
 
 Set `ADMISSION_SUPPORT_RECIPIENT` on ingestion with the same command shape when
