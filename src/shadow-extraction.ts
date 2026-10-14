@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
-// v41 retains v34 prompt wording and v36 filtering, and uses a shared Claude
+// v42 retains v34 prompt wording and v36 filtering, and uses a shared Claude
 // schema definition and ISO currency grammar. Cache identity covers
 // the Haiku candidate's medium effort / 8192 total output-token configuration.
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v41';
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v42';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v5';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v2';
 export const SHADOW_EXTRACTION_MODEL_ID = 'claude-haiku-5-5';

@@ -24,8 +24,13 @@ function claudeSchema() {
   const fields = schema.properties.fields.properties;
   // Reuse the identical list-valued field grammar rather than compiling five
   // copies (locations, housing, timing, education, and eligibility).
-  schema.$defs = { textField: fields.locations };
-  for (const field of ['locations', 'housing', 'timing', 'education', 'eligibility']) fields[field] = { $ref: '#/$defs/textField' };
+  const textField = { ...fields.locations as Record<string, unknown> };
+  delete textField.description;
+  schema.$defs = { textField };
+  for (const field of ['locations', 'housing', 'timing', 'education', 'eligibility']) {
+    const description = (fields[field] as { description?: string }).description;
+    fields[field] = { $ref: '#/$defs/textField', ...(description ? { description } : {}) };
+  }
   return schema;
 }
 

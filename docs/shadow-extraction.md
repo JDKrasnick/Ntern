@@ -52,7 +52,7 @@ a result employer-authoritative.
 The next-release extraction candidate is `claude-haiku-5-5`, at medium effort,
 with a 8192-token cap that includes thinking. Extraction, the bounded repair,
 and prospective verification use the same provider adapter. The model and
-prompt revision are included in cache identities. Revision v41 shares one
+prompt revision are included in cache identities. Revision v42 shares one
 schema definition across the five list-valued fields to keep Claude's grammar
 within its compilation limit, requests the canonical string-list form, and
 constrains currency to three uppercase letters. The domain validator still

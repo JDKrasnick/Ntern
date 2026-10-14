@@ -26,7 +26,7 @@ describe('Claude shadow inference', () => {
       const schema = body.output_config.format.schema;
       expect(schema.$defs.textField).toHaveProperty('anyOf');
       for (const field of ['locations', 'housing', 'timing', 'education', 'eligibility']) {
-        expect(schema.properties.fields.properties[field]).toEqual({ $ref: '#/$defs/textField' });
+        expect(schema.properties.fields.properties[field]).toMatchObject({ $ref: '#/$defs/textField', description: expect.any(String) });
       }
       expect(init?.signal).toBeInstanceOf(AbortSignal);
       return Response.json(message);
