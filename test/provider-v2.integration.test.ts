@@ -11,15 +11,24 @@ const postingId = '11111111-1111-4111-8111-111111111111';
 const title = 'Software Engineering Intern, Summer 2027';
 const scheduledAt = '2026-10-05T12:00:00.000Z';
 
-describe('Greenhouse last-posting closure', () => {
+describe.each(['greenhouse', 'lever'] as const)('%s last-posting closure', (provider) => {
   async function fixture(owner: boolean) {
-    const source = { ...acmeSource, status: 'published' as const };
+    const greenhouse = { ...acmeSource, status: 'published' as const };
+    const lever = { id: 'lever-acme', company: 'Acme', site: 'acme', careersUrl: 'https://acme.test/careers',
+      admittedAt: scheduledAt, status: 'published' as const, region: 'global' as const,
+      evidenceStatus: 'legacy-review' as const };
+    const source = provider === 'greenhouse' ? greenhouse : lever;
     const store = new MemoryInternshipStore();
     const observed: ShadowDiscoveryInput[] = [];
-    let body: unknown = { jobs: [technicalInternship] };
+    let body: unknown = provider === 'greenhouse' ? { jobs: [technicalInternship] } : [{
+      id: postingId, text: title, hostedUrl: `https://jobs.lever.co/acme/${postingId}`,
+      applyUrl: `https://jobs.lever.co/acme/${postingId}/apply`,
+      descriptionPlain: 'Build software. Summer 2027 internship.',
+      categories: { location: 'New York', commitment: 'Intern' }, createdAt: Date.parse(scheduledAt),
+    }];
     let persist = true;
     const dependencies = {
-      store, sources: [source], v2CatalogWriteOwner: () => owner,
+      store, v2CatalogWriteOwner: () => owner,
       linkValidator: async (url: string) => url,
       fetchImpl: async () => new Response(JSON.stringify(body)),
       shadowDiscovery: {
@@ -30,9 +39,11 @@ describe('Greenhouse last-posting closure', () => {
         },
       },
     };
-    const poll = () => runGreenhouseBoard({ version: 1 as const, sourceId: source.id, scheduledAt }, dependencies);
+    const poll = () => provider === 'greenhouse'
+      ? runGreenhouseBoard({ version: 1 as const, sourceId: greenhouse.id, scheduledAt }, { ...dependencies, sources: [greenhouse] })
+      : runLeverBoard({ version: 1 as const, sourceId: lever.id, scheduledAt }, { ...dependencies, sources: [lever] });
     await poll();
-    return { store, observed, source, poll, empty: () => { body = { jobs: [], meta: { total: 0 } }; },
+    return { store, observed, source, poll, empty: () => { body = provider === 'greenhouse' ? { jobs: [], meta: { total: 0 } } : []; },
       malformed: () => { body = {}; }, incomplete: () => { body = { jobs: [], meta: { total: 1 } }; },
       failPersistence: () => { persist = false; } };
   }
@@ -65,7 +76,7 @@ describe('Greenhouse last-posting closure', () => {
     const f = await fixture(true);
     const before = await f.store.getCheckpoint(f.source.id);
     f.malformed();
-    await expect(f.poll()).rejects.toThrow('response shape was invalid');
+    await expect(f.poll()).rejects.toThrow(provider === 'greenhouse' ? 'response shape was invalid' : 'response was not an array');
     expect(f.observed).toHaveLength(1);
     expect(await f.store.getCheckpoint(f.source.id)).toEqual(before);
   });
@@ -79,7 +90,7 @@ describe('Greenhouse last-posting closure', () => {
     expect(await f.store.getCheckpoint(f.source.id)).toEqual(before);
   });
 
-  it('rejects an empty response that claims a remaining posting', async () => {
+  if (provider === 'greenhouse') it('rejects an empty response that claims a remaining posting', async () => {
     const f = await fixture(true);
     const before = await f.store.getCheckpoint(f.source.id);
     f.incomplete();
