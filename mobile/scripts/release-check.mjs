@@ -66,6 +66,38 @@ for (const name of requiredUrls) {
   if (!value || !/^https:\/\//.test(value))
     fail(`${name} must be a public HTTPS URL`);
 }
+const nativePrivacyPath = new URL(
+  "../ios/InternNotifs/PrivacyInfo.xcprivacy", import.meta.url,
+);
+if (!existsSync(nativePrivacyPath)) {
+  fail("missing native privacy manifest");
+} else if (!readFileSync(nativePrivacyPath, "utf8").includes(
+  "<string>NSPrivacyCollectedDataTypeEmailsOrTextMessages</string>",
+)) {
+  fail("native privacy manifest must disclose optional Gmail email data");
+}
+if (!process.exitCode) {
+  await Promise.all(requiredUrls.filter(name => name !== "EXPO_PUBLIC_API_URL").map(async name => {
+    try {
+      const response = await fetch(process.env[name], {
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok || !response.url.startsWith("https://") ||
+          !response.headers.get("content-type")?.includes("text/html")) {
+        fail(`${name} must load a public HTTPS policy page (HTTP ${response.status})`);
+        await response.body?.cancel();
+        return;
+      }
+      const page = await response.text();
+      if (name === "EXPO_PUBLIC_SUPPORT_URL" &&
+          !/id=["']delete-account["']/.test(page)) {
+        fail("support page must include the public account-deletion path");
+      }
+    } catch {
+      fail(`${name} public page could not be verified`);
+    }
+  }));
+}
 if (!process.exitCode) {
   for (const [command, args] of [
     ["npm", ["run", "typecheck"]],

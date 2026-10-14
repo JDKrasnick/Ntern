@@ -1015,14 +1015,13 @@ function JobCard({
               roleTable && styles.roleTableRow,
               roleTable && wideEditorialRow && styles.roleTableRowWide,
               compactMobile && styles.mobileEditorialRoleRow,
-              isNew && styles.catalogListRowFresh,
             ]}
             onPress={onOpen}
           >
             {desktopVariant === "simplify" ? (
               <View style={styles.simplifyRoleContent}>
                 <View style={styles.simplifyRoleTopline}>
-                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
+                  {isNew ? <Text style={styles.newSparkText} accessibilityLabel="New role">New</Text> : null}
                   <View style={styles.desktopRoleIdentity}>
                     <CompanyMark company={display.company} employerId={employerId} />
                     <View style={styles.simplifyRoleCopy}>
@@ -1048,7 +1047,7 @@ function JobCard({
                     <Text style={styles.ycRoleCompany} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text>
                     <Text style={styles.ycRoleSource} numberOfLines={1}>{source.primary}</Text>
                   </View>
-                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
+                  {isNew ? <Text style={styles.newSparkText} accessibilityLabel="New role">New</Text> : null}
                 </View>
                 <Text style={styles.ycRoleTitle} numberOfLines={2}>{display.title}</Text>
                 <Text style={styles.ycRoleMeta} numberOfLines={2}>
@@ -1067,7 +1066,7 @@ function JobCard({
             ) : desktopVariant === "blend" ? (
               <View style={styles.blendRoleContent}>
                 <View style={styles.blendRoleTopline}>
-                  {isNew ? <View style={styles.newSpark} accessibilityLabel="New here role"><Ionicons name="sparkles-outline" size={13} color={colors.signal} /><Text style={styles.newSparkText}>New here</Text></View> : null}
+                  {isNew ? <Text style={styles.newSparkText} accessibilityLabel="New role">New</Text> : null}
                   <View style={styles.desktopRoleIdentity}>
                     <CompanyMark company={display.company} employerId={employerId} />
                     <Text style={styles.blendRoleCompany} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text>
@@ -1104,8 +1103,7 @@ function JobCard({
                     })}
                     {recencyBadge ? (
                       <View style={styles.newSpark} accessibilityLabel={`${recencyBadge} role`}>
-                        <Ionicons name="sparkles-outline" size={13} color={colors.signal} />
-                        <Text style={styles.newSparkText}>{recencyBadge}</Text>
+                        <Text style={styles.newSparkText}>{isNew ? "New" : recencyBadge}</Text>
                       </View>
                     ) : null}
                   </View>
@@ -1448,8 +1446,7 @@ function CatalogListSkeleton({ count = 5 }: { count?: number }) {
 function CatalogFreshnessLabel({ label, isNew }: { label: string; isNew: boolean }) {
   return (
     <View style={styles.catalogFreshnessLabel}>
-      {isNew ? <Ionicons name="sparkles-outline" size={12} color={colors.signal} /> : null}
-      <Text style={styles.catalogListFreshness} numberOfLines={1}>{label}</Text>
+      <Text style={[styles.catalogListFreshness, isNew && styles.catalogListNewLabel]} numberOfLines={1}>{isNew ? "New" : label}</Text>
     </View>
   );
 }
@@ -1544,7 +1541,7 @@ function CatalogTile({
               if (event.nativeEvent.actionName === "hide") handleHide();
             }}
             activeOpacity={0.85}
-            style={lane ? [styles.catalogTile, styles.catalogTileLane] : [styles.catalogListRow, isNew && styles.catalogListRowFresh, wideRow && styles.catalogListRowWide]}
+            style={lane ? [styles.catalogTile, styles.catalogTileLane] : [styles.catalogListRow, wideRow && styles.catalogListRowWide]}
             onPress={() => onOpenRole(job)}
           >
             {lane ? <>
@@ -1553,8 +1550,7 @@ function CatalogTile({
                 <Text style={styles.catalogTileCompany} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text>
                 {recencyBadge ? (
                   <View style={styles.catalogTileNew} accessibilityLabel={`${recencyBadge} role`}>
-                    <Ionicons name="sparkles-outline" size={12} color={colors.signal} />
-                    <Text style={styles.catalogTileNewText}>{recencyBadge}</Text>
+                    <Text style={styles.catalogTileNewText}>{isNew ? "New" : recencyBadge}</Text>
                   </View>
                 ) : null}
               </View>
@@ -1722,7 +1718,7 @@ function CatalogGroupTile({
             accessibilityHint="Opens every role in this group"
             onPress={() => onOpenGroup(group)}
             activeOpacity={0.85}
-            style={lane ? [styles.catalogTile, styles.catalogTileLane] : [styles.catalogListRow, hasNewRole && styles.catalogListRowFresh, wideRow && styles.catalogListRowWide]}
+            style={lane ? [styles.catalogTile, styles.catalogTileLane] : [styles.catalogListRow, wideRow && styles.catalogListRowWide]}
           >
             {lane ? <>
               <View style={styles.catalogTileIdentity}>
@@ -3265,7 +3261,6 @@ function launchInterval(previousOpenedAt: string | null) {
 
 function LaunchInbox({
   inbox,
-  update,
   highlightedJobIds,
   loading = false,
   error,
@@ -3366,15 +3361,6 @@ function LaunchInbox({
               <QueuePillButton count={queueCount} onPress={onOpenQueue} />
             ) : null}
           </View>
-          {update ? (
-            <View style={styles.roleUpdateStrip}>
-              <Ionicons name="sparkles-outline" size={18} color={colors.signal} />
-              <View style={styles.roleUpdateCopy}>
-                <Text style={styles.roleUpdateTitle}>{update.total} new {update.total === 1 ? "role" : "roles"}</Text>
-                <Text style={styles.roleUpdateInterval}>Since {launchInterval(update.previousOpenedAt)}</Text>
-              </View>
-            </View>
-          ) : null}
         </View>
       }
       renderItem={({ item }) =>
@@ -3499,7 +3485,7 @@ function CatalogPaginationFooter({
  * card so an action means one thing everywhere.
  * FIRST VIEWPORT: query, active-facet tokens, a compact freshness lens, then the
  * first comparison rows.
- * SIGNATURE: new roles live in the list itself. A quiet tint marks them in place,
+ * SIGNATURE: new roles live in the list itself. A small New label marks them in place,
  * while New / All changes the lens without introducing a second scrolling axis.
  * RISK: density. Comparison columns appear only when 900px gives them room;
  * narrower surfaces keep the same editorial reading order as the phone.
@@ -10288,10 +10274,6 @@ const styles = StyleSheet.create({
   navIconWrap: { alignItems: "center", justifyContent: "center" },
   navBadgeText: { color: colors.onDark, fontSize: 11, fontWeight: "700" },
   navBadge: { alignItems: "center", backgroundColor: colors.ink, borderRadius: 9, justifyContent: "center", minWidth: 18, paddingHorizontal: 4, position: "absolute", right: -12, top: -6 },
-  roleUpdateStrip: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20, paddingVertical: 12, borderTopWidth: 1, borderBottomWidth: 1, borderColor: colors.separator },
-  roleUpdateCopy: { flex: 1 },
-  roleUpdateTitle: { color: colors.ink, fontSize: 15, fontWeight: "600" },
-  roleUpdateInterval: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 2 },
   inboxHeader: { paddingTop: 28, paddingBottom: 20 },
   // The wide Roles rows inset their content by 20, so the heading that sits above
   // them insets by the same amount instead of hanging back at the column edge.
@@ -10569,7 +10551,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 15,
   },
-  catalogListRowFresh: { backgroundColor: colors.signalSoft },
   catalogListRowWide: { minHeight: 92, paddingHorizontal: 20, paddingVertical: 14 },
   catalogListEmployer: { alignItems: "center", flexDirection: "row", flexShrink: 0, gap: 10, width: 44 },
   catalogListEmployerWide: { width: 180 },
@@ -10578,7 +10559,8 @@ const styles = StyleSheet.create({
   catalogListMobileTopline: { alignItems: "center", flexDirection: "row", gap: 8, marginBottom: 2 },
   catalogListCompanyMobile: { color: colors.signal, flex: 1, fontSize: 12, fontWeight: "700", lineHeight: 16, minWidth: 0 },
   catalogFreshnessLabel: { flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 },
-  catalogListFreshness: { color: colors.signal, flexShrink: 0, fontSize: 10, fontWeight: "800", letterSpacing: 0.35, textTransform: "uppercase" },
+  catalogListFreshness: { color: colors.muted, flexShrink: 0, fontSize: 11, fontWeight: "600" },
+  catalogListNewLabel: { color: colors.signal },
   catalogListTitle: { color: colors.ink, fontSize: 15, fontWeight: "700", lineHeight: 20 },
   catalogListSource: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },
   catalogListMeta: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 3 },
@@ -11426,15 +11408,10 @@ const styles = StyleSheet.create({
   jobCompanyRow: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
   newSpark: {
     alignItems: "center",
-    backgroundColor: colors.signalSoft,
-    borderRadius: 999,
     flexDirection: "row",
-    gap: 4,
     marginLeft: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
   },
-  newSparkText: { color: colors.signal, fontSize: 11, fontWeight: "800", letterSpacing: 0.2 },
+  newSparkText: { color: colors.signal, fontSize: 11, fontWeight: "600" },
   title: {
     color: colors.ink,
     fontSize: 17,
