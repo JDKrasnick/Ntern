@@ -15,6 +15,22 @@ function extraction(overrides: Partial<ShadowExtraction['fields']>): ShadowExtra
 }
 
 describe('postprocessRoleScopedExtraction', () => {
+  it('matches country aliases within one structured site without inventing a different country', () => {
+    for (const [value, passage] of [
+      ['Ann Arbor, MI, USA', 'Location: Ann Arbor, MI\nPrimary Location: USA-MI-Ann Arbor-KLA'],
+      ['Shanghai, China', 'Location: Shanghai, CHN'],
+      ['London, United Kingdom', 'Location: London, UK'],
+    ]) {
+      const result = postprocessRoleScopedExtraction(extraction({ locations: field('present', [value, 'Shanghai, Germany'], [passage!]) }));
+      expect(result.extraction.fields.locations.value).toEqual([value]);
+    }
+  });
+
+  it('retains an explicit US-person requirement even when the value is a short label', () => {
+    const result = postprocessRoleScopedExtraction(extraction({ eligibility: field('present', ['U.S. Person'],
+      ['Must be a U.S. Person due to required access to U.S. export-controlled information.']) }));
+    expect(result.extraction.fields.eligibility.status).toBe('present');
+  });
   it('does not mistake employer-provided visa sponsorship for applicant paperwork', () => {
     const result = postprocessRoleScopedExtraction(extraction({
       eligibility: field('present', ['We provide visa sponsorship.'], ['We provide visa sponsorship.']),

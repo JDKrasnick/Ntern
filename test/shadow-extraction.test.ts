@@ -145,6 +145,17 @@ describe('shadow extraction contract', () => {
     expect(validateShadowExtraction(value, input).accepted?.fields.compensation).toMatchObject({ status: 'present' });
   });
 
+  it('accepts explicit RMB pay quoted with the ISO CNY currency without confusing it with USD', () => {
+    const passage = 'Internship salary: 280 RMB per day (working day)';
+    const input = normalizeExactPostingDescription('Intern', passage);
+    const value = output();
+    value.fields.locations = { value: null as never, status: 'not-stated', evidence: [], qualifiers: [] };
+    value.fields.compensation = { value: [{ min: 280, max: 280, currency: 'CNY', period: 'day' }], status: 'present', evidence: [passage], qualifiers: [] };
+    expect(validateShadowExtraction(value, input).accepted?.fields.compensation.status).toBe('present');
+    value.fields.compensation.value[0]!.currency = 'USD';
+    expect(validateShadowExtraction(value, input).failures).toContain('compensation: numeric or unit inconsistency');
+  });
+
   it.each(['68 880,00 zł', '68\u00a0880,00 PLN', '68\u202f880,00 zł'])('accepts grouped Polish amounts without dropping currency evidence: %s', amount => {
     const passage = `The minimum Annual Salary for this role in Poland is ${amount}.`;
     const input = normalizeExactPostingDescription('Intern', passage);

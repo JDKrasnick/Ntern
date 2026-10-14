@@ -26,11 +26,11 @@ const genericEverify = /\be-?verify\b/iu;
 const proceduralEligibility = /\b(?:e-?verify|drug[- ]?test|background[- ]?check|visa[- ]?(?:processing|application process)|visa application process|(?:application|applying)[^.\n]{0,120}\b(?:visa|permit|residen)|(?:(?:submit|attach)\b|(?:you|applicants?|candidates?)\s+(?:(?:must|should|are required to)\s+)?(?:provide|include)\b)[^.\n]{0,120}\b(?:passport|identity document|permit|visa|documentation))\b/iu;
 const statutoryWage = /\b(?:minimum wage|wage notice|pay transparency)\b/iu;
 const genericHybridBenefit = /\b(?:hybrid work model|hybrid work schedule options|flexible work model|work[- ]life)\b/iu;
-const structuredRoleLocation = /^(?:OFFICIAL STRUCTURED ROLE LOCATION DATA[^\n]*\n)?Location:\s+\S/mu;
+const structuredRoleLocation = /^(?:OFFICIAL STRUCTURED ROLE LOCATION DATA[^\n]*\n)?(?:Primary )?Location:\s*\S/mu;
 const roleLocationHeader = /\b(?:Full|Part)[- ]Time\s+(?:Temp\s+)?[^\n]{1,120}\bRequisition ID\s*:/iu;
 const roleLocation = /\b(?:this|the) (?:role|position|internship|job)\b.*\b(?:in|at|based)\b|\b(?:interns?|internships?|co-?ops?|new grads?)\b.*\b(?:in|at|based)\b|\bbased(?: in person)? (?:at|in)\b|\bon[- ]?site in\b|\bavailable\b.*\bin\b|\b(?:primary|primarily|work)\s+locations?\s+(?:are|is|include)\b/iu;
 const languageOnly = /\b(?:fluent|proficien(?:cy|t)|speak|language)\b/iu;
-const eligibilityTerms = /\b(?:work authorization|authorized to work|work lawfully|eligible for employment|citizens?|citizenship|nationality|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]?control(?:led)?|itar|international traffic in arms|national defense authorization act|ndaa)\b/iu;
+const eligibilityTerms = /\b(?:work authorization|authorized to work|work lawfully|eligible for employment|u\.?s\.?\s+persons?|citizens?|citizenship|nationality|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]?control(?:led)?|itar|international traffic in arms|national defense authorization act|ndaa)\b/iu;
 const studentStatus = /\b(?:current(?:ly)?|enrolled)\b[^.\n]{0,80}\b(?:student|co-?op)\b|\bstudents? only\b/iu;
 const applicantResidence = /\b(?:applicants?|candidates?|students?)\b[^.\n]{0,80}\b(?:must|need to|are required to|should)\b[^.\n]{0,80}\b(?:live|reside|be located|available)\b/iu;
 const companyIdentity = /\b(?:we|the company|our organization)\s+(?:are|is)\b|\babout (?:us|the company)\b/iu;
@@ -56,15 +56,18 @@ function fieldText(field: ShadowField): string {
 
 function containsLocation(passage: string, location: string): boolean {
   const fold = (text: string) => text.normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+    .replace(/\b(?:united states(?: of america)?|usa|u s a|u s)\b/gu, 'us')
+    .replace(/\b(?:china|chn)\b/gu, 'cn')
+    .replace(/\b(?:united kingdom|gbr|great britain)\b/gu, 'uk');
   const words = ` ${fold(passage)} `;
   if (words.includes(` ${fold(location)} `)) return true;
   const components = location.split(',').map(fold).filter(Boolean);
   // Only an individual structured location label can reorder components. Do
   // not assemble a city and country from different sites or prose passages.
-  return components.length > 0 && passage.split('\n').filter((line) => /^Location:\s+/u.test(line))
+  return components.length > 0 && passage.split('\n').filter((line) => /^(?:Primary )?Location:\s*/u.test(line))
     .some((line) => {
-      const label = ` ${fold(line.replace(/^Location:\s+/u, ''))} `;
+      const label = ` ${fold(line.replace(/^(?:Primary )?Location:\s*/u, ''))} `;
       return components.every((component) => label.includes(` ${component} `));
     });
 }
