@@ -33,7 +33,8 @@ describe('Greenhouse last-posting closure', () => {
     const poll = () => runGreenhouseBoard({ version: 1 as const, sourceId: source.id, scheduledAt }, dependencies);
     await poll();
     return { store, observed, source, poll, empty: () => { body = { jobs: [], meta: { total: 0 } }; },
-      malformed: () => { body = {}; }, failPersistence: () => { persist = false; } };
+      malformed: () => { body = {}; }, incomplete: () => { body = { jobs: [], meta: { total: 1 } }; },
+      failPersistence: () => { persist = false; } };
   }
 
   it('keeps a V2-owned board healthy and persists complete empty snapshots after its final posting closes', async () => {
@@ -75,6 +76,15 @@ describe('Greenhouse last-posting closure', () => {
     f.empty();
     f.failPersistence();
     await expect(f.poll()).rejects.toThrow('failed to persist its complete source snapshot');
+    expect(await f.store.getCheckpoint(f.source.id)).toEqual(before);
+  });
+
+  it('rejects an empty response that claims a remaining posting', async () => {
+    const f = await fixture(true);
+    const before = await f.store.getCheckpoint(f.source.id);
+    f.incomplete();
+    await expect(f.poll()).rejects.toThrow('empty response contradicts its declared total');
+    expect(f.observed).toHaveLength(1);
     expect(await f.store.getCheckpoint(f.source.id)).toEqual(before);
   });
 });

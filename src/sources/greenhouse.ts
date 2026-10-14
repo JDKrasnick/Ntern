@@ -401,6 +401,10 @@ export class GreenhouseBoardAdapter implements SourceAdapter, SourceConnector {
       throw new SourceFetchError(`${this.id}: Greenhouse response shape was invalid`, 'json');
     }
     let jobs = (payload as GreenhouseJobsResponse).jobs ?? [];
+    const declaredTotal = (payload as { meta?: { total?: unknown } }).meta?.total;
+    if (jobs.length === 0 && declaredTotal !== undefined && declaredTotal !== 0) {
+      throw new SourceFetchError(`${this.id}: Greenhouse empty response contradicts its declared total`, 'json');
+    }
     if (jobs.length > GREENHOUSE_BOARD_MAX_JOBS) {
       throw new SourceFetchError(`${this.id}: Greenhouse board exceeds ${GREENHOUSE_BOARD_MAX_JOBS} jobs`, 'capacity');
     }
