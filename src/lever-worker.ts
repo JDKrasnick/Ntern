@@ -300,7 +300,8 @@ export async function runLeverBoard(
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
     dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({ runId: message.runId,
       seedOnly: message.seedOnly === true, forceFullAcquisition: message.seedOnly === true,
-      naturalProviderPoll: !message.force });
+      naturalProviderPoll: !message.force,
+      allowCompleteEmptySnapshot: dependencies.v2CatalogWriteOwner?.(source.id) === true });
   const pollFailure = failureFromPollReport(poll, sourceHealth);
   if (pollFailure) throw pollFailure;
   const publishedHealth = await dependencies.store.getSourceHealth(source.id);

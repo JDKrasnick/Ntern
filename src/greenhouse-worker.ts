@@ -149,7 +149,10 @@ export async function runGreenhouseBoard(
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
     dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({
-    naturalProviderPoll: !message.force, forceFullAcquisition: message.force === true, seedOnly: message.seedOnly === true });
+    naturalProviderPoll: !message.force, forceFullAcquisition: message.force === true, seedOnly: message.seedOnly === true,
+    // V2 closes missing postings through verified complete snapshots and its
+    // omission fence. A valid empty board must reach that durable path.
+    allowCompleteEmptySnapshot: dependencies.v2CatalogWriteOwner?.(source.id) === true });
   const pollFailure = failureFromPollReport(poll, sourceHealth);
   if (pollFailure) throw pollFailure;
   const checkpoint = await dependencies.store.getCheckpoint(source.id);

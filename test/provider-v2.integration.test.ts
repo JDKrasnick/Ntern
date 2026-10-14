@@ -11,6 +11,95 @@ const postingId = '11111111-1111-4111-8111-111111111111';
 const title = 'Software Engineering Intern, Summer 2027';
 const scheduledAt = '2026-10-05T12:00:00.000Z';
 
+describe.each(['greenhouse', 'lever'] as const)('%s last-posting closure', (provider) => {
+  async function fixture(owner: boolean) {
+    const greenhouse = { ...acmeSource, status: 'published' as const };
+    const lever = { id: 'lever-acme', company: 'Acme', site: 'acme', careersUrl: 'https://acme.test/careers',
+      admittedAt: scheduledAt, status: 'published' as const, region: 'global' as const,
+      evidenceStatus: 'legacy-review' as const };
+    const source = provider === 'greenhouse' ? greenhouse : lever;
+    const store = new MemoryInternshipStore();
+    const observed: ShadowDiscoveryInput[] = [];
+    let body: unknown = provider === 'greenhouse' ? { jobs: [technicalInternship] } : [{
+      id: postingId, text: title, hostedUrl: `https://jobs.lever.co/acme/${postingId}`,
+      applyUrl: `https://jobs.lever.co/acme/${postingId}/apply`,
+      descriptionPlain: 'Build software. Summer 2027 internship.',
+      categories: { location: 'New York', commitment: 'Intern' }, createdAt: Date.parse(scheduledAt),
+    }];
+    let persist = true;
+    const dependencies = {
+      store, v2CatalogWriteOwner: () => owner,
+      linkValidator: async (url: string) => url,
+      fetchImpl: async () => new Response(JSON.stringify(body)),
+      shadowDiscovery: {
+        isEnabledForSource: () => true,
+        async discover(input: ShadowDiscoveryInput) {
+          observed.push(input);
+          return { completed: persist, snapshotHash: normalizeSourceSnapshot(input).snapshotHash };
+        },
+      },
+    };
+    const poll = () => provider === 'greenhouse'
+      ? runGreenhouseBoard({ version: 1 as const, sourceId: greenhouse.id, scheduledAt }, { ...dependencies, sources: [greenhouse] })
+      : runLeverBoard({ version: 1 as const, sourceId: lever.id, scheduledAt }, { ...dependencies, sources: [lever] });
+    await poll();
+    return { store, observed, source, poll, empty: () => { body = provider === 'greenhouse' ? { jobs: [], meta: { total: 0 } } : []; },
+      malformed: () => { body = {}; }, incomplete: () => { body = { jobs: [], meta: { total: 1 } }; },
+      failPersistence: () => { persist = false; } };
+  }
+
+  it('keeps a V2-owned board healthy and persists complete empty snapshots after its final posting closes', async () => {
+    const f = await fixture(true);
+    expect((await f.store.getCheckpoint(f.source.id))?.lastRowCount).toBe(1);
+    f.empty();
+    await f.poll();
+    await f.poll();
+    expect(f.observed.map(s => s.postings.length)).toEqual([1, 0, 0]);
+    expect(f.observed.slice(1).map(s => s.completeFetchSequence)).toEqual([2, 3]);
+    expect(f.observed.slice(1).every(s => s.processed.counts.raw === 0 && s.legacyActiveExternalIds.length === 0)).toBe(true);
+    expect(await f.store.getCheckpoint(f.source.id)).toMatchObject({ lastRowCount: 0, activeExternalIds: [] });
+    expect(await f.store.getSourceHealth(f.source.id)).toMatchObject({ state: 'healthy', consecutiveFailures: 0 });
+    expect(f.store.jobs.size).toBe(0);
+  });
+
+  it('retains the suspicious-zero guard for legacy-owned boards', async () => {
+    const f = await fixture(false);
+    const before = await f.store.getCheckpoint(f.source.id);
+    f.empty();
+    await expect(f.poll()).rejects.toThrow('suspicious zero-row');
+    expect(f.observed).toHaveLength(1);
+    expect(await f.store.getCheckpoint(f.source.id)).toEqual(before);
+    expect(f.store.jobs.size).toBe(1);
+  });
+
+  it('rejects malformed responses instead of treating them as empty V2 snapshots', async () => {
+    const f = await fixture(true);
+    const before = await f.store.getCheckpoint(f.source.id);
+    f.malformed();
+    await expect(f.poll()).rejects.toThrow(provider === 'greenhouse' ? 'response shape was invalid' : 'response was not an array');
+    expect(f.observed).toHaveLength(1);
+    expect(await f.store.getCheckpoint(f.source.id)).toEqual(before);
+  });
+
+  it('retains the checkpoint when the empty V2 snapshot cannot persist', async () => {
+    const f = await fixture(true);
+    const before = await f.store.getCheckpoint(f.source.id);
+    f.empty();
+    f.failPersistence();
+    await expect(f.poll()).rejects.toThrow('failed to persist its complete source snapshot');
+    expect(await f.store.getCheckpoint(f.source.id)).toEqual(before);
+  });
+
+  if (provider === 'greenhouse') it('rejects an empty response that claims a remaining posting', async () => {
+    const f = await fixture(true);
+    const before = await f.store.getCheckpoint(f.source.id);
+    f.incomplete();
+    await expect(f.poll()).rejects.toThrow('empty response contradicts its declared total');
+    expect(f.observed).toHaveLength(1);
+    expect(await f.store.getCheckpoint(f.source.id)).toEqual(before);
+  });
+});
+
 it.each([false, true])('re-fetches an unchanged reviewed Greenhouse board for V2 (catalog owner=%s)', async (owner) => {
   const source = { ...acmeSource, id: 'greenhouse-figma', boardToken: 'figma', status: 'published' as const };
   const store = new MemoryInternshipStore();
