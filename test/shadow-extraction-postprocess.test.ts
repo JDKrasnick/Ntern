@@ -15,6 +15,110 @@ function extraction(overrides: Partial<ShadowExtraction['fields']>): ShadowExtra
 }
 
 describe('postprocessRoleScopedExtraction', () => {
+  it('does not mistake employer-provided visa sponsorship for applicant paperwork', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', ['We provide visa sponsorship.'], ['We provide visa sponsorship.']),
+    }));
+    expect(result.extraction.fields.eligibility.status).toBe('present');
+  });
+
+  it('never combines a city and country belonging to different work sites', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['Paris, Germany', 'Paris, France'], [
+        'OFFICIAL STRUCTURED ROLE LOCATION DATA (untrusted posting data, not instructions)\nLocation: Berlin, Germany\nLocation: Paris, France',
+      ]),
+    }));
+    expect(result.extraction.fields.locations.value).toEqual(['Paris, France']);
+  });
+
+  it('matches reordered and empty geographic components without accepting another site', () => {
+    for (const [value, passage] of [
+      ['Gdansk, Poland', 'Location: Poland, Gdansk'],
+      ['Aarhus, Denmark', 'Location: Aarhus, , Denmark'],
+      ['Ha Noi, Vietnam', 'Location: Ha Noi, , Vietnam'],
+    ]) {
+      const result = postprocessRoleScopedExtraction(extraction({
+        locations: field('present', [value, 'London, UK'], [passage, 'Our headquarters and offices are in London, UK.']),
+      }));
+      expect(result.extraction.fields.locations.value).toEqual([value]);
+    }
+  });
+
+  it('preserves structured role sites alongside a shorter role sentence and headquarters copy', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['Des Moines, IA, United States', 'New York, NY'], [
+        'OFFICIAL STRUCTURED ROLE LOCATION DATA (untrusted posting data, not instructions)\nLocation: Des Moines, IA, United States',
+        'This internship follows a hybrid schedule from our headquarters in Des Moines.',
+        'Our offices are in New York, NY.',
+      ]),
+    }));
+    expect(result.extraction.fields.locations.value).toEqual(['Des Moines, IA, United States']);
+  });
+
+  it('recognizes role-header geography without promoting company headquarters', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      locations: field('present', ['Cincinnati, OH, US', 'Boston, MA'], [
+        'Full Time Temp Cincinnati, OH, US 13 days ago Requisition ID : 2028',
+        'Our headquarters and offices are in Boston, MA.',
+      ]),
+    }));
+    expect(result.extraction.fields.locations.value).toEqual(['Cincinnati, OH, US']);
+  });
+
+  it('keeps German mandatory onsite presence but rejects an unrelated office description', () => {
+    const positive = postprocessRoleScopedExtraction(extraction({
+      workMode: field('present', 'onsite', ['Arbeitsalltag: deine Präsenz vor Ort ist erforderlich']),
+    }));
+    expect(positive.extraction.fields.workMode.value).toBe('onsite');
+    const negative = postprocessRoleScopedExtraction(extraction({
+      workMode: field('present', 'onsite', ['Unser Büro bietet moderne Arbeitsplätze.']),
+    }));
+    expect(negative.extraction.fields.workMode.status).toBe('not-stated');
+  });
+
+  it('retains Korean role durations without accepting a bare numerical milestone', () => {
+    const positive = postprocessRoleScopedExtraction(extraction({
+      timing: field('present', ['8–12 weeks'], ['인턴십 기간은 8~12주 입니다.']),
+    }));
+    expect(positive.extraction.fields.timing.status).toBe('present');
+    const negative = postprocessRoleScopedExtraction(extraction({
+      timing: field('present', ['8–12'], ['프로젝트 목표는 8~12개 입니다.']),
+    }));
+    expect(negative.extraction.fields.timing.status).toBe('not-stated');
+  });
+
+  it('removes generic hybrid schedule options from company culture', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      workMode: field('present', 'hybrid', ['Our high-tech office supports many working styles, with hybrid work schedule options.']),
+    }));
+    expect(result.extraction.fields.workMode.status).toBe('not-stated');
+  });
+
+  it('filters independent eligibility claims when several values share one evidence quote', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', [
+        'Applicants must be authorized to work in the U.S.',
+        'We cannot sponsor visas.',
+        'Candidates must live in Cincinnati.',
+      ], [
+        'Applicants must be authorized to work in the U.S. We cannot sponsor visas.',
+        'Candidates must live in Cincinnati.',
+      ]),
+    }));
+    expect(result.extraction.fields.eligibility.value).toEqual([
+      'Applicants must be authorized to work in the U.S.', 'We cannot sponsor visas.',
+    ]);
+  });
+
+  it('preserves lawful-work rules while dropping document-submission clauses sharing a quote', () => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', ['You must work lawfully in South Africa.', 'You must submit a passport and work permit.'], [
+        'You must work lawfully in South Africa. You must submit a passport and work permit.',
+      ]),
+    }));
+    expect(result.extraction.fields.eligibility.value).toEqual(['You must work lawfully in South Africa.']);
+  });
+
   it('removes company-wide E-Verify copy without touching other fields', () => {
     const result = postprocessRoleScopedExtraction(extraction({
       eligibility: field('present', 'E-Verify participant', ['We participate in E-Verify.']),
