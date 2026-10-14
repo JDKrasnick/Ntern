@@ -49,38 +49,48 @@ a result employer-authoritative.
 
 ## Cost guard and rollout
 
-The next-release extraction candidate is `claude-haiku-5-5`, at medium effort,
-with a 8192-token cap that includes thinking. Extraction, the bounded repair,
-and prospective verification use the same provider adapter. The model and
-prompt revision are included in cache identities. Revision v43 shares one
-schema definition across the five list-valued fields to keep Claude's grammar
-within its compilation limit, requests the canonical string-list form, and
-constrains currency to three uppercase letters. The domain validator still
-checks statuses, quotes, currency evidence, and numeric consistency. Prior
-GPT-5 mini accuracy results do not establish Haiku accuracy.
+The next-release extraction candidate is `gpt-6-luna`, at medium effort with
+an 8192-token total cap. `claude-haiku-5-5` remains an explicitly selectable
+alternative with its own credential. Extraction, bounded repair, and prospective
+verification use the selected provider. Model and prompt revisions are included
+in cache identities. Revision v45 clarifies source-stated education programs and
+audiences, complete posting-header locations, and explicit temporary terms.
+Neither a program audience nor a preference implies a minimum degree.
 
-For local evaluations, paste the Claude key into `ANTHROPIC_API_KEY=` in the
-gitignored root `.env`. The three evaluation runners select credentials by
-model; `--model gpt-5-mini-2025-08-07` preserves the baseline comparison.
-Missing Claude credentials fail closed, with no OpenAI fallback. Existing
-OpenAI icon and other features continue to use their own adapter and secret.
-`npm run test:anthropic:live` performs an opt-in real API contract check using
-the same adapter, schema, effort, and token limit as the Worker. The normal
-suite skips this check and never needs a real credential.
+The shared validator recognizes source-supported country/currency aliases and
+localized pay formatting. Haiku reuses one schema definition for list-valued
+fields to avoid its real grammar-compilation limit; all providers retain source
+quote, status, numeric, and unit validation. Provider descriptions cannot
+substitute for the domain validator or source-based accuracy evaluation.
 
-At release, provision `ANTHROPIC_API_KEY` as a secret on the ingestion Worker
-(and its dev counterpart for dev validation), using the repository's secret
-provisioning procedure. Never put it in Wrangler variables, Terraform state,
-queue messages, artifacts, or the public/mobile environment. The existing
-OpenTofu `keep_bindings = ["secret_text"]` preserves Worker secrets.
+Local evaluations select credentials by model: `OPENAI_API_KEY` or `OPENAI_KEY`
+for Luna, `ANTHROPIC_API_KEY` for Haiku. Paste the latter in the gitignored root
+`.env`. The three evaluation runners support explicit `--model` comparisons.
+Missing selected-provider credentials fail closed, with no provider fallback.
+Existing OpenAI icon features retain their own adapter and settings.
+
+`npm run test:metadata-model:live` checks the active model's complete production
+schema. `npm run test:anthropic:live` checks Haiku explicitly. Both are opt-in;
+the normal suite skips live calls and requires no real credential.
+
+Provision `OPENAI_KEY` for the selected Luna model and `ANTHROPIC_API_KEY` for
+the Haiku alternative as secrets on ingestion Workers, including dev. Never
+put values in Wrangler variables, Terraform state, queue messages, artifacts,
+or public/mobile variables. OpenTofu preserves `secret_text` bindings.
 `SHADOW_EXTRACTION_ENABLED` controls calls independently from publication.
 
-Before production, run the unseen extraction holdout and housing/deadline
-challenge cases against independently checked labels. Measure precision,
-recall, unsupported claims, invalid outputs, latency, and actual billed tokens
-including thinking and repairs. All-field publication and the scoped historical
-backfill still require the contracts and conversions in the release proposal;
-changing the inference provider does not implement those changes.
+Both automatic prospective publication and manual receipt creation require
+25 fully reviewed natural runs from the exact model/prompt/schema/preprocessing
+version, with at least 95% precision and recall and positive examples for every
+policy-allowed field. A verified output from another model version cannot gain a
+new automatic receipt. An already authorized exact receipt can finish projecting
+while the next model's gate is pending. Migration 0055 gives the bounded review
+query an index ordered by exact version and completion time.
+
+All-field publication contracts/conversions, explicit deadline support, and
+scoped historical execution remain separate release work; changing the provider
+does not implement them. Source-based holdouts and housing/deadline challenge
+cases still apply before those fields are promoted.
 
 Enabled execution must provide both
 `SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS` (the forecast for all existing

@@ -64,11 +64,14 @@ export async function publishProspectiveShadowMetadata(env: {
     LEFT JOIN shadow_publication_receipts receipt ON receipt.run_key = r.run_key
       AND receipt.policy_version = ? AND receipt.revoked_at IS NULL
     LEFT JOIN shadow_publication_decisions decision ON decision.run_key = r.run_key AND decision.policy_version = ?
-    WHERE r.state = 'completed' AND r.origin = 'provider-poll' AND r.input_completeness = 'complete'
-      AND r.created_at >= ? AND revision.observed_at >= ?
+     WHERE r.state = 'completed' AND r.origin = 'provider-poll' AND r.input_completeness = 'complete'
+       AND r.created_at >= ? AND revision.observed_at >= ?
+       AND ((r.model_id = ? AND r.prompt_version = ? AND r.schema_version = ? AND r.preprocessing_version = ?)
+         OR receipt.run_key IS NOT NULL)
       AND (decision.run_key IS NULL OR (decision.result = 'receipted' AND receipt.projected_at IS NULL))
     ORDER BY r.created_at, r.run_key LIMIT 1`)
-    .bind(policy.version, policy.version, policy.startsAt, policy.startsAt).first<ProspectiveRunRow>();
+    .bind(policy.version, policy.version, policy.startsAt, policy.startsAt, SHADOW_EXTRACTION_MODEL_ID,
+      SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION).first<ProspectiveRunRow>();
   if (!run) return { result: 'none' };
   const object = await env.SHADOW_EXTRACTION_ARTIFACTS.get(run.response_key);
   if (!object || object.size === undefined || object.size > maxArtifactBytes) throw new Error('Prospective artifact is unavailable or oversized');
@@ -99,6 +102,14 @@ export async function publishProspectiveShadowMetadata(env: {
     externalId: run.external_id, contentHash: run.content_hash, runKey: run.run_key,
     policyVersion: policy.version, allowedFields: acceptedFields });
   const receiptId = createHash('sha256').update(`receipt\0${evidenceFingerprint}`).digest('hex');
+  const authorized = await env.DB.prepare(`SELECT receipt_id FROM shadow_publication_receipts
+    WHERE receipt_id = ? AND revoked_at IS NULL`).bind(receiptId).first<{ receipt_id: string }>();
+  if (!authorized) {
+    // Independent model agreement is not a substitute for source-based
+    // evaluation of this exact model/prompt/schema/preprocessing version.
+    const qualityGate = await rolloutQualityGate(env.DB);
+    if (policy.allowedFields.some(field => !qualityGate.fields[field].passed)) return { result: 'quality-gate-pending', runKey: run.run_key };
+  }
   const inserted = await env.DB.prepare(`INSERT INTO shadow_publication_receipts
       (receipt_id, job_id, source_id, external_id, content_hash, run_key, policy_version, accepted_fields, evidence_fingerprint, created_at)
     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -190,15 +201,14 @@ async function evaluationSummary(db: D1Database) {
     preprocessing: row.preprocessing_version, field: row.field, outcome: row.outcome, count: row.count })) };
 }
 
+export const naturalShadowCohortSql = `SELECT run_key FROM shadow_extraction_runs
+  WHERE state = 'completed' AND origin IN ('provider-poll', 'scheduled-verification')
+    AND model_id = ? AND prompt_version = ? AND schema_version = ? AND preprocessing_version = ?
+  ORDER BY completed_at, run_key LIMIT ?`;
+
 async function rolloutQualityGate(db: D1Database) {
   const rows = await db.prepare(`SELECT cohort.run_key, evaluations.field, evaluations.outcome
-    FROM (
-      SELECT run_key FROM shadow_extraction_runs
-      WHERE state = 'completed' AND origin IN ('provider-poll', 'scheduled-verification')
-        AND model_id = ? AND prompt_version = ? AND schema_version = ? AND preprocessing_version = ?
-      ORDER BY completed_at, run_key
-      LIMIT ?
-    ) cohort
+    FROM (${naturalShadowCohortSql}) cohort
     LEFT JOIN shadow_extraction_evaluations evaluations ON evaluations.run_key = cohort.run_key
     ORDER BY cohort.run_key, evaluations.field`).bind(SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION,
       SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION, rolloutReviewTarget)

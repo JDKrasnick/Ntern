@@ -33,7 +33,7 @@ describe('Claude shadow inference', () => {
     });
     const accepted = validateShadowExtraction(extraction, input).accepted!;
     for (const next of [prompt, shadowExtractionRepairPrompt(input, ['locations']), shadowVerificationPrompt(input, accepted)]) {
-      const result = await inferShadowExtraction('claude-test', input, next, request);
+      const result = await inferShadowExtraction('claude-test', input, next, request, shadowModelDefaults('claude-haiku-5-5'));
       expect(result).toEqual({ response: extraction, inputTokens: 1000, outputTokens: 500, actualCostCents: 1 });
       expect(validateShadowExtraction(result.response, input).failures).toEqual([]);
     }
@@ -41,8 +41,8 @@ describe('Claude shadow inference', () => {
   });
 
   it('selects only the intended provider credential and never falls back', async () => {
-    expect(shadowModelApiKey({ OPENAI_KEY: 'openai' })).toBeUndefined();
-    expect(shadowModelApiKey({ ANTHROPIC_API_KEY: 'claude', OPENAI_KEY: 'openai' })).toBe('claude');
+    expect(shadowModelApiKey({ OPENAI_KEY: 'openai' }, 'claude-haiku-5-5')).toBeUndefined();
+    expect(shadowModelApiKey({ ANTHROPIC_API_KEY: 'claude', OPENAI_KEY: 'openai' }, 'claude-haiku-5-5')).toBe('claude');
     expect(shadowModelApiKey({ ANTHROPIC_API_KEY: 'claude' }, 'gpt-6-luna')).toBeUndefined();
     const request = vi.fn();
     await expect(inferAnthropicShadowExtraction('', input, prompt, request)).rejects.toThrow('ANTHROPIC_API_KEY');
@@ -92,7 +92,7 @@ describe('Claude shadow inference', () => {
   it('uses Luna token limits and prices when explicitly selected for comparison', async () => {
     const request = vi.fn(async (_url, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
-      expect(body).toMatchObject({ model: 'gpt-6-luna', max_completion_tokens: 1400, reasoning_effort: 'medium' });
+      expect(body).toMatchObject({ model: 'gpt-6-luna', max_completion_tokens: 8192, reasoning_effort: 'medium' });
       expect(body).not.toHaveProperty('temperature');
       return Response.json({ choices: [{ message: { content: '{}' } }], usage: { prompt_tokens: 100000, completion_tokens: 10000 } });
     });

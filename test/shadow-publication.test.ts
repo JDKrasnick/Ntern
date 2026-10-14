@@ -10,7 +10,7 @@ import { SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PREPROCESSING_VERSION, SH
 import type { Internship, RoleMetadataEvidence } from '../src/types.js';
 import type { R2Bucket } from '../cloudflare/types.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
-import { publishProspectiveShadowMetadata } from '../cloudflare/shadow-publication.js';
+import { publishProspectiveShadowMetadata, naturalShadowCohortSql } from '../cloudflare/shadow-publication.js';
 
 const hash = 'a'.repeat(64);
 
@@ -58,7 +58,7 @@ async function publicationDatabase(): Promise<{ database: DatabaseSync; artifact
   const database = new DatabaseSync(':memory:');
   for (const migration of ['0001_initial.sql', '0003_billing_shutdown.sql', '0015_role_metadata_enrichment.sql', '0020_shadow_extraction.sql', '0021_shadow_extraction_fencing.sql',
     '0022_shadow_extraction_cache_expiry.sql', '0023_shadow_extraction_attempt_costs.sql', '0024_shadow_publication_receipts.sql', '0025_shadow_extraction_evaluations.sql',
-    '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql', '0033_shadow_publication_projection.sql']) {
+    '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql', '0033_shadow_publication_projection.sql', '0055_shadow_natural_cohort.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   database.prepare(`INSERT INTO shadow_extraction_runs
@@ -134,6 +134,14 @@ async function createReceipt(database: DatabaseSync, artifacts: MemoryR2, versio
 }
 
 describe('shadow publication policy', () => {
+  it('finds the first current-version completions through a covering index without sorting history', async () => {
+    const { database } = await publicationDatabase();
+    seedRolloutQualityGate(database);
+    const plan = database.prepare(`EXPLAIN QUERY PLAN ${naturalShadowCohortSql}`).all(SHADOW_EXTRACTION_MODEL_ID,
+      SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION, 25);
+    expect(JSON.stringify(plan)).toContain('shadow_extraction_natural_cohort');
+    expect(JSON.stringify(plan)).not.toContain('TEMP B-TREE');
+  });
   it('fails closed for absent, malformed, duplicate, and unsupported policies', () => {
     expect(parseShadowPublicationPolicy(undefined).enabled).toBe(false);
     expect(parseShadowPublicationPolicy('{oops').enabled).toBe(false);
@@ -302,16 +310,28 @@ describe('shadow publication policy', () => {
     let refreshes = 0;
     const refresh = async () => { refreshes += 1; };
     database.prepare(`UPDATE shadow_extraction_runs SET origin = 'backfill', input_completeness = 'complete',
-      created_at = '2026-09-24T00:01:00.000Z' WHERE run_key = ?`).run(hash);
-    database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-24T00:01:00.000Z'`).run();
+      created_at = '2026-09-26T00:01:00.000Z', completed_at = '2026-09-26T00:01:00.000Z', model_id = ?, prompt_version = ?, schema_version = ?, preprocessing_version = ? WHERE run_key = ?`)
+      .run(SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION, hash);
+    database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-26T00:01:00.000Z'`).run();
     await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
       verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
     expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'none' });
     database.prepare("UPDATE shadow_extraction_runs SET origin = 'provider-poll' WHERE run_key = ?").run(hash);
+    expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'quality-gate-pending', runKey: hash });
+    expect((database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get() as { count: number }).count).toBe(0);
+    expect(refreshes).toBe(0);
+    seedRolloutQualityGate(database);
     expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'projected', runKey: hash });
     expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'none' });
     expect(refreshes).toBe(1);
     expect((database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get() as { count: number }).count).toBe(1);
+    // An already authorized projection can resume after the active model
+    // changes, even while the new version's review cohort is pending.
+    database.prepare("UPDATE shadow_extraction_runs SET model_id = 'previous-model' WHERE run_key = ?").run(hash);
+    database.prepare('DELETE FROM shadow_extraction_evaluations').run();
+    database.prepare('UPDATE shadow_publication_receipts SET projected_at = NULL').run();
+    expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'projected', runKey: hash });
+    expect(refreshes).toBe(2);
   });
 
   it('publishes a verified provider run after the old receipt cap is reached', async () => {
@@ -319,8 +339,10 @@ describe('shadow publication policy', () => {
     const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-test', mode: 'prospective-provider-poll',
       startsAt: '2026-09-24T00:00:00.000Z', allowedFields: ['locations'], cohort: [], maxReceipts: null };
     database.prepare(`UPDATE shadow_extraction_runs SET origin = 'provider-poll', input_completeness = 'complete',
-      created_at = '2026-09-24T00:01:00.000Z' WHERE run_key = ?`).run(hash);
-    database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-24T00:01:00.000Z'`).run();
+      created_at = '2026-09-26T00:01:00.000Z', completed_at = '2026-09-26T00:01:00.000Z', model_id = ?, prompt_version = ?, schema_version = ?, preprocessing_version = ? WHERE run_key = ?`)
+      .run(SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION, hash);
+    database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-26T00:01:00.000Z'`).run();
+    seedRolloutQualityGate(database);
     for (let index = 0; index < 25; index += 1) {
       database.prepare(`INSERT INTO shadow_publication_receipts
         (receipt_id, job_id, source_id, external_id, content_hash, run_key, policy_version, accepted_fields, evidence_fingerprint, created_at)
@@ -334,5 +356,21 @@ describe('shadow publication policy', () => {
       LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
     expect(await publishProspectiveShadowMetadata(env, async () => {})).toEqual({ result: 'projected', runKey: hash });
     expect((database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get() as { count: number }).count).toBe(26);
+  });
+
+  it('does not use a current model review cohort to publish an older model output', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    seedRolloutQualityGate(database);
+    const policy = { enabled: true, version: 'old-model-test', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T00:00:00.000Z', allowedFields: ['locations'], cohort: [], maxReceipts: null };
+    database.prepare(`UPDATE shadow_extraction_runs SET origin = 'provider-poll', input_completeness = 'complete',
+      created_at = '2026-09-26T00:01:00.000Z' WHERE run_key = ?`).run(hash);
+    database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-26T00:01:00.000Z'`).run();
+    await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
+      verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
+    const env = { DB: d1(database), DOCUMENTS: new MemoryR2(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+    expect(await publishProspectiveShadowMetadata(env, async () => {})).toEqual({ result: 'none' });
+    expect((database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get() as { count: number }).count).toBe(0);
   });
 });

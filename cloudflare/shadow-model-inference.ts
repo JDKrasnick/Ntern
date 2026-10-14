@@ -6,6 +6,7 @@ export function shadowModelDefaults(model = SHADOW_EXTRACTION_MODEL_ID): ShadowI
   if (model !== anthropicShadowModelId && !shadowModelPricingCents[model]) throw new Error(`Unsupported extraction model: ${model}`);
   return model === anthropicShadowModelId
     ? { model, maxOutputTokens: anthropicShadowOutputTokens, reasoningEffort: 'medium' }
+    : model === 'gpt-6-luna' ? { model, maxOutputTokens: 8192, reasoningEffort: 'medium' }
     : { model, maxOutputTokens: 1400, reasoningEffort: model.startsWith('gpt-5-') ? 'minimal' : 'medium' };
 }
 
