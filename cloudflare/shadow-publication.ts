@@ -97,8 +97,11 @@ export async function publishProspectiveShadowMetadata(env: {
   const attached = job?.open && job.sourceReferences.some(reference => reference.sourceId === run.source_id
     && reference.externalId === run.external_id);
   if (!attached || !extraction || !acceptedFields.length) {
+    // A receipt may already exist when projection failed on an earlier pass.
+    // Finish an ineligible recovery instead of retaining its priority forever.
     await env.DB.prepare(`INSERT INTO shadow_publication_decisions (run_key, policy_version, result, recorded_at)
-      VALUES (?, ?, 'skipped', ?) ON CONFLICT(run_key, policy_version) DO NOTHING`)
+      VALUES (?, ?, 'skipped', ?) ON CONFLICT(run_key, policy_version)
+      DO UPDATE SET result = excluded.result, recorded_at = excluded.recorded_at`)
       .bind(run.run_key, policy.version, new Date().toISOString()).run();
     return { result: 'skipped', runKey: run.run_key };
   }

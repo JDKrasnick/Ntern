@@ -87,7 +87,9 @@ new automatic or manual receipt. New manual receipts also check the candidate's
 own version tuple before using the current review gate. An already authorized
 exact receipt can finish projecting while the next model's gate is pending;
 the maintenance selector prioritizes unprojected active receipts ahead of pending
-new candidates. Migration 0055 gives the bounded review
+new candidates. A recovery whose role closes or loses its exact source records a
+terminal skipped decision so later candidates can proceed. Transient projection
+failures remain retryable. Migration 0055 gives the bounded review
 query an index ordered by exact version and completion time.
 
 All-field publication contracts/conversions, explicit deadline support, and

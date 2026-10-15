@@ -352,6 +352,53 @@ describe('shadow publication policy', () => {
     expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'quality-gate-pending', runKey: 'b'.repeat(64) });
   });
 
+  it.each(['closed', 'detached', 'transient'] as const)(
+    'continues past a %s receipt recovery after a projection failure', async recovery => {
+      const { database, artifacts } = await publicationDatabase();
+      seedRolloutQualityGate(database);
+      const policy = { enabled: true, version: 'recovery-lifecycle-test', mode: 'prospective-provider-poll',
+        startsAt: '2026-09-24T00:00:00.000Z', allowedFields: ['locations'], cohort: [], maxReceipts: null };
+      database.prepare(`UPDATE shadow_extraction_runs SET origin = 'provider-poll', input_completeness = 'complete',
+        created_at = '2026-09-26T00:01:00.000Z', completed_at = '2026-09-26T00:01:00.000Z' WHERE run_key = ?`).run(hash);
+      database.prepare("UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-26T00:01:00.000Z'").run();
+      await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
+        verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
+      const env = { DB: d1(database), DOCUMENTS: new MemoryR2(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+        LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+      await expect(publishProspectiveShadowMetadata(env, async () => { throw new Error('temporary projection failure'); }))
+        .rejects.toThrow('temporary projection failure');
+      const jobs = new D1InternshipStore(env.DB);
+      const job = (await jobs.getJob('job-1'))!;
+      if (recovery === 'closed') await jobs.putInternship({ ...job, open: false });
+      if (recovery === 'detached') await jobs.putInternship({ ...job, sourceReferences: [] });
+      const nextRun = 'b'.repeat(64);
+      await jobs.putInternship({ ...job, jobId: 'job-2', open: true, normalizedUrl: 'https://jobs.example/124', fingerprint: 'second',
+        location: 'Location not specified', sourceReferences: job.sourceReferences.map(reference => ({ ...reference, externalId: '124', metadataEvidence: [] })) });
+      database.prepare(`INSERT INTO shadow_extraction_runs
+        (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version,
+          schema_version, preprocessing_version, state, input_key, response_key, created_at, completed_at, updated_at, origin, input_completeness)
+        SELECT ?, 'job-2', source_id, '124', source_url, posting_identity, content_hash, model_id, prompt_version,
+          schema_version, preprocessing_version, state, input_key, response_key, '2026-09-27T00:01:00.000Z', completed_at,
+          updated_at, origin, input_completeness FROM shadow_extraction_runs WHERE run_key = ?`).run(nextRun, hash);
+      database.prepare(`INSERT INTO shadow_extraction_posting_revisions (job_id, source_id, external_id, content_hash, observed_at)
+        VALUES ('job-2', 'greenhouse-acme', '124', ?, '2026-09-27T00:01:00.000Z')`).run(hash);
+      let refreshes = 0;
+      const refresh = async () => { refreshes += 1; };
+      expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({
+        result: recovery === 'transient' ? 'projected' : 'skipped', runKey: hash,
+      });
+      expect(database.prepare('SELECT result FROM shadow_publication_decisions WHERE run_key = ?').get(hash))
+        .toEqual({ result: recovery === 'transient' ? 'receipted' : 'skipped' });
+      expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'projected', runKey: nextRun });
+      expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'none' });
+      expect(refreshes).toBe(recovery === 'transient' ? 2 : 1);
+      const projected = (await jobs.getJob('job-2'))!;
+      expect(projected.location).toBe('Austin, TX');
+      expect(projected.notification).toEqual({ smsPending: false, digestPending: false });
+      expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts WHERE run_key = ?').get(nextRun))
+        .toMatchObject({ projected_at: expect.any(String) });
+    });
+
   it('publishes a verified provider run after the old receipt cap is reached', async () => {
     const { database, artifacts } = await publicationDatabase();
     const policy = { enabled: true, version: 'prospective-provider-poll-2026-09-test', mode: 'prospective-provider-poll',
