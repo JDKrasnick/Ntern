@@ -6,6 +6,10 @@ const fact = (field: PostingFactField, statements: string[], qualifiers: string[
   ({ field, statements, qualifiers, sourceUrl: 'https://example.com/job', contentHash: 'a'.repeat(64) });
 
 describe('brief metadata disclosures', () => {
+  it('puts legacy location in the same metadata flow without duplicating published location', () => {
+    expect(postingFactSummaries(undefined, { locations: ['San Jose, CA'] })[0]?.tags).toEqual(['San Jose']);
+    expect(postingFactSummaries([fact('locations', ['San Jose, CA'])], { locations: ['San Jose, California'] })).toHaveLength(1);
+  });
   it.each([
     ['Pursuing a bachelor’s degree in Mechanical or Electrical Engineering', ['Pursuing bachelor’s']],
     ['Bachelors in Computer Science or related field', ['Bachelor’s']],

@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "../src/catalog-quality.js";
+import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "../src/catalog-quality.js";
 import { compactCompensationLabel } from "../../shared/compensation-display.js";
 
 describe("catalog presentation hardening", () => {
+  it("shows the term once in the role sheet title", () => {
+    expect(roleSheetTitle("Hardware Intern [Winter 2027]", "winter-2027")).toBe("Hardware Intern [Winter 2027]");
+    expect(roleSheetTitle("Hardware Intern", "winter-2027")).toBe("Hardware Intern · Winter 2027");
+    expect(roleSheetTitle("Hardware Intern", "ongoing")).toBe("Hardware Intern");
+    expect(roleSheetTitle("Hardware Intern", undefined)).toBe("Hardware Intern");
+  });
   it("uses explicit currency, period and applicability on every role surface", () => {
     const role = { compensation: { raw: "legacy", ranges: [
       { minAmount: 2000, maxAmount: 4000, currency: "JPY", period: "hourly", applicableLocations: ["Tokyo"] },

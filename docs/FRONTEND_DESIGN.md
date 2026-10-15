@@ -337,9 +337,11 @@ The Apple private key must remain in AWS/Apple configuration and must never be e
 
 ### Role metadata disclosures
 
-Preserve the app's original bottom-sheet layout: role title, company, categories,
-location/term, source information, and application actions. Keep the
-company mark small beside its name. Pay stays green and joins the other metadata in the same wrapping line. Metadata uses brief labeled
+Preserve the app's compact bottom sheet. Align the company mark beside the title
+block, with company name and disciplines on one wrapping subtitle underneath.
+Show the term once in the title, and put location in the metadata flow. Source,
+discovery timing, and confirmation appear as one quiet secondary line above the
+application actions. Pay stays green and joins the other metadata in the same wrapping line. Metadata uses brief labeled
 phrases that wrap together, without separate full-width rows, dividers, or pill
 backgrounds. Tap/click, keyboard focus, or a 450 ms hover opens a small speech
 bubble attached to the phrase. The bubble overlays the sheet without changing

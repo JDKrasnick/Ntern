@@ -14,6 +14,7 @@ export interface RoleFactSummary {
 interface DisplayContext {
   compensation?: DisplayCompensation;
   housing?: readonly DisplayHousingDetail[];
+  locations?: readonly string[];
 }
 
 const unique = (values: string[]) => [...new Set(values.map(value => value.trim()).filter(Boolean))];
@@ -115,6 +116,7 @@ export function postingFactSummaries(facts: readonly PostingFact[] | undefined, 
   };
   fallback('compensation', compensationLabels(context.compensation));
   fallback('housing', housingLabels(context.housing).map(item => unique([item.label, item.detail]).join(' · ')));
+  fallback('locations', [...(context.locations ?? [])]);
   return postingFactDetails(input).map(fact => {
     const source = input.find(item => item.field === fact.field)!;
     const full = fact.tags;

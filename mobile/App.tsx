@@ -39,7 +39,7 @@ import * as Clipboard from "expo-clipboard";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, catalogCardKind, catalogQueryPreview, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, refreshCacheFirst, type GroupedCatalogPage } from "./src/catalog";
-import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
+import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "./src/catalog-quality";
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
 import { type DisplayHousingDetail } from "../shared/housing-display";
@@ -2096,9 +2096,6 @@ function JobDetailSheet({
 
   const role = job ?? displayedJob.current;
   const roleDisplay = role ? presentCatalogRole(role) : undefined;
-  const details = [role?.postingFacts?.some(fact => fact.field === "locations") ? undefined : roleDisplay?.location, roleDisplay?.season]
-    .filter(Boolean)
-    .join(" · ");
   const actionLabel = !role?.open
     ? "View official listing"
     : signedIn
@@ -2147,38 +2144,30 @@ function JobDetailSheet({
             <JobRouteStatusContent state={routeState} onDismiss={roleSheet.dismiss} onRetry={onRetry} />
           ) : role ? (
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetContent}>
-              <Text style={styles.sheetEyebrow}>{role.open ? "Role details" : "Closed role"}</Text>
-              <Text style={styles.sheetTitle}>{roleDisplay?.title}</Text>
-              <View style={styles.sheetEmployer}>
+              {!role.open ? <Text style={styles.sheetEyebrow}>Closed role</Text> : null}
+              <View style={styles.sheetHeader}>
                 <CompanyMark
                   key={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id ?? role.company}
                   company={employerName(roleDisplay?.company, role.employerCategory)}
                   employerId={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id}
-                  size={28}
+                  size={40}
                 />
-                <Text style={styles.sheetEmployerName}>{employerName(roleDisplay?.company, role.employerCategory)}</Text>
-              </View>
-              {role.disciplines?.length ? (
-                <View style={[styles.jobCardMidPills, { marginTop: 10 }]}>
-                  {role.disciplines.slice(0, 4).map((d) => {
-                    const s = disciplineStyleFor(d);
-                    return (
-                      <View key={d} style={styles.disciplineTag}>
-                        <Text style={[styles.disciplineTagText, { color: s.color }]}>{s.label}</Text>
-                      </View>
-                    );
-                  })}
+                <View style={styles.sheetHeadingCopy}>
+                  <Text style={styles.sheetTitle}>{roleSheetTitle(roleDisplay?.title ?? role.title, role.season)}</Text>
+                  <View style={styles.sheetEmployer}>
+                    <Text style={styles.sheetEmployerName}>{employerName(roleDisplay?.company, role.employerCategory)}</Text>
+                    {role.disciplines?.slice(0, 4).map(d => {
+                      const tone = disciplineStyleFor(d);
+                      return <Text key={d} style={[styles.sheetDiscipline, { color: tone.color }]}>· {tone.label}</Text>;
+                    })}
+                  </View>
                 </View>
-              ) : null}
-              {details ? <Text style={styles.sheetDetail}>{details}</Text> : null}
-              <RoleMetadataHints key={`${role.jobId}:${role.postingFacts?.map(fact => fact.contentHash).join(":") ?? "legacy"}`}
-                facts={postingFactSummaries(role.postingFacts, { compensation: role.compensation, housing: role.housing })} />
-              <View style={styles.sheetTrustBlock}>
-                <Text style={styles.sheetTrustPrimary}>{source.primary}</Text>
-                {source.corroboration ? <Text style={styles.sheetTrustSecondary}>{source.corroboration}</Text> : null}
-                {postingTiming ? <Text style={styles.sheetTrustSecondary}>{postingTiming.detail}</Text> : null}
-                <Text style={styles.sheetTrustSecondary}>{freshnessLabel(role.lastSeenAt)}</Text>
               </View>
+              <RoleMetadataHints key={`${role.jobId}:${role.postingFacts?.map(fact => fact.contentHash).join(":") ?? "legacy"}`}
+                facts={postingFactSummaries(role.postingFacts, { compensation: role.compensation, housing: role.housing, locations: role.locations?.length ? role.locations : role.location ? [role.location] : [] })} />
+              <Text style={styles.sheetSourceNote} accessibilityLabel={[source.primary, source.corroboration, postingTiming?.detail, freshnessLabel(role.lastSeenAt)].filter(Boolean).join(". ")}>
+                {[source.primary, source.corroboration, postingTiming?.summary, freshnessLabel(role.lastSeenAt)].filter(Boolean).join(" · ")}
+              </Text>
               {role.postingIdentityStatus === "unconfirmed" ? (
                 <View style={styles.sheetIdentityNotice} accessibilityLabel="Identity unconfirmed. We verified the employer and application page, but have not yet matched this listing to reviewed exact posting evidence. It may later be combined with another listing.">
                   <Ionicons name="shield-outline" size={17} color={colors.signal} />
@@ -11338,8 +11327,12 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
     lineHeight: 32,
   },
-  sheetEmployer: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
-  sheetEmployerName: { color: colors.body, fontSize: 17, fontWeight: "600", lineHeight: 24, flex: 1 },
+  sheetHeader: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
+  sheetHeadingCopy: { flex: 1, minWidth: 0 },
+  sheetEmployer: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 6, rowGap: 2, marginTop: 5 },
+  sheetDiscipline: { fontSize: 13, fontWeight: "600", lineHeight: 21 },
+  sheetSourceNote: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 10 },
+  sheetEmployerName: { color: colors.body, fontSize: 15, fontWeight: "600", lineHeight: 21 },
   sheetCompany: {
     color: colors.body,
     fontSize: 17,

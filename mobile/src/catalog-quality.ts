@@ -50,6 +50,16 @@ export function seasonLabel(value: unknown): string {
   return !season || season.toLowerCase() === "ongoing" ? "Season not specified" : season;
 }
 
+/** Keep the term in the title only once, including legacy machine-formatted seasons. */
+export function roleSheetTitle(title: string, season: unknown): string {
+  const term = boundedCatalogText(season, 80);
+  if (!term || /^(?:ongoing|unspecified|season not specified)$/iu.test(term)) return title;
+  const comparable = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, '');
+  if (comparable(title).includes(comparable(term))) return title;
+  const formatted = term.replace(/-/gu, ' ').replace(/^\w/u, letter => letter.toUpperCase());
+  return `${title} · ${formatted}`;
+}
+
 export function presentCatalogRole<T extends { company?: unknown; title?: unknown; location?: unknown; locations?: unknown; season?: unknown; compensation?: DisplayCompensation }>(role: T) {
   return {
     company: boundedCatalogText(role.company, 160) || "Unknown company",
