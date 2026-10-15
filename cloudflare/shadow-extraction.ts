@@ -22,7 +22,7 @@ import { parseShadowPublicationPolicy } from '../src/shadow-publication.js';
 import { shadowVerificationPrompt, verifiedProspectiveFields } from '../src/shadow-verification.js';
 import type { ProviderIdentity } from '../src/types.js';
 import type { D1Database, D1PreparedStatement, MessageBatch, Queue, R2Bucket } from './types.js';
-import { inferOpenAIShadowExtraction } from './openai-shadow-inference.js';
+import { inferShadowExtraction, shadowModelApiKey } from './shadow-model-inference.js';
 
 export interface ShadowExtractionMessage {
   version: 1;
@@ -57,6 +57,7 @@ export interface ShadowExtractionEnvironment {
   SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS?: string;
   SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS?: string;
   OPENAI_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
   LLM_METADATA_PUBLICATION_POLICY_JSON?: string;
 }
 
@@ -100,6 +101,8 @@ function month(now: Date): string { return now.toISOString().slice(0, 7); }
 const providerMonthlyShadowLimitCents = 2_000;
 const providerMonthlyCombinedLimitCents = 3_500;
 const providerRunReservationCents = 20;
+export const modelRuntimeProbeSourceId = '_metadata-model-runtime-probe';
+const modelRuntimeProbeMonthlyLimitCents = 100;
 
 function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOrigin, forecast: number, headroom: number): number {
   if (origin === 'provider-poll') {
@@ -122,17 +125,26 @@ function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOri
 
 export async function providerShadowBudgetStatus(db: D1Database, now: Date,
   env: Pick<ShadowExtractionEnvironment, 'SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS' | 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS'>,
-): Promise<{ period: string; allowanceCents: number; spentCents: number; exhausted: boolean } | undefined> {
+): Promise<{ period: string; allowanceCents: number; spentCents: number; exhausted: boolean;
+  historical: { allowanceCents: number; spentCents: number; availableCents: number; exhausted: boolean } } | undefined> {
   const forecast = parseCents(env.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS);
   const headroom = parseCents(env.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS);
   if (forecast === undefined || headroom === undefined) return undefined;
   const period = month(now);
   const allowanceCents = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom);
-  const row = await db.prepare(`SELECT COALESCE(SUM(CASE WHEN state = 'reserved' AND reserved_cents > actual_cents THEN reserved_cents
-      WHEN state IN ('reserved', 'reconciled') THEN actual_cents ELSE 0 END), 0) AS spent_cents
-    FROM shadow_extraction_cost_ledger WHERE period = ?`).bind(period).first<{ spent_cents: number }>();
+  const row = await db.prepare(`SELECT COALESCE(SUM(charged_cents), 0) AS spent_cents,
+      COALESCE(SUM(CASE WHEN origin != 'provider-poll' AND NOT (origin = 'controlled' AND source_id = ?)
+        THEN charged_cents ELSE 0 END), 0) AS historical_cents
+    FROM (SELECT r.origin, r.source_id, CASE WHEN l.state = 'reserved' AND l.reserved_cents > l.actual_cents THEN l.reserved_cents
+      WHEN l.state IN ('reserved', 'reconciled') THEN l.actual_cents ELSE 0 END AS charged_cents
+      FROM shadow_extraction_cost_ledger l JOIN shadow_extraction_runs r ON r.run_key = l.run_key WHERE l.period = ?)`)
+    .bind(modelRuntimeProbeSourceId, period).first<{ spent_cents: number; historical_cents: number }>();
   const spentCents = row?.spent_cents ?? 0;
-  return { period, allowanceCents, spentCents, exhausted: spentCents + providerRunReservationCents > allowanceCents };
+  const historicalAllowance = monthlyShadowAllowanceCents(period, 'backfill', forecast, headroom);
+  const historicalSpent = row?.historical_cents ?? 0;
+  const availableCents = Math.max(0, Math.min(historicalAllowance - historicalSpent, allowanceCents - spentCents));
+  return { period, allowanceCents, spentCents, exhausted: spentCents + providerRunReservationCents > allowanceCents,
+    historical: { allowanceCents: historicalAllowance, spentCents: historicalSpent, availableCents, exhausted: availableCents < 10 } };
 }
 
 function r2Key(contentHash: string): string { return `shadow-input/${safeKeyPart(contentHash)}.json`; }
@@ -210,6 +222,66 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   return message;
 }
 
+const modelRuntimeProbeJobId = createHash('sha256').update('metadata-model-runtime-probe-v1').digest('hex').slice(0, 32);
+
+export async function modelRuntimeProbeStatus(db: D1Database) {
+  const run = await db.prepare(`SELECT run_key AS runKey, state, error, response_key AS responseKey,
+      input_tokens AS inputTokens, output_tokens AS outputTokens, actual_cost_cents AS actualCostCents, validation
+    FROM shadow_extraction_runs WHERE job_id = ? AND source_id = ?
+      AND model_id = ? AND prompt_version = ? AND schema_version = ? AND preprocessing_version = ?
+    ORDER BY created_at DESC, run_key LIMIT 1`).bind(modelRuntimeProbeJobId, modelRuntimeProbeSourceId,
+      SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION,
+      SHADOW_EXTRACTION_PREPROCESSING_VERSION).first<{ runKey: string; state: string; error: string | null;
+        responseKey: string | null; inputTokens: number | null; outputTokens: number | null; actualCostCents: number | null; validation: string | null }>();
+  let checks: Record<string, boolean> | undefined;
+  if (run?.state === 'completed') {
+    let validation: ShadowValidationResult = { failures: ['Unreadable probe validation'], fieldOutcomes: [] };
+    try {
+      const saved = JSON.parse(run.validation ?? 'null') as ShadowValidationResult | null;
+      if (saved && Array.isArray(saved.failures) && Array.isArray(saved.fieldOutcomes)) validation = saved;
+    } catch { /* A corrupt diagnostic record is not a passing probe. */ }
+    const fields = validation.accepted?.fields;
+    checks = {
+      contractValid: validation.failures.length === 0 && Boolean(fields),
+      compensation: fields?.compensation.status === 'present' && Array.isArray(fields.compensation.value)
+        && fields.compensation.value.some((band: unknown) => band !== null && typeof band === 'object'
+          && 'min' in band && band.min === 40 && 'max' in band && band.max === 40
+          && 'currency' in band && band.currency === 'USD' && 'period' in band && band.period === 'hour'),
+      location: fields?.locations.status === 'present' && Array.isArray(fields.locations.value)
+        && fields.locations.value.some((place: unknown) => typeof place === 'string' && /\baustin\b/iu.test(place)),
+      workMode: fields?.workMode.status === 'present' && fields.workMode.value === 'onsite',
+      noExtraClaims: (['housing', 'timing', 'education', 'eligibility'] as const)
+        .every(field => fields?.[field].status === 'not-stated'),
+    };
+  }
+  const { validation: validationJson, ...status } = run ?? {};
+  void validationJson;
+  return { synthetic: true, model: SHADOW_EXTRACTION_MODEL_ID, prompt: SHADOW_EXTRACTION_PROMPT_VERSION,
+    state: run?.state ?? 'not-queued', ...status, ...(checks ? { checks, passed: Object.values(checks).every(Boolean) } : {}) };
+}
+
+/** Fixed synthetic data; never creates a Catalog job or a natural-review run. */
+export async function queueModelRuntimeProbe(env: ShadowExtractionEnvironment, now = new Date(), retry = false) {
+  if (env.SHADOW_EXTRACTION_ENABLED !== 'true') throw new Error('Model execution is disabled');
+  if (!shadowModelApiKey(env)) throw new Error('Selected model credential is unavailable');
+  const current = await modelRuntimeProbeStatus(env.DB);
+  const failed = ['transient-failure', 'invalid-output', 'disabled'].includes(current.state);
+  if (current.state !== 'not-queued' && !(retry && failed)) return current;
+  const sourceUrl = 'https://example.invalid/metadata-model-runtime-probe';
+  const message = await enqueueShadowExtraction(env, {
+    jobId: modelRuntimeProbeJobId, sourceId: modelRuntimeProbeSourceId,
+    externalId: retry ? `runtime-probe-${crypto.randomUUID()}` : 'runtime-probe-v1', sourceUrl,
+    providerIdentity: { provider: 'structured', sourceId: modelRuntimeProbeSourceId, sourceUrl },
+    title: 'Software Engineering Intern',
+    description: 'Location: Austin, Texas, United States. This role is onsite. Compensation: USD 40 per hour.',
+    observedAt: now.toISOString(), origin: 'controlled',
+    baseline: { compensation: 'present', locations: 'present', workMode: 'present', housing: 'not-stated',
+      timing: 'not-stated', education: 'not-stated', eligibility: 'not-stated' },
+  });
+  if (!message) throw new Error('Could not queue the fixed runtime probe');
+  return { ...current, state: 'queued', runKey: message.runKey };
+}
+
 /** Atomic reservation checks the already-forecast app spend and the monthly
  * shadow envelope before an inference call. A missing value fails closed. */
 export async function reserveShadowCost(db: D1Database, now: Date, runKey: string, leaseToken: string, reserveCents: number, env: Pick<ShadowExtractionEnvironment, 'SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS' | 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS'>): Promise<boolean> {
@@ -220,17 +292,36 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
   const prior = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger
     WHERE period = ? AND lease_token = ?`).bind(period, leaseToken).first<{ state: string; reserved_cents: number }>();
   if (prior?.state === 'reserved' && prior.reserved_cents >= reserveCents) return true;
-  const run = await db.prepare('SELECT origin FROM shadow_extraction_runs WHERE run_key = ?')
-    .bind(runKey).first<{ origin: ShadowExtractionOrigin }>();
-  const allowance = monthlyShadowAllowanceCents(period, run?.origin ?? 'legacy-unknown', forecast, headroom);
+  const run = await db.prepare('SELECT origin, source_id FROM shadow_extraction_runs WHERE run_key = ?')
+    .bind(runKey).first<{ origin: ShadowExtractionOrigin; source_id: string }>();
+  // Each lane has its own sublimit; every lane also consumes the same total
+  // model ceiling. Live spending must not consume the historical sublimit.
+  // A fixed synthetic probe has a separate $1 diagnostic envelope, still
+  // charged to the existing global model ceiling. It never borrows the
+  // historical cohort's smaller allowance or counts as natural traffic.
+  const probe = run?.origin === 'controlled' && run.source_id === modelRuntimeProbeSourceId;
+  const allowance = monthlyShadowAllowanceCents(period, probe ? 'provider-poll' : run?.origin ?? 'legacy-unknown', forecast, headroom);
+  const globalAllowance = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom);
+  const historical = !probe && run?.origin !== 'provider-poll';
   if (reserveCents > allowance) return false;
   const result = await db.prepare(`INSERT INTO shadow_extraction_cost_ledger (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
     SELECT ?, ?, ?, ?, 0, 'reserved', ?, ?
     WHERE NOT EXISTS (SELECT 1 FROM shadow_extraction_cost_ledger WHERE period = ? AND lease_token = ?)
       AND COALESCE((SELECT SUM(CASE WHEN state = 'reserved' AND reserved_cents > actual_cents THEN reserved_cents
         WHEN state IN ('reserved', 'reconciled') THEN actual_cents ELSE 0 END)
-        FROM shadow_extraction_cost_ledger WHERE period = ?), 0) + ? <= ?`).bind(
-    period, leaseToken, runKey, reserveCents, now.toISOString(), now.toISOString(), period, leaseToken, period, reserveCents, allowance,
+        FROM shadow_extraction_cost_ledger WHERE period = ?), 0) + ? <= ?
+      AND (? = 0 OR COALESCE((SELECT SUM(CASE WHEN ledger.state = 'reserved' AND ledger.reserved_cents > ledger.actual_cents THEN ledger.reserved_cents
+        WHEN ledger.state IN ('reserved', 'reconciled') THEN ledger.actual_cents ELSE 0 END)
+        FROM shadow_extraction_cost_ledger ledger JOIN shadow_extraction_runs probe_run ON probe_run.run_key = ledger.run_key
+        WHERE ledger.period = ? AND probe_run.origin = 'controlled' AND probe_run.source_id = ?), 0) + ? <= ?)
+      AND (? = 0 OR COALESCE((SELECT SUM(CASE WHEN ledger.state = 'reserved' AND ledger.reserved_cents > ledger.actual_cents THEN ledger.reserved_cents
+        WHEN ledger.state IN ('reserved', 'reconciled') THEN ledger.actual_cents ELSE 0 END)
+        FROM shadow_extraction_cost_ledger ledger JOIN shadow_extraction_runs historical_run ON historical_run.run_key = ledger.run_key
+        WHERE ledger.period = ? AND historical_run.origin != 'provider-poll'
+          AND NOT (historical_run.origin = 'controlled' AND historical_run.source_id = ?)), 0) + ? <= ?)`).bind(
+    period, leaseToken, runKey, reserveCents, now.toISOString(), now.toISOString(), period, leaseToken, period, reserveCents, globalAllowance,
+    probe ? 1 : 0, period, modelRuntimeProbeSourceId, reserveCents, modelRuntimeProbeMonthlyLimitCents,
+    historical ? 1 : 0, period, modelRuntimeProbeSourceId, reserveCents, allowance,
   ).run();
   if (result.meta.changes === 1) return true;
   const existing = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger
@@ -281,15 +372,15 @@ async function finishRun(db: D1Database, message: ShadowExtractionMessage, lease
 }
 
 async function reconcileUsage(db: D1Database, message: ShadowExtractionMessage, leaseToken: string, startedAt: Date,
-  response: Pick<ShadowInferenceResult, 'inputTokens' | 'outputTokens' | 'actualCostCents'>, now: Date): Promise<void> {
+  response: Pick<ShadowInferenceResult, 'inputTokens' | 'outputTokens' | 'actualCostCents'>, now: Date, usageUncertain = false): Promise<void> {
   await db.batch([
     db.prepare(`INSERT OR IGNORE INTO shadow_extraction_usage (lease_token, run_key, input_tokens, output_tokens, actual_cost_cents, recorded_at)
       SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM shadow_extraction_claims WHERE lease_token = ? AND run_key = ?)`)
       .bind(leaseToken, message.runKey, response.inputTokens, response.outputTokens, response.actualCostCents, now.toISOString(), leaseToken, message.runKey),
-    db.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = ?, state = 'reconciled', updated_at = ?
+    db.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = ?, state = ?, updated_at = ?
       WHERE period = ? AND lease_token = ? AND run_key = ?
         AND EXISTS (SELECT 1 FROM shadow_extraction_usage WHERE lease_token = ? AND run_key = ?)`)
-      .bind(response.actualCostCents, now.toISOString(), month(startedAt), leaseToken, message.runKey, leaseToken, message.runKey),
+      .bind(response.actualCostCents, usageUncertain ? 'reserved' : 'reconciled', now.toISOString(), month(startedAt), leaseToken, message.runKey, leaseToken, message.runKey),
   ]);
 }
 
@@ -384,17 +475,17 @@ export async function shadowExtractionSummary(db: D1Database): Promise<Record<st
 }
 
 export async function processShadowExtractionBatch(batch: MessageBatch<unknown>, env: ShadowExtractionEnvironment, now = () => new Date(), infer?: (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => Promise<ShadowInferenceResult>): Promise<void> {
-  const apiKey = env.OPENAI_KEY;
+  const apiKey = shadowModelApiKey(env);
   const inference = infer ?? (apiKey
-    ? (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => inferOpenAIShadowExtraction(apiKey, input, prompt, fetch, {
-      model: SHADOW_EXTRACTION_MODEL_ID, maxOutputTokens: 1400, reasoningEffort: 'minimal',
-    })
+    ? (input: NormalizedPostingInput, prompt: ReturnType<typeof shadowExtractionPrompt>) => inferShadowExtraction(apiKey, input, prompt)
     : undefined);
   for (const queued of batch.messages) {
     let message: ShadowExtractionMessage;
     try { message = readJson(queued.body); } catch { queued.ack(); continue; }
     const startedAt = now();
     let leaseToken: string | undefined;
+    let inferenceStarted = false;
+    let usageUncertain = false;
     try {
       leaseToken = await claimRun(env.DB, message, startedAt);
       if (!leaseToken) { queued.ack(); continue; }
@@ -453,6 +544,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       const usageValid = (response: ShadowInferenceResult) => Number.isSafeInteger(response.inputTokens) && response.inputTokens >= 0
         && Number.isSafeInteger(response.outputTokens) && response.outputTokens >= 0
         && Number.isSafeInteger(response.actualCostCents) && response.actualCostCents >= 0;
+      inferenceStarted = true;
       const response = await inference(normalized, shadowExtractionPrompt(normalized));
       if (!usageValid(response)) {
         throw new Error('model usage is invalid');
@@ -485,6 +577,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
             repairedFields = malformedFields.filter((field) => retryProjection.accepted!.fields[field].status === 'present');
           }
         } catch (error) {
+          usageUncertain = true;
           // The initial projection is already contract-valid and billed. Do
           // not requeue it merely because the optional repair was unavailable.
           repairError = error instanceof Error ? error.message.slice(0, 500) : 'model repair failed';
@@ -496,7 +589,7 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
           actualCostCents: response.actualCostCents + repairedResponse.actualCostCents }
         : response;
       if (!await currentRevision(env.DB, message)) {
-        await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now());
+        await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now(), usageUncertain);
         await finishRun(env.DB, message, leaseToken, 'obsolete', now(), { error: 'a newer posting revision arrived during inference', inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens, actualCostCents: usage.actualCostCents }); queued.ack(); continue;
       }
@@ -520,10 +613,11 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
             response: checked.response, inputTokens: checked.inputTokens, outputTokens: checked.outputTokens,
             actualCostCents: checked.actualCostCents };
         } catch (error) {
+          usageUncertain = true;
           verificationError = error instanceof Error ? error.message.slice(0, 500) : 'verifier failed';
         }
       }
-      await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now());
+      await reconcileUsage(env.DB, message, leaseToken, startedAt, usage, now(), usageUncertain);
       const responseKey = `shadow-response/${message.runKey}/${leaseToken}.json`;
       await env.SHADOW_EXTRACTION_ARTIFACTS.put(responseKey, new TextEncoder().encode(JSON.stringify({ response: response.response, validation, rawValidation,
         projection: initialProjection ? { removedFields: initialProjection.removedFields, failures: initialProjection.failures } : undefined,
@@ -544,7 +638,11 @@ export async function processShadowExtractionBatch(batch: MessageBatch<unknown>,
       // write is fenced, so a late failure cannot replace the newer result.
       if (leaseToken) {
         const failedAt = now();
-        await releaseShadowCost(env.DB, failedAt, message.runKey, leaseToken);
+        // A transport error or truncated response can still be billable. Hold
+        // its bounded reservation when usage is unknown, including failures
+        // in optional repair/verification calls. Never turn an unknown bill
+        // into free headroom for another attempt.
+        if (!inferenceStarted) await releaseShadowCost(env.DB, failedAt, message.runKey, leaseToken);
         await finishRun(env.DB, message, leaseToken, 'transient-failure', failedAt, { error: error instanceof Error ? error.message.slice(0, 500) : 'unknown failure' });
       }
       if ((queued.attempts ?? 1) >= 2) queued.ack(); else queued.retry({ delaySeconds: 300 }, error);

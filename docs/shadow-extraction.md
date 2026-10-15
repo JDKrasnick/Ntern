@@ -49,19 +49,80 @@ a result employer-authoritative.
 
 ## Cost guard and rollout
 
-Production shadow execution uses the pinned `gpt-5-mini-2025-08-07` snapshot. Store `OPENAI_KEY` as a Worker secret;
-never put it in Wrangler variables, Terraform state, queue messages, or artifacts.
+The next-release extraction candidate is `gpt-6-luna`, at medium effort with
+an 8192-token total cap. `claude-haiku-5-5` remains an explicitly selectable
+alternative with its own credential. Extraction, bounded repair, and prospective
+verification use the selected provider. Model and prompt revisions are included
+in cache identities. Revision v52 preserves exact worksite labels, complete linked
+qualifications, atomic authorization policies, and role-specific terms while
+excluding generic employer policy and recruiting audiences. Neither a program
+audience nor a preference implies a minimum degree. Six prompt-only iterations
+improved the fixed source score from 328/337 to 336/337, with a separate synthetic
+contrast score improving from 106/112 to 109/112. These are development evidence,
+not production acceptance; see [the evaluation and remaining gaps](shadow-prompt-v52-evaluation.md).
+
+The shared validator recognizes source-supported country/currency aliases and
+localized pay formatting. Haiku reuses one schema definition for list-valued
+fields to avoid its real grammar-compilation limit; all providers retain source
+quote, status, numeric, and unit validation. Provider descriptions cannot
+substitute for the domain validator or source-based accuracy evaluation.
+
+Local evaluations select credentials by model: `OPENAI_API_KEY` or `OPENAI_KEY`
+for Luna, `ANTHROPIC_API_KEY` for Haiku. Paste the latter in the gitignored root
+`.env`. The three evaluation runners support explicit `--model` comparisons.
+Missing selected-provider credentials fail closed, with no provider fallback.
+Existing OpenAI icon features retain their own adapter and settings.
+
+`npm run test:metadata-model:live` checks the active model's complete production
+schema. `npm run test:anthropic:live` checks Haiku explicitly. Both are opt-in;
+the normal suite skips live calls and requires no real credential.
+
+Provision `OPENAI_KEY` for the selected Luna model and `ANTHROPIC_API_KEY` for
+the Haiku alternative as secrets on ingestion Workers, including dev. Never
+put values in Wrangler variables, Terraform state, queue messages, artifacts,
+or public/mobile variables. OpenTofu preserves `secret_text` bindings.
 `SHADOW_EXTRACTION_ENABLED` controls calls independently from publication.
+
+Both automatic prospective publication and manual receipt creation require
+25 fully reviewed natural runs from the exact model/prompt/schema/preprocessing
+version, with at least 95% precision and recall and positive examples for every
+policy-allowed field. A verified output from another model version cannot gain a
+new automatic or manual receipt. New manual receipts also check the candidate's
+own version tuple before using the current review gate. An already authorized
+exact receipt can finish projecting while the next model's gate is pending;
+the maintenance selector prioritizes unprojected active receipts ahead of pending
+new candidates. A recovery whose role closes or loses its exact source records a
+terminal skipped decision so later candidates can proceed. Transient projection
+failures remain retryable. Migration 0055 gives the bounded review
+query an index ordered by exact version and completion time.
+
+All-field publication contracts/conversions, explicit deadline support, and
+scoped historical execution remain separate release work; changing the provider
+does not implement them. Source-based holdouts and housing/deadline challenge
+cases still apply before those fields are promoted.
 
 Enabled execution must provide both
 `SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS` (the forecast for all existing
 Cloudflare usage) and `SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS`. The consumer
-fails closed unless cumulative reservations and reconciled actual usage fit both
-the shadow headroom and the combined $20/month cap. A single request can finish
+fails closed unless cumulative reservations and reconciled actual usage fit the
+total model allowance (at most $20/month with the $20 headroom binding), and the
+forecast plus model usage stays within $35/month. The legacy smaller binding
+retains its earlier limits. Historical/non-provider work also has its own
+$5/month sublimit; provider traffic and fixed diagnostic probes do not consume
+that sublimit. Every lane still consumes the total model allowance. Unknown
+billed usage remains charged to both applicable limits. Budget status exposes
+historical spending and available capacity after both limits, so a partial
+backfill must stop when either is exhausted. A single request can finish
 slightly above its conservative reservation, but that actual usage reduces later
 capacity. It retries one transient delivery
 with a five-minute delay; malformed output is a visible `invalid-output` state,
 not a repair loop.
+
+When a requested model call fails without trustworthy usage, its reservation
+stays held: the provider may still bill a timeout or truncated response. A failed
+optional repair or verification records known usage and keeps the remaining
+reservation. Operations must reconcile those unknown costs against provider
+billing before releasing headroom; they are not reported as measured token cost.
 
 Use the authenticated, read-only endpoint below for aggregate run states,
 latency, cost totals, version distribution, input completeness by origin and
@@ -71,6 +132,16 @@ differences:
 ```text
 GET /internal/operations/shadow-extraction
 ```
+
+For a deployed-runtime check, authenticated `POST
+/internal/operations/shadow-extraction/probe` queues fixed synthetic data through
+the real consumer. `GET` on the same path reports durable usage and checks the
+known pay, location, work mode, and absence of extra claims. Repeated requests
+reuse an existing result; `POST ?retry=true` can retry a failed probe. No caller
+supplies posting text. Probes have origin `controlled`, never count toward the
+natural cohort, and cannot create Catalog jobs or publication receipts. Their
+$1 monthly diagnostic envelope remains inside the existing total model ceiling;
+the historical backfill sublimit is unchanged.
 
 `LLM_METADATA_PUBLICATION_POLICY_JSON` is a plain Worker variable, not a
 secret. Production templates default to disabled; the deployment environment

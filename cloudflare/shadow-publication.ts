@@ -34,6 +34,10 @@ interface RunRow {
   source_url: string;
   content_hash: string;
   response_key: string;
+  model_id: string;
+  prompt_version: string;
+  schema_version: string;
+  preprocessing_version: string;
 }
 
 interface ProspectiveRunRow extends RunRow {
@@ -56,7 +60,7 @@ export async function publishProspectiveShadowMetadata(env: {
   if (!policy.enabled || policy.mode !== 'prospective-provider-poll') return { result: 'disabled' };
   const run = await env.DB.prepare(`SELECT r.run_key, r.job_id, r.source_id, r.external_id, r.source_url,
       r.content_hash, r.response_key, r.origin, r.created_at, r.input_completeness,
-      revision.observed_at, receipt.projected_at
+      revision.observed_at, receipt.projected_at, r.model_id, r.prompt_version, r.schema_version, r.preprocessing_version
     FROM shadow_extraction_runs r
     JOIN shadow_extraction_posting_revisions revision ON revision.job_id = r.job_id
       AND revision.source_id = r.source_id AND revision.external_id = r.external_id
@@ -64,11 +68,15 @@ export async function publishProspectiveShadowMetadata(env: {
     LEFT JOIN shadow_publication_receipts receipt ON receipt.run_key = r.run_key
       AND receipt.policy_version = ? AND receipt.revoked_at IS NULL
     LEFT JOIN shadow_publication_decisions decision ON decision.run_key = r.run_key AND decision.policy_version = ?
-    WHERE r.state = 'completed' AND r.origin = 'provider-poll' AND r.input_completeness = 'complete'
-      AND r.created_at >= ? AND revision.observed_at >= ?
+     WHERE r.state = 'completed' AND r.origin = 'provider-poll' AND r.input_completeness = 'complete'
+       AND r.created_at >= ? AND revision.observed_at >= ?
+       AND ((r.model_id = ? AND r.prompt_version = ? AND r.schema_version = ? AND r.preprocessing_version = ?)
+         OR receipt.run_key IS NOT NULL)
       AND (decision.run_key IS NULL OR (decision.result = 'receipted' AND receipt.projected_at IS NULL))
-    ORDER BY r.created_at, r.run_key LIMIT 1`)
-    .bind(policy.version, policy.version, policy.startsAt, policy.startsAt).first<ProspectiveRunRow>();
+    ORDER BY CASE WHEN receipt.run_key IS NOT NULL AND receipt.projected_at IS NULL THEN 0 ELSE 1 END,
+      r.created_at, r.run_key LIMIT 1`)
+    .bind(policy.version, policy.version, policy.startsAt, policy.startsAt, SHADOW_EXTRACTION_MODEL_ID,
+      SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION).first<ProspectiveRunRow>();
   if (!run) return { result: 'none' };
   const object = await env.SHADOW_EXTRACTION_ARTIFACTS.get(run.response_key);
   if (!object || object.size === undefined || object.size > maxArtifactBytes) throw new Error('Prospective artifact is unavailable or oversized');
@@ -89,8 +97,11 @@ export async function publishProspectiveShadowMetadata(env: {
   const attached = job?.open && job.sourceReferences.some(reference => reference.sourceId === run.source_id
     && reference.externalId === run.external_id);
   if (!attached || !extraction || !acceptedFields.length) {
+    // A receipt may already exist when projection failed on an earlier pass.
+    // Finish an ineligible recovery instead of retaining its priority forever.
     await env.DB.prepare(`INSERT INTO shadow_publication_decisions (run_key, policy_version, result, recorded_at)
-      VALUES (?, ?, 'skipped', ?) ON CONFLICT(run_key, policy_version) DO NOTHING`)
+      VALUES (?, ?, 'skipped', ?) ON CONFLICT(run_key, policy_version)
+      DO UPDATE SET result = excluded.result, recorded_at = excluded.recorded_at`)
       .bind(run.run_key, policy.version, new Date().toISOString()).run();
     return { result: 'skipped', runKey: run.run_key };
   }
@@ -99,6 +110,14 @@ export async function publishProspectiveShadowMetadata(env: {
     externalId: run.external_id, contentHash: run.content_hash, runKey: run.run_key,
     policyVersion: policy.version, allowedFields: acceptedFields });
   const receiptId = createHash('sha256').update(`receipt\0${evidenceFingerprint}`).digest('hex');
+  const authorized = await env.DB.prepare(`SELECT receipt_id FROM shadow_publication_receipts
+    WHERE receipt_id = ? AND revoked_at IS NULL`).bind(receiptId).first<{ receipt_id: string }>();
+  if (!authorized) {
+    // Independent model agreement is not a substitute for source-based
+    // evaluation of this exact model/prompt/schema/preprocessing version.
+    const qualityGate = await rolloutQualityGate(env.DB);
+    if (policy.allowedFields.some(field => !qualityGate.fields[field].passed)) return { result: 'quality-gate-pending', runKey: run.run_key };
+  }
   const inserted = await env.DB.prepare(`INSERT INTO shadow_publication_receipts
       (receipt_id, job_id, source_id, external_id, content_hash, run_key, policy_version, accepted_fields, evidence_fingerprint, created_at)
     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -145,7 +164,8 @@ async function artifact(bucket: R2Bucket, key: string): Promise<{ extraction: Sh
 }
 
 async function completedRun(db: D1Database, runKey: string): Promise<RunRow> {
-  const run = await db.prepare(`SELECT run_key, job_id, source_id, external_id, source_url, content_hash, response_key
+  const run = await db.prepare(`SELECT run_key, job_id, source_id, external_id, source_url, content_hash, response_key,
+      model_id, prompt_version, schema_version, preprocessing_version
     FROM shadow_extraction_runs WHERE run_key = ? AND state = 'completed'`).bind(runKey).first<RunRow>();
   if (!run?.response_key) throw new Error('Completed extraction run was not found');
   return run;
@@ -190,15 +210,14 @@ async function evaluationSummary(db: D1Database) {
     preprocessing: row.preprocessing_version, field: row.field, outcome: row.outcome, count: row.count })) };
 }
 
+export const naturalShadowCohortSql = `SELECT run_key FROM shadow_extraction_runs
+  WHERE state = 'completed' AND origin IN ('provider-poll', 'scheduled-verification')
+    AND model_id = ? AND prompt_version = ? AND schema_version = ? AND preprocessing_version = ?
+  ORDER BY completed_at, run_key LIMIT ?`;
+
 async function rolloutQualityGate(db: D1Database) {
   const rows = await db.prepare(`SELECT cohort.run_key, evaluations.field, evaluations.outcome
-    FROM (
-      SELECT run_key FROM shadow_extraction_runs
-      WHERE state = 'completed' AND origin IN ('provider-poll', 'scheduled-verification')
-        AND model_id = ? AND prompt_version = ? AND schema_version = ? AND preprocessing_version = ?
-      ORDER BY completed_at, run_key
-      LIMIT ?
-    ) cohort
+    FROM (${naturalShadowCohortSql}) cohort
     LEFT JOIN shadow_extraction_evaluations evaluations ON evaluations.run_key = cohort.run_key
     ORDER BY cohort.run_key, evaluations.field`).bind(SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION,
       SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION, rolloutReviewTarget)
@@ -322,6 +341,10 @@ export async function handleShadowPublication(request: Request, env: {
     const existingReceipt = await env.DB.prepare(`SELECT receipt_id FROM shadow_publication_receipts
       WHERE receipt_id = ? AND revoked_at IS NULL`).bind(receiptId).first<{ receipt_id: string }>();
     if (!existingReceipt) {
+      if (run.model_id !== SHADOW_EXTRACTION_MODEL_ID || run.prompt_version !== SHADOW_EXTRACTION_PROMPT_VERSION
+        || run.schema_version !== SHADOW_EXTRACTION_SCHEMA_VERSION || run.preprocessing_version !== SHADOW_EXTRACTION_PREPROCESSING_VERSION) {
+        throw new Error('New receipts require the current model/prompt/schema/preprocessing version');
+      }
       const qualityGate = await rolloutQualityGate(env.DB);
       const blockedFields = policy.allowedFields.filter(field => !qualityGate.fields[field].passed);
       if (blockedFields.length) throw new Error(`Natural production quality gate has not passed for: ${blockedFields.join(', ')}`);

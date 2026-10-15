@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
 
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v34';
+// v52 retains source-only extraction with atomic policies, complete linked
+// qualifications, exact site labels, and role-scoped term disclosures.
+// The selected Luna profile uses medium effort and an 8192-token total cap.
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v52';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v5';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v2';
-export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-5-mini-2025-08-07';
+export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-6-luna';
 export const SHADOW_EXTRACTION_MAX_INPUT_BYTES = 40_000;
 
 export const shadowStatuses = ['present', 'not-stated', 'conflicting', 'incomplete'] as const;
@@ -127,13 +130,13 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput, tuning: Sh
       '- For any status other than present, return value=null with empty evidence and qualifiers. Never return the strings "null" or "unknown" as a field value.',
       '',
       'FIELD DEFINITIONS',
-      '- compensation: explicit base wage, salary, or pay rate only. Exclude bonuses, benefits, reimbursements, and housing, travel, meal, equipment, wellness, or other allowances. Each item’s evidence must itself support its amount, currency, and pay period and identify it as compensation for this role. A number labeled only “Hourly Rate” is not enough unless the same passage or its immediately adjacent role-specific label says it is this role’s pay.',
-      '- locations: normalized geographic place names for actual work sites of this role. Evidence must contain both a geographic place and language that places this role, position, or internship at that site. “This internship/position is based at [an office or headquarters] in [place]” is a role-site disclosure; return the place, not the office name. The OFFICIAL STRUCTURED ROLE LOCATION DATA section is a direct role-site disclosure; otherwise require role-scoped prose. A single role-scoped multi-site list may support every listed site, but a geographic list in compensation or legal text never does. Consider each listed location independently: keep a place supported by role-site evidence and discard a country or region supported only by authorization, citizenship, export-control, compliance, applicant-residence, or pay text. Exclude work modes, schedules, company office labels, headquarters or office lists, company footprint, hiring or pay jurisdictions, applicant availability, and places mentioned only in authorization or compliance text.',
+      '- compensation: explicit base wage, salary, or pay rate only. Exclude bonuses, benefits, reimbursements, and housing, travel, meal, equipment, wellness, or other allowances. Each item’s evidence must itself support its amount, currency, and pay period and identify it as compensation for this role. A number labeled only “Hourly Rate” is not enough unless the same passage or its immediately adjacent role-specific label says it is this role’s pay. If explicit base pay is disclosed without a pay period, retain the range with period unknown; do not infer annual cadence or drop the disclosed range solely because cadence is missing.',
+      '- locations: normalized geographic place names for actual work sites of this role. Evidence must contain both a geographic place and language that places this role, position, or internship at that site. “This internship/position is based at [an office or headquarters] in [place]” is a role-site disclosure; return the place, not the office name. The OFFICIAL STRUCTURED ROLE LOCATION DATA section, Location/Primary Location labels, and posting headers beside employment type or a requisition ID are direct role-site disclosures; otherwise require role-scoped prose. A single role-scoped multi-site list may support every listed site, but a geographic list in compensation or legal text never does. Consider each listed location independently: keep a place supported by role-site evidence and discard a country or region supported only by authorization, citizenship, export-control, compliance, applicant-residence, or pay text. Exclude work modes, schedules, company office labels, headquarters or office lists, company footprint, hiring or pay jurisdictions, applicant availability, and places mentioned only in authorization or compliance text.',
       '- workMode: exactly remote, hybrid, or onsite, and only from an explicit statement about this role. Normalize on-site, on site, in-person, and in-office to onsite. A role-specific requirement to work in an office on a regular weekly schedule is onsite. Hybrid requires an explicit committed recurring combination of remote and onsite work. A mandatory onsite onboarding or initial phase remains onsite when later remote days are only possible, discretionary, conditional, or supervisor-approved; use the mandatory arrangement. Do not infer work mode from a place, a generic office reference, silence, benefit, or benefit-eligibility condition.',
-      '- housing: role-specific housing, relocation, or travel support. A benefit addressed directly to interns, co-ops, or other holders of this role is role-specific even when it appears in a Benefits section and is conditional (for example, based on work mode or location). Do not suppress a direct role benefit because generic policy text appears elsewhere.',
-      '- timing: the role term, start or end window, duration, or required work schedule. An explicit full-time or part-time requirement is a work-schedule disclosure, and a stated number of weeks or months is a duration disclosure. Exclude application or posting dates, recruiting events, onboarding or project milestones, general program marketing, graduation timing, return-to-school plans, years of experience, future-employment expectations, and applicant-pool labels.',
-      '- education: an actual degree requirement or preference for this role. A statement that no degree is required is not an education disclosure.',
-      '- eligibility: an explicit condition for an applicant to hold this role, or an explicit sponsorship policy for this role. Valid subjects are work authorization, citizenship or nationality, visas or sponsorship, security clearance, and export control. Exclude E-Verify, EEO, wage notices, background checks, drug tests, language requirements, school or location attendance, general candidate descriptions, and visa, permit, documentation, or application procedures unless the same passage explicitly states who may hold this role. A weekly-hours, days-in-office, full-time, start-date, duration, availability, commitment, or term-date sentence is timing, never eligibility, even if it uses “must” or “required”.',
+      '- housing: role-specific housing, relocation, or travel support. A benefit addressed directly to interns, co-ops, or other holders of this role is role-specific even when it appears in a Benefits section and is conditional (for example, based on work mode or location). Do not suppress a direct role benefit because generic policy text appears elsewhere. General pay stipends, meals, ordinary parking, equipment, and wellness benefits alone are not housing, relocation, or travel support.',
+      '- timing: the role term, start or end window, duration, or required work schedule. Explicit full-time/part-time requirements and a stated temporary/fixed-term status are role-term disclosures, and a stated number of weeks or months is a duration disclosure. Exclude application or posting dates, recruiting events, onboarding or project milestones, general program marketing, graduation timing, return-to-school plans, years of experience, future-employment expectations, and applicant-pool labels.',
+      '- education: explicit role-related degree, study-program, or school/university enrollment requirements, preferences, or audience statements. Studying a named subject such as software engineering counts even if a degree level is not stated. Engineering/management school or university-program enrollment also counts; record the source statement without inventing a degree level or minimum qualification. Preserve required/preferred/audience scope and linked study-year, graduation, and return-to-school conditions. Do not infer a study subject or degree from the job title or a recruiting label for a student job; require an actual education/enrollment statement. A study year alone, an application-document procedure, a salary tier, or a statement that no degree is required is not a degree/program disclosure.',
+      '- eligibility: explicit role-specific work-authorization, citizenship, visa/sponsorship, security-clearance, or export-control ACCESS POLICIES, including affirmative requirements and explicit negative policies such as no security clearance required or no sponsorship offered. An explicit no-clearance-required policy is a fact even when other access restrictions apply; preserve BOTH in the value. Preserve exceptions and conditional alternatives. Do not return a legal label without the actual conditions. Exclude generic E-Verify/EEO, background checks, drug tests, school/location attendance, language, or application/document procedures unless the passage directly states the applicant must be able to hold this role. Role work hours and term dates belong only in timing.',
       '',
       'CLASSIFICATION',
       '- technical=yes when the title or description explicitly identifies engineering, scientific, data, quantitative, or another technical work area.',
@@ -141,7 +144,39 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput, tuning: Sh
       '- Use unknown only when neither the title nor description provides a signal for that classification.',
       '',
       'FINAL AUDIT',
-      'Before responding, rescan the whole description for each field. For every present field, verify that every value and qualifier is supported by that field’s exact evidence and that every evidence string occurs verbatim in description. Remove anything guessed, paraphrased, procedurally related, company-wide, or supported only by the title. In particular, never turn an internship, co-op, season, date, location, or other word from the title into a field fact.',
+      'Before responding, rescan the description for every field. Field values may be concise faithful normalizations or translations, but every evidence string must remain an exact contiguous source substring. Every returned value/qualifier needs that field’s evidence. Remove guessed, procedural, company-wide, out-of-field and title-only claims. Do not omit an essential condition merely to make the value shorter.',
+      '',
+      'DECISION PROCEDURE',
+      'For each field, collect candidate source spans, decide whether each applies to this role, then retain all supported facts. A field is not absent merely because its disclosure is in a heading, footer, table, or named internship program. Run the following checks before returning JSON:',
+      '- Pay: a Pay Range, Salary Range, Hourly Pay, or equivalent pay header in this exact posting is a role-pay disclosure. Quote the label and the amount/rate lines together as ONE contiguous passage, preserving newlines. Keep every distinct base-pay band; retain its period as unknown only when it is unstated. Do not misclassify a disclosed role-pay range as a generic wage notice.',
+      '- Worksites: prefer the explicit Location/Primary Location label as evidence when available. Keep the source\'s place components, order and abbreviations in the value; do not expand abbreviations, reverse a country/city label, or add an unstated country. Return every explicitly offered role worksite, including optional offices where candidates may sit. Company office lists alone do not establish worksites.',
+      '- Term: a duration/start window stated for the named internship program offering this role applies to the role. Generic recruiting slogans do not. A company-wide attendance, flexible-work or office policy is NOT this role\'s timing, even when it says all employees or all members. Timing must describe this role\'s term or a role-specific required schedule.',
+      '- Education: a phrase advertising a \'software engineering student\' job and bare study years alone is a recruiting audience label, not proof of an actual degree/program/enrollment statement. When an actual education statement exists, preserve its required/preferred scope, alternatives, degree subjects and linked study-stage/graduation/return-to-school conditions.',
+      '- Housing: an explicit role-specific denial is present information; quote the denial, not a positive benefit. Keep all conditions of offers.',
+      '',
+      'FIELD BOUNDARY REVIEW',
+      '- Education needs an actual education anchor: a degree level/credential, named school or university enrollment, or a named subject explicitly linked to studying, enrollment, or pursuit. A title-like recruiting phrase advertising an engineering student and a separate bare study-year/student-status sentence do not establish an academic program. Do not promote maintaining student status for some number of years into an education claim by itself.',
+      '- Split facts by field even when they share a sentence: role duration and weekly hours belong in timing; compulsory academic-program participation and school enrollment/return requirements belong in education. Keep the full exact source span as evidence if needed, but make the timing VALUE contain only temporal/schedule facts, without academic conditions.',
+      '- A direct statement that this employer must verify the applicant\'s ability to work lawfully in the role\'s country states a work-authorization condition. Preserve that literal requirement without inventing a citizenship restriction, sponsorship policy, or application procedure. EEO language around it does not erase a direct work-authorization statement.',
+      '',
+      'OUTPUT COVERAGE CHECK',
+      '- completeness=complete: never use incomplete as an uncertainty label. For a complete description, determine present, conflicting or not-stated from the source. A clearly labeled hourly pay range with exact amounts is not incomplete. Quote the whole adjacent pay-label/range block once; do not drop a disclosed band because another pay band or table row is also present.',
+      '- Timing contains the internship/employment term and required attendance/work-hours commitment, not responsibilities or expected tasks. Recurring seminars, meetings, training sessions and project deliverables are duties/milestones, not role timing. A statement that a manager will later communicate team norms supplies no actual schedule and must not be returned as a timing value.',
+      '- Evidence is an audit trail, not a substitute for values. Retain all essential explicitly stated facts in the value or its clearly linked qualifiers. For eligibility this includes a stated absence of a security-clearance requirement alongside other access restrictions, plus every exception and conditional alternative. A fact quoted only in evidence and omitted from the returned information is lost.',
+      'COMPLETENESS OF VALUES',
+      '- Keep the whole relevant academic clause: degree or school/program, required versus preferred, named subject, alternative credentials, and linked final-year/end-of-studies/graduation/return-to-school restrictions. Do not cut off a trailing study-stage condition at a comma or conjunction. Omit unrelated skill/experience clauses.',
+      '- One location entry represents one offered actual worksite. Prefer a precise official worksite label over a broader metropolitan reference to that same position; do not turn broad region and precise site descriptions into two offices. Keep distinct places when the role explicitly offers alternatives or multiple sites. Do not add countries from school enrollment or authorization paragraphs.',
+      '- Before returning eligibility, compare the information in value/qualifiers against EVERY valid eligibility evidence span. In particular, if a security-clearance header says None required, the value must explicitly retain that absence even alongside separate restricted-access requirements. Evidence-only facts are not returned metadata.',
+      '',
+      'ATOMIC FACTS, NOT FRAGMENTS OR PROCEDURES',
+      '- Each eligibility value must make sense independently: include the actual policy subject from its heading, not a bare Yes, No or None required. For example, a Security Clearance heading with None required supports a self-contained no-security-clearance-required statement. Quote the heading plus the exact answer as evidence. Do not attach identity verification, background-check steps or application paperwork to that policy value; they are separate procedures and excluded. Other genuine access restrictions remain separate values with all exceptions.',
+      '- Education requires the degree/program/enrollment anchor described above. Bare recent-graduate, self-taught, student-job and junior/senior recruiting labels do not establish an actual degree/program even when presented as applicant audiences. Preserve recent-graduate timing only when linked to an actual stated degree/program; do not invent a degree for self-taught applicants.',
+      '- Timing requires an actual disclosed term fact or schedule. Duration will be discussed, dates to be agreed later, internship position, and opportunities for future employment contain no duration/start/end fact by themselves. Return not-stated if no actual term/schedule is disclosed; retain concrete duration/date facts when accompanied by a negotiable-detail qualifier.',
+      '',
+      'LINKED CONDITIONS MUST SURVIVE',
+      '- A degree/credential alternative conditioned on experience is ONE qualification: retain the experience amount with that degree alternative (including zero years). Excluding unrelated experience does not permit detaching an experience condition from its education pathway. Preserve every linked alternative and do not turn conditional eligibility into unconditional eligibility.',
+      '- An explicit requirement to work extended/additional hours is a required work-schedule fact even when no number of hours is given. Preserve it in timing alongside the dates/duration. Excluding recurring duties does not exclude mandatory work-hour commitments.',
+      '- Do not invent currency from a dollar sign for a role in Canada or another non-US location. CAD/CA$/C$ and USD/US$ are different explicit currencies. When currency remains genuinely ambiguous, preserve no guessed currency claim under this wire contract; do not force a foreign $ amount into USD simply to improve pay recall.',
       tuningInstruction[tuning],
     ].join('\n'),
     user: JSON.stringify({ title: input.title, completeness: input.completeness, description: input.description }),
@@ -185,13 +220,14 @@ function words(value: string): string[] {
 }
 
 function compensationNumberPresent(passage: string, value: number): boolean {
-  return [...passage.matchAll(/(?:^|[^0-9.])([0-9]+(?:[,.][0-9]{3})*(?:[,.][0-9]+)?)(?![0-9])/gu)]
+  return [...passage.matchAll(/(?:^|[^0-9.])([0-9]{1,3}(?:[ \u00a0\u202f][0-9]{3})+(?:[,.][0-9]{1,2})?|[0-9]+(?:[,.][0-9]{3})*(?:[,.][0-9]+)?)(?![0-9])/gu)]
     .some((match) => {
-      const token = match[1]!;
+      const token = match[1]!.replace(/[ \u00a0\u202f]/gu, '');
       const direct = Number(token.replace(/,/gu, ''));
+      const decimalComma = /^\d+(?:\.\d{3})*,\d{1,2}$/u.test(token) ? Number(token.replace(/\./gu, '').replace(',', '.')) : Number.NaN;
       // European job posts use `.` as a thousands separator, e.g. 43.456,--.
       const europeanThousands = /^\d{1,3}(?:\.\d{3})+$/u.test(token) ? Number(token.replace(/\./gu, '')) : Number.NaN;
-      return direct === value || europeanThousands === value;
+      return Number.isFinite(decimalComma) ? decimalComma === value : direct === value || europeanThousands === value;
     });
 }
 
@@ -201,6 +237,8 @@ function compensationCurrencyPresent(passage: string, currency: string): boolean
     CAD: /(?:\bCAD\b|CA\$|C\$|\bCanadian dollars?\b)/iu,
     EUR: /(?:\bEUR\b|€|\beuros?\b)/iu,
     GBP: /(?:\bGBP\b|£|\b(?:British )?pounds?\b)/iu,
+    PLN: /(?:\bPLN\b|zł|\bzloty\b)/iu,
+    CNY: /\b(?:CNY|RMB|renminbi)\b/iu,
   };
   return (aliases[currency] ?? new RegExp(`\\b${currency}\\b`, 'u')).test(passage);
 }
