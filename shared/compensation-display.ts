@@ -13,9 +13,36 @@ const decimalNumber = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 
 const compactThousands = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const compactWhole = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 
+type DisplayRange = NonNullable<DisplayCompensation['ranges']>[number];
+const knownCurrency = (currency: string) => /^[A-Z]{3}$/u.test(currency) && currency !== 'XXX';
+const normalized = (text: string | undefined) => (text ?? '').replace(/\s+/gu, ' ').trim().toLowerCase();
+
+/** Prefer the specific currency only for the same scoped, source-backed disclosure. */
+function distinctRanges(value: DisplayCompensation | undefined): DisplayRange[] {
+  const ranges = (value?.ranges ?? []).slice(0, 24).filter(range => Number.isFinite(range.minAmount)
+    && Number.isFinite(range.maxAmount) && range.minAmount > 0 && range.maxAmount >= range.minAmount);
+  const scope = (range: DisplayRange) => JSON.stringify([range.minAmount, range.maxAmount, range.period,
+    normalized(range.periodLabel), normalized(range.applicabilityLabel),
+    [...new Set((range.applicableLocations ?? []).map(normalized))].sort(),
+    [...new Set((range.applicableEducationLevels ?? []).map(normalized))].sort()]);
+  const seen = new Set<string>();
+  return ranges.filter(range => {
+    const key = `${range.currency}\0${scope(range)}\0${knownCurrency(range.currency) ? '' : normalized(range.sourceText)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (knownCurrency(range.currency)) return true;
+    const quote = normalized(range.sourceText);
+    if (!quote) return true;
+    const matches = ranges.filter(other => knownCurrency(other.currency) && scope(other) === scope(range)
+      && normalized(other.sourceText) && (normalized(other.sourceText).includes(quote) || quote.includes(normalized(other.sourceText))));
+    // A shared '$' alone cannot choose between USD, CAD, or another dollar.
+    const currencies = new Set(matches.map(other => other.currency));
+    return currencies.size !== 1;
+  });
+}
+
 export function compensationLabels(value: DisplayCompensation | undefined): string[] {
-  const labels = (value?.ranges ?? []).slice(0, 24).flatMap((range) => {
-    if (!Number.isFinite(range.minAmount) || !Number.isFinite(range.maxAmount) || range.minAmount <= 0 || range.maxAmount < range.minAmount) return [];
+  const labels = distinctRanges(value).flatMap((range) => {
     const number = (amount: number) => decimalNumber.format(amount);
     const isKnownCurrency = /^[A-Z]{3}$/u.test(range.currency) && range.currency !== 'XXX';
     let currencyPrefix = '';
@@ -53,8 +80,7 @@ export function compensationLabels(value: DisplayCompensation | undefined): stri
 
 /** A single compact disclosure for role rows; the detail sheet retains every range and qualifier. */
 export function compactCompensationLabel(value: DisplayCompensation | undefined): string {
-  const ranges = (value?.ranges ?? []).filter((range) => Number.isFinite(range.minAmount)
-    && Number.isFinite(range.maxAmount) && range.minAmount > 0 && range.maxAmount >= range.minAmount);
+  const ranges = distinctRanges(value);
   if (ranges.length > 1) return "Pay varies";
   const range = ranges[0];
   if (range) {
