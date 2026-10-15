@@ -15,6 +15,19 @@ function extraction(overrides: Partial<ShadowExtraction['fields']>): ShadowExtra
 }
 
 describe('postprocessRoleScopedExtraction', () => {
+  it.each([
+    'Authorization to work in the United States',
+    'Authorisation to work in the United Kingdom',
+    'Must be authorized to work in Canada',
+    'Must be authorised to work in Australia',
+  ])('retains explicit employment eligibility: %s', (requirement) => {
+    const result = postprocessRoleScopedExtraction(extraction({
+      eligibility: field('present', [requirement], [requirement]),
+    }));
+    expect(result.extraction.fields.eligibility).toEqual(field('present', [requirement], [requirement]));
+    expect(result.changes).toEqual([]);
+  });
+
   it('matches country aliases within one structured site without inventing a different country', () => {
     for (const [value, passage] of [
       ['Ann Arbor, MI, USA', 'Location: Ann Arbor, MI\nPrimary Location: USA-MI-Ann Arbor-KLA'],
