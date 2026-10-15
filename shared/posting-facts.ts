@@ -15,6 +15,7 @@ export const postingFactLabels: Record<PostingFactField, string> = {
 
 export function postingFactDetails(facts: readonly PostingFact[] | undefined) {
   return (facts ?? []).filter(fact => postingFactFields.includes(fact.field) && fact.statements.length)
+    .sort((left, right) => postingFactFields.indexOf(left.field) - postingFactFields.indexOf(right.field))
     .map(fact => ({ field: fact.field, label: postingFactLabels[fact.field],
       tags: [...new Set([...fact.statements, ...fact.qualifiers].map(value => value.trim()).filter(Boolean))] }));
 }

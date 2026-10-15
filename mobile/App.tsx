@@ -2173,7 +2173,7 @@ function JobDetailSheet({
                 </View>
               ))}
               {postingFactDetails(role.postingFacts).map(fact => (
-                <View key={fact.field} style={styles.sheetTrustBlock}>
+                <View key={fact.field} style={styles.sheetFactBlock}>
                   <Text style={styles.sheetTrustPrimary}>{fact.label}</Text>
                   <View style={styles.sheetFactTags}>
                     {fact.tags.map(tag => (
@@ -11365,9 +11365,10 @@ const styles = StyleSheet.create({
   sheetTrustBlock: { gap: 3, marginTop: 16 },
   sheetTrustPrimary: { color: colors.body, fontSize: 14, fontWeight: "700", lineHeight: 20 },
   sheetTrustSecondary: { color: colors.muted, fontSize: 13, lineHeight: 19 },
+  sheetFactBlock: { gap: 3, marginTop: 12 },
   sheetFactTags: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 3 },
   sheetFactTag: { backgroundColor: colors.canvas, borderColor: colors.separator, borderWidth: 1,
-    borderRadius: 8, paddingHorizontal: 9, paddingVertical: 5, maxWidth: "100%", flexShrink: 1 },
+    borderRadius: 8, paddingHorizontal: 9, paddingVertical: 4, maxWidth: "100%", flexShrink: 1 },
   sheetFactTagText: { color: colors.body, fontSize: 13, lineHeight: 18 },
   sheetIdentityNotice: {
     alignItems: "flex-start",
