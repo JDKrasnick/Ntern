@@ -2049,28 +2049,35 @@ function CatalogGroupLoadingSkeleton() {
   );
 }
 
-function RoleFactDisclosure({ fact }: { fact: RoleFactSummary }) {
-  const [expanded, setExpanded] = useState(false);
+function RoleFactDisclosures({ facts }: { facts: RoleFactSummary[] }) {
+  const [expandedField, setExpandedField] = useState<RoleFactSummary["field"] | null>(null);
+  const expanded = facts.find(fact => fact.field === expandedField);
   return (
-    <View style={styles.sheetFactBlock}>
-      <TouchableOpacity
+    <View style={styles.sheetFacts}>
+      <View style={styles.sheetFactFlow}>
+      {facts.map(fact => <TouchableOpacity
+        key={fact.field}
         accessibilityRole="button"
         accessibilityLabel={`${fact.label}: ${fact.tags.join(", ")}`}
-        accessibilityHint={expanded ? "Hide full details" : "Show full details"}
-        aria-expanded={expanded}
+        accessibilityHint={expandedField === fact.field ? "Hide full details" : "Show full details"}
+        aria-expanded={expandedField === fact.field}
         activeOpacity={0.65}
-        onPress={() => setExpanded(value => !value)}
-        style={styles.sheetFactDisclosure}
+        onPress={() => setExpandedField(value => value === fact.field ? null : fact.field)}
+        style={[styles.sheetFactDisclosure, fact.field === "compensation" ? styles.sheetFactPay : null]}
       >
-        <Text style={styles.sheetFactLabel}>{fact.label}</Text>
-        <Text style={styles.sheetFactValue}>{fact.tags.join(" · ")}</Text>
-        <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={16} color={colors.signal} />
-      </TouchableOpacity>
+        <Text style={fact.field === "compensation" ? styles.pay : styles.sheetFactValue}>
+          {fact.field !== "compensation" ? <Text style={styles.sheetFactLabel}>{fact.label}: </Text> : null}
+          {fact.tags.join(" · ")}
+        </Text>
+        <Ionicons name={expandedField === fact.field ? "chevron-up" : "chevron-down"} size={12} color={colors.signal} />
+      </TouchableOpacity>)}
+      </View>
       {expanded ? (
         <View style={styles.sheetFactExpanded}>
-          {fact.payOptions.map(option => <Text key={option} style={styles.sheetFactDetail}>{option}</Text>)}
-          {fact.details.map(detail => <Text key={detail} style={styles.sheetFactDetail}>{detail}</Text>)}
-          {fact.morePayOptions ? <Text style={styles.sheetTrustSecondary}>More pay options on the employer’s site.</Text> : null}
+          <Text style={styles.sheetTrustPrimary}>{expanded.label}</Text>
+          {expanded.payOptions.map(option => <Text key={option} style={styles.sheetFactDetail}>{option}</Text>)}
+          {expanded.details.map(detail => <Text key={detail} style={styles.sheetFactDetail}>{detail}</Text>)}
+          {expanded.morePayOptions ? <Text style={styles.sheetTrustSecondary}>More pay options on the employer’s site.</Text> : null}
         </View>
       ) : null}
     </View>
@@ -2174,17 +2181,17 @@ function JobDetailSheet({
             <JobRouteStatusContent state={routeState} onDismiss={roleSheet.dismiss} onRetry={onRetry} />
           ) : role ? (
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetContent}>
+              <Text style={styles.sheetEyebrow}>{role.open ? "Role details" : "Closed role"}</Text>
+              <Text style={styles.sheetTitle}>{roleDisplay?.title}</Text>
               <View style={styles.sheetEmployer}>
                 <CompanyMark
                   key={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id ?? role.company}
                   company={employerName(roleDisplay?.company, role.employerCategory)}
                   employerId={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id}
-                  size={48}
+                  size={28}
                 />
                 <Text style={styles.sheetEmployerName}>{employerName(roleDisplay?.company, role.employerCategory)}</Text>
               </View>
-              {!role.open ? <Text style={styles.sheetEyebrow}>Closed role</Text> : null}
-              <Text style={styles.sheetTitle}>{roleDisplay?.title}</Text>
               {role.disciplines?.length ? (
                 <View style={[styles.jobCardMidPills, { marginTop: 10 }]}>
                   {role.disciplines.slice(0, 4).map((d) => {
@@ -2198,9 +2205,8 @@ function JobDetailSheet({
                 </View>
               ) : null}
               {details ? <Text style={styles.sheetDetail}>{details}</Text> : null}
-              {postingFactSummaries(role.postingFacts, { compensation: role.compensation, housing: role.housing }).map(fact => (
-                <RoleFactDisclosure key={`${role.jobId}:${fact.field}:${role.postingFacts?.find(item => item.field === fact.field)?.contentHash ?? "legacy"}`} fact={fact} />
-              ))}
+              <RoleFactDisclosures key={`${role.jobId}:${role.postingFacts?.map(fact => fact.contentHash).join(":") ?? "legacy"}`}
+                facts={postingFactSummaries(role.postingFacts, { compensation: role.compensation, housing: role.housing })} />
               <View style={styles.sheetTrustBlock}>
                 <Text style={styles.sheetTrustPrimary}>{source.primary}</Text>
                 {source.corroboration ? <Text style={styles.sheetTrustSecondary}>{source.corroboration}</Text> : null}
@@ -11366,7 +11372,7 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
     lineHeight: 32,
   },
-  sheetEmployer: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 14 },
+  sheetEmployer: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
   sheetEmployerName: { color: colors.body, fontSize: 17, fontWeight: "600", lineHeight: 24, flex: 1 },
   sheetCompany: {
     color: colors.body,
@@ -11384,11 +11390,13 @@ const styles = StyleSheet.create({
   sheetTrustBlock: { gap: 3, marginTop: 16 },
   sheetTrustPrimary: { color: colors.body, fontSize: 14, fontWeight: "700", lineHeight: 20 },
   sheetTrustSecondary: { color: colors.muted, fontSize: 13, lineHeight: 19 },
-  sheetFactBlock: { borderBottomColor: colors.separator, borderBottomWidth: StyleSheet.hairlineWidth },
-  sheetFactDisclosure: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 48, paddingVertical: 12 },
-  sheetFactLabel: { color: colors.body, fontSize: 13, fontWeight: "600", lineHeight: 20, width: 76 },
-  sheetFactValue: { color: colors.ink, fontSize: 14, lineHeight: 21, flex: 1 },
-  sheetFactExpanded: { gap: 6, paddingTop: 0, paddingBottom: 14, maxWidth: 760 },
+  sheetFacts: { marginTop: 8 },
+  sheetFactFlow: { flexDirection: "row", flexWrap: "wrap", columnGap: 18 },
+  sheetFactDisclosure: { flexDirection: "row", alignItems: "center", gap: 5, minHeight: 44, paddingVertical: 6, maxWidth: "100%" },
+  sheetFactPay: { width: "100%" },
+  sheetFactLabel: { color: colors.body, fontWeight: "600" },
+  sheetFactValue: { color: colors.body, fontSize: 14, lineHeight: 21, flexShrink: 1 },
+  sheetFactExpanded: { gap: 6, paddingTop: 6, paddingBottom: 6, maxWidth: 760 },
   sheetFactDetail: { color: colors.body, fontSize: 14, lineHeight: 21 },
   sheetIdentityNotice: {
     alignItems: "flex-start",

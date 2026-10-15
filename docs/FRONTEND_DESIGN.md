@@ -337,14 +337,15 @@ The Apple private key must remain in AWS/Apple configuration and must never be e
 
 ### Role metadata disclosures
 
-Use a continuous label-and-value list for metadata, with brief phrases separated
-by middle dots. Align labels, values, and trailing teal disclosure chevrons;
-fine horizontal dividers provide structure without pill backgrounds or borders.
-Keep captions to a few words; full claims, conditions, and exceptions expand
-inline when the row is tapped. Disclosure controls are transparent, never gray
-buttons or filter chips. Keep the employer application
-button as the clear primary action. Interactive disclosure rows have at least
-48 pt touch targets, keyboard activation, and explicit expanded state.
+Preserve the app's original bottom-sheet layout: role title, company, categories,
+location/term, green pay, source information, and application actions. Keep the
+company mark small beside its name. Additional metadata uses brief labeled
+phrases that wrap together, without separate full-width rows, dividers, or pill
+backgrounds. A tap reveals that field's full claims, conditions, and exceptions
+below the phrases; only one field expands at a time. Controls stay transparent
+with small teal chevrons, 44 pt touch targets, keyboard activation, and explicit
+expanded state. The public standalone role page uses aligned label/value rows.
+Keep the employer application button as the clear primary action.
 
 Pay varies opens up to three distinct pay options with their currency, cadence,
 and applicability. Never use a vague Pay disclosed badge. Housing stipends show
