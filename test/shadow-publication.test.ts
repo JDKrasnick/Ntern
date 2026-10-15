@@ -65,7 +65,8 @@ async function publicationDatabase(): Promise<{ database: DatabaseSync; artifact
     (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version,
       schema_version, preprocessing_version, state, input_key, response_key, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`).run(
-    hash, 'job-1', 'greenhouse-acme', '123', 'https://jobs.example/123', '{}', hash, 'model', 'prompt', 'schema', 'preprocessing', 'input', 'response',
+    hash, 'job-1', 'greenhouse-acme', '123', 'https://jobs.example/123', '{}', hash, SHADOW_EXTRACTION_MODEL_ID,
+    SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION, 'input', 'response',
     '2026-09-08T00:00:00.000Z', '2026-09-08T00:00:00.000Z',
   );
   database.prepare(`INSERT INTO shadow_extraction_posting_revisions (job_id, source_id, external_id, content_hash, observed_at)
@@ -293,6 +294,9 @@ describe('shadow publication policy', () => {
     const first = await createReceipt(database, artifacts, 'v1', ['locations']);
     const second = await createReceipt(database, artifacts, 'v2', ['workMode']);
     const repeated = await createReceipt(database, artifacts, 'v2', ['workMode']);
+    database.prepare("UPDATE shadow_extraction_runs SET model_id = 'previous-model' WHERE run_key = ?").run(hash);
+    database.prepare('DELETE FROM shadow_extraction_evaluations WHERE run_key != ?').run(hash);
+    expect(await createReceipt(database, artifacts, 'v2', ['workMode'])).toEqual(repeated);
     expect(second.receiptId).not.toBe(first.receiptId);
     expect(repeated).toEqual(second);
     const rows = database.prepare(`SELECT receipt_id, policy_version, accepted_fields, evidence_fingerprint
@@ -336,8 +340,16 @@ describe('shadow publication policy', () => {
     database.prepare("UPDATE shadow_extraction_runs SET model_id = 'previous-model' WHERE run_key = ?").run(hash);
     database.prepare('DELETE FROM shadow_extraction_evaluations').run();
     database.prepare('UPDATE shadow_publication_receipts SET projected_at = NULL').run();
+    // An earlier unreceipted current-version candidate must not starve recovery.
+    database.prepare(`INSERT INTO shadow_extraction_runs
+      (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version,
+       schema_version, preprocessing_version, state, input_key, response_key, created_at, updated_at, origin, input_completeness)
+      SELECT ?, job_id, source_id, external_id, source_url, posting_identity, content_hash, ?, prompt_version,
+        schema_version, preprocessing_version, state, input_key, response_key, '2026-09-25T00:00:00.000Z', updated_at, origin, input_completeness
+      FROM shadow_extraction_runs WHERE run_key = ?`).run('b'.repeat(64), SHADOW_EXTRACTION_MODEL_ID, hash);
     expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'projected', runKey: hash });
     expect(refreshes).toBe(2);
+    expect(await publishProspectiveShadowMetadata(env, refresh)).toEqual({ result: 'quality-gate-pending', runKey: 'b'.repeat(64) });
   });
 
   it('publishes a verified provider run after the old receipt cap is reached', async () => {
@@ -370,7 +382,7 @@ describe('shadow publication policy', () => {
     const policy = { enabled: true, version: 'old-model-test', mode: 'prospective-provider-poll',
       startsAt: '2026-09-24T00:00:00.000Z', allowedFields: ['locations'], cohort: [], maxReceipts: null };
     database.prepare(`UPDATE shadow_extraction_runs SET origin = 'provider-poll', input_completeness = 'complete',
-      created_at = '2026-09-26T00:01:00.000Z' WHERE run_key = ?`).run(hash);
+      created_at = '2026-09-26T00:01:00.000Z', model_id = 'previous-model' WHERE run_key = ?`).run(hash);
     database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at = '2026-09-26T00:01:00.000Z'`).run();
     await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
       verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
@@ -379,4 +391,22 @@ describe('shadow publication policy', () => {
     expect(await publishProspectiveShadowMetadata(env, async () => {})).toEqual({ result: 'none' });
     expect((database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get() as { count: number }).count).toBe(0);
   });
+
+  it.each(['model_id', 'prompt_version', 'schema_version', 'preprocessing_version'] as const)(
+    'rejects a new manual receipt with stale %s even when the current review gate passes', async column => {
+      const { database, artifacts } = await publicationDatabase();
+      seedRolloutQualityGate(database);
+      database.prepare(`UPDATE shadow_extraction_runs SET ${column} = 'previous-version' WHERE run_key = ?`).run(hash);
+      database.prepare(`INSERT INTO shadow_extraction_evaluations (run_key, field, outcome, evaluated_at)
+        VALUES (?, 'locations', 'correct-present', '2026-10-14T00:00:00.000Z')`).run(hash);
+      const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Operations-Key': 'secret' },
+        body: JSON.stringify({ action: 'create-receipt', runKey: hash, acceptedFields: ['locations'] }),
+      }), { OPERATIONS_SHARED_SECRET: 'secret', DB: d1(database), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+        LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify({ enabled: true, version: 'manual-stale', allowedFields: ['locations'],
+          cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }] }) } as unknown as Environment);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ message: 'New receipts require the current model/prompt/schema/preprocessing version' });
+      expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get()).toEqual({ count: 0 });
+    });
 });
