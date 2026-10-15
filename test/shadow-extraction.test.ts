@@ -103,7 +103,7 @@ describe('shadow extraction contract', () => {
       .bind(key, key === probe ? modelRuntimeProbeSourceId : 'ordinary-source', key, SHADOW_EXTRACTION_MODEL_ID, now.toISOString(), now.toISOString()).run();
     await DB.prepare(`INSERT INTO shadow_extraction_cost_ledger
       (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
-      VALUES ('2026-10', 'prior', ?, 10, 600, 'reconciled', ?, ?)`).bind(prior, now.toISOString(), now.toISOString()).run();
+      VALUES ('2026-10', 'prior', ?, 10, 1000, 'reconciled', ?, ?)`).bind(prior, now.toISOString(), now.toISOString()).run();
     const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2000' };
     expect(await reserveShadowCost(DB, now, historical, 'history', 10, env)).toBe(false);
     for (let i = 0; i < 10; i++) expect(await reserveShadowCost(DB, now, probe, `probe-${i}`, 10, env)).toBe(true);
@@ -488,11 +488,27 @@ describe('shadow extraction queue and cost ledger', () => {
     for (const key of ['c'.repeat(64), 'd'.repeat(64)]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, attempts, lease_until, input_key, created_at, updated_at)
       VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, ?, 'p', 's', 'n', 'queued', 0, '', 'shadow-input/x.json', ?, ?)`)
       .bind(key, key, SHADOW_EXTRACTION_MODEL_ID, now.toISOString(), now.toISOString()).run();
-    const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1995', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100' };
+    const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '2495', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2000' };
     expect(await reserveShadowCost(DB, now, 'c'.repeat(64), 'lease-c', 5, env)).toBe(true);
     await DB.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = 7, state = 'reconciled'
       WHERE period = '2026-10' AND run_key = ?`).bind('c'.repeat(64)).run();
     expect(await reserveShadowCost(DB, now, 'd'.repeat(64), 'lease-d', 1, env)).toBe(false);
+  });
+
+  it.each([
+    ['2026-08', '1500', '2000', 500],
+    ['2026-09', '1500', '2000', 800],
+    ['2026-10', '1500', '2000', 1000],
+    ['2026-11', '1500', '2000', 1000],
+    ['2026-10', '1500', '500', 500],
+    ['2026-10', '2400', '2000', 100],
+    ['2026-10', '2500', '2000', 0],
+  ])('bounds historical allowance for period %s, forecast %s and headroom %s', async (period, forecast, headroom, allowance) => {
+    const status = await providerShadowBudgetStatus(schema(), new Date(`${period}-15T00:00:00.000Z`), {
+      SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: forecast,
+      SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: headroom,
+    });
+    expect(status?.historical).toMatchObject({ allowanceCents: allowance, availableCents: allowance });
   });
 
   it('lets historical work use its own sublimit without borrowing beyond the total ceiling', async () => {
@@ -505,20 +521,20 @@ describe('shadow extraction queue and cost ledger', () => {
       .bind(key, key, SHADOW_EXTRACTION_MODEL_ID, key === provider ? 'provider-poll' : 'backfill', now.toISOString(), now.toISOString()).run();
     await DB.prepare(`INSERT INTO shadow_extraction_cost_ledger
       (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
-      VALUES ('2026-10', 'provider-prior', ?, 20, 1068, 'reconciled', ?, ?)`).bind(provider, now.toISOString(), now.toISOString()).run();
+      VALUES ('2026-10', 'provider-prior', ?, 20, 600, 'reconciled', ?, ?)`).bind(provider, now.toISOString(), now.toISOString()).run();
     const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2000' };
-    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ spentCents: 1068,
-      historical: { allowanceCents: 500, spentCents: 0, availableCents: 500, exhausted: false } });
-    const reservations = await Promise.all(Array.from({ length: 51 }, (_, i) => reserveShadowCost(DB, now, historical, `historical-${i}`, 10, env)));
-    expect(reservations.filter(Boolean)).toHaveLength(50);
-    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ historical: { spentCents: 500, availableCents: 0, exhausted: true } });
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ spentCents: 600,
+      historical: { allowanceCents: 1000, spentCents: 0, availableCents: 1000, exhausted: false } });
+    const reservations = await Promise.all(Array.from({ length: 101 }, (_, i) => reserveShadowCost(DB, now, historical, `historical-${i}`, 10, env)));
+    expect(reservations.filter(Boolean)).toHaveLength(100);
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ historical: { spentCents: 1000, availableCents: 0, exhausted: true } });
     expect(await reserveShadowCost(DB, now, historical, 'historical-0', 10, env)).toBe(true);
-    await DB.prepare("UPDATE shadow_extraction_cost_ledger SET actual_cents = 1495 WHERE lease_token = 'provider-prior'").run();
+    await DB.prepare("UPDATE shadow_extraction_cost_ledger SET actual_cents = 995 WHERE lease_token = 'provider-prior'").run();
     expect(await reserveShadowCost(DB, now, provider, 'provider-last', 5, env)).toBe(true);
     expect(await reserveShadowCost(DB, now, provider, 'provider-over', 1, env)).toBe(false);
   });
 
-  it('keeps the September backfill sublimit while reserving provider-poll work', async () => {
+  it('preserves September limits and applies the extra historical headroom starting in October', async () => {
     const DB = schema();
     const september = new Date('2026-09-23T00:00:00.000Z');
     const october = new Date('2026-10-01T00:00:00.000Z');
@@ -531,7 +547,7 @@ describe('shadow extraction queue and cost ledger', () => {
       VALUES (?, ?, ?, 10, 691, 'reconciled', ?, ?)`).bind(period, `prior-${period}`, priorKey, september.toISOString(), september.toISOString()).run();
     const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2000' };
     expect(await reserveShadowCost(DB, september, septemberKey, 'september-v34', 10, env)).toBe(true);
-    expect(await reserveShadowCost(DB, october, octoberKey, 'october-v34', 10, env)).toBe(false);
+    expect(await reserveShadowCost(DB, october, octoberKey, 'october-v34', 10, env)).toBe(true);
     await DB.prepare(`UPDATE shadow_extraction_cost_ledger SET actual_cents = 790 WHERE period = '2026-09' AND run_key = ?`).bind(priorKey).run();
     expect(await reserveShadowCost(DB, september, overLimitKey, 'september-over-limit', 10, env)).toBe(false);
     expect(await reserveShadowCost(DB, september, providerKey, 'september-provider', 10, env)).toBe(true);

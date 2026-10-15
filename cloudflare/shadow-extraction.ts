@@ -116,11 +116,13 @@ function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOri
     return Math.min(headroom, providerMonthlyShadowLimitCents,
       Math.max(0, providerMonthlyCombinedLimitCents - forecast));
   }
-  // Keep the previously approved September backfill limit; prospective work
-  // alone receives the new $20 monthly allowance.
+  // The owner approved $5 more historical headroom starting in October.
+  // Preserve earlier periods and keep every lane under the global model cap.
+  const historicalLimitCents = period >= '2026-10' ? 1_000 : 500;
+  const historicalCombinedLimitCents = period >= '2026-10' ? 2_500 : 2_000;
   const septemberIncreaseCents = period === '2026-09' ? 300 : 0;
-  return Math.min(Math.min(headroom, 500) + septemberIncreaseCents,
-    Math.max(0, 2_000 + septemberIncreaseCents - forecast));
+  return Math.min(Math.min(headroom, historicalLimitCents) + septemberIncreaseCents,
+    Math.max(0, historicalCombinedLimitCents + septemberIncreaseCents - forecast));
 }
 
 export async function providerShadowBudgetStatus(db: D1Database, now: Date,

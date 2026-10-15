@@ -108,8 +108,10 @@ fails closed unless cumulative reservations and reconciled actual usage fit the
 total model allowance (at most $20/month with the $20 headroom binding), and the
 forecast plus model usage stays within $35/month. The legacy smaller binding
 retains its earlier limits. Historical/non-provider work also has its own
-$5/month sublimit; provider traffic and fixed diagnostic probes do not consume
-that sublimit. Every lane still consumes the total model allowance. Unknown
+$10/month sublimit starting in October 2026, with forecast plus historical usage
+capped at $25/month; earlier periods retain their original limits. Provider
+traffic and fixed diagnostic probes do not consume that sublimit. Every lane
+still consumes the total model allowance. Unknown
 billed usage remains charged to both applicable limits. Budget status exposes
 historical spending and available capacity after both limits, so a partial
 backfill must stop when either is exhausted. A single request can finish
