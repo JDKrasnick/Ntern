@@ -2174,9 +2174,17 @@ function JobDetailSheet({
             <JobRouteStatusContent state={routeState} onDismiss={roleSheet.dismiss} onRetry={onRetry} />
           ) : role ? (
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetContent}>
-              <Text style={styles.sheetEyebrow}>{role.open ? "Role details" : "Closed role"}</Text>
+              <View style={styles.sheetEmployer}>
+                <CompanyMark
+                  key={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id ?? role.company}
+                  company={employerName(roleDisplay?.company, role.employerCategory)}
+                  employerId={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id}
+                  size={48}
+                />
+                <Text style={styles.sheetEmployerName}>{employerName(roleDisplay?.company, role.employerCategory)}</Text>
+              </View>
+              {!role.open ? <Text style={styles.sheetEyebrow}>Closed role</Text> : null}
               <Text style={styles.sheetTitle}>{roleDisplay?.title}</Text>
-              <Text style={styles.sheetCompany}>{employerName(roleDisplay?.company, role.employerCategory)}</Text>
               {role.disciplines?.length ? (
                 <View style={[styles.jobCardMidPills, { marginTop: 10 }]}>
                   {role.disciplines.slice(0, 4).map((d) => {
@@ -11361,6 +11369,8 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
     lineHeight: 32,
   },
+  sheetEmployer: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 14 },
+  sheetEmployerName: { color: colors.body, fontSize: 17, fontWeight: "600", lineHeight: 24, flex: 1 },
   sheetCompany: {
     color: colors.body,
     fontSize: 17,
