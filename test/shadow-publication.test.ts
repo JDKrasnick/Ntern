@@ -549,3 +549,18 @@ describe('shadow publication policy', () => {
       expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get()).toEqual({ count: 0 });
     });
 });
+
+
+describe('isolated dev publication configuration', () => {
+  it('keeps the deployed policies enabled and bound to the current extraction profile', () => {
+    for (const file of ['wrangler.dev.ingestion.jsonc', 'wrangler.dev.catalog-publisher.jsonc']) {
+      const config = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+      const encoded = config.match(/^\s*"LLM_METADATA_PUBLICATION_POLICY_JSON": (".*"),?$/mu)?.[1];
+      expect(encoded).toBeDefined();
+      const policy = parseShadowPublicationPolicy(JSON.parse(encoded!));
+      expect(policy.enabled).toBe(true);
+      expect(policy.allowedFields).toEqual([...shadowPublicationFields]);
+      expect(policy.releaseApproval?.prompt).toBe(SHADOW_EXTRACTION_PROMPT_VERSION);
+    }
+  });
+});
