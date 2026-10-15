@@ -12,6 +12,12 @@ const api = (data, status = 200) => vi.stubGlobal("fetch", vi.fn(async () => Res
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe("public role renderer", () => {
+  it("omits unstated metadata instead of adding placeholder tags", async () => {
+    api({ ...job, location: "", workMode: "unspecified" });
+    const html = await (await worker.fetch(request("/jobs/abc123"), env)).text();
+    expect(html).not.toContain('<dt>Location</dt>');
+    expect(html).not.toContain('<dt>Work mode</dt>');
+  });
   it("uses native disclosure controls and caps expanded pay choices at three", async () => {
     api({ ...job, compensation: { ranges: [37, 42, 50, 60].map(amount => ({ minAmount: amount, maxAmount: amount, currency: "USD", period: "hourly" })) } });
     const html = await (await worker.fetch(request("/jobs/abc123"), env)).text();

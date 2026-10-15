@@ -136,9 +136,10 @@ async function render(request, apiOrigin) {
     && Array.isArray(fact.qualifiers) && fact.qualifiers.every(value => typeof value === "string")),
     { compensation: job.compensation, housing: job.housing });
   const facts = [["Company", [job.company]],
-    ...(!publishedFacts.some(fact => fact.field === "locations") ? [["Location", [job.location || "Not specified"]]] : []),
+    ...(job.location && !/^(?:not specified|not stated|unknown|location not specified)$/iu.test(job.location)
+      && !publishedFacts.some(fact => fact.field === "locations") ? [["Location", [job.location]]] : []),
     ...(job.programType ? [["Program", [job.programType]]] : []),
-    ...(job.workMode && !publishedFacts.some(fact => fact.field === "workMode") ? [["Work mode", [job.workMode]]] : []),
+    ...(job.workMode && job.workMode !== "unspecified" && !publishedFacts.some(fact => fact.field === "workMode") ? [["Work mode", [job.workMode]]] : []),
     ...publishedFacts.map(fact => [fact.label, fact.tags, fact]), ["Source", [sourceLabel]]];
   const factHtml = facts.map(([label, tags, disclosure]) => {
     const pills = tags.map(tag => `<span class="fact-tag">${escapeHtml(tag)}</span>`).join("");

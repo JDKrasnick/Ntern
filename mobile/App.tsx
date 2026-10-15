@@ -2063,11 +2063,13 @@ function RoleFactDisclosure({ fact }: { fact: RoleFactSummary }) {
         onPress={() => setExpanded(value => !value)}
         style={styles.sheetFactDisclosure}
       >
-        {fact.tags.map(tag => (
-          <View key={tag} style={styles.sheetFactTag}>
-            <Text style={styles.sheetFactTagText}>{tag}</Text>
-          </View>
-        ))}
+        <View style={styles.sheetFactTags}>
+          {fact.tags.map(tag => (
+            <View key={tag} style={styles.sheetFactTag}>
+              <Text style={styles.sheetFactTagText}>{tag}</Text>
+            </View>
+          ))}
+        </View>
         <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={14} color={colors.muted} />
       </TouchableOpacity>
       {expanded ? (
@@ -11379,7 +11381,8 @@ const styles = StyleSheet.create({
   sheetTrustPrimary: { color: colors.body, fontSize: 14, fontWeight: "700", lineHeight: 20 },
   sheetTrustSecondary: { color: colors.muted, fontSize: 13, lineHeight: 19 },
   sheetFactBlock: { gap: 3, marginTop: 12 },
-  sheetFactDisclosure: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", alignSelf: "flex-start", gap: 6, minHeight: 48, paddingVertical: 6 },
+  sheetFactDisclosure: { flexDirection: "row", alignItems: "center", alignSelf: "flex-start", maxWidth: "100%", gap: 6, minHeight: 48, paddingVertical: 6 },
+  sheetFactTags: { flexDirection: "row", flexWrap: "wrap", flexShrink: 1, gap: 6 },
   sheetFactTag: { backgroundColor: colors.canvas, borderColor: colors.separator, borderWidth: 1,
     borderRadius: 8, paddingHorizontal: 9, paddingVertical: 4, maxWidth: "100%", flexShrink: 1 },
   sheetFactTagText: { color: colors.body, fontSize: 14, lineHeight: 20 },
