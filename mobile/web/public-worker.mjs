@@ -1,6 +1,8 @@
-import { escapeHtml, metadata, policyDescriptions, sitemap } from "../scripts/web-seo.mjs";
+import { page } from "./public-page.mjs";
+import { escapeHtml, policyDescriptions, sitemap } from "../scripts/web-seo.mjs";
 import { isPastSeason } from "../../src/core/early-career.ts";
 import { topicLinks, topics } from "./topics.mjs";
+import { postingFactSummaries } from "../../shared/posting-fact-display.ts";
 
 const approvedOrigins = new Set([
   "https://intern-notifs.jdkrasnick.workers.dev",
@@ -10,16 +12,7 @@ const maxApiBytes = 2 * 1024 * 1024;
 const roleIdPattern = /^[a-zA-Z0-9_-]{1,128}$/;
 const maxCursor = 10000;
 
-export function page({ title, description, path, body, noindex = false }) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    ${metadata({ title, description, path, noindex })}
-    <link rel="icon" href="/favicon.ico" /><link rel="stylesheet" href="/policy.css" />
-    <style>body{background:#f2f2f7}header{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:2.5rem}header a{font-weight:700;text-decoration:none}.brand{color:#061a33;font-size:1.25rem}.primary{display:inline-block;background:#0e7490;color:white;padding:.7rem 1rem;border-radius:.5rem;font-weight:600;text-decoration:none;min-height:24px}.roles{list-style:none;padding:0;margin:1.5rem 0}.roles li{border-bottom:1px solid #d1d1d6;padding:1rem 0}.roles a{font-weight:600}.roles p{margin:.35rem 0 0}.facts{display:grid;grid-template-columns:minmax(7rem,1fr) 2fr;gap:.5rem 1rem;margin:1.5rem 0}dt{font-weight:600}dd{margin:0}h1,h2,p,a,dd{overflow-wrap:anywhere}.pagination{display:flex;justify-content:space-between;gap:1rem}a{min-height:24px;text-underline-offset:.2em}a:hover{text-decoration:underline}a:focus-visible{outline:3px solid #0e7490;outline-offset:4px}::selection{background:#ceeaf0;color:#061a33}</style>
-    </head><body><main><header><a class="brand" href="/">Ntern</a><a href="/">Open the app</a></header>
-    ${body}<nav aria-label="More from Ntern"><a href="/about">About</a><a href="/jobs">Browse roles</a><a href="/source-policy">Sources and corrections</a><a href="/privacy">Privacy</a><a href="/support">Support</a></nav>
-    </main></body></html>`;
-}
+export { page };
 
 function response(body, status = 200, contentType = "text/html; charset=utf-8", ttl = 300) {
   return new Response(body, { status, headers: {
@@ -138,12 +131,27 @@ async function render(request, apiOrigin) {
   const description = `${title}${job.location ? ` in ${job.location}` : ""}. View the role summary and apply on the employer’s official site with Ntern.`;
   const sourceLabel = job.sourceReferences?.some((source) => source.state === "open" && source.provenance === "employer-submitted") ? "Employer submitted"
     : job.sourceReferences?.some((source) => source.state === "open" && ["official-ats", "official-structured"].includes(source.provenance)) ? "Employer posted" : "Source reported";
-  const facts = [["Company", job.company], ["Location", job.location || "Not specified"],
-    ...(job.programType ? [["Program", job.programType]] : []), ...(job.workMode ? [["Work mode", job.workMode]] : []), ["Source", sourceLabel]];
+  const publishedFacts = postingFactSummaries((Array.isArray(job.postingFacts) ? job.postingFacts : []).filter(fact =>
+    fact && Array.isArray(fact.statements) && fact.statements.every(value => typeof value === "string")
+    && Array.isArray(fact.qualifiers) && fact.qualifiers.every(value => typeof value === "string")),
+    { compensation: job.compensation, housing: job.housing });
+  const facts = [["Company", [job.company]],
+    ...(job.location && !/^(?:not specified|not stated|unknown|location not specified)$/iu.test(job.location)
+      && !publishedFacts.some(fact => fact.field === "locations") ? [["Location", [job.location]]] : []),
+    ...(job.programType ? [["Program", [job.programType]]] : []),
+    ...(job.workMode && job.workMode !== "unspecified" && !publishedFacts.some(fact => fact.field === "workMode") ? [["Work mode", [job.workMode]]] : []),
+    ...publishedFacts.map(fact => [fact.label, fact.tags, fact]), ["Source", [sourceLabel]]];
+  const factHtml = facts.map(([label, tags, disclosure]) => {
+    const value = `<span class="fact-value">${tags.map(escapeHtml).join(" · ")}</span>`;
+    if (!disclosure) return `<div class="fact-row"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`;
+    const pay = disclosure.payOptions.length ? `<ul>${disclosure.payOptions.map(option => `<li>${escapeHtml(option)}</li>`).join("")}</ul>` : "";
+    const details = disclosure.details.map(detail => `<p>${escapeHtml(detail)}</p>`).join("");
+    return `<div class="fact-row"><dt>${escapeHtml(label)}</dt><dd><details class="fact-disclosure"><summary aria-label="${escapeHtml(`${label}: ${tags.join(', ')}`)}">${value}<svg class="fact-chevron" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></summary><div class="fact-detail">${pay}${details}${disclosure.morePayOptions ? '<p>More pay options on the employer’s site.</p>' : ''}</div></details></dd></div>`;
+  }).join("");
   return response(page({ title: `${title} — Ntern`, description, path: `/jobs/${job.jobId}`,
     body: `<h1>${escapeHtml(job.title)}</h1><p class="lede">${escapeHtml(job.company)}${job.location ? ` · ${escapeHtml(job.location)}` : ""}</p>
       <a class="primary" href="${escapeHtml(officialUrl)}" rel="external noreferrer">Apply on the employer’s site</a>
-      <dl class="facts">${facts.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl>
+      <dl class="facts">${factHtml}</dl>
       <h2>Before you apply</h2><p>This is a catalog summary, not the full job description. Check the employer’s page for current requirements, deadlines, pay, and work authorization. An open listing does not guarantee eligibility or visa sponsorship.</p>
       <h2>Why Ntern?</h2><p>Ntern helps students and new graduates discover credible technical roles in one calm, free catalog. Browse without an account, see where each listing came from, and choose when to apply. Ntern does not submit applications for you.</p>
       <p><a href="/?job=${encodeURIComponent(job.jobId)}">View this role in the Ntern app</a> to save it or explore the catalog. <a href="/source-policy">Read about our sources and corrections.</a></p>`,

@@ -333,3 +333,32 @@ Required configuration outside the app code:
 5. Add the mobile auth-session implementation, then test first sign-in, returning sign-in, private relay email, logout, account deletion, and a full TestFlight build.
 
 The Apple private key must remain in AWS/Apple configuration and must never be embedded in Expo environment variables, the mobile binary, or Git.
+
+
+### Role metadata disclosures
+
+Preserve the app's compact bottom sheet. Align the company mark beside the title
+block, with company name and disciplines on one wrapping subtitle underneath.
+Show the term once in the title, and put location in the metadata flow. Source,
+discovery timing, and confirmation appear as one quiet secondary line above the
+application actions. Pay stays green and joins the other metadata in the same wrapping line. Metadata uses brief labeled
+phrases that wrap together, without separate full-width rows, dividers, or pill
+backgrounds. Tap/click, keyboard focus, or a 450 ms hover opens a small speech
+bubble attached to the phrase. The bubble overlays the sheet without changing
+its height; full claims and exceptions remain available, with scrolling for long
+details. It flips above the trigger near the bottom of the screen, and closes on
+an outside tap, Escape, or scrolling the underlying page. Hover stays open while
+moving from the trigger into the bubble. Use colored field icons and labels:
+green pay, teal location, blue work mode, amber housing, violet dates, indigo
+education, and green-teal eligibility. Controls stay transparent with 44 pt touch
+targets and explicit expanded state. The standalone public role page uses
+aligned label/value rows.
+Keep the employer application button as the clear primary action.
+
+Pay varies opens up to three distinct pay options with their currency, cadence,
+and applicability. Never use a vague Pay disclosed badge. Housing stipends show
+the amount or explicitly say the amount is unstated; conditional support names
+the benefit, such as “Relocation may be available,” with the full condition in
+the hint. Do not use standalone “Depends” labels or trailing info symbols; the
+metadata text itself opens the hint. Unstated fields stay
+hidden, and switching roles resets expanded details.

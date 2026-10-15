@@ -19,6 +19,7 @@
 ## Milestones
 
 - [x] Add search metadata, production canonicals, robots rules, and a sitemap to the public web export; keep Pages previews out of search. Deployment and Search Console verification are tracked in [`seo.md`](seo.md).
+- [x] Support public, source-attributed facts for all seven model metadata fields in role details, with brief colored field labels and anchored hint bubbles in the app, profile-bound release approval, exact historical cohorts, durable receipts, and bounded catalog refreshes. See [the release contract](shadow-extraction.md#owner-approved-full-metadata-release).
 - [x] Serve public role summaries and a paginated directory as HTML through a scoped Pages renderer, with official handoff, source labels, bounded cached API reads, and real closed/missing/error status codes. Production deployment remains pending.
 - [x] Add distinct public pages for software internships, machine-learning internships, and new-grad roles, explaining Ntern and linking to bounded, relevant catalog searches. Search Console indexing and impact measurement remain pending.
 - [x] Move the prominent feed-header SEO link into a quiet web footer and a dedicated About page, keeping the public role directory and topic pages discoverable.

@@ -1,5 +1,6 @@
 import type { SourceOccurrence } from '../types.js';
 import { mergeRoleMetadataEvidence, replaceVerifiedPageMetadataEvidence } from '../role-metadata.js';
+import { providerShadowRevisionChanged } from '../shadow-extraction.js';
 
 /**
  * Source occurrences are durably stored by source and external ID. Document
@@ -49,16 +50,18 @@ export function mergeSourceOccurrence(
     : incoming.providerEvidence ?? previous?.providerEvidence;
   const provenance = incoming.provenance ?? previous?.provenance;
   const admission = latestAdmission(previous?.admission, incoming.admission);
+  const priorEvidence = previous && providerShadowRevisionChanged(previous, incoming)
+    ? previous.metadataEvidence?.filter(item => item.sourceClass !== 'reviewed-shadow') : previous?.metadataEvidence;
   const metadataEvidence = incoming.metadataExtraction
-    ? replaceVerifiedPageMetadataEvidence(previous?.metadataEvidence, incoming.metadataEvidence, incoming.sourceId)
-    : mergeRoleMetadataEvidence(previous?.metadataEvidence, incoming.metadataEvidence);
+    ? replaceVerifiedPageMetadataEvidence(priorEvidence, incoming.metadataEvidence, incoming.sourceId)
+    : mergeRoleMetadataEvidence(priorEvidence, incoming.metadataEvidence);
   return {
     ...previous,
     ...incoming,
     ...(provenance ? { provenance } : {}),
     ...(providerEvidence ? { providerEvidence } : {}),
     ...(admission ? { admission } : {}),
-    ...(metadataEvidence.length ? { metadataEvidence } : {}),
+    ...(metadataEvidence.length || previous?.metadataEvidence ? { metadataEvidence } : {}),
     ...(firstAttachedAt ? { firstAttachedAt } : {}),
     ...(previous?.firstAttachedAtPrecision === 'exact' || incoming.firstAttachedAtPrecision === 'exact'
       ? { firstAttachedAtPrecision: 'exact' as const }

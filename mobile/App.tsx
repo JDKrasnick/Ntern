@@ -39,10 +39,13 @@ import * as Clipboard from "expo-clipboard";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, catalogCardKind, catalogQueryPreview, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, refreshCacheFirst, type GroupedCatalogPage } from "./src/catalog";
-import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
+import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "./src/catalog-quality";
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
-import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
+import { type DisplayHousingDetail } from "../shared/housing-display";
+import { type PostingFact } from "../shared/posting-facts";
+import { postingFactSummaries } from "../shared/posting-fact-display";
+import { RoleMetadataHints } from "./src/RoleMetadataHints";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { dayIndexCacheKey, isDayIndexFresh, loadDayIndex, prefetchDayIndex, readDayIndex, readDayIndexCached, type ReleaseDayCount } from "./src/day-index";
@@ -126,6 +129,7 @@ type Job = {
   applyUrl: string;
   compensation: { raw: string };
   housing?: DisplayHousingDetail[];
+  postingFacts?: PostingFact[];
   employerCategory?: EmployerCategory;
   disciplines?: string[];
   open: boolean;
@@ -192,6 +196,7 @@ type CatalogGroupRole = {
   advancedDegreeRequired?: boolean;
   compensation: { raw: string };
   housing?: DisplayHousingDetail[];
+  postingFacts?: PostingFact[];
   firstSeenAt: string;
   lastSeenAt: string;
   sourceReferences: Job["sourceReferences"];
@@ -1096,8 +1101,8 @@ function JobCard({
                     {job.disciplines?.slice(0, 2).map((d) => {
                       const s = disciplineStyleFor(d);
                       return (
-                        <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
-                          <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
+                        <View key={d} style={styles.disciplineTag}>
+                          <Text style={[styles.disciplineTagText, { color: s.color }]}>{s.label}</Text>
                         </View>
                       );
                     })}
@@ -1167,6 +1172,7 @@ function catalogRoleJob(role: CatalogGroupRole): Job {
     applyUrl: role.officialApplyUrl,
     compensation: role.compensation ?? { raw: "" },
     housing: role.housing,
+    postingFacts: role.postingFacts,
     employerCategory: role.employerCategory,
     disciplines: role.disciplines,
     open: role.open,
@@ -1879,8 +1885,8 @@ function CatalogGroupCard({
                     {group.disciplines.slice(0, 2).map((d) => {
                       const s = disciplineStyleFor(d);
                       return (
-                        <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
-                          <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
+                        <View key={d} style={styles.disciplineTag}>
+                          <Text style={[styles.disciplineTagText, { color: s.color }]}>{s.label}</Text>
                         </View>
                       );
                     })}
@@ -2090,9 +2096,6 @@ function JobDetailSheet({
 
   const role = job ?? displayedJob.current;
   const roleDisplay = role ? presentCatalogRole(role) : undefined;
-  const details = [roleDisplay?.location, roleDisplay?.season]
-    .filter(Boolean)
-    .join(" · ");
   const actionLabel = !role?.open
     ? "View official listing"
     : signedIn
@@ -2141,39 +2144,30 @@ function JobDetailSheet({
             <JobRouteStatusContent state={routeState} onDismiss={roleSheet.dismiss} onRetry={onRetry} />
           ) : role ? (
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetContent}>
-              <Text style={styles.sheetEyebrow}>{role.open ? "Role details" : "Closed role"}</Text>
-              <Text style={styles.sheetTitle}>{roleDisplay?.title}</Text>
-              <Text style={styles.sheetCompany}>{employerName(roleDisplay?.company, role.employerCategory)}</Text>
-              {role.disciplines?.length ? (
-                <View style={[styles.jobCardMidPills, { marginTop: 10 }]}>
-                  {role.disciplines.slice(0, 4).map((d) => {
-                    const s = disciplineStyleFor(d);
-                    return (
-                      <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
-                        <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
-                      </View>
-                    );
-                  })}
+              {!role.open ? <Text style={styles.sheetEyebrow}>Closed role</Text> : null}
+              <View style={styles.sheetHeader}>
+                <CompanyMark
+                  key={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id ?? role.company}
+                  company={employerName(roleDisplay?.company, role.employerCategory)}
+                  employerId={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id}
+                  size={40}
+                />
+                <View style={styles.sheetHeadingCopy}>
+                  <Text style={styles.sheetTitle}>{roleSheetTitle(roleDisplay?.title ?? role.title, role.season)}</Text>
+                  <View style={styles.sheetEmployer}>
+                    <Text style={styles.sheetEmployerName}>{employerName(roleDisplay?.company, role.employerCategory)}</Text>
+                    {role.disciplines?.slice(0, 4).map(d => {
+                      const tone = disciplineStyleFor(d);
+                      return <Text key={d} style={[styles.sheetDiscipline, { color: tone.color }]}>· {tone.label}</Text>;
+                    })}
+                  </View>
                 </View>
-              ) : null}
-              <Text style={styles.sheetDetail}>{details}</Text>
-              {roleDisplay?.compensation ? (
-                <View style={styles.jobCardMidPills}>
-                  <Text style={styles.pay} numberOfLines={2}>{roleDisplay.compensation}</Text>
-                </View>
-              ) : null}
-              {housingLabels(role.housing).map((housing, index) => (
-                <View key={`${housing.label}-${index}`} style={styles.sheetTrustBlock}>
-                  <Text style={styles.sheetTrustPrimary}>{housing.label}</Text>
-                  {housing.detail ? <Text style={styles.sheetTrustSecondary}>{housing.detail}</Text> : null}
-                </View>
-              ))}
-              <View style={styles.sheetTrustBlock}>
-                <Text style={styles.sheetTrustPrimary}>{source.primary}</Text>
-                {source.corroboration ? <Text style={styles.sheetTrustSecondary}>{source.corroboration}</Text> : null}
-                {postingTiming ? <Text style={styles.sheetTrustSecondary}>{postingTiming.detail}</Text> : null}
-                <Text style={styles.sheetTrustSecondary}>{freshnessLabel(role.lastSeenAt)}</Text>
               </View>
+              <RoleMetadataHints key={`${role.jobId}:${role.postingFacts?.map(fact => fact.contentHash).join(":") ?? "legacy"}`}
+                facts={postingFactSummaries(role.postingFacts, { compensation: role.compensation, housing: role.housing, locations: role.locations?.length ? role.locations : role.location ? [role.location] : [] })} />
+              <Text style={styles.sheetSourceNote} accessibilityLabel={[source.primary, source.corroboration, postingTiming?.detail, freshnessLabel(role.lastSeenAt)].filter(Boolean).join(". ")}>
+                {[source.primary, source.corroboration, postingTiming?.summary, freshnessLabel(role.lastSeenAt)].filter(Boolean).join(" · ")}
+              </Text>
               {role.postingIdentityStatus === "unconfirmed" ? (
                 <View style={styles.sheetIdentityNotice} accessibilityLabel="Identity unconfirmed. We verified the employer and application page, but have not yet matched this listing to reviewed exact posting evidence. It may later be combined with another listing.">
                   <Ionicons name="shield-outline" size={17} color={colors.signal} />
@@ -4342,8 +4336,8 @@ function SwipeScreen({
               {job.disciplines.slice(0, 3).map((discipline) => {
                 const disciplineStyle = disciplineStyleFor(discipline);
                 return (
-                  <View key={discipline} style={[styles.disciplinePill, { backgroundColor: disciplineStyle.backgroundColor, borderColor: disciplineStyle.borderColor }]}>
-                    <Text style={[styles.disciplinePillText, { color: disciplineStyle.color }]}>{disciplineStyle.label}</Text>
+                  <View key={discipline} style={styles.disciplineTag}>
+                    <Text style={[styles.disciplineTagText, { color: disciplineStyle.color }]}>{disciplineStyle.label}</Text>
                   </View>
                 );
               })}
@@ -11272,8 +11266,8 @@ const styles = StyleSheet.create({
     width: 112,
   },
   swipeHideActionText: { color: colors.onDark, fontSize: 14, fontWeight: "800" },
-  disciplinePill: { borderRadius: 999, borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4 },
-  disciplinePillText: { fontSize: 11, fontWeight: "800", letterSpacing: 0.2 },
+  disciplineTag: { paddingVertical: 2 },
+  disciplineTagText: { fontSize: 12, fontWeight: "700" },
   jobCardTopTags: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginLeft: 8, flexShrink: 1, justifyContent: "flex-end" },
   jobCardMidPills: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
   jobCardFooterLeft: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12, gap: 12 },
@@ -11333,6 +11327,12 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
     lineHeight: 32,
   },
+  sheetHeader: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
+  sheetHeadingCopy: { flex: 1, minWidth: 0 },
+  sheetEmployer: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 6, rowGap: 2, marginTop: 5 },
+  sheetDiscipline: { fontSize: 13, fontWeight: "600", lineHeight: 21 },
+  sheetSourceNote: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 10 },
+  sheetEmployerName: { color: colors.body, fontSize: 15, fontWeight: "600", lineHeight: 21 },
   sheetCompany: {
     color: colors.body,
     fontSize: 17,

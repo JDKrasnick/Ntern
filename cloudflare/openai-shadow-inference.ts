@@ -13,7 +13,7 @@ export const shadowModelPricingCents: Record<string, { input: number; output: nu
 };
 
 const evidence = { type: 'array', items: { type: 'string', minLength: 1 } } as const;
-const qualifiers = { type: 'array', items: { type: 'string', minLength: 1 } } as const;
+const qualifiers = { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1, maxLength: 160 } } as const;
 
 function fieldSchema(presentValue: Record<string, unknown>) { return {
   anyOf: [
@@ -32,10 +32,9 @@ function fieldSchema(presentValue: Record<string, unknown>) { return {
 } as const; }
 
 const strings = {
-  anyOf: [
-    { type: 'string' },
-    { type: 'array', items: { type: 'string' } },
-  ],
+  type: 'array', minItems: 1, maxItems: 8,
+  items: { type: 'string', minLength: 1, maxLength: 160 },
+  description: 'Short self-contained display tags, one fact per item, ideally 2–10 words. Keep each condition with its fact. Exact full source text belongs in evidence.',
 };
 
 const workMode = { type: 'string', enum: ['remote', 'hybrid', 'onsite'] } as const;
@@ -83,7 +82,7 @@ export const shadowResponseSchema = {
         education: { ...fieldSchema(strings),
           description: 'Retain required, preferred, and audience education statements with their scope. A named study subject/program counts when the source says the applicant is studying it, even without a degree level. Explicit enrollment in an engineering/management school or university program also counts, including general mandatory university enrollment; do not invent a degree level or major. Preserve degree alternatives, equivalencies, and linked enrollment, study-year, graduation, and return-to-school conditions. Job titles/recruiting labels, mere study-year alone, pay tiers, and document-submission procedures are not degree/program requirements.' },
         eligibility: { ...fieldSchema(strings),
-          description: 'Retain the complete role-linked work-authorization, citizenship, sponsorship, clearance, or access restriction, including conditional language, exclusions, and exceptions. Use full statements rather than bare labels. Do not replace an explicit restriction with only its law name, or add legal interpretations or application paperwork.' },
+          description: 'Short self-contained tags retaining the role-linked work-authorization, citizenship, sponsorship, clearance, or access restriction, including conditional language, exclusions, and exceptions. Do not replace a restriction with only its law name, or add legal interpretations or application paperwork.' },
       },
     },
   },

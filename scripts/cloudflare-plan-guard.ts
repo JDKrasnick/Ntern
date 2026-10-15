@@ -1,4 +1,5 @@
 import { sourceAllowlistBindingValid } from '../src/ingestion-v2/source-allowlist.js';
+import { parseShadowPublicationPolicy, shadowPublicationFields } from '../src/shadow-publication.js';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -156,6 +157,16 @@ function permitsProspectiveMetadataPolicy(before: string, after: string): boolea
   try {
     const prior = JSON.parse(before) as unknown;
     const next = JSON.parse(after) as unknown;
+    const approved = parseShadowPublicationPolicy(after);
+    const priorApproved = parseShadowPublicationPolicy(before);
+    const fullRelease = approved.enabled && approved.mode === 'prospective-provider-poll'
+      && new TextEncoder().encode(after).byteLength <= 5000
+      && approved.version === 'full-metadata-2026-10-v1' && approved.maxReceipts === null
+      && approved.releaseApproval && approved.allowedFields.length === shadowPublicationFields.length
+      && shadowPublicationFields.every(field => approved.allowedFields.includes(field));
+    if (fullRelease && approved.startsAt === priorApproved.startsAt
+      && (isProspectiveMetadataPolicy(prior, true) || priorApproved.releaseApproval)) return true;
+    if (priorApproved.releaseApproval && (isDeepStrictEqual(next, disabledMetadataPolicy) || isProspectiveMetadataPolicy(next, true))) return true;
     return (isDeepStrictEqual(prior, disabledMetadataPolicy) && isProspectiveMetadataPolicy(next))
       || (isProspectiveMetadataPolicy(prior, true) && isDeepStrictEqual(next, disabledMetadataPolicy))
       || (isProspectiveMetadataPolicy(prior) && isProspectiveMetadataPolicy(next, true)

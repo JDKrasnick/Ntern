@@ -886,7 +886,7 @@ export function extractPostingMetadataEvidence(input: Omit<ExtractRoleMetadataIn
 }
 
 export function roleMetadataEvidenceHasFields(value: RoleMetadataEvidence): boolean {
-  return Boolean(value.compensationRanges?.length || value.housing?.length || value.education || value.season || value.locations?.length || value.workMode
+  return Boolean(value.postingFacts?.length || value.compensationRanges?.length || value.housing?.length || value.education || value.season || value.locations?.length || value.workMode
     || value.applicationDeadline || value.employerPublishedAt || value.employerUpdatedAt);
 }
 
@@ -1062,9 +1062,20 @@ export function reconcileRoleMetadata(
   const graduation = education?.graduationDateWindow
     ? { value: education.graduationDateWindow, provenance: education.provenance }
     : undefined;
+  const activeFacts = usable.filter(item => !existing || existing.sourceReferences.some(ref => ref.sourceId === item.sourceId && ref.state !== 'closed'))
+    .flatMap(item => item.postingFacts ?? []);
+  const postingFacts = [...new Set(activeFacts.map(fact => fact.field))].flatMap(field => {
+      const facts = activeFacts.filter(fact => fact.field === field);
+      // Different attached sources must agree. Never combine contradictory statements.
+      const values = new Set(facts.map(fact => stable({ statements: fact.statements, qualifiers: fact.qualifiers })));
+      if (values.size > 1) conflicts.push({ field: 'posting-facts', applicabilityKey: field,
+        evidenceHashes: [...new Set(facts.map(fact => fact.contentHash))].sort(), values: [...values].sort() });
+      return values.size === 1 ? [facts[0]!] : [];
+    });
   const metadata: ReconciledRoleMetadata = {
     schemaVersion: 1, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
     evidenceHashes: [...new Set(usable.map((item) => item.artifactHash))].sort(),
+    ...(postingFacts.length ? { postingFacts } : {}),
     ...(ranges.ranges.length ? { compensationRanges: ranges.ranges } : {}), ...(education ? { education } : {}),
     ...(season.value?.provenance.length ? { season: season.value } : {}),
     ...(housing.length ? { housing } : {}),
@@ -1149,6 +1160,7 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
     ...job,
     ...(updatedIdentity ? { internshipIdentity: updatedIdentity } : {}),
     ...(result.metadata ? { roleMetadata: result.metadata } : {}),
+    ...(result.metadata?.postingFacts?.length ? { postingFacts: result.metadata.postingFacts } : {}),
     ...(result.metadata?.housing ? { housing: result.metadata.housing } : {}),
     ...(result.compensation ? { compensation: result.compensation } : previousCompensationWasProjected ? { compensation: { raw: '' } } : {}),
     ...(locationNames?.length ? { locations: locationNames, location: locationSummary(locationNames) } : {}),
@@ -1161,6 +1173,7 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
     ...(result.metadata?.employerUpdatedAt ? { employerUpdatedAt: result.metadata.employerUpdatedAt.value } : {}),
   };
   if (!result.metadata) delete projected.roleMetadata;
+  if (!result.metadata?.postingFacts?.length) delete projected.postingFacts;
   // Reconcile the community advanced-degree badge with the employer's explicit
   // audience so the two never contradict on the same role (a community cap can
   // mark a role graduate-only that the official page opens to undergraduates).

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { inferOpenAIShadowExtraction } from '../cloudflare/openai-shadow-inference.js';
+import { inferOpenAIShadowExtraction, shadowResponseSchema } from '../cloudflare/openai-shadow-inference.js';
 import { normalizeExactPostingDescription, shadowExtractionPrompt } from '../src/shadow-extraction.js';
 
 const input = normalizeExactPostingDescription('Software Engineering Intern', 'Austin\n$50 - $60 per hour');
@@ -17,6 +17,16 @@ const extracted = {
 };
 
 describe('OpenAI shadow inference', () => {
+  it('requires compact phrase arrays while preserving unrestricted verbatim evidence', () => {
+    const fields = shadowResponseSchema.properties.fields.properties;
+    for (const name of ['housing', 'timing', 'education', 'eligibility'] as const) {
+      expect(fields[name].anyOf[0].properties.value).toMatchObject({
+        type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', maxLength: 160 },
+      });
+      expect(fields[name].anyOf[0].properties.evidence.items).not.toHaveProperty('maxLength');
+    }
+    expect(shadowExtractionPrompt(input).system).toContain('Keep a condition with the fact it limits in the SAME tag');
+  });
   it('uses the pinned 4o-mini snapshot in JSON mode and records conservative cost', async () => {
     const request = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;

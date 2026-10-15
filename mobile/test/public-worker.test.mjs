@@ -12,6 +12,33 @@ const api = (data, status = 200) => vi.stubGlobal("fetch", vi.fn(async () => Res
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe("public role renderer", () => {
+  it("omits unstated metadata instead of adding placeholder tags", async () => {
+    api({ ...job, location: "", workMode: "unspecified" });
+    const html = await (await worker.fetch(request("/jobs/abc123"), env)).text();
+    expect(html).not.toContain('<dt>Location</dt>');
+    expect(html).not.toContain('<dt>Work mode</dt>');
+  });
+  it("uses native disclosure controls and caps expanded pay choices at three", async () => {
+    api({ ...job, compensation: { ranges: [37, 42, 50, 60].map(amount => ({ minAmount: amount, maxAmount: amount, currency: "USD", period: "hourly" })) } });
+    const html = await (await worker.fetch(request("/jobs/abc123"), env)).text();
+    expect(html).toContain('<summary aria-label="Pay: Pay varies">');
+    expect(html).toContain('<li>USD 37/hour</li><li>USD 42/hour</li><li>USD 50/hour</li>');
+    expect(html).not.toContain('USD 60/hour');
+    expect(html).not.toContain('Pay disclosed');
+    expect(html).toContain('More pay options on the employer’s site.');
+    expect(html).not.toContain('<details class="fact-disclosure" open');
+  });
+  it("shows all published posting facts and escapes their statements and qualifiers", async () => {
+    const fields = ["compensation", "locations", "workMode", "housing", "timing", "education", "eligibility"];
+    api({ ...job, postingFacts: fields.map(field => ({ field, statements: [`${field}: <script>unsafe</script>`], qualifiers: ["Only if eligible & enrolled"], sourceUrl: job.applyUrl, contentHash: "a".repeat(64) })) });
+    const html = await (await worker.fetch(request("/jobs/abc123"), env)).text();
+    for (const field of fields) expect(html).toContain(`${field}: &lt;script&gt;unsafe&lt;/script&gt;`);
+    expect(html).toContain("Only if eligible &amp; enrolled");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain('<dt>Housing</dt><dd><details class="fact-disclosure">');
+    expect(html.match(/<dt>Location<\/dt>/g)).toHaveLength(1);
+    expect(html).toContain('<p>Only if eligible &amp; enrolled</p>');
+  });
   it("serves the same HTML to visitors and bots, with source labels and a safe handoff", async () => {
     api(job);
     const browser = await worker.fetch(request("/jobs/abc123"), env);
@@ -49,6 +76,7 @@ describe("public role renderer", () => {
     api({ ...job, title: '<script>alert("x")</script>', company: '" onload="bad' });
     const html = await (await worker.fetch(request("/jobs/abc123"), env)).text();
     expect(html).not.toContain("<script>");
+
     expect(html).toContain("&lt;script&gt;");
     api({ ...job, applyUrl: "javascript:alert(1)" });
     expect((await worker.fetch(request("/jobs/abc123"), env)).status).toBe(503);

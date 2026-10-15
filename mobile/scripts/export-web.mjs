@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { addMetadata, homeDescription, homeTitle, policyDescriptions, sitemap } from "./web-seo.mjs";
-import { page } from "../web/public-worker.mjs";
+import { page } from "../web/public-page.mjs";
 import { topicLinks, topics } from "../web/topics.mjs";
 import { aboutPage } from "../web/about.mjs";
 
