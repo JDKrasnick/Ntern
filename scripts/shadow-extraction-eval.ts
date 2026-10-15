@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { SHADOW_EXTRACTION_MODEL_ID, normalizeExactPostingDescription, shadowExtractionPrompt, validateShadowExtraction } from '../src/shadow-extraction.js';
 import { inferShadowExtraction, shadowModelDefaults } from '../cloudflare/shadow-model-inference.js';
 import { localShadowApiKey } from './shadow-model-cli.js';
+import { postprocessRoleScopedExtraction } from '../src/shadow-extraction-postprocess.js';
 import {
   evaluateShadowCase,
   parseShadowEvalCases,
@@ -23,6 +24,7 @@ const has = (name: string) => args.includes(name);
 const casesPath = option('--cases') ?? 'test/fixtures/shadow-extraction-eval.json';
 const offlinePath = option('--offline');
 const live = has('--live');
+const roleScope = has('--role-scope');
 const recordPath = option('--record');
 const reportBase = option('--report') ?? 'eval/shadow-extraction-results';
 const limitValue = Number(option('--limit') ?? 0);
@@ -31,7 +33,7 @@ if (!Number.isInteger(limitValue) || limitValue < 0) {
 }
 const limit = limitValue;
 if ((offlinePath === undefined) !== live) {
-  console.error('Usage: tsx scripts/shadow-extraction-eval.ts (--offline <recorded.json> | --live) [--cases <dataset.json>] [--record <out.json>] [--report <base>] [--limit <n>] [--model <id>]');
+  console.error('Usage: tsx scripts/shadow-extraction-eval.ts (--offline <recorded.json> | --live) [--cases <dataset.json>] [--record <out.json>] [--report <base>] [--limit <n>] [--model <id>] [--role-scope]');
   process.exit(1);
 }
 if (recordPath !== undefined && !live) {
@@ -45,7 +47,10 @@ const golden = parseShadowEvalCases(JSON.parse(await readFile(casesPath, 'utf8')
 function resultFor(goldenCase: ShadowEvalCase, validation: ReturnType<typeof validateShadowExtraction>,
   inference?: { inputTokens: number; outputTokens: number; actualCostCents: number }): ShadowEvalCaseResult {
   if (validation.accepted) {
-    const evaluation = evaluateShadowCase(validation.accepted, goldenCase.expected);
+    const extraction = roleScope
+      ? postprocessRoleScopedExtraction(validation.accepted, normalizeExactPostingDescription(goldenCase.title, goldenCase.description).completeness).extraction
+      : validation.accepted;
+    const evaluation = evaluateShadowCase(extraction, goldenCase.expected);
     return { id: goldenCase.id, valid: true, failures: [], classification: evaluation.classification, fields: evaluation.fields,
       ...(inference ? { cost: { inputTokens: inference.inputTokens, outputTokens: inference.outputTokens, actualCostCents: inference.actualCostCents } } : {}) };
   }
@@ -88,7 +93,7 @@ if (live) {
 
 const mode = live ? 'live' : 'offline';
 const recordedAt = new Date().toISOString();
-const summary = summarizeShadowEval(results);
+const summary = { ...summarizeShadowEval(results), roleScopeApplied: roleScope };
 const reportJson = `${reportBase}.json`;
 const reportMd = `${reportBase}.md`;
 await mkdir(dirname(reportJson), { recursive: true });
@@ -116,6 +121,7 @@ const caseRows = results.map((result) => {
 await writeFile(reportMd, `# Shadow extraction evaluation
 
 Mode: ${mode}
+Role-scope postprocessing: ${roleScope ? 'applied' : 'not applied'}
 Model: ${model}
 Recorded at: ${recordedAt}
 Cases: ${summary.cases} | Valid: ${summary.validCases} | Invalid: ${summary.invalidCases}

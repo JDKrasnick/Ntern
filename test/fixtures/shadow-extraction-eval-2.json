@@ -63,7 +63,7 @@
           "locations": { "status": "present", "value": ["New York"] },
           "workMode": { "status": "conflicting" },
           "housing": { "status": "not-stated" },
-          "timing": { "status": "not-stated" },
+          "timing": { "status": "present", "value": true },
           "education": { "status": "not-stated" },
           "eligibility": { "status": "not-stated" }
         }
@@ -148,7 +148,7 @@
           "locations": { "status": "not-stated" },
           "workMode": { "status": "not-stated" },
           "housing": { "status": "not-stated" },
-          "timing": { "status": "present", "value": true },
+          "timing": { "status": "not-stated" },
           "education": { "status": "present", "value": true },
           "eligibility": { "status": "not-stated" }
         }
@@ -199,7 +199,7 @@
           "locations": { "status": "present", "value": ["New York"] },
           "workMode": { "status": "present", "value": "onsite" },
           "housing": { "status": "not-stated" },
-          "timing": { "status": "not-stated" },
+          "timing": { "status": "present", "value": true },
           "education": { "status": "not-stated" },
           "eligibility": { "status": "not-stated" }
         }

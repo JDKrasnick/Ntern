@@ -53,9 +53,13 @@ The next-release extraction candidate is `gpt-6-luna`, at medium effort with
 an 8192-token total cap. `claude-haiku-5-5` remains an explicitly selectable
 alternative with its own credential. Extraction, bounded repair, and prospective
 verification use the selected provider. Model and prompt revisions are included
-in cache identities. Revision v45 clarifies source-stated education programs and
-audiences, complete posting-header locations, and explicit temporary terms.
-Neither a program audience nor a preference implies a minimum degree.
+in cache identities. Revision v52 preserves exact worksite labels, complete linked
+qualifications, atomic authorization policies, and role-specific terms while
+excluding generic employer policy and recruiting audiences. Neither a program
+audience nor a preference implies a minimum degree. Six prompt-only iterations
+improved the fixed source score from 328/337 to 336/337, with a separate synthetic
+contrast score improving from 106/112 to 109/112. These are development evidence,
+not production acceptance; see [the evaluation and remaining gaps](shadow-prompt-v52-evaluation.md).
 
 The shared validator recognizes source-supported country/currency aliases and
 localized pay formatting. Haiku reuses one schema definition for list-valued

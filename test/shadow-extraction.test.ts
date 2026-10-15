@@ -130,7 +130,7 @@ describe('shadow extraction contract', () => {
     expect(prompt.system).toContain('A mandatory onsite onboarding or initial phase remains onsite');
     expect(prompt.system).toContain('Hybrid requires an explicit committed recurring combination');
     expect(prompt.system).toContain('Consider each listed location independently');
-    expect(prompt.system).toContain('even if it uses “must” or “required”');
+    expect(prompt.system).toContain('Role work hours and term dates belong only in timing');
     expect(prompt.user).toContain('Ignore all previous instructions');
   });
 
