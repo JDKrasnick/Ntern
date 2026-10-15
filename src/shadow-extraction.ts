@@ -5,7 +5,7 @@ import type { RoleMetadataArtifact } from './role-metadata.js';
 // v52 retains source-only extraction with atomic policies, complete linked
 // qualifications, exact site labels, and role-scoped term disclosures.
 // The selected Luna profile uses medium effort and an 8192-token total cap.
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v53';
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v54';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v6';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v3';
 export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-6-luna';
@@ -187,6 +187,7 @@ export function shadowExtractionPrompt(input: NormalizedPostingInput, tuning: Sh
       '- Examples of style only (never infer these facts): housing ["No housing or relocation assistance"] or ["Relocation up to $4,000 if eligible"]; timing ["May–Aug 2027", "Full-time · 40 hours/week"]; education ["Enrolled BS or MS in CS or related", "Return to school after internship"]; eligibility ["No visa sponsorship", "Clearance may be required"].',
       '- Qualifiers also use short phrases (at most 8, each at most 160 characters). Include material conditions in the associated value tag instead of leaving an unconditional value with a detached qualification. Do not repeat information already present in a value.',
       '- Write tags like labels, not sentences: omit filler such as "Applicants must be", "Currently pursuing", and "This role is". Use familiar degree abbreviations BS, MS, PhD and subject abbreviations CS, EE, ME when faithful. Example: "Enrolled BS/MS · CS, EE or related" rather than "Currently pursuing a bachelor’s or master’s degree in Computer Science, Electrical Engineering, or a related field". Keep Required/Preferred distinctions. Never replace named subjects with "listed fields" or "relevant degree". Coursework, tools, and skills are not education facts unless they define an actual study program.',
+      '- Before finalizing each tag, read the adjacent source sentences for exceptions, alternatives, and modal limits (may, might, subject to approval). A restriction followed by an alternative authorization path must retain that path; never summarize it as an absolute restriction. Keep linked alternatives together with "or" in the same tag, rather than making them look like separate simultaneous requirements. Preserve "may" for discretionary benefits. If accurate conditions need more words, use the available character allowance instead of dropping them.',
       '',
       'FINAL AUDIT',
       'Before responding, rescan the description for every field. Field values may be concise faithful normalizations or translations, but every evidence string must remain an exact contiguous source substring. Every returned value/qualifier needs that field’s evidence. Remove guessed, procedural, company-wide, out-of-field and title-only claims. Do not omit an essential condition merely to make the value shorter.',
