@@ -12,6 +12,14 @@ const api = (data, status = 200) => vi.stubGlobal("fetch", vi.fn(async () => Res
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe("public role renderer", () => {
+  it("shows all published posting facts and escapes their statements and qualifiers", async () => {
+    const fields = ["compensation", "locations", "workMode", "housing", "timing", "education", "eligibility"];
+    api({ ...job, postingFacts: fields.map(field => ({ field, statements: [`${field}: <script>unsafe</script>`], qualifiers: ["Only if eligible & enrolled"], sourceUrl: job.applyUrl, contentHash: "a".repeat(64) })) });
+    const html = await (await worker.fetch(request("/jobs/abc123"), env)).text();
+    for (const field of fields) expect(html).toContain(`${field}: &lt;script&gt;unsafe&lt;/script&gt;`);
+    expect(html).toContain("Only if eligible &amp; enrolled");
+    expect(html).not.toContain("<script>");
+  });
   it("serves the same HTML to visitors and bots, with source labels and a safe handoff", async () => {
     api(job);
     const browser = await worker.fetch(request("/jobs/abc123"), env);

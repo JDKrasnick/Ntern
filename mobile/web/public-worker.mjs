@@ -140,6 +140,13 @@ async function render(request, apiOrigin) {
     : job.sourceReferences?.some((source) => source.state === "open" && ["official-ats", "official-structured"].includes(source.provenance)) ? "Employer posted" : "Source reported";
   const facts = [["Company", job.company], ["Location", job.location || "Not specified"],
     ...(job.programType ? [["Program", job.programType]] : []), ...(job.workMode ? [["Work mode", job.workMode]] : []), ["Source", sourceLabel]];
+  const factLabels = { compensation: "Pay", locations: "Location", workMode: "Work mode", housing: "Housing and relocation",
+    timing: "Dates and commitment", education: "Education", eligibility: "Eligibility" };
+  for (const fact of Array.isArray(job.postingFacts) ? job.postingFacts.slice(0, 7) : []) {
+    if (!Object.hasOwn(factLabels, fact.field) || !Array.isArray(fact.statements) || !Array.isArray(fact.qualifiers)) continue;
+    const statements = [...fact.statements, ...fact.qualifiers].filter(value => typeof value === "string").slice(0, 12);
+    if (statements.length) facts.push([factLabels[fact.field], statements.join(" · ")]);
+  }
   return response(page({ title: `${title} — Ntern`, description, path: `/jobs/${job.jobId}`,
     body: `<h1>${escapeHtml(job.title)}</h1><p class="lede">${escapeHtml(job.company)}${job.location ? ` · ${escapeHtml(job.location)}` : ""}</p>
       <a class="primary" href="${escapeHtml(officialUrl)}" rel="external noreferrer">Apply on the employer’s site</a>

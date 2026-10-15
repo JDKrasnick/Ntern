@@ -1,9 +1,9 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { parseShadowPublicationPolicy, policyAllows, shadowExtractionEvidence } from '../src/shadow-publication.js';
+import { parseShadowPublicationPolicy, policyAllows, shadowExtractionEvidence, shadowPublicationFields } from '../src/shadow-publication.js';
 import cloudflareWorker, { type Environment } from '../cloudflare/worker.js';
-import { reconcileRoleMetadata, ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
+import { reconcileRoleMetadata, projectRoleMetadata, mergeRoleMetadataEvidence, ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PREPROCESSING_VERSION, SHADOW_EXTRACTION_PROMPT_VERSION,
   SHADOW_EXTRACTION_SCHEMA_VERSION, type ShadowExtraction } from '../src/shadow-extraction.js';
@@ -11,8 +11,12 @@ import type { Internship, RoleMetadataEvidence } from '../src/types.js';
 import type { R2Bucket } from '../cloudflare/types.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { publishProspectiveShadowMetadata, naturalShadowCohortSql } from '../cloudflare/shadow-publication.js';
+import { mergeSourceOccurrence } from '../src/identity/source-occurrence.js';
 
 const hash = 'a'.repeat(64);
+const releaseApproval = { model: SHADOW_EXTRACTION_MODEL_ID, prompt: SHADOW_EXTRACTION_PROMPT_VERSION,
+  schema: SHADOW_EXTRACTION_SCHEMA_VERSION, preprocessing: SHADOW_EXTRACTION_PREPROCESSING_VERSION,
+  approvedAt: '2026-10-15T16:00:00.000Z', reason: 'Owner approves all seven fields after model evaluation and source spot checks.' };
 
 function d1(database: DatabaseSync): D1Database {
   return {
@@ -135,6 +139,90 @@ async function createReceipt(database: DatabaseSync, artifacts: MemoryR2, versio
 }
 
 describe('shadow publication policy', () => {
+  it('binds release approval to the exact profile and requires it for a historical prospective cohort', () => {
+    const policy = { enabled: true, version: 'full-metadata-2026-10-v1', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T03:20:27.000Z', allowedFields: [...shadowPublicationFields], maxReceipts: null,
+      cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }], releaseApproval };
+    expect(parseShadowPublicationPolicy(JSON.stringify(policy)).enabled).toBe(true);
+    for (const key of ['model', 'prompt', 'schema', 'preprocessing'] as const) {
+      expect(parseShadowPublicationPolicy(JSON.stringify({ ...policy, releaseApproval: { ...releaseApproval, [key]: 'different' } })).enabled).toBe(false);
+    }
+    expect(parseShadowPublicationPolicy(JSON.stringify({ ...policy, releaseApproval: undefined })).enabled).toBe(false);
+    expect(parseShadowPublicationPolicy(JSON.stringify({ ...policy, cohort: [...policy.cohort, ...policy.cohort] })).enabled).toBe(false);
+  });
+
+  it('publishes all seven validated fields from an approved exact revision without inventing human evaluations', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    const full = structuredClone(extraction);
+    full.fields.compensation = { status: 'present', value: [{ min: 40, max: 50, currency: 'USD', period: 'hour' }],
+      evidence: ['$40–$50 USD per hour'], qualifiers: ['Pay depends on degree level.'] };
+    for (const [field, quote] of [['housing', 'No housing or relocation assistance.'], ['timing', 'January–June 2027, 40 hours per week.'],
+      ['education', 'Currently pursuing a bachelor’s degree.'], ['eligibility', 'Must have permission to work in the US; sponsorship is unavailable.']] as const) {
+      full.fields[field] = { status: 'present', value: [quote], evidence: [quote], qualifiers: [] };
+    }
+    const validation = { accepted: full, failures: [], fieldOutcomes: [] };
+    await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation })).buffer);
+    for (const field of shadowPublicationFields) database.prepare(`INSERT OR REPLACE INTO shadow_extraction_field_outcomes
+      (run_key, field, status, accepted) VALUES (?, ?, 'present', 1)`).run(hash, field);
+    const policy = { enabled: true, version: 'full-metadata-2026-10-v1', allowedFields: [...shadowPublicationFields],
+      cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }], releaseApproval };
+    const env = { OPERATIONS_SHARED_SECRET: 'secret', PUBLIC_API_URL: 'https://intern-notifs.test', DB: d1(database), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) } as unknown as Environment;
+    const send = (action: string, extra = {}) => cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+      method: 'POST', headers: { 'X-Operations-Key': 'secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, runKey: hash, acceptedFields: [...shadowPublicationFields], ...extra }),
+    }), env);
+    expect((await send('create-receipt')).status).toBe(409);
+    const response = await send('publish-approved', { deferProjection: true });
+    expect(response.status).toBe(200);
+    const result = await response.json() as { publishedFields: string[] };
+    expect(result.publishedFields).toHaveLength(7);
+    const jobs = new D1InternshipStore(d1(database));
+    const job = (await jobs.getJob('job-1'))!;
+    expect(job.postingFacts).toHaveLength(7);
+    const publicResponse = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/jobs/job-1'), env);
+    expect(publicResponse.status).toBe(200);
+    expect((await publicResponse.json() as { postingFacts: unknown[] }).postingFacts).toHaveLength(7);
+    expect(job.postingFacts?.find(fact => fact.field === 'housing')?.statements).toEqual(['No housing or relocation assistance.']);
+    expect(job.postingFacts?.find(fact => fact.field === 'eligibility')?.statements[0]).toContain('sponsorship is unavailable');
+    expect(job.compensation.ranges?.[0]).toMatchObject({ minAmount: 40, maxAmount: 50 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_extraction_evaluations').get()).toEqual({ count: 0 });
+    expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).toEqual({ projected_at: null });
+    expect((await send('refresh-approved', { runKeys: [hash, 'b'.repeat(64)] })).status).toBe(409);
+    expect((await send('refresh-approved', { runKeys: [hash] })).status).toBe(200);
+    expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).not.toEqual({ projected_at: null });
+    expect((await send('publish-approved')).status).toBe(200);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get()).toEqual({ count: 1 });
+    database.prepare(`UPDATE shadow_extraction_posting_revisions SET content_hash = ?`).run('b'.repeat(64));
+    expect((await send('publish-approved')).status).toBe(409);
+    const replacement = shadowExtractionEvidence({ extraction, sourceId: 'greenhouse-acme', sourceUrl: 'https://jobs.example/123',
+      contentHash: 'b'.repeat(64), observedAt: new Date().toISOString(), extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, allowedFields: ['locations'] })!;
+    const revised = projectRoleMetadata({ ...job, sourceReferences: job.sourceReferences.map(ref => ({ ...ref,
+      metadataEvidence: mergeRoleMetadataEvidence(ref.metadataEvidence, [replacement]) })) }).job;
+    expect(revised.postingFacts?.map(fact => fact.field)).toEqual(['locations']);
+    expect(revised.postingFacts?.[0]?.contentHash).toBe('b'.repeat(64));
+    const previous = { ...job.sourceReferences[0]!, shadowContentHash: 'a'.repeat(64), shadowMetadataHash: 'c'.repeat(64) };
+    const changed = mergeSourceOccurrence(previous, { ...previous, metadataEvidence: [], shadowMetadataHash: 'd'.repeat(64) });
+    expect(changed.metadataEvidence).toEqual([]);
+    expect(projectRoleMetadata({ ...job, sourceReferences: [changed] }).job.postingFacts).toBeUndefined();
+  });
+
+  it('keeps independent verification mandatory for an explicitly approved prospective release', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    const policy = { enabled: true, version: 'full-metadata-2026-10-v1', mode: 'prospective-provider-poll',
+      startsAt: '2026-09-24T00:00:00.000Z', allowedFields: [...shadowPublicationFields], cohort: [], maxReceipts: null, releaseApproval };
+    database.prepare(`UPDATE shadow_extraction_runs SET origin='provider-poll', input_completeness='complete',
+      created_at='2026-10-15T00:00:00.000Z', completed_at='2026-10-15T00:00:00.000Z'`).run();
+    database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at='2026-10-15T00:00:00.000Z'`).run();
+    await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
+      verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
+    const env = { DB: d1(database), DOCUMENTS: new MemoryR2(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+    expect(await publishProspectiveShadowMetadata(env, async () => undefined)).toEqual({ result: 'projected', runKey: hash });
+    const job = (await new D1InternshipStore(d1(database)).getJob('job-1'))!;
+    expect(job.postingFacts?.map(fact => fact.field)).toEqual(['locations']);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_extraction_evaluations').get()).toEqual({ count: 0 });
+  });
   it('hides the runtime probe from unauthenticated callers', async () => {
     const { database } = await publicationDatabase();
     const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-extraction/probe',
@@ -152,7 +240,7 @@ describe('shadow publication policy', () => {
   it('fails closed for absent, malformed, duplicate, and unsupported policies', () => {
     expect(parseShadowPublicationPolicy(undefined).enabled).toBe(false);
     expect(parseShadowPublicationPolicy('{oops').enabled).toBe(false);
-    expect(parseShadowPublicationPolicy(JSON.stringify({ enabled: true, version: 'v1', allowedFields: ['housing'], cohort: [] })).enabled).toBe(false);
+    expect(parseShadowPublicationPolicy(JSON.stringify({ enabled: true, version: 'v1', allowedFields: ['unsupported'], cohort: [] })).enabled).toBe(false);
     expect(parseShadowPublicationPolicy(JSON.stringify({ enabled: true, version: 'v1', allowedFields: ['locations', 'locations'], cohort: [] })).enabled).toBe(false);
   });
 
@@ -167,7 +255,7 @@ describe('shadow publication policy', () => {
       startsAt: '2026-09-24T03:20:27.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: null };
     expect(parseShadowPublicationPolicy(JSON.stringify(policy)).maxReceipts).toBeNull();
     expect(parseShadowPublicationPolicy(JSON.stringify({ ...policy, maxReceipts: undefined })).enabled).toBe(false);
-    expect(parseShadowPublicationPolicy(JSON.stringify({ ...policy, allowedFields: ['workMode'] })).enabled).toBe(false);
+    expect(parseShadowPublicationPolicy(JSON.stringify({ ...policy, allowedFields: ['unsupported'] })).enabled).toBe(false);
   });
 
   it('converts only supported, receipt-allowed fields with quoted provenance', () => {

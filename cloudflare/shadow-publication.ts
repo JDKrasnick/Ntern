@@ -112,7 +112,7 @@ export async function publishProspectiveShadowMetadata(env: {
   const receiptId = createHash('sha256').update(`receipt\0${evidenceFingerprint}`).digest('hex');
   const authorized = await env.DB.prepare(`SELECT receipt_id FROM shadow_publication_receipts
     WHERE receipt_id = ? AND revoked_at IS NULL`).bind(receiptId).first<{ receipt_id: string }>();
-  if (!authorized) {
+  if (!authorized && !policy.releaseApproval) {
     // Independent model agreement is not a substitute for source-based
     // evaluation of this exact model/prompt/schema/preprocessing version.
     const qualityGate = await rolloutQualityGate(env.DB);
@@ -270,11 +270,13 @@ export async function handleShadowPublication(request: Request, env: {
       GROUP BY policy_version, result`).all<{ policy_version: string; result: string; count: number }>();
     return Response.json({ enabled: policy.enabled, version: policy.version, mode: policy.mode ?? 'exact-cohort',
       startsAt: policy.startsAt ?? null, maxReceipts: policy.maxReceipts ?? null, allowedFields: policy.allowedFields,
+      releaseApproval: policy.releaseApproval ?? null,
       prospectiveDecisions: decisions.results,
-      cohortSize: policy.cohort.length, activeReceipts: receipts.results, evaluations: await evaluationSummary(env.DB),
+      cohortSize: policy.cohort.length || policy.releaseApproval?.historicalCohortSize || 0,
+      activeReceipts: receipts.results, evaluations: await evaluationSummary(env.DB),
       rolloutQualityGate: await rolloutQualityGate(env.DB),
       extractionScope: { classification: ['technical', 'earlyCareer', 'disciplines'],
-        metadata: [...evaluationFields], publishedMetadata: ['compensation', 'locations', 'workMode'],
+        metadata: [...evaluationFields], publishedMetadata: [...shadowPublicationFields],
         deterministicBaseline: { covered: [...deterministicBaselineFields], llmOnly: ['eligibility'] } } },
     { headers: { 'Cache-Control': 'no-store' } });
   }
@@ -284,11 +286,30 @@ export async function handleShadowPublication(request: Request, env: {
     runKey?: unknown;
     acceptedFields?: unknown;
     evaluations?: unknown;
+    deferProjection?: unknown;
+    runKeys?: unknown;
+    cohortProof?: unknown;
   } | null;
   if (typeof input?.runKey !== 'string' || !/^[a-f0-9]{64}$/u.test(input.runKey)) {
     return Response.json({ message: 'A valid runKey is required' }, { status: 400 });
   }
   try {
+    if (input.action === 'refresh-approved') {
+      if (!policy.enabled || !policy.releaseApproval || !Array.isArray(input.runKeys) || !input.runKeys.length || input.runKeys.length > 20
+        || input.runKeys.some(key => typeof key !== 'string' || !/^[a-f0-9]{64}$/u.test(key))
+        || new Set(input.runKeys).size !== input.runKeys.length) throw new Error('A bounded approved receipt batch is required');
+      const keys = input.runKeys as string[];
+      const placeholders = keys.map(() => '?').join(',');
+      const receipts = await env.DB.prepare(`SELECT run_key FROM shadow_publication_receipts
+        WHERE policy_version = ? AND revoked_at IS NULL AND run_key IN (${placeholders})`)
+        .bind(policy.version, ...keys).all<{ run_key: string }>();
+      if (receipts.results.length !== keys.length) throw new Error('Approved receipt batch is incomplete');
+      await refreshProjection();
+      await env.DB.prepare(`UPDATE shadow_publication_receipts SET projected_at = ?
+        WHERE policy_version = ? AND revoked_at IS NULL AND projected_at IS NULL AND run_key IN (${placeholders})`)
+        .bind(new Date().toISOString(), policy.version, ...keys).run();
+      return Response.json({ projected: keys.length, policyVersion: policy.version });
+    }
     const run = await completedRun(env.DB, input.runKey);
     const reviewed = await artifact(env.SHADOW_EXTRACTION_ARTIFACTS, run.response_key);
     if (input.action === 'record-evaluation') {
@@ -312,10 +333,11 @@ export async function handleShadowPublication(request: Request, env: {
       return Response.json({ runKey: run.run_key, recorded: evaluations.length, conformance,
         evaluation: await evaluationSummary(env.DB) });
     }
-    if (input.action !== 'create-receipt' || !Array.isArray(input.acceptedFields) || input.acceptedFields.length === 0
+    const approvedRelease = input.action === 'publish-approved' && Boolean(policy.releaseApproval);
+    if ((!approvedRelease && input.action !== 'create-receipt') || !Array.isArray(input.acceptedFields) || input.acceptedFields.length === 0
       || input.acceptedFields.some(field => typeof field !== 'string' || !policy.allowedFields.includes(field as ShadowPublicationField))
       || new Set(input.acceptedFields).size !== input.acceptedFields.length) throw new Error('Policy-allowed acceptedFields are required');
-    if (!policy.enabled || !policyAllows(policy, { sourceId: run.source_id, externalId: run.external_id, contentHash: run.content_hash })) {
+    if (!policy.enabled || !policyAllows(policy, { sourceId: run.source_id, externalId: run.external_id, contentHash: run.content_hash }, input.cohortProof)) {
       throw new Error('Run is not in the exact enabled cohort');
     }
     const revision = await currentRevision(env.DB, run);
@@ -325,12 +347,12 @@ export async function handleShadowPublication(request: Request, env: {
     if (acceptedFields.some(field => !outcomes.results.some(outcome => outcome.field === field))) throw new Error('Receipt fields are not validator-accepted');
     const evaluations = await env.DB.prepare(`SELECT field FROM shadow_extraction_evaluations WHERE run_key = ? AND outcome = 'correct-present'`)
       .bind(run.run_key).all<{ field: string }>();
-    if (acceptedFields.some(field => !evaluations.results.some(evaluation => evaluation.field === field))) throw new Error('Receipt fields have not passed human evaluation');
+    if (!approvedRelease && acceptedFields.some(field => !evaluations.results.some(evaluation => evaluation.field === field))) throw new Error('Receipt fields have not passed human evaluation');
     const publishable = shadowPublishableFields(reviewed.extraction, acceptedFields);
     if (publishable.length !== acceptedFields.length) throw new Error('Receipt fields do not contain publishable values');
     const jobs = new D1InternshipStore(env.DB);
     const job = await jobs.getJob(run.job_id);
-    if (!job) throw new Error('Catalog job was not found');
+    if (!job?.open) throw new Error('Open catalog job was not found');
     if (!job.sourceReferences.some(reference => reference.sourceId === run.source_id && reference.externalId === run.external_id)) {
       throw new Error('Exact source occurrence is no longer attached to the catalog job');
     }
@@ -345,9 +367,11 @@ export async function handleShadowPublication(request: Request, env: {
         || run.schema_version !== SHADOW_EXTRACTION_SCHEMA_VERSION || run.preprocessing_version !== SHADOW_EXTRACTION_PREPROCESSING_VERSION) {
         throw new Error('New receipts require the current model/prompt/schema/preprocessing version');
       }
-      const qualityGate = await rolloutQualityGate(env.DB);
-      const blockedFields = policy.allowedFields.filter(field => !qualityGate.fields[field].passed);
-      if (blockedFields.length) throw new Error(`Natural production quality gate has not passed for: ${blockedFields.join(', ')}`);
+      if (!policy.releaseApproval) {
+        const qualityGate = await rolloutQualityGate(env.DB);
+        const blockedFields = policy.allowedFields.filter(field => !qualityGate.fields[field].passed);
+        if (blockedFields.length) throw new Error(`Natural production quality gate has not passed for: ${blockedFields.join(', ')}`);
+      }
     }
     await env.DB.prepare(`INSERT INTO shadow_publication_receipts
       (receipt_id, job_id, source_id, external_id, content_hash, run_key, policy_version, accepted_fields, evidence_fingerprint, created_at)
@@ -358,7 +382,7 @@ export async function handleShadowPublication(request: Request, env: {
     const publishedFields = [...new Set(active.results.flatMap(row => {
       const fields = JSON.parse(row.accepted_fields) as unknown;
       return Array.isArray(fields) ? fields.filter((field): field is ShadowPublicationField => typeof field === 'string'
-        && ['compensation', 'locations', 'workMode'].includes(field)) : [];
+        && shadowPublicationFields.includes(field as ShadowPublicationField)) : [];
     }))].sort();
     const evidence = shadowExtractionEvidence({ extraction: reviewed.extraction, sourceId: run.source_id, sourceUrl: run.source_url,
       contentHash: run.content_hash, observedAt: revision.observed_at, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, allowedFields: publishedFields });
@@ -370,7 +394,14 @@ export async function handleShadowPublication(request: Request, env: {
     await operations.recordRoleMetadataEvidence(run.job_id, [evidence], projected.conflicts, revision.observed_at,
       { sourceId: run.source_id, sourceClasses: ['reviewed-shadow'] });
     await jobs.putInternship(projected.job);
+    if (approvedRelease && input.deferProjection === true) {
+      return Response.json({ receiptId, evidenceFingerprint, policyVersion: policy.version, acceptedFields, publishedFields,
+        published: true, projectionDeferred: true });
+    }
     await refreshProjection();
+    await env.DB.prepare(`UPDATE shadow_publication_receipts SET projected_at = ?
+      WHERE receipt_id = ? AND projected_at IS NULL AND revoked_at IS NULL`)
+      .bind(new Date().toISOString(), receiptId).run();
     return Response.json({ receiptId, evidenceFingerprint, policyVersion: policy.version, acceptedFields, publishedFields, published: true });
   } catch (error) {
     return Response.json({ message: error instanceof Error ? error.message : 'Shadow publication operation failed' }, { status: 409 });

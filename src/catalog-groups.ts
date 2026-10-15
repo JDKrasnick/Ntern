@@ -104,6 +104,7 @@ export interface CatalogGroupRole {
   advancedDegreeRequired: boolean;
   compensation: Internship['compensation'];
   housing?: Internship['housing'];
+  postingFacts?: Internship['postingFacts'];
   workAuthorizationStatus: NonNullable<Internship['workAuthorizationStatus']>;
   applicationDeadline?: Internship['applicationDeadline'];
   graduationWindow?: Internship['graduationWindow'];
@@ -512,6 +513,7 @@ function catalogGroupRole(job: Internship): CatalogGroupRole {
     requiresUsCitizenship: Boolean(job.requirements?.requiresUsCitizenship),
     advancedDegreeRequired: Boolean(job.requirements?.advancedDegreeRequired),
     compensation: job.compensation, ...(job.housing?.length ? { housing: job.housing } : {}), workAuthorizationStatus: job.workAuthorizationStatus ?? 'unknown',
+    ...(job.postingFacts?.length ? { postingFacts: job.postingFacts } : {}),
     ...(job.applicationDeadline ? { applicationDeadline: job.applicationDeadline } : {}),
     ...(job.graduationWindow ? { graduationWindow: job.graduationWindow } : {}),
     ...(job.programType ?? identityProgramType ? { programType: job.programType ?? identityProgramType } : {}),

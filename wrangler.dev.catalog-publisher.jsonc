@@ -50,7 +50,7 @@
     "INGESTION_V2_ISOLATED_WORKERS_ENABLED": "true",
     "OUTBOUND_NOTIFICATIONS_ENABLED": "false",
     "DEPLOYMENT_ROLE": "catalog-publisher",
-    "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":true,\"version\":\"prospective-provider-poll-2026-10-dev-v1\",\"mode\":\"prospective-provider-poll\",\"startsAt\":\"2026-10-06T04:41:00.000Z\",\"allowedFields\":[\"compensation\",\"locations\"],\"cohort\":[],\"maxReceipts\":null}"
+    "LLM_METADATA_PUBLICATION_POLICY_JSON": "{\"enabled\":true,\"version\":\"full-metadata-2026-10-v1\",\"mode\":\"prospective-provider-poll\",\"startsAt\":\"2026-10-06T04:41:00.000Z\",\"allowedFields\":[\"compensation\",\"locations\",\"workMode\",\"housing\",\"timing\",\"education\",\"eligibility\"],\"cohort\":[],\"maxReceipts\":null,\"releaseApproval\":{\"model\":\"gpt-6-luna\",\"prompt\":\"shadow-extraction-prompt-v52\",\"schema\":\"shadow-extraction-schema-v5\",\"preprocessing\":\"exact-posting-markdown-v3\",\"approvedAt\":\"2026-10-15T16:04:51.648Z\",\"reason\":\"Owner approved fully public publication of all seven fields after six prompt iterations, dev validation and manual official-source spot checks; accepts expected extraction error.\",\"historicalCohortRoot\":\"343ebdcebef7f9cc91b0ce74d0cb9da4f27936c1a61142b2899c6e415a64e8f1\",\"historicalCohortSize\":1}}"
   },
   "queues": {
     "producers": [],

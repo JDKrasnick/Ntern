@@ -1,6 +1,7 @@
 import type { JobFilter } from './core/filters.js';
 import type { EmployerCategory } from './core/employers.js';
 import type { EducationLevel } from '../shared/education-display.js';
+import type { PostingFact } from '../shared/posting-facts.js';
 import type { ImportedJob, ResumeArtifact, ResumeBankItem, ResumeDraft, ResumeProfile } from './resume.js';
 import type { ResumeSubscription } from './subscription.js';
 
@@ -853,6 +854,7 @@ export interface CompensationRange {
 }
 
 export type RoleMetadataField =
+  | 'posting-facts'
   | 'compensation'
   | 'housing'
   | 'education'
@@ -887,6 +889,7 @@ export interface RoleMetadataEvidence {
   sourceUrl: string;
   observedAt: string;
   exactPosting: true;
+  postingFacts?: PostingFact[];
   compensationRanges?: CompensationRange[];
   housing?: HousingDetail[];
   education?: EducationAudience;
@@ -922,6 +925,7 @@ export interface ReconciledRoleMetadata {
   schemaVersion: 1;
   extractionVersion: number;
   evidenceHashes: string[];
+  postingFacts?: PostingFact[];
   compensationRanges?: CompensationRange[];
   housing?: HousingDetail[];
   education?: EducationAudience;
@@ -1171,6 +1175,7 @@ export interface Internship {
   title: string;
   location: string;
   locations?: string[];
+  postingFacts?: PostingFact[];
   housing?: HousingDetail[];
   /** Trusted operations receipt; source parsers must never create this. */
   metadataOmission?: RoleMetadataOmission;

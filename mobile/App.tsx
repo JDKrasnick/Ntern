@@ -43,6 +43,7 @@ import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compac
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
 import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
+import { postingFactDetails, type PostingFact } from "../shared/posting-facts";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { dayIndexCacheKey, isDayIndexFresh, loadDayIndex, prefetchDayIndex, readDayIndex, readDayIndexCached, type ReleaseDayCount } from "./src/day-index";
@@ -126,6 +127,7 @@ type Job = {
   applyUrl: string;
   compensation: { raw: string };
   housing?: DisplayHousingDetail[];
+  postingFacts?: PostingFact[];
   employerCategory?: EmployerCategory;
   disciplines?: string[];
   open: boolean;
@@ -192,6 +194,7 @@ type CatalogGroupRole = {
   advancedDegreeRequired?: boolean;
   compensation: { raw: string };
   housing?: DisplayHousingDetail[];
+  postingFacts?: PostingFact[];
   firstSeenAt: string;
   lastSeenAt: string;
   sourceReferences: Job["sourceReferences"];
@@ -1167,6 +1170,7 @@ function catalogRoleJob(role: CatalogGroupRole): Job {
     applyUrl: role.officialApplyUrl,
     compensation: role.compensation ?? { raw: "" },
     housing: role.housing,
+    postingFacts: role.postingFacts,
     employerCategory: role.employerCategory,
     disciplines: role.disciplines,
     open: role.open,
@@ -2162,10 +2166,16 @@ function JobDetailSheet({
                   <Text style={styles.pay} numberOfLines={2}>{roleDisplay.compensation}</Text>
                 </View>
               ) : null}
-              {housingLabels(role.housing).map((housing, index) => (
+              {housingLabels(role.postingFacts?.some(fact => fact.field === "housing") ? undefined : role.housing).map((housing, index) => (
                 <View key={`${housing.label}-${index}`} style={styles.sheetTrustBlock}>
                   <Text style={styles.sheetTrustPrimary}>{housing.label}</Text>
                   {housing.detail ? <Text style={styles.sheetTrustSecondary}>{housing.detail}</Text> : null}
+                </View>
+              ))}
+              {postingFactDetails(role.postingFacts).map(fact => (
+                <View key={fact.field} style={styles.sheetTrustBlock}>
+                  <Text style={styles.sheetTrustPrimary}>{fact.label}</Text>
+                  <Text style={styles.sheetTrustSecondary}>{fact.detail}</Text>
                 </View>
               ))}
               <View style={styles.sheetTrustBlock}>

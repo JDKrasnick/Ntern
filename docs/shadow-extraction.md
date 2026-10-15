@@ -230,7 +230,49 @@ catalog unchanged.
 
 ## Publication scope
 
-Production's active policy is `prospective-provider-poll-2026-09-v1`, starting at
+### Owner-approved full metadata release
+
+The October 15 release supports all seven fields: compensation, locations, work
+mode, housing/relocation, dates/commitment, education, and eligibility. The owner
+explicitly approved public publication after the prompt evaluation, development
+checks, and official-source spot checks, accepting expected extraction error.
+`releaseApproval` records that decision against the exact model, prompt, schema,
+and preprocessing profile. An invalid or changed profile disables that policy;
+approval is never carried automatically to a new extraction profile. The natural
+25-run review metrics remain visible and are not represented as passing.
+
+The prospective publisher retains independent verification, exact current posting
+revision, open attached catalog role, and validator-accepted present-field checks.
+The verifier must retain both values and qualifiers. Negative statements such as
+no housing or restricted work eligibility remain negative; missing/conflicting
+fields are omitted. Public `postingFacts` retain the field statements, qualifiers,
+official source URL, and content hash. They supplement existing typed metadata;
+dates and eligibility text do not silently change lifecycle, filters, or alerts.
+Text that exceeds the display bound is omitted rather than truncating a condition.
+Conflicting statements from attached sources are withheld.
+
+An approved policy may also bind up to 250 exact historical source/posting/hash
+entries through `historicalCohortRoot` and `historicalCohortSize` in the approval.
+The compact root fits Cloudflare's variable limit; each request supplies a bounded
+Merkle membership proof for its exact revision. Authenticated `publish-approved` publishes only those exact
+validated revisions and creates normal receipts. It does not fabricate per-field
+human evaluations. The backfill runner freshly reacquires official sources and
+rejects changed, closed, detached, or unavailable roles before publication.
+`deferProjection: true` allows bounded batches; `refresh-approved` accepts at most
+20 existing active receipts, refreshes the catalog once, then marks them projected.
+Individual job reads expose the canonical facts; grouped cards and web/native role
+details carry the same facts. No notification replay or new-role visibility is
+created. Previously documented date omissions and unspecified-currency limitations
+remain model/schema limitations, not claims that every field is complete.
+
+The release policy is `full-metadata-2026-10-v1`. Without profile-bound owner
+approval, the existing natural-production quality gate and manual review rules
+below remain mandatory. Disabling or restoring the prior policy stops new full
+release receipts; it does not erase facts that have already been published.
+
+### Previous prospective policy
+
+The preceding policy was `prospective-provider-poll-2026-09-v1`, starting at
 `2026-09-24T03:20:27.000Z`, with automatic compensation and location publication.
 This policy is separate from V1/V2 admission ownership. It excludes historical
 backfill, incomplete inputs, and artifacts that do not carry the active policy's

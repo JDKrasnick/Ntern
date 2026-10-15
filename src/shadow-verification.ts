@@ -1,6 +1,6 @@
 import type { NormalizedPostingInput, ShadowExtraction, ShadowField } from './shadow-extraction.js';
 
-export const prospectivePublicationFields = ['compensation', 'locations'] as const;
+export const prospectivePublicationFields = ['compensation', 'locations', 'workMode', 'housing', 'timing', 'education', 'eligibility'] as const;
 export type ProspectivePublicationField = typeof prospectivePublicationFields[number];
 
 /** An independent model pass checks candidate facts against the same exact
@@ -13,6 +13,7 @@ export function shadowVerificationPrompt(input: NormalizedPostingInput, candidat
       'For each present field, retain only values that are directly supported by exact contiguous passages in the posting.',
       'Compensation must be base pay for this role, with the same amount, currency, period, and applicability.',
       'Locations must be actual work sites for this role, never authorization, pay jurisdiction, company office lists, or applicant residence.',
+      'Work mode, housing or relocation, dates and hours, education, and eligibility must be explicitly stated for this role. Preserve conditions and negations. Never infer visa sponsorship or citizenship from location.',
       'Never add a fact missing from the candidate. Return the complete candidate JSON shape, replacing unsupported fields with status not-stated, null value, and empty evidence and qualifiers.',
     ].join('\n'),
     user: JSON.stringify({ title: input.title, completeness: input.completeness, description: input.description, candidate }),
@@ -32,6 +33,7 @@ export function verifiedProspectiveFields(primary: ShadowExtraction, verifier: S
     const candidate: ShadowField = primary.fields[name];
     const checked: ShadowField = verifier.fields[name];
     return candidate.status === 'present' && checked.status === 'present'
-      && canonical(candidate.value) === canonical(checked.value);
+      && canonical(candidate.value) === canonical(checked.value)
+      && canonical(candidate.qualifiers) === canonical(checked.qualifiers);
   });
 }

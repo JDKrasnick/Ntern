@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { actionableChanges, validateCloudflarePlan } from '../scripts/cloudflare-plan-guard.js';
 import { encodeSourceAllowlist } from '../src/ingestion-v2/source-allowlist.js';
+import { SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION,
+  SHADOW_EXTRACTION_PREPROCESSING_VERSION } from '../src/shadow-extraction.js';
 
 type TestChange = {
   address: string;
@@ -818,6 +820,18 @@ describe('Cloudflare deployment plan guard', () => {
     expect(validateCloudflarePlan(plan([update(disabled, JSON.stringify(policy))]))).toHaveLength(1);
     expect(validateCloudflarePlan(plan([update(JSON.stringify(policy), disabled)]))).toHaveLength(1);
     const unlimited = { ...policy, maxReceipts: null };
+    const full = { ...unlimited, version: 'full-metadata-2026-10-v1',
+      allowedFields: ['compensation', 'locations', 'workMode', 'housing', 'timing', 'education', 'eligibility'],
+      cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: 'a'.repeat(64) }],
+      releaseApproval: { model: SHADOW_EXTRACTION_MODEL_ID, prompt: SHADOW_EXTRACTION_PROMPT_VERSION,
+        schema: SHADOW_EXTRACTION_SCHEMA_VERSION, preprocessing: SHADOW_EXTRACTION_PREPROCESSING_VERSION,
+        approvedAt: '2026-10-15T16:00:00.000Z', reason: 'Owner approves publication after evaluation and source checks.' } };
+    expect(validateCloudflarePlan(plan([update(JSON.stringify(unlimited), JSON.stringify(full))]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([update(JSON.stringify(full), JSON.stringify(unlimited))]))).toHaveLength(1);
+    for (const invalid of [{ ...full, releaseApproval: undefined }, { ...full, startsAt: '2026-09-23T00:00:00.000Z' },
+      { ...full, releaseApproval: { ...full.releaseApproval, preprocessing: 'different' } }]) {
+      expect(() => validateCloudflarePlan(plan([update(JSON.stringify(unlimited), JSON.stringify(invalid))]))).toThrow('Refusing unsafe Cloudflare plan');
+    }
     expect(validateCloudflarePlan(plan([update(JSON.stringify(policy), JSON.stringify(unlimited))]))).toHaveLength(1);
     expect(validateCloudflarePlan(plan([update(JSON.stringify(unlimited), disabled)]))).toHaveLength(1);
     expect(() => validateCloudflarePlan(plan([update(disabled, JSON.stringify(unlimited))]))).toThrow('Refusing unsafe Cloudflare plan');
