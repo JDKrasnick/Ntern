@@ -134,6 +134,12 @@ async function createReceipt(database: DatabaseSync, artifacts: MemoryR2, versio
 }
 
 describe('shadow publication policy', () => {
+  it('hides the runtime probe from unauthenticated callers', async () => {
+    const { database } = await publicationDatabase();
+    const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-extraction/probe',
+      { method: 'POST' }), { OPERATIONS_SHARED_SECRET: 'secret', DB: d1(database) } as unknown as Environment);
+    expect(response.status).toBe(404);
+  });
   it('finds the first current-version completions through a covering index without sorting history', async () => {
     const { database } = await publicationDatabase();
     seedRolloutQualityGate(database);

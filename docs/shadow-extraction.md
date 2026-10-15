@@ -117,6 +117,16 @@ differences:
 GET /internal/operations/shadow-extraction
 ```
 
+For a deployed-runtime check, authenticated `POST
+/internal/operations/shadow-extraction/probe` queues fixed synthetic data through
+the real consumer. `GET` on the same path reports durable usage and checks the
+known pay, location, work mode, and absence of extra claims. Repeated requests
+reuse an existing result; `POST ?retry=true` can retry a failed probe. No caller
+supplies posting text. Probes have origin `controlled`, never count toward the
+natural cohort, and cannot create Catalog jobs or publication receipts. Their
+$1 monthly diagnostic envelope remains inside the existing total model ceiling;
+the historical backfill sublimit is unchanged.
+
 `LLM_METADATA_PUBLICATION_POLICY_JSON` is a plain Worker variable, not a
 secret. Production templates default to disabled; the deployment environment
 supplies the enabled policy. Dev templates carry their enabled prospective

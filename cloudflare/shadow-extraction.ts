@@ -101,6 +101,8 @@ function month(now: Date): string { return now.toISOString().slice(0, 7); }
 const providerMonthlyShadowLimitCents = 2_000;
 const providerMonthlyCombinedLimitCents = 3_500;
 const providerRunReservationCents = 20;
+export const modelRuntimeProbeSourceId = '_metadata-model-runtime-probe';
+const modelRuntimeProbeMonthlyLimitCents = 100;
 
 function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOrigin, forecast: number, headroom: number): number {
   if (origin === 'provider-poll') {
@@ -211,6 +213,66 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   return message;
 }
 
+const modelRuntimeProbeJobId = createHash('sha256').update('metadata-model-runtime-probe-v1').digest('hex').slice(0, 32);
+
+export async function modelRuntimeProbeStatus(db: D1Database) {
+  const run = await db.prepare(`SELECT run_key AS runKey, state, error, response_key AS responseKey,
+      input_tokens AS inputTokens, output_tokens AS outputTokens, actual_cost_cents AS actualCostCents, validation
+    FROM shadow_extraction_runs WHERE job_id = ? AND source_id = ?
+      AND model_id = ? AND prompt_version = ? AND schema_version = ? AND preprocessing_version = ?
+    ORDER BY created_at DESC, run_key LIMIT 1`).bind(modelRuntimeProbeJobId, modelRuntimeProbeSourceId,
+      SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION,
+      SHADOW_EXTRACTION_PREPROCESSING_VERSION).first<{ runKey: string; state: string; error: string | null;
+        responseKey: string | null; inputTokens: number | null; outputTokens: number | null; actualCostCents: number | null; validation: string | null }>();
+  let checks: Record<string, boolean> | undefined;
+  if (run?.state === 'completed') {
+    let validation: ShadowValidationResult = { failures: ['Unreadable probe validation'], fieldOutcomes: [] };
+    try {
+      const saved = JSON.parse(run.validation ?? 'null') as ShadowValidationResult | null;
+      if (saved && Array.isArray(saved.failures) && Array.isArray(saved.fieldOutcomes)) validation = saved;
+    } catch { /* A corrupt diagnostic record is not a passing probe. */ }
+    const fields = validation.accepted?.fields;
+    checks = {
+      contractValid: validation.failures.length === 0 && Boolean(fields),
+      compensation: fields?.compensation.status === 'present' && Array.isArray(fields.compensation.value)
+        && fields.compensation.value.some((band: unknown) => band !== null && typeof band === 'object'
+          && 'min' in band && band.min === 40 && 'max' in band && band.max === 40
+          && 'currency' in band && band.currency === 'USD' && 'period' in band && band.period === 'hour'),
+      location: fields?.locations.status === 'present' && Array.isArray(fields.locations.value)
+        && fields.locations.value.some((place: unknown) => typeof place === 'string' && /\baustin\b/iu.test(place)),
+      workMode: fields?.workMode.status === 'present' && fields.workMode.value === 'onsite',
+      noExtraClaims: (['housing', 'timing', 'education', 'eligibility'] as const)
+        .every(field => fields?.[field].status === 'not-stated'),
+    };
+  }
+  const { validation: validationJson, ...status } = run ?? {};
+  void validationJson;
+  return { synthetic: true, model: SHADOW_EXTRACTION_MODEL_ID, prompt: SHADOW_EXTRACTION_PROMPT_VERSION,
+    state: run?.state ?? 'not-queued', ...status, ...(checks ? { checks, passed: Object.values(checks).every(Boolean) } : {}) };
+}
+
+/** Fixed synthetic data; never creates a Catalog job or a natural-review run. */
+export async function queueModelRuntimeProbe(env: ShadowExtractionEnvironment, now = new Date(), retry = false) {
+  if (env.SHADOW_EXTRACTION_ENABLED !== 'true') throw new Error('Model execution is disabled');
+  if (!shadowModelApiKey(env)) throw new Error('Selected model credential is unavailable');
+  const current = await modelRuntimeProbeStatus(env.DB);
+  const failed = ['transient-failure', 'invalid-output', 'disabled'].includes(current.state);
+  if (current.state !== 'not-queued' && !(retry && failed)) return current;
+  const sourceUrl = 'https://example.invalid/metadata-model-runtime-probe';
+  const message = await enqueueShadowExtraction(env, {
+    jobId: modelRuntimeProbeJobId, sourceId: modelRuntimeProbeSourceId,
+    externalId: retry ? `runtime-probe-${crypto.randomUUID()}` : 'runtime-probe-v1', sourceUrl,
+    providerIdentity: { provider: 'structured', sourceId: modelRuntimeProbeSourceId, sourceUrl },
+    title: 'Software Engineering Intern',
+    description: 'Location: Austin, Texas, United States. This role is onsite. Compensation: USD 40 per hour.',
+    observedAt: now.toISOString(), origin: 'controlled',
+    baseline: { compensation: 'present', locations: 'present', workMode: 'present', housing: 'not-stated',
+      timing: 'not-stated', education: 'not-stated', eligibility: 'not-stated' },
+  });
+  if (!message) throw new Error('Could not queue the fixed runtime probe');
+  return { ...current, state: 'queued', runKey: message.runKey };
+}
+
 /** Atomic reservation checks the already-forecast app spend and the monthly
  * shadow envelope before an inference call. A missing value fails closed. */
 export async function reserveShadowCost(db: D1Database, now: Date, runKey: string, leaseToken: string, reserveCents: number, env: Pick<ShadowExtractionEnvironment, 'SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS' | 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS'>): Promise<boolean> {
@@ -221,17 +283,26 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
   const prior = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger
     WHERE period = ? AND lease_token = ?`).bind(period, leaseToken).first<{ state: string; reserved_cents: number }>();
   if (prior?.state === 'reserved' && prior.reserved_cents >= reserveCents) return true;
-  const run = await db.prepare('SELECT origin FROM shadow_extraction_runs WHERE run_key = ?')
-    .bind(runKey).first<{ origin: ShadowExtractionOrigin }>();
-  const allowance = monthlyShadowAllowanceCents(period, run?.origin ?? 'legacy-unknown', forecast, headroom);
+  const run = await db.prepare('SELECT origin, source_id FROM shadow_extraction_runs WHERE run_key = ?')
+    .bind(runKey).first<{ origin: ShadowExtractionOrigin; source_id: string }>();
+  // A fixed synthetic probe has a separate $1 diagnostic envelope, still
+  // charged to the existing global model ceiling. It never borrows the
+  // historical cohort's smaller allowance or counts as natural traffic.
+  const probe = run?.origin === 'controlled' && run.source_id === modelRuntimeProbeSourceId;
+  const allowance = monthlyShadowAllowanceCents(period, probe ? 'provider-poll' : run?.origin ?? 'legacy-unknown', forecast, headroom);
   if (reserveCents > allowance) return false;
   const result = await db.prepare(`INSERT INTO shadow_extraction_cost_ledger (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
     SELECT ?, ?, ?, ?, 0, 'reserved', ?, ?
     WHERE NOT EXISTS (SELECT 1 FROM shadow_extraction_cost_ledger WHERE period = ? AND lease_token = ?)
       AND COALESCE((SELECT SUM(CASE WHEN state = 'reserved' AND reserved_cents > actual_cents THEN reserved_cents
         WHEN state IN ('reserved', 'reconciled') THEN actual_cents ELSE 0 END)
-        FROM shadow_extraction_cost_ledger WHERE period = ?), 0) + ? <= ?`).bind(
+        FROM shadow_extraction_cost_ledger WHERE period = ?), 0) + ? <= ?
+      AND (? = 0 OR COALESCE((SELECT SUM(CASE WHEN ledger.state = 'reserved' AND ledger.reserved_cents > ledger.actual_cents THEN ledger.reserved_cents
+        WHEN ledger.state IN ('reserved', 'reconciled') THEN ledger.actual_cents ELSE 0 END)
+        FROM shadow_extraction_cost_ledger ledger JOIN shadow_extraction_runs probe_run ON probe_run.run_key = ledger.run_key
+        WHERE ledger.period = ? AND probe_run.origin = 'controlled' AND probe_run.source_id = ?), 0) + ? <= ?)`).bind(
     period, leaseToken, runKey, reserveCents, now.toISOString(), now.toISOString(), period, leaseToken, period, reserveCents, allowance,
+    probe ? 1 : 0, period, modelRuntimeProbeSourceId, reserveCents, modelRuntimeProbeMonthlyLimitCents,
   ).run();
   if (result.meta.changes === 1) return true;
   const existing = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger

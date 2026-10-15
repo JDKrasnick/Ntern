@@ -58,7 +58,8 @@ import { recordPhase, runScheduledStep, runCatalogProjectionMaintenance, refresh
 export { runCatalogProjectionMaintenance } from './catalog-projection-maintenance.js';
 import { catalogDeliveryIsDeferred, isSourceDispatchInFlight, missedPublishedInterval, SOURCE_MESSAGE_DEADLINE_MS } from '../src/source-poll-cadence.js';
 import { QueueMessageDeadlineError, withinMessageDeadline } from '../src/sqs-fifo-batch.js';
-import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary } from './shadow-extraction.js';
+import { processShadowExtractionBatch, providerShadowBudgetStatus, shadowExtractionSummary,
+  modelRuntimeProbeStatus, queueModelRuntimeProbe } from './shadow-extraction.js';
 import { handleShadowPublication, publishProspectiveShadowMetadata } from './shadow-publication.js';
 import type { D1Database, DurableObjectNamespace, MessageBatch, Queue, R2Bucket, ScheduledController } from './types.js';
 import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork, recordGmailFailure, type GmailWorkMessage } from './gmail.js';
@@ -1308,6 +1309,18 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   if (url.pathname === '/internal/operations/dlq') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     return withCors(await handleDlqOperations(request, dlqDependencies(env)));
+  }
+  if (url.pathname === '/internal/operations/shadow-extraction/probe' && (request.method === 'GET' || request.method === 'POST')) {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    try {
+      const probe = request.method === 'POST'
+        ? await queueModelRuntimeProbe(env, new Date(), url.searchParams.get('retry') === 'true')
+        : await modelRuntimeProbeStatus(env.DB);
+      return withCors(Response.json(probe, { status: probe.state === 'queued' ? 202 : 200, headers: { 'Cache-Control': 'no-store' } }));
+    } catch (error) {
+      return withCors(Response.json({ message: error instanceof Error ? error.message.slice(0, 200) : 'Runtime probe failed' },
+        { status: 409, headers: { 'Cache-Control': 'no-store' } }));
+    }
   }
   if (request.method === 'GET' && url.pathname === '/internal/operations/shadow-extraction') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
