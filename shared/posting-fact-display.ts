@@ -27,22 +27,25 @@ function housingTags(statements: string[], qualifiers: string[]): string[] {
   if (statements.every(text => negative.test(text)) && !conditional.test(all) && !moneyHint.test(all)
     && !/[;]|\b(?:but|however)\b/iu.test(all)) return ['None'];
   const labels = statements.flatMap(text => {
+    const isConditional = conditional.test([text, ...qualifiers].join(' '));
     // Keep each amount with its own benefit, never attach a relocation amount to a housing stipend.
     const currency = '(?:USD|CAD|AUD|EUR|GBP|PLN|INR|SGD|NZD|JPY|CNY|CHF|SEK|NOK|DKK|BRL|MXN|KRW|ZAR)';
     const number = '\\d[\\d,]*(?:\\.\\d{1,2})?';
     const amount = `(?:\\b${currency}\\s*|[$€£¥₹₩])\\s*${number}(?:\\s*[–-]\\s*(?:${currency}\\s*|[$€£¥₹₩])?\\s*${number})?|${number}\\s*\\b${currency}\\b`;
     const amounts = [...text.matchAll(new RegExp(amount, 'giu'))]
       .map(match => `${/cost to you|employee.paid|rent you pay/iu.test(text) ? 'Cost ' : /up to\s*$/iu.test(text.slice(0, match.index)) ? 'Up to ' : ''}${match[0]}`);
-    if (amounts.length) return amounts;
-    if (negative.test(text)) return [conditional.test(text) ? 'Depends'
+    if (amounts.length) return amounts.map(amount => isConditional ? `${amount}${/\beligib/iu.test([text, ...qualifiers].join(' ')) ? ' if eligible' : ' (conditional)'}` : amount);
+    if (negative.test(text)) return [isConditional ? /relocation/iu.test(text) && !/housing/iu.test(text) ? 'Relocation not guaranteed' : 'Housing not guaranteed'
       : /relocation/iu.test(text) && !/housing/iu.test(text) ? 'No relocation' : 'No housing'];
+    if (isConditional && /relocation/iu.test(text)) return ['Relocation may be available', ...(moneyHint.test(text) ? [] : ['Amount unstated'])];
+    if (isConditional && /stipend|allowance/iu.test(text)) return ['Stipend may be available', ...(moneyHint.test(text) ? [] : ['Amount unstated'])];
     if (/stipend|allowance/iu.test(text)) return [moneyHint.test(text) ? 'Stipend details' : 'Stipend: amount unstated'];
     if (/relocation/iu.test(text)) return [moneyHint.test(text) ? 'Relocation details' : 'Relocation: no amount'];
-    if (/provided|employer.paid|furnished|covered/iu.test(text)) return ['Provided'];
-    if (/\bavailable\b/iu.test(text)) return ['Available'];
-    return [conditional.test(text) ? 'Depends' : 'Details'];
+    if (/provided|employer.paid|furnished|covered/iu.test(text)) return [isConditional ? 'May be provided' : 'Provided'];
+    if (/\bavailable\b/iu.test(text)) return [isConditional ? 'May be available' : 'Available'];
+    return [isConditional ? 'Housing may be available' : 'Details'];
   });
-  return unique([...labels, ...(conditional.test(all) ? ['Depends'] : [])]);
+  return unique(labels);
 }
 
 function educationTags(text: string): string[] {
@@ -76,7 +79,7 @@ function educationTags(text: string): string[] {
 function eligibilityTags(text: string): string[] {
   const tags: string[] = [];
   if (/\b(?:no|not|cannot|unavailable|unable)\b.*\b(?:sponsor|visa)|\b(?:sponsor\w*|visa)\b.*\b(?:not|unavailable)\b/iu.test(text)) tags.push('No sponsorship');
-  else if (/\bsponsor\w*\b/iu.test(text)) tags.push(conditional.test(text) ? 'Depends' : 'Sponsorship');
+  else if (/\bsponsor\w*\b/iu.test(text)) tags.push(conditional.test(text) ? 'May offer sponsorship' : 'Sponsorship');
   if (/\bu\.?s\.?\s+person/iu.test(text)) tags.push('US person');
   if (/\b(?:authorized|authorised|authorization|authorisation|work lawfully|work permit|right to work)\b/iu.test(text)) tags.push('Work authorization');
   if (/\bclearance\b/iu.test(text)) {
@@ -84,7 +87,7 @@ function eligibilityTags(text: string): string[] {
       : /\beligib/iu.test(text) ? 'Clearance eligibility'
         : conditional.test(text) ? 'May need clearance' : /\brequir|\bmust|\bactive\b/iu.test(text) ? 'Clearance required' : 'Clearance');
   }
-  if (conditional.test(text)) tags.push('Depends');
+  if (conditional.test(text) && !tags.includes('May offer sponsorship')) tags.push('Conditions apply');
   return tags.length ? tags : ['Requirements'];
 }
 
@@ -142,7 +145,7 @@ export function postingFactSummaries(facts: readonly PostingFact[] | undefined, 
     } else tags = source.statements;
     // Keep meaningful labels intact; wrapping is better than replacing a degree or condition with "Details".
     tags = unique(tags);
-    if (tags.length > 3 && tags.includes('Depends')) tags = [...tags.filter(tag => tag !== 'Depends').slice(0, 2), 'Depends'];
+    if (tags.length > 3 && tags.includes('Conditions apply')) tags = [...tags.filter(tag => tag !== 'Conditions apply').slice(0, 2), 'Conditions apply'];
     return { field: fact.field, label: fact.label, tags: tags.slice(0, 3), details, payOptions, morePayOptions };
   });
 }

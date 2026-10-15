@@ -357,6 +357,8 @@ Keep the employer application button as the clear primary action.
 
 Pay varies opens up to three distinct pay options with their currency, cadence,
 and applicability. Never use a vague Pay disclosed badge. Housing stipends show
-the amount or explicitly say the amount is unstated; conditional support uses
-Depends with the full condition available on expansion. Unstated fields stay
+the amount or explicitly say the amount is unstated; conditional support names
+the benefit, such as “Relocation may be available,” with the full condition in
+the hint. Do not use standalone “Depends” labels or trailing info symbols; the
+metadata text itself opens the hint. Unstated fields stay
 hidden, and switching roles resets expanded details.

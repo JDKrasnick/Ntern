@@ -121,7 +121,6 @@ export function RoleMetadataHints({ facts }: { facts: RoleFactSummary[] }) {
             {fact.field !== 'compensation' ? <Text style={[hintStyles.label, { color: tone.color }]}>{fact.label}: </Text> : null}
             {fact.tags.join(' · ')}
           </Text>
-          <Ionicons name="information-circle-outline" size={12} color={tone.color} />
         </Pressable></View>;
       })}
     </View>

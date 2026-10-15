@@ -56,14 +56,23 @@ describe('brief metadata disclosures', () => {
     expect(postingFactSummaries([fact('housing', ['No housing or relocation assistance'])])[0]?.tags).toEqual(['None']);
     const statements = ['Housing stipend for interns relocating to the area', 'Relocation support up to $4,000 gross up, if eligible'];
     const result = postingFactSummaries([fact('housing', statements)])[0]!;
-    expect(result.tags).toEqual(['Stipend: amount unstated', 'Up to $4,000', 'Depends']);
+    expect(result.tags).toEqual(['Stipend may be available', 'Amount unstated', 'Up to $4,000 if eligible']);
     expect(result.details).toEqual(statements);
     expect(postingFactSummaries([fact('housing', ['Housing cost to you: $300 per month'])])[0]?.tags).toEqual(['Cost $300']);
-    expect(postingFactSummaries([fact('housing', ['Housing stipend of $2,000–$4,000 if eligible'])])[0]?.tags).toEqual(['$2,000–$4,000', 'Depends']);
-    expect(postingFactSummaries([fact('housing', ['No housing provided unless approved'])])[0]?.tags).toContain('Depends');
+    expect(postingFactSummaries([fact('housing', ['Housing stipend of $2,000–$4,000 if eligible'])])[0]?.tags).toEqual(['$2,000–$4,000 if eligible']);
+    expect(postingFactSummaries([fact('housing', ['No housing provided unless approved'])])[0]?.tags).toEqual(['Housing not guaranteed']);
     expect(postingFactSummaries([fact('housing', ['No housing provided; relocation support up to $4,000'])])[0]?.tags).not.toContain('None');
     expect(postingFactSummaries([fact('housing', ['Housing stipend of 5000 PLN'])])[0]?.tags).toEqual(['5000 PLN']);
     expect(postingFactSummaries([fact('housing', ['Housing stipend of five thousand dollars'])])[0]?.tags).toEqual(['Stipend details']);
+  });
+
+  it('names the conditional benefit instead of showing a standalone Depends', () => {
+    const statement = 'Relocation assistance may be provided for eligible roles';
+    const summary = postingFactSummaries([fact('housing', [statement])])[0]!;
+    expect(summary.tags).toEqual(['Relocation may be available', 'Amount unstated']);
+    expect(summary.details).toEqual([statement]);
+    expect(postingFactSummaries([fact('eligibility', ['Visa sponsorship may be available'])])[0]?.tags).toEqual(['May offer sponsorship']);
+    expect(postingFactSummaries([fact('housing', ['Housing provided'], ['If eligible'])])[0]?.tags).toEqual(['May be provided']);
   });
 
   it('keeps every field brief and retains complete conditions for expansion', () => {
