@@ -105,7 +105,7 @@ export function RoleMetadataHints({ facts }: { facts: RoleFactSummary[] }) {
     <View style={hintStyles.flow}>
       {facts.map(fact => {
         const tone = fieldStyle[fact.field];
-        return <View key={fact.field} style={[hintStyles.item, fact.field === 'compensation' ? hintStyles.pay : null]}><Pressable
+        return <View key={fact.field} style={hintStyles.item}><Pressable
           ref={node => { if (node) anchors.current.set(fact.field, node); else anchors.current.delete(fact.field); }}
           accessibilityRole="button"
           accessibilityLabel={`${fact.label}: ${fact.tags.join(', ')}`}
@@ -158,7 +158,6 @@ const hintStyles = StyleSheet.create({
   flow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 18 },
   item: { maxWidth: '100%' },
   trigger: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 5, minHeight: 44, paddingVertical: 6, maxWidth: '100%' },
-  pay: { width: '100%' },
   value: { color: '#3A3A3C', fontSize: 14, lineHeight: 21, flexShrink: 1 },
   label: { fontWeight: '600' },
   payText: { color: '#067647', fontWeight: '700' },
