@@ -495,6 +495,29 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await reserveShadowCost(DB, now, 'd'.repeat(64), 'lease-d', 1, env)).toBe(false);
   });
 
+  it('lets historical work use its own sublimit without borrowing beyond the total ceiling', async () => {
+    const DB = schema(); const now = new Date('2026-10-14T00:00:00.000Z');
+    const provider = '6'.repeat(64); const historical = '7'.repeat(64);
+    for (const key of [provider, historical]) await DB.prepare(`INSERT INTO shadow_extraction_runs
+      (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version,
+       schema_version, preprocessing_version, state, input_key, origin, created_at, updated_at)
+      VALUES (?, 'job', 'source', 'external', 'https://example.test', '{}', ?, ?, 'p', 's', 'n', 'queued', 'input', ?, ?, ?)`)
+      .bind(key, key, SHADOW_EXTRACTION_MODEL_ID, key === provider ? 'provider-poll' : 'backfill', now.toISOString(), now.toISOString()).run();
+    await DB.prepare(`INSERT INTO shadow_extraction_cost_ledger
+      (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
+      VALUES ('2026-10', 'provider-prior', ?, 20, 1068, 'reconciled', ?, ?)`).bind(provider, now.toISOString(), now.toISOString()).run();
+    const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2000' };
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ spentCents: 1068,
+      historical: { allowanceCents: 500, spentCents: 0, availableCents: 500, exhausted: false } });
+    const reservations = await Promise.all(Array.from({ length: 51 }, (_, i) => reserveShadowCost(DB, now, historical, `historical-${i}`, 10, env)));
+    expect(reservations.filter(Boolean)).toHaveLength(50);
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ historical: { spentCents: 500, availableCents: 0, exhausted: true } });
+    expect(await reserveShadowCost(DB, now, historical, 'historical-0', 10, env)).toBe(true);
+    await DB.prepare("UPDATE shadow_extraction_cost_ledger SET actual_cents = 1495 WHERE lease_token = 'provider-prior'").run();
+    expect(await reserveShadowCost(DB, now, provider, 'provider-last', 5, env)).toBe(true);
+    expect(await reserveShadowCost(DB, now, provider, 'provider-over', 1, env)).toBe(false);
+  });
+
   it('keeps the September backfill sublimit while reserving provider-poll work', async () => {
     const DB = schema();
     const september = new Date('2026-09-23T00:00:00.000Z');

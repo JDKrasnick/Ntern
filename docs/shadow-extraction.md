@@ -83,8 +83,11 @@ Both automatic prospective publication and manual receipt creation require
 25 fully reviewed natural runs from the exact model/prompt/schema/preprocessing
 version, with at least 95% precision and recall and positive examples for every
 policy-allowed field. A verified output from another model version cannot gain a
-new automatic receipt. An already authorized exact receipt can finish projecting
-while the next model's gate is pending. Migration 0055 gives the bounded review
+new automatic or manual receipt. New manual receipts also check the candidate's
+own version tuple before using the current review gate. An already authorized
+exact receipt can finish projecting while the next model's gate is pending;
+the maintenance selector prioritizes unprojected active receipts ahead of pending
+new candidates. Migration 0055 gives the bounded review
 query an index ordered by exact version and completion time.
 
 All-field publication contracts/conversions, explicit deadline support, and
@@ -95,8 +98,15 @@ cases still apply before those fields are promoted.
 Enabled execution must provide both
 `SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS` (the forecast for all existing
 Cloudflare usage) and `SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS`. The consumer
-fails closed unless cumulative reservations and reconciled actual usage fit both
-the shadow headroom and the combined $20/month cap. A single request can finish
+fails closed unless cumulative reservations and reconciled actual usage fit the
+total model allowance (at most $20/month with the $20 headroom binding), and the
+forecast plus model usage stays within $35/month. The legacy smaller binding
+retains its earlier limits. Historical/non-provider work also has its own
+$5/month sublimit; provider traffic and fixed diagnostic probes do not consume
+that sublimit. Every lane still consumes the total model allowance. Unknown
+billed usage remains charged to both applicable limits. Budget status exposes
+historical spending and available capacity after both limits, so a partial
+backfill must stop when either is exhausted. A single request can finish
 slightly above its conservative reservation, but that actual usage reduces later
 capacity. It retries one transient delivery
 with a five-minute delay; malformed output is a visible `invalid-output` state,

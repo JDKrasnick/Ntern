@@ -125,17 +125,26 @@ function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOri
 
 export async function providerShadowBudgetStatus(db: D1Database, now: Date,
   env: Pick<ShadowExtractionEnvironment, 'SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS' | 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS'>,
-): Promise<{ period: string; allowanceCents: number; spentCents: number; exhausted: boolean } | undefined> {
+): Promise<{ period: string; allowanceCents: number; spentCents: number; exhausted: boolean;
+  historical: { allowanceCents: number; spentCents: number; availableCents: number; exhausted: boolean } } | undefined> {
   const forecast = parseCents(env.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS);
   const headroom = parseCents(env.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS);
   if (forecast === undefined || headroom === undefined) return undefined;
   const period = month(now);
   const allowanceCents = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom);
-  const row = await db.prepare(`SELECT COALESCE(SUM(CASE WHEN state = 'reserved' AND reserved_cents > actual_cents THEN reserved_cents
-      WHEN state IN ('reserved', 'reconciled') THEN actual_cents ELSE 0 END), 0) AS spent_cents
-    FROM shadow_extraction_cost_ledger WHERE period = ?`).bind(period).first<{ spent_cents: number }>();
+  const row = await db.prepare(`SELECT COALESCE(SUM(charged_cents), 0) AS spent_cents,
+      COALESCE(SUM(CASE WHEN origin != 'provider-poll' AND NOT (origin = 'controlled' AND source_id = ?)
+        THEN charged_cents ELSE 0 END), 0) AS historical_cents
+    FROM (SELECT r.origin, r.source_id, CASE WHEN l.state = 'reserved' AND l.reserved_cents > l.actual_cents THEN l.reserved_cents
+      WHEN l.state IN ('reserved', 'reconciled') THEN l.actual_cents ELSE 0 END AS charged_cents
+      FROM shadow_extraction_cost_ledger l JOIN shadow_extraction_runs r ON r.run_key = l.run_key WHERE l.period = ?)`)
+    .bind(modelRuntimeProbeSourceId, period).first<{ spent_cents: number; historical_cents: number }>();
   const spentCents = row?.spent_cents ?? 0;
-  return { period, allowanceCents, spentCents, exhausted: spentCents + providerRunReservationCents > allowanceCents };
+  const historicalAllowance = monthlyShadowAllowanceCents(period, 'backfill', forecast, headroom);
+  const historicalSpent = row?.historical_cents ?? 0;
+  const availableCents = Math.max(0, Math.min(historicalAllowance - historicalSpent, allowanceCents - spentCents));
+  return { period, allowanceCents, spentCents, exhausted: spentCents + providerRunReservationCents > allowanceCents,
+    historical: { allowanceCents: historicalAllowance, spentCents: historicalSpent, availableCents, exhausted: availableCents < 10 } };
 }
 
 function r2Key(contentHash: string): string { return `shadow-input/${safeKeyPart(contentHash)}.json`; }
@@ -285,11 +294,15 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
   if (prior?.state === 'reserved' && prior.reserved_cents >= reserveCents) return true;
   const run = await db.prepare('SELECT origin, source_id FROM shadow_extraction_runs WHERE run_key = ?')
     .bind(runKey).first<{ origin: ShadowExtractionOrigin; source_id: string }>();
+  // Each lane has its own sublimit; every lane also consumes the same total
+  // model ceiling. Live spending must not consume the historical sublimit.
   // A fixed synthetic probe has a separate $1 diagnostic envelope, still
   // charged to the existing global model ceiling. It never borrows the
   // historical cohort's smaller allowance or counts as natural traffic.
   const probe = run?.origin === 'controlled' && run.source_id === modelRuntimeProbeSourceId;
   const allowance = monthlyShadowAllowanceCents(period, probe ? 'provider-poll' : run?.origin ?? 'legacy-unknown', forecast, headroom);
+  const globalAllowance = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom);
+  const historical = !probe && run?.origin !== 'provider-poll';
   if (reserveCents > allowance) return false;
   const result = await db.prepare(`INSERT INTO shadow_extraction_cost_ledger (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)
     SELECT ?, ?, ?, ?, 0, 'reserved', ?, ?
@@ -300,9 +313,15 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
       AND (? = 0 OR COALESCE((SELECT SUM(CASE WHEN ledger.state = 'reserved' AND ledger.reserved_cents > ledger.actual_cents THEN ledger.reserved_cents
         WHEN ledger.state IN ('reserved', 'reconciled') THEN ledger.actual_cents ELSE 0 END)
         FROM shadow_extraction_cost_ledger ledger JOIN shadow_extraction_runs probe_run ON probe_run.run_key = ledger.run_key
-        WHERE ledger.period = ? AND probe_run.origin = 'controlled' AND probe_run.source_id = ?), 0) + ? <= ?)`).bind(
-    period, leaseToken, runKey, reserveCents, now.toISOString(), now.toISOString(), period, leaseToken, period, reserveCents, allowance,
+        WHERE ledger.period = ? AND probe_run.origin = 'controlled' AND probe_run.source_id = ?), 0) + ? <= ?)
+      AND (? = 0 OR COALESCE((SELECT SUM(CASE WHEN ledger.state = 'reserved' AND ledger.reserved_cents > ledger.actual_cents THEN ledger.reserved_cents
+        WHEN ledger.state IN ('reserved', 'reconciled') THEN ledger.actual_cents ELSE 0 END)
+        FROM shadow_extraction_cost_ledger ledger JOIN shadow_extraction_runs historical_run ON historical_run.run_key = ledger.run_key
+        WHERE ledger.period = ? AND historical_run.origin != 'provider-poll'
+          AND NOT (historical_run.origin = 'controlled' AND historical_run.source_id = ?)), 0) + ? <= ?)`).bind(
+    period, leaseToken, runKey, reserveCents, now.toISOString(), now.toISOString(), period, leaseToken, period, reserveCents, globalAllowance,
     probe ? 1 : 0, period, modelRuntimeProbeSourceId, reserveCents, modelRuntimeProbeMonthlyLimitCents,
+    historical ? 1 : 0, period, modelRuntimeProbeSourceId, reserveCents, allowance,
   ).run();
   if (result.meta.changes === 1) return true;
   const existing = await db.prepare(`SELECT state, reserved_cents FROM shadow_extraction_cost_ledger
