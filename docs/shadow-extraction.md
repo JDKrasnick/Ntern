@@ -276,7 +276,7 @@ dates and eligibility text do not silently change lifecycle, filters, or alerts.
 Text that exceeds the display bound is omitted rather than truncating a condition.
 Conflicting statements from attached sources are withheld.
 
-An approved policy may also bind up to 250 exact historical source/posting/hash
+An approved policy may also bind up to 1000 exact historical source/posting/hash
 entries through `historicalCohortRoot` and `historicalCohortSize` in the approval.
 The compact root fits Cloudflare's variable limit; each request supplies a bounded
 Merkle membership proof for its exact revision. Authenticated `publish-approved` publishes only those exact
@@ -294,6 +294,25 @@ The release policy is `full-metadata-2026-10-v1`. Without profile-bound owner
 approval, the existing natural-production quality gate and manual review rules
 below remain mandatory. Disabling or restoring the prior policy stops new full
 release receipts; it does not erase facts that have already been published.
+
+Explicit replacement is separate from normal enrichment. `publish-approved`
+accepts `replaceExisting: true` only when the exact cohort approval contains
+`replaceExistingMetadata: true`, input is complete, every field is validator
+accepted, and the request contains the entire publishable snapshot. The current
+profile is required even for retries with an existing receipt. A complete empty
+snapshot is valid: it clears stale values rather than retaining old pay or tags.
+Replacement retires prior metadata evidence and receipts, preserving source
+attachments, admission, identity, visibility, and notification history. Partial
+or incomplete refreshes cannot erase accepted metadata.
+
+The owner-approved October seven-day refresh has a $5 total ceiling. At approval
+the ledger committed 1720 cents globally, including 877 historical cents. An
+explicit headroom binding of `2220` permits at most 500 more committed cents,
+with historical spending capped at 1377 cents. Reservations and concurrent
+traffic count against these ceilings. The special allowance applies only in
+October 2026; other months retain the prior limits. The runner also caps its
+own task at 500 cents and must report unprocessed or unavailable roles rather
+than claiming that every role in the window was refreshed.
 
 ### Previous prospective policy
 

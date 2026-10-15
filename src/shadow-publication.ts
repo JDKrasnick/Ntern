@@ -28,7 +28,7 @@ export interface ShadowPublicationPolicy {
   maxReceipts?: number | null;
   /** Explicit owner release approval. Bound to this exact extraction profile. */
   releaseApproval?: { model: string; prompt: string; schema: string; preprocessing: string; approvedAt: string; reason: string;
-    historicalCohortRoot?: string; historicalCohortSize?: number };
+    historicalCohortRoot?: string; historicalCohortSize?: number; replaceExistingMetadata?: boolean };
 }
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -59,7 +59,8 @@ export function parseShadowPublicationPolicy(raw: string | undefined): ShadowPub
         || typeof approval.reason !== 'string' || approval.reason.trim().length < 10 || approval.reason.length > 500) throw new Error('invalid release approval');
       if ((approval.historicalCohortRoot !== undefined || approval.historicalCohortSize !== undefined)
         && (!isHash(approval.historicalCohortRoot) || !Number.isSafeInteger(approval.historicalCohortSize)
-          || Number(approval.historicalCohortSize) < 1 || Number(approval.historicalCohortSize) > 250)) throw new Error('invalid approved cohort');
+          || Number(approval.historicalCohortSize) < 1 || Number(approval.historicalCohortSize) > 1000)) throw new Error('invalid approved cohort');
+      if (approval.replaceExistingMetadata !== undefined && approval.replaceExistingMetadata !== true) throw new Error('invalid replacement approval');
       releaseApproval = approval as ShadowPublicationPolicy['releaseApproval'];
     }
     if (value.mode === 'prospective-provider-poll') {
@@ -91,7 +92,7 @@ export function policyAllows(policy: ShadowPublicationPolicy, identity: ShadowPu
       && verifyShadowCohortProof(policy.releaseApproval.historicalCohortRoot, identity, proof)));
 }
 
-export function shadowPublicationFingerprint(value: { jobId: string; sourceId: string; externalId: string; contentHash: string; runKey: string; policyVersion: string; allowedFields: readonly ShadowPublicationField[] }): string {
+export function shadowPublicationFingerprint(value: { jobId: string; sourceId: string; externalId: string; contentHash: string; runKey: string; policyVersion: string; allowedFields: readonly ShadowPublicationField[]; replaceExisting?: boolean }): string {
   return hash({ ...value, allowedFields: [...value.allowedFields].sort() });
 }
 
