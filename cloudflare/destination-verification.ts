@@ -17,7 +17,7 @@ import { createMetadataAcquirer, metadataApiRoute, type MetadataAcquisition } fr
 import { metadataFieldOutcomes, type MetadataAuditOutcome } from '../src/metadata-audit.js';
 import type { D1Database, MessageBatch, Queue, R2Bucket } from './types.js';
 import { enqueueShadowExtraction, type ShadowBaseline } from './shadow-extraction.js';
-import { normalizeExactPostingDescription, type ShadowExtractionOrigin } from '../src/shadow-extraction.js';
+import { normalizeExactPostingDescription, type ShadowExtractionOrigin, type ShadowStructuredEvidence } from '../src/shadow-extraction.js';
 import { safeDiagnostic } from '../src/source-health.js';
 import { recordQueueFailureBestEffort, resolveQueueFailures } from './dlq-operations.js';
 
@@ -101,7 +101,7 @@ async function handoffShadowExtraction(input: {
   message: DestinationVerificationMessage;
   title: string;
   description?: string;
-  structuredLocations?: readonly string[];
+  structuredEvidence?: ShadowStructuredEvidence;
   sourceUrl: string;
   observedAt: string;
   incomplete: boolean;
@@ -110,7 +110,7 @@ async function handoffShadowExtraction(input: {
 }): Promise<void> {
   const description = input.description?.trim() ?? '';
   const descriptionBytes = new TextEncoder().encode(description).byteLength;
-  const normalized = normalizeExactPostingDescription(input.title, description, input.incomplete, undefined, input.structuredLocations);
+  const normalized = normalizeExactPostingDescription(input.title, description, input.incomplete, undefined, input.structuredEvidence);
   let outcome: 'enqueued' | 'skipped-no-text' | 'skipped-no-binding' | 'skipped-oversized' | 'failed';
   try {
     if (!normalized.title || !normalized.description) outcome = 'skipped-no-text';
@@ -120,7 +120,7 @@ async function handoffShadowExtraction(input: {
         SHADOW_EXTRACTION_ARTIFACTS: input.env.SHADOW_EXTRACTION_ARTIFACTS }, {
         jobId: input.message.jobId, sourceId: input.message.sourceId, externalId: input.message.externalId,
         sourceUrl: input.sourceUrl, providerIdentity: input.message.providerIdentity, title: input.title,
-        description, structuredLocations: input.structuredLocations, observedAt: input.observedAt, incomplete: input.incomplete,
+        description, structuredEvidence: input.structuredEvidence, observedAt: input.observedAt, incomplete: input.incomplete,
         origin: input.message.shadowOrigin ?? (input.message.reason === 'historical-backfill' ? 'backfill' : 'scheduled-verification'),
         ...(input.baseline ? { baseline: input.baseline } : {}),
       });
@@ -637,7 +637,7 @@ export async function processDestinationVerificationBatch(
           }
           const inspectedAt = now().toISOString();
           await handoffShadowExtraction({ env, operations, message, title, description: apiAcquisition.artifact.text,
-          sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false, structuredLocations: apiAcquisition.artifact.locations, method: apiAcquisition.method });
+          sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false, structuredEvidence: apiAcquisition.artifact, method: apiAcquisition.method });
           if (message.idempotencyKey) await operations.recordVerificationCompletion(message.idempotencyKey, inspectedAt);
           await acknowledge(queued); continue;
         }
@@ -648,7 +648,7 @@ export async function processDestinationVerificationBatch(
           const result = await persistDestinationAdmission({ jobs, operations, message, job, reference,
             reachability: 'live', inspectedAt, apiAcquisition, durationMs: now().getTime() - Date.parse(attemptedAt) });
           await handoffShadowExtraction({ env, operations, message, title: apiAcquisition.artifact.title ?? reference.title,
-            description: apiAcquisition.artifact.text, sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false, structuredLocations: apiAcquisition.artifact.locations,
+            description: apiAcquisition.artifact.text, sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false, structuredEvidence: apiAcquisition.artifact,
             baseline: result.shadowBaseline, method: apiAcquisition.method });
           await acknowledge(queued); continue;
         }
@@ -889,7 +889,7 @@ export async function processDestinationVerificationBatch(
         // admission, publication, or notifications.
         const shadowArtifact = apiAcquisition?.artifact?.text
           ? { title: apiAcquisition.artifact.title, description: apiAcquisition.artifact.text, sourceUrl: apiAcquisition.sourceUrl,
-            incomplete: false }
+            incomplete: false, structuredEvidence: apiAcquisition.artifact }
           : evidence?.contentExcerpt && !evidence.identicalEvidenceForDifferentPosting
             ? { title: evidence.title ?? currentReference.title, description: evidence.contentExcerpt, sourceUrl: evidence.url,
               incomplete: evidence.inspectionTruncated === true || evidence.loadingShell === true }
@@ -897,6 +897,7 @@ export async function processDestinationVerificationBatch(
         if (!candidateOnly) {
           await handoffShadowExtraction({ env, operations, message, title: shadowArtifact?.title ?? currentReference.title,
             description: shadowArtifact?.description, sourceUrl: shadowArtifact?.sourceUrl ?? message.candidateUrl,
+            structuredEvidence: shadowArtifact && 'structuredEvidence' in shadowArtifact ? shadowArtifact.structuredEvidence : undefined,
             observedAt: inspectedAt, incomplete: shadowArtifact?.incomplete ?? true,
             ...('shadowBaseline' in result ? { baseline: result.shadowBaseline } : {}),
             method: apiAcquisition?.method ?? 'browser' });

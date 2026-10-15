@@ -141,6 +141,50 @@ describe('shadow extraction contract', () => {
     expect(input.description).toContain('Build services.');
   });
 
+  it('preserves role-scoped structured fields without introducing a pay period or posting dates as deadlines', () => {
+    const input = normalizeExactPostingDescription('Intern', 'Build services.', false, undefined, {
+      locations: Array.from({ length: 13 }, (_, i) => `City ${i}`), workMode: 'OnSite',
+      compensationText: 'USD 30–40 per hour',
+      compensationBands: [{ minAmount: 50, maxAmount: 60, currency: 'USD', label: 'Regional pay', sourceText: 'Regional pay: USD 50–60' }],
+      compensationSections: [{ label: 'Masters', text: 'USD 45 per hour' }],
+      deadline: '2026-11-01T17:00:00', deadlineTimezone: 'America/New_York',
+    });
+    expect(input.description).toContain('Work mode for this role: OnSite');
+    expect(input.description).toContain('Compensation for this role: USD 30–40 per hour');
+    expect(input.description).toContain('Compensation for this role (Regional pay): Regional pay: USD 50–60');
+    expect(input.description).toContain('Compensation for this role (Masters): USD 45 per hour');
+    expect(input.description).toContain('Application deadline for this role: 2026-11-01T17:00:00 (America/New_York)');
+    expect(input.description).toContain('Location: City 12');
+    expect(input.completeness).toBe('complete');
+    expect(normalizeExactPostingDescription('Intern', 'Build services.', false, undefined, { workMode: 'Remote' }).contentHash)
+      .not.toBe(normalizeExactPostingDescription('Intern', 'Build services.', false, undefined, { workMode: 'OnSite' }).contentHash);
+    const artifact = { workMode: 'OnSite', publishedAt: '2026-10-01', updatedAt: '2026-10-15' };
+    const dates = normalizeExactPostingDescription('Intern', 'Build services.', false, undefined, artifact);
+    expect(dates.description).not.toContain('2026-10-01');
+    expect(dates.description).not.toContain('2026-10-15');
+    expect(dates.description).not.toContain('deadline');
+  });
+
+  it('stores structured role evidence in the exact bounded R2 input sent to the model', async () => {
+    const artifacts = new MemoryR2(); const messages: unknown[] = [];
+    const message = await enqueueShadowExtraction({ DB: schema(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_QUEUE: { async send(body: unknown) { messages.push(body); }, async sendBatch() {} } }, {
+      jobId: 'structured-role', sourceId: 'lever-acme', externalId: 'exact', sourceUrl: 'https://example.test/role',
+      providerIdentity: { provider: 'lever', tenant: 'acme', postingId: 'exact', sourceId: 'lever-acme', sourceUrl: 'https://example.test/role' }, title: 'Engineering Intern',
+      description: 'Build services.\\n'.repeat(10_000), structuredEvidence: { workMode: 'onsite', locations: ['Baku'], compensationText: 'USD 30 per hour' },
+      observedAt: '2026-10-15T00:00:00Z', origin: 'controlled',
+    });
+    expect(messages).toHaveLength(1);
+    const bytes = artifacts.values.get(message!.inputKey)!;
+    const stored = JSON.parse(new TextDecoder().decode(bytes)) as { normalized: { description: string; completeness: string; contentHash: string } };
+    expect(bytes.byteLength).toBeLessThanOrEqual(42_000);
+    expect(stored.normalized.description).toContain('Work mode for this role: onsite');
+    expect(stored.normalized.description).toContain('Location: Baku');
+    expect(stored.normalized.description).toContain('USD 30 per hour');
+    expect(stored.normalized.completeness).toBe('incomplete');
+    expect(stored.normalized.contentHash).toBe(message!.contentHash);
+  });
+
   it('accepts quoted regional hourly bands and rejects absent quotes or unsupported numbers', () => {
     const input = normalizeExactPostingDescription('Intern', source);
     expect(validateShadowExtraction(output(), input).accepted?.fields.compensation).toMatchObject({ status: 'present' });

@@ -180,11 +180,14 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
       title: selected.title,
       ...(selected.text ? { text: selected.text } : {}),
       ...(selected.compensationText ? { compensationText: selected.compensationText } : {}),
+      ...(selected.compensationSections ? { compensationSections: selected.compensationSections } : {}),
+      ...(selected.compensationBands ? { compensationBands: selected.compensationBands } : {}),
       ...(selected.locations?.length ? { locations: selected.locations } : {}),
       ...(selected.workMode ? { workMode: selected.workMode } : {}),
       ...(selected.publishedAt ? { publishedAt: selected.publishedAt } : {}),
       ...(selected.updatedAt ? { updatedAt: selected.updatedAt } : {}),
       ...(selected.deadline ? { deadline: selected.deadline } : {}),
+      ...(selected.deadlineTimezone ? { deadlineTimezone: selected.deadlineTimezone } : {}),
     };
   }
   if (!record(payload)) return undefined;
@@ -238,9 +241,13 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
       const url = new URL(String(payload.hostedUrl));
       if (url.origin !== 'https://jobs.lever.co' || url.pathname.replace(/\/$/u, '') !== `/${identity.tenant}/${expected}`) return undefined;
     } catch { return undefined; }
-    const sections = Array.isArray(payload.lists) ? payload.lists.flatMap((item) => record(item) ? [text(item.text), description(item.content)] : []) : [];
+    const sections = Array.isArray(payload.lists) ? payload.lists.flatMap((item) => {
+      if (!record(item)) return [];
+      const content = description(item.content);
+      return content ? [text(item.text), content] : [];
+    }) : [];
     const descriptions = [payload.descriptionPlain, payload.description, payload.additionalPlain, payload.additional].map(description);
-    if (!descriptions.some(Boolean)) return undefined;
+    if (![...descriptions, ...sections].some(Boolean)) return undefined;
     const timestamp = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && !Number.isNaN(new Date(value).valueOf()) ? new Date(value).toISOString() : undefined;
     return { title: text(payload.text), text: [...descriptions, ...sections].filter(Boolean).join('\n'),
       compensationText: [bandText(payload.salaryRange), description(payload.salaryDescriptionPlain), description(payload.salaryDescription)].filter(Boolean).join('\n'),

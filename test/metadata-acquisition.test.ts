@@ -5,6 +5,7 @@ import { extractPostingMetadataEvidence, compensationFromRanges, reconcileRoleMe
 import { exactPostingRecoveryUrl, renderedDescriptionReady } from '../src/rendered-destination-evidence.js';
 import { compareMetadataCohort, decodeMetadataCursor, encodeMetadataCursor, metadataFieldOutcomes } from '../src/metadata-audit.js';
 import type { ProviderIdentity } from '../src/types.js';
+import { normalizeExactPostingDescription } from '../src/shadow-extraction.js';
 import tenstorrentProbe from './fixtures/trusted-catalog/tenstorrent-5221670007.json' with { type: 'json' };
 import boozAllenProbe from './fixtures/trusted-catalog/booz-allen-r0248143.json' with { type: 'json' };
 import fab2Probe from './fixtures/trusted-catalog/fab2-0c4dc4f4-01c9-4138-a666-e7234cda7e95.json' with { type: 'json' };
@@ -26,6 +27,30 @@ function streamed(body: string, chunkSize: number): Response {
 }
 
 describe('identity-bound public metadata APIs', () => {
+  it.each(['OnSite', 'Hybrid', 'Remote'])('carries Ashby structured %s and compensation into model evidence', (workplaceType) => {
+    const artifact = parseMetadataApiResponse(identity('ashby'), 'ashby-api', { jobs: [{
+      id: uuid, title: 'Engineering Intern', jobUrl: `https://jobs.ashbyhq.com/acme/${uuid}`,
+      descriptionPlain: 'Build services.', workplaceType, location: 'Austin',
+      compensation: { scrapeableCompensationSalarySummary: 'USD 30–40 per hour' },
+    }] })!;
+    const input = normalizeExactPostingDescription(artifact.title, artifact.text!, false, undefined, artifact);
+    expect(input.description).toContain(`Work mode for this role: ${workplaceType}`);
+    expect(input.description).toContain('USD 30–40 per hour');
+    expect(input.description).toContain('Location: Austin');
+  });
+  it('accepts an exact Lever posting whose role description exists only in lists', () => {
+    const artifact = parseMetadataApiResponse(identity('lever'), 'lever-api', {
+      id: uuid, text: 'Software Engineering Intern', hostedUrl: `https://jobs.lever.co/acme/${uuid}`,
+      lists: [{ text: 'Qualifications', content: '<p>Currently pursuing a bachelors degree.</p>' }],
+      workplaceType: 'onsite', categories: { location: 'Baku' },
+    });
+    expect(artifact).toMatchObject({ workMode: 'onsite', locations: ['Baku'] });
+    expect(artifact?.text).toContain('Currently pursuing a bachelors degree.');
+    expect(parseMetadataApiResponse(identity('lever'), 'lever-api', {
+      id: uuid, text: 'Software Engineering Intern', hostedUrl: `https://jobs.lever.co/acme/${uuid}`,
+      lists: [{ text: 'Qualifications', content: '' }],
+    })).toBeUndefined();
+  });
   it('preserves degree-specific nested HTML pay rows through acquisition and reconciliation', () => {
     const artifact = parseMetadataApiResponse(identity('greenhouse', '123'), 'greenhouse-api', { id: 123, title: 'Engineering Intern',
       content: '<h3>Compensation and Benefits</h3><ul><li>The compensation for this role:<ul><li>Engineering Intern/Undergraduate: $30/hour</li><li>Engineering Intern/Masters: $32.50/hour</li><li>Engineering Intern/PhD: $35/hour</li></ul></li></ul>' });

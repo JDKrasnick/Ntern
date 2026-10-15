@@ -21,6 +21,14 @@ description to the private `intern-notifs-shadow-extraction` R2 bucket and
 enqueues only a compact reference: posting IDs, source identity, content hash,
 versioned cache key, and R2 object key. Queue messages never contain the source
 description, prompts, user data, credentials, or an arbitrary URL to fetch.
+Preprocessing `exact-posting-markdown-v3` includes exact provider locations,
+work mode, compensation text and labeled bands, and application deadlines in
+the same bounded evidence corpus as the description. Units and applicability
+labels come from the source; publication and update dates are not deadlines.
+All API handoff paths preserve these structured fields, including scheduled
+verification and historical collection. A changed evidence corpus changes the
+content hash; the preprocessing revision also prevents reuse of v2 results.
+Prior v2 evaluations do not establish accuracy for this new input format.
 The acquisition report records the handoff outcome (`enqueued`,
 `skipped-no-text`, `skipped-no-binding`, or `failed`), acquisition method, and a
 description byte count. Each run records an immutable `provider-poll`,
