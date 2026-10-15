@@ -19,6 +19,9 @@ describe("public role renderer", () => {
     for (const field of fields) expect(html).toContain(`${field}: &lt;script&gt;unsafe&lt;/script&gt;`);
     expect(html).toContain("Only if eligible &amp; enrolled");
     expect(html).not.toContain("<script>");
+    expect(html).toContain('<dt>Housing</dt><dd><span class="fact-tag">housing:');
+    expect(html.match(/<dt>Location<\/dt>/g)).toHaveLength(1);
+    expect(html).toContain('<span class="fact-tag">Only if eligible &amp; enrolled</span>');
   });
   it("serves the same HTML to visitors and bots, with source labels and a safe handoff", async () => {
     api(job);
@@ -57,6 +60,7 @@ describe("public role renderer", () => {
     api({ ...job, title: '<script>alert("x")</script>', company: '" onload="bad' });
     const html = await (await worker.fetch(request("/jobs/abc123"), env)).text();
     expect(html).not.toContain("<script>");
+
     expect(html).toContain("&lt;script&gt;");
     api({ ...job, applyUrl: "javascript:alert(1)" });
     expect((await worker.fetch(request("/jobs/abc123"), env)).status).toBe(503);

@@ -5,6 +5,7 @@ import type { ShadowExtraction, ShadowField } from './shadow-extraction.js';
 import { prospectivePublicationFields } from './shadow-verification.js';
 import { postingFactFields, type PostingFact } from '../shared/posting-facts.js';
 import { verifyShadowCohortProof } from './shadow-cohort.js';
+import { compensationLabels } from '../shared/compensation-display.js';
 import { SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION,
   SHADOW_EXTRACTION_PREPROCESSING_VERSION } from './shadow-extraction.js';
 
@@ -138,7 +139,9 @@ export function shadowExtractionEvidence(input: {
     if (candidate.status !== 'present' || !candidate.evidence.length) return [];
     // Keep text claims and their conditions intact; supporting passages may
     // contain surrounding benefits that do not belong in the displayed field.
-    const textValues = typeof candidate.value === 'string' ? [candidate.value]
+    const textValues = name === 'compensation' ? compensationLabels({ ranges: compensation })
+      : name === 'workMode' && mode ? [{ remote: 'Remote', hybrid: 'Hybrid', onsite: 'Onsite' }[mode.value]]
+      : typeof candidate.value === 'string' ? [candidate.value]
       : Array.isArray(candidate.value) && candidate.value.every(value => typeof value === 'string') ? candidate.value as string[] : candidate.evidence;
     const statements = [...new Set(textValues.map(text => text.replace(/\s+/gu, ' ').trim()).filter(Boolean))];
     const qualifiers = [...new Set(candidate.qualifiers.map(text => text.replace(/\s+/gu, ' ').trim()).filter(Boolean))];

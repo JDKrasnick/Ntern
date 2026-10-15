@@ -2094,7 +2094,7 @@ function JobDetailSheet({
 
   const role = job ?? displayedJob.current;
   const roleDisplay = role ? presentCatalogRole(role) : undefined;
-  const details = [roleDisplay?.location, roleDisplay?.season]
+  const details = [role?.postingFacts?.some(fact => fact.field === "locations") ? undefined : roleDisplay?.location, roleDisplay?.season]
     .filter(Boolean)
     .join(" · ");
   const actionLabel = !role?.open
@@ -2160,8 +2160,8 @@ function JobDetailSheet({
                   })}
                 </View>
               ) : null}
-              <Text style={styles.sheetDetail}>{details}</Text>
-              {roleDisplay?.compensation ? (
+              {details ? <Text style={styles.sheetDetail}>{details}</Text> : null}
+              {roleDisplay?.compensation && !role.postingFacts?.some(fact => fact.field === "compensation") ? (
                 <View style={styles.jobCardMidPills}>
                   <Text style={styles.pay} numberOfLines={2}>{roleDisplay.compensation}</Text>
                 </View>
@@ -2175,7 +2175,13 @@ function JobDetailSheet({
               {postingFactDetails(role.postingFacts).map(fact => (
                 <View key={fact.field} style={styles.sheetTrustBlock}>
                   <Text style={styles.sheetTrustPrimary}>{fact.label}</Text>
-                  <Text style={styles.sheetTrustSecondary}>{fact.detail}</Text>
+                  <View style={styles.sheetFactTags}>
+                    {fact.tags.map(tag => (
+                      <View key={tag} style={styles.sheetFactTag}>
+                        <Text style={styles.sheetFactTagText}>{tag}</Text>
+                      </View>
+                    ))}
+                  </View>
                 </View>
               ))}
               <View style={styles.sheetTrustBlock}>
@@ -11359,6 +11365,10 @@ const styles = StyleSheet.create({
   sheetTrustBlock: { gap: 3, marginTop: 16 },
   sheetTrustPrimary: { color: colors.body, fontSize: 14, fontWeight: "700", lineHeight: 20 },
   sheetTrustSecondary: { color: colors.muted, fontSize: 13, lineHeight: 19 },
+  sheetFactTags: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 3 },
+  sheetFactTag: { backgroundColor: colors.canvas, borderColor: colors.separator, borderWidth: 1,
+    borderRadius: 8, paddingHorizontal: 9, paddingVertical: 5, maxWidth: "100%", flexShrink: 1 },
+  sheetFactTagText: { color: colors.body, fontSize: 13, lineHeight: 18 },
   sheetIdentityNotice: {
     alignItems: "flex-start",
     backgroundColor: colors.signalSoft,

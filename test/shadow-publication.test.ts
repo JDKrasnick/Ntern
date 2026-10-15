@@ -180,6 +180,8 @@ describe('shadow publication policy', () => {
     const jobs = new D1InternshipStore(d1(database));
     const job = (await jobs.getJob('job-1'))!;
     expect(job.postingFacts).toHaveLength(7);
+    expect(job.postingFacts?.find(fact => fact.field === 'compensation')?.statements).toEqual(['USD 40–50/hour']);
+    expect(job.postingFacts?.find(fact => fact.field === 'workMode')?.statements).toEqual(['Onsite']);
     const publicResponse = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/jobs/job-1'), env);
     expect(publicResponse.status).toBe(200);
     expect((await publicResponse.json() as { postingFacts: unknown[] }).postingFacts).toHaveLength(7);

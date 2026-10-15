@@ -21,6 +21,23 @@ description to the private `intern-notifs-shadow-extraction` R2 bucket and
 enqueues only a compact reference: posting IDs, source identity, content hash,
 versioned cache key, and R2 object key. Queue messages never contain the source
 description, prompts, user data, credentials, or an arbitrary URL to fetch.
+
+### Compact role facts
+
+Prompt v53 / schema v6 returns housing, timing, education, and eligibility as
+arrays of short, self-contained phrases. Aim for 2–10 words per phrase, bounded
+at eight phrases of 160 characters each. Keep a condition in the same phrase
+as the claim it limits; preserve negatives, alternatives, and exceptions.
+Exact supporting passages remain private and are not shortened for display.
+Pay uses the existing structured currency/range/period formatter. Role details
+render small wrapping tags grouped under Pay, Location, Work mode, Housing,
+Dates, Education, and Eligibility. Tags are informational and never clipped.
+
+This profile changes the inference cache key and invalidates earlier publication
+approvals. Existing v52 historical runs must be re-extracted and reviewed before
+they can be included in a v53 release plan; changing the policy version alone
+does not convert their output into compact facts.
+
 Preprocessing `exact-posting-markdown-v3` includes exact provider locations,
 work mode, compensation text and labeled bands, and application deadlines in
 the same bounded evidence corpus as the description. Units and applicability
