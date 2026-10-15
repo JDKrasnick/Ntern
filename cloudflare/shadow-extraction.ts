@@ -106,6 +106,14 @@ export const modelRuntimeProbeSourceId = '_metadata-model-runtime-probe';
 const modelRuntimeProbeMonthlyLimitCents = 100;
 
 function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOrigin, forecast: number, headroom: number): number {
+  // Owner-approved seven-day refresh: at approval the October ledger had
+  // 1720 cents committed globally, including 877 historical cents. These
+  // ceilings permit at most $5 more total, including reservations and other
+  // traffic. The explicit binding opts in; the grant expires after October.
+  if (period === '2026-10' && headroom === 2220) {
+    const limit = origin === 'provider-poll' ? 2220 : 1377;
+    return Math.min(limit, Math.max(0, 1500 + limit - forecast));
+  }
   if (origin === 'provider-poll') {
     // During promotion the old 500¢ binding retains its existing September
     // allowance until the reviewed 2000¢ binding is applied.

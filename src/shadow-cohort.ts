@@ -7,7 +7,7 @@ const parent = (left: string, right: string) => hash([left, right].sort());
 
 /** A compact root fits the Worker variable; each exact revision carries its proof. */
 export function buildShadowCohort(entries: readonly Identity[]) {
-  if (!entries.length || entries.length > 250 || new Set(entries.map(leaf)).size !== entries.length) throw new Error('Invalid historical cohort');
+  if (!entries.length || entries.length > 1000 || new Set(entries.map(leaf)).size !== entries.length) throw new Error('Invalid historical cohort');
   const levels = [entries.map(leaf)];
   while (levels.at(-1)!.length > 1) {
     const prior = levels.at(-1)!;
@@ -21,6 +21,6 @@ export function buildShadowCohort(entries: readonly Identity[]) {
 }
 
 export function verifyShadowCohortProof(root: string, entry: Identity, proof: unknown): boolean {
-  if (!Array.isArray(proof) || proof.length > 8 || proof.some(value => typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value))) return false;
+  if (!Array.isArray(proof) || proof.length > 10 || proof.some(value => typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value))) return false;
   return proof.reduce((current: string, sibling: string) => parent(current, sibling), leaf(entry)) === root;
 }

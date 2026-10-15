@@ -10,6 +10,7 @@ import { SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PREPROCESSING_VERSION, SH
 import type { Internship, RoleMetadataEvidence } from '../src/types.js';
 import type { R2Bucket } from '../cloudflare/types.js';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
+import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { publishProspectiveShadowMetadata, naturalShadowCohortSql } from '../cloudflare/shadow-publication.js';
 import { mergeSourceOccurrence } from '../src/identity/source-occurrence.js';
 
@@ -139,6 +140,58 @@ async function createReceipt(database: DatabaseSync, artifacts: MemoryR2, versio
 }
 
 describe('shadow publication policy', () => {
+  it.each([false, true])('replaces stale metadata and receipts, including an empty complete snapshot (%s)', async empty => {
+    const { database, artifacts } = await publicationDatabase();
+    database.prepare("UPDATE shadow_extraction_runs SET input_completeness='complete'").run();
+    const fresh = structuredClone(extraction);
+    if (empty) for (const field of shadowPublicationFields) fresh.fields[field] = { value: null, status: 'not-stated', evidence: [], qualifiers: [] };
+    await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: fresh, failures: [] } })).buffer);
+    for (const field of shadowPublicationFields) database.prepare('INSERT OR REPLACE INTO shadow_extraction_field_outcomes (run_key,field,status,accepted) VALUES (?,?,?,1)').run(hash, field, fresh.fields[field].status);
+    const jobs = new D1InternshipStore(d1(database));
+    const original = (await jobs.getJob('job-1'))!;
+    const stale: RoleMetadataEvidence = { schemaVersion: 1, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION - 1,
+      artifactHash: 'b'.repeat(64), sourceClass: 'official-ats', sourceId: 'greenhouse-acme', sourceUrl: 'https://old.example',
+      observedAt: '2026-10-01T00:00:00.000Z', exactPosting: true,
+      postingFacts: [{ field: 'education', statements: ['Old degree'], qualifiers: [], sourceUrl: 'https://old.example', contentHash: 'b'.repeat(64) }] };
+    await new D1CatalogAdmissionStore(d1(database)).recordRoleMetadataEvidence('job-1', [stale], [], stale.observedAt);
+    await jobs.putInternship({ ...original, sourceReferences: original.sourceReferences.map(ref => ({ ...ref, metadataEvidence: [stale] })),
+      roleMetadata: { schemaVersion: 1, extractionVersion: stale.extractionVersion, evidenceHashes: [stale.artifactHash] },
+      compensation: { raw: 'Old $99/hour' }, housing: [{ kind: 'available', sourceText: 'Old housing', provenance: [] }],
+      postingFacts: [{ field: 'education', statements: ['Old degree'], qualifiers: [], sourceUrl: 'https://old.example', contentHash: 'b'.repeat(64) }] });
+    database.prepare(`INSERT INTO shadow_publication_receipts (receipt_id,job_id,source_id,external_id,content_hash,run_key,policy_version,accepted_fields,evidence_fingerprint,created_at) VALUES ('old','job-1','greenhouse-acme','123',?,?,'old','["education"]','old','2026-10-01T00:00:00.000Z')`).run(hash, hash);
+    const policy = { enabled: true, version: 'full-metadata-2026-10-v1', allowedFields: [...shadowPublicationFields],
+      cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }], releaseApproval: { ...releaseApproval, replaceExistingMetadata: true } };
+    const env = { OPERATIONS_SHARED_SECRET: 'secret', DB: d1(database), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) } as unknown as Environment;
+    const send = (extra = {}) => cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+      method: 'POST', headers: { 'X-Operations-Key': 'secret', 'Content-Type': 'application/json' }, body: JSON.stringify({
+        action: 'publish-approved', runKey: hash, replaceExisting: true, deferProjection: true, acceptedFields: empty ? [] : ['locations', 'workMode'], ...extra }),
+    }), env);
+    if (!empty) expect((await send({ acceptedFields: ['locations'] })).status).toBe(409);
+    policy.releaseApproval.replaceExistingMetadata = false;
+    env.LLM_METADATA_PUBLICATION_POLICY_JSON = JSON.stringify(policy);
+    expect((await send()).status).toBe(409);
+    policy.releaseApproval.replaceExistingMetadata = true;
+    env.LLM_METADATA_PUBLICATION_POLICY_JSON = JSON.stringify(policy);
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(200);
+    const result = (await jobs.getJob('job-1'))!;
+    expect(result.compensation.raw).toBe('');
+    expect(result.housing).toBeUndefined();
+    expect(result.postingFacts?.map(fact => fact.field) ?? []).toEqual(empty ? [] : ['locations', 'workMode']);
+    expect(result.firstSeenAt).toBe(original.firstSeenAt);
+    expect(result.notification).toEqual(original.notification);
+    expect(result.admission).toEqual(original.admission);
+    expect(result.sourceReferences.map(ref => [ref.sourceId, ref.externalId])).toEqual(original.sourceReferences.map(ref => [ref.sourceId, ref.externalId]));
+    expect(result.sourceReferences.flatMap(ref => ref.metadataEvidence ?? []).some(item => item.artifactHash === stale.artifactHash)).toBe(false);
+    expect(database.prepare('SELECT is_current FROM role_metadata_evidence WHERE artifact_hash=?').get(stale.artifactHash)).toEqual({ is_current: 0 });
+    expect(database.prepare("SELECT revoked_at FROM shadow_publication_receipts WHERE receipt_id='old'").get()).not.toEqual({ revoked_at: null });
+    database.prepare("UPDATE shadow_extraction_runs SET input_completeness='incomplete'").run();
+    expect((await send()).status).toBe(409);
+    database.prepare("UPDATE shadow_extraction_runs SET input_completeness='complete', prompt_version='old'").run();
+    expect((await send()).status).toBe(409);
+  });
+
   it('binds release approval to the exact profile and requires it for a historical prospective cohort', () => {
     const policy = { enabled: true, version: 'full-metadata-2026-10-v1', mode: 'prospective-provider-poll',
       startsAt: '2026-09-24T03:20:27.000Z', allowedFields: [...shadowPublicationFields], maxReceipts: null,

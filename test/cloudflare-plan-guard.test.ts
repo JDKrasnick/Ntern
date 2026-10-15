@@ -766,6 +766,9 @@ describe('Cloudflare deployment plan guard', () => {
     });
     expect(validateCloudflarePlan(plan([change('500', '2000')]))).toHaveLength(1);
     expect(validateCloudflarePlan(plan([change('2000', '500')]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([change('2000', '2220')]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([change('2220', '2000')]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([change('2000', '2221')]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([change('500', '3000')]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 

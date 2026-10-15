@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mergeRoleMetadataEvidence, projectRoleMetadata, ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
+import { mergeRoleMetadataEvidence, projectRoleMetadata, replaceRoleMetadataSnapshot, ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import {
   deterministicBaselineFields,
   fieldBaselineConformance,
@@ -38,6 +38,7 @@ interface RunRow {
   prompt_version: string;
   schema_version: string;
   preprocessing_version: string;
+  input_completeness: string | null;
 }
 
 interface ProspectiveRunRow extends RunRow {
@@ -165,7 +166,7 @@ async function artifact(bucket: R2Bucket, key: string): Promise<{ extraction: Sh
 
 async function completedRun(db: D1Database, runKey: string): Promise<RunRow> {
   const run = await db.prepare(`SELECT run_key, job_id, source_id, external_id, source_url, content_hash, response_key,
-      model_id, prompt_version, schema_version, preprocessing_version
+      model_id, prompt_version, schema_version, preprocessing_version, input_completeness
     FROM shadow_extraction_runs WHERE run_key = ? AND state = 'completed'`).bind(runKey).first<RunRow>();
   if (!run?.response_key) throw new Error('Completed extraction run was not found');
   return run;
@@ -289,6 +290,7 @@ export async function handleShadowPublication(request: Request, env: {
     deferProjection?: unknown;
     runKeys?: unknown;
     cohortProof?: unknown;
+    replaceExisting?: unknown;
   } | null;
   if (typeof input?.runKey !== 'string' || !/^[a-f0-9]{64}$/u.test(input.runKey)) {
     return Response.json({ message: 'A valid runKey is required' }, { status: 400 });
@@ -334,7 +336,13 @@ export async function handleShadowPublication(request: Request, env: {
         evaluation: await evaluationSummary(env.DB) });
     }
     const approvedRelease = input.action === 'publish-approved' && Boolean(policy.releaseApproval);
-    if ((!approvedRelease && input.action !== 'create-receipt') || !Array.isArray(input.acceptedFields) || input.acceptedFields.length === 0
+    const replaceExisting = input.replaceExisting === true;
+    if (input.replaceExisting !== undefined && input.replaceExisting !== true) throw new Error('replaceExisting must be true when supplied');
+    if (replaceExisting && (!approvedRelease || policy.releaseApproval?.replaceExistingMetadata !== true
+      || policy.allowedFields.length !== shadowPublicationFields.length || run.input_completeness !== 'complete')) {
+      throw new Error('Replacement requires explicit all-field approval and complete current input');
+    }
+    if ((!approvedRelease && input.action !== 'create-receipt') || !Array.isArray(input.acceptedFields) || (!replaceExisting && input.acceptedFields.length === 0)
       || input.acceptedFields.some(field => typeof field !== 'string' || !policy.allowedFields.includes(field as ShadowPublicationField))
       || new Set(input.acceptedFields).size !== input.acceptedFields.length) throw new Error('Policy-allowed acceptedFields are required');
     if (!policy.enabled || !policyAllows(policy, { sourceId: run.source_id, externalId: run.external_id, contentHash: run.content_hash }, input.cohortProof)) {
@@ -342,9 +350,13 @@ export async function handleShadowPublication(request: Request, env: {
     }
     const revision = await currentRevision(env.DB, run);
     const acceptedFields = [...input.acceptedFields].sort() as ShadowPublicationField[];
+    if (replaceExisting && JSON.stringify(acceptedFields) !== JSON.stringify(shadowPublishableFields(reviewed.extraction, shadowPublicationFields).sort())) {
+      throw new Error('Replacement must include the complete publishable snapshot');
+    }
     const outcomes = await env.DB.prepare(`SELECT field FROM shadow_extraction_field_outcomes WHERE run_key = ? AND accepted = 1`)
       .bind(run.run_key).all<{ field: string }>();
     if (acceptedFields.some(field => !outcomes.results.some(outcome => outcome.field === field))) throw new Error('Receipt fields are not validator-accepted');
+    if (replaceExisting && shadowPublicationFields.some(field => !outcomes.results.some(outcome => outcome.field === field))) throw new Error('Every replacement field must be validator-accepted');
     const evaluations = await env.DB.prepare(`SELECT field FROM shadow_extraction_evaluations WHERE run_key = ? AND outcome = 'correct-present'`)
       .bind(run.run_key).all<{ field: string }>();
     if (!approvedRelease && acceptedFields.some(field => !evaluations.results.some(evaluation => evaluation.field === field))) throw new Error('Receipt fields have not passed human evaluation');
@@ -358,11 +370,12 @@ export async function handleShadowPublication(request: Request, env: {
     }
     await currentRevision(env.DB, run);
     const evidenceFingerprint = shadowPublicationFingerprint({ jobId: run.job_id, sourceId: run.source_id, externalId: run.external_id,
-      contentHash: run.content_hash, runKey: run.run_key, policyVersion: policy.version, allowedFields: acceptedFields });
+      contentHash: run.content_hash, runKey: run.run_key, policyVersion: policy.version, allowedFields: acceptedFields,
+      ...(replaceExisting ? { replaceExisting: true } : {}) });
     const receiptId = createHash('sha256').update(`receipt\0${evidenceFingerprint}`).digest('hex');
     const existingReceipt = await env.DB.prepare(`SELECT receipt_id FROM shadow_publication_receipts
       WHERE receipt_id = ? AND revoked_at IS NULL`).bind(receiptId).first<{ receipt_id: string }>();
-    if (!existingReceipt) {
+    if (replaceExisting || !existingReceipt) {
       if (run.model_id !== SHADOW_EXTRACTION_MODEL_ID || run.prompt_version !== SHADOW_EXTRACTION_PROMPT_VERSION
         || run.schema_version !== SHADOW_EXTRACTION_SCHEMA_VERSION || run.preprocessing_version !== SHADOW_EXTRACTION_PREPROCESSING_VERSION) {
         throw new Error('New receipts require the current model/prompt/schema/preprocessing version');
@@ -379,19 +392,27 @@ export async function handleShadowPublication(request: Request, env: {
         run.content_hash, run.run_key, policy.version, JSON.stringify(acceptedFields), evidenceFingerprint, new Date().toISOString()).run();
     const active = await env.DB.prepare(`SELECT accepted_fields FROM shadow_publication_receipts
       WHERE run_key = ? AND content_hash = ? AND revoked_at IS NULL`).bind(run.run_key, run.content_hash).all<{ accepted_fields: string }>();
-    const publishedFields = [...new Set(active.results.flatMap(row => {
+    const publishedFields = replaceExisting ? acceptedFields : [...new Set(active.results.flatMap(row => {
       const fields = JSON.parse(row.accepted_fields) as unknown;
       return Array.isArray(fields) ? fields.filter((field): field is ShadowPublicationField => typeof field === 'string'
         && shadowPublicationFields.includes(field as ShadowPublicationField)) : [];
     }))].sort();
     const evidence = shadowExtractionEvidence({ extraction: reviewed.extraction, sourceId: run.source_id, sourceUrl: run.source_url,
       contentHash: run.content_hash, observedAt: revision.observed_at, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION, allowedFields: publishedFields });
-    if (!evidence) throw new Error('Extraction contains no publishable evidence');
+    if (!evidence && !replaceExisting) throw new Error('Extraction contains no publishable evidence');
     const sourceReferences = job.sourceReferences.map(reference => reference.sourceId === run.source_id && reference.externalId === run.external_id
-      ? { ...reference, metadataEvidence: mergeRoleMetadataEvidence(reference.metadataEvidence, [evidence]) } : reference);
-    const projected = projectRoleMetadata({ ...job, sourceReferences });
+      ? { ...reference, metadataEvidence: mergeRoleMetadataEvidence(reference.metadataEvidence, evidence ? [evidence] : []) } : reference);
+    const projected = replaceExisting ? replaceRoleMetadataSnapshot(job, evidence, run.external_id) : projectRoleMetadata({ ...job, sourceReferences });
     const operations = new D1CatalogAdmissionStore(env.DB);
-    await operations.recordRoleMetadataEvidence(run.job_id, [evidence], projected.conflicts, revision.observed_at,
+    if (replaceExisting) {
+      const classes = ['official-api', 'official-ats', 'official-json-ld', 'official-page', 'reviewed-shadow', 'reviewed-community', 'deterministic-inference'] as const;
+      for (const sourceId of new Set(job.sourceReferences.map(reference => reference.sourceId))) {
+        await operations.recordRoleMetadataEvidence(run.job_id, evidence && sourceId === run.source_id ? [evidence] : [],
+          projected.conflicts, revision.observed_at, { sourceId, sourceClasses: classes });
+      }
+      await env.DB.prepare(`UPDATE shadow_publication_receipts SET revoked_at = ? WHERE job_id = ? AND receipt_id != ? AND revoked_at IS NULL`)
+        .bind(new Date().toISOString(), run.job_id, receiptId).run();
+    } else await operations.recordRoleMetadataEvidence(run.job_id, evidence ? [evidence] : [], projected.conflicts, revision.observed_at,
       { sourceId: run.source_id, sourceClasses: ['reviewed-shadow'] });
     await jobs.putInternship(projected.job);
     if (approvedRelease && input.deferProjection === true) {

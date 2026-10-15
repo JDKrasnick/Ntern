@@ -388,7 +388,8 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
       const { text: afterText, ...afterRest } = nextBinding;
       if (!isDeepStrictEqual(beforeRest, afterRest)) return false;
       if (beforeText === afterText) return true;
-      if (!((beforeText === '500' && afterText === '2000') || (beforeText === '2000' && afterText === '500'))) return false;
+      if (!((beforeText === '500' && afterText === '2000') || (beforeText === '2000' && afterText === '500')
+        || (beforeText === '2000' && afterText === '2220') || (beforeText === '2220' && afterText === '2000'))) return false;
       permittedBindingChanged = true;
       return true;
     }

@@ -17,9 +17,16 @@ describe('approved historical cohort', () => {
     const entry = { sourceId: 'ashby-test', externalId: '123', contentHash: 'a'.repeat(64) };
     const { root } = buildShadowCohort([entry]);
     expect(verifyShadowCohortProof(root, entry, [])).toBe(true);
-    for (const proof of [undefined, ['invalid'], Array(9).fill('a'.repeat(64))]) expect(verifyShadowCohortProof(root, entry, proof)).toBe(false);
+    for (const proof of [undefined, ['invalid'], Array(11).fill('a'.repeat(64))]) expect(verifyShadowCohortProof(root, entry, proof)).toBe(false);
     expect(() => buildShadowCohort([])).toThrow();
     expect(() => buildShadowCohort([entry, entry])).toThrow();
-    expect(() => buildShadowCohort(Array.from({ length: 251 }, (_, i) => ({ ...entry, externalId: String(i) })))).toThrow();
+    expect(() => buildShadowCohort(Array.from({ length: 1001 }, (_, i) => ({ ...entry, externalId: String(i) })))).toThrow();
+  });
+  it('supports a seven-day cohort without weakening exact membership', () => {
+    const entries = Array.from({ length: 847 }, (_, i) => ({ sourceId: 'source', externalId: String(i), contentHash: 'a'.repeat(64) }));
+    const cohort = buildShadowCohort(entries);
+    expect(cohort.entries[846]!.proof).toHaveLength(10);
+    expect(verifyShadowCohortProof(cohort.root, cohort.entries[846]!, cohort.entries[846]!.proof)).toBe(true);
+    expect(verifyShadowCohortProof(cohort.root, { ...entries[846]!, externalId: 'not-approved' }, cohort.entries[846]!.proof)).toBe(false);
   });
 });

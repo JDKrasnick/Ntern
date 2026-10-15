@@ -1096,6 +1096,17 @@ function structuredIdentity(job: Internship): InternshipIdentity | undefined {
     ? value as InternshipIdentity : undefined;
 }
 
+/** Explicit owner refresh: remove old metadata before projecting the complete new snapshot. */
+export function replaceRoleMetadataSnapshot(job: Internship, evidence: RoleMetadataEvidence | undefined, externalId: string): ReturnType<typeof projectRoleMetadata> {
+  const sourceReferences = job.sourceReferences.map(reference => ({ ...reference,
+    metadataEvidence: evidence && reference.sourceId === evidence.sourceId && reference.externalId === externalId ? [evidence] : [],
+  }));
+  return projectRoleMetadata({ ...job, sourceReferences, roleMetadata: undefined, postingFacts: undefined,
+    metadataOmission: undefined, compensation: { raw: '' }, housing: undefined, workMode: undefined,
+    location: '', locations: [], graduationWindow: undefined, applicationDeadline: undefined,
+  }, evidence ? [evidence] : []);
+}
+
 /** Projects reconciled evidence without touching identity, lifecycle, visibility, or notification state. */
 export function projectRoleMetadata(job: Internship, evidence = job.sourceReferences.flatMap((item) => item.metadataEvidence ?? [])): {
   job: Internship; conflicts: MetadataConflict[]; deferredEvidenceHashes?: string[];
