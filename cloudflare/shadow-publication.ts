@@ -300,7 +300,7 @@ export async function handleShadowPublication(request: Request, env: {
         || new Set(input.runKeys).size !== input.runKeys.length) throw new Error('A bounded approved receipt batch is required');
       const keys = input.runKeys as string[];
       const placeholders = keys.map(() => '?').join(',');
-      const receipts = await env.DB.prepare(`SELECT run_key FROM shadow_publication_receipts
+      const receipts = await env.DB.prepare(`SELECT DISTINCT run_key FROM shadow_publication_receipts
         WHERE policy_version = ? AND revoked_at IS NULL AND run_key IN (${placeholders})`)
         .bind(policy.version, ...keys).all<{ run_key: string }>();
       if (receipts.results.length !== keys.length) throw new Error('Approved receipt batch is incomplete');

@@ -187,12 +187,14 @@ describe('shadow publication policy', () => {
     expect(job.postingFacts?.find(fact => fact.field === 'eligibility')?.statements[0]).toContain('sponsorship is unavailable');
     expect(job.compensation.ranges?.[0]).toMatchObject({ minAmount: 40, maxAmount: 50 });
     expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_extraction_evaluations').get()).toEqual({ count: 0 });
+    // More than one approved field subset may create receipts for the same run.
+    expect((await send('publish-approved', { acceptedFields: ['locations'], deferProjection: true })).status).toBe(200);
     expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).toEqual({ projected_at: null });
     expect((await send('refresh-approved', { runKeys: [hash, 'b'.repeat(64)] })).status).toBe(409);
     expect((await send('refresh-approved', { runKeys: [hash] })).status).toBe(200);
     expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).not.toEqual({ projected_at: null });
     expect((await send('publish-approved')).status).toBe(200);
-    expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts').get()).toEqual({ count: 2 });
     database.prepare(`UPDATE shadow_extraction_posting_revisions SET content_hash = ?`).run('b'.repeat(64));
     expect((await send('publish-approved')).status).toBe(409);
     const replacement = shadowExtractionEvidence({ extraction, sourceId: 'greenhouse-acme', sourceUrl: 'https://jobs.example/123',
