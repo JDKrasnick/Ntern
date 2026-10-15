@@ -44,7 +44,8 @@ import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitia
 import { compactCompensationLabel } from "../shared/compensation-display";
 import { type DisplayHousingDetail } from "../shared/housing-display";
 import { type PostingFact } from "../shared/posting-facts";
-import { postingFactSummaries, type RoleFactSummary } from "../shared/posting-fact-display";
+import { postingFactSummaries } from "../shared/posting-fact-display";
+import { RoleMetadataHints } from "./src/RoleMetadataHints";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { dayIndexCacheKey, isDayIndexFresh, loadDayIndex, prefetchDayIndex, readDayIndex, readDayIndexCached, type ReleaseDayCount } from "./src/day-index";
@@ -2049,41 +2050,6 @@ function CatalogGroupLoadingSkeleton() {
   );
 }
 
-function RoleFactDisclosures({ facts }: { facts: RoleFactSummary[] }) {
-  const [expandedField, setExpandedField] = useState<RoleFactSummary["field"] | null>(null);
-  const expanded = facts.find(fact => fact.field === expandedField);
-  return (
-    <View style={styles.sheetFacts}>
-      <View style={styles.sheetFactFlow}>
-      {facts.map(fact => <TouchableOpacity
-        key={fact.field}
-        accessibilityRole="button"
-        accessibilityLabel={`${fact.label}: ${fact.tags.join(", ")}`}
-        accessibilityHint={expandedField === fact.field ? "Hide full details" : "Show full details"}
-        aria-expanded={expandedField === fact.field}
-        activeOpacity={0.65}
-        onPress={() => setExpandedField(value => value === fact.field ? null : fact.field)}
-        style={[styles.sheetFactDisclosure, fact.field === "compensation" ? styles.sheetFactPay : null]}
-      >
-        <Text style={fact.field === "compensation" ? styles.pay : styles.sheetFactValue}>
-          {fact.field !== "compensation" ? <Text style={styles.sheetFactLabel}>{fact.label}: </Text> : null}
-          {fact.tags.join(" · ")}
-        </Text>
-        <Ionicons name={expandedField === fact.field ? "chevron-up" : "chevron-down"} size={12} color={colors.signal} />
-      </TouchableOpacity>)}
-      </View>
-      {expanded ? (
-        <View style={styles.sheetFactExpanded}>
-          <Text style={styles.sheetTrustPrimary}>{expanded.label}</Text>
-          {expanded.payOptions.map(option => <Text key={option} style={styles.sheetFactDetail}>{option}</Text>)}
-          {expanded.details.map(detail => <Text key={detail} style={styles.sheetFactDetail}>{detail}</Text>)}
-          {expanded.morePayOptions ? <Text style={styles.sheetTrustSecondary}>More pay options on the employer’s site.</Text> : null}
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
 function JobDetailSheet({
   job,
   signedIn,
@@ -2205,7 +2171,7 @@ function JobDetailSheet({
                 </View>
               ) : null}
               {details ? <Text style={styles.sheetDetail}>{details}</Text> : null}
-              <RoleFactDisclosures key={`${role.jobId}:${role.postingFacts?.map(fact => fact.contentHash).join(":") ?? "legacy"}`}
+              <RoleMetadataHints key={`${role.jobId}:${role.postingFacts?.map(fact => fact.contentHash).join(":") ?? "legacy"}`}
                 facts={postingFactSummaries(role.postingFacts, { compensation: role.compensation, housing: role.housing })} />
               <View style={styles.sheetTrustBlock}>
                 <Text style={styles.sheetTrustPrimary}>{source.primary}</Text>
@@ -11390,14 +11356,6 @@ const styles = StyleSheet.create({
   sheetTrustBlock: { gap: 3, marginTop: 16 },
   sheetTrustPrimary: { color: colors.body, fontSize: 14, fontWeight: "700", lineHeight: 20 },
   sheetTrustSecondary: { color: colors.muted, fontSize: 13, lineHeight: 19 },
-  sheetFacts: { marginTop: 8 },
-  sheetFactFlow: { flexDirection: "row", flexWrap: "wrap", columnGap: 18 },
-  sheetFactDisclosure: { flexDirection: "row", alignItems: "center", gap: 5, minHeight: 44, paddingVertical: 6, maxWidth: "100%" },
-  sheetFactPay: { width: "100%" },
-  sheetFactLabel: { color: colors.body, fontWeight: "600" },
-  sheetFactValue: { color: colors.body, fontSize: 14, lineHeight: 21, flexShrink: 1 },
-  sheetFactExpanded: { gap: 6, paddingTop: 6, paddingBottom: 6, maxWidth: 760 },
-  sheetFactDetail: { color: colors.body, fontSize: 14, lineHeight: 21 },
   sheetIdentityNotice: {
     alignItems: "flex-start",
     backgroundColor: colors.signalSoft,

@@ -341,10 +341,16 @@ Preserve the app's original bottom-sheet layout: role title, company, categories
 location/term, green pay, source information, and application actions. Keep the
 company mark small beside its name. Additional metadata uses brief labeled
 phrases that wrap together, without separate full-width rows, dividers, or pill
-backgrounds. A tap reveals that field's full claims, conditions, and exceptions
-below the phrases; only one field expands at a time. Controls stay transparent
-with small teal chevrons, 44 pt touch targets, keyboard activation, and explicit
-expanded state. The public standalone role page uses aligned label/value rows.
+backgrounds. Tap/click, keyboard focus, or a 450 ms hover opens a small speech
+bubble attached to the phrase. The bubble overlays the sheet without changing
+its height; full claims and exceptions remain available, with scrolling for long
+details. It flips above the trigger near the bottom of the screen, and closes on
+an outside tap, Escape, or scrolling the underlying page. Hover stays open while
+moving from the trigger into the bubble. Use colored field icons and labels:
+green pay, teal location, blue work mode, amber housing, violet dates, indigo
+education, and green-teal eligibility. Controls stay transparent with 44 pt touch
+targets and explicit expanded state. The standalone public role page uses
+aligned label/value rows.
 Keep the employer application button as the clear primary action.
 
 Pay varies opens up to three distinct pay options with their currency, cadence,
