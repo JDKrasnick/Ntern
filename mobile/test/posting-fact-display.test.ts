@@ -6,6 +6,20 @@ const fact = (field: PostingFactField, statements: string[], qualifiers: string[
   ({ field, statements, qualifiers, sourceUrl: 'https://example.com/job', contentHash: 'a'.repeat(64) });
 
 describe('brief metadata disclosures', () => {
+  it.each([
+    ['Pursuing a bachelor’s degree in Mechanical or Electrical Engineering', 'Bachelor’s'],
+    ['Bachelors in Computer Science or related field', 'Bachelor’s'],
+    ['Currently enrolled in an undergraduate B.S. program in Robotics', 'Bachelor’s'],
+    ['Bachelor’s or Master’s in Mechatronics', 'Bachelor’s / Master’s'],
+    ['Master’s degree in Computer Science preferred', 'Master’s preferred'],
+    ['Pursuing degree · Mechanical, Electrical, Robotics, Mechatronics or related engineering; ≥2 years completed by internship start', 'Pursuing degree'],
+    ['Currently enrolled in an undergraduate program', 'Undergrad'],
+  ])('shows a supported degree summary and keeps majors in the hint: %s', (statement, label) => {
+    const result = postingFactSummaries([fact('education', [statement])])[0]!;
+    expect(result.tags).toEqual([label]);
+    expect(result.details).toEqual([statement]);
+  });
+
   it('caps pay options at three, retains scope, and never shows Pay disclosed', () => {
     const ranges = [37, 42, 50, 60].map((amount, i) => ({ minAmount: amount, maxAmount: amount, currency: 'USD', period: 'hourly',
       applicableEducationLevels: [['undergraduate'], ['masters'], ['doctoral'], ['mba']][i] }));

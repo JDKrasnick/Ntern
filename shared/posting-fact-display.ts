@@ -46,14 +46,17 @@ function housingTags(statements: string[], qualifiers: string[]): string[] {
 
 function educationTag(text: string): string {
   const levels = [
-    [/\b(?:undergrad(?:uate)?|bachelor|BS|BA|BSc)\b/iu, 'Undergrad'],
-    [/\b(?:master|masters|MS|MSc|MBA)\b/iu, 'Master’s'],
+    [/\b(?:bachelors?|B\.?S\.?|B\.?A\.?|BSc)\b/iu, 'Bachelor’s'],
+    [/\bundergrad(?:uate)?\b/iu, 'Undergrad'],
+    [/\b(?:masters?|M\.?S\.?|MSc|MBA)\b/iu, 'Master’s'],
     [/\b(?:PhD|Ph\.D\.?|doctoral|doctorate)\b/iu, 'PhD'],
     [/\bassociate/iu, 'Associate'], [/\bhigh school\b/iu, 'High school'],
     [/\bgraduate (?:degree|program|student)\b/iu, 'Grad'],
   ] as const;
-  const labels = levels.filter(([pattern]) => pattern.test(text)).map(([, label]) => label);
+  const matched = levels.filter(([pattern]) => pattern.test(text)).map(([, label]) => label);
+  const labels = matched.filter(label => label !== 'Undergrad' || !matched.includes('Bachelor’s'));
   if (labels.length) return `${labels.join(' / ')}${/\bprefer/iu.test(text) ? ' preferred' : ''}`;
+  if (/\b(?:pursuing|working toward|working towards)\b.*\bdegree\b/iu.test(text)) return 'Pursuing degree';
   if (/\b(?:enrolled|enrollment|studying|student)\b/iu.test(text)) return 'Enrolled';
   if (/\brecent grad|graduated.*(?:year|month)/iu.test(text)) return 'Recent grad';
   if (/\bequivalent experience\b/iu.test(text)) return 'Equivalent exp.';
