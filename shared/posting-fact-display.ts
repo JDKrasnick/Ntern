@@ -44,23 +44,32 @@ function housingTags(statements: string[], qualifiers: string[]): string[] {
   return unique([...labels, ...(conditional.test(all) ? ['Depends'] : [])]);
 }
 
-function educationTag(text: string): string {
+function educationTags(text: string): string[] {
   const levels = [
     [/\b(?:bachelors?|B\.?S\.?|B\.?A\.?|BSc)\b/iu, 'Bachelor’s'],
     [/\bundergrad(?:uate)?\b/iu, 'Undergrad'],
-    [/\b(?:masters?|M\.?S\.?|MSc|MBA)\b/iu, 'Master’s'],
+    [/\b(?:masters?|M\.?S\.?|MSc)\b/iu, 'Master’s'],
+    [/\bMBA\b/iu, 'MBA'],
     [/\b(?:PhD|Ph\.D\.?|doctoral|doctorate)\b/iu, 'PhD'],
     [/\bassociate/iu, 'Associate'], [/\bhigh school\b/iu, 'High school'],
     [/\bgraduate (?:degree|program|student)\b/iu, 'Grad'],
   ] as const;
   const matched = levels.filter(([pattern]) => pattern.test(text)).map(([, label]) => label);
   const labels = matched.filter(label => label !== 'Undergrad' || !matched.includes('Bachelor’s'));
-  if (labels.length) return `${labels.join(' / ')}${/\bprefer/iu.test(text) ? ' preferred' : ''}`;
-  if (/\b(?:pursuing|working toward|working towards)\b.*\bdegree\b/iu.test(text)) return 'Pursuing degree';
-  if (/\b(?:enrolled|enrollment|studying|student)\b/iu.test(text)) return 'Enrolled';
-  if (/\brecent grad|graduated.*(?:year|month)/iu.test(text)) return 'Recent grad';
-  if (/\bequivalent experience\b/iu.test(text)) return 'Equivalent exp.';
-  return 'Requirements';
+  const pursuing = /\b(?:pursuing|working towards?|enrolled|enrollment|studying|current(?:ly)? student)\b/iu.test(text);
+  const preferred = /\bprefer/iu.test(text);
+  const captions = labels.map(label => `${pursuing ? 'Pursuing ' : ''}${pursuing && !['PhD', 'MBA'].includes(label) ? label.toLocaleLowerCase('en-US') : label}${preferred ? ' preferred' : ''}`);
+  if (/\bequivalent experience\b/iu.test(text)) captions.push('Or equivalent exp.');
+  if (captions.length) return captions;
+  // The source must name the level before we can call it a bachelor's or master's.
+  if (pursuing && /\bdegree\b/iu.test(text)) {
+    const years = text.match(/(?:≥\s*|at least\s+)?(\d+)\s*(?:\+|years? completed|years? (?:of|toward))/iu);
+    return [/\bengineering\b/iu.test(text) ? 'Pursuing engineering degree' : 'Pursuing degree',
+      ...(years ? [`${years[1]}+ years completed`] : [])];
+  }
+  if (/\b(?:enrolled|enrollment|studying|student)\b/iu.test(text)) return ['Enrolled'];
+  if (/\brecent grad|graduated.*(?:year|month)/iu.test(text)) return ['Recent grad'];
+  return [text];
 }
 
 function eligibilityTags(text: string): string[] {
@@ -85,8 +94,10 @@ function timingTags(text: string): string[] {
   if (/\b(?:fixed.term|temporary)\b/iu.test(text)) tags.push('Fixed-term');
   const hours = text.match(/\b(\d+(?:[–-]\d+)?)\s*(?:hours?|hrs?)\s*(?:per|a|\/)\s*week/iu);
   if (hours) tags.push(`${hours[1]} hr/wk`);
-  const duration = text.match(/\b(\d+)\s*[- ]?\s*(weeks?|months?)\b/iu);
-  if (duration) tags.push(`${duration[1]} ${duration[2]}${/\bminimum|at least\b/iu.test(text) ? ' min.' : ''}`);
+  const days = text.match(/\b(\d+)\s*days?\s*(?:per|a|\/)\s*week/iu);
+  if (days) tags.push(`${days[1]} days/wk`);
+  const duration = text.match(/\b(\d+(?:\s*[–-]\s*\d+)?)\s*[- ]?\s*(weeks?|months?)\b/iu);
+  if (duration) tags.push(`${duration[1]} ${duration[2]!.replace(/s$/u, '')}${duration[1] === '1' ? '' : 's'}${/\bminimum|at least\b/iu.test(text) ? ' min.' : ''}`);
   // Use an already short, complete date fragment; never cut a sentence mid-condition.
   const date = text.split(/[;·]/u)[0]!.trim();
   if (/\b(?:Jan\w*|Feb\w*|Mar\w*|Apr\w*|May|Jun\w*|Jul\w*|Aug\w*|Sep\w*|Oct\w*|Nov\w*|Dec\w*|Spring|Summer|Fall|Winter)\b/iu.test(date)) {
@@ -119,7 +130,7 @@ export function postingFactSummaries(facts: readonly PostingFact[] | undefined, 
       morePayOptions = options.length > 3;
       details = unique(source.qualifiers);
     } else if (fact.field === 'housing') tags = housingTags(source.statements, source.qualifiers);
-    else if (fact.field === 'education') tags = full.map(educationTag);
+    else if (fact.field === 'education') tags = full.flatMap(educationTags);
     else if (fact.field === 'eligibility') tags = full.flatMap(eligibilityTags);
     else if (fact.field === 'timing') tags = full.flatMap(timingTags);
     else if (fact.field === 'locations') {
@@ -127,8 +138,8 @@ export function postingFactSummaries(facts: readonly PostingFact[] | undefined, 
       const cities = unique(sites.map(text => text.split(',')[0]!.trim())).slice(0, 2);
       tags = [...cities, ...(sites.length > cities.length ? [`+${sites.length - cities.length} more`] : [])];
     } else tags = source.statements;
-    // Long or unfamiliar copy gets a neutral disclosure, never a truncated claim.
-    tags = unique(tags.map(tag => tag.length <= 24 ? tag : 'Details'));
+    // Keep meaningful labels intact; wrapping is better than replacing a degree or condition with "Details".
+    tags = unique(tags);
     if (tags.length > 3 && tags.includes('Depends')) tags = [...tags.filter(tag => tag !== 'Depends').slice(0, 2), 'Depends'];
     return { field: fact.field, label: fact.label, tags: tags.slice(0, 3), details, payOptions, morePayOptions };
   });

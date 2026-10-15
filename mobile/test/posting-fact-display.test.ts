@@ -7,17 +7,26 @@ const fact = (field: PostingFactField, statements: string[], qualifiers: string[
 
 describe('brief metadata disclosures', () => {
   it.each([
-    ['Pursuing a bachelor’s degree in Mechanical or Electrical Engineering', 'Bachelor’s'],
-    ['Bachelors in Computer Science or related field', 'Bachelor’s'],
-    ['Currently enrolled in an undergraduate B.S. program in Robotics', 'Bachelor’s'],
-    ['Bachelor’s or Master’s in Mechatronics', 'Bachelor’s / Master’s'],
-    ['Master’s degree in Computer Science preferred', 'Master’s preferred'],
-    ['Pursuing degree · Mechanical, Electrical, Robotics, Mechatronics or related engineering; ≥2 years completed by internship start', 'Pursuing degree'],
-    ['Currently enrolled in an undergraduate program', 'Undergrad'],
-  ])('shows a supported degree summary and keeps majors in the hint: %s', (statement, label) => {
+    ['Pursuing a bachelor’s degree in Mechanical or Electrical Engineering', ['Pursuing bachelor’s']],
+    ['Bachelors in Computer Science or related field', ['Bachelor’s']],
+    ['Currently enrolled in an undergraduate B.S. program in Robotics', ['Pursuing bachelor’s']],
+    ['Bachelor’s or Master’s in Mechatronics', ['Bachelor’s', 'Master’s']],
+    ['Pursuing a bachelor’s or master’s in Computer Science', ['Pursuing bachelor’s', 'Pursuing master’s']],
+    ['Pursuing a PhD in Robotics', ['Pursuing PhD']],
+    ['Currently enrolled in an MBA program', ['Pursuing MBA']],
+    ['Bachelor’s degree or equivalent experience', ['Bachelor’s', 'Or equivalent exp.']],
+    ['Master’s degree in Computer Science preferred', ['Master’s preferred']],
+    ['Pursuing degree · Mechanical, Electrical, Robotics, Mechatronics or related engineering; ≥2 years completed by internship start', ['Pursuing engineering degree', '2+ years completed']],
+    ['Currently enrolled in an undergraduate program', ['Pursuing undergrad']],
+  ])('shows a supported degree summary and keeps majors in the hint: %s', (statement, labels) => {
     const result = postingFactSummaries([fact('education', [statement])])[0]!;
-    expect(result.tags).toEqual([label]);
+    expect(result.tags).toEqual(labels);
     expect(result.details).toEqual([statement]);
+  });
+
+  it('retains duration ranges and weekly attendance at a glance', () => {
+    expect(postingFactSummaries([fact('timing', ['8–12-month internship', 'In-office collaboration · 5 days/week'])])[0]?.tags)
+      .toEqual(['8–12 months', '5 days/wk']);
   });
 
   it('caps pay options at three, retains scope, and never shows Pay disclosed', () => {
@@ -68,7 +77,7 @@ describe('brief metadata disclosures', () => {
       expect(result.details).toEqual(facts.find(item => item.field === result.field)!.statements);
     }
     expect(results.find(item => item.field === 'eligibility')?.details).toContain('May also qualify with required export authorization');
-    expect(results.find(item => item.field === 'education')?.tags).toEqual(['Undergrad / Grad']);
+    expect(results.find(item => item.field === 'education')?.tags).toEqual(['Pursuing undergrad', 'Pursuing grad']);
     expect(postingFactSummaries(undefined)).toEqual([]);
     expect(postingFactSummaries([fact('eligibility', ['No visa sponsorship; security clearance required'])])[0]?.tags).toContain('Clearance required');
   });

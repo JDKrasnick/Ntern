@@ -1101,8 +1101,8 @@ function JobCard({
                     {job.disciplines?.slice(0, 2).map((d) => {
                       const s = disciplineStyleFor(d);
                       return (
-                        <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
-                          <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
+                        <View key={d} style={styles.disciplineTag}>
+                          <Text style={[styles.disciplineTagText, { color: s.color }]}>{s.label}</Text>
                         </View>
                       );
                     })}
@@ -1885,8 +1885,8 @@ function CatalogGroupCard({
                     {group.disciplines.slice(0, 2).map((d) => {
                       const s = disciplineStyleFor(d);
                       return (
-                        <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
-                          <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
+                        <View key={d} style={styles.disciplineTag}>
+                          <Text style={[styles.disciplineTagText, { color: s.color }]}>{s.label}</Text>
                         </View>
                       );
                     })}
@@ -2163,8 +2163,8 @@ function JobDetailSheet({
                   {role.disciplines.slice(0, 4).map((d) => {
                     const s = disciplineStyleFor(d);
                     return (
-                      <View key={d} style={[styles.disciplinePill, { backgroundColor: s.backgroundColor, borderColor: s.borderColor }]}>
-                        <Text style={[styles.disciplinePillText, { color: s.color }]}>{s.label}</Text>
+                      <View key={d} style={styles.disciplineTag}>
+                        <Text style={[styles.disciplineTagText, { color: s.color }]}>{s.label}</Text>
                       </View>
                     );
                   })}
@@ -4347,8 +4347,8 @@ function SwipeScreen({
               {job.disciplines.slice(0, 3).map((discipline) => {
                 const disciplineStyle = disciplineStyleFor(discipline);
                 return (
-                  <View key={discipline} style={[styles.disciplinePill, { backgroundColor: disciplineStyle.backgroundColor, borderColor: disciplineStyle.borderColor }]}>
-                    <Text style={[styles.disciplinePillText, { color: disciplineStyle.color }]}>{disciplineStyle.label}</Text>
+                  <View key={discipline} style={styles.disciplineTag}>
+                    <Text style={[styles.disciplineTagText, { color: disciplineStyle.color }]}>{disciplineStyle.label}</Text>
                   </View>
                 );
               })}
@@ -11277,8 +11277,8 @@ const styles = StyleSheet.create({
     width: 112,
   },
   swipeHideActionText: { color: colors.onDark, fontSize: 14, fontWeight: "800" },
-  disciplinePill: { borderRadius: 999, borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4 },
-  disciplinePillText: { fontSize: 11, fontWeight: "800", letterSpacing: 0.2 },
+  disciplineTag: { paddingVertical: 2 },
+  disciplineTagText: { fontSize: 12, fontWeight: "700" },
   jobCardTopTags: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginLeft: 8, flexShrink: 1, justifyContent: "flex-end" },
   jobCardMidPills: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
   jobCardFooterLeft: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12, gap: 12 },
