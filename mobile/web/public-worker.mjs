@@ -142,11 +142,11 @@ async function render(request, apiOrigin) {
     ...(job.workMode && job.workMode !== "unspecified" && !publishedFacts.some(fact => fact.field === "workMode") ? [["Work mode", [job.workMode]]] : []),
     ...publishedFacts.map(fact => [fact.label, fact.tags, fact]), ["Source", [sourceLabel]]];
   const factHtml = facts.map(([label, tags, disclosure]) => {
-    const pills = tags.map(tag => `<span class="fact-tag">${escapeHtml(tag)}</span>`).join("");
-    if (!disclosure) return `<dt>${escapeHtml(label)}</dt><dd>${pills}</dd>`;
+    const value = `<span class="fact-value">${tags.map(escapeHtml).join(" · ")}</span>`;
+    if (!disclosure) return `<div class="fact-row"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`;
     const pay = disclosure.payOptions.length ? `<ul>${disclosure.payOptions.map(option => `<li>${escapeHtml(option)}</li>`).join("")}</ul>` : "";
     const details = disclosure.details.map(detail => `<p>${escapeHtml(detail)}</p>`).join("");
-    return `<dt>${escapeHtml(label)}</dt><dd><details class="fact-disclosure"><summary aria-label="${escapeHtml(`${label}: ${tags.join(', ')}`)}">${pills}</summary><div class="fact-detail">${pay}${details}${disclosure.morePayOptions ? '<p>More pay options on the employer’s site.</p>' : ''}</div></details></dd>`;
+    return `<div class="fact-row"><dt>${escapeHtml(label)}</dt><dd><details class="fact-disclosure"><summary aria-label="${escapeHtml(`${label}: ${tags.join(', ')}`)}">${value}<svg class="fact-chevron" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></summary><div class="fact-detail">${pay}${details}${disclosure.morePayOptions ? '<p>More pay options on the employer’s site.</p>' : ''}</div></details></dd></div>`;
   }).join("");
   return response(page({ title: `${title} — Ntern`, description, path: `/jobs/${job.jobId}`,
     body: `<h1>${escapeHtml(job.title)}</h1><p class="lede">${escapeHtml(job.company)}${job.location ? ` · ${escapeHtml(job.location)}` : ""}</p>

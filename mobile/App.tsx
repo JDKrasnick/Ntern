@@ -2053,7 +2053,6 @@ function RoleFactDisclosure({ fact }: { fact: RoleFactSummary }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <View style={styles.sheetFactBlock}>
-      <Text style={styles.sheetTrustPrimary}>{fact.label}</Text>
       <TouchableOpacity
         accessibilityRole="button"
         accessibilityLabel={`${fact.label}: ${fact.tags.join(", ")}`}
@@ -2063,14 +2062,9 @@ function RoleFactDisclosure({ fact }: { fact: RoleFactSummary }) {
         onPress={() => setExpanded(value => !value)}
         style={styles.sheetFactDisclosure}
       >
-        <View style={styles.sheetFactTags}>
-          {fact.tags.map(tag => (
-            <View key={tag} style={styles.sheetFactTag}>
-              <Text style={styles.sheetFactTagText}>{tag}</Text>
-            </View>
-          ))}
-        </View>
-        <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={14} color={colors.muted} />
+        <Text style={styles.sheetFactLabel}>{fact.label}</Text>
+        <Text style={styles.sheetFactValue}>{fact.tags.join(" · ")}</Text>
+        <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={16} color={colors.signal} />
       </TouchableOpacity>
       {expanded ? (
         <View style={styles.sheetFactExpanded}>
@@ -11380,13 +11374,11 @@ const styles = StyleSheet.create({
   sheetTrustBlock: { gap: 3, marginTop: 16 },
   sheetTrustPrimary: { color: colors.body, fontSize: 14, fontWeight: "700", lineHeight: 20 },
   sheetTrustSecondary: { color: colors.muted, fontSize: 13, lineHeight: 19 },
-  sheetFactBlock: { gap: 3, marginTop: 12 },
-  sheetFactDisclosure: { flexDirection: "row", alignItems: "center", alignSelf: "flex-start", maxWidth: "100%", gap: 6, minHeight: 48, paddingVertical: 6 },
-  sheetFactTags: { flexDirection: "row", flexWrap: "wrap", flexShrink: 1, gap: 6 },
-  sheetFactTag: { backgroundColor: colors.canvas, borderColor: colors.separator, borderWidth: 1,
-    borderRadius: 8, paddingHorizontal: 9, paddingVertical: 4, maxWidth: "100%", flexShrink: 1 },
-  sheetFactTagText: { color: colors.body, fontSize: 14, lineHeight: 20 },
-  sheetFactExpanded: { gap: 6, paddingTop: 2, paddingBottom: 4, maxWidth: 760 },
+  sheetFactBlock: { borderBottomColor: colors.separator, borderBottomWidth: StyleSheet.hairlineWidth },
+  sheetFactDisclosure: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 48, paddingVertical: 12 },
+  sheetFactLabel: { color: colors.body, fontSize: 13, fontWeight: "600", lineHeight: 20, width: 76 },
+  sheetFactValue: { color: colors.ink, fontSize: 14, lineHeight: 21, flex: 1 },
+  sheetFactExpanded: { gap: 6, paddingTop: 0, paddingBottom: 14, maxWidth: 760 },
   sheetFactDetail: { color: colors.body, fontSize: 14, lineHeight: 21 },
   sheetIdentityNotice: {
     alignItems: "flex-start",

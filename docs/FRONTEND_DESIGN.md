@@ -337,11 +337,12 @@ The Apple private key must remain in AWS/Apple configuration and must never be e
 
 ### Role metadata disclosures
 
-Group brief, neutral tags under each metadata field. Keep captions to a few
-words; full claims, conditions, and exceptions expand inline when tapped.
-Use the existing canvas, body text, slim neutral borders, and a small disclosure
-chevron. Tags are informational disclosures, not selected filters: no teal fill,
-extra card, modal, or competing primary action. Keep the employer application
+Use a continuous label-and-value list for metadata, with brief phrases separated
+by middle dots. Align labels, values, and trailing teal disclosure chevrons;
+fine horizontal dividers provide structure without pill backgrounds or borders.
+Keep captions to a few words; full claims, conditions, and exceptions expand
+inline when the row is tapped. Disclosure controls are transparent, never gray
+buttons or filter chips. Keep the employer application
 button as the clear primary action. Interactive disclosure rows have at least
 48 pt touch targets, keyboard activation, and explicit expanded state.
 
