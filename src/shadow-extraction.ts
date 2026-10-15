@@ -5,7 +5,7 @@ import type { RoleMetadataArtifact } from './role-metadata.js';
 // v52 retains source-only extraction with atomic policies, complete linked
 // qualifications, exact site labels, and role-scoped term disclosures.
 // The selected Luna profile uses medium effort and an 8192-token total cap.
-export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v54';
+export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v55';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v6';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v3';
 export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-6-luna';

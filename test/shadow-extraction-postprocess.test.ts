@@ -110,6 +110,25 @@ describe('postprocessRoleScopedExtraction', () => {
     expect(result.extraction.fields.workMode.status).toBe('not-stated');
   });
 
+  it('preserves alternative export authorization and work-permit paths in compact tags', () => {
+    for (const alternative of ['May also qualify with required export authorization', 'Or an approved export license', 'Or UK employment authorisation', 'Right to work with a valid work permit']) {
+      const value = ['U.S. person status required', alternative];
+      const evidence = ['This role requires U.S. person status.', alternative];
+      const result = postprocessRoleScopedExtraction(extraction({ eligibility: field('present', value, evidence) }));
+      expect(result.extraction.fields.eligibility).toMatchObject({ value, evidence });
+      expect(result.changes).toEqual([]);
+    }
+  });
+
+  it('retains conditions and records a change when removing unrelated eligibility fragments', () => {
+    const claim = field('present', ['No visa sponsorship', 'Must be near the office'],
+      ['This position does not sponsor visas.', 'Ability to be physically located near the facility during open hours.']);
+    claim.qualifiers = ['Unless an existing authorization applies'];
+    const result = postprocessRoleScopedExtraction(extraction({ eligibility: claim }));
+    expect(result.extraction.fields.eligibility.qualifiers).toEqual(claim.qualifiers);
+    expect(result.changes).toEqual([{ field: 'eligibility', reason: 'procedural-eligibility-copy' }]);
+  });
+
   it('filters independent eligibility claims when several values share one evidence quote', () => {
     const result = postprocessRoleScopedExtraction(extraction({
       eligibility: field('present', [

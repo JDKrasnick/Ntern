@@ -30,7 +30,7 @@ const structuredRoleLocation = /^(?:OFFICIAL STRUCTURED ROLE LOCATION DATA[^\n]*
 const roleLocationHeader = /\b(?:Full|Part)[- ]Time\s+(?:Temp\s+)?[^\n]{1,120}\bRequisition ID\s*:/iu;
 const roleLocation = /\b(?:this|the) (?:role|position|internship|job)\b.*\b(?:in|at|based)\b|\b(?:interns?|internships?|co-?ops?|new grads?)\b.*\b(?:in|at|based)\b|\bbased(?: in person)? (?:at|in)\b|\bon[- ]?site in\b|\bavailable\b.*\bin\b|\b(?:primary|primarily|work)\s+locations?\s+(?:are|is|include)\b/iu;
 const languageOnly = /\b(?:fluent|proficien(?:cy|t)|speak|language)\b/iu;
-const eligibilityTerms = /\b(?:work authorization|authorized to work|work lawfully|eligible for employment|u\.?s\.?\s+persons?|citizens?|citizenship|nationality|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]?control(?:led)?|itar|international traffic in arms|national defense authorization act|ndaa)\b/iu;
+const eligibilityTerms = /\b(?:work authorization|employment authori[sz]ation|work permit|right to work|authorized to work|work lawfully|eligible for employment|u\.?s\.?\s+persons?|citizens?|citizenship|nationality|permanent resident|visa|sponsor(?:ship)?|clearance|export[- ]?(?:control(?:led)?|authori[sz]ation|licen[sc]e)|itar|international traffic in arms|national defense authorization act|ndaa)\b/iu;
 const studentStatus = /\b(?:current(?:ly)?|enrolled)\b[^.\n]{0,80}\b(?:student|co-?op)\b|\bstudents? only\b/iu;
 const applicantResidence = /\b(?:applicants?|candidates?|students?)\b[^.\n]{0,80}\b(?:must|need to|are required to|should)\b[^.\n]{0,80}\b(?:live|reside|be located|available)\b/iu;
 const companyIdentity = /\b(?:we|the company|our organization)\s+(?:are|is)\b|\babout (?:us|the company)\b/iu;
@@ -100,7 +100,10 @@ export function postprocessRoleScopedExtraction(extraction: ShadowExtraction, in
         && eligibilityTerms.test(value) && !proceduralEligibility.test(value));
       const retainedPassages = passages.filter((passage) => eligibilityTerms.test(passage));
       if (retainedValues.length === 0 || retainedPassages.length === 0) clear('eligibility', 'procedural-eligibility-copy');
-      else if (retainedValues.length !== eligibility.value.length) fields.eligibility = { ...eligibility, value: retainedValues, evidence: retainedPassages, qualifiers: [] };
+      else if (retainedValues.length !== eligibility.value.length) {
+        fields.eligibility = { ...eligibility, value: retainedValues, evidence: retainedPassages };
+        changes.push({ field: 'eligibility', reason: 'procedural-eligibility-copy' });
+      }
     } else if (passages.length > 0 && passages.every((passage) => proceduralEligibility.test(passage))) clear('eligibility', 'procedural-eligibility-copy');
   }
 

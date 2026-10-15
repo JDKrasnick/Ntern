@@ -24,7 +24,7 @@ description, prompts, user data, credentials, or an arbitrary URL to fetch.
 
 ### Compact role facts
 
-Prompt v54 / schema v6 returns housing, timing, education, and eligibility as
+Prompt v55 / schema v6 returns housing, timing, education, and eligibility as
 arrays of short, self-contained phrases. Aim for 2–10 words per phrase, bounded
 at eight phrases of 160 characters each. Keep a condition in the same phrase
 as the claim it limits; preserve negatives, alternatives, and exceptions.
@@ -35,7 +35,7 @@ Dates, Education, and Eligibility. Tags are informational and never clipped.
 
 This profile changes the inference cache key and invalidates earlier publication
 approvals. Existing v52 historical runs must be re-extracted and reviewed before
-they can be included in a v54 release plan; changing the policy version alone
+they can be included in a v55 release plan; changing the policy version alone
 does not convert their output into compact facts.
 
 Preprocessing `exact-posting-markdown-v3` includes exact provider locations,
