@@ -78,6 +78,7 @@ function occurrence(listing: ProcessedListing, externalId: string): SourceOccurr
       : {}),
     ...(listing.sourceMetadataProcessing ? { sourceMetadataProcessing: listing.sourceMetadataProcessing } : {}),
     ...(listing.shadowContentHash ? { shadowContentHash: listing.shadowContentHash } : {}),
+    ...(listing.shadowMetadataHash ? { shadowMetadataHash: listing.shadowMetadataHash } : {}),
     ...(listing.providerEvidence ? { providerEvidence: listing.providerEvidence } : {}),
     ...(listing.metadataEvidence?.length ? { metadataEvidence: listing.metadataEvidence } : {}),
     ...(listing.metadataExtraction ? { metadataExtraction: listing.metadataExtraction } : {}),

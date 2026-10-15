@@ -78,6 +78,25 @@ export type ShadowStructuredEvidence = Pick<RoleMetadataArtifact,
   'workMode' | 'compensationText' | 'compensationSections' | 'compensationBands' | 'deadline' | 'deadlineTimezone'>
   & { locations?: readonly string[] };
 
+/** Poll revisions exclude observation timestamps. Keep this separate from the
+ * prose hash so existing occurrences can establish a baseline without replay. */
+export function shadowStructuredEvidenceHash(evidence: ShadowStructuredEvidence): string {
+  return sha256(JSON.stringify({
+    locations: [...new Set((evidence.locations ?? []).map(location => location.trim()).filter(Boolean))].sort(),
+    workMode: evidence.workMode?.trim().toLowerCase() ?? null,
+    compensationText: evidence.compensationText?.trim() ?? null,
+    compensationSections: evidence.compensationSections ?? [], compensationBands: evidence.compensationBands ?? [],
+    deadline: evidence.deadline ?? null, deadlineTimezone: evidence.deadlineTimezone ?? null,
+  }));
+}
+
+export function providerShadowRevisionChanged(previous: { shadowContentHash?: string; shadowMetadataHash?: string } | undefined,
+  current: { shadowContentHash?: string; shadowMetadataHash?: string }): boolean {
+  return Boolean(current.shadowContentHash) && (!previous || Boolean(previous.shadowContentHash
+    && (previous.shadowContentHash !== current.shadowContentHash
+      || (previous.shadowMetadataHash && current.shadowMetadataHash && previous.shadowMetadataHash !== current.shadowMetadataHash))));
+}
+
 function structuredRoleLocationPreamble(locations: readonly string[]): string {
   const unique = [...new Set(locations.map((location) => removeUnsafeControls(location).trim()).filter(Boolean))];
   if (!unique.length) return '';

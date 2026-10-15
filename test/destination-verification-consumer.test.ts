@@ -601,6 +601,22 @@ describe('destination verification queue consumer', () => {
     expect(shadowQueue.send).toHaveBeenCalledOnce();
   });
 
+  it('rejects a natural metadata revision superseded by a later source poll before fetching or enqueueing', async () => {
+    const { db, jobs } = subject(); const { job, reference } = role();
+    reference.shadowMetadataHash = 'b'.repeat(64); await jobs.putInternship(job);
+    const send = vi.fn(); const put = vi.fn();
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
+      candidateUrl: reference.applyUrl, providerIdentity: { provider: 'greenhouse', tenant: 'acme', postingId: reference.externalId,
+        sourceId: reference.sourceId, sourceUrl: reference.sourceUrl }, reason: 'content-change', queuedAt: '2026-08-30T00:00:00Z',
+      shadowOrigin: 'provider-poll', shadowContentHash: 'c'.repeat(64), shadowMetadataHash: 'a'.repeat(64),
+    });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: { send, sendBatch: vi.fn() }, SHADOW_EXTRACTION_ARTIFACTS: { put } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(queued.ack).toHaveBeenCalledOnce(); expect(queued.retry).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
+  });
+
   it('settles a provider-shadow message whose posting left the board instead of dead-lettering it', async () => {
     const { database, db, jobs } = subject();
     const { job, reference } = role();

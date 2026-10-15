@@ -29,6 +29,12 @@ All API handoff paths preserve these structured fields, including scheduled
 verification and historical collection. A changed evidence corpus changes the
 content hash; the preprocessing revision also prevents reuse of v2 results.
 Prior v2 evaluations do not establish accuracy for this new input format.
+Source processing revision 6 also stores a separate structured-evidence hash.
+Existing occurrences establish this baseline without new natural extraction;
+later work-mode, location, or compensation changes can trigger extraction even
+when prose is unchanged. Legacy polling and the V2 catalog writer use the same
+comparison, include both revisions in retry identity, and bind queued work to
+the current source metadata revision. Publication/update timestamps are excluded.
 The acquisition report records the handoff outcome (`enqueued`,
 `skipped-no-text`, `skipped-no-binding`, or `failed`), acquisition method, and a
 description byte count. Each run records an immutable `provider-poll`,

@@ -25,6 +25,7 @@ export interface DestinationVerificationRequest {
   metadataExtractionVersion?: number;
   metadataArtifactHash?: string;
   shadowContentHash?: string;
+  shadowMetadataHash?: string;
   metadataBackfillToken?: string;
   shadowOrigin?: ShadowExtractionOrigin;
 }

@@ -37,6 +37,7 @@ export interface DestinationVerificationMessage {
   metadataExtractionVersion?: number;
   metadataArtifactHash?: string;
   shadowContentHash?: string;
+  shadowMetadataHash?: string;
   metadataBackfillToken?: string;
   shadowOrigin?: ShadowExtractionOrigin;
 }
@@ -608,6 +609,10 @@ export async function processDestinationVerificationBatch(
           ? undefined : matchingBrowserDestination(job, message, message.queuedAt);
         if (existing) {
           await settleWithoutVerification(queued, message, attemptedAt, existing.classification, existing.nextCheckAt);
+          continue;
+        }
+        if (naturalProviderShadow && message.shadowMetadataHash && message.shadowMetadataHash !== reference.shadowMetadataHash) {
+          await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
           continue;
         }
         let apiAcquisition = candidateOnly ? undefined : await acquireMetadata(message.providerIdentity, message.candidateUrl);

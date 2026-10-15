@@ -141,6 +141,7 @@ describe('neutral boundary parity', () => {
     employerEvidence: expect.any(Object) as unknown as object,
     providerIdentity: expect.any(Object) as unknown as object,
     shadowContentHash: expect.stringMatching(/^[a-f0-9]{64}$/) as unknown as string,
+    shadowMetadataHash: expect.stringMatching(/^[a-f0-9]{64}$/) as unknown as string,
     metadataCompleteness: { complete: true, title: 'complete', location: 'complete' } as const,
     metadataEvidence: expect.any(Array) as unknown as [],
   };
