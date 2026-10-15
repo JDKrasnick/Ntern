@@ -34,6 +34,9 @@ describe('brief metadata disclosures', () => {
     expect(postingFactSummaries([fact('housing', ['Housing cost to you: $300 per month'])])[0]?.tags).toEqual(['Cost $300']);
     expect(postingFactSummaries([fact('housing', ['Housing stipend of $2,000–$4,000 if eligible'])])[0]?.tags).toEqual(['$2,000–$4,000', 'Depends']);
     expect(postingFactSummaries([fact('housing', ['No housing provided unless approved'])])[0]?.tags).toContain('Depends');
+    expect(postingFactSummaries([fact('housing', ['No housing provided; relocation support up to $4,000'])])[0]?.tags).not.toContain('None');
+    expect(postingFactSummaries([fact('housing', ['Housing stipend of 5000 PLN'])])[0]?.tags).toEqual(['5000 PLN']);
+    expect(postingFactSummaries([fact('housing', ['Housing stipend of five thousand dollars'])])[0]?.tags).toEqual(['Stipend details']);
   });
 
   it('keeps every field brief and retains complete conditions for expansion', () => {
@@ -53,5 +56,6 @@ describe('brief metadata disclosures', () => {
     expect(results.find(item => item.field === 'eligibility')?.details).toContain('May also qualify with required export authorization');
     expect(results.find(item => item.field === 'education')?.tags).toEqual(['Undergrad / Grad']);
     expect(postingFactSummaries(undefined)).toEqual([]);
+    expect(postingFactSummaries([fact('eligibility', ['No visa sponsorship; security clearance required'])])[0]?.tags).toContain('Clearance required');
   });
 });

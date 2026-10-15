@@ -19,19 +19,24 @@ interface DisplayContext {
 const unique = (values: string[]) => [...new Set(values.map(value => value.trim()).filter(Boolean))];
 const conditional = /\b(?:if|when|may|might|eligible|depends?|depending|conditional|subject to|relocating|based on|unless|except|only|within)\b/iu;
 const negative = /^(?:no\b|none\b|not provided\b)|\b(?:not (?:provided|available|offered)|unavailable)\b/iu;
+const moneyHint = /\d|[$€£¥₹₩]|\b(?:dollars?|euros?|pounds?|USD|CAD|AUD|EUR|GBP|PLN|INR|SGD|NZD|JPY|CNY|CHF|SEK|NOK|DKK|BRL|MXN|KRW|ZAR)\b/iu;
 
 function housingTags(statements: string[], qualifiers: string[]): string[] {
   const all = [...statements, ...qualifiers].join(' ');
-  if (statements.every(text => negative.test(text)) && !conditional.test(all)) return ['None'];
+  if (statements.every(text => negative.test(text)) && !conditional.test(all) && !moneyHint.test(all)
+    && !/[;]|\b(?:but|however)\b/iu.test(all)) return ['None'];
   const labels = statements.flatMap(text => {
     // Keep each amount with its own benefit, never attach a relocation amount to a housing stipend.
-    const amounts = [...text.matchAll(/(?:\b(?:USD|CAD|AUD|EUR|GBP)\s*|[$€£¥])\s*\d[\d,]*(?:\.\d{1,2})?(?:\s*[–-]\s*(?:(?:USD|CAD|AUD|EUR|GBP)\s*|[$€£¥])?\s*\d[\d,]*(?:\.\d{1,2})?)?/gu)]
+    const currency = '(?:USD|CAD|AUD|EUR|GBP|PLN|INR|SGD|NZD|JPY|CNY|CHF|SEK|NOK|DKK|BRL|MXN|KRW|ZAR)';
+    const number = '\\d[\\d,]*(?:\\.\\d{1,2})?';
+    const amount = `(?:\\b${currency}\\s*|[$€£¥₹₩])\\s*${number}(?:\\s*[–-]\\s*(?:${currency}\\s*|[$€£¥₹₩])?\\s*${number})?|${number}\\s*\\b${currency}\\b`;
+    const amounts = [...text.matchAll(new RegExp(amount, 'giu'))]
       .map(match => `${/cost to you|employee.paid|rent you pay/iu.test(text) ? 'Cost ' : /up to\s*$/iu.test(text.slice(0, match.index)) ? 'Up to ' : ''}${match[0]}`);
     if (amounts.length) return amounts;
     if (negative.test(text)) return [conditional.test(text) ? 'Depends'
       : /relocation/iu.test(text) && !/housing/iu.test(text) ? 'No relocation' : 'No housing'];
-    if (/stipend|allowance/iu.test(text)) return ['Stipend: amount unstated'];
-    if (/relocation/iu.test(text)) return ['Relocation: no amount'];
+    if (/stipend|allowance/iu.test(text)) return [moneyHint.test(text) ? 'Stipend details' : 'Stipend: amount unstated'];
+    if (/relocation/iu.test(text)) return [moneyHint.test(text) ? 'Relocation details' : 'Relocation: no amount'];
     if (/provided|employer.paid|furnished|covered/iu.test(text)) return ['Provided'];
     if (/\bavailable\b/iu.test(text)) return ['Available'];
     return [conditional.test(text) ? 'Depends' : 'Details'];
@@ -62,7 +67,7 @@ function eligibilityTags(text: string): string[] {
   if (/\bu\.?s\.?\s+person/iu.test(text)) tags.push('US person');
   if (/\b(?:authorized|authorised|authorization|authorisation|work lawfully|work permit|right to work)\b/iu.test(text)) tags.push('Work authorization');
   if (/\bclearance\b/iu.test(text)) {
-    tags.push(/\bno\b.*\bclearance|\bclearance\b.*\bnot required\b/iu.test(text) ? 'No clearance'
+    tags.push(/\bno(?:\s+(?:security|active|government|existing))*\s+clearance\b|\bclearance(?:\s+is)?\s+not required\b/iu.test(text) ? 'No clearance'
       : /\beligib/iu.test(text) ? 'Clearance eligibility'
         : conditional.test(text) ? 'May need clearance' : /\brequir|\bmust|\bactive\b/iu.test(text) ? 'Clearance required' : 'Clearance');
   }
