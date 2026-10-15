@@ -33,6 +33,14 @@ Pay uses the existing structured currency/range/period formatter. Role details
 render small wrapping tags grouped under Pay, Location, Work mode, Housing,
 Dates, Education, and Eligibility. Tags are informational and never clipped.
 
+The display layer uses brief captions (at most 24 characters each, at most three
+per field) with full statements and qualifiers in an inline disclosure. Unknown
+wording receives a neutral details caption instead of a guessed or truncated
+claim. Pay varies opens at most three distinct scoped pay options; additional
+options remain on the official listing. A housing stipend with no stated amount
+is explicitly labeled as such. These presentation rules also apply to legacy
+pay and housing data, without changing extraction or requiring inference calls.
+
 This profile changes the inference cache key and invalidates earlier publication
 approvals. Existing v52 historical runs must be re-extracted and reviewed before
 they can be included in a v55 release plan; changing the policy version alone

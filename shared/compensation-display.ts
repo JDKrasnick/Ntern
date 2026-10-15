@@ -73,7 +73,7 @@ export function compensationLabels(value: DisplayCompensation | undefined): stri
     const cleaned = rawFallback.replace(/^Currency not stated\s*/u, '');
     if (cleaned) return [cleaned];
     // fallback to just hide phrase
-    return [rawFallback.replace('Currency not stated', '').trim() || 'Pay disclosed: see details'];
+    return [rawFallback.replace('Currency not stated', '').trim() || 'Pay details'];
   }
   return rawFallback ? [rawFallback] : [];
 }
@@ -95,5 +95,16 @@ export function compactCompensationLabel(value: DisplayCompensation | undefined)
   const raw = typeof value?.raw === "string" ? value.raw.normalize("NFC").replace(/\s+/gu, " ").trim() : "";
   if (!raw) return "";
   const concise = raw.split(/[·;]|\.(?:\s|$)/u, 1)[0]?.trim() ?? "";
-  return concise.length <= 44 ? concise : "Pay disclosed";
+  return concise.length <= 24 ? concise : "Pay details";
+}
+
+/** One concise caption and its unabridged scoped disclosure per distinct band. */
+export function compensationOptions(value: DisplayCompensation | undefined): Array<{ label: string; detail: string }> {
+  const ranges = distinctRanges(value);
+  if (ranges.length) return ranges.map(range => ({
+    label: compactCompensationLabel({ ranges: [range] }),
+    detail: compensationLabels({ ranges: [range] })[0]!,
+  }));
+  const raw = typeof value?.raw === 'string' ? value.raw.trim() : '';
+  return raw ? [{ label: compactCompensationLabel(value), detail: raw }] : [];
 }

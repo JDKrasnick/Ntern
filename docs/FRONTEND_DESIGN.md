@@ -333,3 +333,20 @@ Required configuration outside the app code:
 5. Add the mobile auth-session implementation, then test first sign-in, returning sign-in, private relay email, logout, account deletion, and a full TestFlight build.
 
 The Apple private key must remain in AWS/Apple configuration and must never be embedded in Expo environment variables, the mobile binary, or Git.
+
+
+### Role metadata disclosures
+
+Group brief, neutral tags under each metadata field. Keep captions to a few
+words; full claims, conditions, and exceptions expand inline when tapped.
+Use the existing canvas, body text, slim neutral borders, and a small disclosure
+chevron. Tags are informational disclosures, not selected filters: no teal fill,
+extra card, modal, or competing primary action. Keep the employer application
+button as the clear primary action. Interactive disclosure rows have at least
+48 pt touch targets, keyboard activation, and explicit expanded state.
+
+Pay varies opens up to three distinct pay options with their currency, cadence,
+and applicability. Never use a vague Pay disclosed badge. Housing stipends show
+the amount or explicitly say the amount is unstated; conditional support uses
+Depends with the full condition available on expansion. Unstated fields stay
+hidden, and switching roles resets expanded details.

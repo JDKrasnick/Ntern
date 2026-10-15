@@ -1,0 +1,12 @@
+import { metadata } from "../scripts/web-seo.mjs";
+
+export function page({ title, description, path, body, noindex = false }) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    ${metadata({ title, description, path, noindex })}
+    <link rel="icon" href="/favicon.ico" /><link rel="stylesheet" href="/policy.css" />
+    <style>body{background:#f2f2f7}header{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:2.5rem}header a{font-weight:700;text-decoration:none}.brand{color:#061a33;font-size:1.25rem}.primary{display:inline-block;background:#0e7490;color:white;padding:.7rem 1rem;border-radius:.5rem;font-weight:600;text-decoration:none;min-height:24px}.roles{list-style:none;padding:0;margin:1.5rem 0}.roles li{border-bottom:1px solid #d1d1d6;padding:1rem 0}.roles a{font-weight:600}.roles p{margin:.35rem 0 0}.facts{display:grid;grid-template-columns:minmax(7rem,1fr) 2fr;gap:.5rem 1rem;margin:1.5rem 0}dt{font-weight:600}dd{margin:0;display:flex;flex-wrap:wrap;gap:.4rem}.fact-disclosure{width:100%}.fact-disclosure summary{cursor:pointer;min-height:48px;align-content:center}.fact-disclosure summary::marker{color:#6c6c70}.fact-disclosure summary:focus-visible{outline:3px solid #0e7490;outline-offset:3px;border-radius:4px}.fact-detail{max-width:65ch;font-size:.9rem;line-height:1.5}.fact-detail p{margin:.4rem 0}.fact-detail ul{padding-left:1.2rem;margin:.4rem 0}.fact-tag{display:inline-block;margin:.2rem .3rem .2rem 0;background:#e5e5ea;border-radius:.5rem;padding:.25rem .55rem;font-size:.875rem;line-height:1.4;max-width:100%;overflow-wrap:anywhere}@media(max-width:480px){.facts{grid-template-columns:1fr;gap:.35rem}.facts dd{margin-bottom:.6rem}}h1,h2,p,a,dd{overflow-wrap:anywhere}.pagination{display:flex;justify-content:space-between;gap:1rem}a{min-height:24px;text-underline-offset:.2em}a:hover{text-decoration:underline}a:focus-visible{outline:3px solid #0e7490;outline-offset:4px}::selection{background:#ceeaf0;color:#061a33}</style>
+    </head><body><main><header><a class="brand" href="/">Ntern</a><a href="/">Open the app</a></header>
+    ${body}<nav aria-label="More from Ntern"><a href="/about">About</a><a href="/jobs">Browse roles</a><a href="/source-policy">Sources and corrections</a><a href="/privacy">Privacy</a><a href="/support">Support</a></nav>
+    </main></body></html>`;
+}

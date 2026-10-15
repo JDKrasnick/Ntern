@@ -42,8 +42,9 @@ import { appendGroupedCatalogPage, catalogCardKind, catalogQueryPreview, catalog
 import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, seasonLabel } from "./src/catalog-quality";
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
-import { housingLabels, type DisplayHousingDetail } from "../shared/housing-display";
-import { postingFactDetails, type PostingFact } from "../shared/posting-facts";
+import { type DisplayHousingDetail } from "../shared/housing-display";
+import { type PostingFact } from "../shared/posting-facts";
+import { postingFactSummaries, type RoleFactSummary } from "../shared/posting-fact-display";
 import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, defaultEducationLevel, disciplineChipOptions, educationFilterOptions, emptyCatalogFilters, employerCategoryLabels, groupedCatalogParameters, releaseDayLabel, seasonFilterOptions, sourceFilterOptions, workModeFilterOptions, type CatalogFilterValues, type ChipOption } from "./src/catalog-filters";
 import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth, weekdayInitials } from "./src/release-calendar";
 import { dayIndexCacheKey, isDayIndexFresh, loadDayIndex, prefetchDayIndex, readDayIndex, readDayIndexCached, type ReleaseDayCount } from "./src/day-index";
@@ -2048,6 +2049,38 @@ function CatalogGroupLoadingSkeleton() {
   );
 }
 
+function RoleFactDisclosure({ fact }: { fact: RoleFactSummary }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <View style={styles.sheetFactBlock}>
+      <Text style={styles.sheetTrustPrimary}>{fact.label}</Text>
+      <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel={`${fact.label}: ${fact.tags.join(", ")}`}
+        accessibilityHint={expanded ? "Hide full details" : "Show full details"}
+        aria-expanded={expanded}
+        activeOpacity={0.65}
+        onPress={() => setExpanded(value => !value)}
+        style={styles.sheetFactDisclosure}
+      >
+        {fact.tags.map(tag => (
+          <View key={tag} style={styles.sheetFactTag}>
+            <Text style={styles.sheetFactTagText}>{tag}</Text>
+          </View>
+        ))}
+        <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={14} color={colors.muted} />
+      </TouchableOpacity>
+      {expanded ? (
+        <View style={styles.sheetFactExpanded}>
+          {fact.payOptions.map(option => <Text key={option} style={styles.sheetFactDetail}>{option}</Text>)}
+          {fact.details.map(detail => <Text key={detail} style={styles.sheetFactDetail}>{detail}</Text>)}
+          {fact.morePayOptions ? <Text style={styles.sheetTrustSecondary}>More pay options on the employer’s site.</Text> : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function JobDetailSheet({
   job,
   signedIn,
@@ -2161,28 +2194,8 @@ function JobDetailSheet({
                 </View>
               ) : null}
               {details ? <Text style={styles.sheetDetail}>{details}</Text> : null}
-              {roleDisplay?.compensation && !role.postingFacts?.some(fact => fact.field === "compensation") ? (
-                <View style={styles.jobCardMidPills}>
-                  <Text style={styles.pay} numberOfLines={2}>{roleDisplay.compensation}</Text>
-                </View>
-              ) : null}
-              {housingLabels(role.postingFacts?.some(fact => fact.field === "housing") ? undefined : role.housing).map((housing, index) => (
-                <View key={`${housing.label}-${index}`} style={styles.sheetTrustBlock}>
-                  <Text style={styles.sheetTrustPrimary}>{housing.label}</Text>
-                  {housing.detail ? <Text style={styles.sheetTrustSecondary}>{housing.detail}</Text> : null}
-                </View>
-              ))}
-              {postingFactDetails(role.postingFacts).map(fact => (
-                <View key={fact.field} style={styles.sheetFactBlock}>
-                  <Text style={styles.sheetTrustPrimary}>{fact.label}</Text>
-                  <View style={styles.sheetFactTags}>
-                    {fact.tags.map(tag => (
-                      <View key={tag} style={styles.sheetFactTag}>
-                        <Text style={styles.sheetFactTagText}>{tag}</Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
+              {postingFactSummaries(role.postingFacts, { compensation: role.compensation, housing: role.housing }).map(fact => (
+                <RoleFactDisclosure key={`${role.jobId}:${fact.field}:${role.postingFacts?.find(item => item.field === fact.field)?.contentHash ?? "legacy"}`} fact={fact} />
               ))}
               <View style={styles.sheetTrustBlock}>
                 <Text style={styles.sheetTrustPrimary}>{source.primary}</Text>
@@ -11366,10 +11379,12 @@ const styles = StyleSheet.create({
   sheetTrustPrimary: { color: colors.body, fontSize: 14, fontWeight: "700", lineHeight: 20 },
   sheetTrustSecondary: { color: colors.muted, fontSize: 13, lineHeight: 19 },
   sheetFactBlock: { gap: 3, marginTop: 12 },
-  sheetFactTags: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 3 },
+  sheetFactDisclosure: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", alignSelf: "flex-start", gap: 6, minHeight: 48, paddingVertical: 6 },
   sheetFactTag: { backgroundColor: colors.canvas, borderColor: colors.separator, borderWidth: 1,
     borderRadius: 8, paddingHorizontal: 9, paddingVertical: 4, maxWidth: "100%", flexShrink: 1 },
-  sheetFactTagText: { color: colors.body, fontSize: 13, lineHeight: 18 },
+  sheetFactTagText: { color: colors.body, fontSize: 14, lineHeight: 20 },
+  sheetFactExpanded: { gap: 6, paddingTop: 2, paddingBottom: 4, maxWidth: 760 },
+  sheetFactDetail: { color: colors.body, fontSize: 14, lineHeight: 21 },
   sheetIdentityNotice: {
     alignItems: "flex-start",
     backgroundColor: colors.signalSoft,
