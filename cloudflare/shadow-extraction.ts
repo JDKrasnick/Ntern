@@ -16,6 +16,7 @@ import {
   type ShadowExtractionOrigin,
   type ShadowStatus,
   type ShadowValidationResult,
+  type ShadowStructuredEvidence,
 } from '../src/shadow-extraction.js';
 import { postprocessRoleScopedExtraction } from '../src/shadow-extraction-postprocess.js';
 import { parseShadowPublicationPolicy } from '../src/shadow-publication.js';
@@ -116,11 +117,13 @@ function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOri
     return Math.min(headroom, providerMonthlyShadowLimitCents,
       Math.max(0, providerMonthlyCombinedLimitCents - forecast));
   }
-  // Keep the previously approved September backfill limit; prospective work
-  // alone receives the new $20 monthly allowance.
+  // The owner approved $5 more historical headroom starting in October.
+  // Preserve earlier periods and keep every lane under the global model cap.
+  const historicalLimitCents = period >= '2026-10' ? 1_000 : 500;
+  const historicalCombinedLimitCents = period >= '2026-10' ? 2_500 : 2_000;
   const septemberIncreaseCents = period === '2026-09' ? 300 : 0;
-  return Math.min(Math.min(headroom, 500) + septemberIncreaseCents,
-    Math.max(0, 2_000 + septemberIncreaseCents - forecast));
+  return Math.min(Math.min(headroom, historicalLimitCents) + septemberIncreaseCents,
+    Math.max(0, historicalCombinedLimitCents + septemberIncreaseCents - forecast));
 }
 
 export async function providerShadowBudgetStatus(db: D1Database, now: Date,
@@ -166,6 +169,7 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   title: string;
   description: string;
   structuredLocations?: readonly string[];
+  structuredEvidence?: ShadowStructuredEvidence;
   observedAt: string;
   incomplete?: boolean;
   baseline?: ShadowBaseline;
@@ -178,7 +182,9 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
       jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId, sourceUrl: input.sourceUrl,
       providerIdentity: input.providerIdentity, observedAt: input.observedAt, origin,
     }, retention: { expiresAt: new Date(Date.parse(input.observedAt) + retentionDays * 86_400_000).toISOString() } });
-  let normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete, undefined, input.structuredLocations);
+  const structuredEvidence = { ...input.structuredEvidence,
+    locations: input.structuredEvidence?.locations ?? input.structuredLocations };
+  let normalized = normalizeExactPostingDescription(input.title, input.description, input.incomplete, undefined, structuredEvidence);
   if (!normalized.title || !normalized.description) return undefined;
   let stored = serialize(normalized);
   const artifactLimit = maxInputBytes + 2_000;
@@ -191,7 +197,7 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
     let fitting: { normalized: typeof normalized; stored: string } | undefined;
     while (low <= high) {
       const budget = Math.floor((low + high) / 2);
-      const candidate = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget, input.structuredLocations);
+      const candidate = normalizeExactPostingDescription(input.title, input.description, input.incomplete, budget, structuredEvidence);
       const candidateStored = serialize(candidate);
       if (candidate.title && candidate.description && bytes(candidateStored) <= artifactLimit) {
         fitting = { normalized: candidate, stored: candidateStored };

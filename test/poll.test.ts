@@ -195,9 +195,23 @@ describe('polling', () => {
     expect(queued).toHaveLength(2);
     expect(queued[1]).toMatchObject({ externalId: '101', reason: 'content-change', shadowOrigin: 'provider-poll' });
     expect(queued[1]?.idempotencyKey).not.toBe(queued[0]?.idempotencyKey);
+    rows = rows.map(row => row.externalId === '101' ? { ...row, declaredWorkMode: 'onsite' } : row);
+    hash = 'metadata-only-mode-change';
+    await run();
+    expect(queued).toHaveLength(3);
+    expect(queued[2]).toMatchObject({ reason: 'content-change', shadowContentHash: queued[1]!.shadowContentHash,
+      shadowMetadataHash: expect.stringMatching(/^[a-f0-9]{64}$/u) });
+    expect(queued[2]?.idempotencyKey).not.toBe(queued[1]?.idempotencyKey);
+    await run();
+    expect(queued).toHaveLength(3);
+    rows = rows.map(row => row.externalId === '101' ? { ...row, compensationText: 'USD 30 per hour' } : row);
+    hash = 'metadata-only-pay-change';
+    await run();
+    expect(queued).toHaveLength(4);
+    expect(queued[3]?.idempotencyKey).not.toBe(queued[2]?.idempotencyKey);
     rows = [...rows, posting('102', 'Security Engineering Intern')]; hash = 'forced-role';
     await run(false);
-    expect(queued).toHaveLength(2);
+    expect(queued).toHaveLength(4);
   });
 
   it('queues evaluation-only shadow work when an official posting is blocked only by an unresolved employer', async () => {

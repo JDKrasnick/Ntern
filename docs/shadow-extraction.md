@@ -21,6 +21,20 @@ description to the private `intern-notifs-shadow-extraction` R2 bucket and
 enqueues only a compact reference: posting IDs, source identity, content hash,
 versioned cache key, and R2 object key. Queue messages never contain the source
 description, prompts, user data, credentials, or an arbitrary URL to fetch.
+Preprocessing `exact-posting-markdown-v3` includes exact provider locations,
+work mode, compensation text and labeled bands, and application deadlines in
+the same bounded evidence corpus as the description. Units and applicability
+labels come from the source; publication and update dates are not deadlines.
+All API handoff paths preserve these structured fields, including scheduled
+verification and historical collection. A changed evidence corpus changes the
+content hash; the preprocessing revision also prevents reuse of v2 results.
+Prior v2 evaluations do not establish accuracy for this new input format.
+Source processing revision 6 also stores a separate structured-evidence hash.
+Existing occurrences establish this baseline without new natural extraction;
+later work-mode, location, or compensation changes can trigger extraction even
+when prose is unchanged. Legacy polling and the V2 catalog writer use the same
+comparison, include both revisions in retry identity, and bind queued work to
+the current source metadata revision. Publication/update timestamps are excluded.
 The acquisition report records the handoff outcome (`enqueued`,
 `skipped-no-text`, `skipped-no-binding`, or `failed`), acquisition method, and a
 description byte count. Each run records an immutable `provider-poll`,
@@ -108,8 +122,10 @@ fails closed unless cumulative reservations and reconciled actual usage fit the
 total model allowance (at most $20/month with the $20 headroom binding), and the
 forecast plus model usage stays within $35/month. The legacy smaller binding
 retains its earlier limits. Historical/non-provider work also has its own
-$5/month sublimit; provider traffic and fixed diagnostic probes do not consume
-that sublimit. Every lane still consumes the total model allowance. Unknown
+$10/month sublimit starting in October 2026, with forecast plus historical usage
+capped at $25/month; earlier periods retain their original limits. Provider
+traffic and fixed diagnostic probes do not consume that sublimit. Every lane
+still consumes the total model allowance. Unknown
 billed usage remains charged to both applicable limits. Budget status exposes
 historical spending and available capacity after both limits, so a partial
 backfill must stop when either is exhausted. A single request can finish

@@ -175,6 +175,23 @@ describe('ingestion v2 reconciler catalog sink', () => {
     })]);
     expect(store.notificationEvents.size).toBe(0);
   });
+  it('baselines old metadata revisions quietly and queues each subsequent metadata-only change once', async () => {
+    const store = new MemoryInternshipStore(); const sink = new ReconcilerAdmissionV2CatalogSink(store, () => new Date(observedAt));
+    const input = officialCommit(); await sink.commit(input);
+    const [first] = await store.listPendingProviderShadowVerifications();
+    await store.markProviderShadowVerificationEnqueued(first.idempotencyKey!);
+    const baseline = { ...input, listing: { ...input.listing, shadowMetadataHash: 'c'.repeat(64) } };
+    await sink.commit(baseline);
+    expect(await store.listPendingProviderShadowVerifications()).toEqual([]);
+    expect((await store.getSourceOccurrence(input.sourceId, input.externalId))?.occurrence.shadowMetadataHash).toBe('c'.repeat(64));
+    const changed = { ...baseline, listing: { ...baseline.listing, shadowMetadataHash: 'd'.repeat(64) } };
+    await sink.commit(changed); const [next] = await store.listPendingProviderShadowVerifications();
+    expect(next).toMatchObject({ shadowContentHash: input.listing.shadowContentHash, shadowMetadataHash: 'd'.repeat(64), reason: 'content-change' });
+    expect(next.idempotencyKey).not.toBe(first.idempotencyKey);
+    await store.markProviderShadowVerificationEnqueued(next.idempotencyKey!);
+    await sink.commit(changed); expect(await store.listPendingProviderShadowVerifications()).toEqual([]);
+    expect(store.notificationEvents.size).toBe(0);
+  });
   it.each([
     ['nontechnical', { technical: false }],
     ['closed', { state: 'closed' as const }],

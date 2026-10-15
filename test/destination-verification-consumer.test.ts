@@ -82,6 +82,62 @@ describe('destination verification queue consumer', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  it.each(['provider-poll', 'backfill', 'scheduled-verification'] as const)('preserves structured Lever mode and pay through the %s handoff', async (origin) => {
+    const { db, jobs } = subject(); const { job, reference } = role();
+    const postingId = 'ef725594-42dd-4f0d-ba8e-df8179dbc6cb';
+    Object.assign(reference, { sourceId: 'lever-acme', externalId: postingId,
+      sourceUrl: 'https://api.lever.co/v0/postings/acme?mode=json', applyUrl: `https://jobs.lever.co/acme/${postingId}` });
+    await jobs.putInternship({ ...job, applyUrl: reference.applyUrl, normalizedUrl: reference.applyUrl });
+    const description = 'Build software as an engineering intern.';
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => Response.json({
+      id: postingId, text: reference.title, hostedUrl: reference.applyUrl, descriptionPlain: description,
+      categories: { location: 'Baku' }, workplaceType: 'onsite',
+      salaryRange: { min: 30, max: 40, currency: 'USD', interval: 'per-hour-wage' },
+    })));
+    const put = vi.fn().mockResolvedValue(undefined); const send = vi.fn();
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: postingId,
+      candidateUrl: reference.applyUrl, providerIdentity: { provider: 'lever', tenant: 'acme', postingId, sourceId: reference.sourceId, sourceUrl: reference.sourceUrl },
+      reason: origin === 'backfill' ? 'historical-backfill' : 'content-change', queuedAt: '2026-08-30T00:00:00Z',
+      shadowOrigin: origin,
+      ...(origin === 'backfill' ? { metadataBackfillToken: 'staging-only-shadow-handoff' } : {}),
+      ...(origin === 'provider-poll' ? { shadowContentHash: normalizeExactPostingDescription(reference.title, description).contentHash } : {}),
+    });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: { send, sendBatch: vi.fn() },
+      SHADOW_EXTRACTION_ARTIFACTS: { put } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(queued.ack).toHaveBeenCalledOnce(); expect(queued.retry).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledOnce(); expect(put).toHaveBeenCalledOnce();
+    const stored = JSON.parse(new TextDecoder().decode(put.mock.calls[0]![1] as ArrayBuffer)) as { normalized: { description: string } };
+    expect(stored.normalized.description).toContain('Work mode for this role: onsite');
+    expect(stored.normalized.description).toContain('Location: Baku');
+    expect(stored.normalized.description).toContain('USD 30 - 40 per hour');
+  });
+
+  it('retains Greenhouse structured pay, locations and deadline on the general verification path', async () => {
+    const { db, jobs } = subject(); const { job, reference } = role();
+    await jobs.putInternship(job);
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => Response.json({
+      id: Number(reference.externalId), title: reference.title, content: 'Build software as an intern.',
+      location: { name: 'Austin' }, application_deadline: '2026-11-01T17:00:00Z',
+      pay_input_ranges: [{ min_cents: 3000, max_cents: 4000, currency_type: 'USD', title: 'Austin Hourly Rate' }],
+    })));
+    const put = vi.fn().mockResolvedValue(undefined);
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
+      candidateUrl: reference.applyUrl, providerIdentity: { provider: 'greenhouse', tenant: 'acme', postingId: reference.externalId,
+        sourceId: reference.sourceId, sourceUrl: reference.sourceUrl }, reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: { send: vi.fn(), sendBatch: vi.fn() },
+      SHADOW_EXTRACTION_ARTIFACTS: { put } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(put).toHaveBeenCalledOnce();
+    const stored = JSON.parse(new TextDecoder().decode(put.mock.calls[0]![1] as ArrayBuffer)) as { normalized: { description: string } };
+    expect(stored.normalized.description).toContain('Location: Austin');
+    expect(stored.normalized.description).toContain('Austin Hourly Rate');
+    expect(stored.normalized.description).toContain('USD 30 - 40');
+    expect(stored.normalized.description).toContain('Application deadline for this role: 2026-11-01T17:00:00Z');
+  });
+
   it('acknowledges a duplicate completion without opening a page or mutating state', async () => {
     const { db, operations } = subject();
     await operations.recordVerificationCompletion('already-complete', '2026-08-30T00:00:00Z');
@@ -543,6 +599,22 @@ describe('destination verification queue consumer', () => {
     expect(stale.retry).not.toHaveBeenCalled();
     expect(artifactPut).toHaveBeenCalledOnce();
     expect(shadowQueue.send).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a natural metadata revision superseded by a later source poll before fetching or enqueueing', async () => {
+    const { db, jobs } = subject(); const { job, reference } = role();
+    reference.shadowMetadataHash = 'b'.repeat(64); await jobs.putInternship(job);
+    const send = vi.fn(); const put = vi.fn();
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
+      candidateUrl: reference.applyUrl, providerIdentity: { provider: 'greenhouse', tenant: 'acme', postingId: reference.externalId,
+        sourceId: reference.sourceId, sourceUrl: reference.sourceUrl }, reason: 'content-change', queuedAt: '2026-08-30T00:00:00Z',
+      shadowOrigin: 'provider-poll', shadowContentHash: 'c'.repeat(64), shadowMetadataHash: 'a'.repeat(64),
+    });
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: { send, sendBatch: vi.fn() }, SHADOW_EXTRACTION_ARTIFACTS: { put } as unknown as R2Bucket,
+    }, () => new Date('2026-08-30T00:01:00Z'));
+    expect(queued.ack).toHaveBeenCalledOnce(); expect(queued.retry).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
   });
 
   it('settles a provider-shadow message whose posting left the board instead of dead-lettering it', async () => {

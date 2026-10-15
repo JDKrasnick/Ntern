@@ -10,7 +10,7 @@ import { applicationUrlRejection } from '../sources/quality.js';
 import { providerPostingReference } from '../identity/posting.js';
 import { extractPostingMetadataEvidence } from '../role-metadata.js';
 import { metadataDescriptionText } from '../core/metadata-text.js';
-import { normalizeExactPostingDescription } from '../shadow-extraction.js';
+import { normalizeExactPostingDescription, shadowStructuredEvidenceHash } from '../shadow-extraction.js';
 import type {
   JobRequirements,
   PostingDecision,
@@ -22,7 +22,7 @@ import type {
 
 // Source preprocessing can change independently of the shared API/page parser.
 // Revisit source snapshots without invalidating complete API acquisitions.
-export const SOURCE_METADATA_PROCESSING_REVISION = 5;
+export const SOURCE_METADATA_PROCESSING_REVISION = 6;
 
 function markdownToText(value: string): string {
   return htmlToText(value
@@ -163,7 +163,9 @@ export function processPosting(
     }),
     fetchedAt: posting.fetchedAt,
     ...(posting.providerIdentity && ['greenhouse', 'lever', 'ashby'].includes(posting.providerIdentity.provider)
-      ? { shadowContentHash: normalizeExactPostingDescription(title, shadowDescription).contentHash }
+      ? { shadowContentHash: normalizeExactPostingDescription(title, shadowDescription).contentHash,
+        shadowMetadataHash: shadowStructuredEvidenceHash({ locations: sourceLocations,
+          workMode: posting.declaredWorkMode, compensationText: posting.compensationText, compensationBands: posting.compensationBands }) }
       : {}),
     technical: assessment.technical,
     ...(technicalScopeFor({ company, title: classificationTitle, location, season }, content) ? { technicalScope: technicalScopeFor({ company, title: classificationTitle, location, season }, content) } : {}),

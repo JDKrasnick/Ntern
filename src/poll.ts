@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { providerShadowRevisionChanged } from './shadow-extraction.js';
 import { classifyD1Failure } from '../cloudflare/d1-errors.js';
 import { assessApplicationPageForListing, canonicalApplicationUrl, type ApplicationPageEvidence, type ApplicationUrlValidator } from './core/application-url.js';
 import { boardReference, reachabilityFromFailure, reachabilityFromSignals, verifyApplication, type AttributionBasis, type Reachability } from './core/application-verification.js';
@@ -126,6 +127,7 @@ function sourceOwnedMaterial(value: ProcessedListing | SourceOccurrence): string
     state: value.state,
     providerEvidence: value.providerEvidence,
     shadowContentHash: value.shadowContentHash,
+    shadowMetadataHash: value.shadowMetadataHash,
   });
 }
 
@@ -184,6 +186,7 @@ function quarantinedOccurrence(
     ...(listing.admissionConfigurationVersion ? { admissionConfigurationVersion: listing.admissionConfigurationVersion } : {}),
     ...(listing.sourceMetadataProcessing ? { sourceMetadataProcessing: listing.sourceMetadataProcessing } : {}),
     ...(listing.shadowContentHash ? { shadowContentHash: listing.shadowContentHash } : {}),
+    ...(listing.shadowMetadataHash ? { shadowMetadataHash: listing.shadowMetadataHash } : {}),
     postingIdentityDecision: decision,
     company: listing.company,
     title: listing.title,
@@ -1398,8 +1401,7 @@ export class IngestionRunner {
           && listing.postingIdentityDecision?.status === 'confirmed'
           && listing.technical !== false && listing.state === 'open' && shadowEvaluationAdmissionEligible(listing, admission)
           && Boolean(listing.shadowContentHash)
-          && (!priorOccurrence || (Boolean(priorOccurrence.occurrence.shadowContentHash)
-            && priorOccurrence.occurrence.shadowContentHash !== listing.shadowContentHash))
+          && providerShadowRevisionChanged(priorOccurrence?.occurrence, listing)
           && ['greenhouse', 'lever', 'ashby'].includes(listing.providerIdentity.provider)) {
           const reason = existing?.normalizedUrl && existing.normalizedUrl !== normalizedUrl
             ? 'url-change' as const : priorOccurrence ? 'content-change' as const : 'first-sight' as const;
@@ -1408,8 +1410,9 @@ export class IngestionRunner {
             jobId, sourceId: listing.sourceId, externalId: id, providerIdentity: listing.providerIdentity,
             candidateUrl: listing.applyUrl, reason, metadataExtractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
             shadowContentHash: listing.shadowContentHash,
+            shadowMetadataHash: listing.shadowMetadataHash,
             shadowOrigin: 'provider-poll',
-            idempotencyKey: createHash('sha256').update(`provider-poll-shadow-v1\0${jobId}\0${listing.sourceId}\0${id}\0${listing.shadowContentHash}`).digest('hex'),
+            idempotencyKey: createHash('sha256').update(`provider-poll-shadow-v2\0${jobId}\0${listing.sourceId}\0${id}\0${listing.shadowContentHash}\0${listing.shadowMetadataHash ?? ''}`).digest('hex'),
           });
         }
         if (admission.catalogEligible && ['posting-detail', 'application-form'].includes(destination.classification)) {
