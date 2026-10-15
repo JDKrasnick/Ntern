@@ -11335,9 +11335,6 @@ const styles = StyleSheet.create({
   },
   sheetDismissArea: { flex: 1 },
   jobSheet: {
-    alignSelf: "center",
-    width: "100%",
-    maxWidth: 760,
     backgroundColor: colors.canvas,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
