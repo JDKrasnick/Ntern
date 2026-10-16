@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { D1MaintenancePhaseStore, maintenancePhaseKey } from '../cloudflare/maintenance-phases.js';
 import type { D1Database } from '../cloudflare/types.js';
 import { DatabaseSync } from 'node:sqlite';
+import { markerSignals } from '../scripts/ingestion-watchdog.js';
 
 describe('maintenance phase markers', () => {
   it('retains the last completion across repeated starts and repairs malformed history', async () => {
@@ -14,7 +15,14 @@ describe('maintenance phase markers', () => {
     const read = () => JSON.parse((sql.prepare('SELECT value FROM system_state').get() as { value: string }).value);
     try {
       const completed = new Date('2026-10-15T20:00:00Z');
+      await phases.record('dispatch', 'started', completed);
+      await phases.record('dispatch', 'started', new Date('2026-10-15T20:40:00Z'));
+      expect(read()).toMatchObject({ firstStartedAt: completed.toISOString() });
+      const key = maintenancePhaseKey('admission_v2', 'dispatch');
+      expect(markerSignals([{ key, value: JSON.stringify(read()), updated_at: '2026-10-15T20:40:00Z' }],
+        [key], new Date('2026-10-15T20:40:00Z'))).toHaveLength(1);
       await phases.record('dispatch', 'complete', completed);
+      expect(read().firstStartedAt).toBeUndefined();
       await phases.record('dispatch', 'started', new Date('2026-10-15T20:10:00Z'));
       await phases.record('dispatch', 'started', new Date('2026-10-15T20:40:00Z'));
       expect(read()).toMatchObject({ status: 'started', lastCompletedAt: completed.toISOString() });

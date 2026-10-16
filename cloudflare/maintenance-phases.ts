@@ -59,8 +59,17 @@ export class D1MaintenancePhaseStore implements MaintenancePhaseRecorder {
               json_extract(system_state.value, '$.lastCompletedAt'),
               CASE WHEN json_extract(system_state.value, '$.status') = 'complete'
                 THEN json_extract(system_state.value, '$.observedAt') END)
+          END, 'firstStartedAt', CASE WHEN json_extract(excluded.value, '$.status') = 'started'
+            THEN CASE WHEN json_valid(system_state.value) THEN COALESCE(
+              json_extract(system_state.value, '$.firstStartedAt'),
+              CASE WHEN json_extract(system_state.value, '$.status') = 'started'
+                THEN json_extract(system_state.value, '$.observedAt') END,
+              json_extract(excluded.value, '$.observedAt'))
+            ELSE json_extract(excluded.value, '$.observedAt') END
           END)), updated_at = excluded.updated_at`)
-        .bind(maintenancePhaseKey(this.scope, phase), JSON.stringify({ scope: this.scope, phase, status, observedAt: at }), at).run();
+        .bind(maintenancePhaseKey(this.scope, phase), JSON.stringify({ scope: this.scope, phase, status, observedAt: at,
+          ...(status === 'started' ? { firstStartedAt: at } : {}),
+        }), at).run();
     } catch (error) {
       this.log(JSON.stringify({ event: 'maintenance_phase_marker_failed',
         scope: this.scope, phase, status, diagnostic: safeDiagnostic(error) }));

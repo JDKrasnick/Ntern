@@ -81,6 +81,11 @@ describe('guarded dispatcher marking', () => {
         ORDER BY COALESCE(retry_at,updated_at) LIMIT 500`).all(now);
       expect(JSON.stringify(plan)).toContain('ingestion_rows_ready_admission');
       expect(JSON.stringify(plan)).not.toContain('TEMP B-TREE');
+      const expiredPlan = database.prepare(`EXPLAIN QUERY PLAN SELECT source_id FROM ingestion_rows
+        WHERE state='processing' AND consecutive_omissions<2 AND lease_expires_at<=?
+        ORDER BY lease_expires_at LIMIT 500`).all(now);
+      expect(JSON.stringify(expiredPlan)).toContain('ingestion_rows_lease');
+      expect(JSON.stringify(expiredPlan)).not.toContain('TEMP B-TREE');
     } finally { database.close(); }
   });
   it('rejects stale identities, future retries, active leases and nondispatchable states without changing them', async () => {

@@ -29,7 +29,8 @@ existing workflow can also be dispatched against a reviewed PR branch.
 Paused and disabled sources are excluded from the active-owner progress checks.
 Phase markers retain the last completion across subsequent starts, so repeatedly
 starting work without finishing cannot keep an old completion healthy. Legacy
-markers without that field use the start timestamp until the next completion.
+markers without that field retain the first start timestamp across restarts
+until the next completion.
 Provider retry cooldowns are respected. Polling/progress checks apply only to
 sources whose current flags authorize V2 catalog ownership. R2 inspection is
 bounded to 10,000 groups, and source inspection to 500 owners in batches of 25, with a four-minute
@@ -71,6 +72,9 @@ budget before the rotating bootstrap/policy sweep. Migration `0056` bounds that
 selection to 500 candidates per state and at most 25 sources. Existing row leases,
 handoffs, retry cooldowns, and notification fencing still apply. See the
 [October investigation](email-alert-investigation-2026-10-16.md) for evidence.
+
+Before a phase's first completion, its marker retains the first start time so
+repeated restarts cannot keep an unfinished phase looking fresh indefinitely.
 
 Local read-only rehearsal:
 
