@@ -13,6 +13,21 @@ const message = { stop_reason: 'end_turn', content: [{ type: 'thinking', thinkin
   usage: { input_tokens: 1000, output_tokens: 500 } };
 
 describe('Claude shadow inference', () => {
+  it('defaults metadata extraction, repair, and verification to Claude without using the icon credential', async () => {
+    expect(shadowModelDefaults()).toMatchObject({ model: 'claude-haiku-5-5', maxOutputTokens: 8192 });
+    expect(shadowModelApiKey({ OPENAI_KEY: 'icon-only', OPENAI_API_KEY: 'comparison-only' })).toBeUndefined();
+    expect(shadowModelApiKey({ ANTHROPIC_API_KEY: 'metadata', OPENAI_KEY: 'icon-only' })).toBe('metadata');
+    const request = vi.fn(async (url: string | URL | Request) => {
+      expect(url).toBe('https://api.anthropic.com/v1/messages');
+      return Response.json(message);
+    });
+    const accepted = validateShadowExtraction(extraction, input).accepted!;
+    for (const next of [prompt, shadowExtractionRepairPrompt(input, ['locations']), shadowVerificationPrompt(input, accepted)]) {
+      await inferShadowExtraction('metadata', input, next, request);
+    }
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
   it('routes extraction, repair, and verification through the same bounded structured-output adapter', async () => {
     const request = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       expect(url).toBe('https://api.anthropic.com/v1/messages');
@@ -23,6 +38,8 @@ describe('Claude shadow inference', () => {
         output_config: { effort: 'medium', format: { type: 'json_schema' } } });
       expect(body).not.toHaveProperty('temperature');
       expect(JSON.stringify(body.output_config.format.schema)).not.toContain('minLength');
+      expect(JSON.stringify(body.output_config.format.schema)).not.toContain('maxLength');
+      expect(JSON.stringify(body.output_config.format.schema)).not.toContain('maxItems');
       const schema = body.output_config.format.schema;
       expect(schema.$defs.textField).toHaveProperty('anyOf');
       for (const field of ['locations', 'housing', 'timing', 'education', 'eligibility']) {

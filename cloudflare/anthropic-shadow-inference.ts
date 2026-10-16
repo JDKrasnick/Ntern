@@ -5,8 +5,8 @@ import { shadowResponseSchema, type ShadowInferenceOptions } from './openai-shad
 export const anthropicShadowModelId = 'claude-haiku-5-5';
 export const anthropicShadowOutputTokens = 8192;
 
-// Claude's grammar compiler does not support minLength. Domain validation
-// still enforces nonempty evidence and exact source quotes after inference.
+// Claude's grammar compiler rejects string lengths and array upper bounds.
+// Source validation and supported-field projection still run after inference.
 function grammarSchema(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(grammarSchema);
   if (value && typeof value === 'object') {
@@ -14,7 +14,8 @@ function grammarSchema(value: unknown): unknown {
     const variants = (value as { anyOf?: Array<{ type?: string }> }).anyOf;
     if (variants?.length === 2 && variants[0]?.type === 'string' && variants[1]?.type === 'array') return grammarSchema(variants[1]);
     return Object.fromEntries(Object.entries(value)
-      .filter(([key]) => key !== 'minLength').map(([key, child]) => [key, grammarSchema(child)]));
+      .filter(([key]) => !['minLength', 'maxLength', 'maxItems'].includes(key))
+      .map(([key, child]) => [key, grammarSchema(child)]));
   }
   return value;
 }
