@@ -79,6 +79,11 @@ export function reviewedProviderUrlReference(input: string): ReviewedProviderUrl
     } } : { outcome: 'none' };
   }
 
+  // An employer can expose both a native posting route and an embedded ATS.
+  // Its reviewed host does not turn a native immutable ID into a Greenhouse
+  // ID, even when the same number occurs in that board's current checkpoint.
+  if (syntactic.provider !== 'unknown') return { outcome: 'none' };
+
   const host = inputHost.replace(/^www\./, '');
   // CareerPuck serves a Greenhouse board at a shared host, so the board cannot
   // be inferred from the host. The path names the public board token and the
