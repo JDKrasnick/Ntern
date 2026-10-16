@@ -48,7 +48,8 @@ export default {
 async function deferPublicationFailure(error: unknown, event: ScheduledController, env: CatalogPublisherEnvironment): Promise<string | undefined> {
   const d1 = classifyD1Failure(error);
   const failureClass = isR2InternalFailure(error) ? 'r2-internal'
-    : d1 === 'overloaded' ? 'd1-overloaded' : d1 === 'internal' ? 'd1-internal' : d1 === 'stalled' ? 'd1-stalled' : undefined;
+    : d1 === 'overloaded' ? 'd1-overloaded' : d1 === 'internal' ? 'd1-internal' : d1 === 'stalled' ? 'd1-stalled'
+      : d1 === 'retryable' ? 'd1-retryable' : undefined;
   if (!failureClass) return undefined;
   const scope = ['1-51/10 * * * *', '1,11,21,31,41,51 * * * *'].includes(event.cron)
     ? 'catalog_projection' : 'catalog_projection_r2';
@@ -94,7 +95,7 @@ async function runScheduled(event: ScheduledController, env: CatalogPublisherEnv
         throw error;
       }), phases);
     if (!result.projection) {
-      if (isR2InternalFailure(projectionFailure) || ['overloaded', 'internal', 'stalled'].includes(classifyD1Failure(projectionFailure))) throw projectionFailure;
+      if (isR2InternalFailure(projectionFailure) || ['overloaded', 'internal', 'stalled', 'retryable'].includes(classifyD1Failure(projectionFailure))) throw projectionFailure;
       throw new Error('D1 catalog projection failed');
     }
     await recordPhase(phases, 'catalog_projection_complete', 'complete', observedAt);

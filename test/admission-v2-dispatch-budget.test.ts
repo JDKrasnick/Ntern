@@ -21,11 +21,35 @@ describe('scheduled admission dispatch progress', () => {
     vi.spyOn(repository, 'getDispatchSourceCursor').mockImplementation(async () => cursor);
     vi.spyOn(repository, 'setDispatchSourceCursor').mockImplementation(async (next) => { cursor = next; });
     vi.spyOn(repository, 'listActiveSourceIds').mockImplementation(async (limit, after) => ids.filter(id => !after || id > after).slice(0, limit));
+    vi.spyOn(repository, 'listReadyAdmissionSourceIds').mockResolvedValue([]);
     vi.spyOn(repository, 'overview').mockImplementation(async sourceId => ({ sourceId, pending: 0, queued: 0, processing: 0, settled: 0, quarantined: 0, absent: 0 }));
     vi.spyOn(dispatcher, 'planAdmissionV2Dispatch').mockImplementation(async sourceId => ({ sourceId, snapshotHash: '', snapshotKey: '', admissionVersion: '', baseline: false, messages: [] }));
     env = { DB: {}, INGESTION_V2_ADMISSION_ENABLED: 'true', ADMISSION_V2_QUEUE: { sendBatch: vi.fn(async () => {}) } } as unknown as AdmissionDispatchEnvironment;
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it('dispatches due work beyond the cursor before a slow fleet sweep', async () => {
+    cursor = 'a';
+    vi.mocked(repository.listReadyAdmissionSourceIds).mockResolvedValue(['z-due']);
+    vi.mocked(repository.overview).mockImplementation(async sourceId => {
+      elapsed += ADMISSION_V2_DISPATCH_BUDGET_MS;
+      return { sourceId, pending: 0, queued: 0, processing: 0, settled: 0, quarantined: 0, absent: 0 };
+    });
+    await runAdmissionV2Dispatch(env, observedAt);
+    expect(vi.mocked(dispatcher.planAdmissionV2Dispatch).mock.calls.map(([id]) => id)).toEqual(['z-due', 'b']);
+    expect(cursor).toBe('b');
+  });
+
+  it('reserves migration progress when the ready lane consumes its budget', async () => {
+    vi.mocked(repository.listReadyAdmissionSourceIds).mockResolvedValue(['x-due', 'y-due']);
+    vi.mocked(dispatcher.planAdmissionV2Dispatch).mockImplementation(async sourceId => {
+      elapsed += ADMISSION_V2_DISPATCH_BUDGET_MS;
+      return { sourceId, snapshotHash: '', snapshotKey: '', admissionVersion: '', baseline: false, messages: [] };
+    });
+    await runAdmissionV2Dispatch(env, observedAt);
+    expect(vi.mocked(dispatcher.planAdmissionV2Dispatch).mock.calls.map(([id]) => id)).toEqual(['x-due', 'a']);
+    expect(cursor).toBe('a');
+  });
 
   it('rotates across a fleet larger than one page and wraps only after its end', async () => {
     ids = Array.from({ length: ADMISSION_V2_SOURCE_LIMIT * 2 + 1 }, (_, i) => `source-${String(i).padStart(3, '0')}`);

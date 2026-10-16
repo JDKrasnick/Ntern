@@ -40,6 +40,21 @@ export async function runAdmissionV2Dispatch(env: AdmissionDispatchEnvironment, 
   let migrated = 0;
   let batches = 0;
   let rows = 0;
+  // A full fleet rotation can exceed an hour. Give due rows the first half of
+  // this invocation, then reserve progress for bootstrap/policy migration.
+  if (requestedSourceId === undefined) {
+    const ready = await ledger.listReadyAdmissionSourceIds(observedAt.toISOString());
+    for (const sourceId of ready) {
+      if (performance.now() - startedAt >= ADMISSION_V2_DISPATCH_BUDGET_MS / 2) break;
+      if (!admissionSourceAllowed(env, sourceId)) continue;
+      const plan = await planAdmissionV2Dispatch(sourceId, { ledger, now: () => observedAt });
+      if (plan.messages.length) {
+        await sendQueueMessages(env.ADMISSION_V2_QUEUE, plan.messages as unknown[]);
+        batches += plan.messages.length;
+        rows += plan.messages.reduce((sum, message) => sum + message.externalIds.length, 0);
+      }
+    }
+  }
   for (const sourceId of selectedSourceIds) {
     if (requestedSourceId === undefined && considered > 0
       && performance.now() - startedAt >= ADMISSION_V2_DISPATCH_BUDGET_MS) break;

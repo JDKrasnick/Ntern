@@ -20,7 +20,7 @@ describe('private scheduled delivery', () => {
     expect(isR2InternalFailure(message === null ? null : new Error(message))).toBe(false);
   });
   it.each(['1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *'])('defers only acknowledged publication pressure on cron %s', async cron => {
-    for (const failureClass of ['r2-internal', 'd1-stalled']) {
+    for (const failureClass of ['r2-internal', 'd1-stalled', 'd1-retryable']) {
       const fetch = vi.fn(async () => Response.json({ completed: false, deferred: true, failureClass },
         { status: 503, headers: { 'Retry-After': '600' } }));
       await expect(forwardIsolatedSchedule({ fetch }, { ...event, cron })).resolves.toBeUndefined();
@@ -28,8 +28,10 @@ describe('private scheduled delivery', () => {
     }
   });
 
-  it('retains an exhausted D1 projection stall and recovers on the next cadence', async () => {
-    const stall = new D1StatementStallError(20_000);
+  it.each([
+    [new D1StatementStallError(20_000), 'd1-stalled'],
+    [new Error('D1_ERROR: Network connection lost.'), 'd1-retryable'],
+  ])('retains a deferred D1 projection failure %s and recovers on the next cadence', async (stall, failureClass) => {
     const refresh = vi.spyOn(projection, 'refreshCatalogProjectionD1').mockRejectedValueOnce(stall).mockResolvedValueOnce({} as never);
     const maintenance = vi.spyOn(projection, 'runCatalogProjectionMaintenance').mockImplementation(async (_publish, build) => {
       try { return { prospectiveShadowMetadata: {}, projection: await build() }; }
@@ -51,7 +53,7 @@ describe('private scheduled delivery', () => {
       const response = await publisher.fetch(request({ ...event, cron }), env);
       expect(response.status).toBe(503);
       expect(response.headers.get('Retry-After')).toBe('600');
-      expect(await response.clone().json()).toEqual({ completed: false, deferred: true, failureClass: 'd1-stalled' });
+      expect(await response.clone().json()).toEqual({ completed: false, deferred: true, failureClass });
       expect(refresh).toHaveBeenCalledOnce();
       expect(markers.at(-1)).toMatchObject({ phase: 'catalog_projection', status: 'failed' });
       expect(markers).not.toContainEqual(expect.objectContaining({ phase: 'catalog_projection_complete', status: 'complete' }));

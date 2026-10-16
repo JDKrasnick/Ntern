@@ -960,7 +960,8 @@ describe('Cloudflare scheduled posting identity audit', () => {
     }, { audit: async () => coverageRegressionPlan, log: () => undefined })).rejects.toThrow('integrity gate failed');
 
     await expect(runScheduledPostingIdentityAudit({
-      DB: {} as Environment['DB'], IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'true', IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0.5',
+      DB: { prepare: () => ({ bind: () => ({ first: async () => null, run: async () => ({}) }) }) } as unknown as Environment['DB'],
+      IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED: 'true', IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0.5',
     }, { audit: async () => coverageRegressionPlan, log: () => undefined })).resolves.toMatchObject({
       status: 'passed', confirmedCoverageFloor: 0.5, coverageRegression: false,
     });

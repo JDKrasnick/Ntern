@@ -28,10 +28,13 @@ const descriptions: Record<string, string> = {
 export function markerSignals(markers: Marker[], required: string[], now: Date): Signal[] {
   return required.flatMap(key => {
     const row = markers.find(marker => marker.key === key);
-    let value: { status?: string; observedAt?: string } = {};
+    let value: { status?: string; observedAt?: string; lastCompletedAt?: string; firstStartedAt?: string } = {};
     try { value = JSON.parse(row?.value ?? '{}'); } catch { /* Report malformed state. */ }
-    const age = now.getTime() - Date.parse(value.observedAt ?? row?.updated_at ?? '');
-    return value.status === 'complete' && Number.isFinite(age) && age >= -minute && age <= 30 * minute
+    const age = now.getTime() - Date.parse((value.status === 'started' ? value.lastCompletedAt ?? value.firstStartedAt : undefined)
+      ?? value.observedAt ?? row?.updated_at ?? '');
+    // The same row records both start and completion. A fresh start is work
+    // in progress, not proof of a missed run; a terminated run ages out here.
+    return (value.status === 'complete' || value.status === 'started') && Number.isFinite(age) && age >= -minute && age <= 30 * minute
       ? [] : [{ id: 'scheduled-work-stalled', detail: `${key}: status=${value.status ?? 'missing'}, ageMinutes=${Number.isFinite(age) ? Math.round(age / minute) : 'invalid'}` }];
   });
 }

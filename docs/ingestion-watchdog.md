@@ -16,7 +16,7 @@ existing workflow can also be dispatched against a reviewed PR branch.
 
 | Condition | Email trigger |
 | --- | --- |
-| Missed or failed scheduled work | Maintenance, D1 catalog, R2 catalog, or enabled V2 dispatch completion missing, invalid, failed, or over 30 minutes old |
+| Missed or failed scheduled work | Maintenance, D1 catalog, R2 catalog, or enabled V2 dispatch completion missing, invalid, failed, or over 30 minutes old; a fresh running phase is allowed, using its retained last completion when available |
 | Broken catalog publication | Missing/retired R2 pointer outside the five-minute D1-to-R2 handoff; generation over 30 minutes old; corrupt/missing pages, hash, page map, or durable manifest; mismatch against a stable D1 generation |
 | Public catalog failure | HTTP failure or a response without a catalog groups array |
 | Worker failure | A failed invocation or recorded error on currently serving ingestion/admission/publisher versions in the last hour; a `clientDisconnected` invocation with zero errors does not trigger this signal |
@@ -27,6 +27,10 @@ existing workflow can also be dispatched against a reviewed PR branch.
 | Watchdog cannot inspect state | Missing credentials, lost API access, malformed required state, or probe timeout |
 
 Paused and disabled sources are excluded from the active-owner progress checks.
+Phase markers retain the last completion across subsequent starts, so repeatedly
+starting work without finishing cannot keep an old completion healthy. Legacy
+markers without that field retain the first start timestamp across restarts
+until the next completion.
 Provider retry cooldowns are respected. Polling/progress checks apply only to
 sources whose current flags authorize V2 catalog ownership. R2 inspection is
 bounded to 10,000 groups, and source inspection to 500 owners in batches of 25, with a four-minute
@@ -56,6 +60,21 @@ incident counts; emails intentionally keep a stable body to avoid conflicting
 idempotent retries. An incident makes the watchdog job fail **after** attempting
 delivery. Download `ingestion-watchdog-production-*` or
 `ingestion-watchdog-dev-*` artifacts for evidence (retained for 14 days).
+
+The Worker health email respects an acknowledged source quarantine while that
+source stays paused and has no attempt after acknowledgment. Another failed
+attempt or an active source pages again. Recurring identity inventory is separate
+from structural integrity: the first audit seeds its source cohort; subsequent
+audits email only additions. Delivery must succeed before advancing that cohort.
+
+Admission dispatch gives indexed due work up to half its existing one-minute
+budget before the rotating bootstrap/policy sweep. Migration `0056` bounds that
+selection to 500 candidates per state and at most 25 sources. Existing row leases,
+handoffs, retry cooldowns, and notification fencing still apply. See the
+[October investigation](email-alert-investigation-2026-10-16.md) for evidence.
+
+Before a phase's first completion, its marker retains the first start time so
+repeated restarts cannot keep an unfinished phase looking fresh indefinitely.
 
 Local read-only rehearsal:
 

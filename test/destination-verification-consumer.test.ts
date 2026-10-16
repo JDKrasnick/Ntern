@@ -857,6 +857,20 @@ describe('destination verification queue consumer', () => {
     vi.unstubAllGlobals();
   });
 
+  it('deduplicates the same recurrence but delivers a new cohort on the same day', async () => {
+    const { operations } = subject();
+    const send = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', send);
+    try {
+      const env = { RESEND_API_KEY: 'key', ADMISSION_SUPPORT_RECIPIENT: 'ops@example.test', AUTH_FROM_EMAIL: 'from@example.test' };
+      const input = { signals: ['repeated-unconfirmed-identity-source'], details: 'New recurring source', observedAt: '2026-10-15T12:00:00Z' };
+      await sendAdmissionOperationalAlert(operations, env, { ...input, incidentKey: 'cohort-a' });
+      await sendAdmissionOperationalAlert(operations, env, { ...input, incidentKey: 'cohort-a' });
+      await sendAdmissionOperationalAlert(operations, env, { ...input, incidentKey: 'cohort-b' });
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('suppresses external operational email in the dev recording environment', async () => {
     const { operations } = subject();
     const send = vi.fn();
