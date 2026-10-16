@@ -48,6 +48,17 @@ const health = (sql: DatabaseSync, sourceId: string, value: Record<string, unkno
 describe('ingestion health signals', () => {
   const observedAt = new Date('2026-09-25T12:00:00Z');
 
+  it('keeps reviewed paused quarantines quiet until another attempt fails', async () => {
+    const { sql, db } = setup();
+    try {
+      health(sql, 'paused-reviewed', { state: 'quarantined', sourceStatus: 'paused', incidentState: 'acknowledged',
+        lastAttemptAt: '2026-09-25T10:00:00Z', incidentAcknowledgedAt: '2026-09-25T11:00:00Z' });
+      expect((await ingestionHealthSignals(db, observedAt)).signals).not.toContain('source-quarantined');
+      sql.prepare("UPDATE catalog_items SET value=json_set(value,'$.lastAttemptAt',?)").run('2026-09-25T11:30:00Z');
+      expect((await ingestionHealthSignals(db, observedAt)).signals).toContain('source-quarantined');
+    } finally { sql.close(); }
+  });
+
   it('names defect failures, quarantine, an unavailable ledger, and starvation', async () => {
     const { sql, db } = setup();
     try {

@@ -436,7 +436,7 @@ async function sendIncidentEmail(
 export async function sendAdmissionOperationalAlert(
   store: D1CatalogAdmissionStore,
   env: Pick<DestinationVerificationEnvironment, 'RESEND_API_KEY' | 'ADMISSION_SUPPORT_RECIPIENT' | 'AUTH_FROM_EMAIL' | 'OUTBOUND_NOTIFICATIONS_ENABLED'>,
-  input: { signals: string[]; details: string; observedAt: string },
+  input: { signals: string[]; details: string; observedAt: string; incidentKey?: string },
 ): Promise<boolean> {
   if (!input.signals.length) return false;
   const recording = env.OUTBOUND_NOTIFICATIONS_ENABLED === 'false';
@@ -446,7 +446,7 @@ export async function sendAdmissionOperationalAlert(
     ? '\n\nAction required: inspect the destination-verification DLQ and, after review, use the authenticated DLQ operations replay flow. Do not purge messages.'
     : '';
   const day = input.observedAt.slice(0, 10);
-  const dedupeKey = createHash('sha256').update(`operational-health\0${day}\0${signals.join(',')}`).digest('hex');
+  const dedupeKey = createHash('sha256').update(`operational-health\0${day}\0${signals.join(',')}${input.incidentKey ? `\0${input.incidentKey}` : ''}`).digest('hex');
   if (await store.emailDeliveryExists(dedupeKey)) return true;
   if (recording) recordDevEmail('admission_operational_alert');
   else {

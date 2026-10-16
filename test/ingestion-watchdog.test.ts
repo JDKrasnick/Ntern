@@ -27,6 +27,18 @@ it.each(['missing', 'failed', 'malformed', 'old', 'future'])('detects a silently
   expect(markerSignals(markers, phases, now)).toEqual([]);
 });
 
+it('allows a fresh running phase but detects a run that never completes', () => {
+  const running = structuredClone(markers);
+  running[0]!.value = JSON.stringify({ status: 'started', observedAt: now.toISOString() });
+  expect(markerSignals(running, phases, now)).toEqual([]);
+  expect(markerSignals(running, phases, new Date(now.getTime() + 31 * 60_000)))
+    .toContainEqual(expect.objectContaining({ id: 'scheduled-work-stalled', detail: expect.stringContaining('status=started') }));
+  running[0]!.value = JSON.stringify({ status: 'failed', observedAt: now.toISOString() });
+  expect(markerSignals(running, phases, now)).toHaveLength(1);
+  running[0]!.value = JSON.stringify({ status: 'started', observedAt: now.toISOString(), lastCompletedAt: '2026-10-06T17:00:00Z' });
+  expect(markerSignals(running, phases, now)).toHaveLength(1);
+});
+
 it.each(['missing-page', 'truncated-page', 'changed-role', 'duplicate-group', 'wrong-index', 'wrong-manifest', 'wrong-hash'])('detects silent catalog corruption: %s', fault => {
   const p = structuredClone(pointer), values: unknown[] = structuredClone(pages), keys = [...manifest];
   if (fault === 'missing-page') values[1] = undefined;

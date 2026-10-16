@@ -82,7 +82,13 @@ export async function ingestionHealthSignals(
     let health: SourceHealth | undefined;
     try { health = JSON.parse(row.value) as SourceHealth; } catch { continue; }
     if (!health) continue;
-    if (health.state === 'quarantined') quarantined.push(health.sourceId ?? row.pk.replace(/^SOURCE#/u, ''));
+    // A reviewed incident on an intentionally paused source remains visible in
+    // operations, but does not need another daily page while nothing changes.
+    if (health.state === 'quarantined'
+      && !(health.sourceStatus === 'paused' && health.incidentState === 'acknowledged'
+        && Date.parse(health.lastAttemptAt) <= Date.parse(health.incidentAcknowledgedAt ?? ''))) {
+      quarantined.push(health.sourceId ?? row.pk.replace(/^SOURCE#/u, ''));
+    }
   }
   if (quarantined.length) {
     signals.add('source-quarantined');
