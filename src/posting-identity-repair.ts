@@ -221,6 +221,15 @@ function jobColumns(job: Internship): Partial<CatalogRow> {
   };
 }
 
+function projectIdentityMetadata(job: Internship): Internship {
+  // A closed historical occurrence must not defer a live peer's accepted
+  // projection behind an old extraction schema. Still-active old evidence
+  // retains the normal rollout guard; entirely historical jobs stay intact.
+  const evidence = job.sourceReferences.filter(reference => reference.state !== 'closed')
+    .flatMap(reference => reference.metadataEvidence ?? []);
+  return evidence.length ? projectRoleMetadata(job, evidence).job : job;
+}
+
 function mergeJob(
   canonical: Internship,
   members: Internship[],
@@ -249,7 +258,7 @@ function mergeJob(
     ?? canonical.compensation;
   const lastSeenAt = latest(members.map((job) => job.lastSeenAt));
   const admission = deriveCanonicalAdmission(sourceReferences, lastSeenAt);
-  return projectRoleMetadata({
+  return projectIdentityMetadata({
     ...canonical,
     company,
     title,
@@ -278,7 +287,7 @@ function mergeJob(
       digestPending: !digestedAt && members.some((job) => job.notification.digestPending),
       ...(smsSentAt ? { smsSentAt } : {}), ...(digestedAt ? { digestedAt } : {}),
     },
-  }).job;
+  });
 }
 
 function statusRank(status: ApplicationRecord['status']) {
@@ -949,8 +958,8 @@ export function postingIdentityRepairPlan(
       ? (reference: SourceOccurrence) => reference
       : classifiedOccurrence;
     const merged = audit ? canonical.job : retainedIdentity
-      ? { ...canonical.job, postingIdentityStatus: 'confirmed' as const,
-          sourceReferences: canonical.job.sourceReferences.map((reference) => classifyReference(reference, canonical.job.firstSeenAt)) }
+      ? projectIdentityMetadata({ ...canonical.job, postingIdentityStatus: 'confirmed' as const,
+          sourceReferences: canonical.job.sourceReferences.map((reference) => classifyReference(reference, canonical.job.firstSeenAt)) })
       : mergeJob(canonical.job, ordered.map((item) => item.job), identity, official, classifyReference);
     if (!audit) canonicalJobs.set(canonical.job.jobId, merged);
     for (const item of ordered) {

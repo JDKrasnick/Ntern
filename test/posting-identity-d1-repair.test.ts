@@ -838,6 +838,37 @@ describe('D1 posting identity repair', () => {
     sqlite.close();
   });
 
+  it.each(['closed', 'open'] as const)('reprojects an already merged role only after its older source is %s', async (state) => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const id = '8024138', url = `https://job-boards.greenhouse.io/towerresearchcapital/jobs/${id}`;
+    const oldHash = 'b'.repeat(64), liveHash = 'c'.repeat(64);
+    const oldFact = { field: 'education' as const, statements: ['Historical degree'], qualifiers: [], sourceUrl: url, contentHash: oldHash };
+    const liveFact = { ...oldFact, statements: ['Enrolled PhD student'], contentHash: liveHash };
+    const evidence = (sourceId: string, hash: string, version: number, fact: typeof oldFact) => ({
+      schemaVersion: 1 as const, extractionVersion: version, artifactHash: hash,
+      sourceClass: 'reviewed-shadow' as const, sourceId, sourceUrl: url,
+      observedAt: '2026-10-16T00:00:00.000Z', exactPosting: true as const, postingFacts: [fact],
+    });
+    await store.putCheckpoint({ sourceId: 'greenhouse-towerresearchcapital', successfulFetches: 1, activeExternalIds: [id] });
+    await store.putInternship(job('already-merged', url, '2026-09-01T00:00:00.000Z', [
+      { ...occurrence('speedyapply-2027-ai', 'historical', url), state,
+        metadataEvidence: [evidence('speedyapply-2027-ai', oldHash, ROLE_METADATA_EXTRACTION_VERSION - 1, oldFact)] },
+      { ...occurrence('greenhouse-towerresearchcapital', id, url),
+        metadataEvidence: [evidence('greenhouse-towerresearchcapital', liveHash, ROLE_METADATA_EXTRACTION_VERSION, liveFact)] },
+    ], { postingIdentity: buildPostingIdentity({ applicationUrl: url }), postingIdentityStatus: 'confirmed',
+      roleMetadata: { schemaVersion: 1, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION - 1,
+        evidenceHashes: [oldHash], postingFacts: [oldFact] }, postingFacts: [oldFact] }));
+    const dry = await runPostingIdentityRepair(db, { scope: 'occurrences' });
+    expect(dry.conflicts).toEqual([]);
+    await runPostingIdentityRepair(db, {
+      scope: 'occurrences', apply: true, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    expect((await store.getJob('already-merged'))?.roleMetadata?.postingFacts)
+      .toEqual([state === 'closed' ? liveFact : oldFact]);
+    sqlite.close();
+  });
+
   it.each([
     ['unowned host', 'flyzipline', 'https://unreviewed.example/open-roles/987654?gh_jid=987654'],
     ['different tenant', 'akunacapital', 'https://www.zipline.com/open-roles/987654?gh_jid=987654'],
