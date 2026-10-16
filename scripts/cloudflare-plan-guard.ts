@@ -164,6 +164,19 @@ function permitsProspectiveMetadataPolicy(before: string, after: string): boolea
       && approved.version === 'full-metadata-2026-10-v1' && approved.maxReceipts === null
       && approved.releaseApproval && approved.allowedFields.length === shadowPublicationFields.length
       && shadowPublicationFields.every(field => approved.allowedFields.includes(field));
+    // Only the reviewed provider swap may rebind the previous approval to the
+    // current parser. Keep its cohort, start time, fields, and all other scope.
+    if (fullRelease && isRecord(prior) && isRecord(next)
+      && isRecord(prior.releaseApproval) && isRecord(next.releaseApproval)
+      && prior.releaseApproval.model === 'gpt-6-luna'
+      && next.releaseApproval.model === 'claude-haiku-5-5') {
+      const rebound = { ...prior, releaseApproval: { ...prior.releaseApproval,
+        model: next.releaseApproval.model } };
+      const validatedPrior = parseShadowPublicationPolicy(JSON.stringify(rebound));
+      if (validatedPrior.enabled && validatedPrior.releaseApproval
+        && isDeepStrictEqual({ ...rebound, releaseApproval: { ...rebound.releaseApproval,
+          approvedAt: next.releaseApproval.approvedAt, reason: next.releaseApproval.reason } }, next)) return true;
+    }
     if (fullRelease && approved.startsAt === priorApproved.startsAt
       && (isProspectiveMetadataPolicy(prior, true) || priorApproved.releaseApproval)) return true;
     if (priorApproved.releaseApproval && (isDeepStrictEqual(next, disabledMetadataPolicy) || isProspectiveMetadataPolicy(next, true))) return true;
@@ -389,7 +402,8 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
       if (!isDeepStrictEqual(beforeRest, afterRest)) return false;
       if (beforeText === afterText) return true;
       if (!((beforeText === '500' && afterText === '2000') || (beforeText === '2000' && afterText === '500')
-        || (beforeText === '2000' && afterText === '2220') || (beforeText === '2220' && afterText === '2000'))) return false;
+        || (beforeText === '2000' && afterText === '2220') || (beforeText === '2220' && afterText === '2000')
+        || (beforeText === '2220' && afterText === '2520') || (beforeText === '2520' && afterText === '2220'))) return false;
       permittedBindingChanged = true;
       return true;
     }
