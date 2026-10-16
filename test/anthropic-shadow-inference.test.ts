@@ -38,6 +38,8 @@ describe('Claude shadow inference', () => {
         output_config: { effort: 'medium', format: { type: 'json_schema' } } });
       expect(body).not.toHaveProperty('temperature');
       expect(JSON.stringify(body.output_config.format.schema)).not.toContain('minLength');
+      expect(JSON.stringify(body.output_config.format.schema)).not.toContain('maxLength');
+      expect(JSON.stringify(body.output_config.format.schema)).not.toContain('maxItems');
       const schema = body.output_config.format.schema;
       expect(schema.$defs.textField).toHaveProperty('anyOf');
       for (const field of ['locations', 'housing', 'timing', 'education', 'eligibility']) {

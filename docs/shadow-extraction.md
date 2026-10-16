@@ -100,8 +100,9 @@ contrast score improving from 106/112 to 109/112. These are development evidence
 not production acceptance; see [the evaluation and remaining gaps](shadow-prompt-v52-evaluation.md).
 
 The shared validator recognizes source-supported country/currency aliases and
-localized pay formatting. Haiku reuses one schema definition for list-valued
-fields to avoid its real grammar-compilation limit; all providers retain source
+localized pay formatting. Haiku removes unsupported string-length and array
+upper-bound constraints from its provider schema and reuses one definition for
+list-valued fields to avoid its grammar-compilation limit; all providers retain source
 quote, status, numeric, and unit validation. Provider descriptions cannot
 substitute for the domain validator or source-based accuracy evaluation.
 
