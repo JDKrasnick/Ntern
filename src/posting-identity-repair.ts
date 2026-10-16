@@ -18,6 +18,7 @@ import {
   unscopedGreenhouseEmbedPostingId,
 } from './identity/reviewed-provider.js';
 import { notificationDedupeKey } from './notifications.js';
+import { projectRoleMetadata } from './role-metadata.js';
 import type { CatalogRelease } from './catalog-groups.js';
 import { isOfficialOccurrence } from './sources/provenance.js';
 import type { ApplicationRecord, DeliveryReceipt, Internship, PostingIdentity, PostingProvider, ProviderPostingEvidence, SourceCheckpoint, SourceOccurrence } from './types.js';
@@ -248,7 +249,7 @@ function mergeJob(
     ?? canonical.compensation;
   const lastSeenAt = latest(members.map((job) => job.lastSeenAt));
   const admission = deriveCanonicalAdmission(sourceReferences, lastSeenAt);
-  return {
+  return projectRoleMetadata({
     ...canonical,
     company,
     title,
@@ -277,7 +278,7 @@ function mergeJob(
       digestPending: !digestedAt && members.some((job) => job.notification.digestPending),
       ...(smsSentAt ? { smsSentAt } : {}), ...(digestedAt ? { digestedAt } : {}),
     },
-  };
+  }).job;
 }
 
 function statusRank(status: ApplicationRecord['status']) {
@@ -321,6 +322,15 @@ function presentationReviewEvidenceHash(row: PresentationReviewRow, locations: s
   })).digest('hex');
 }
 
+/** Custom employer routes need the registry's host ownership check as well as
+ * the exact posting ID. A generic gh_jid query is never identity evidence. */
+function presentationReviewReference(url: string) {
+  const reference = providerPostingReference(url);
+  if (reference.provider !== 'unknown') return reference;
+  const reviewed = reviewedProviderUrlReference(url);
+  return reviewed.outcome === 'match' ? reviewed.reference : reference;
+}
+
 function reviewedPresentation(
   row: PresentationReviewRow,
 ): { key: string; occurrence: SourceOccurrence & { preserveCanonicalSeason: true } } {
@@ -328,8 +338,8 @@ function reviewedPresentation(
   if (!Array.isArray(locations) || !locations.length || locations.some((value) => typeof value !== 'string' || !value.trim())) {
     throw new Error(`${row.id}: reviewed presentation locations are invalid`);
   }
-  const reference = providerPostingReference(row.apply_url);
-  const evidenceReference = providerPostingReference(row.evidence_url);
+  const reference = presentationReviewReference(row.apply_url);
+  const evidenceReference = presentationReviewReference(row.evidence_url);
   if (reference.provider === 'unknown' || !reference.postingId
     || reference.provider !== row.provider || reference.tenant !== row.tenant || reference.postingId !== row.posting_id
     || evidenceReference.provider !== row.provider || evidenceReference.tenant !== row.tenant

@@ -6,6 +6,7 @@ import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
 import { runBoundedPostingIdentityOccurrenceRepair, runBoundedPostingIdentityRepair, runBoundedPostingIdentityRepairBatch } from '../src/posting-identity-bounded-repair.js';
 import { postingIdentityRepairQueryCount, runPostingIdentityRepair } from '../src/posting-identity-repair.js';
+import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import type { Internship, ProviderPostingEvidence, SourceOccurrence } from '../src/types.js';
 
 type SqliteValue = string | number | bigint | null | Uint8Array;
@@ -758,6 +759,100 @@ describe('D1 posting identity repair', () => {
       postingIdentity: { provider: 'smartrecruiters', tenant: 'boschgroup', providerPostingId: '744000142898574' },
     });
     expect(await store.getJob('bosch-second-list')).toMatchObject({ jobId: 'bosch-community' });
+    sqlite.close();
+  });
+
+  it('preserves a native Jane Street identity when its host also owns a Greenhouse board', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const id = '8617298002';
+    const native = `https://www.janestreet.com/join-jane-street/position/${id}`;
+    const reference: SourceOccurrence = {
+      ...occurrence('speedyapply-2027-swe', 'native-jane-street-row', native),
+      postingIdentityDecision: {
+        status: 'confirmed', exactKey: `provider:janestreet:janestreet:${id}`,
+        evidenceKind: 'immutable-provider-id', provider: 'janestreet', tenant: 'janestreet',
+        contractId: 'posting-provider-janestreet', contractVersion: 1, approvalReference: 'registry:janestreet:v1',
+        evidenceHash: '12b3ca0eb9698bab2169b3b36e0e4b9f418f23f93710a897d849e37be15c1e1f',
+        observedAt: '2026-08-31T21:22:48.003Z',
+      },
+    };
+    await store.putCheckpoint({ sourceId: 'greenhouse-janestreet', successfulFetches: 1, activeExternalIds: [id] });
+    await store.putInternship(job('native-jane-street', native, '2026-10-01T00:00:00.000Z', [reference], { company: 'Jane Street' }));
+    await store.putSourceOccurrence({
+      sourceId: reference.sourceId, externalId: reference.externalId!, jobId: 'native-jane-street',
+      occurrence: reference, present: true, consecutiveOmissions: 0,
+      changedSnapshotHash: 'current', changedAt: '2026-10-01T00:00:00.000Z',
+    });
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({ conflicts: [], occurrenceCounts: { confirmed: 1, quarantined: 0 } });
+    await runPostingIdentityRepair(db, {
+      scope: 'identity', apply: true, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    expect(await store.getJob('native-jane-street')).toMatchObject({
+      applyUrl: native, postingIdentity: { provider: 'janestreet', tenant: 'janestreet', providerPostingId: id },
+    });
+    sqlite.close();
+  });
+
+  it('merges reviewed custom Greenhouse presentations without changing the exact identity', async () => {
+    const sqlite = database(); const db = sqliteD1(sqlite); const store = new D1InternshipStore(db);
+    const id = '7891460003';
+    const direct = `https://job-boards.greenhouse.io/flyzipline/jobs/${id}`;
+    const custom = `https://www.zipline.com/open-roles/${id}?gh_jid=${id}`;
+    const fact = { field: 'workMode' as const, statements: ['Onsite'], qualifiers: [], sourceUrl: custom, contentHash: 'a'.repeat(64) };
+    const duplicateReference = {
+      ...occurrence('vanshb03-summer-2027', 'zipline-b', custom),
+      metadataEvidence: [{ schemaVersion: 1 as const, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
+        artifactHash: fact.contentHash, sourceClass: 'reviewed-shadow' as const, sourceId: 'vanshb03-summer-2027',
+        sourceUrl: custom, observedAt: '2026-10-16T00:00:00.000Z', exactPosting: true as const, postingFacts: [fact] }],
+    };
+    await store.putCheckpoint({ sourceId: 'greenhouse-flyzipline', successfulFetches: 1, activeExternalIds: [id] });
+    await store.putInternship(job('zipline-first', direct, '2026-10-01T00:00:00.000Z', [
+      occurrence('speedyapply-2027-swe', 'zipline-a', direct),
+    ], { company: 'Zipline', internshipIdentity: { company: { canonicalId: 'zipline' } } }));
+    await store.putInternship(job('zipline-second', custom, '2026-10-02T00:00:00.000Z', [
+      duplicateReference,
+    ], { company: 'flyzipline', internshipIdentity: { company: { canonicalId: 'flyzipline' } } }));
+    expect(await runPostingIdentityRepair(db, { scope: 'identity' })).toMatchObject({
+      eligibleDuplicateGroups: 0, unresolvedDuplicateGroups: 1,
+    });
+    sqlite.exec(readFileSync(new URL('../cloudflare/migrations/0057_reviewed_greenhouse_presentations.sql', import.meta.url), 'utf8'));
+    const dry = await runPostingIdentityRepair(db, { scope: 'identity' });
+    expect(dry).toMatchObject({ eligibleDuplicateGroups: 1, unresolvedDuplicateGroups: 0, conflicts: [] });
+    await runPostingIdentityRepair(db, {
+      scope: 'identity', apply: true, repairToken: dry.repairToken,
+      expectedChanges: dry.expectedChanges, expectedDuplicateJobs: dry.duplicateJobs,
+    });
+    expect(await store.getJob('zipline-first')).toMatchObject({
+      company: 'Zipline', title: 'Long Range Platform Hardware Engineering Intern (Summer 2027)',
+      location: 'South San Francisco, California, USA', applyUrl: custom,
+      postingIdentity: { provider: 'greenhouse', tenant: 'flyzipline', providerPostingId: id },
+      firstSeenAt: '2026-10-01T00:00:00.000Z', notification: { smsPending: false, digestPending: false },
+      roleMetadata: { postingFacts: [fact] }, postingFacts: [fact],
+    });
+    expect(await store.getJob('zipline-second')).toMatchObject({ jobId: 'zipline-first' });
+    expect(sqlite.prepare("SELECT COUNT(*) AS n FROM posting_identity_presentation_reviews WHERE id LIKE 'operator-20261016-%'").get()).toEqual({ n: 36 });
+    expect(() => sqlite.exec("DELETE FROM posting_identity_presentation_reviews WHERE id LIKE 'operator-20261016-%'"))
+      .toThrow('posting identity presentation reviews are immutable');
+    sqlite.close();
+  });
+
+  it.each([
+    ['unowned host', 'flyzipline', 'https://unreviewed.example/open-roles/987654?gh_jid=987654'],
+    ['different tenant', 'akunacapital', 'https://www.zipline.com/open-roles/987654?gh_jid=987654'],
+    ['conflicting query ID', 'flyzipline', 'https://www.zipline.com/open-roles/987654?gh_jid=123456'],
+  ])('rejects a custom presentation review with %s', async (_label, tenant, url) => {
+    const sqlite = database(); const db = sqliteD1(sqlite);
+    sqlite.prepare(`INSERT INTO posting_identity_presentation_reviews
+      (id, provider, tenant, posting_id, company, title, location, locations_json,
+       apply_url, evidence_url, evidence_hash, reviewed_at, reviewed_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      'untrusted-custom', 'greenhouse', tenant, '987654', 'Zipline', 'Intern', 'California',
+      '["California"]', url, url, '0'.repeat(64), '2026-10-16T00:00:00Z', 'test-reviewer',
+    );
+    expect((await runPostingIdentityRepair(db, { scope: 'identity' })).conflicts)
+      .toEqual(['untrusted-custom: reviewed presentation URL does not match its exact provider identity']);
     sqlite.close();
   });
 
