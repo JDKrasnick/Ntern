@@ -35,6 +35,7 @@ function harness() {
   for (const migration of ['0045_ingestion_v2.sql', '0046_ingestion_v2_admission.sql', '0047_ingestion_v2_dispatch_cursor.sql', '0048_ingestion_v2_effect_claim.sql', '0049_ingestion_v2_cost_windows.sql', '0050_ingestion_v2_omission_closure.sql', '0051_ingestion_v2_qualification_cadence.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
+  database.exec(readFileSync(new URL('../cloudflare/migrations/0056_admission_due_work.sql', import.meta.url), 'utf8'));
   const prepared = (query: string, values: SQLInputValue[] = []): D1PreparedStatement => ({
     bind(...next: unknown[]) { return prepared(query, next as SQLInputValue[]); },
     async first<T>() { return (database.prepare(query).get(...values) as T | undefined) ?? null; },
@@ -62,6 +63,26 @@ function harness() {
 }
 
 describe('guarded dispatcher marking', () => {
+  it('prioritizes due rows, excludes cooldowns and omissions, and samples bounded indexed work', async () => {
+    const { database, repository } = harness();
+    try {
+      for (const record of [
+        row('pending', { sourceId: 'z-pending' }),
+        row('queued', { sourceId: 'y-queued', state: 'queued' }),
+        row('cooldown', { sourceId: 'cooldown', state: 'queued', retryAt: future }),
+        row('expired', { sourceId: 'expired', state: 'processing', leaseExpiresAt: now }),
+        row('live', { sourceId: 'live', state: 'processing', leaseExpiresAt: future }),
+        row('omitted', { sourceId: 'omitted', consecutiveOmissions: 2 }),
+        row('settled', { sourceId: 'settled', state: 'settled' }),
+      ]) await repository.putRows([record]);
+      expect(await repository.listReadyAdmissionSourceIds(now)).toEqual(['expired', 'y-queued', 'z-pending']);
+      const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT source_id FROM ingestion_rows
+        WHERE state='queued' AND consecutive_omissions<2 AND COALESCE(retry_at,updated_at)<=?
+        ORDER BY COALESCE(retry_at,updated_at) LIMIT 500`).all(now);
+      expect(JSON.stringify(plan)).toContain('ingestion_rows_ready_admission');
+      expect(JSON.stringify(plan)).not.toContain('TEMP B-TREE');
+    } finally { database.close(); }
+  });
   it('rejects stale identities, future retries, active leases and nondispatchable states without changing them', async () => {
     const { database, repository } = harness();
     try {

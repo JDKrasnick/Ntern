@@ -916,6 +916,26 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
     return results.map((row) => row.source_id);
   }
 
+  /** Sample indexed due work before the slower fleet-wide migration sweep. */
+  async listReadyAdmissionSourceIds(now: string): Promise<string[]> {
+    const { results } = await this.db.prepare(`
+      SELECT source_id, MIN(due_at) AS oldest FROM (
+        SELECT * FROM (SELECT source_id, COALESCE(retry_at, updated_at) AS due_at
+          FROM ingestion_rows WHERE state = 'pending' AND consecutive_omissions < 2
+            AND COALESCE(retry_at, updated_at) <= ? ORDER BY COALESCE(retry_at, updated_at) LIMIT 500)
+        UNION ALL
+        SELECT * FROM (SELECT source_id, COALESCE(retry_at, updated_at) AS due_at
+          FROM ingestion_rows WHERE state = 'queued' AND consecutive_omissions < 2
+            AND COALESCE(retry_at, updated_at) <= ? ORDER BY COALESCE(retry_at, updated_at) LIMIT 500)
+        UNION ALL
+        SELECT * FROM (SELECT source_id, lease_expires_at AS due_at
+          FROM ingestion_rows WHERE state = 'processing' AND lease_expires_at <= ?
+            AND consecutive_omissions < 2 ORDER BY lease_expires_at LIMIT 500)
+      ) GROUP BY source_id ORDER BY oldest, source_id LIMIT 25
+    `).bind(now, now, now).all<{ source_id: string }>();
+    return results.map(row => row.source_id);
+  }
+
   async getDispatchSourceCursor(): Promise<string | undefined> {
     const row = await this.db.prepare(
       "SELECT source_cursor FROM ingestion_v2_dispatch_state WHERE singleton = 1",
