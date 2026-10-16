@@ -768,6 +768,10 @@ describe('Cloudflare deployment plan guard', () => {
     expect(validateCloudflarePlan(plan([change('2000', '500')]))).toHaveLength(1);
     expect(validateCloudflarePlan(plan([change('2000', '2220')]))).toHaveLength(1);
     expect(validateCloudflarePlan(plan([change('2220', '2000')]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([change('2220', '2520')]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([change('2520', '2220')]))).toHaveLength(1);
+    expect(() => validateCloudflarePlan(plan([change('2220', '2521')]))).toThrow('Refusing unsafe Cloudflare plan');
+    expect(() => validateCloudflarePlan(plan([change('2000', '2520')]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([change('2000', '2221')]))).toThrow('Refusing unsafe Cloudflare plan');
     expect(() => validateCloudflarePlan(plan([change('500', '3000')]))).toThrow('Refusing unsafe Cloudflare plan');
   });
@@ -831,6 +835,28 @@ describe('Cloudflare deployment plan guard', () => {
         approvedAt: '2026-10-15T16:00:00.000Z', reason: 'Owner approves publication after evaluation and source checks.' } };
     expect(validateCloudflarePlan(plan([update(JSON.stringify(unlimited), JSON.stringify(full))]))).toHaveLength(1);
     expect(validateCloudflarePlan(plan([update(JSON.stringify(full), JSON.stringify(unlimited))]))).toHaveLength(1);
+    const priorProvider = { ...full, releaseApproval: { ...full.releaseApproval, model: 'gpt-6-luna' } };
+    const nextProvider = { ...full, releaseApproval: { ...full.releaseApproval,
+      approvedAt: '2026-10-16T02:18:00.000Z', reason: 'Owner requests Anthropic metadata and the $8 refresh grant.' } };
+    const providerUpdate = update(JSON.stringify(priorProvider), JSON.stringify(nextProvider));
+    expect(validateCloudflarePlan(plan([providerUpdate]))).toHaveLength(1);
+    const headroom = 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS';
+    const combined = { ...providerUpdate,
+      before: { ...providerUpdate.before, bindings: [...providerUpdate.before.bindings,
+        { name: headroom, type: 'plain_text', text: '2220' }] },
+      after: { ...providerUpdate.after, bindings: [...providerUpdate.after.bindings,
+        { name: headroom, type: 'plain_text', text: '2520' }] } };
+    expect(validateCloudflarePlan(plan([combined]))).toHaveLength(1);
+    expect(validateCloudflarePlan(plan([{ ...providerUpdate,
+      address: 'cloudflare_workers_script.isolated["catalog-publisher"]' }]))).toHaveLength(1);
+    for (const invalid of [
+      { ...nextProvider, startsAt: '2026-09-23T00:00:00.000Z' },
+      { ...nextProvider, cohort: [] },
+      { ...nextProvider, allowedFields: ['compensation'] },
+      { ...nextProvider, releaseApproval: { ...nextProvider.releaseApproval, model: 'unreviewed-model' } },
+      { ...nextProvider, releaseApproval: { ...nextProvider.releaseApproval, historicalCohortRoot: 'b'.repeat(64), historicalCohortSize: 1 } },
+    ]) expect(() => validateCloudflarePlan(plan([update(JSON.stringify(priorProvider), JSON.stringify(invalid))])))
+      .toThrow('Refusing unsafe Cloudflare plan');
     for (const invalid of [{ ...full, releaseApproval: undefined }, { ...full, startsAt: '2026-09-23T00:00:00.000Z' },
       { ...full, releaseApproval: { ...full.releaseApproval, preprocessing: 'different' } }]) {
       expect(() => validateCloudflarePlan(plan([update(JSON.stringify(unlimited), JSON.stringify(invalid))]))).toThrow('Refusing unsafe Cloudflare plan');
