@@ -4,11 +4,11 @@ import type { RoleMetadataArtifact } from './role-metadata.js';
 /** Versions are part of the cache key. Changing any one forces a new shadow run. */
 // v52 retains source-only extraction with atomic policies, complete linked
 // qualifications, exact site labels, and role-scoped term disclosures.
-// The selected Luna profile uses medium effort and an 8192-token total cap.
+// The selected Claude profile uses medium effort and an 8192-token output cap.
 export const SHADOW_EXTRACTION_PROMPT_VERSION = 'shadow-extraction-prompt-v55';
 export const SHADOW_EXTRACTION_SCHEMA_VERSION = 'shadow-extraction-schema-v6';
 export const SHADOW_EXTRACTION_PREPROCESSING_VERSION = 'exact-posting-markdown-v3';
-export const SHADOW_EXTRACTION_MODEL_ID = 'gpt-6-luna';
+export const SHADOW_EXTRACTION_MODEL_ID = 'claude-haiku-5-5';
 export const SHADOW_EXTRACTION_MAX_INPUT_BYTES = 40_000;
 
 export const shadowStatuses = ['present', 'not-stated', 'conflicting', 'incomplete'] as const;

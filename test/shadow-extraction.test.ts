@@ -94,7 +94,7 @@ describe('shadow extraction contract', () => {
     const DB = schema(); const artifacts = new MemoryR2(); const messages: unknown[] = [];
     const env = { DB, SHADOW_EXTRACTION_ARTIFACTS: artifacts, SHADOW_EXTRACTION_QUEUE: {
       async send(body: unknown) { messages.push(body); }, async sendBatch() {},
-    }, SHADOW_EXTRACTION_ENABLED: 'true', OPENAI_KEY: 'test-key',
+    }, SHADOW_EXTRACTION_ENABLED: 'true', ANTHROPIC_API_KEY: 'test-key',
     SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2000' };
     const now = new Date('2026-10-14T00:00:00.000Z');
     expect((await modelRuntimeProbeStatus(DB)).state).toBe('not-queued');
@@ -565,6 +565,9 @@ describe('shadow extraction queue and cost ledger', () => {
     ['2026-10', '1500', '2000', 1000],
     ['2026-11', '1500', '2000', 1000],
     ['2026-10', '1500', '2220', 1377],
+    ['2026-10', '1500', '2520', 1677],
+    ['2026-11', '1500', '2520', 1000],
+    ['2026-09', '1500', '2520', 800],
     ['2026-11', '1500', '2220', 1000],
     ['2026-09', '1500', '2220', 800],
     ['2026-10', '1500', '500', 500],
@@ -601,7 +604,10 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await reserveShadowCost(DB, now, provider, 'provider-over', 1, env)).toBe(false);
   });
 
-  it('caps the approved seven-day refresh at $5 including concurrent reservations', async () => {
+  it.each([
+    ['2220', 50, 2220, 1377],
+    ['2520', 80, 2520, 1677],
+  ] as const)('caps the approved refresh with headroom %s including concurrent reservations', async (headroom, count, total, historicalLimit) => {
     const DB = schema(); const now = new Date('2026-10-15T22:00:00.000Z');
     const historical = '7'.repeat(64), provider = '8'.repeat(64);
     for (const key of [historical, provider]) await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key, job_id, source_id, external_id, source_url, posting_identity, content_hash, model_id, prompt_version, schema_version, preprocessing_version, state, input_key, origin, created_at, updated_at)
@@ -610,11 +616,15 @@ describe('shadow extraction queue and cost ledger', () => {
     for (const [key, cents] of [[historical, 877], [provider, 843]] as const) await DB.prepare(`INSERT INTO shadow_extraction_cost_ledger
       (period,lease_token,run_key,reserved_cents,actual_cents,state,created_at,updated_at) VALUES ('2026-10',?,?,10,?,'reconciled',?,?)`)
       .bind(key, key, cents, now.toISOString(), now.toISOString()).run();
-    const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2220' };
-    const reserved = await Promise.all(Array.from({ length: 51 }, (_, i) => reserveShadowCost(DB, now, historical, `refresh-${i}`, 10, env)));
-    expect(reserved.filter(Boolean)).toHaveLength(50);
+    const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: headroom };
+    const reserved = await Promise.all(Array.from({ length: count + 1 }, (_, i) => reserveShadowCost(DB, now, historical, `refresh-${i}`, 10, env)));
+    expect(reserved.filter(Boolean)).toHaveLength(count);
     expect(await reserveShadowCost(DB, now, provider, 'over-total', 1, env)).toBe(false);
-    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ allowanceCents: 2220, spentCents: 2220, historical: { allowanceCents: 1377, spentCents: 1377, availableCents: 0 } });
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ allowanceCents: total, spentCents: total, historical: { allowanceCents: historicalLimit, spentCents: historicalLimit, availableCents: 0 } });
+    if (headroom === '2220') {
+      const raised = { ...env, SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2520' };
+      expect(await providerShadowBudgetStatus(DB, now, raised)).toMatchObject({ spentCents: 2220, historical: { availableCents: 300 } });
+    }
   });
 
   it('preserves September limits and applies the extra historical headroom starting in October', async () => {

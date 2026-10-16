@@ -88,9 +88,8 @@ a result employer-authoritative.
 
 ## Cost guard and rollout
 
-The next-release extraction candidate is `gpt-6-luna`, at medium effort with
-an 8192-token total cap. `claude-haiku-5-5` remains an explicitly selectable
-alternative with its own credential. Extraction, bounded repair, and prospective
+The selected extraction model is `claude-haiku-5-5`, at medium effort with
+an 8192-token output cap and its own Anthropic credential. Extraction, bounded repair, and prospective
 verification use the selected provider. Model and prompt revisions are included
 in cache identities. Revision v52 preserves exact worksite labels, complete linked
 qualifications, atomic authorization policies, and role-specific terms while
@@ -106,8 +105,9 @@ fields to avoid its real grammar-compilation limit; all providers retain source
 quote, status, numeric, and unit validation. Provider descriptions cannot
 substitute for the domain validator or source-based accuracy evaluation.
 
-Local evaluations select credentials by model: `OPENAI_API_KEY` or `OPENAI_KEY`
-for Luna, `ANTHROPIC_API_KEY` for Haiku. Paste the latter in the gitignored root
+Local evaluations select credentials by model: `ANTHROPIC_API_KEY` for the
+selected Haiku profile, or `OPENAI_API_KEY`/`OPENAI_KEY` for explicitly requested
+Luna comparisons. Paste the Anthropic key in the gitignored root
 `.env`. The three evaluation runners support explicit `--model` comparisons.
 Missing selected-provider credentials fail closed, with no provider fallback.
 Existing OpenAI icon features retain their own adapter and settings.
@@ -116,8 +116,9 @@ Existing OpenAI icon features retain their own adapter and settings.
 schema. `npm run test:anthropic:live` checks Haiku explicitly. Both are opt-in;
 the normal suite skips live calls and requires no real credential.
 
-Provision `OPENAI_KEY` for the selected Luna model and `ANTHROPIC_API_KEY` for
-the Haiku alternative as secrets on ingestion Workers, including dev. Never
+Provision `ANTHROPIC_API_KEY` for metadata and retain `OPENAI_KEY` for icon
+resolution as secrets on ingestion Workers, including dev. Metadata fails closed
+when the Anthropic credential is missing and never falls back to OpenAI. Never
 put values in Wrangler variables, Terraform state, queue messages, artifacts,
 or public/mobile variables. OpenTofu preserves `secret_text` bindings.
 `SHADOW_EXTRACTION_ENABLED` controls calls independently from publication.
@@ -305,10 +306,12 @@ Replacement retires prior metadata evidence and receipts, preserving source
 attachments, admission, identity, visibility, and notification history. Partial
 or incomplete refreshes cannot erase accepted metadata.
 
-The owner-approved October seven-day refresh has a $5 total ceiling. At approval
+The owner-approved October seven-day refresh has an $8 total ceiling, raised
+from $5 without resetting prior spending. At the original approval
 the ledger committed 1720 cents globally, including 877 historical cents. An
-explicit headroom binding of `2220` permits at most 500 more committed cents,
-with historical spending capped at 1377 cents. Reservations and concurrent
+explicit headroom binding of `2520` permits at most 800 more committed cents
+from that original baseline, with historical spending capped at 1677 cents.
+The earlier `2220` binding retains the original $5 grant. Reservations and concurrent
 traffic count against these ceilings. The special allowance applies only in
 October 2026; other months retain the prior limits. The runner also caps its
 own task at 500 cents and must report unprocessed or unavailable roles rather
