@@ -16,13 +16,20 @@ locals {
   # dev headroom rehearsal supersedes Greenhouse's old limit of 6: overlapping
   # large boards retained >120 MiB. Concurrency 2 must still drain each sweep
   # inside the half-hour cadence; see docs/ingestion-v2-production-readiness.md.
+  # Ashby is sized from the 2026-10-17 provider degradation: an upstream slowdown
+  # took its per-message wall clock from ~0.7 s to ~56 s, and the alphabetical
+  # tail of the 80-source sweep then slipped past the watchdog's 60-minute
+  # attempt threshold. Applying the same formula to that effective wall clock
+  # gives min(10, max(2, 2 x ceil(80 x 56 / 1800))) = 6, which retires the
+  # degraded sweep in ~13 minutes. Ashby boards are small (the largest observed
+  # ledger read is ~230 rows), so it is not bound by Greenhouse's memory ceiling.
   # Keep in step with both Wrangler ingestion profiles.
   # Destination verification retains board metadata until a delivery ends.
   # One message per delivery bounds that working set; concurrency stays at one.
   consumer_max_concurrency = {
     greenhouse               = 2
     lever                    = 2
-    ashby                    = 2
+    ashby                    = 6
     github                   = 2
     gmail                    = 1
     destination-verification = 1
