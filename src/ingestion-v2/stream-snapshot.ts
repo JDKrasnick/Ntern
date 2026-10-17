@@ -40,6 +40,9 @@ export async function readSnapshotRows(
       topKey = String(value);
       if (keys.has(topKey) || (topKey !== 'rows' && !headers.includes(topKey))) throw new Error('Ingestion snapshot header is duplicated or unsupported');
       keys.add(topKey); expectingKey = false;
+      // A chunk can end between this key and its scalar value. The preceding
+      // value may be the entire rows array, so its offset is not this header's.
+      valueStart = offset;
     } else if (depth === 1 && token === TokenType.COLON) awaitingValue = true;
     else if (depth === 1 && awaitingValue) {
       awaitingValue = false; valueStart = offset;
