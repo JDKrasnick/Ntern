@@ -80,6 +80,29 @@ describe('bounded immutable snapshot reader', () => {
     const legacy = { rows, ...header, schemaVersion: 1, snapshotHash: snapshotHashForRows(rows) };
     expect((await readSnapshotRows(stream(JSON.stringify(legacy)), legacy, [])).rows.size).toBe(0);
   });
+  it.each(['key', 'colon'])('accepts a chunk ending at a header %s after a large rows array', async (boundary) => {
+    const postings = fixture().rows.map(row => row.posting);
+    postings[0]!.content[0]!.value = 'x'.repeat(32 * 1024);
+    const envelope = normalizeSourceSnapshot({ sourceId: 'example', postings,
+      admissionVersion: 'v1', observedAt: '2026-10-01T00:00:00.000Z' });
+    const raw = serializeEnvelope(envelope);
+    const split = raw.indexOf('"schemaVersion":') + '"schemaVersion"'.length + (boundary === 'colon' ? 1 : 0);
+    const bytes = new TextEncoder().encode(raw);
+    const byteSplit = new TextEncoder().encode(raw.slice(0, split)).length;
+    const input = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(bytes.subarray(0, byteSplit));
+      controller.enqueue(bytes.subarray(byteSplit));
+      controller.close();
+    } });
+    expect((await readSnapshotRows(input, envelope, ['b'])).rows.get('b')).toEqual(envelope.rows[1]);
+  });
+  it('still cancels an oversized unfinished scalar header after rows', async () => {
+    const raw = '{"rows":[],"sourceId":"' + 'x'.repeat(32 * 1024);
+    let canceled = false;
+    await expect(readSnapshotRows(stream(raw, 4096, () => { canceled = true; }), fixture(), []))
+      .rejects.toThrow('header exceeds byte limit');
+    expect(canceled).toBe(true);
+  });
   it.each(['unselected-content', 'row-count', 'document-count', 'source', 'policy', 'row-order', 'duplicate-row', 'truncated', 'trailing', 'duplicate-header', 'array-row', 'object-header'])('fails closed on %s', async (fault) => {
     const expected = fixture();
     const envelope = structuredClone(expected);

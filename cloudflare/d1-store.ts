@@ -27,13 +27,13 @@ const deliveryReceiptLifetimeSeconds = 90 * 24 * 60 * 60;
 const catalogProjectionMaxAgeMs = 7 * 24 * 60 * 60 * 1_000;
 // D1 caps one RPC argument at 32 MiB, and a `batch()` sends every statement's
 // bound values inside a single argument. The projection is a copy of the whole
-// catalog, so its write is budgeted in bytes rather than statements: a quarter
-// of the ceiling leaves room for the RPC envelope, which inflates the JSON it
-// carries (a measured 40 MB batch crossed the wire as 70 MB).
-export const CATALOG_PROJECTION_BATCH_BYTES = 8 * 1024 * 1024;
+// catalog, so its write is budgeted in bytes rather than statements. Keep the
+// bound strings and their serialized/native RPC copies small while the grouped
+// catalog is resident (a measured 40 MB batch crossed the wire as 70 MB).
+export const CATALOG_PROJECTION_BATCH_BYTES = 4 * 1024 * 1024;
 // One statement is also one RPC argument once it is sent, and a single group can
 // serialize to megabytes, so the per-statement payload needs its own budget.
-const CATALOG_PROJECTION_STATEMENT_BYTES = 4 * 1024 * 1024;
+const CATALOG_PROJECTION_STATEMENT_BYTES = 512 * 1024;
 const documentUploadLeaseSeconds = 15 * 60;
 // Occurrence rows are retained for every posting a source has ever listed, so a
 // per-source partition grows without bound. Reading it in one statement lets the
