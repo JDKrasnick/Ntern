@@ -6,6 +6,28 @@ The bounds are deployed and the stranded dead-letter messages are replayed by th
 guarded operations path; the post-deploy observations are recorded at the end of
 this document.
 
+## 2026-10-17 catalog identity follow-up
+
+The production watchdog reported 134.6 MiB p99 on the isolated catalog
+publisher. Per-minute analytics locate the high samples on D1 projection-build
+runs; R2-only publication remains substantially lower. The 7,744 eligible stored
+jobs include 23.5 MB of structured identity JSON, mostly repeated field
+provenance that grouping never reads.
+
+Projection reads now remove that provenance and the unused identity search
+title in D1 before hydration. Identity values, education/season evidence status,
+current and legacy identity precedence, public source provenance, and complete
+stored jobs remain intact. A frozen production-input replay falls from
+48,719,016 to 29,325,340 hydrated JSON bytes while both initial publication and
+renewal retain the exact content version `9964cc489a3c3c42bd76` (6,277 cards /
+7,627 roles). The regression fails against the previous read and covers all
+three card kinds, legacy scalar/array forms, absent identities, and closed roles.
+
+Node replay memory is diagnostic rather than a Worker acceptance result: its
+observed initial peak fell from 120.1 to 106.7 MiB, while renewal remained around
+118–119 MiB. Isolated-dev and post-deploy Worker measurements are required to
+establish the actual runtime headroom; the 120 MiB watchdog stays unchanged.
+
 ## 2026-10-08 catalog reference follow-up
 
 A single isolated publisher invocation reached 141.6 MiB. Read-only production

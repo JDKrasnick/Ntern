@@ -7,6 +7,7 @@ import { openCatalogSortKey } from '../src/catalog-recency.js';
 import type { EducationLevel, Internship, InternshipIdentity } from '../src/types.js';
 import { createApiHandler } from '../src/api.js';
 import { MemoryUserStore } from '../src/store.js';
+import { buildInternshipIdentity } from '../src/identity/enrichment.js';
 
 function job(jobId: string, title: string): Internship {
   return {
@@ -153,6 +154,52 @@ describe('D1 filtered catalog projection', () => {
       expect(full[0]?.admission?.destination).toHaveProperty('diagnostic', diagnostic);
       const project = (jobs: Internship[]) => groupCatalogJobs(jobs, { includeClosed: true }).map(catalogGroupDetails);
       expect(project(compact)).toEqual(project(full));
+    } finally { database.close(); }
+  });
+
+  it('hydrates identity values without repeated provenance and builds identical current and legacy cards', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT, sk TEXT, kind TEXT, value TEXT, PRIMARY KEY(pk, sk))');
+    const insert = database.prepare('INSERT INTO catalog_items VALUES (?, ?, ?, ?)');
+    for (let index = 0; index < 105; index++) {
+      const identity = buildInternshipIdentity({
+        company: `Employer ${Math.floor(index / 2)}`, title: 'Software Engineering Intern', location: 'Remote', season: 'summer-2027',
+        seasonEvidenceStatus: 'explicit', content: 'Currently pursuing a bachelor degree in computer science.',
+        sourceId: 'greenhouse-example', sourceUrl: `https://example.test/${'evidence/'.repeat(300)}`, observedAt: '2026-10-01T00:00:00.000Z',
+      });
+      identity.education = { levels: ['undergraduate'], evidenceStatus: 'explicit', provenance: identity.education.provenance };
+      const variants = [
+        { internshipIdentity: identity },
+        { identity },
+        { internshipIdentity: null, identity },
+        { internshipIdentity: {}, identity },
+        { identity: { canonicalCompanyId: 'legacy-employer', canonicalCompanyName: 'Legacy Employer',
+          programType: 'internship', season: 'summer-2027', educationAudience: { levels: ['undergraduate'], evidence: 'explicit' },
+          title: { display: 'Legacy Software Intern' }, disciplineTags: ['software', { value: 'security', provenance: ['unused'] }],
+          locations: ['Remote', { displayName: 'New York', workMode: 'hybrid', provenance: ['unused'] }] } },
+        { internshipIdentity: { disciplines: [], locations: [], education: { levels: [], evidenceStatus: 'unspecified' } } },
+        {},
+      ];
+      const value = { ...job(`identity-${index}`, 'Software Engineering Intern'),
+        company: `Employer ${Math.floor(index / 2)}`, open: index % 2 === 0, ...variants[index % variants.length] };
+      insert.run(`JOB#${value.jobId}`, 'META', 'internship', JSON.stringify(value));
+    }
+    let hydratedBytes = 0;
+    const store = new D1InternshipStore(sqliteD1(database, (_sql, rows) => {
+      hydratedBytes += (rows as { value: string }[]).reduce((total, row) => total + row.value.length, 0);
+    }));
+    try {
+      const full = await store.listCatalog();
+      const fullBytes = hydratedBytes; hydratedBytes = 0;
+      const compact = await store.listCatalog({ projectionInput: true });
+      expect(hydratedBytes).toBeLessThan(fullBytes / 4);
+      const project = (jobs: Internship[]) => groupCatalogJobs(jobs, { includeClosed: true }).map(catalogGroupDetails);
+      expect(project(compact)).toEqual(project(full));
+      expect(new Set(project(compact).map(details => details.group.kind))).toEqual(new Set(['individual', 'program-group', 'employer-release']));
+      expect(JSON.stringify(compact)).not.toContain('evidence/evidence/');
+      expect(JSON.stringify(full)).toContain('evidence/evidence/');
+      expect(JSON.parse((database.prepare('SELECT value FROM catalog_items LIMIT 1').get() as { value: string }).value)
+        .internshipIdentity.company.displayName.provenance).toHaveLength(1);
     } finally { database.close(); }
   });
 

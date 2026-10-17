@@ -34,6 +34,25 @@ export const CATALOG_PROJECTION_BATCH_BYTES = 4 * 1024 * 1024;
 // One statement is also one RPC argument once it is sent, and a single group can
 // serialize to megabytes, so the per-statement payload needs its own budget.
 const CATALOG_PROJECTION_STATEMENT_BYTES = 512 * 1024;
+
+/** Grouping reads identity values and evidence status, never their per-field
+ * provenance. Strip those repeated evidence objects in D1, before the complete
+ * catalog is hydrated. Preserve both current and legacy identity shapes. */
+function catalogProjectionIdentity(path: '$.internshipIdentity' | '$.identity'): string {
+  const value = `json_extract(catalog_items.value, '${path}')`;
+  const arrays = ['disciplines', 'disciplineTags', 'locations'].flatMap(field => [
+    `'$.${field}'`,
+    `json(CASE WHEN json_type(catalog_items.value, '${path}.${field}') = 'array'
+      THEN (SELECT json_group_array(CASE WHEN item.type = 'object' THEN json_remove(item.value, '$.provenance') ELSE item.value END)
+        FROM json_each(catalog_items.value, '${path}.${field}') AS item)
+      ELSE catalog_items.value -> '${path}.${field}' END)`,
+  ]);
+  return `CASE WHEN json_type(catalog_items.value, '${path}') = 'object' THEN
+    json_set(json_remove(${value}, '$.company.displayName.provenance', '$.programType.provenance',
+      '$.season.provenance', '$.education.provenance', '$.educationAudience.provenance',
+      '$.title.official.provenance', '$.title.display.provenance', '$.title.search'), ${arrays.join(', ')})
+    ELSE catalog_items.value -> '${path}' END`;
+}
 const documentUploadLeaseSeconds = 15 * 60;
 // Occurrence rows are retained for every posting a source has ever listed, so a
 // per-source partition grows without bound. Reading it in one statement lets the
@@ -1099,6 +1118,8 @@ export class D1InternshipStore implements InternshipStore {
       '$.admission.destination', '$.admission.metadata',
       '$.admission.reasonCodes', '$.admission.evidenceCodes', '$.roleMetadata'),
       '$.roleMetadata.educationAudience', json_extract(value, '$.roleMetadata.educationAudience'),
+      '$.internshipIdentity', json(${catalogProjectionIdentity('$.internshipIdentity')}),
+      '$.identity', json(${catalogProjectionIdentity('$.identity')}),
       '$.sourceReferences', json((SELECT json_group_array(json_remove(reference.value,
         '$.metadataEvidence', '$.admission', '$.postingIdentityDecision',
         '$.trustedCommunityAlertQualification', '$.metadataExtraction', '$.sourceMetadataProcessing'))

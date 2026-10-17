@@ -170,7 +170,17 @@ test('compiled publication retains public provenance without hydrating internal 
   const reference = { sourceId: 'greenhouse-figma', sourceUrl: 'https://boards.greenhouse.io/figma', externalId: 'reference-role',
     provenance: 'official-ats', state: 'open', postedAt: '2026-10-06', providerTimestamp: { value: '2026-10-06T12:00:00Z', semantics: 'published' },
     ...Object.fromEntries(fields.map(field => [field, { diagnostic }])) };
-  const job = { ...JSON.parse(row.value), jobId: 'reference-role', sourceReferences: [reference] };
+  const evidence = { source: 'official-ats', sourceId: 'greenhouse-figma', diagnostic };
+  const job = { ...JSON.parse(row.value), jobId: 'reference-role', sourceReferences: [reference],
+    internshipIdentity: {
+      company: { canonicalId: 'figma', displayName: { value: 'Figma', provenance: [evidence] } },
+      programType: { value: 'internship', provenance: [evidence] },
+      season: { term: 'summer', year: 2027, evidenceStatus: 'explicit', provenance: [evidence] },
+      education: { levels: ['undergraduate'], evidenceStatus: 'explicit', provenance: [evidence] },
+      title: { display: { value: 'Structured Software Intern', provenance: [evidence] }, search: { value: 'unused', provenance: [evidence] } },
+      disciplines: [{ value: 'software', provenance: [evidence] }],
+      locations: [{ name: 'Remote', workMode: 'remote', provenance: [evidence] }],
+    } };
   await db.prepare("INSERT INTO catalog_items(pk,sk,kind,value) VALUES ('JOB#reference-role','INTERNSHIP','internship',?)").bind(JSON.stringify(job)).run();
   const caller = await runtime.getWorker('scheduled-caller-e2e');
   const publish = async () => {
@@ -185,9 +195,16 @@ test('compiled publication retains public provenance without hydrating internal 
     const groups = JSON.parse(await (await bucket.get(`public-catalog/v1/${pointer.pageVersion ?? pointer.version}/0`)).text());
     const role = groups.flatMap(group => group.roles).find(role => role.jobId === 'reference-role');
     assert.ok(role);
+    assert.equal(role.title, 'Structured Software Intern');
+    assert.equal(role.season, 'summer-2027');
+    assert.deepEqual(role.education.levels, ['undergraduate']);
+    assert.equal(role.education.evidence, 'explicit');
+    assert.deepEqual(role.workModes, ['remote']);
+    assert.equal(JSON.stringify(groups).includes(diagnostic), false);
     assert.deepEqual(role.sourceReferences, [{ sourceId: reference.sourceId, sourceUrl: reference.sourceUrl, externalId: reference.externalId,
       provenance: reference.provenance, state: reference.state, postedAt: reference.postedAt, providerTimestamp: reference.providerTimestamp }]);
     const stored = JSON.parse((await db.prepare("SELECT value FROM catalog_items WHERE pk='JOB#reference-role'").first()).value);
+    assert.deepEqual(stored.internshipIdentity, job.internshipIdentity);
     for (const field of fields) assert.equal(stored.sourceReferences[0][field].diagnostic, diagnostic);
     assert.equal((await db.prepare("SELECT count(*) AS n FROM catalog_items WHERE kind='notification-event'").first()).n, 0);
   } finally {
