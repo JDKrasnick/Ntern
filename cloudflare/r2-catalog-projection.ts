@@ -100,8 +100,13 @@ export class R2CatalogProjection {
       || groups.some((group, index) => pointer.groupPages[group.group.groupId] !== Math.floor(index / pageSize))) return false;
     try {
       for (let index = 0; index * pageSize < groups.length; index += 1) {
-        const page = await this.page(pointer, index);
-        if (JSON.stringify(page) !== JSON.stringify(groups.slice(index * pageSize, (index + 1) * pageSize))) return false;
+        const object = await this.bucket.get(`${prefix}/${pointer.pageVersion ?? pointer.version}/${index}`);
+        if (!object) return false;
+        // Published pages already have canonical JSON bytes. Parsing them here
+        // retains a second page graph beside the full in-memory catalog, then
+        // allocates another string just to compare it with the expected page.
+        const saved = await new Response(object.body).text();
+        if (saved !== JSON.stringify(groups.slice(index * pageSize, (index + 1) * pageSize))) return false;
       }
       return true;
     } catch { return false; }

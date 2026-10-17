@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { refreshCatalogProjectionD1 } from '../cloudflare/catalog-projection-maintenance.js';
-import type { CatalogGroupDetails } from '../src/catalog-groups.js';
+import { catalogGroupDetails, groupCatalogJobs, type CatalogGroupDetails } from '../src/catalog-groups.js';
+import { R2CatalogProjection } from '../cloudflare/r2-catalog-projection.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
 import { processSnapshot, SOURCE_METADATA_PROCESSING_REVISION } from '../src/ingestion/processor.js';
@@ -53,6 +54,51 @@ const MESSAGE_HEAP_CEILING_MB = 112;
 const exposeGc = globalThis.gc;
 
 describe('catalog projection resource retention', () => {
+  it('renews large R2 pages without retaining a second parsed page graph', async () => {
+    if (!exposeGc) return;
+    const observed = new Date(Date.now() - 60_000).toISOString();
+    const jobs = Array.from({ length: 101 }, (_, index): Internship => ({
+      jobId: `renewal-${index}`, company: `Employer ${index}`, title: 'Software Intern', location: 'Remote', season: 'summer-2027',
+      applyUrl: `https://example.test/${index}`, normalizedUrl: `https://example.test/${index}`, fingerprint: `${index}`,
+      compensation: { raw: '' }, technical: true, open: true, firstSeenAt: observed, lastSeenAt: observed,
+      notification: { smsPending: false, digestPending: false },
+      sourceReferences: Array.from({ length: 20 }, (_, ref) => ({
+        sourceId: 'renewal-source', document: 'jobs.json', sourceUrl: 'https://example.test/jobs', row: ref,
+        externalId: `${index}-${ref}`, company: `Employer ${index}`, title: 'Software Intern', location: 'Remote',
+        season: 'summer-2027', applyUrl: `https://example.test/${index}`, state: 'open',
+        compensation: { raw: `${index}-${ref}:` + 'x'.repeat(1_024) },
+      })),
+    }));
+    const values = groupCatalogJobs(jobs).map(catalogGroupDetails);
+    const objects = new Map<string, ArrayBuffer>();
+    const projection = new R2CatalogProjection({
+      async put(key: string, value: ArrayBuffer) { objects.set(key, value); return { etag: 'stored' }; },
+      async get(key: string) { const value = objects.get(key); return value ? { body: new Response(value).body!, etag: 'stored' } : null; },
+    } as unknown as R2Bucket);
+    await projection.publish(values, observed);
+    const page = [...objects].find(([key]) => key.endsWith('/0'))![1];
+    expect(page.byteLength).toBeGreaterThan(4 * 1024 * 1024);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    exposeGc();
+    const baseline = process.memoryUsage().heapUsed;
+    let parsedPeak = baseline;
+    const json = Response.prototype.json;
+    const reader = vi.spyOn(Response.prototype, 'json').mockImplementation(async function(this: Response) {
+      const value = await json.call(this);
+      exposeGc();
+      parsedPeak = Math.max(parsedPeak, process.memoryUsage().heapUsed);
+      return value;
+    });
+    try {
+      const later = new Date().toISOString();
+      await projection.revalidate(values, later);
+      reader.mockRestore();
+      const pointer = JSON.parse(new TextDecoder().decode(objects.get('public-catalog/v1/current')!));
+      expect(pointer).toMatchObject({ schemaVersion: 1, generatedAt: later });
+      expect(parsedPeak - baseline).toBeLessThan(2 * 1024 * 1024);
+      console.info('R2 renewal parsed-page allocation', { pageBytes: page.byteLength, parsedGrowthMb: (parsedPeak - baseline) / 1024 / 1024 });
+    } finally { reader.mockRestore(); }
+  });
   it('releases raw job objects before D1 writes and R2 pointer validation', async () => {
     if (!exposeGc) return;
     const references: Array<WeakRef<Internship>> = [];
