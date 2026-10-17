@@ -212,6 +212,46 @@ describe('Cloudflare deployment plan guard', () => {
     ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
   });
 
+  it('permits only the reviewed Ashby throughput concurrency increase', () => {
+    const settings = {
+      batch_size: 1,
+      max_concurrency: 2,
+      max_retries: 2,
+      max_wait_time_ms: 5_000,
+      retry_delay: 0,
+      visibility_timeout_ms: null,
+    };
+    const consumer = {
+      account_id: 'account',
+      consumer_id: 'consumer',
+      dead_letter_queue: 'intern-notifs-ashby-dlq',
+      queue_id: 'queue',
+      script_name: 'intern-notifs-ingestion',
+      settings,
+      type: 'worker',
+    };
+    const increase = {
+      address: 'cloudflare_queue_consumer.ingestion["ashby"]',
+      actions: ['update'],
+      before: consumer,
+      after: {
+        ...consumer,
+        settings: { ...settings, max_concurrency: 6, retry_delay: null },
+      },
+      after_unknown: { settings: { retry_delay: true, visibility_timeout_ms: true } },
+    };
+
+    expect(validateCloudflarePlan(plan([increase]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...increase, address: 'cloudflare_queue_consumer.ingestion["greenhouse"]' },
+      { ...increase, after: { ...increase.after, settings: { ...increase.after.settings, max_concurrency: 3 } } },
+      { ...increase, after: { ...increase.after, settings: { ...increase.after.settings, batch_size: 2 } } },
+      { ...increase, after: { ...increase.after, dead_letter_queue: 'intern-notifs-lever-dlq' } },
+      { ...increase, after: { ...increase.after, script_name: 'other-worker' } },
+      { ...increase, after_unknown: { settings: { max_retries: true } } },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+
   it('permits only the reviewed destination batch and wait reduction', () => {
     const before = {
       account_id: 'account', consumer_id: 'consumer', queue_id: 'queue', type: 'worker',

@@ -145,6 +145,18 @@ describe('Cloudflare deployment configuration', () => {
     expect(read('infra/cloudflare/main.tf')).toMatch(/greenhouse\s+= 2\b/u);
   });
 
+  it('sizes the Ashby sweep to survive a provider slowdown in dev, production, and OpenTofu', () => {
+    for (const [config, queue] of [
+      [ingestion, 'intern-notifs-ashby'],
+      [devIngestion, 'intern-notifs-dev-ashby'],
+    ] as const) {
+      expect(config.queues?.consumers?.find((consumer) => consumer.queue === queue)).toMatchObject({
+        max_batch_size: 1, max_concurrency: 6, max_retries: 2,
+      });
+    }
+    expect(read('infra/cloudflare/main.tf')).toMatch(/ashby\s+= 6\b/u);
+  });
+
   it('disables API invocation logs while keeping structured logs and ingestion at full sampling', () => {
     const expectedObservability = (invocationLogs: boolean) => ({
       enabled: true,
