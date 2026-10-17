@@ -227,6 +227,22 @@ room for the p90 tail. The values live in `locals.consumer_max_concurrency` in
 `infra/cloudflare/main.tf` and are mirrored in `wrangler.ingestion.jsonc`; a
 config test fails if the two ever disagree.
 
+### Ashby was re-sized for a provider slowdown (2026-10-17)
+
+On 2026-10-17 the Ashby job-board API degraded for about 35 minutes
+(18:04-18:39Z): board fetches rose from ~0.7 s to 25-95 s each, while Greenhouse
+and Lever messages to the same D1 database and traffic controller stayed at
+1-2 s. The 80-source sweep therefore took ~37 minutes instead of ~3, and its
+alphabetical tail (`ashby-the-exploration-company` … `ashby-zello`) crossed the
+watchdog's 60-minute `lastAttemptAt` threshold even though every delivery
+succeeded. Sizing Ashby with the formula above against the measured *effective*
+wall clock (2 slots x 37 min / 80 messages ≈ 56 s) gives
+`min(10, max(2, 2 x ceil(80 x 56 / 1800)))` = **6**, which retires the same
+degraded sweep in ~13 minutes and keeps the tail inside the threshold. Ashby
+boards are small relative to Greenhouse's, so the increase does not reintroduce
+the large-board memory ceiling that fixed Greenhouse at 2. The reviewed plan
+guard accepts exactly this 2 → 6 increase.
+
 ### No single message can hold a slot for minutes
 
 - Ashby and Lever shadow retries now throw instead of sleeping when a provider
@@ -523,9 +539,12 @@ draining).
    fleet that stops dispatching is visible in one line, and
    `provider_cadence_slip` names the sources that missed an interval:
    `npx wrangler tail intern-notifs-ingestion --format json --config wrangler.ingestion.jsonc --search provider_cadence_slip`.
-3. Re-derive the consumer concurrency if the fleet grows. The values in
-   `locals.consumer_max_concurrency` follow
+3. Re-derive the consumer concurrency if the fleet grows or a provider degrades.
+   The values in `locals.consumer_max_concurrency` follow
    `min(10, max(2, 2 x ceil(published x wallClock / cadence)))`; re-measure with
    the consumers and metrics endpoints under "Operator procedure" and update both
    `infra/cloudflare/main.tf` and `wrangler.ingestion.jsonc` together (the config
-   test fails if they diverge).
+   test fails if they diverge). Size against the *effective* wall clock over the
+   whole window, not the median under good conditions — the 2026-10-17 Ashby
+   degradation is why this is explicit. Any concurrency change must also be
+   permitted by the reviewed exception in `scripts/cloudflare-plan-guard.ts`.
