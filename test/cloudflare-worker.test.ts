@@ -149,7 +149,7 @@ describe('Cloudflare scheduled dispatch leases', () => {
     ['greenhouse', reviewedGreenhouseSources.find((source) => source.status === 'shadow')!],
     ['lever', reviewedLeverSources.find((source) => source.status === 'shadow')!],
     ['ashby', reviewedAshbySources.find((source) => source.status === 'shadow')!],
-  ] as const)('serializes an eligible %s recovery probe as forced work', async (provider, source) => {
+  ] as const)('serializes an eligible %s recovery probe as forced work, then respects an acknowledged hold', async (provider, source) => {
     const health: SourceHealth = {
       sourceId: source.id,
       state: 'quarantined',
@@ -194,6 +194,21 @@ describe('Cloudflare scheduled dispatch leases', () => {
         ASHBY_QUEUE: workQueue,
       } as Environment, provider, probeAt)).resolves.toBe(1);
       expect(sent).toEqual([expect.objectContaining({ sourceId: source.id, force: true })]);
+      // Acknowledging the existing paused incident must stop scheduled probes,
+      // even on a later recovery window after the dispatch lease expires.
+      health.incidentAcknowledgedAt = probeAt.toISOString();
+      health.incidentState = 'acknowledged';
+      sent.length = 0;
+      await expect(dispatchProviders({
+        DB: {} as Environment['DB'],
+        GREENHOUSE_QUEUE: workQueue,
+        LEVER_QUEUE: workQueue,
+        ASHBY_QUEUE: workQueue,
+      } as Environment, provider, new Date(probeAt.getTime() + SOURCE_POLL_CADENCE.recoveryProbeIntervalMs))).resolves.toBe(0);
+      expect(sent).toEqual([]);
+      // A fresh incident can retain an older acknowledgment timestamp.
+      health.incidentState = 'open';
+      expect(isQuarantinedRecoveryProbeDue(source.id, health, probeAt)).toBe(true);
     } finally {
       vi.restoreAllMocks();
     }

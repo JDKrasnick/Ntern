@@ -447,7 +447,7 @@ export function catalogProjectionSortKey(group: CatalogGroupDetails): string {
 }
 
 /** Deterministically builds safe catalog rows without treating title/location similarity as posting identity. */
-export function groupCatalogJobs(jobs: Internship[], options: { includeClosed?: boolean } = {}): BuiltGroup[] {
+function catalogJobSets(jobs: Internship[], options: { includeClosed?: boolean }) {
   const visible = jobs.filter((job) => (options.includeClosed || job.open) && job.technical !== false);
   const { releases, remaining } = releaseGroups(visible);
   const grouped: Internship[][] = [];
@@ -461,10 +461,27 @@ export function groupCatalogJobs(jobs: Internship[], options: { includeClosed?: 
   }
   grouped.push(...programs.values());
   return [
-    ...releases.map(({ roles, groupId: stableGroupId }) => ({ row: summarize('employer-release', roles, stableGroupId), jobs: roles })),
-    ...grouped.map((roles) => ({ row: summarize(roles.length > 1 ? 'program-group' : 'individual', roles), jobs: roles })),
-    ...unsafe.map((job) => ({ row: summarize('individual', [job]), jobs: [job] })),
-  ].sort((left, right) => right.row.updatedAt.localeCompare(left.row.updatedAt));
+    ...releases.map(({ roles, groupId }) => ({ type: 'employer-release' as const, roles, groupId })),
+    ...grouped.map((roles) => ({ type: roles.length > 1 ? 'program-group' as const : 'individual' as const, roles, groupId: undefined })),
+    ...unsafe.map((job) => ({ type: 'individual' as const, roles: [job], groupId: undefined })),
+  ];
+}
+
+export function groupCatalogJobs(jobs: Internship[], options: { includeClosed?: boolean } = {}): BuiltGroup[] {
+  return catalogJobSets(jobs, options).map(({ type, roles, groupId }) => ({
+    row: summarize(type, roles, groupId), jobs: roles,
+  })).sort((left, right) => right.row.updatedAt.localeCompare(left.row.updatedAt));
+}
+
+/** Owns and consumes the input. Build each featured role only when its raw
+ * group can be released, instead of retaining all summaries beside all jobs. */
+export function* consumeCatalogGroups(jobs: Internship[]): Generator<BuiltGroup> {
+  const sets = catalogJobSets(jobs, { includeClosed: true });
+  jobs.length = 0;
+  for (const set of sets) {
+    yield { row: summarize(set.type, set.roles, set.groupId), jobs: set.roles };
+    set.roles.length = 0;
+  }
 }
 
 function sourceCredibility(job: Internship): CatalogGroupRole['sourceCredibility'] {

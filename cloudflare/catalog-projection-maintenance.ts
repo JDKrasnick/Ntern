@@ -1,4 +1,4 @@
-import { catalogGroupDetails, compareCatalogProjectionGroups, groupCatalogJobs } from '../src/catalog-groups.js';
+import { catalogGroupDetails, compareCatalogProjectionGroups, consumeCatalogGroups, type CatalogGroupDetails } from '../src/catalog-groups.js';
 import { catalogRecency, openCatalogSortKey } from '../src/catalog-recency.js';
 import type { D1InternshipStore } from './d1-store.js';
 import { R2CatalogProjection } from './r2-catalog-projection.js';
@@ -62,16 +62,12 @@ async function buildCatalogProjection(store: D1InternshipStore) {
     const key = openCatalogSortKey(job);
     return !newest || key > newest ? key : newest;
   }, undefined);
-  const grouped = groupCatalogJobs(jobs, { includeClosed: true });
-  // These arrays belong to this refresh. Grouping has captured every job it
-  // needs; release the original holder, then each group's raw jobs as its cards
-  // materialize, so converted input does not coexist with the whole output.
-  jobs.length = 0;
-  const groups = grouped.map(group => {
-    const details = catalogGroupDetails(group);
+  const groups: CatalogGroupDetails[] = [];
+  for (const group of consumeCatalogGroups(jobs)) {
+    groups.push(catalogGroupDetails(group));
     group.jobs.length = 0;
-    return details;
-  }).sort(compareCatalogProjectionGroups);
+  }
+  groups.sort(compareCatalogProjectionGroups);
   return { groups, liveWatermark };
 }
 
