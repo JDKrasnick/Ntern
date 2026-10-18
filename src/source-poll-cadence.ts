@@ -150,6 +150,9 @@ function isShadowSourceDue(
 
 export function isQuarantinedRecoveryProbeDue(sourceId: string, health: SourceHealth, now: Date): boolean {
   if (health.state !== 'quarantined') return false;
+  // An operator has reviewed this hold. Only an explicit recover action should
+  // probe it again; scheduled forced deliveries would reopen the same incident.
+  if (health.sourceStatus === 'paused' && health.incidentState === 'acknowledged' && health.incidentAcknowledgedAt) return false;
   const lastAttemptAt = timestamp(health.lastAttemptAt) ?? timestamp(health.quarantinedAt);
   if (lastAttemptAt === undefined) return false;
   const elapsedWindows = Math.floor(now.getTime() / SOURCE_POLL_CADENCE.publishedIntervalMs)

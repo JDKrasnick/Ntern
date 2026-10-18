@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { catalogEducation, catalogGroupDetails, catalogTextMatches, employerDropGroupId, employerDropKey, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs } from '../src/catalog-groups.js';
+import { catalogEducation, catalogGroupDetails, catalogTextMatches, consumeCatalogGroups, employerDropGroupId, employerDropKey, filterCatalogGroupDetails, filterCatalogGroups, groupCatalogJobs } from '../src/catalog-groups.js';
 import type { EducationEvidenceStatus, Internship, InternshipIdentity, InternshipProgramType, SeasonEvidenceStatus } from '../src/types.js';
 
 type IdentityJob = Internship & { internshipIdentity?: Record<string, unknown> };
@@ -35,6 +35,26 @@ function identity(options: {
 }
 
 describe('grouped catalog domain', () => {
+  it('consumes publication input one group at a time with identical cards for releases, programs, closed and individual roles', () => {
+    const jobs = [
+      ...Array.from({ length: 25 }, (_, index) => job(`release-${index}`, index)),
+      ...[0, 1].map(index => job(`program-${index}`, index, { company: 'Program Corp', internshipIdentity: identity(),
+        catalogRecency: 'baseline', postedAt: undefined })),
+      job('individual', 0, { company: 'Other Corp' }),
+      job('closed', 0, { company: 'Closed Corp', open: false }),
+      job('nontechnical', 0, { technical: false }),
+    ];
+    const expected = groupCatalogJobs(jobs, { includeClosed: true }).map(catalogGroupDetails);
+    const original = [...jobs];
+    const result = [];
+    for (const group of consumeCatalogGroups(jobs)) {
+      expect(jobs).toHaveLength(0);
+      result.push(catalogGroupDetails(group));
+    }
+    const ordered = (cards: typeof expected) => cards.sort((a, b) => a.group.groupId.localeCompare(b.group.groupId));
+    expect(ordered(result)).toEqual(ordered(expected));
+    expect(original.every(job => job.jobId && Array.isArray(job.sourceReferences))).toBe(true);
+  });
   it('searches company and role words without treating a location abbreviation as a role match', () => {
     expect(catalogTextMatches('av', ['Avid', 'AI/ML Engineering Intern'])).toBe(true);
     expect(catalogTextMatches('av', ['Priceline', 'Software Engineering - Web/JavaScript'])).toBe(false);

@@ -67,6 +67,11 @@ attempt or an active source pages again. Recurring identity inventory is separat
 from structural integrity: the first audit seeds its source cohort; subsequent
 audits email only additions. Delivery must succeed before advancing that cohort.
 
+Acknowledged paused quarantines do not receive scheduled recovery probes.
+Use the explicit source `recover` action to validate a reviewed hold again,
+then `resume` only after a healthy result. A new open incident still receives
+automatic recovery probes even if it retains an older acknowledgment timestamp.
+
 Admission dispatch gives indexed due work up to half its existing one-minute
 budget before the rotating bootstrap/policy sweep. Migration `0056` bounds that
 selection to 500 candidates per state and at most 25 sources. Existing row leases,

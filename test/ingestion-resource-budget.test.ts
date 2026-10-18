@@ -60,7 +60,15 @@ describe('catalog projection resource retention', () => {
     const references: Array<WeakRef<Internship>> = [];
     const original = catalogGroups.catalogGroupDetails;
     let converted = 0;
+    let heapAtRead = 0;
     const materialize = vi.spyOn(catalogGroups, 'catalogGroupDetails').mockImplementation(group => {
+      if (converted === 0) {
+        exposeGc();
+        const summaryGrowthMb = (process.memoryUsage().heapUsed - heapAtRead) / 1024 / 1024;
+        console.info('Catalog initial summary allocation', { summaryGrowthMb });
+        // No full fleet of cloned featured-role references before conversion.
+        expect(summaryGrowthMb).toBeLessThan(3);
+      }
       const details = original(group);
       if (++converted === 500) {
         exposeGc();
@@ -77,7 +85,12 @@ describe('catalog projection resource retention', () => {
             jobId: `materialize-${index}`, company: `Employer ${index}`, title: 'Software Intern', location: 'Remote', season: 'summer-2027',
             applyUrl: `https://example.test/${index}`, normalizedUrl: `https://example.test/${index}`, fingerprint: `${index}`,
             compensation: { raw: '' }, technical: true, open: true, firstSeenAt: observed, lastSeenAt: observed,
-            notification: { smsPending: false, digestPending: false }, sourceReferences: [],
+            notification: { smsPending: false, digestPending: false },
+            sourceReferences: Array.from({ length: 30 }, (_, ref) => ({
+              sourceId: `source-${ref}`, document: 'jobs.json', sourceUrl: 'https://example.test/jobs', row: ref,
+              externalId: `${index}-${ref}`, company: `Employer ${index}`, title: 'Software Intern', location: 'Remote',
+              season: 'summer-2027', applyUrl: `https://example.test/${index}`, state: 'open', compensation: { raw: '' },
+            })),
             internshipIdentity: { unusedMetadata: Array.from({ length: 10 }, (_, field) => ({ value: `${index}-${field}` })) },
           };
           references.push(new WeakRef(job));
@@ -86,6 +99,8 @@ describe('catalog projection resource retention', () => {
         // End the WeakRef creation task before measuring collection during the
         // real grouping/materialization pipeline, as an awaited D1 read does.
         await new Promise<void>(resolve => setImmediate(resolve));
+        exposeGc();
+        heapAtRead = process.memoryUsage().heapUsed;
         return jobs;
       },
       async putCatalogProjection(groups: CatalogGroupDetails[]) { written = groups; },
