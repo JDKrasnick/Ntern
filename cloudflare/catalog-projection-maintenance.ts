@@ -62,8 +62,16 @@ async function buildCatalogProjection(store: D1InternshipStore) {
     const key = openCatalogSortKey(job);
     return !newest || key > newest ? key : newest;
   }, undefined);
-  const groups = groupCatalogJobs(jobs, { includeClosed: true })
-    .map(catalogGroupDetails).sort(compareCatalogProjectionGroups);
+  const grouped = groupCatalogJobs(jobs, { includeClosed: true });
+  // These arrays belong to this refresh. Grouping has captured every job it
+  // needs; release the original holder, then each group's raw jobs as its cards
+  // materialize, so converted input does not coexist with the whole output.
+  jobs.length = 0;
+  const groups = grouped.map(group => {
+    const details = catalogGroupDetails(group);
+    group.jobs.length = 0;
+    return details;
+  }).sort(compareCatalogProjectionGroups);
   return { groups, liveWatermark };
 }
 

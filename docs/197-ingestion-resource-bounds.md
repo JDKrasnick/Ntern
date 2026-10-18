@@ -28,6 +28,15 @@ observed initial peak fell from 120.1 to 106.7 MiB, while renewal remained aroun
 118–119 MiB. Isolated-dev and post-deploy Worker measurements are required to
 establish the actual runtime headroom; the 120 MiB watchdog stays unchanged.
 
+The guarded production deployment of that trimming completed two rebuilds at
+117.6 and 119.4 MiB p99: below the watchdog threshold, but with little margin.
+The follow-up clears this refresh's raw input array after grouping, releases
+each group's raw jobs as its cards materialize, and reuses the summary's full
+featured role in the role list. Previously all 499 already-converted raw jobs
+remained live halfway through a 1,000-job regression. These changes reduce
+overlap between input and output graphs; serialized cards retain their fields.
+Live verification of the additional headroom follows its deployment.
+
 ## 2026-10-08 catalog reference follow-up
 
 A single isolated publisher invocation reached 141.6 MiB. Read-only production

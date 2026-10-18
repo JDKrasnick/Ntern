@@ -491,7 +491,10 @@ function provenanceLabels(job: Internship): string[] {
 export function catalogGroupDetails(group: BuiltGroup): CatalogGroupDetails {
   return {
     group: group.row,
-    roles: [...group.jobs].sort(compareCatalogRecency).map(catalogGroupRole),
+    // The summary already materialized this full-fidelity role. Most cards
+    // contain one role, so rebuilding it doubles most of the catalog graph.
+    roles: [...group.jobs].sort(compareCatalogRecency).map(job => job.jobId === group.row.featuredRole.jobId
+      ? group.row.featuredRole : catalogGroupRole(job)),
   };
 }
 
