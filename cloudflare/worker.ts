@@ -67,6 +67,7 @@ import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork,
 import { D1EmployerStore } from './employer-store.js';
 import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
+import { destinationQueueHealth } from './destination-queue-health.js';
 import { companyIconResponse } from './company-icon.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
 import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, storeProviderIcon, verifyIconDomain } from './employer-icon-resolver.js';
@@ -2304,8 +2305,22 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       'shadow-extraction': env.SHADOW_EXTRACTION_DLQ,
     }));
     const maximumQueueAgeMs = Number(env.ADMISSION_QUEUE_AGE_ALERT_HOURS ?? 120) * 60 * 60_000;
-    const queueAgeMs = queueMetrics?.oldestMessageTimestamp
-      ? observedAt.getTime() - queueMetrics.oldestMessageTimestamp.getTime() : 0;
+    const destinationHealth = await step('destination_queue_age_confirmation', () => destinationQueueHealth(
+      queueMetrics, () => new Date(), maximumQueueAgeMs, async () => {
+        const queueId = env.DESTINATION_VERIFICATION_QUEUE_ID;
+        if (!queueId) throw new Error('Destination verification queue ID is not configured');
+        const metrics = await cloudflareApi(env, `/queues/${encodeURIComponent(queueId)}/metrics`, {
+          signal: AbortSignal.timeout(10_000),
+        }) as { backlog_count: number; backlog_bytes: number; oldest_message_timestamp_ms?: number };
+        console.log(JSON.stringify({ event: 'destination_queue_metrics_confirmation',
+          bindingCount: queueMetrics?.backlogCount,
+          bindingOldestTimestampMs: queueMetrics?.oldestMessageTimestamp?.getTime(), rest: metrics }));
+        return { backlogCount: metrics.backlog_count, backlogBytes: metrics.backlog_bytes,
+          ...(metrics.oldest_message_timestamp_ms
+            ? { oldestMessageTimestamp: new Date(metrics.oldest_message_timestamp_ms) } : {}) };
+      },
+    ));
+    const queueAgeMs = destinationHealth?.ageMs;
     // A stalled publication pipeline is invisible in the source-health surface:
     // polls keep succeeding while admission withholds every new role. The age of
     // the newest published role is the feed's own freshness.
@@ -2319,7 +2334,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     const ingestionHealth = await step('ingestion_health_signals', () => ingestionHealthSignals(env.DB, observedAt));
     const operationalSignals = [
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
-      ...(queueAgeMs >= maximumQueueAgeMs ? ['destination-verification-age'] : []),
+      ...(destinationHealth?.signals ?? []),
       ...(recentOverloads ? ['d1-overloaded'] : []),
       ...(dlqGrowth && Object.keys(dlqGrowth.increases).length ? ['dlq-growth'] : []),
       ...(starvation?.starved ? ['catalog-starvation'] : []),
@@ -2328,7 +2343,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     ];
     const alertSent = await step('admission_operational_alert', () => sendAdmissionOperationalAlert(new D1CatalogAdmissionStore(env.DB), env, {
       signals: operationalSignals, observedAt: observedAt.toISOString(),
-      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${queueMetrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}; newest published role: ${publication?.newest ?? 'unavailable'} (${starvation?.hoursSinceNewest !== undefined ? `${starvation.hoursSinceNewest.toFixed(1)}h` : 'unknown'} ago; ${publication?.eligible ?? 'unavailable'} eligible roles).`
+      details: `D1 overload failures in the last 30 minutes: ${recentOverloads ?? 'unavailable'}; destination queue depth: ${destinationHealth?.metrics?.backlogCount ?? 'unavailable'}; oldest age ms: ${queueAgeMs ?? 'unavailable'}; binding oldest timestamp ms: ${queueMetrics?.oldestMessageTimestamp?.getTime() ?? 'unavailable'}; effective oldest timestamp ms: ${destinationHealth?.metrics?.oldestMessageTimestamp?.getTime() ?? 'unavailable'}; DLQ depth: ${deadLetterMetrics?.backlogCount ?? 'unavailable'}; DLQ growth: ${JSON.stringify(dlqGrowth?.increases ?? {})}; newest published role: ${publication?.newest ?? 'unavailable'} (${starvation?.hoursSinceNewest !== undefined ? `${starvation.hoursSinceNewest.toFixed(1)}h` : 'unknown'} ago; ${publication?.eligible ?? 'unavailable'} eligible roles).`
         + (maintenanceFailures.length ? `\n\nMaintenance steps that failed: ${[...new Set(maintenanceFailures)].join(', ')}.` : '')
         + (ingestionHealth?.details ? `\n\n${ingestionHealth.details}` : ''),
     }));
