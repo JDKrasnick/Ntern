@@ -600,11 +600,17 @@ describe('Cloudflare maintenance cron', () => {
     const legacyDrainRun = vi.fn().mockResolvedValue({ meta: { changes: 5_000 } });
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const queueMetricsRequest = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({
+      success: true, result: { backlog_count: 0, backlog_bytes: 0, oldest_message_timestamp_ms: 0 },
+    }));
     try {
       await cloudflareWorker.scheduled({
         cron: '9-59/10 * * * *', scheduledTime: Date.parse('2026-09-17T17:09:00.000Z'),
       } as Parameters<typeof cloudflareWorker.scheduled>[0], {
         INGESTION_V2_ISOLATED_WORKERS_ENABLED: isolated,
+        CLOUDFLARE_ACCOUNT_ID: 'test-account',
+        CLOUDFLARE_SHUTDOWN_TOKEN: 'test-token',
+        DESTINATION_VERIFICATION_QUEUE_ID: 'test-destination-queue',
         ADMISSION_WORKER: { async fetch() { return Response.json({ completed: true }); } },
         DB: { prepare: (query: string) => {
           maintenanceStatements.push(query);
@@ -619,11 +625,17 @@ describe('Cloudflare maintenance cron', () => {
           };
           return statement;
         } },
-        DESTINATION_VERIFICATION_QUEUE: queue(undefined),
+        DESTINATION_VERIFICATION_QUEUE: queue(async () => ({ backlogCount: 10, backlogBytes: 1000,
+          oldestMessageTimestamp: new Date(Date.now() - 2_813_937_542) })),
         DESTINATION_VERIFICATION_DLQ: queue(undefined),
       } as unknown as Environment);
 
       expect(legacyDrainRun).toHaveBeenCalledOnce();
+      expect(queueMetricsRequest).toHaveBeenCalledWith(
+        'https://api.cloudflare.com/client/v4/accounts/test-account/queues/test-destination-queue/metrics',
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect(markers).toHaveBeenCalledWith('destination_queue_age_confirmation', 'complete');
       expect(maintenanceStatements).toContainEqual(expect.stringContaining('catalog_items_kind_pk_sk'));
       expect(failing).toHaveBeenCalled();
       expect(metadata).not.toHaveBeenCalled();

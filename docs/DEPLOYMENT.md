@@ -582,6 +582,17 @@ non-empty DLQ, a work item older than `ADMISSION_QUEUE_AGE_ALERT_HOURS`, and an
 admission incident opened since the previous pass. The queue-age threshold is
 managed consistently in Wrangler and OpenTofu.
 
+Before emitting a destination queue-age alert, the monitor attempts to confirm an old or
+unusable binding metric through the read-only REST metrics endpoint for the
+configured `DESTINATION_VERIFICATION_QUEUE_ID`. It measures age at sampling time,
+ignores timestamps for empty queues, and rejects timestamps outside Cloudflare's
+14-day maximum retention. A failed confirmation emits
+`destination-verification-metrics-unavailable` and retains any plausible old
+binding age; an unusable REST result emits
+`destination-verification-metrics-invalid` rather than claiming a known work age.
+Neither path pulls, acknowledges, replays, or purges messages. Inspect the reported
+binding/effective timestamps alongside live queue metrics when these signals fire.
+
 Stale destination evidence no longer alerts. Durable admission (2026-09-17) made
 the stored decision authoritative, so nothing re-inspects an admitted
 destination and evidence past `freshUntil` is expected rather than a defect. The
