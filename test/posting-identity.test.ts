@@ -382,6 +382,39 @@ describe('posting identity', () => {
     expect(first.identity?.canonicalJobId).not.toBe(second.identity?.canonicalJobId);
   });
 
+  it.each([
+    'https://physicalreasoning.ai/join/software-engineering-intern',
+    'https://physicalreasoning.ai/join/software-engineering-intern/',
+    'https://physicalreasoning.ai/join/software-engineering-intern/?utm_source=github-vansh-ouckah',
+  ])('confirms the reviewed Physical Reasoning posting: %s', (applicationUrl) => {
+    const result = resolvePostingIdentityDecision({
+      sourceId: 'vanshb03-summer-2027', externalId: 'physical-reasoning-intern',
+      applicationUrl, observedAt: '2026-10-18T12:00:00.000Z',
+    });
+    expect(result.decision).toMatchObject({
+      status: 'confirmed', evidenceKind: 'reviewed-canonical-url',
+      exactKey: 'url:https://physicalreasoning.ai/join/software-engineering-intern',
+    });
+    expect(result.identity?.aliases.map((alias) => alias.value)).toEqual([
+      'url:https://physicalreasoning.ai/join/software-engineering-intern',
+    ]);
+  });
+
+  it.each([
+    'https://physicalreasoning.ai/join/',
+    'https://physicalreasoning.ai/join/software-engineer/',
+    'https://physicalreasoning.ai/join/software-engineering-intern/other',
+    'https://physicalreasoning.ai.evil.test/join/software-engineering-intern/',
+    'https://careers.physicalreasoning.ai/join/software-engineering-intern/',
+    'http://physicalreasoning.ai/join/software-engineering-intern/',
+    'https://physicalreasoning.ai/join/software-engineering-intern/?job=another-role',
+  ])('keeps unreviewed Physical Reasoning URL variants unconfirmed: %s', (applicationUrl) => {
+    expect(resolvePostingIdentityDecision({
+      sourceId: 'community', externalId: 'role', applicationUrl,
+      observedAt: '2026-10-18T12:00:00.000Z',
+    }).decision.status).toBe('unconfirmed');
+  });
+
   it('requires a checked-in contract and an observed exact URL for reviewer-approved URL identity', () => {
     const canonicalUrl = 'https://careers.example.test/jobs/42';
     const reviewedCanonicalUrl = {

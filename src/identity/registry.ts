@@ -63,6 +63,21 @@ export function reviewedCanonicalUrlEvidenceHash(canonicalUrlValue: string, cont
   });
 }
 
+/** Exact employer posting pages reviewed without an immutable ATS identifier.
+ * Keep this scoped to individual URLs: a title slug is not a provider ID.
+ * Review evidence: docs/physical-reasoning-posting-review.md.
+ */
+const REVIEWED_CANONICAL_URLS: Readonly<Record<string, ReviewedCanonicalUrlEvidence>> = {
+  'https://physicalreasoning.ai/join/software-engineering-intern': {
+    canonicalUrl: 'https://physicalreasoning.ai/join/software-engineering-intern',
+    contractId: REVIEWED_CANONICAL_URL_CONTRACT_ID,
+    contractVersion: POSTING_IDENTITY_CONTRACT_VERSION,
+    approvalReference: 'physical-reasoning-software-engineering-intern-2026-10-18',
+    evidenceHash: reviewedCanonicalUrlEvidenceHash('https://physicalreasoning.ai/join/software-engineering-intern'),
+    observedAt: '2026-10-18T00:00:00.000Z',
+  },
+};
+
 function canonicalUrl(value: string) {
   try { return canonicalizePostingUrl(value); }
   catch { return value.trim(); }
@@ -245,7 +260,7 @@ export function resolvePostingIdentityDecision(input: PostingIdentityRegistryInp
     return confirmed(input, exactKey, 'authoritative-employer-requisition', { employerId: requisition.employerId, ...contract, evidenceHash: digest({ exactKey, contract }) }, identity);
   }
 
-  const reviewedUrl = input.reviewedCanonicalUrl;
+  const reviewedUrl = input.reviewedCanonicalUrl ?? REVIEWED_CANONICAL_URLS[canonicalUrl(input.applicationUrl)];
   if (reviewedUrl) {
     const expectedUrl = canonicalUrl(reviewedUrl.canonicalUrl);
     const observedCanonicalUrls = new Set(urls.map(canonicalUrl));
