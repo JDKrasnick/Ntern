@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { refreshCatalogProjectionD1 } from '../cloudflare/catalog-projection-maintenance.js';
 import { catalogGroupDetails, groupCatalogJobs, type CatalogGroupDetails } from '../src/catalog-groups.js';
+import * as catalogGroups from '../src/catalog-groups.js';
 import { R2CatalogProjection } from '../cloudflare/r2-catalog-projection.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { parseInternshipMarkdown } from '../src/core/markdown.js';
@@ -54,6 +55,51 @@ const MESSAGE_HEAP_CEILING_MB = 112;
 const exposeGc = globalThis.gc;
 
 describe('catalog projection resource retention', () => {
+  it('releases converted raw jobs while the remaining catalog is still being materialized', async () => {
+    if (!exposeGc) return;
+    const references: Array<WeakRef<Internship>> = [];
+    const original = catalogGroups.catalogGroupDetails;
+    let converted = 0;
+    const materialize = vi.spyOn(catalogGroups, 'catalogGroupDetails').mockImplementation(group => {
+      const details = original(group);
+      if (++converted === 500) {
+        exposeGc();
+        expect(references.slice(0, 499).filter(reference => reference.deref()).length).toBeLessThanOrEqual(1);
+      }
+      return details;
+    });
+    let written: CatalogGroupDetails[] = [];
+    const store = {
+      async listCatalog() {
+        const jobs = Array.from({ length: 1_000 }, (_, index): Internship => {
+          const observed = '2026-10-01T00:00:00.000Z';
+          const job: Internship = {
+            jobId: `materialize-${index}`, company: `Employer ${index}`, title: 'Software Intern', location: 'Remote', season: 'summer-2027',
+            applyUrl: `https://example.test/${index}`, normalizedUrl: `https://example.test/${index}`, fingerprint: `${index}`,
+            compensation: { raw: '' }, technical: true, open: true, firstSeenAt: observed, lastSeenAt: observed,
+            notification: { smsPending: false, digestPending: false }, sourceReferences: [],
+            internshipIdentity: { unusedMetadata: Array.from({ length: 10 }, (_, field) => ({ value: `${index}-${field}` })) },
+          };
+          references.push(new WeakRef(job));
+          return job;
+        });
+        // End the WeakRef creation task before measuring collection during the
+        // real grouping/materialization pipeline, as an awaited D1 read does.
+        await new Promise<void>(resolve => setImmediate(resolve));
+        return jobs;
+      },
+      async putCatalogProjection(groups: CatalogGroupDetails[]) { written = groups; },
+    } as unknown as D1InternshipStore;
+    try {
+      const result = await refreshCatalogProjectionD1(store, undefined);
+      expect(converted).toBe(1_000);
+      expect(result.roles).toBe(1_000);
+      expect(written.every(details => details.roles.includes(details.group.featuredRole))).toBe(true);
+      expect(written.flatMap(details => details.roles).map(role => role.jobId).sort())
+        .toEqual(Array.from({ length: 1_000 }, (_, index) => `materialize-${index}`).sort());
+    } finally { materialize.mockRestore(); }
+  });
+
   it('renews large R2 pages without retaining a second parsed page graph', async () => {
     if (!exposeGc) return;
     const observed = new Date(Date.now() - 60_000).toISOString();
