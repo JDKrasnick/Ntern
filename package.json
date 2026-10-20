@@ -14,7 +14,7 @@
     "test": "vitest run --dir test --exclude ingestion-resource-budget.test.ts",
     "test:budget": "NODE_OPTIONS=--expose-gc vitest run --dir test test/ingestion-resource-budget.test.ts",
     "test:unit": "vitest run --dir test --exclude test/integration.workflow.test.ts --exclude test/api.workflow.test.ts --exclude test/full-day.workflow.test.ts",
-    "test:integration": "vitest run test/destination-queue-resilience.integration.test.ts test/full-day.workflow.test.ts test/github-ingestion-day.integration.test.ts",
+    "test:integration": "vitest run test/destination-queue-resilience.integration.test.ts test/provider-metadata-notification-race.integration.test.ts test/full-day.workflow.test.ts test/github-ingestion-day.integration.test.ts",
     "test:ingestion:ci": "vitest run test/github-ingestion-day.integration.test.ts test/poll.test.ts test/source-occurrence-pagination.test.ts",
     "test:ingestion:history": "tsx scripts/verify-ingestion-v2-history.ts",
     "ingestion:v2:cost:gate": "tsx scripts/ingestion-v2-cost-gate.ts",

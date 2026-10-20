@@ -703,6 +703,12 @@ export class D1InternshipStore implements InternshipStore {
   async putInternship(job: Internship): Promise<void> {
     await this.internshipStatement(job).run();
   }
+  /** Read a canonical job with the exact stored value used to fence a later write. */
+  async getJobSnapshot(jobId: string): Promise<{ job: Internship; value: string } | undefined> {
+    const row = await this.db.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META' AND kind = 'internship'")
+      .bind(`JOB#${jobId}`).first<JsonRow>();
+    return row ? { job: withEmployerCategory(JSON.parse(row.value) as Internship), value: row.value } : undefined;
+  }
   async getJob(jobId: string) {
     const direct = await this.get<Internship>(`JOB#${jobId}`, 'META');
     if (direct) return withEmployerCategory(direct);
@@ -924,6 +930,7 @@ export class D1InternshipStore implements InternshipStore {
     occurrence?: SourceOccurrenceState,
     expectedOccurrence?: SourceOccurrenceState,
     notificationEvent?: NotificationEvent,
+    expectedJobValue?: string,
   ): Promise<boolean> {
     const canonical = canonicalCatalogRecency(job);
     const canonicalJson = JSON.stringify(canonical);
@@ -937,7 +944,7 @@ export class D1InternshipStore implements InternshipStore {
       ) AND (? IS NULL OR EXISTS (
         SELECT 1 FROM catalog_items AS expected_occurrence
         WHERE expected_occurrence.pk = ? AND expected_occurrence.sk = ? AND expected_occurrence.value = ?
-      ))`).bind(
+      )) AND (? IS NULL OR value = ?)`).bind(
       canonicalJson,
       canonical.normalizedUrl,
       canonical.fingerprint,
@@ -956,6 +963,8 @@ export class D1InternshipStore implements InternshipStore {
       expectedOccurrence ? `SOURCE#${expectedOccurrence.sourceId}` : '',
       expectedOccurrence ? `OCCURRENCE#${expectedOccurrence.externalId}` : '',
       expectedOccurrence ? JSON.stringify(expectedOccurrence) : '',
+      expectedJobValue ?? null,
+      expectedJobValue ?? null,
     );
     const statements = [jobUpdate];
     if (occurrence && expectedOccurrence) {
@@ -975,7 +984,9 @@ export class D1InternshipStore implements InternshipStore {
           `JOB#${canonical.jobId}`, canonicalJson));
     }
     const [result] = await this.db.batch(statements);
-    return result?.meta.changes === 1;
+    // D1 includes trigger writes in changes (the metadata revision triggers
+    // make a successful one-row update report more than one change).
+    return (result?.meta.changes ?? 0) > 0;
   }
   async putInternshipWithNotificationEvent(job: Internship, event: NotificationEvent): Promise<boolean> {
     const eventStatement = this.db.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES (?, 'EVENT', 'notification-event', ?) ON CONFLICT(pk, sk) DO NOTHING")

@@ -27,6 +27,9 @@ metadata from the exact official API artifact. Model extraction supplements this
 baseline; when its budget is exhausted, the catalog retains regex-derived facts
 with official-source provenance. This metadata write preserves admission,
 destination verification, role lifecycle, and notification state.
+It refreshes the job after acquisition and compares the exact stored snapshot
+at commit time. Concurrent changes cause a retry before evidence persistence or
+model handoff, so completed notifications cannot become pending again.
 Budget-blocked runs can be reclaimed on a later delivery after headroom is
 restored; completed runs remain deduplicated. Restoring headroom does not itself
 requeue previously acknowledged messages.

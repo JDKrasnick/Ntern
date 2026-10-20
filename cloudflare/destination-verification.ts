@@ -634,7 +634,19 @@ export async function processDestinationVerificationBatch(
           }
           // The producer hashes the canonical persisted title, which may be a
           // reviewed repair of the provider's raw title.
-          const title = reference.title;
+          // Acquisition can overlap notification delivery or a source update.
+          // Project from a fresh snapshot and fence the entire stored job, not
+          // just this reference, so a later concurrent update also survives.
+          const snapshot = await jobs.getJobSnapshot(job.jobId);
+          const currentJob = snapshot?.job;
+          const currentReference = currentJob?.sourceReferences.find((item) => item.sourceId === message.sourceId
+            && item.externalId === message.externalId);
+          if (!snapshot || !currentJob || !currentReference || !destinationVerificationMatchesReference(currentReference, message)
+            || (message.shadowMetadataHash && message.shadowMetadataHash !== currentReference.shadowMetadataHash)) {
+            await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
+            continue;
+          }
+          const title = currentReference.title;
           const normalized = normalizeExactPostingDescription(title, apiAcquisition.artifact.text, false);
           if (normalized.contentHash !== message.shadowContentHash) {
             await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
@@ -647,20 +659,22 @@ export async function processDestinationVerificationBatch(
           const extracted = extractPostingMetadataEvidence({ artifact: apiAcquisition.artifact,
             sourceClass: 'official-api', sourceId: message.sourceId,
             sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, exactPosting: true });
-          const enrichedReference = { ...reference,
-            metadataEvidence: mergeRoleMetadataEvidence(reference.metadataEvidence, extracted),
+          const enrichedReference = { ...currentReference,
+            metadataEvidence: mergeRoleMetadataEvidence(currentReference.metadataEvidence, extracted),
             metadataExtraction: { version: ROLE_METADATA_EXTRACTION_VERSION,
               artifactHash: extracted[0]!.artifactHash, observedAt: inspectedAt,
               outcome: extracted.some(roleMetadataEvidenceHasFields) ? 'extracted' as const : 'no-explicit-metadata' as const },
           };
-          const sourceReferences = job.sourceReferences.map((item) => item === reference ? enrichedReference : item);
-          const projected = projectRoleMetadata({ ...job, sourceReferences });
+          const sourceReferences = currentJob.sourceReferences.map((item) => item === currentReference ? enrichedReference : item);
+          const projected = projectRoleMetadata({ ...currentJob, sourceReferences });
           const occurrence = await jobs.getSourceOccurrence(message.sourceId, message.externalId);
           const nextOccurrence = occurrence ? { ...occurrence,
             occurrence: { ...occurrence.occurrence, ...enrichedReference }, changedAt: inspectedAt } : undefined;
-          if (!await jobs.putAdmissionState({ ...projected.job, sourceReferences }, reference, nextOccurrence, occurrence)) {
-            await settleWithoutVerification(queued, message, inspectedAt, 'obsolete');
-            continue;
+          if (!await jobs.putAdmissionState({ ...projected.job, sourceReferences }, currentReference, nextOccurrence, occurrence,
+            undefined, snapshot.value)) {
+            // A notification or another reference may have changed. Redelivery
+            // revalidates the source revision and projects from current state.
+            throw new Error('Job changed during provider metadata persistence');
           }
           await operations.recordRoleMetadataEvidence(job.jobId, extracted, projected.conflicts, inspectedAt,
             { sourceId: message.sourceId, sourceClasses: ['official-api'] });
