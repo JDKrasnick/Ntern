@@ -642,6 +642,7 @@ export async function processDestinationVerificationBatch(
           const currentReference = currentJob?.sourceReferences.find((item) => item.sourceId === message.sourceId
             && item.externalId === message.externalId);
           if (!snapshot || !currentJob || !currentReference || !destinationVerificationMatchesReference(currentReference, message)
+            || (currentReference.shadowContentHash && currentReference.shadowContentHash !== message.shadowContentHash)
             || (message.shadowMetadataHash && message.shadowMetadataHash !== currentReference.shadowMetadataHash)) {
             await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
             continue;

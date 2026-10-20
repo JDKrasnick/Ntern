@@ -145,11 +145,11 @@ describe('provider metadata and concurrent notification delivery integration', (
     expect(s.database.prepare('SELECT COUNT(*) AS count FROM queue_failure_events WHERE resolved_at IS NULL').get()).toEqual({ count: 0 });
   });
 
-  it('settles a source revision superseded during acquisition without persisting stale metadata', async () => {
+  it.each(['shadowMetadataHash', 'shadowContentHash'] as const)('settles a %s revision superseded during acquisition without persisting stale metadata', async (revision) => {
     const s = setup(); await s.jobs.putInternship(s.job);
     vi.stubGlobal('fetch', vi.fn(async () => {
       const current = (await s.jobs.getJob(s.job.jobId))!;
-      current.sourceReferences[0]!.shadowMetadataHash = 'b'.repeat(64);
+      current.sourceReferences[0]![revision] = 'b'.repeat(64);
       await s.jobs.putInternship(current); return s.payload();
     }));
     const queued = await s.deliver();
