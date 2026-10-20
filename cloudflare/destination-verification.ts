@@ -12,7 +12,7 @@ import { activeTrustedCommunityPolicy, advanceTrustedCommunityQualification } fr
 import type { CatalogAdmissionReason, Internship, ProcessedListing, ProviderIdentity, SourceOccurrence } from '../src/types.js';
 import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
 import { D1InternshipStore } from './d1-store.js';
-import { extractPostingMetadataEvidence, extractVerifiedPageMetadataEvidence, projectRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from '../src/role-metadata.js';
+import { extractPostingMetadataEvidence, extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence, projectRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from '../src/role-metadata.js';
 import { createMetadataAcquirer, metadataApiRoute, type MetadataAcquisition } from '../src/metadata-acquisition.js';
 import { metadataFieldOutcomes, type MetadataAuditOutcome } from '../src/metadata-audit.js';
 import type { D1Database, MessageBatch, Queue, R2Bucket } from './types.js';
@@ -641,8 +641,34 @@ export async function processDestinationVerificationBatch(
             continue;
           }
           const inspectedAt = now().toISOString();
+          // Persist the deterministic baseline before optional model enrichment.
+          // A budget rejection downstream must not leave this fast path without
+          // the same official-posting metadata as general verification.
+          const extracted = extractPostingMetadataEvidence({ artifact: apiAcquisition.artifact,
+            sourceClass: 'official-api', sourceId: message.sourceId,
+            sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, exactPosting: true });
+          const enrichedReference = { ...reference,
+            metadataEvidence: mergeRoleMetadataEvidence(reference.metadataEvidence, extracted),
+            metadataExtraction: { version: ROLE_METADATA_EXTRACTION_VERSION,
+              artifactHash: extracted[0]!.artifactHash, observedAt: inspectedAt,
+              outcome: extracted.some(roleMetadataEvidenceHasFields) ? 'extracted' as const : 'no-explicit-metadata' as const },
+          };
+          const sourceReferences = job.sourceReferences.map((item) => item === reference ? enrichedReference : item);
+          const projected = projectRoleMetadata({ ...job, sourceReferences });
+          const occurrence = await jobs.getSourceOccurrence(message.sourceId, message.externalId);
+          const nextOccurrence = occurrence ? { ...occurrence,
+            occurrence: { ...occurrence.occurrence, ...enrichedReference }, changedAt: inspectedAt } : undefined;
+          if (!await jobs.putAdmissionState({ ...projected.job, sourceReferences }, reference, nextOccurrence, occurrence)) {
+            await settleWithoutVerification(queued, message, inspectedAt, 'obsolete');
+            continue;
+          }
+          await operations.recordRoleMetadataEvidence(job.jobId, extracted, projected.conflicts, inspectedAt,
+            { sourceId: message.sourceId, sourceClasses: ['official-api'] });
+          const baseline = shadowBaseline(metadataFieldOutcomes({ evidence: extracted, conflicts: projected.conflicts,
+            acquired: true, complete: true }));
           await handoffShadowExtraction({ env, operations, message, title, description: apiAcquisition.artifact.text,
-          sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false, structuredEvidence: apiAcquisition.artifact, method: apiAcquisition.method });
+            sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false,
+            structuredEvidence: apiAcquisition.artifact, baseline, method: apiAcquisition.method });
           if (message.idempotencyKey) await operations.recordVerificationCompletion(message.idempotencyKey, inspectedAt);
           await acknowledge(queued); continue;
         }

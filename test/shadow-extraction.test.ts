@@ -566,6 +566,9 @@ describe('shadow extraction queue and cost ledger', () => {
     ['2026-11', '1500', '2000', 1000],
     ['2026-10', '1500', '2220', 1377],
     ['2026-10', '1500', '2520', 1677],
+    ['2026-10', '1500', '3220', 2377],
+    ['2026-11', '1500', '3220', 1000],
+    ['2026-09', '1500', '3220', 800],
     ['2026-11', '1500', '2520', 1000],
     ['2026-09', '1500', '2520', 800],
     ['2026-11', '1500', '2220', 1000],
@@ -607,6 +610,7 @@ describe('shadow extraction queue and cost ledger', () => {
   it.each([
     ['2220', 50, 2220, 1377],
     ['2520', 80, 2520, 1677],
+    ['3220', 150, 3220, 2377],
   ] as const)('caps the approved refresh with headroom %s including concurrent reservations', async (headroom, count, total, historicalLimit) => {
     const DB = schema(); const now = new Date('2026-10-15T22:00:00.000Z');
     const historical = '7'.repeat(64), provider = '8'.repeat(64);
@@ -677,6 +681,33 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await providerShadowBudgetStatus(DB, now, {
       SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '500',
     })).toMatchObject({ allowanceCents: 900, spentCents: 0, exhausted: false });
+  });
+
+  it('reclaims a redelivered budget-blocked run after headroom is restored without repeating completed inference', async () => {
+    const DB = schema(); const artifacts = new MemoryR2();
+    const queue: Queue = { async send() {}, async sendBatch() {} };
+    const now = () => new Date('2026-10-20T00:00:00Z');
+    const message = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts }, {
+      jobId: 'job-budget-retry', sourceId: identity.sourceId, externalId: '123', sourceUrl: identity.sourceUrl, providerIdentity: identity,
+      title: 'Software Engineering Intern', description, observedAt: now().toISOString(), origin: 'provider-poll',
+    });
+    let calls = 0;
+    const infer = async () => { calls++; return { response: output(), inputTokens: 100, outputTokens: 50, actualCostCents: 6 }; };
+    const batch = { queue: 'shadow-extraction', messages: [{ id: 'retry-budget', body: message,
+      ack() {}, retry() { throw new Error('Unexpected delivery retry'); } }] };
+    const env = { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '0' };
+    await processShadowExtractionBatch(batch, env, now, infer);
+    expect(calls).toBe(0);
+    expect(await DB.prepare('SELECT state,error FROM shadow_extraction_runs').first())
+      .toEqual({ state: 'disabled', error: 'cost headroom unavailable' });
+    const funded = { ...env, SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '3220' };
+    await processShadowExtractionBatch(batch, funded, now, infer);
+    expect(calls).toBe(1);
+    expect(await DB.prepare('SELECT state,attempts FROM shadow_extraction_runs').first())
+      .toEqual({ state: 'completed', attempts: 2 });
+    await processShadowExtractionBatch(batch, funded, now, infer);
+    expect(calls).toBe(1);
   });
 
   it('holds unknown billed usage across a transient retry and records deterministic baseline differences', async () => {

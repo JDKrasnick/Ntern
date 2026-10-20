@@ -403,7 +403,8 @@ function isPermittedBindingUpdate(before: unknown, after: unknown): boolean {
       if (beforeText === afterText) return true;
       if (!((beforeText === '500' && afterText === '2000') || (beforeText === '2000' && afterText === '500')
         || (beforeText === '2000' && afterText === '2220') || (beforeText === '2220' && afterText === '2000')
-        || (beforeText === '2220' && afterText === '2520') || (beforeText === '2520' && afterText === '2220'))) return false;
+        || (beforeText === '2220' && afterText === '2520') || (beforeText === '2520' && afterText === '2220')
+        || (beforeText === '2520' && afterText === '3220') || (beforeText === '3220' && afterText === '2520'))) return false;
       permittedBindingChanged = true;
       return true;
     }

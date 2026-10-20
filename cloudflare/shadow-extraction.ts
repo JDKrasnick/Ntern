@@ -108,10 +108,10 @@ const modelRuntimeProbeMonthlyLimitCents = 100;
 function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOrigin, forecast: number, headroom: number): number {
   // Owner-approved seven-day refresh: at approval the October ledger had
   // 1720 cents committed globally, including 877 historical cents. These
-  // grants permit $5 originally, raised to $8 total by the owner, including
+  // grants permit $5 originally, raised to $15 total by the owner, including
   // reservations and other traffic. The explicit binding opts in; the grant
   // expires after October.
-  if (period === '2026-10' && (headroom === 2220 || headroom === 2520)) {
+  if (period === '2026-10' && [2220, 2520, 3220].includes(headroom)) {
     const grant = headroom - 1720;
     const limit = origin === 'provider-poll' ? headroom : 877 + grant;
     return Math.min(limit, Math.max(0, 1500 + limit - forecast));
@@ -360,7 +360,9 @@ async function claimRun(db: D1Database, message: ShadowExtractionMessage, now: D
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 1, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_key) DO UPDATE SET state = 'running', attempts = shadow_extraction_runs.attempts + 1, lease_until = excluded.lease_until,
       lease_token = excluded.lease_token, updated_at = excluded.updated_at
-    WHERE shadow_extraction_runs.state IN ('queued', 'transient-failure') OR (shadow_extraction_runs.state = 'running' AND shadow_extraction_runs.lease_until < ?)`)
+    WHERE shadow_extraction_runs.state IN ('queued', 'transient-failure')
+      OR (shadow_extraction_runs.state = 'disabled' AND shadow_extraction_runs.error = 'cost headroom unavailable')
+      OR (shadow_extraction_runs.state = 'running' AND shadow_extraction_runs.lease_until < ?)`)
     .bind(message.runKey, message.jobId, message.sourceId, message.externalId, message.sourceUrl, JSON.stringify(message.providerIdentity), message.contentHash,
       SHADOW_EXTRACTION_MODEL_ID, SHADOW_EXTRACTION_PROMPT_VERSION, SHADOW_EXTRACTION_SCHEMA_VERSION, SHADOW_EXTRACTION_PREPROCESSING_VERSION,
       until, leaseToken, message.cacheKey, message.inputKey, message.origin ?? 'legacy-unknown', now.toISOString(), now.toISOString(), now.toISOString()).run();
