@@ -14,6 +14,7 @@ import { allDisciplineStyles, disciplineKey, disciplineSearchVariants } from '..
 import { classifyJob, type JobCategory } from './core/filters.js';
 import type { CatalogSort, OpportunityScore } from '../shared/opportunity-score.js';
 import { rankCatalogGroups } from './catalog-ranking.js';
+import type { CompanySizeScores } from './company-size.js';
 
 const DISCIPLINE_FILTER_VALUES: Record<string, string> = Object.fromEntries(
   allDisciplineStyles().map(({ tag, style }) => [tag, style.filterValue]),
@@ -126,6 +127,8 @@ export interface CatalogGroupRole {
 }
 
 export interface CatalogGroupFilter {
+  /** Request-scoped cached scores; never populated from public query parameters. */
+  companySizes?: CompanySizeScores;
   sort?: CatalogSort;
   /** Observation-time window, independent of opportunity scoring. */
   addedSince?: string;
@@ -663,5 +666,5 @@ export function filterCatalogGroupDetails(groups: CatalogGroupDetails[], filter:
       roles,
     }];
   });
-  return filter.sort === 'best' ? rankCatalogGroups(filtered) : filtered;
+  return filter.sort === 'best' ? rankCatalogGroups(filtered, filter.companySizes) : filtered;
 }

@@ -10,6 +10,7 @@ import { catalogProviderIds, integrationRegistry } from '../src/integration-regi
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import { D1EmployerStore } from '../cloudflare/employer-store.js';
+import { D1CompanySizeStore } from '../cloudflare/company-size-store.js';
 import * as employerRegistry from '../cloudflare/employer-registry.js';
 import * as greenhouseWorker from '../src/greenhouse-worker.js';
 import * as leverWorker from '../src/lever-worker.js';
@@ -37,6 +38,26 @@ const queue = (metrics: Queue['metrics']): Queue => ({
   async send() {},
   async sendBatch() {},
   metrics,
+});
+
+describe('company size operations', () => {
+  it('requires operations authorization, validates budgets and stays inactive without a provider key', async () => {
+    const env = { OPERATIONS_SHARED_SECRET: 'secret', DB: { prepare: () => ({ async first() { return null; } }) } } as unknown as Environment;
+    const inventory = vi.spyOn(D1CompanySizeStore.prototype, 'inventory').mockResolvedValue([]);
+    try {
+      const request = (path: string, body?: unknown, authorized = true) => new Request(`https://example.test${path}`, {
+        method: body === undefined ? 'GET' : 'POST', headers: authorized ? { 'X-Operations-Key': 'secret' } : {},
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      expect((await cloudflareWorker.fetch(request('/internal/company-sizes', undefined, false), env)).status).toBe(404);
+      expect(inventory).not.toHaveBeenCalled();
+      const coverage = await cloudflareWorker.fetch(request('/internal/company-sizes'), env);
+      expect(await coverage.json()).toEqual({ configured: false, enabled: false, companies: [], roles: 0 });
+      for (const limit of [0, 26, 1.5, '5', null]) expect((await cloudflareWorker.fetch(request('/internal/company-sizes/refresh', { limit }), env)).status).toBe(400);
+      const inactive = await cloudflareWorker.fetch(request('/internal/company-sizes/refresh', { limit: 5 }), env);
+      expect(await inactive.json()).toMatchObject({ attempted: 0, skipped: 'disabled' });
+    } finally { inventory.mockRestore(); }
+  });
 });
 
 describe('source inspection reconnects', () => {

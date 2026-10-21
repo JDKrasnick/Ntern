@@ -3,6 +3,9 @@
  * Unknown employers stay neutral. Aliases are exact normalized names, never substrings.
  * Refresh sources and review scores together in a reviewed change.
  */
+import { companyWeights } from './config/weights.js';
+import { canonicalCompanyKey } from './core/normalize.js';
+
 export interface CompanyRating {
   company: string;
   aliases: string[];
@@ -43,7 +46,15 @@ export const companyRatings: readonly CompanyRating[] = [
     sources: ['https://www.cloudflare.com/press/press-releases/2026/cloudflare-announces-fourth-quarter-and-fiscal-year-2025-financial-results/'] },
 ];
 
-const key = (value: string) => value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
-  .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+(?:inc|incorporated|corp|corporation|llc|ltd|limited)$/u, '');
+const key = canonicalCompanyKey;
 const ratings = new Map(companyRatings.flatMap(rating => [rating.company, ...rating.aliases].map(name => [key(name), rating] as const)));
 export const companyRating = (company: string) => ratings.get(key(company));
+
+/** Reuse the established simple employer tiers while enrichment is unavailable.
+ * Exact normalized names and explicit aliases only; never substring matching. */
+const tierScores = new Map(Object.entries(companyWeights.weights).map(([company, score]) => [canonicalCompanyKey(company), score]));
+for (const [alias, company] of Object.entries(companyWeights.aliases)) {
+  const score = tierScores.get(canonicalCompanyKey(company));
+  if (score !== undefined) tierScores.set(canonicalCompanyKey(alias), score);
+}
+export const companyTierScore = (company: string) => tierScores.get(canonicalCompanyKey(company));

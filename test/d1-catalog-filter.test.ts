@@ -106,6 +106,12 @@ describe('D1 filtered catalog projection', () => {
       expect(compactRows.length).toBeGreaterThan(200);
       expect(compactRows.join('')).not.toContain('DO-NOT-HYDRATE');
       expect(hydrationSizes.every(size => size <= 7)).toBe(true);
+      const companySizes = new Map(values.map((value, index) => [value.company.toLowerCase(), index % 2 ? 85 : 55]));
+      const sizeExpected = rankCatalogGroups(projected, companySizes);
+      const sizeFirst = await store.listCatalogProjectionFiltered(undefined, 7, { sort: 'best', status: 'open', companySizes });
+      const sizeSecond = await store.listCatalogProjectionFiltered(sizeFirst!.cursor, 7, { sort: 'best', status: 'open', companySizes });
+      expect([...sizeFirst!.groups, ...sizeSecond!.groups].map(details => details.group.groupId)).toEqual(sizeExpected.slice(0, 14).map(details => details.group.groupId));
+      expect(sizeFirst!.groups.map(details => details.group.opportunity)).toEqual(sizeExpected.slice(0, 7).map(details => details.group.opportunity));
       const filter = { sort: 'best' as const, status: 'open' as const, query: 'machine', addedSince: '2026-06-01T00:00:00.000Z' };
       const searched = await store.listCatalogProjectionFiltered(undefined, 50, filter);
       expect(searched!.groups.map(details => details.group.groupId)).toEqual(rankCatalogGroups(filterCatalogGroupDetails(projected, filter)).map(details => details.group.groupId));

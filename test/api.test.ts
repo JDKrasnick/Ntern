@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApiHandler } from '../src/api.js';
 import { MemoryInternshipStore, MemoryReleaseStore, MemoryUserStore } from '../src/store.js';
 import type { Internship } from '../src/types.js';
+import { catalogGroupDetails, groupCatalogJobs } from '../src/catalog-groups.js';
 
 const job: Internship = { jobId: 'job-1', company: 'Acme', title: 'Software Intern', location: 'Remote', season: 'summer-2027', applyUrl: 'https://apply.example.test/role', normalizedUrl: 'https://apply.example.test/role', fingerprint: 'acme', compensation: { raw: '' }, sourceReferences: [], open: true, firstSeenAt: '2026-07-19T00:00:00.000Z', lastSeenAt: '2026-07-19T00:00:00.000Z', notification: { smsPending: false, digestPending: false } };
 const event = (userId: string | undefined, method: string, rawPath: string, body?: unknown, queryStringParameters?: Record<string, string>) => ({ rawPath, queryStringParameters, body: body === undefined ? undefined : JSON.stringify(body), requestContext: { http: { method }, ...(userId ? { authorizer: { jwt: { claims: { sub: userId } } } } : {}) } });
@@ -12,6 +13,28 @@ const hasUndefined = (value: unknown): boolean =>
 
 describe('public API ownership boundary', () => {
   afterEach(() => vi.useRealTimers());
+  it('uses one cache snapshot for global ranking and retains it through projection filtering and details', async () => {
+    const jobs = new MemoryInternshipStore();
+    const values = ['Acme', 'Other', 'Microsoft'].map((company, index) => ({ ...job,
+      jobId: `size-${index}`, company, fingerprint: `size-${index}`, normalizedUrl: `https://apply.example.test/size-${index}` }));
+    for (const value of values) await jobs.putInternship(value);
+    await jobs.putCatalogProjection(groupCatalogJobs(values).map(catalogGroupDetails), new Date().toISOString());
+    const companySizes = vi.fn(async () => new Map([['acme', 55], ['other', 85], ['microsoft', 50]]));
+    const handler = createApiHandler({ jobs, users: new MemoryUserStore(), companySizes });
+    const first = JSON.parse((await handler(event(undefined, 'GET', '/catalog', undefined, { sort: 'best', limit: '1' }))).body);
+    expect(first.groups[0]).toMatchObject({ company: 'Microsoft', opportunity: { company: 95, companyEvidence: 'reviewed' } });
+    expect(companySizes).toHaveBeenCalledTimes(1);
+    const second = JSON.parse((await handler(event(undefined, 'GET', '/catalog', undefined, { sort: 'best', limit: '1', cursor: first.cursor }))).body);
+    expect(second.groups[0]).toMatchObject({ company: 'Other', opportunity: { company: 85, companyEvidence: 'size' } });
+    const detail = JSON.parse((await handler(event(undefined, 'GET', `/catalog/groups/${second.groups[0].groupId}`, undefined, { sort: 'best' }))).body);
+    expect(detail.group.opportunity).toMatchObject({ company: 85, companyEvidence: 'size' });
+    companySizes.mockRejectedValueOnce(new Error('cache unavailable'));
+    const neutral = JSON.parse((await handler(event(undefined, 'GET', '/catalog', undefined, { sort: 'best' }))).body);
+    expect(neutral.groups.filter((group: { company: string }) => group.company !== 'Microsoft').every((group: { opportunity: { company: number } }) => group.opportunity.company === 50)).toBe(true);
+    const reads = companySizes.mock.calls.length;
+    await handler(event(undefined, 'GET', '/catalog', undefined, { sort: 'newest' }));
+    expect(companySizes).toHaveBeenCalledTimes(reads);
+  });
   it('keeps bounded crawler requests to one store page even when publication filters it empty', async () => {
     const jobs = new MemoryInternshipStore();
     const page = vi.spyOn(jobs, 'listOpen').mockResolvedValue({ jobs: [{ ...job, postingIdentityStatus: 'unconfirmed' }], cursor: '100' });

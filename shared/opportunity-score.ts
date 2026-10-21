@@ -6,7 +6,7 @@ export interface OpportunityScore {
   company: number;
   pay: number;
   role: number;
-  companyEvidence: 'reviewed' | 'unrated';
+  companyEvidence: 'reviewed' | 'lookup' | 'size' | 'unrated';
   payEvidence: 'listed' | 'unknown';
   reasons: string[];
 }
