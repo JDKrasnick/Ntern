@@ -452,7 +452,7 @@ export class MemoryInternshipStore implements InternshipStore {
     const matching = filterCatalogGroupDetails(this.catalogProjection.groups, filter)
       .filter((details) => !overlay || !overlaySupersedesGroup(overlay, details));
     if (filter.sort === 'best') {
-      const ranked = rankCatalogGroups([...matching, ...filterCatalogGroupDetails(overlay?.groups ?? [], filter)]);
+      const ranked = rankCatalogGroups([...matching, ...filterCatalogGroupDetails(overlay?.groups ?? [], filter)], filter.companySizes);
       return { groups: structuredClone(ranked.slice(offset, offset + limit)),
         ...(offset + limit < ranked.length ? { cursor: String(offset + limit) } : {}) };
     }

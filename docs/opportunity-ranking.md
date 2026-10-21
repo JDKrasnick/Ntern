@@ -49,11 +49,20 @@ lower/upper bound, pinned when selected and preserved across pagination.
   evidence; they are not externally measured prestige, guarantees of internship
   quality, or investment ratings. Unknown employers receive 50, independently
   of employer category, application platform, company-name length or link shape.
-  Initial coverage is deliberately limited; an unrated employer is not a bad one.
+  Initial reviewed coverage is deliberately limited; an unrated employer is not a bad one.
   Expansion follows the hybrid policy: gather primary evidence, propose a score
   under the rubric, then review major employers and uncertain cases in a normal
-  reviewed repository change. No live model calls or unreviewed ratings run on
-  catalog requests. Automated evidence collection is not implemented in v1.
+  reviewed repository change. No external company lookup runs on catalog requests.
+  The existing `src/config/weights.ts` company tiers provide the active simple
+  fallback, marked `companyEvidence: lookup`: 100, 80 or 60 points, with exact
+  normalized names and explicit aliases. These are presets, not newly researched
+  ratings. Reviewed scores take priority. Unknown companies stay neutral at 50.
+  An optional People Data Labs lookup supplies a cached company-size fallback,
+  marked `companyEvidence: size`, after both tables. Employee counts below
+  50 score 50, 50–199 score 55, 200–999 score 65, 1,000–9,999 score 75, and
+  10,000+ score 85. This is a rough company-size proxy, not a prestige assessment.
+  Missing, expired, unsupported, or failed lookups remain neutral at 50.
+
 - **Pay:** use the disclosed minimum base pay, never the maximum of a wide range.
   Missing, invalid, unsupported, ambiguous, multiple, degree-specific or
   location-specific bands receive 50. Housing, bonuses and equity are excluded.
@@ -82,6 +91,40 @@ do not yet adjust for cities, living costs or role-specific salary distributions
 Unsupported currencies stay neutral. “Higher listed pay” means at least 70 under
 this policy, not a verified market percentile. Calibrate these anchors against a
 reviewed catalog sample before a production rollout.
+
+### Optional company-size lookup
+
+The server-only `PDL_API_KEY` secret and `COMPANY_SIZE_LOOKUP_ENABLED=true` are
+both required. The flag defaults off and remains off while provider access is
+unavailable. A configured key alone makes zero provider requests. Never put the
+key in mobile configuration or commit it. Provision it only on the ingestion
+Worker; the API Worker reads the shared cache and forwards operations privately.
+
+The existing ten-minute icon maintenance schedule processes up to five distinct
+open-catalog employers after checking D1 pressure. It uses a known employer
+website domain when available, never an ATS host. Domain matches require
+likelihood 6 and an exact matched website; name-only matches require likelihood
+5 and an exact normalized name. Requests use the fixed PDL endpoint, an eight-second
+timeout, a 16 KiB response limit, and no automatic retries or redirects.
+
+Migration `0058_company_size_cache.sql` persists results independently of jobs.
+Matches last 30 days and no-match results last seven days. A shared lease prevents
+concurrent paid refreshes. Any provider error stops the batch and pauses further
+refreshes for an hour. Catalog reads use one score snapshot for both global
+ranking and selected-page hydration; cache failures retain neutral scores.
+
+Operations-key protected endpoints:
+
+- `GET /internal/company-sizes`: all open-catalog employer names, role counts,
+  cache coverage and configuration presence, without credentials.
+- `POST /internal/company-sizes/refresh` with `{ "limit": 5 }`: refresh at most
+  25 due employers. A disabled flag means `skipped: disabled`; no key means
+  `skipped: missing-key`. Both make zero paid calls.
+
+`npx tsx scripts/audit-company-sizes.ts` audits all pages of the live public
+catalog, saves a reproducible snapshot under `.context/`, and checks each
+representative against every fallback band. It reports synthetic scenarios
+separately from real provider coverage and performs no paid provider lookups.
 
 ## Grouping, paging and explanations
 

@@ -1442,6 +1442,33 @@ type CatalogCardProps = {
 function CatalogListSkeleton({ count = 5 }: { count?: number }) {
   const { width } = useWindowDimensions();
   const wide = Platform.OS === "web" && catalogListUsesColumns(width);
+  if (Platform.OS === "web") return (
+    <View accessibilityRole="progressbar" accessibilityLabel="Loading internships" style={styles.catalogListSkeleton}>
+      {Array.from({ length: count }, (_, index) => (
+        <View key={index} style={[styles.catalogListRow, wide && styles.catalogListRowWide]}>
+          <View style={styles.catalogListEmployer}><View style={styles.companyMarkSkeleton} /></View>
+          <View style={[styles.catalogListPrimary, { overflow: "hidden" }]}>
+            <Skeleton width={220} height={14} />
+            <View style={styles.skeletonGap8} />
+            <Skeleton width={108} height={12} />
+            {!wide ? <><View style={styles.skeletonGap8} /><Skeleton width={156} height={12} /></> : null}
+          </View>
+          {wide ? <>
+            <View style={styles.catalogMetadataColumns}>
+              <View style={styles.catalogSeasonColumn}><Skeleton width={72} height={12} /></View>
+              <View style={styles.catalogEducationColumn}><Skeleton width={104} height={12} /></View>
+            </View>
+            <View style={styles.catalogListDetails}><Skeleton width={108} height={12} /></View>
+            <View style={styles.catalogListPay}><Skeleton width={58} height={12} /></View>
+          </> : null}
+          <View style={[styles.catalogListActivity, !wide && styles.catalogListActivityMobile]}>
+            <Skeleton width={wide ? 60 : 18} height={12} />
+            {wide ? <Skeleton width={76} height={12} /> : null}
+          </View>
+        </View>
+      ))}
+    </View>
+  );
   return (
     <View accessibilityRole="progressbar" accessibilityLabel="Loading internships" style={styles.catalogListSkeleton}>
       {Array.from({ length: count }, (_, index) => (
@@ -4740,10 +4767,39 @@ function SwipeScreen({
 function AppLoadingSkeleton() {
   const { width } = useWindowDimensions();
   const usesNavigationRail = width >= 700;
-  // The boot lands on Roles, whose wide rows inset their content by 20; the ghost
-  // header and rows use the same gutter so the shell does not shift when the real
-  // feed arrives.
-  const wideRolesRow = Platform.OS === "web" && width >= 900;
+  if (Platform.OS === "web") {
+    const navigation = <View style={[styles.nav, usesNavigationRail && styles.navRail, styles.catalogNavigation]}>
+      {Array.from({ length: 7 }, (_, index) => <View key={index} style={[styles.navItem, usesNavigationRail && styles.navRailItem]}>
+        <Skeleton width={22} height={22} />
+        <View style={styles.skeletonGap8} />
+        <Skeleton width={40} height={10} />
+      </View>)}
+    </View>;
+    return <SafeAreaView style={[styles.screen, styles.catalogCanvas]} accessibilityRole="progressbar" accessibilityLabel="Loading your internships">
+      <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
+        {usesNavigationRail ? navigation : null}
+        <View style={styles.appMain}>
+          <View style={styles.catalogPageColumn}>
+            <View style={styles.catalogFeedHeader}>
+              <View style={styles.catalogFilterToolbar}>
+                <View style={styles.catalogToolbarSearch}><Skeleton width={180} height={14} /></View>
+                <View style={styles.catalogSortTrigger}><Skeleton width={78} height={14} /></View>
+                <View style={styles.catalogToolbarControls}>
+                  <View style={styles.catalogToolbarSegments}><View style={{ width: 202, height: 38, justifyContent: "center", paddingHorizontal: 12 }}><Skeleton width={178} height={14} /></View></View>
+                  <View style={styles.catalogSortTrigger}><Skeleton width={64} height={14} /></View>
+                </View>
+              </View>
+            </View>
+            {catalogListUsesColumns(width) ? <CatalogColumnHeadings /> : null}
+            <CatalogListSkeleton count={8} />
+          </View>
+        </View>
+        {!usesNavigationRail ? navigation : null}
+      </View>
+    </SafeAreaView>;
+  }
+  // Preserve the native startup presentation.
+  const wideRolesRow = false;
   return (
     <SafeAreaView
       style={styles.screen}
