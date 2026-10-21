@@ -1505,7 +1505,8 @@ function CatalogFreshnessLabel({ label, isNew }: { label: string; isNew: boolean
 function CatalogMetadataColumns({ seasons, education, wide = false }: { seasons: string[]; education: CatalogEducation[]; wide?: boolean }) {
   const values = catalogMetadataTags(seasons, education);
   const season = values.filter(item => item.kind === 'season' || item.label === 'Season unspecified').map(item => item.label.replace('Season unspecified', 'Not specified')).join(' · ');
-  const audience = values.filter(item => item.kind === 'education' || item.label.startsWith('Education ')).map(item => item.label.replace('Education unspecified', 'Not specified').replace('Education unclear', 'Conflicting sources')).join(' / ');
+  const audienceLabels = values.filter(item => item.kind === 'education' || item.label.startsWith('Education ')).map(item => item.label.replace('Education unspecified', 'Not specified').replace('Education unclear', 'Conflicting sources'));
+  const audience = audienceLabels.map(label => audienceLabels.length > 2 ? label.replace(/^Undergrad\b/u, 'UGrad') : label).join('/');
   return <View style={[styles.catalogMetadataColumns, !wide && styles.catalogMetadataColumnsMobile]}>
     <View style={styles.catalogSeasonColumn}>
       {!wide ? <Text style={styles.catalogMetadataCaption}>Season</Text> : null}
@@ -1513,7 +1514,7 @@ function CatalogMetadataColumns({ seasons, education, wide = false }: { seasons:
     </View>
     <View style={styles.catalogEducationColumn}>
       {!wide ? <Text style={styles.catalogMetadataCaption}>Education</Text> : null}
-      <Text style={[styles.catalogMetadataValue, values.some(item => item.kind === 'education') && styles.catalogEducationValue]}>{audience}</Text>
+      <Text style={styles.catalogMetadataValue} numberOfLines={1}>{audience}</Text>
     </View>
   </View>;
 }
@@ -10968,7 +10969,6 @@ const styles = StyleSheet.create({
   catalogMetadataCaption: { color: catalogColors.secondary, fontSize: 10, lineHeight: 15, marginBottom: 1 },
   catalogMetadataValue: { color: catalogColors.text, fontSize: 12, lineHeight: 18 },
   catalogSeasonValue: { color: "#24699C", fontWeight: "500" },
-  catalogEducationValue: { color: "#72549B", fontWeight: "500" },
   catalogPayValue: { color: catalogColors.pay, fontWeight: "500" },
   catalogListDetails: Platform.OS === "web" ? ({ minWidth: 0, paddingRight: 18, width: 150 }) : ({ minWidth: 0, paddingRight: 18, width: 220 }),
   catalogListLocation: Platform.OS === "web" ? ({ color: catalogColors.secondary, fontSize: 13, fontWeight: "400", lineHeight: 19 }) : ({ color: colors.body, fontSize: 13, fontWeight: "600", lineHeight: 18 }),
