@@ -46,6 +46,40 @@ function indexColumns(database: DatabaseSync, index: string): string[] {
 }
 
 describe('employer icon resolution migration', () => {
+  it.each(['missing', 'known', 'inactive', 'resolved', 'invalidated', 'corporate', 'reviewed-domain', 'stored-icon', 'inflight', 'blocked-sibling'])(
+    'restores current catalog evidence while preserving %s decisions', (state) => {
+      const database = migrated();
+      database.exec(readFileSync(new URL('../cloudflare/migrations/0001_initial.sql', import.meta.url), 'utf8'));
+      database.exec(readFileSync(new URL('../cloudflare/migrations/0013_canonical_employer_icons.sql', import.meta.url), 'utf8'));
+      database.prepare(`UPDATE canonical_employers SET icon_tie_break_at='old', icon_tie_break_fingerprint='fp',
+        icon_resolution_status=?, icon_key=?, website_domain_source=? WHERE id='acme'`)
+        .run(['resolved', 'invalidated'].includes(state) ? state : 'unresolved',
+          state === 'stored-icon' ? 'company-icons/acme/reviewed.png' : null, state === 'reviewed-domain' ? 'reviewed' : 'automatic');
+      database.prepare(`INSERT INTO employer_icon_resolutions
+        (id,canonical_employer_id,evidence_fingerprint,status,evidence_json,next_retry_at,lease_until,review_priority,created_at,updated_at)
+        VALUES ('repair','acme','fp','unresolved',?,'2099-01-01',?,?,'old','old')`)
+        .run(state === 'known' ? '{"provenance":"reviewed-community"}' : '{}',
+          state === 'inflight' ? '2100-01-01' : null, state === 'corporate' ? 50 : 10);
+      if (state === 'blocked-sibling') insertTask(database, 'blocked', 'blocked', 'invalidated');
+      database.prepare(`INSERT INTO catalog_items(pk,sk,kind,value) VALUES
+        ('CATALOG_PROJECTION','CURRENT','catalog-projection','{"version":"current"}'),
+        ('CATALOG_PROJECTION#MANIFESTS','current','catalog-projection',?)`)
+        .run(JSON.stringify({ keys: state === 'inactive' ? [] : ['active'] }));
+      database.prepare(`INSERT INTO catalog_items(pk,sk,kind,value) VALUES
+        ('CATALOG_PROJECTION#GROUPS','active','catalog-projection',?)`)
+        .run(JSON.stringify({ group: { featuredRole: { canonicalEmployerId: 'acme',
+          sourceReferences: [{ provenance: 'reviewed-community' }] } } }));
+      const beforeRoles = database.prepare('SELECT * FROM catalog_items ORDER BY pk,sk').all();
+      database.exec(readFileSync(new URL('../cloudflare/migrations/0063_restore_catalog_icon_provenance.sql', import.meta.url), 'utf8'));
+      expect(database.prepare("SELECT icon_tie_break_at FROM canonical_employers WHERE id='acme'").get())
+        .toMatchObject({ icon_tie_break_at: state === 'missing' ? null : 'old' });
+      expect(database.prepare("SELECT next_retry_at FROM employer_icon_resolutions WHERE id='repair'").get())
+        .toMatchObject({ next_retry_at: state === 'missing' ? '1970-01-01T00:00:00.000Z' : '2099-01-01' });
+      expect(database.prepare('SELECT * FROM catalog_items ORDER BY pk,sk').all()).toEqual(beforeRoles);
+      database.close();
+    },
+  );
+
   it('registers missing reviewed source IDs without replacing existing reviewer choices', () => {
     const database = migrated();
     database.exec(readFileSync(new URL('../cloudflare/migrations/0013_canonical_employer_icons.sql', import.meta.url), 'utf8'));

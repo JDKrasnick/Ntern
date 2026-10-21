@@ -2142,6 +2142,52 @@ describe('employers needing resolution', () => {
 });
 
 describe('employer icon coverage v2', () => {
+  it('does not mistake a second evidence row for a never-attempted company', async () => {
+    const { database, admission, icons } = subject();
+    for (const id of ['old', 'new']) await admission.putCanonicalEmployer(employerRow(id, id), NOW.toISOString());
+    for (const [id, employer] of [['old-a', 'old'], ['old-b', 'old'], ['new', 'new']]) {
+      await icons.enqueue({ id: id!, canonicalEmployerId: employer!, evidenceFingerprint: id!, evidenceJson: '{}',
+        nextRetryAt: NOW.toISOString(), now: NOW.toISOString() });
+    }
+    database.exec(`INSERT INTO catalog_items (pk,sk,kind,value) VALUES
+      ('CATALOG_PROJECTION','CURRENT','catalog-projection','{"version":"company-first"}'),
+      ('CATALOG_PROJECTION#MANIFESTS','company-first','catalog-projection','{"keys":["old","new"]}'),
+      ('CATALOG_PROJECTION#GROUPS','old','catalog-projection','{"group":{"roleCount":100,"featuredRole":{"canonicalEmployerId":"old"}}}'),
+      ('CATALOG_PROJECTION#GROUPS','new','catalog-projection','{"group":{"roleCount":1,"featuredRole":{"canonicalEmployerId":"new"}}}')`);
+    expect((await icons.claimDue(NOW.toISOString(), 1, 60_000))[0]?.id).toBe('old-a');
+    database.prepare("UPDATE employer_icon_resolutions SET attempts=1, lease_until=NULL, next_retry_at='2099-01-01' WHERE id='old-a'").run();
+    expect((await icons.claimDue(NOW.toISOString(), 1, 60_000))[0]?.canonicalEmployerId).toBe('new');
+  });
+
+  it('restores reviewed provenance from the current catalog for a seedless canonical task', async () => {
+    const { database, db, admission, icons } = subject();
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 1 }, NOW.toISOString());
+    await admission.putCanonicalEmployer(employerRow('nova', 'NovaQuantum Systems'), NOW.toISOString());
+    await icons.enqueue({ id: 'old-seed', canonicalEmployerId: 'nova', evidenceFingerprint: 'old-seed',
+      evidenceJson: '{}', nextRetryAt: NOW.toISOString(), now: NOW.toISOString() });
+    const url = 'https://novaquantum.wd5.myworkdayjobs.com/careers/job/Intern_R-123';
+    database.exec(`INSERT INTO catalog_items (pk,sk,kind,value) VALUES
+      ('CATALOG_PROJECTION','CURRENT','catalog-projection','{"version":"reviewed"}'),
+      ('CATALOG_PROJECTION#MANIFESTS','reviewed','catalog-projection','{"keys":["nova"]}')`);
+    database.prepare(`INSERT INTO catalog_items (pk,sk,kind,value) VALUES ('CATALOG_PROJECTION#GROUPS','nova','catalog-projection',?)`)
+      .run(JSON.stringify({ group: { roleCount: 10, featuredRole: { canonicalEmployerId: 'nova', company: 'NovaQuantum Systems',
+        title: 'Intern', officialApplyUrl: url, sourceReferences: [{ sourceId: 'reviewed-list', provenance: 'reviewed-community' }] } } }));
+    const imageUrl = logoDevImageUrl('novaquantum.com', LOGO_IMAGE_TOKEN);
+    const fetchImpl = scriptedFetch({
+      [url]: () => html('<html><title>Workday</title></html>'),
+      [logoDevSearchUrl('NovaQuantum Systems')]: () => ok([{ name: 'NovaQuantum Systems', domain: 'novaquantum.com' }]),
+      [imageUrl]: () => webp(),
+      'https://novaquantum.com/': () => status(403),
+    });
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {
+      LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN,
+    }), NOW, DEPENDENCIES(fetchImpl), { backfill: false });
+    expect(result.resolved).toBe(1);
+    const decision = database.prepare("SELECT evidence_json FROM employer_icon_resolutions WHERE id='old-seed'").get()!;
+    expect(JSON.parse(decision.evidence_json as string)).toMatchObject({ provenance: 'reviewed-community', sourceId: 'reviewed-list',
+      applicationUrl: url, provider: 'workday', tenant: 'novaquantum', reasonCode: 'domain-accepted' });
+  });
+
   it('prioritizes fresh active discoveries by role count ahead of exhausted retries and stale groups', async () => {
     const { database, admission, icons } = subject();
     const independent = await icons.registerIdentity({ canonicalEmployerId: '', displayName: 'Novel Robotics',

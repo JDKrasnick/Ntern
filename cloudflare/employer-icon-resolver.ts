@@ -252,7 +252,7 @@ export async function runEmployerIconResolutionPass(
     const tasks = await store.claimDue(now.toISOString(), maximum, ICON_LEASE_MS);
     result.claimed = tasks.length;
     console.log(JSON.stringify({ event: 'company_icon_resolution_started', mode: settings.mode,
-      claimed: tasks.length, firstAttempts: tasks.filter((task) => task.attempts === 0).length,
+      claimed: tasks.length, firstAttempts: tasks.filter((task) => task.previouslyAttempted === false).length,
       concurrency: Math.min(2, tasks.length) }));
     const providerOutcomes: Record<string, number> = {};
     const confirmation: ConfirmationStats = { probes: 0, ties: 0 };
@@ -419,6 +419,7 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
       seed = { ...seed, applicationUrl: posting.url, roleTitle: posting.title ?? seed.roleTitle,
         provider: reference.provider !== 'unknown' ? reference.provider : posting.provider ?? seed.provider,
         ...(reference.tenant ? { tenant: reference.tenant } : {}),
+        ...(posting.sourceId ? { sourceId: posting.sourceId } : {}),
         ...(posting.provenance ? { provenance: posting.provenance } : {}) };
     }
   }
