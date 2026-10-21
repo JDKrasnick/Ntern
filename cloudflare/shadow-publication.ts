@@ -138,7 +138,8 @@ export async function publishProspectiveShadowMetadata(env: {
     contentHash: run.content_hash, observedAt: run.observed_at, extractionVersion: ROLE_METADATA_EXTRACTION_VERSION,
     allowedFields: acceptedFields });
   if (!evidence) throw new Error('Verified fields yielded no publishable evidence');
-  const latest = await jobs.getJob(run.job_id);
+  const snapshot = await jobs.getJobSnapshot(job!.jobId);
+  const latest = snapshot?.job;
   if (!latest?.open || !latest.sourceReferences.some(reference => reference.sourceId === run.source_id
     && reference.externalId === run.external_id)) throw new Error('Catalog role is no longer open with exact source');
   await currentRevision(env.DB, run);
@@ -148,7 +149,11 @@ export async function publishProspectiveShadowMetadata(env: {
   const operations = new D1CatalogAdmissionStore(env.DB);
   await operations.recordRoleMetadataEvidence(run.job_id, [evidence], projected.conflicts, run.observed_at,
     { sourceId: run.source_id, sourceClasses: ['reviewed-shadow'] });
-  await jobs.putInternship(projected.job);
+  const expectedReference = latest.sourceReferences.find(reference => reference.sourceId === run.source_id
+    && reference.externalId === run.external_id)!;
+  if (!await jobs.putAdmissionState(projected.job, expectedReference, undefined, undefined, undefined, snapshot!.value)) {
+    throw new Error('Catalog job changed during shadow publication; retry the unprojected receipt');
+  }
   await refreshProjection();
   await env.DB.prepare(`UPDATE shadow_publication_receipts SET projected_at = ?
     WHERE receipt_id = ? AND revoked_at IS NULL AND projected_at IS NULL`)
@@ -363,7 +368,9 @@ export async function handleShadowPublication(request: Request, env: {
     const publishable = shadowPublishableFields(reviewed.extraction, acceptedFields);
     if (publishable.length !== acceptedFields.length) throw new Error('Receipt fields do not contain publishable values');
     const jobs = new D1InternshipStore(env.DB);
-    const job = await jobs.getJob(run.job_id);
+    const canonicalJob = await jobs.getJob(run.job_id);
+    const snapshot = canonicalJob && await jobs.getJobSnapshot(canonicalJob.jobId);
+    const job = snapshot?.job;
     if (!job?.open) throw new Error('Open catalog job was not found');
     if (!job.sourceReferences.some(reference => reference.sourceId === run.source_id && reference.externalId === run.external_id)) {
       throw new Error('Exact source occurrence is no longer attached to the catalog job');
@@ -410,11 +417,19 @@ export async function handleShadowPublication(request: Request, env: {
         await operations.recordRoleMetadataEvidence(run.job_id, evidence && sourceId === run.source_id ? [evidence] : [],
           projected.conflicts, revision.observed_at, { sourceId, sourceClasses: classes });
       }
-      await env.DB.prepare(`UPDATE shadow_publication_receipts SET revoked_at = ? WHERE job_id = ? AND receipt_id != ? AND revoked_at IS NULL`)
-        .bind(new Date().toISOString(), run.job_id, receiptId).run();
     } else await operations.recordRoleMetadataEvidence(run.job_id, evidence ? [evidence] : [], projected.conflicts, revision.observed_at,
       { sourceId: run.source_id, sourceClasses: ['reviewed-shadow'] });
-    await jobs.putInternship(projected.job);
+    const expectedReference = job.sourceReferences.find(reference => reference.sourceId === run.source_id
+      && reference.externalId === run.external_id)!;
+    // Retire receipts against the pre-write snapshot in the same transaction as
+    // the job update. A delayed request cannot retire a newer replacement.
+    const retireReceipts = replaceExisting ? [env.DB.prepare(`UPDATE shadow_publication_receipts
+      SET revoked_at = ? WHERE job_id = ? AND receipt_id != ? AND revoked_at IS NULL
+        AND EXISTS (SELECT 1 FROM catalog_items WHERE pk = ? AND sk = 'META' AND kind = 'internship' AND value = ?)`)
+      .bind(new Date().toISOString(), run.job_id, receiptId, `JOB#${job.jobId}`, snapshot!.value)] : [];
+    if (!await jobs.putAdmissionState(projected.job, expectedReference, undefined, undefined, undefined, snapshot!.value, retireReceipts)) {
+      throw new Error('Catalog job changed during shadow publication; retry the unprojected receipt');
+    }
     if (approvedRelease && input.deferProjection === true) {
       return Response.json({ receiptId, evidenceFingerprint, policyVersion: policy.version, acceptedFields, publishedFields,
         published: true, projectionDeferred: true });

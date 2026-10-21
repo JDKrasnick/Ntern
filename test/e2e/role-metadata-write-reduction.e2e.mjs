@@ -19,6 +19,7 @@
  * evidence and reaches the guarded repair plan.
  */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -40,6 +41,7 @@ const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 // The runtime's own fetch, restored after every stubbed delivery.
 const realFetch = globalThis.fetch;
 const workerName = 'intern-notifs-e2e-metadata';
+const apiWorkerName = 'intern-notifs-e2e-metadata-api';
 const operationsSecret = 'e2e-operations-secret';
 const internalServiceSecret = 'e2e-internal-service-secret';
 const destinationVerificationQueue = 'intern-notifs-destination-verification';
@@ -205,11 +207,17 @@ before(async () => {
       TRUSTED_COMMUNITY_CATALOG_ENABLED: { type: 'text', value: 'false' },
       PUBLIC_API_URL: { type: 'text', value: 'https://api.example.test' },
       DB: { type: 'd1', id: 'intern-notifs-e2e-metadata' },
+      DOCUMENTS: { type: 'r2', name: 'intern-notifs-e2e-metadata-documents' },
       DESTINATION_VERIFICATION_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-metadata-destination' },
       DESTINATION_VERIFICATION_DLQ: { type: 'queue', name: 'intern-notifs-e2e-metadata-destination-dlq' },
       SHADOW_EXTRACTION_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-metadata-shadow' },
       SHADOW_EXTRACTION_ARTIFACTS: { type: 'r2', name: 'intern-notifs-e2e-metadata-artifacts' },
       SHADOW_EXTRACTION_DLQ: { type: 'queue', name: 'intern-notifs-e2e-metadata-shadow-dlq' },
+    }), await createWorkerConfig(apiWorkerName, join(repositoryRoot, 'cloudflare/dist/api'), 'api-worker.js', {
+      DEPLOYMENT_ROLE: { type: 'text', value: 'api' },
+      PUBLIC_API_URL: { type: 'text', value: 'https://api.example.test' },
+      IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: { type: 'text', value: 'false' },
+      DB: { type: 'd1', id: 'intern-notifs-e2e-metadata' },
     })],
   });
   await runtime.ready;
@@ -234,10 +242,18 @@ async function operations(path, init = {}) {
 }
 
 /** Delivers one message to the compiled destination-verification consumer. */
-async function deliver(body, injectedFetch) {
+async function deliver(body, injectedFetch, { beforeCommit, loseQueueAck = false } = {}) {
   const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
   const counter = countingDatabase(database);
+  const batch = counter.batch.bind(counter);
+  counter.batch = async (statements) => {
+    if (beforeCommit && statements.some((statement) => statement.sql.startsWith('UPDATE catalog_items SET kind'))) {
+      const update = beforeCommit; beforeCommit = undefined; await update();
+    }
+    return batch(statements);
+  };
   const settled = { ack: 0, retry: [] };
+  const shadowMessages = [];
   globalThis.fetch = injectedFetch;
   try {
     await builtWorker.queue({ queue: destinationVerificationQueue, messages: [{
@@ -248,7 +264,7 @@ async function deliver(body, injectedFetch) {
       DB: counter,
       DESTINATION_VERIFICATION_QUEUE: { send: async () => undefined, sendBatch: async () => undefined },
       DESTINATION_VERIFICATION_DLQ: { send: async () => undefined, sendBatch: async () => undefined },
-      SHADOW_EXTRACTION_QUEUE: { send: async () => undefined, sendBatch: async () => undefined },
+      SHADOW_EXTRACTION_QUEUE: { send: async (message) => { shadowMessages.push(message); if (loseQueueAck) throw new Error('Injected send acknowledgement lost after acceptance'); }, sendBatch: async () => undefined },
       SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
       SHADOW_EXTRACTION_DLQ: { send: async () => undefined, sendBatch: async () => undefined },
       IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'false',
@@ -258,7 +274,7 @@ async function deliver(body, injectedFetch) {
   } finally {
     globalThis.fetch = realFetch;
   }
-  return { counter, settled };
+  return { counter, settled, shadowMessages };
 }
 
 /** Serves the recorded real response for one board job, and nothing else. */
@@ -368,8 +384,8 @@ test('collects one real artifact, then replays it without rewriting evidence', a
   const afterReplay = await revisions();
   assert.deepEqual(afterReplay.jobs, jobsAfterFirst.jobs, 'a replay must not expire a staged review');
   assert.equal(afterReplay.metadata, jobsAfterFirst.metadata + 1, 'only the observation trigger advances the metadata revision');
-  assert.equal((await shadowArtifacts.list()).objects.length, 1,
-    'an unchanged replay must not add a downstream artifact');
+  assert.equal((await shadowArtifacts.list()).objects.length, 2,
+    'each observation retains its immutable verification envelope');
   const replayedAttempt = await dump('SELECT artifact_hash, observed_at FROM role_metadata_extraction_attempts');
   assert.equal(replayedAttempt.length, 1);
   assert.ok(replayedAttempt[0].observed_at > attempts[0].observed_at,
@@ -448,3 +464,265 @@ test('reads the live provider response and replays it without rewriting evidence
       'the live replay must advance the observation row');
     assert.deepEqual(calls, [apiUrl, apiUrl]);
   });
+
+
+// Exercise the production bundle against real D1 transactions and R2, then
+// verify the metadata through the compiled public API after budget rejection.
+for (const channel of ['sms', 'digest']) {
+  for (const stage of ['acquisition', 'commit']) {
+    test(`provider metadata preserves ${channel} completion during ${stage}, redelivery, and model budget rejection`, async () => {
+      const document = jobDocument();
+      document.notification = { smsPending: true, digestPending: true };
+      await database.prepare("UPDATE catalog_items SET value = ?, sms_pending = 1, digest_pending = 1 WHERE pk = ? AND sk = 'META'")
+        .bind(JSON.stringify(document), `JOB#${jobId}`).run();
+      const description = `Software Engineering Intern. Pay: USD 50 - 60 per hour. Test revision ${channel} ${stage}.`;
+      const payload = { ...capturedPayload, content: description, pay_input_ranges: [], location: { name: 'Austin, TX' } };
+      const contentHash = createHash('sha256').update(JSON.stringify({ title: document.title, description, completeness: 'complete' })).digest('hex');
+      const body = { ...collectionMessage(), reason: 'content-change', shadowOrigin: 'provider-poll', shadowContentHash: contentHash,
+        idempotencyKey: `e2e-notification-${channel}-${stage}` };
+      const pendingField = channel === 'sms' ? 'smsPending' : 'digestPending';
+      const sentField = channel === 'sms' ? 'smsSentAt' : 'digestedAt';
+      const pendingColumn = channel === 'sms' ? 'sms_pending' : 'digest_pending';
+      const sentAt = '2026-10-20T00:00:30Z';
+      async function completeNotification() {
+        const row = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'").bind(`JOB#${jobId}`).first();
+        const latest = JSON.parse(row.value);
+        latest.notification[pendingField] = false; latest.notification[sentField] = sentAt;
+        await database.prepare(`UPDATE catalog_items SET value = ?, ${pendingColumn} = 0 WHERE pk = ? AND sk = 'META'`)
+          .bind(JSON.stringify(latest), `JOB#${jobId}`).run();
+      }
+      let updated = false;
+      const serve = payloadServer(payload, []);
+      const fetched = async (request) => {
+        if (stage === 'acquisition' && !updated) { updated = true; await completeNotification(); }
+        return serve(request);
+      };
+      let result = await deliver(body, fetched, stage === 'commit' ? { beforeCommit: completeNotification } : {});
+      if (stage === 'commit') {
+        assert.equal(result.settled.ack, 0);
+        assert.equal(result.settled.retry.length, 1);
+        assert.equal(result.shadowMessages.length, 0, 'a failed CAS must not hand off model work');
+        assert.equal(rowsWrittenFor(result.counter, /role_metadata_evidence/u), 0, 'a failed CAS must not publish evidence');
+        result = await deliver(body, fetched);
+      }
+      assert.deepEqual(result.settled.retry, []); assert.equal(result.settled.ack, 1);
+      assert.equal(result.shadowMessages.length, 1);
+      const duplicate = await deliver(body, fetched);
+      assert.equal(duplicate.settled.ack, 1); assert.equal(duplicate.shadowMessages.length, 0);
+
+      const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+      let modelAcks = 0;
+      globalThis.fetch = async () => { throw new Error('Budget-blocked model work must not make a network request'); };
+      try {
+        await builtWorker.queue({ queue: 'intern-notifs-shadow-extraction', messages: [{
+          id: `model-${channel}-${stage}`, body: result.shadowMessages[0], attempts: 1, timestamp: new Date(),
+          ack() { modelAcks++; }, retry() { throw new Error('Unexpected model retry'); },
+        }] }, { DB: database, SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
+          SHADOW_EXTRACTION_ENABLED: 'true', ANTHROPIC_API_KEY: 'synthetic-unused-test-key',
+          SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '0' });
+      } finally { globalThis.fetch = realFetch; }
+      assert.equal(modelAcks, 1);
+      const run = await database.prepare('SELECT state,error FROM shadow_extraction_runs WHERE run_key = ?').bind(result.shadowMessages[0].runKey).first();
+      assert.deepEqual(run, { state: 'disabled', error: 'cost headroom unavailable' });
+      const storedRow = await database.prepare(`SELECT value,${pendingColumn} AS pending FROM catalog_items WHERE pk = ? AND sk = 'META'`).bind(`JOB#${jobId}`).first();
+      const stored = JSON.parse(storedRow.value);
+      assert.equal(stored.notification[pendingField], false); assert.equal(stored.notification[sentField], sentAt);
+      assert.equal(storedRow.pending, 0); assert.equal(stored.open, true);
+      assert.deepEqual(stored.admission, document.admission);
+      const api = await runtime.getWorker(apiWorkerName);
+      const response = await api.fetch('https://api.example.test/jobs');
+      assert.equal(response.status, 200);
+      const publicRole = (await response.json()).jobs.find((job) => job.jobId === jobId);
+      assert.ok(publicRole, 'the enriched role must remain publicly visible');
+      assert.match(publicRole.compensation.raw, /50/u);
+      assert.match(publicRole.location, /Austin/u);
+    });
+  }
+}
+
+for (const mode of ['control', 'lost-ack', 'budget-recovery', 'publisher-race', 'replacement-race']) {
+  test(`verified publication ${mode}: repeated handoff retains verified publication`, async () => {
+    const document = jobDocument();
+    if (mode === 'publisher-race') document.notification = { smsPending: true, digestPending: false };
+    await database.prepare("UPDATE catalog_items SET value = ? WHERE pk = ? AND sk = 'META'")
+      .bind(JSON.stringify(document), `JOB#${jobId}`).run();
+    const description = `Software Engineering Intern\nAustin\n$50 - $60 per hour\nReview scenario ${mode}.`;
+    const payload = { ...capturedPayload, content: description, pay_input_ranges: [], location: { name: 'Austin' } };
+    const shadowContentHash = createHash('sha256').update(JSON.stringify({ title: document.title, description, completeness: 'complete' })).digest('hex');
+    const body = { ...collectionMessage(), reason: 'content-change', shadowOrigin: 'provider-poll', shadowContentHash,
+      idempotencyKey: `deep-review-${mode}` };
+    const first = await deliver(body, payloadServer(payload, []), { loseQueueAck: mode === 'lost-ack' });
+    const messages = [...first.shadowMessages];
+    if (mode === 'lost-ack') {
+      assert.equal(first.settled.ack, 0); assert.equal(first.settled.retry.length, 1);
+      const second = await deliver(body, payloadServer(payload, []));
+      assert.equal(second.settled.ack, 1); messages.push(...second.shadowMessages);
+    } else assert.equal(first.settled.ack, 1);
+    const blank = { value: null, status: 'not-stated', evidence: [], qualifiers: [] };
+    const output = { classification: { technical: 'yes', earlyCareer: 'yes', disciplines: ['software'] }, fields: {
+      compensation: { value: [{ min: 50, max: 60, currency: 'USD', period: 'hour' }], status: 'present', evidence: ['$50 - $60 per hour'], qualifiers: [] },
+      locations: { value: ['Austin'], status: 'present', evidence: ['Austin'], qualifiers: [] },
+      workMode: blank, housing: blank, timing: blank, education: blank, eligibility: blank,
+    } };
+    const devProfile = JSON.parse(await readFile(join(repositoryRoot, 'wrangler.dev.ingestion.jsonc'), 'utf8'));
+    const policy = { ...JSON.parse(devProfile.vars.LLM_METADATA_PUBLICATION_POLICY_JSON), startsAt: new Date(Date.now() - 60000).toISOString() };
+    const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+    let calls = 0;
+    globalThis.fetch = async (url) => {
+      assert.equal(url, 'https://api.anthropic.com/v1/messages'); calls++;
+      return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(output) }], usage: { input_tokens: 100, output_tokens: 50 } });
+    };
+    try {
+      if (mode === 'budget-recovery') {
+        await builtWorker.queue({ queue: 'intern-notifs-shadow-extraction', messages: [{ id: 'blocked', body: messages[0], attempts: 1, timestamp: new Date(), ack() {}, retry() { throw new Error('Unexpected budget retry'); } }] },
+          { DB: database, SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts, SHADOW_EXTRACTION_ENABLED: 'true', ANTHROPIC_API_KEY: 'unused-test-key',
+            SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '0', LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) });
+        assert.equal((await database.prepare('SELECT state FROM shadow_extraction_runs WHERE run_key = ?').bind(messages[0].runKey).first()).state, 'disabled');
+        assert.equal(calls, 0);
+      }
+      for (const message of messages) await builtWorker.queue({ queue: 'intern-notifs-shadow-extraction', messages: [{
+        id: 'deep-review-model', body: message, attempts: 1, timestamp: new Date(), ack() {}, retry() { throw new Error('Unexpected model retry'); },
+      }] }, { DB: database, SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts, SHADOW_EXTRACTION_ENABLED: 'true', ANTHROPIC_API_KEY: 'unused-test-key',
+        SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '3220',
+        LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) });
+    } finally { globalThis.fetch = realFetch; }
+    const run = await database.prepare('SELECT state,response_key FROM shadow_extraction_runs WHERE run_key = ?').bind(messages[0].runKey).first();
+    assert.equal(run.state, 'completed');
+    const saved = JSON.parse(await new Response((await shadowArtifacts.get(run.response_key)).body).text());
+    const { default: publisher } = await import(new URL('../../cloudflare/dist/catalog-publisher/catalog-publisher-worker.js', import.meta.url));
+    const publicationDb = countingDatabase(database);
+    const realBatch = publicationDb.batch.bind(publicationDb);
+    let raced = false;
+    let replacing = false;
+    publicationDb.batch = async (statements) => {
+      if (!raced && ((mode === 'publisher-race' && statements.some(item => /INSERT/iu.test(item.sql) && item.sql.includes('role_metadata_evidence')))
+        || (replacing && statements.some(item => item.sql.includes('UPDATE catalog_items') && item.sql.includes('AND (? IS NULL OR value = ?)'))))) {
+        raced = true;
+        const row = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'").bind(`JOB#${jobId}`).first();
+        const latest = JSON.parse(row.value); latest.notification = { smsPending: false, digestPending: false, smsSentAt: new Date().toISOString() };
+        await database.prepare("UPDATE catalog_items SET value = ?, sms_pending = 0 WHERE pk = ? AND sk = 'META'").bind(JSON.stringify(latest), `JOB#${jobId}`).run();
+      }
+      return realBatch(statements);
+    };
+    await publisher.scheduled({ cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() }, {
+      DB: publicationDb, DOCUMENTS: await runtime.getR2Bucket('DOCUMENTS', workerName), SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
+      INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true', LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy),
+    });
+    if (mode === 'publisher-race') {
+      const deferred = await database.prepare('SELECT projected_at FROM shadow_publication_receipts WHERE run_key = ?').bind(messages[0].runKey).first();
+      assert.equal(deferred.projected_at, null, 'a stale write must leave the receipt recoverable');
+      await publisher.scheduled({ cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() }, {
+        DB: publicationDb, DOCUMENTS: await runtime.getR2Bucket('DOCUMENTS', workerName), SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
+        INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true', LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy),
+      });
+    }
+    if (mode === 'replacement-race') {
+      const prior = await database.prepare('SELECT receipt_id FROM shadow_publication_receipts WHERE run_key=? AND projected_at IS NOT NULL').bind(messages[0].runKey).first();
+      assert.ok(prior);
+      replacing = true;
+      const replacementPolicy = { ...policy, cohort: [{ sourceId: messages[0].sourceId, externalId: messages[0].externalId, contentHash: messages[0].contentHash }] };
+      const replace = async (action = 'publish-approved') => builtWorker.fetch(new globalThis.Request('https://ingestion.example.test/internal/operations/shadow-publication', {
+        method: 'POST', headers: { 'X-InternNotifs-Service-Key': internalServiceSecret, 'X-Operations-Key': operationsSecret, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, runKey: messages[0].runKey, runKeys: [messages[0].runKey], replaceExisting: true,
+          deferProjection: true, acceptedFields: saved.verification.acceptedFields }),
+      }), { DB: publicationDb, DOCUMENTS: await runtime.getR2Bucket('DOCUMENTS', workerName), SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts, OPERATIONS_SHARED_SECRET: operationsSecret,
+        INTERNAL_SERVICE_SECRET: internalServiceSecret, LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(replacementPolicy) });
+      const conflicted = await replace();
+      const conflictBody = await conflicted.text();
+      assert.equal(conflicted.status, 409, conflictBody);
+      assert.match(conflictBody, /Catalog job changed/);
+      assert.equal(raced, true);
+      const retained = await database.prepare('SELECT revoked_at FROM shadow_publication_receipts WHERE receipt_id=?').bind(prior.receipt_id).first();
+      assert.equal(retained.revoked_at, null, 'a conflicted replacement must retain the previous publication receipt');
+      const recovered = await replace();
+      assert.equal(recovered.status, 200, await recovered.text());
+      const replaced = await database.prepare('SELECT revoked_at FROM shadow_publication_receipts WHERE receipt_id=?').bind(prior.receipt_id).first();
+      assert.ok(replaced.revoked_at, 'successful retry retires the previous receipt');
+      const refreshed = await replace('refresh-approved');
+      assert.equal(refreshed.status, 200, await refreshed.text());
+      const stored = await database.prepare("SELECT value,sms_pending FROM catalog_items WHERE pk=? AND sk='META'").bind(`JOB#${jobId}`).first();
+      assert.equal(JSON.parse(stored.value).notification.smsPending, false);
+      assert.ok(JSON.parse(stored.value).notification.smsSentAt);
+      assert.equal(stored.sms_pending, 0);
+    }
+    const receipts = await database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts WHERE run_key = ? AND projected_at IS NOT NULL AND revoked_at IS NULL').bind(messages[0].runKey).first();
+    console.log(JSON.stringify({ mode, calls, verified: Boolean(saved.verification), receipts: receipts.count }));
+    assert.equal(receipts.count, 1, 'a retried provider handoff must still reach verified metadata publication');
+    if (mode === 'publisher-race') {
+      assert.equal(raced, true, 'the test must interleave notification completion after the publisher read');
+      const stored = await database.prepare("SELECT value,sms_pending FROM catalog_items WHERE pk = ? AND sk = 'META'").bind(`JOB#${jobId}`).first();
+      assert.equal(JSON.parse(stored.value).notification.smsPending, false, 'verified publication must retain concurrent notification completion');
+      assert.equal(stored.sms_pending, 0);
+    }
+  });
+}
+
+for (const scenario of ['overlap', 'rollback']) {
+  test(`replacement receipt transaction survives ${scenario}`, async () => {
+    const run = await database.prepare(`SELECT * FROM shadow_extraction_runs
+      WHERE state='completed' ORDER BY completed_at DESC LIMIT 1`).first();
+    assert.ok(run);
+    const response = JSON.parse(await new Response((await shadowArtifacts.get(run.response_key)).body).text());
+    const profile = JSON.parse(await readFile(join(repositoryRoot, 'wrangler.dev.ingestion.jsonc'), 'utf8'));
+    const policy = { ...JSON.parse(profile.vars.LLM_METADATA_PUBLICATION_POLICY_JSON), version: `atomic-${scenario}-first`,
+      cohort: [{ sourceId: run.source_id, externalId: run.external_id, contentHash: run.content_hash }] };
+    const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+    const DB = countingDatabase(database);
+    const documents = await runtime.getR2Bucket('DOCUMENTS', workerName);
+    const publish = async (currentPolicy, action = 'publish-approved') => builtWorker.fetch(new globalThis.Request(
+      'https://ingestion.example.test/internal/operations/shadow-publication', {
+        method: 'POST', headers: { 'X-InternNotifs-Service-Key': internalServiceSecret, 'X-Operations-Key': operationsSecret,
+          'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, runKey: run.run_key, runKeys: [run.run_key], replaceExisting: true, deferProjection: true,
+          acceptedFields: response.verification.acceptedFields }),
+      }), { DB, DOCUMENTS: documents, SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
+        OPERATIONS_SHARED_SECRET: operationsSecret, INTERNAL_SERVICE_SECRET: internalServiceSecret,
+        LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(currentPolicy) });
+    const active = () => database.prepare(`SELECT receipt_id,policy_version FROM shadow_publication_receipts
+      WHERE job_id=? AND revoked_at IS NULL ORDER BY receipt_id`).bind(run.job_id).all();
+    const baseline = await publish(policy);
+    assert.equal(baseline.status, 200, await baseline.text());
+    const beforeReceipts = (await active()).results;
+    assert.equal(beforeReceipts.length, 1);
+    const beforeJob = await database.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='META'").bind(`JOB#${run.job_id}`).first();
+    const newerPolicy = { ...policy, version: `atomic-${scenario}-second` };
+    if (scenario === 'rollback') {
+      await database.prepare(`CREATE TRIGGER fail_replacement_job BEFORE UPDATE OF value ON catalog_items
+        WHEN OLD.pk='JOB#${jobId}' AND OLD.sk='META'
+        BEGIN SELECT RAISE(ABORT, 'injected replacement job failure'); END`).run();
+      try {
+        const failed = await publish(newerPolicy);
+        assert.equal(failed.status, 409, await failed.text());
+        const retained = (await active()).results.filter(receipt => beforeReceipts.some(previous => previous.receipt_id === receipt.receipt_id));
+        assert.deepEqual(retained, beforeReceipts, 'job failure must roll back receipt retirement');
+        const afterJob = await database.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='META'").bind(`JOB#${run.job_id}`).first();
+        assert.equal(afterJob.value, beforeJob.value);
+      } finally { await database.prepare('DROP TRIGGER fail_replacement_job').run(); }
+      const retry = await publish(newerPolicy);
+      assert.equal(retry.status, 200, await retry.text());
+    } else {
+      const batch = DB.batch.bind(DB);
+      let interleaved = false;
+      DB.batch = async statements => {
+        const result = await batch(statements);
+        if (!interleaved && statements.some(statement => statement.sql.includes('UPDATE catalog_items')
+          && statement.sql.includes('AND (? IS NULL OR value = ?)'))) {
+          interleaved = true;
+          const newer = await publish(newerPolicy);
+          assert.equal(newer.status, 200, await newer.text());
+        }
+        return result;
+      };
+      const older = await publish(policy);
+      assert.equal(older.status, 200, await older.text());
+      assert.equal(interleaved, true);
+    }
+    const remaining = (await active()).results;
+    assert.equal(remaining.length, 1, 'exactly one replacement must retain publication authority');
+    assert.equal(remaining[0].policy_version, newerPolicy.version);
+    const refreshed = await publish(newerPolicy, 'refresh-approved');
+    assert.equal(refreshed.status, 200, await refreshed.text());
+    const receipt = await database.prepare('SELECT projected_at FROM shadow_publication_receipts WHERE receipt_id=?').bind(remaining[0].receipt_id).first();
+    assert.ok(receipt.projected_at);
+  });
+}

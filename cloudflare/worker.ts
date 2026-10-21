@@ -170,6 +170,7 @@ export interface Environment extends AuthEnvironment,
   RESUME_TUNER_ENABLED?: string;
   SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS?: string;
   SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS?: string;
+  SHADOW_EXTRACTION_DEV_EXTRA_CENTS?: string;
   /** Default-disabled, exact-cohort policy for reviewer-receipted shadow data. */
   LLM_METADATA_PUBLICATION_POLICY_JSON?: string;
   GMAIL_CLIENT_ID?: string;

@@ -12,7 +12,7 @@ import { activeTrustedCommunityPolicy, advanceTrustedCommunityQualification } fr
 import type { CatalogAdmissionReason, Internship, ProcessedListing, ProviderIdentity, SourceOccurrence } from '../src/types.js';
 import { D1CatalogAdmissionStore, destinationVerificationMatchesReference, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
 import { D1InternshipStore } from './d1-store.js';
-import { extractPostingMetadataEvidence, extractVerifiedPageMetadataEvidence, projectRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from '../src/role-metadata.js';
+import { extractPostingMetadataEvidence, extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence, projectRoleMetadata, replaceVerifiedPageMetadataEvidence, roleMetadataEvidenceHasFields, ROLE_METADATA_EXTRACTION_VERSION, VERIFIED_PAGE_METADATA_SOURCES } from '../src/role-metadata.js';
 import { createMetadataAcquirer, metadataApiRoute, type MetadataAcquisition } from '../src/metadata-acquisition.js';
 import { metadataFieldOutcomes, type MetadataAuditOutcome } from '../src/metadata-audit.js';
 import type { D1Database, MessageBatch, Queue, R2Bucket } from './types.js';
@@ -634,15 +634,56 @@ export async function processDestinationVerificationBatch(
           }
           // The producer hashes the canonical persisted title, which may be a
           // reviewed repair of the provider's raw title.
-          const title = reference.title;
+          // Acquisition can overlap notification delivery or a source update.
+          // Project from a fresh snapshot and fence the entire stored job, not
+          // just this reference, so a later concurrent update also survives.
+          const snapshot = await jobs.getJobSnapshot(job.jobId);
+          const currentJob = snapshot?.job;
+          const currentReference = currentJob?.sourceReferences.find((item) => item.sourceId === message.sourceId
+            && item.externalId === message.externalId);
+          if (!snapshot || !currentJob || !currentReference || !destinationVerificationMatchesReference(currentReference, message)
+            || (currentReference.shadowContentHash && currentReference.shadowContentHash !== message.shadowContentHash)
+            || (message.shadowMetadataHash && message.shadowMetadataHash !== currentReference.shadowMetadataHash)) {
+            await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
+            continue;
+          }
+          const title = currentReference.title;
           const normalized = normalizeExactPostingDescription(title, apiAcquisition.artifact.text, false);
           if (normalized.contentHash !== message.shadowContentHash) {
             await settleWithoutVerification(queued, message, now().toISOString(), 'obsolete');
             continue;
           }
           const inspectedAt = now().toISOString();
+          // Persist the deterministic baseline before optional model enrichment.
+          // A budget rejection downstream must not leave this fast path without
+          // the same official-posting metadata as general verification.
+          const extracted = extractPostingMetadataEvidence({ artifact: apiAcquisition.artifact,
+            sourceClass: 'official-api', sourceId: message.sourceId,
+            sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, exactPosting: true });
+          const enrichedReference = { ...currentReference,
+            metadataEvidence: mergeRoleMetadataEvidence(currentReference.metadataEvidence, extracted),
+            metadataExtraction: { version: ROLE_METADATA_EXTRACTION_VERSION,
+              artifactHash: extracted[0]!.artifactHash, observedAt: inspectedAt,
+              outcome: extracted.some(roleMetadataEvidenceHasFields) ? 'extracted' as const : 'no-explicit-metadata' as const },
+          };
+          const sourceReferences = currentJob.sourceReferences.map((item) => item === currentReference ? enrichedReference : item);
+          const projected = projectRoleMetadata({ ...currentJob, sourceReferences });
+          const occurrence = await jobs.getSourceOccurrence(message.sourceId, message.externalId);
+          const nextOccurrence = occurrence ? { ...occurrence,
+            occurrence: { ...occurrence.occurrence, ...enrichedReference }, changedAt: inspectedAt } : undefined;
+          if (!await jobs.putAdmissionState({ ...projected.job, sourceReferences }, currentReference, nextOccurrence, occurrence,
+            undefined, snapshot.value)) {
+            // A notification or another reference may have changed. Redelivery
+            // revalidates the source revision and projects from current state.
+            throw new Error('Job changed during provider metadata persistence');
+          }
+          await operations.recordRoleMetadataEvidence(job.jobId, extracted, projected.conflicts, inspectedAt,
+            { sourceId: message.sourceId, sourceClasses: ['official-api'] });
+          const baseline = shadowBaseline(metadataFieldOutcomes({ evidence: extracted, conflicts: projected.conflicts,
+            acquired: true, complete: true }));
           await handoffShadowExtraction({ env, operations, message, title, description: apiAcquisition.artifact.text,
-          sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false, structuredEvidence: apiAcquisition.artifact, method: apiAcquisition.method });
+            sourceUrl: apiAcquisition.sourceUrl, observedAt: inspectedAt, incomplete: false,
+            structuredEvidence: apiAcquisition.artifact, baseline, method: apiAcquisition.method });
           if (message.idempotencyKey) await operations.recordVerificationCompletion(message.idempotencyKey, inspectedAt);
           await acknowledge(queued); continue;
         }

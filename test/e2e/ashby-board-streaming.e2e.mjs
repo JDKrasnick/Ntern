@@ -218,12 +218,13 @@ test('streams a fabricated multi-megabyte board and persists the posting artifac
 });
 
 test('one batch acquires every posting the same board publishes', async () => {
-  const before = (await shadowArtifacts.list()).objects.length;
+  const previous = (await shadowArtifacts.list()).objects;
+  const before = previous.length;
   assert.equal(before, 1, 'the previous test must have persisted exactly posting A');
   // The regression under review: two postings from the same board in one batch.
   // Production runs one acquirer per batch (max_batch_size 5), so this is the
-  // normal shape, not an edge case. A and B hash to different artifact keys, so
-  // a healthy run adds exactly one new object (B) while A is rewritten.
+  // normal batch shape. Both observations retain immutable envelopes, and the
+  // earlier observation of A remains available to its already queued message.
   const calls = [];
   const [first, second] = await deliver(
     [collectionMessage(postingA, 'ashby-batch-a'), collectionMessage(postingB, 'ashby-batch-b')], boardServer(calls));
@@ -231,9 +232,17 @@ test('one batch acquires every posting the same board publishes', async () => {
   assert.deepEqual(second.retry, [], `second message retried: ${JSON.stringify(second.retry)}`);
   assert.equal(first.ack, 1);
   assert.equal(second.ack, 1);
-  const after = (await shadowArtifacts.list()).objects.length;
+  const objects = (await shadowArtifacts.list()).objects;
+  const after = objects.length;
   console.log(`ashby e2e batch: board=${board.byteLength}B fetches=${calls.length} artifacts=${after}`);
   assert.equal(calls.length, 1, 'the board must be fetched once for the whole batch so the provider is not throttled');
-  assert.equal(after, before + 1,
-    'each posting in the batch must persist its own artifact; one artifact means the second posting was served the first posting\'s streamed payload');
+  assert.equal(after, before + 2, 'each observation retains its own immutable input envelope');
+  const added = objects.filter(object => !previous.some(prior => prior.key === object.key));
+  const envelopes = await Promise.all(added.map(async object => JSON.parse(await new Response((await shadowArtifacts.get(object.key)).body).text())));
+  assert.deepEqual(envelopes.map(envelope => envelope.identity.externalId).sort(), [postingA, postingB]);
+  for (const envelope of envelopes) {
+    const expected = envelope.identity.externalId === postingA
+      ? 'Build streaming acquisition for board A.' : 'Serve board B from the same batch.';
+    assert.ok(envelope.normalized.description.includes(expected), 'each posting must retain its own streamed description');
+  }
 });
