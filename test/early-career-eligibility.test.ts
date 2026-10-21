@@ -243,6 +243,15 @@ describe('employer-authoritative early-career policy', () => {
       .toMatchObject({ decision: { kind: 'admitted' }, admission: { catalogEligible: true, alertEligible: true,
         earlyCareer: { status: 'eligible', programType: 'entry-level' } } });
   });
+  it('preserves a provider-declared internship when the title and prose omit intern', () => {
+    const role = { ...posting('Associate Software Developer', 'Build Python services while completing your degree.'), lifecycleAuthority: 'posting' as const };
+    const input = { sourceId: role.sourceId, externalId: role.externalId, posting: role,
+      evaluatedAt: now, earlyCareerEligibilityEnabled: true, probe: { reachability: 'blocked' as const } };
+    expect(gradeAdmissionRow(input)).toMatchObject({ decision: { kind: 'admitted' }, admission: {
+      catalogEligible: true, earlyCareer: { status: 'eligible', programType: 'internship' } } });
+    const unofficial = processPosting({ ...role, provenance: 'reviewed-community' }, [], true).listing!;
+    expect(earlyCareerFromEvidence(unofficial.metadataEvidence ?? []).status).toBe('unknown');
+  });
   it('hydrates an index-only generic title and commits the body-supported internship', async () => {
     const full = posting('Software Engineer', 'This position is a paid internship building software.');
     const index = { ...full, content: [], contentCompleteness: 'index-only' as const };

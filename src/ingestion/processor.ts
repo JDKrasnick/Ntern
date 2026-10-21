@@ -139,6 +139,10 @@ export function processPosting(
     metadataEvidence: extractPostingMetadataEvidence({
       artifact: {
         title,
+        // `posting` authority represents an explicit provider internship field
+        // (currently Ashby's employmentType=Intern), not a community label.
+        ...(posting.lifecycleAuthority === 'posting' && ['official-ats', 'official-structured'].includes(posting.provenance ?? '')
+          ? { employmentType: 'Intern' } : {}),
         text: shadowDescription,
         ...(posting.compensationText ? { compensationText: posting.compensationText } : {}),
         ...(posting.compensationBands?.length ? { compensationBands: posting.compensationBands } : {}),
