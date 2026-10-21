@@ -25,6 +25,8 @@ describe('provider-neutral field enrichment', () => {
     ['Masters degree', ['Preferred'], []],
     ['Masters degree.', ['Preferred'], []],
     ['Masters degree.', ['Not required'], []],
+    ['Currently pursuing a BS or MS degree', ['Masters degree preferred'], ['undergraduate']],
+    ['Currently pursuing a BS degree', ['Masters degree preferred'], ['undergraduate']],
     ['No Masters degree is required', [], []],
     ['PhD students are not eligible', [], []],
     ['PhD students', ['Not considered'], []],
@@ -81,6 +83,8 @@ describe('provider-neutral field enrichment', () => {
     expect(educationAudienceLevels("2027 Leadership Development Program Intern (Master's)")).toEqual(['masters']);
     // A latency measurement is not a degree.
     expect(educationAudienceLevels('Latency under 5 ms.')).toEqual([]);
+    expect(educationAudienceLevels('Currently pursuing an M.Sc. or Ph.D. in Computer Science.')).toEqual(['doctoral', 'masters']);
+    expect(educationAudienceLevels('Currently pursuing a B.Sc. in Computer Science.')).toEqual(['undergraduate']);
     // "4-year college degree" is the same audience as "four-year degree".
     expect(educationAudienceLevels('Experience with C/C++ 4-year college degree or higher.')).toEqual(['undergraduate']);
     expect(educationAudienceLevels('A 4 year university degree in Physics is required.')).toEqual(['undergraduate']);

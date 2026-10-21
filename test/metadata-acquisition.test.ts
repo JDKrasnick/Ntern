@@ -9,8 +9,56 @@ import { normalizeExactPostingDescription } from '../src/shadow-extraction.js';
 import tenstorrentProbe from './fixtures/trusted-catalog/tenstorrent-5221670007.json' with { type: 'json' };
 import boozAllenProbe from './fixtures/trusted-catalog/booz-allen-r0248143.json' with { type: 'json' };
 import fab2Probe from './fixtures/trusted-catalog/fab2-0c4dc4f4-01c9-4138-a666-e7234cda7e95.json' with { type: 'json' };
+import microsoftPosting from './fixtures/metadata-evidence/microsoft-1970393557042156.json' with { type: 'json' };
+import metaPosting from './fixtures/metadata-evidence/meta-1851348099357899.json' with { type: 'json' };
+import amazonPosting from './fixtures/metadata-evidence/amazon-10584121.json' with { type: 'json' };
 
 const uuid = 'ef725594-42dd-4f0d-ba8e-df8179dbc6cb';
+describe('reviewed employer metadata acquisition', () => {
+  const ms = { provider: 'microsoft', postingId: '1970393557042156', tenant: 'microsoft', sourceId: 'community', sourceUrl: 'https://community.test' } as ProviderIdentity;
+  const meta = { ...ms, provider: 'meta', postingId: '1851348099357899', tenant: 'meta' } as ProviderIdentity;
+  const amazon = { ...ms, provider: 'amazon', postingId: '10584121', tenant: 'amazon' } as ProviderIdentity;
+  const page = (value: unknown, canonical = '') => `${canonical ? `<link rel="canonical" href="${canonical}">` : ''}<script type="application/ld+json">${JSON.stringify(value)}</script>`;
+  it('fetches the exact Microsoft page and retains its stated doctoral qualification', async () => {
+    const url = microsoftPosting.url;
+    const fetcher = vi.fn(async () => new Response(page(microsoftPosting), { headers: { 'content-type': 'text/html' } }));
+    const acquire = createMetadataAcquirer(fetcher);
+    const result = await acquire(ms, url);
+    expect(result?.outcome).toBe('acquired');
+    expect(educationAudienceLevels(result!.artifact!.text!)).toContain('doctoral');
+    expect(parseMetadataApiResponse(ms, 'json-ld-page', page({ ...microsoftPosting, url: url.replace(ms.postingId!, '999') }))).toBeUndefined();
+    expect(metadataApiRoute(ms, url.replace('microsoft.com', 'microsoft.com.evil.test'))).toBeUndefined();
+    const redirected = createMetadataAcquirer(async () => new Response(null, { status: 302, headers: { location: 'https://untrusted.test/role' } }));
+    expect((await redirected(ms, url))?.outcome).toBe('failed');
+    await redirected.close();
+    await acquire.close();
+  });
+  it('binds Meta CRM metadata to its numeric canonical and retains qualifications outside description', async () => {
+    const canonical = `https://www.metacareers.com/profile/job_details/${meta.postingId}/`;
+    const acquire = createMetadataAcquirer(async () => new Response(page(metaPosting, canonical), { headers: { 'content-type': 'text/html' } }));
+    const result = await acquire(meta, `https://www.metacareers.com/jobs/${meta.postingId}`);
+    expect(result?.outcome).toBe('acquired');
+    expect(educationAudienceLevels(result!.artifact!.text!)).toEqual(['doctoral', 'masters', 'undergraduate']);
+    expect(result!.artifact!.text).toContain('Qualifications:');
+    expect(parseMetadataApiResponse(meta, 'json-ld-page', page(metaPosting, canonical.replace(meta.postingId!, '999')))).toBeUndefined();
+    expect(parseMetadataApiResponse(meta, 'json-ld-page', page([metaPosting, metaPosting], canonical))).toBeUndefined();
+    await acquire.close();
+  });
+  it('selects only the exact Amazon requisition and keeps required and preferred qualifications separate', async () => {
+    const route = metadataApiRoute(amazon, 'https://www.amazon.jobs/en/jobs/10584121/hardware-development-engineer-intern-winter-2027');
+    expect(route?.method).toBe('amazon-api');
+    const acquire = createMetadataAcquirer(async () => Response.json(amazonPosting));
+    const result = await acquire(amazon, 'https://www.amazon.jobs/en/jobs/10584121/hardware-development-engineer-intern-winter-2027');
+    expect(result?.artifact?.text).toContain('Basic qualifications:');
+    expect(result?.artifact?.text).toContain('Preferred qualifications:');
+    expect(educationAudienceLevels(result!.artifact!.text!)).toContain('undergraduate');
+    expect(educationAudienceLevels(result!.artifact!.text!)).not.toContain('masters');
+    expect(parseMetadataApiResponse(amazon, 'amazon-api', { jobs: [{ ...amazonPosting.jobs[0], id_icims: '999' }] })).toBeUndefined();
+    expect(parseMetadataApiResponse(amazon, 'amazon-api', { jobs: [amazonPosting.jobs[0], amazonPosting.jobs[0]] })).toBeUndefined();
+    expect(metadataApiRoute(amazon, 'https://www.amazon.jobs/en/jobs/999/other')).toBeUndefined();
+    await acquire.close();
+  });
+});
 const identity = (provider: ProviderIdentity['provider'], postingId = uuid): ProviderIdentity => ({ provider, postingId, tenant: 'acme', sourceId: 'github-discovery', sourceUrl: 'https://github.test/jobs' });
 const extract = (artifact: Parameters<typeof extractPostingMetadataEvidence>[0]['artifact']) => extractPostingMetadataEvidence({ artifact, sourceClass: 'official-ats', sourceId: 'test', sourceUrl: 'https://api.example.test/job', observedAt: '2026-09-05T00:00:00Z', exactPosting: true });
 

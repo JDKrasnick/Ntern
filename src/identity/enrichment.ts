@@ -147,9 +147,16 @@ export function educationAudienceFromPostingFacts(facts: readonly PostingFact[] 
     .flatMap(fact => {
       const text = [...fact.statements, ...fact.qualifiers].join(' ');
       // An exclusion or optional qualification is not a positive degree audience.
-      if (/\b(?:not (?:eligible|accepted|considered)|ineligible|must not|cannot|excluding|except)\b/iu.test(text)
-        || fact.qualifiers.some(value => DEGREE_PREFERRED_ONLY.test(value) || DEGREE_WAIVED.test(value))) return [];
-      return educationAudienceLevels(text);
+      if (/\b(?:not (?:eligible|accepted|considered)|ineligible|must not|cannot|excluding|except)\b/iu.test(text)) return [];
+      const stated = new Set(educationAudienceLevels(fact.statements.join(' ')));
+      for (const qualifier of fact.qualifiers) {
+        if (DEGREE_PREFERRED_ONLY.test(qualifier) || DEGREE_WAIVED.test(qualifier)) {
+          const scoped = educationAudienceLevels(qualifier.replace(DEGREE_PREFERRED_ONLY, '').replace(DEGREE_WAIVED, ''));
+          if (!scoped.length) return [];
+          for (const level of scoped) stated.delete(level);
+        } else for (const level of educationAudienceLevels(qualifier)) stated.add(level);
+      }
+      return [...stated];
     }))].sort();
   return levels.length ? { levels, evidenceStatus: 'explicit' } : undefined;
 }
@@ -271,7 +278,7 @@ const DEGREE_NOUN = String.raw`degrees?|program(?:me)?s?|students?|candidates?|s
 const EDUCATION_AUDIENCE_PATTERNS: Record<EducationLevel, readonly RegExp[]> = {
   undergraduate: [
     /\b(?:undergrad(?:uate)?s?|bachelor(?:['’]s|s)?(?:\s+degree)?|college students?|university students?|(?:four|4)[ -]?year(?: college| university)? degree)\b/iu,
-    /(?<![\w.])(?:BSc|BS|B\.S\.|BA|B\.A\.)(?![\w.])/u,
+    /(?<![\w.])(?:BSc|B\.Sc\.|BS|B\.S\.|BA|B\.A\.)(?![\w.])/u,
     new RegExp(String.raw`(?<![\w.])(?:bsc|bs|ba)(?![\w.])\s+(?:${DEGREE_NOUN}|in\s+\w+)`, 'iu'),
   ],
   masters: [
@@ -279,7 +286,7 @@ const EDUCATION_AUDIENCE_PATTERNS: Record<EducationLevel, readonly RegExp[]> = {
     new RegExp(String.raw`\bmasters\s+(?:${DEGREE_NOUN}|of\s+\w+|in\s+\w+)`, 'iu'),
     new RegExp(String.raw`\bmaster\s+(?:of|${DEGREE_NOUN})`, 'iu'),
     new RegExp(String.raw`\bgraduate\s+(?:students?|program(?:me)?s?|degree|level|coursework)`, 'iu'),
-    /(?<![\w.])(?:MSc|MS|M\.S\.)(?![\w.])/u,
+    /(?<![\w.])(?:MSc|M\.Sc\.|MS|M\.S\.)(?![\w.])/u,
     /(?<![\w.])(?:MA|M\.A\.)(?![\w.])/u,
     new RegExp(String.raw`(?<![\w.])(?:msc|ms|ma)(?![\w.])\s+(?:${DEGREE_NOUN}|in\s+\w+)`, 'iu'),
   ],
