@@ -1527,6 +1527,22 @@ describe('employer icon platform declarations and proposals', () => {
 describe('employer icon uploaded board logo', () => {
   const boardLogo = 'https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/204/510/original/Logo-IMC-Blue.png';
 
+  it('rejects an oversized decoded board image even when its compressed bytes fit', async () => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const url = 'https://generic.wd5.myworkdayjobs.com/careers/job/Intern_P123';
+    const logo = 'https://generic.wd5.myworkdayjobs.com/careers/assets/logo';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode:'resolve', maxPerSweep:5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, {...employerSeed(url),provider:'workday',tenant:'generic'}, NOW);
+    const fetchImpl = scriptedFetch({
+      [url]: () => html(`<meta property="og:image" content="${logo}">`),
+      [logo]: () => new Response(pngBytes(8000,4500),{headers:{'content-type':'image/png'}}),
+    });
+    await runEmployerIconResolutionPass(environment(db,r2.bucket,{}), NOW, DEPENDENCIES(fetchImpl));
+    expect(r2.puts).toHaveLength(0);
+  });
+
   it('stores an employer’s uploaded logo even when no domain resolves', async () => {
     const { db, admission, icons } = subject();
     const r2 = r2Stub();

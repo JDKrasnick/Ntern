@@ -56,6 +56,22 @@ class SnapshotAdapter implements SourceAdapter {
   }
 }
 describe('polling', () => {
+  it('queues future published companies without canonical employer IDs after persistence', async () => {
+    const store = new MemoryInternshipStore();
+    const row: RawListing = { ...listing('https://tenant.wd5.myworkdayjobs.com/careers/job/Intern_P123', 'reviewed-new-company'),
+      company: 'Northstar Robotics', provenance: 'reviewed-community' };
+    const queued: unknown[] = [];
+    const poller = new Poller([new Adapter(row.sourceId, [row])], store,
+      undefined, undefined, undefined, undefined, undefined, undefined, true, false,
+      async (seed) => {
+        expect((await store.listOpen!(undefined, 25)).jobs.some(job => job.company === row.company)).toBe(true);
+        queued.push(seed);
+      });
+    const report = await poller.poll();
+    expect(report.failures).toEqual([]);
+    expect(queued).toEqual([expect.objectContaining({canonicalEmployerId:'',displayName:row.company,
+      applicationUrl:row.applyUrl,provider:'workday',tenant:'tenant',provenance:'reviewed-community'})]);
+  });
   it('forces acquisition without losing content identity or bounded detail progress', async () => {
     const source = 'forced-board';
     const adapter = new SnapshotAdapter(source, snapshotRows(1, source));

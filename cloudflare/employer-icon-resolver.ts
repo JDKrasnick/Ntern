@@ -29,7 +29,7 @@ import {
 import {
   ICON_PROVIDER_TIMEOUT_MS, MAX_ICON_ASSET_BYTES, assetShapeUsable, bannerAssetShapeUsable,
   brandfetchSearchUrl, providerDomainCandidates,
-  iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls,
+  iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls, rasterDimensions,
   proposedDomainMatchesEmployer, siteLogoAssetCandidates,
   logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence,
   type IconPageEvidence,
@@ -1156,7 +1156,7 @@ async function gatherIconEvidence(seed: EmployerIconSeed, deps: EmployerIconReso
         page: { organizations: [] }, failure: pageFailureOutcome(result.status), status: result.status,
       };
     }
-    const logoUrls = platformLogoUrls(result.body);
+    const logoUrls = platformLogoUrls(result.body, result.url);
     // The employer's own declared marks, read from the page already in hand: for an
     // employer whose postings live on its own domain this is the whole site-asset
     // fallback with no extra request at all. Only URLs are kept, and the report is
@@ -1608,6 +1608,8 @@ async function platformAsset(
 ): Promise<PlatformAsset> {
   const raster = iconAssetType(contentType, bytes);
   if (raster) {
+    const size = rasterDimensions(bytes);
+    if (size && size.width * size.height > 4_194_304) return { usable: false, reason: 'logo-too-many-pixels' };
     if (banner && !bannerAssetShapeUsable(bytes)) return { usable: false, reason: 'banner-not-square' };
     return { usable: true, bytes, contentType: raster, rasterized: false };
   }

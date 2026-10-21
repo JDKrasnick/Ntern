@@ -267,6 +267,21 @@ describe('uploaded board logo', () => {
     expect(platformLogoUrls('<html><head><title>Open roles</title></head></html>')).toEqual([]);
   });
 
+  it('accepts only the declared Workday logo for the posting’s exact tenant and career site', () => {
+    const page = 'https://globalhr.wd5.myworkdayjobs.com/en-US/rec_brand_ext/job/City/Intern_1234';
+    const logo = 'https://globalhr.wd5.myworkdayjobs.com/rec_brand_ext/assets/logo';
+    const markup = (url: string) => `<meta property="og:image" content="${url}">`;
+    expect(platformLogoUrls(markup(logo), page)).toEqual([logo]);
+    expect(platformLogoUrls(markup(logo.replace('/rec_brand_ext/', '/fr-CA/REC_BRAND_EXT/')), page)).toHaveLength(1);
+    for (const bad of [logo.replace('globalhr.', 'other.'), logo.replace('rec_brand_ext', 'another_brand'),
+      logo.replace('/assets/logo', '/assets/banner'), logo.replace('.com/', '.com.evil.test/'),
+      logo.replace('https:', 'http:'), `${logo}?redirect=other`, `${logo}#other`]) {
+      expect(platformLogoUrls(markup(bad), page)).toEqual([]);
+    }
+    expect(platformLogoUrls(markup(logo))).toEqual([]);
+    expect(platformLogoUrls(markup(logo), page.replace('/job/City/Intern_1234', ''))).toEqual([]);
+  });
+
   it('reads the Greenhouse board logo and banner a board publishes instead of og:image', () => {
     // The current board renderer serializes its payload inside a script, so every
     // key and value arrives escaped, and `og:image` is emitted with no value at all.

@@ -4,7 +4,7 @@ import type { CanonicalEmployer } from '../src/types.js';
 import type { R2Bucket } from './types.js';
 
 const COMPANY_ICON_ID = /^[a-z0-9][a-z0-9-]{0,159}$/u;
-const PUBLIC_ICON_CONTENT_TYPES = new Set(['image/avif', 'image/png', 'image/webp']);
+const PUBLIC_ICON_CONTENT_TYPES = new Set(['image/avif', 'image/png', 'image/webp', 'image/jpeg']);
 
 export function validCompanyIconEmployerId(id: string): boolean {
   return COMPANY_ICON_ID.test(id);

@@ -34,6 +34,20 @@ Do not derive branding from arbitrary websites or third-party favicon services. 
 
 Most canonical employers are created before anyone has an icon for them, and a role must never wait on one. An employer without a reviewed icon therefore gets a background decision, and every unresolved case renders the deterministic monogram the client already draws. A role published without an icon is never hidden and never delays a notification.
 
+New catalog roles enqueue icon work automatically in both the V2 owning writer
+and the legacy writer, including companies without canonical employer IDs. The
+10-minute sweep handles the queue, prioritizes active companies, and recovers
+missed enqueues through its bounded catalog cursor. Repeated roles reuse their
+company/site identity; a new site gets its own evidence and task.
+
+Workday's declared `og:image` can supply the employer-uploaded logo without a
+domain decision. The URL must be the same tenant and exact career site's
+`assets/logo` endpoint, with an immutable posting route; arbitrary share images
+and other brands on the same tenant are excluded. Retained JPEG board logos are
+served alongside PNG, WebP, and AVIF. Raster board assets above four megapixels
+are rejected to bound client decoding memory. Migration `0064` retries one
+active missing-logo Workday task per identity and preserves review holds.
+
 ### How a decision is made
 
 The V2 live catalog writer also registers reviewed official-source employer IDs
