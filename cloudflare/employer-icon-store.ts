@@ -65,6 +65,7 @@ export interface EmployerIconTask {
   evidenceFingerprint: string;
   evidenceJson: string;
   attempts: number;
+  previouslyAttempted?: boolean;
 }
 
 export interface EmployerIconReviewItem {
@@ -99,6 +100,9 @@ type Row = Record<string, string | number | null>;
 
 export class D1EmployerIconStore {
   constructor(private readonly db: D1Database) {}
+  private readonly currentPostings = new Map<string, {
+    url: string; title?: string; sourceId?: string; provenance?: EmployerIconSeed['provenance'];
+  }>();
 
   /** Cron and operator catch-up share a single expiring lease across isolates. */
   async acquireSweep(now: string, token: string, leaseMs: number): Promise<boolean> {
@@ -265,6 +269,9 @@ export class D1EmployerIconStore {
         json_extract(item.value, '$.group.featuredRole.companyIconId') AS icon_id,
         json_extract(item.value, '$.group.featuredRole.company') AS company,
         json_extract(item.value, '$.group.featuredRole.officialApplyUrl') AS url,
+        json_extract(item.value, '$.group.featuredRole.title') AS title,
+        json_extract(item.value, '$.group.featuredRole.sourceReferences[0].sourceId') AS source_id,
+        json_extract(item.value, '$.group.featuredRole.sourceReferences[0].provenance') AS provenance,
         json_extract(item.value, '$.group.roleCount') AS roles
       FROM catalog_items AS current
       JOIN catalog_items AS manifest ON manifest.pk = 'CATALOG_PROJECTION#MANIFESTS'
@@ -274,16 +281,28 @@ export class D1EmployerIconStore {
       WHERE current.pk = 'CATALOG_PROJECTION' AND current.sk = 'CURRENT'
         AND item.pk = 'CATALOG_PROJECTION#GROUPS' AND item.sk = manifest_key.value`).all<{
         employer_id: string | null; icon_id: string | null; company: string; url: string; roles: number;
+        title: string | null; source_id: string | null; provenance: string | null;
       }>();
     const weights = new Map<string, number>();
+    this.currentPostings.clear();
     for (const row of groups.results) {
-      const id = row.employer_id ?? row.icon_id ?? companyIconIdentity(row.company, row.url)?.id;
+      const id = row.employer_id ?? row.icon_id ?? (typeof row.company === 'string' && typeof row.url === 'string'
+        ? companyIconIdentity(row.company, row.url)?.id : undefined);
       if (id) weights.set(id, (weights.get(id) ?? 0) + Math.max(0, Number(row.roles) || 0));
+      if (id && typeof row.url === 'string' && row.url.startsWith('https:') && !this.currentPostings.get(id)?.provenance) {
+        const provenance = row.provenance;
+        this.currentPostings.set(id, { url: row.url, ...(row.title ? { title: row.title } : {}),
+          ...(row.source_id ? { sourceId: row.source_id } : {}),
+          ...(provenance === 'official-ats' || provenance === 'official-structured'
+            || provenance === 'employer-submitted' || provenance === 'reviewed-community' ? { provenance } : {}) });
+      }
     }
     const due = await this.db.prepare(`WITH weights AS MATERIALIZED (
         SELECT json_extract(value, '$[0]') AS id, json_extract(value, '$[1]') AS roles FROM json_each(?)
       ), eligible AS (
       SELECT task.*, COALESCE(weights.roles, 0) AS roles,
+        EXISTS (SELECT 1 FROM employer_icon_resolutions AS history
+          WHERE history.canonical_employer_id = task.canonical_employer_id AND history.attempts > 0) AS previously_attempted,
         ROW_NUMBER() OVER (PARTITION BY task.canonical_employer_id
           ORDER BY CASE WHEN task.review_priority >= 100 THEN 0 ELSE 1 END,
             task.attempts, task.next_retry_at, task.created_at, task.id) AS employer_rank
@@ -295,11 +314,11 @@ export class D1EmployerIconStore {
           WHERE blocked.canonical_employer_id = task.canonical_employer_id AND blocked.status = 'invalidated')
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS busy
           WHERE busy.canonical_employer_id = task.canonical_employer_id AND busy.lease_until > ?)
-      ) SELECT id, canonical_employer_id, evidence_fingerprint, evidence_json, attempts FROM eligible
+      ) SELECT id, canonical_employer_id, evidence_fingerprint, evidence_json, attempts, previously_attempted FROM eligible
       WHERE employer_rank = 1
       ORDER BY CASE WHEN review_priority >= 100 THEN 0 ELSE 1 END,
         CASE WHEN roles > 0 THEN 0 ELSE 1 END,
-        CASE WHEN attempts = 0 THEN 0 ELSE 1 END,
+        previously_attempted,
         roles DESC, attempts,
         CASE WHEN COALESCE(json_extract(evidence_json, '$.applicationUrl'), '') <> '' THEN 0 ELSE 1 END,
         next_retry_at, created_at, id LIMIT ?`).bind(JSON.stringify([...weights]), now, now, now, limit).all<Row>();
@@ -317,6 +336,7 @@ export class D1EmployerIconStore {
         id: row.id as string, canonicalEmployerId: row.canonical_employer_id as string,
         evidenceFingerprint: row.evidence_fingerprint as string, evidenceJson: row.evidence_json as string,
         attempts: Number(row.attempts ?? 0),
+        previouslyAttempted: Number(row.previously_attempted) > 0,
       });
     }
     return claimed;
@@ -683,6 +703,10 @@ export class D1EmployerIconStore {
     sourceId?: string;
     provenance?: 'official-ats' | 'official-structured' | 'employer-submitted' | 'reviewed-community';
   } | undefined> {
+    // The grouped projection carries the reviewed source provenance that older
+    // raw role records and seedless tasks can lack. Reuse the claim's snapshot.
+    const current = this.currentPostings.get(canonicalEmployerId);
+    if (current?.provenance) return current;
     if (canonicalEmployerId.startsWith('icon-v1-')) {
       const row = await this.db.prepare('SELECT seed_json FROM company_icon_identities WHERE id = ?')
         .bind(canonicalEmployerId).first<{ seed_json: string }>();

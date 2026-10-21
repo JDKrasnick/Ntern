@@ -60,7 +60,9 @@ operators can distinguish a model decline from failed domain verification.
 ### Scheduling and catch-up
 
 Automatic work prioritizes explicit corrective requests, then active catalog
-identities, first attempts, and the number of active roles that share an icon.
+identities, companies never attempted before, and the number of active roles that share an icon.
+Attempt history covers every evidence row for the company; a second posting
+fingerprint cannot repeatedly claim a first attempt.
 Human-review priority for exhausted retries does not move them ahead of first
 attempts. Counts come from the current manifest, including company/site fallback
 keys for older projections. Only one task per identity may be leased at a time.
@@ -69,6 +71,13 @@ Cron and catch-up share a database lease with a 15-minute crash expiry. Each pas
 runs at most two tasks concurrently and stops starting tasks after 90 seconds;
 unstarted claims are released without consuming an attempt. Existing per-employer
 provider/model budgets, withdrawn decisions, and identity-review holds still apply.
+
+The claim's current-manifest snapshot also supplies a posting's reviewed source
+provenance, source ID, title, and application URL when older canonical tasks lack
+them. This uses the same snapshot as role weighting and adds no per-task catalog
+scan. Migration `0063` re-arms active misses that lacked provenance, preserving
+known-provenance decisions, reviewed domains/icons, withdrawals, corporate holds,
+and employers with an in-flight task. Confidence thresholds do not change.
 
 `POST /internal/admission/employer-icons/sweep` requires `X-Operations-Key`, runs
 in ingestion, and accepts `{"maxTasks":5}` (hard cap five, also bounded by the
