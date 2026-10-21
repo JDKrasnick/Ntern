@@ -19,7 +19,7 @@ const tieBreakRearm = readFileSync(new URL(
   import.meta.url,
 ), 'utf8');
 const reviewedSourceRepair = readFileSync(new URL(
-  '../cloudflare/migrations/0060_reviewed_source_icon_identity.sql', import.meta.url,
+  '../cloudflare/migrations/0061_reviewed_source_icon_identity.sql', import.meta.url,
 ), 'utf8');
 
 function migrated(): DatabaseSync {

@@ -377,7 +377,7 @@ export function tenantCorroboratesEmployer(tenant: string | undefined, canonical
 /** Exact tenant/domain brand equality, never a substring or an ATS transport host. */
 export function reviewedAtsNamesDomain(seed: EmployerIconSeed, domain: string): boolean {
   if ((!officialIconProvenance(seed.provenance) && seed.provenance !== 'reviewed-community') || !seed.tenant
-    || !['greenhouse', 'lever', 'ashby', 'workday'].includes(seed.provider)
+    || seed.provider === 'unknown' || seed.provider === 'paylocity'
     || !/^[a-z0-9-]+$/iu.test(seed.tenant) || isIconTransportHost(domain)) return false;
   const reference = providerPostingReference(seed.applicationUrl);
   if (reference.provider !== seed.provider || reference.tenant?.toLowerCase() !== seed.tenant.toLowerCase()

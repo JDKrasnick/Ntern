@@ -15,6 +15,7 @@ import type { HostResolver } from '../src/employer/safe-network.js';
 import type { OpenAIJsonRequest, OpenAIJsonResult } from '../cloudflare/openai-shadow-inference.js';
 import type { CanonicalEmployer } from '../src/types.js';
 import type { D1Database, D1PreparedStatement, R2Bucket } from '../cloudflare/types.js';
+import { companyIconIdentity } from '../shared/company-icon.js';
 
 type QueryBudget = { used: number; maximum: number; queries?: string[] };
 
@@ -44,7 +45,7 @@ function sqliteD1(database: DatabaseSync, budget?: QueryBudget): D1Database {
 const MIGRATIONS = [
   '0001_initial.sql', '0003_billing_shutdown.sql', '0007_catalog_admission.sql',
   '0013_canonical_employer_icons.sql', '0034_employer_icon_resolution.sql',
-  '0038_employer_icon_resolution_v2.sql',
+  '0038_employer_icon_resolution_v2.sql', '0062_independent_company_icons.sql',
 ];
 
 function subject() {
@@ -2278,6 +2279,58 @@ describe('employer icon coverage v2', () => {
       employers: 2, coveredEmployers: 1, employerCoverageRate: 0.5,
       roles: 3, coveredRoles: 2, roleCoverageRate: 2 / 3,
     });
+  });
+
+  it('counts roles without an employer ID in the coverage denominator', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme', 'reviewed.webp'), NOW.toISOString());
+    database.exec(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES
+      ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection', '{"version":"v"}'),
+      ('CATALOG_PROJECTION#MANIFESTS', 'v', 'catalog-projection', '{"keys":["a","b"]}'),
+      ('CATALOG_PROJECTION#GROUPS', 'a', 'catalog-projection', '{"group":{"roleCount":2,"featuredRole":{"canonicalEmployerId":"acme"}}}'),
+      ('CATALOG_PROJECTION#GROUPS', 'b', 'catalog-projection', '{"group":{"roleCount":3,"featuredRole":{"company":"Unmapped"}}}'),
+      ('CATALOG_PROJECTION#GROUPS', 'old', 'catalog-projection', '{"group":{"roleCount":100,"featuredRole":{"canonicalEmployerId":"acme"}}}')`);
+    expect((await icons.counts()).active).toMatchObject({ roles: 5, coveredRoles: 2, roleCoverageRate: 0.4 });
+  });
+
+  it('resolves and serves a board logo without creating a canonical employer', async () => {
+    const { database, db, icons } = subject();
+    const r2 = r2Stub();
+    const url = 'https://job-boards.greenhouse.io/board-1/jobs/1';
+    const logo = 'https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/1/original/mark.png';
+    const seed = await icons.registerIdentity({ ...employerSeed(url), provenance: 'reviewed-community' }, NOW);
+    expect(seed?.canonicalEmployerId).toBe(companyIconIdentity('Acme', url)?.id);
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, seed!, NOW);
+    expect(await enqueueEmployerIconResolution(icons, { ...seed!, applicationUrl: 'https://job-boards.greenhouse.io/board-1/jobs/2' }, NOW)).toBe(false);
+    await runEmployerIconResolutionPass(environment(db, r2.bucket), NOW, DEPENDENCIES(scriptedFetch({
+      [url]: () => html(`<meta property="og:image" content="${logo}">`),
+      [logo]: () => new Response(new Uint8Array(64), { headers: { 'content-type': 'image/png' } }),
+    })));
+    expect(database.prepare('SELECT COUNT(*) AS n FROM canonical_employers').get()).toMatchObject({ n: 0 });
+    const context = await icons.renderContext(seed!.canonicalEmployerId);
+    expect(context?.iconSource).toBe('platform');
+    const response = await companyIconResponse(seed!.canonicalEmployerId, {
+      async getCanonicalEmployer() { return { ...employerRow(context!.id, context!.displayName), iconKey: context!.iconKey, iconSource: context!.iconSource }; },
+    }, r2.bucket, { automaticDisplay: async () => true });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('image/png');
+    await icons.invalidate(seed!.canonicalEmployerId, NOW.toISOString(), 'wrong');
+    expect((await icons.renderContext(seed!.canonicalEmployerId))?.iconKey).toBeUndefined();
+  });
+
+  it('reuses a matching scope and brand while preserving live donor corrections', async () => {
+    const { admission, icons } = subject();
+    const seed = { ...employerSeed('https://jobs.ashbyhq.com/acme/one'), provider: 'ashby' };
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme', 'first.webp'), NOW.toISOString());
+    const independent = await icons.registerIdentity(seed, NOW, 'acme');
+    expect((await icons.renderContext(independent!.canonicalEmployerId))?.iconKey).toBe('first.webp');
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme', 'corrected.webp'), NOW.toISOString());
+    expect((await icons.renderContext(independent!.canonicalEmployerId))?.iconKey).toBe('corrected.webp');
+    const otherBrand = await icons.registerIdentity({ ...seed, displayName: 'Other Brand' }, NOW, 'acme');
+    expect((await icons.renderContext(otherBrand!.canonicalEmployerId))?.iconKey).toBeUndefined();
+    await icons.invalidate(independent!.canonicalEmployerId, NOW.toISOString(), 'wrong alias');
+    expect((await icons.renderContext(independent!.canonicalEmployerId))?.iconKey).toBeUndefined();
   });
 });
 

@@ -81,6 +81,7 @@ describe('Cloudflare admission v2 boundary', () => {
         expect(committed).not.toHaveBeenCalled();
         expect(database.prepare("SELECT id FROM canonical_employers WHERE id = 'acme'").get()).toBeUndefined();
         expect(database.prepare('SELECT COUNT(*) AS n FROM employer_icon_resolutions').get()).toMatchObject({ n: 0 });
+        expect(database.prepare('SELECT COUNT(*) AS n FROM company_icon_identities').get()).toMatchObject({ n: 0 });
         return;
       }
       expect(committed).toHaveBeenCalledOnce();

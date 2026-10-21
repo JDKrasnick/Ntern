@@ -1,6 +1,6 @@
 # Company icons
 
-Company icons are stored against `canonical_employers`, not provider mappings or a company website domain. The asset lives in the existing `DOCUMENTS` R2 bucket under `company-icons/<canonical-employer-id>/...`; the D1 `icon_key` is the only public reference.
+Company icons belong to a canonical employer or an independent company/site identity. Assets live in the existing `DOCUMENTS` R2 bucket under `company-icons/<identity-id>/...`; D1 owns the icon reference and resolution evidence. Provider mappings, admission, and ranking identity remain separate.
 
 ## Operator workflow
 
@@ -284,6 +284,31 @@ Decision paths taken: automatic resolution, tie-break acceptance, and monogram f
 - **Simple Icons and favicon services are not used.** The mobile client previously carried a hardcoded map of `cdn.simpleicons.org` and `icons.duckduckgo.com` URLs; it has been removed in favour of the first-party route and the monogram.
 
 ### Serving an automatic icon
+
+Icon resolution does not require a canonical employer ID. Catalog roles without
+one use a stable `icon-v1-…` identity derived from the normalized company name and
+application host plus ATS board/site. The browser and native client use the same
+helper as admission and backfill. A shared tenant alone never merges brands:
+RTX/Raytheon and TikTok/ByteDance keep separate identities. These identities live
+in `company_icon_identities`; they grant no admission or ranking authority.
+
+Owning V2 admission records the icon identity after publication. The dedicated
+icon cron also pages 100 current-manifest groups per pass, recovering legacy
+roles and failed enqueues without changing individual role records. Operators
+can accelerate that same bounded recovery with
+`POST /internal/admission/employer-icons/backfill`; repeat until `complete` is
+true. This queues discovery, rather than treating a lookup key as a found logo.
+Matching scope plus brand, or a verified domain plus brand, can reuse an existing
+canonical logo through a live donor reference. Operator invalidations and later
+logo corrections still apply.
+
+Coverage includes every role in the current manifest, including unresolved
+employers. The operations API labels its estimate `coverageBasis: stored-reference`.
+For actual served coverage, run
+`npx tsx scripts/measure-served-company-icons.ts --report <path.json>`.
+It probes every distinct public icon key and counts only nonempty successful
+image responses, weighted by all catalog roles. Lookup eligibility and stored
+references are not measured image availability.
 
 `GET /company-icons/:id` resolves in this order:
 

@@ -227,7 +227,8 @@ export async function runEmployerIconResolutionPass(
   };
   if (settings.mode === 'off') return result;
 
-  result.backfilled = await backfillSeedlessEmployers(store, settings, now);
+  const catalogBackfill = await backfillCatalogIconIdentities(store, now);
+  result.backfilled = catalogBackfill.enqueued + await backfillSeedlessEmployers(store, settings, now);
   const tasks = await store.claimDue(now.toISOString(), settings.maxPerSweep, ICON_LEASE_MS);
   result.claimed = tasks.length;
   const providerOutcomes: Record<string, number> = {};
@@ -271,6 +272,31 @@ export async function runEmployerIconResolutionPass(
     company_icon_resolution_reason_codes: reasonCodes,
   }));
   return result;
+}
+
+/** Also recovers admissions that predate independent icon identities. */
+export async function backfillCatalogIconIdentities(store: D1EmployerIconStore, now: Date): Promise<{ scanned: number; enqueued: number; complete: boolean }> {
+  const page = await store.catalogIconPage(await store.iconBackfillCursor(), 100);
+  const seen = new Set<string>();
+  let enqueued = 0;
+  for (const role of page) {
+    if (typeof role.url !== 'string' || typeof role.company !== 'string') continue;
+    const reference = providerPostingReference(role.url);
+    const seed = await store.registerIdentity({
+      canonicalEmployerId: '', displayName: role.company, roleTitle: role.title,
+      applicationUrl: role.url, provider: reference.provider,
+      ...(reference.tenant ? { tenant: reference.tenant } : {}),
+      ...(role.provenance ? { provenance: role.provenance } : {}),
+      sourceId: role.sourceId ?? 'catalog-backfill',
+    }, now, role.employerId);
+    if (!seed || seen.has(seed.canonicalEmployerId)) continue;
+    seen.add(seed.canonicalEmployerId);
+    const context = await store.renderContext(seed.canonicalEmployerId);
+    if (context?.inheritedFromEmployerId || context?.iconKey || context?.resolutionStatus === 'invalidated') continue;
+    if (await enqueueEmployerIconResolution(store, seed, now)) enqueued += 1;
+  }
+  await store.setIconBackfillCursor(page.length === 100 ? page.at(-1)!.key : '', now.toISOString());
+  return { scanned: page.length, enqueued, complete: page.length < 100 };
 }
 
 /**
@@ -338,15 +364,19 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
   input.diagnostics = {};
   const { store, task, env, now, deps } = input;
   const at = now.toISOString();
-  const context = await store.context(task.canonicalEmployerId);
+  const context = await store.renderContext(task.canonicalEmployerId);
   if (!context) {
     await store.dropTask(task.id, at, 'employer-missing');
     return { outcome: 'unresolved', reasonCode: 'employer-missing' };
   }
   let seed = parseIconSeed(task.evidenceJson, context);
+  if (context.inheritedFromEmployerId && context.resolutionStatus !== 'invalidated') {
+    await store.dropTask(task.id, at, 'existing-icon-identity');
+    return { outcome: 'resolved', reasonCode: 'existing-icon-identity' };
+  }
   // Early backfills had only a name. Refresh their evidence from a current role
   // when they are claimed, instead of repeating name-only searches for a month.
-  if (!seed.applicationUrl || !seed.provenance) {
+  if (!seed.applicationUrl || !seed.provenance || context.id.startsWith('icon-v1-')) {
     const posting = await store.latestPostingForEmployer(context.id);
     if (posting) {
       const reference = providerPostingReference(posting.url);

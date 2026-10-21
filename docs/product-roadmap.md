@@ -238,7 +238,8 @@
 - [x] Harden production coverage after rollout: version and re-run stale misses, prioritize employers with active roles, report both active-employer and role-weighted rates, inherit a reviewed brand/parent icon at read time, keep reviewed canonical domains above automatic evidence, and route cross-domain corporate redirects into identity review.
 - [x] Hold icon resolution in observe mode before enabling automatic display, then move production to bounded resolve mode after reviewing outcomes.
 - [x] Enable Logo.dev R2 caching after the selected plan's self-hosting and retention rights are confirmed and recorded in resolver settings.
-- [x] Connect V2 live admission to canonical employer registration and icon tasks, prefer reviewed tenant mappings, and lower icon confidence for corroborated reviewed ATS routes. Include migration `0060` for missing source IDs and stale unresolved retries; preserve manual decisions and review holds.
+- [x] Connect V2 live admission to canonical employer registration and icon tasks, prefer reviewed tenant mappings, and lower icon confidence for corroborated reviewed ATS routes. Include migration `0061` for missing source IDs and stale unresolved retries; preserve manual decisions and review holds.
+- [x] Resolve icons independently of canonical employer IDs using company plus application host/ATS site, reuse matching existing logos, recover older roles through a bounded catalog backfill, and include unresolved employers in measured coverage.
 - [x] Define and test Greenhouse and Lever high-confidence route detection plus the simple-field, review-only, and never-fill policy.
 - [x] Build a local-only headed, no-submit browser companion pilot for reviewed Greenhouse and Lever test forms.
 - [ ] Add the application review and verification-handoff experience.

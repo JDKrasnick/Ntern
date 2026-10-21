@@ -3,6 +3,7 @@ import type { AdmissionCatalogCommit } from '../src/ingestion-v2/admission/evalu
 import { validCompanyIconEmployerId } from './company-icon.js';
 import { enqueueEmployerIconResolution } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
+import { providerPostingReference } from '../src/identity/posting.js';
 import type { D1Database } from './types.js';
 
 /** Register a reviewed official source's employer before its live catalog commit.
@@ -24,18 +25,22 @@ export async function registerAdmissionEmployer(db: D1Database, input: Admission
 /** Best-effort enrichment after publication; backfill recovers a failed enqueue. */
 export async function enqueueAdmissionEmployerIcon(db: D1Database, input: AdmissionCatalogCommit, now: Date): Promise<void> {
   const employer = input.admission.canonicalEmployer;
-  if (!employer) return;
-  const identity = input.listing.providerIdentity;
+  const parsed = providerPostingReference(input.listing.applyUrl);
+  const identity = parsed.provider === 'unknown' ? input.listing.providerIdentity : parsed;
   try {
-    await enqueueEmployerIconResolution(new D1EmployerIconStore(db), {
-      canonicalEmployerId: employer.id, displayName: employer.displayName,
+    const store = new D1EmployerIconStore(db);
+    const seed = {
+      canonicalEmployerId: employer?.id ?? '', displayName: input.listing.company,
       roleTitle: input.listing.title, applicationUrl: input.listing.applyUrl,
       provider: identity?.provider ?? 'reviewed-registry',
       ...(identity?.tenant ? { tenant: identity.tenant } : {}),
       ...(input.listing.provenance ? { provenance: input.listing.provenance } : {}),
       sourceId: input.sourceId,
-    }, now);
+    };
+    const independent = await store.registerIdentity(seed, now, employer?.id);
+    if (employer) await enqueueEmployerIconResolution(store, { ...seed, canonicalEmployerId: employer.id }, now);
+    else if (independent) await enqueueEmployerIconResolution(store, independent, now);
   } catch {
-    console.warn(JSON.stringify({ event: 'company_icon_resolution_enqueue_failed', canonicalEmployerId: employer.id }));
+    console.warn(JSON.stringify({ event: 'company_icon_resolution_enqueue_failed', canonicalEmployerId: employer?.id }));
   }
 }

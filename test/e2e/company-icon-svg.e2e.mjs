@@ -274,3 +274,47 @@ test('resolves a reviewed Workday tenant from a provider logo despite an empty A
   assert.ok(calls.includes(url));
   assert.ok(!calls.some((href) => href.includes('api.openai.com')), 'reviewed ATS identity must resolve without a model');
 });
+
+test('backfills and serves a reviewed community role with no canonical employer', async () => {
+  const url = 'https://zillow.wd5.myworkdayjobs.com/en-US/Zillow_Group_External/job/Intern_R123';
+  const [acme] = await dump("SELECT icon_key FROM canonical_employers WHERE id = 'acme'");
+  const png = new Uint8Array(await (await documents.get(acme.icon_key)).arrayBuffer());
+  await database.batch([
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES
+      ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection', '{"version":"independent-icons"}'),
+      ('CATALOG_PROJECTION#MANIFESTS', 'independent-icons', 'catalog-projection', '{"keys":["zillow"]}')`),
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES
+      ('CATALOG_PROJECTION#GROUPS', 'zillow', 'catalog-projection', ?)`)
+      .bind(JSON.stringify({ group: { roleCount: 1, featuredRole: {
+        company: 'Zillow', title: 'Applied Scientist Intern', officialApplyUrl: url,
+        sourceReferences: [{ sourceId: 'reviewed-community', provenance: 'reviewed-community' }],
+      } } })),
+  ]);
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  globalThis.fetch = async (request) => {
+    const href = request instanceof URL ? request.href : typeof request === 'string' ? request : request.url;
+    const parsed = new URL(href);
+    if (href === url) return new Response('<html><title>Workday</title></html>', { headers: { 'content-type': 'text/html' } });
+    if (parsed.hostname === 'api.logo.dev') return Response.json([{ name: 'Zillow', domain: 'zillow.com' }]);
+    if (parsed.hostname === 'img.logo.dev') return new Response(png, { headers: { 'content-type': 'image/png' } });
+    if (parsed.hostname === 'zillow.com') return new Response(null, { status: 403 });
+    return internet(request);
+  };
+  try {
+    await builtWorker.scheduled({ cron, scheduledTime: Date.now(), noRetry() {} }, {
+      ...cronEnvironment(), LOGO_DEV_TOKEN: 'fixture-search-token', LOGO_DEV_IMAGE_TOKEN: 'fixture-image-token',
+    }, { waitUntil() {}, passThroughOnException() {} });
+    const [icon] = await dump("SELECT id, icon_key, website_domain FROM company_icon_identities WHERE display_name = 'Zillow'");
+    assert.match(icon.id, /^icon-v1-[a-f0-9]{32}$/u);
+    assert.equal(icon.website_domain, 'zillow.com');
+    assert.ok(await documents.get(icon.icon_key));
+    assert.deepEqual(await dump("SELECT id FROM canonical_employers WHERE display_name = 'Zillow'"), []);
+    globalThis.fetch = realFetch;
+    const fetcher = await worker.getWorker(workerName);
+    const response = await fetcher.fetch(`https://api.example.test/company-icons/${icon.id}`, {
+      headers: { 'X-InternNotifs-Service-Key': 'e2e-internal-service-secret' },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/png');
+  } finally { globalThis.fetch = realFetch; }
+});
