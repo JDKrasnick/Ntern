@@ -43,7 +43,8 @@ use stable group/role IDs. Last day, Last week and the release calendar narrow
 the candidate set separately. Observation-time windows use an inclusive UTC
 lower/upper bound, pinned when selected and preserved across pagination.
 
-- **Company:** the tier recorded on the canonical employer during admission:
+- **Company:** the reviewed tier recorded on the canonical employer during admission,
+  or a separately reviewed catalog company label when no canonical ID is present:
   Exceptional (95), Strong (85), Established (70), or Unrated (neutral 50).
   The editorial rubric blends technical-career reputation with business substance;
   it is not an investment rating, a measured prestige index or a promise about
@@ -81,6 +82,22 @@ this policy, not a verified market percentile. Calibrate these anchors against a
 reviewed catalog sample before a production rollout.
 
 ### Company ranking at admission
+
+Catalog-only labels use `catalog_company_rankings`, added by migration
+`0060_catalog_company_rankings.sql`. This ranking registry does not create an
+employer identity or grant catalog or alert eligibility. Operations reviewers
+can read it with `GET /internal/admission/catalog-company-rankings` and write
+`{ company, ranking, onlyUnreviewed: true }` with `PUT` to the same route.
+Writes default to preserving reviewed rows. An explicit `onlyUnreviewed: false`
+permits a deliberate reviewer edit. The API supplies the reviewer and timestamp.
+
+Canonical IDs remain authoritative. Conflicting name or alias scores stay
+neutral, including collisions between catalog reviews and pending canonical
+employers. Both registries load in bounded pages and share one snapshot for a
+Best request. No enrichment provider runs while a reader browses.
+
+The catalog-wide review and its read-only completeness gate are described in
+[company-ranking-review.md](company-ranking-review.md).
 
 Migration `0059_company_admission_ranking.sql` adds `ranking_json` to
 `canonical_employers`. Every existing or automatically added employer starts
