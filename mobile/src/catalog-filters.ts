@@ -121,13 +121,8 @@ export function defaultCatalogFilters(now = Date.now()): CatalogFilterValues {
 }
 
 /** The main feed shares date and sort preferences, independent of Search facets. */
-export function catalogFeedParameters(filters: CatalogFilterValues, page: { cursor?: string; query?: string } = {}): URLSearchParams {
-  const params = new URLSearchParams({ status: 'open', sort: filters.sort ?? 'best', limit: '50' });
-  if (filters.addedSince) params.set('addedSince', filters.addedSince);
-  if (filters.addedBefore) params.set('addedBefore', filters.addedBefore);
-  if (page.cursor) params.set('cursor', page.cursor);
-  if (page.query?.trim()) params.set('q', page.query.trim());
-  return params;
+export function catalogFeedParameters(filters: CatalogFilterValues, page: { cursor?: string; query?: string; dayZone?: string } = {}): URLSearchParams {
+  return groupedCatalogParameters(catalogRequestState(filters, { query: page.query, dayZone: page.dayZone }), { cursor: page.cursor, limit: 50 });
 }
 
 /** The client's filter state as the request shape the catalog API takes. */

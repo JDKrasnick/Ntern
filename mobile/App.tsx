@@ -96,6 +96,7 @@ import {
   type JobRouteState,
 } from "./src/job-detail";
 import { applicationSections, applicationStatusLabel, nextAvailableQueueEntry, queueEntryTarget, resolveApplicationJob, selectBulkTargets, sortApplyQueue, type ApplicationJobSummary } from "./src/application";
+import { applicationHistoryRows, loadApplicationHistory, parseApplicationHistory, rememberApplication, remainingCatalogGroup, saveApplicationHistory, type ApplicationHistoryEntry, type HistoryRole } from "./src/application-history";
 import {
   appSettingsPayload,
   jobPreferencesPayload,
@@ -211,7 +212,7 @@ type CatalogGroupRole = {
   canonicalEmployerId?: string;
 };
 type CatalogGroupDetails = { group: CatalogGroupRow; roles: CatalogGroupRole[] };
-type AppTab = "roles" | "swipe" | "queue" | "catalog" | "resume" | "profile";
+type AppTab = "roles" | "swipe" | "queue" | "catalog" | "history" | "resume" | "profile";
 
 /**
  * The deck surface's name in one place: the tab, its heading, and the Roles
@@ -2044,6 +2045,7 @@ function CatalogGroupSheet({
   onDismiss,
   onRetry,
   onOpenRole,
+  excludedJobIds,
 }: {
   groupId?: string;
   details?: CatalogGroupDetails;
@@ -2052,7 +2054,12 @@ function CatalogGroupSheet({
   onDismiss: () => void;
   onRetry: () => void;
   onOpenRole: (job: Job) => void;
+  excludedJobIds?: ReadonlySet<string>;
 }) {
+  if (Platform.OS === "web" && details && excludedJobIds?.size) {
+    const roles = details.roles.filter(role => !excludedJobIds.has(role.jobId));
+    details = { ...details, roles, group: { ...details.group, roleCount: roles.length } };
+  }
   const visible = Boolean(groupId);
   const sheetOffset = useSheetEntranceOffset(visible);
   return (
@@ -3019,11 +3026,12 @@ function TabNavigation({
   badgeCount?: number;
   resumeEnabled?: boolean;
 }) {
-  const browsing = Platform.OS === "web" && (active === "roles" || active === "catalog");
+  const browsing = Platform.OS === "web" && (active === "roles" || active === "catalog" || active === "history");
   const tabs = [
     { key: "roles", label: "Catalog", accessibilityLabel: "Catalog", icon: "briefcase-outline", activeIcon: "briefcase" },
     { key: "swipe", label: swipeTabName, accessibilityLabel: `${swipeTabName} roles`, icon: "layers-outline", activeIcon: "layers" },
     { key: "queue", label: "Queue", accessibilityLabel: "Apply queue", icon: "albums-outline", activeIcon: "albums" },
+    ...(Platform.OS === "web" ? [{ key: "history" as const, label: "History", accessibilityLabel: "Application history", icon: "time-outline" as const, activeIcon: "time" as const }] : []),
     { key: "catalog", label: "Search", accessibilityLabel: "Search roles", icon: "search-outline", activeIcon: "search" },
     ...(resumeEnabled ? [{ key: "resume" as const, label: "Resume", icon: "document-text-outline" as const, activeIcon: "document-text" as const }] : []),
     { key: "profile", label: "Profile", icon: "person-outline", activeIcon: "person" },
@@ -3581,6 +3589,7 @@ function CatalogFilterToolbar({ query, onQueryChange, filters, onFiltersChange, 
   children?: React.ReactNode;
 }) {
   const inputRef = useRef<TextInput>(null);
+  const [roleFiltersOpen, setRoleFiltersOpen] = useState(false);
   useWebKeyboardShortcuts([{ key: "/", onPress: () => inputRef.current?.focus() }]);
   return <View accessibilityLabel="Catalog filters" style={styles.catalogFilterToolbar}>
     <View style={styles.catalogToolbarSearch}>
@@ -3592,11 +3601,33 @@ function CatalogFilterToolbar({ query, onQueryChange, filters, onFiltersChange, 
         <Ionicons name="close" size={16} color={catalogColors.secondary} />
       </TouchableOpacity> : Platform.OS === "web" ? <Text style={styles.catalogSearchShortcut}>/</Text> : null}
     </View>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Filter by role" onPress={() => setRoleFiltersOpen(true)} style={styles.catalogSortTrigger}>
+        <Ionicons name="options-outline" size={15} color={catalogColors.accent} />
+        <Text style={styles.catalogSortText}>{filters.disciplines.length === 1 ? disciplineChipOptions.find(item => item.value === filters.disciplines[0])?.label ?? 'Roles' : filters.disciplines.length ? `Roles · ${filters.disciplines.length}` : 'All roles'}</Text>
+        <Ionicons name="chevron-down" size={13} color={catalogColors.secondary} />
+      </TouchableOpacity>
     <View style={styles.catalogToolbarControls}>
       <CatalogDateWindowControl filters={filters} onChange={onFiltersChange} />
       <CatalogSortControl sort={filters.sort ?? 'best'} onChange={sort => onFiltersChange({ ...filters, sort })} />
       {children}
     </View>
+    <FilterSheet visible={roleFiltersOpen} filters={filters} onFiltersChange={onFiltersChange} onClose={() => setRoleFiltersOpen(false)} />
+  </View>;
+}
+
+function ApplicationHistoryScreen({ entries, applications = [], jobs = [], onOpen }: {
+  entries: ApplicationHistoryEntry[]; applications?: Application[]; jobs?: Job[]; onOpen: (job: HistoryRole) => void;
+}) {
+  const rows = applicationHistoryRows(entries, applications, jobs);
+  return <View style={styles.catalogPageColumn}>
+    <FlatList data={rows} keyExtractor={item => item.job.jobId} contentContainerStyle={styles.historyContent}
+      ListHeaderComponent={<View style={styles.historyHeader}><Text style={styles.historyTitle}>History</Text><Text style={styles.catalogListMeta}>Saved on this browser. Opening a form does not confirm submission.</Text></View>}
+      ListEmptyComponent={<View style={styles.emptyState}><Text style={styles.catalogEmptyTitle}>No applications opened yet.</Text><Text style={styles.catalogEmptyCopy}>Click Apply on a role to move it here.</Text></View>}
+      renderItem={({ item }) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Open application for ${item.job.title} at ${item.job.company}`} aria-disabled={!item.job.applyUrl} disabled={!item.job.applyUrl} onPress={() => onOpen(item.job)} style={styles.catalogListRow}>
+        <View style={styles.catalogListEmployer}><CompanyMark company={item.job.company} size={34} /></View>
+        <View style={styles.catalogListPrimary}><Text style={styles.catalogListTitle}>{item.job.title}</Text><Text style={styles.catalogListEmployerName}>{item.job.company}</Text><Text style={styles.catalogListMeta}>{item.status}{item.openedAt ? ` · ${new Date(item.openedAt).toLocaleDateString()}` : ''}</Text></View>
+        {item.job.applyUrl ? <Ionicons name="open-outline" size={17} color={catalogColors.accent} /> : <Text style={styles.catalogListMeta}>Listing unavailable</Text>}
+      </TouchableOpacity>} />
   </View>;
 }
 
@@ -4866,6 +4897,56 @@ function AppContent() {
   const [nextCatalogCursor, setNextCatalogCursor] = useState<string>();
   const [catalogRefresh, setCatalogRefresh] = useState(0);
   const [applications, setApplications] = useState<Application[]>([]);
+  const [applicationHistory, setApplicationHistory] = useState<ApplicationHistoryEntry[]>([]);
+  const [historyHydrated, setHistoryHydrated] = useState(Platform.OS !== "web");
+  const [historyGroups, setHistoryGroups] = useState<Map<string, CatalogGroupDetails>>(() => new Map());
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    void loadApplicationHistory().then(saved => {
+      setApplicationHistory(current => parseApplicationHistory([...current, ...saved]));
+      setHistoryHydrated(true);
+    });
+  }, []);
+  useEffect(() => {
+    if (Platform.OS === "web" && historyHydrated) void saveApplicationHistory(applicationHistory).catch(() => {
+      Alert.alert("History could not be saved", "This browser could not save your history. Keep this tab open to retain it for this session.");
+    });
+  }, [applicationHistory, historyHydrated]);
+  const recordApplicationHistory = useCallback((job: HistoryRole) => {
+    if (Platform.OS === "web") setApplicationHistory(current => rememberApplication(current, job));
+  }, []);
+  const historyJobIds = useMemo(() => Platform.OS === "web" ? new Set([
+    ...applicationHistory.map(entry => entry.job.jobId),
+    ...applications.filter(item => item.status !== 'saved' || item.queuedAt === undefined).map(item => item.jobId),
+  ]) : new Set<string>(), [applicationHistory, applications]);
+  const historyScope = [...historyJobIds].sort().join('|');
+  useEffect(() => {
+    if (Platform.OS !== "web" || !historyJobIds.size) return;
+    let active = true;
+    const affected = [...new Map([...roleFeedGroups, ...catalogGroups].map(group => [group.groupId, group])).values()]
+      .filter(group => historyJobIds.has(group.featuredRole.jobId) && group.roleIds.some(id => !historyJobIds.has(id)) && !historyGroups.has(`${historyScope}:${group.groupId}`)).slice(0, 5);
+    if (!affected.length) return;
+    void Promise.allSettled(affected.map(async group => ({ key: `${historyScope}:${group.groupId}`, details: await api<CatalogGroupDetails>(`/catalog/groups/${encodeURIComponent(group.groupId)}?sort=best`, "") })))
+      .then(results => {
+        if (!active) return;
+        setHistoryGroups(current => {
+          const next = new Map(current);
+          for (const result of results) if (result.status === 'fulfilled') next.set(result.value.key, result.value.details);
+          // A failed lookup remains hidden for this fetch; avoid a retry loop.
+          for (const group of affected) if (!next.has(`${historyScope}:${group.groupId}`)) next.set(`${historyScope}:${group.groupId}`, { group, roles: [] });
+          return next;
+        });
+      });
+    return () => { active = false; };
+  }, [roleFeedGroups, catalogGroups, historyScope, historyGroups]);
+  const visibleCatalogGroups = useMemo(() => catalogGroups.flatMap(group => {
+    const visible = remainingCatalogGroup(group, historyJobIds, historyGroups.get(`${historyScope}:${group.groupId}`)?.roles);
+    return visible ? [visible] : [];
+  }), [catalogGroups, historyJobIds, historyGroups, historyScope]);
+  const visibleRoleFeedGroups = useMemo(() => roleFeedGroups.flatMap(group => {
+    const visible = remainingCatalogGroup(group, historyJobIds, historyGroups.get(`${historyScope}:${group.groupId}`)?.roles);
+    return visible ? [visible] : [];
+  }), [roleFeedGroups, historyJobIds, historyGroups, historyScope]);
   const [queuingJobIds, setSavingJobIds] = useState<Set<string>>(() => new Set());
   const pendingQueueIds = useRef<Set<string>>(new Set());
   const dequeueAfterSave = useRef<Set<string>>(new Set());
@@ -4892,7 +4973,7 @@ function AppContent() {
     let active = true;
     roleFeedGeneration.current += 1;
     roleFeedRequestInFlight.current = false;
-    const parameters = catalogFeedParameters(catalogFilters, { query: debouncedCatalogQuery });
+    const parameters = Platform.OS === "web" ? catalogFeedParameters(catalogFilters, { query: debouncedCatalogQuery, dayZone }) : new URLSearchParams({ status: 'open', sort: 'newest', limit: '50' });
     const duration = catalogFilters.addedSince && catalogFilters.addedBefore
       ? Date.parse(catalogFilters.addedBefore) - Date.parse(catalogFilters.addedSince) : 'all';
     const cacheKey = `${roleFeedCacheKey}.${catalogFilters.sort ?? 'best'}.${duration}`;
@@ -4934,7 +5015,7 @@ function AppContent() {
         if (active) setRoleFeedLoading(false);
       });
     return () => { active = false; };
-  }, [catalogRefresh, catalogFilters.sort, catalogFilters.addedSince, catalogFilters.addedBefore, catalogFiltersHydrated, debouncedCatalogQuery]);
+  }, [catalogRefresh, catalogFilters, catalogFiltersHydrated, debouncedCatalogQuery, dayZone]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string>();
   const [selectedGroup, setSelectedGroup] = useState<CatalogGroupDetails>();
@@ -5217,7 +5298,7 @@ function AppContent() {
     if (!cursor || roleFeedRequestInFlight.current || (!retry && roleFeedMoreError)) return;
     roleFeedRequestInFlight.current = true;
     const generation = roleFeedGeneration.current;
-    const parameters = catalogFeedParameters(catalogFilters, { cursor, query: debouncedCatalogQuery });
+    const parameters = Platform.OS === "web" ? catalogFeedParameters(catalogFilters, { cursor, query: debouncedCatalogQuery, dayZone }) : new URLSearchParams({ status: 'open', sort: 'newest', limit: '50', ...(cursor ? { cursor } : {}) });
     setRoleFeedLoadingMore(true);
     setRoleFeedMoreError(undefined);
     void api<GroupedCatalogPage<CatalogGroupRow>>(
@@ -5604,8 +5685,8 @@ function AppContent() {
   // owns an unfiltered public page, rather than borrowing Catalog's current
   // search/filter state, so it stays a scrollable browse surface.
   const latestCatalogJobs = useMemo(
-    () => roleFeedGroups.flatMap(group => group.featuredRole ? [catalogRoleJob(group.featuredRole)] : []),
-    [roleFeedGroups],
+    () => visibleRoleFeedGroups.flatMap(group => group.featuredRole ? [catalogRoleJob(group.featuredRole)] : []),
+    [visibleRoleFeedGroups],
   );
   // The catalog's newness lane reads the same release the Roles tab shows, so
   // "new" means one thing across both surfaces.
@@ -5665,7 +5746,9 @@ function AppContent() {
     return (
       <>
       <GuestExperience
-        groups={catalogGroups}
+        applicationHistory={applicationHistory}
+        onApplicationOpened={recordApplicationHistory}
+        groups={visibleCatalogGroups}
         preferences={preferences ?? defaultPreference}
         initialTab={landingTab}
         onPreferencesChanged={setPreferences}
@@ -5726,6 +5809,7 @@ function AppContent() {
         }}
       />
       <CatalogGroupSheet
+        excludedJobIds={historyJobIds}
         groupId={selectedGroupVisible ? selectedGroupId : undefined}
         details={selectedGroup}
         loading={selectedGroupLoading}
@@ -5789,7 +5873,17 @@ function AppContent() {
     });
     // Start the request before handing off to the system browser, which can
     // immediately background the native app and suspend later JavaScript work.
-    void openOfficialApplication(job.applyUrl, preferences.applicationHandoff ?? "window", () => dequeueOpenedApplication(job.jobId));
+    void openOfficialApplication(job.applyUrl, preferences.applicationHandoff ?? "window", () => {
+      if (Platform.OS === "web") {
+        const summary = [...latestCatalogJobs, ...catalogJobs].find(item => item.jobId === job.jobId)
+          ?? (selectedJob?.jobId === job.jobId ? selectedJob : undefined)
+          ?? applicationHistory.find(entry => entry.job.jobId === job.jobId)?.job
+          ?? applications.find(item => item.jobId === job.jobId)?.job;
+        if (summary) recordApplicationHistory({ ...summary, applyUrl: job.applyUrl });
+        dismissRoutedJob();
+      }
+      dequeueOpenedApplication(job.jobId);
+    });
   };
   const openQueueBulk = (targets: Array<{ jobId: string; applyUrl: string }>) => {
     if (Platform.OS !== "web") {
@@ -5809,6 +5903,8 @@ function AppContent() {
       if (applicationWindow === null) blocked += 1;
       else {
         applicationWindow.opener = null;
+        const summary = [...latestCatalogJobs, ...catalogJobs].find(item => item.jobId === target.jobId) ?? applications.find(item => item.jobId === target.jobId)?.job;
+        if (summary) recordApplicationHistory({ ...summary, applyUrl: target.applyUrl });
         dequeueOpenedApplication(target.jobId);
       }
     }
@@ -5964,7 +6060,7 @@ function AppContent() {
     })();
   };
   return (
-    <SafeAreaView style={[styles.screen, Platform.OS === "web" && (tab === "roles" || tab === "catalog") && styles.catalogCanvas]}>
+    <SafeAreaView style={[styles.screen, Platform.OS === "web" && (tab === "roles" || tab === "catalog" || tab === "history") && styles.catalogCanvas]}>
       <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
         {usesNavigationRail ? <TabNavigation active={tab} onChange={changeTab} rail badgeCount={applyQueue.length} resumeEnabled={publicConfig.resumeTunerEnabled} /> : null}
         <View style={styles.appMain}>
@@ -6014,6 +6110,8 @@ function AppContent() {
               onRequireAccount={() => undefined}
               keyboardEnabled={!selectedJob && !queueSheetVisible && !resumeDrafting}
             />
+          ) : tab === "history" ? (
+            <ApplicationHistoryScreen entries={applicationHistory} applications={applications} jobs={catalogJobs} onOpen={openApplicationAndScheduleCheck} />
           ) : tab === "queue" ? (
             <View style={styles.pageColumn}>
             <Applications
@@ -6032,7 +6130,7 @@ function AppContent() {
             </View>
           ) : tab === "catalog" ? (
             <CatalogScreen
-              groups={catalogGroups}
+              groups={visibleCatalogGroups}
               query={query}
               onQueryChange={setQuery}
               filters={catalogFilters}
@@ -6116,6 +6214,7 @@ function AppContent() {
         onRemoveFromQueue={removeFromQueue}
       />
       <CatalogGroupSheet
+        excludedJobIds={historyJobIds}
         groupId={selectedGroupVisible ? selectedGroupId : undefined}
         details={selectedGroup}
         loading={selectedGroupLoading}
@@ -6467,6 +6566,8 @@ export default function App() {
 }
 
 function GuestExperience({
+  applicationHistory,
+  onApplicationOpened,
   groups,
   preferences,
   onPreferencesChanged,
@@ -6515,6 +6616,8 @@ function GuestExperience({
   onOpenGroup,
   onSession,
 }: {
+  applicationHistory: ApplicationHistoryEntry[];
+  onApplicationOpened: (job: HistoryRole) => void;
   groups: CatalogGroupRow[];
   preferences: Preference;
   /** The surface this device opens on; the catalog when omitted. */
@@ -6607,7 +6710,7 @@ function GuestExperience({
   return (
     <View style={styles.guestRoot}>
       <SafeAreaView
-        style={[styles.screen, Platform.OS === "web" && (tab === "roles" || tab === "catalog") && styles.catalogCanvas, showAccount && styles.inertScreen]}
+        style={[styles.screen, Platform.OS === "web" && (tab === "roles" || tab === "catalog" || tab === "history") && styles.catalogCanvas, showAccount && styles.inertScreen]}
         accessibilityElementsHidden={showAccount}        importantForAccessibility={showAccount ? "no-hide-descendants" : "auto"}
       >
         <View style={[styles.appShell, usesNavigationRail && styles.appShellWide]}>
@@ -6689,6 +6792,8 @@ function GuestExperience({
                 onRequireAccount={openAccount}
                 keyboardEnabled={!routedJob && !showAccount}
               />
+            ) : tab === "history" ? (
+              <ApplicationHistoryScreen entries={applicationHistory} onOpen={job => { void openOfficialApplication(job.applyUrl, 'window', () => onApplicationOpened(job)); }} />
             ) : tab === "queue" ? (
               <View style={styles.pageColumn}>
                 <AccountGate
@@ -6725,7 +6830,9 @@ function GuestExperience({
           onModalDismissed={onModalDismissedRoute}
           onRetry={onRetryRoute}
           onApply={(job) => {
-            void openOfficialApplication(job.applyUrl);
+            void openOfficialApplication(job.applyUrl, 'window', () => {
+              if (Platform.OS === "web") { onApplicationOpened(job); onDismissRoute(); }
+            });
           }}
           onOpenListing={(job) => {
             void openOfficialApplication(job.applyUrl);
@@ -8499,7 +8606,7 @@ function Applications({
     );
   };
   const queuedIds = new Set(queue.map((entry) => entry.applicationId));
-  const sections = applicationSections(applications, queue);
+  const sections = applicationSections(applications, queue).filter(section => Platform.OS !== "web" || section.title === 'To apply');
   const availableQueueTargets = queue
     .map((item) => queueEntryTarget(item, jobs))
     .filter((target): target is { jobId: string; applyUrl: string } => target !== undefined);
@@ -10687,7 +10794,10 @@ const styles = StyleSheet.create({
   catalogToolbarInput: { color: catalogColors.text, flex: 1, fontSize: 14, lineHeight: 20, minHeight: 42, minWidth: 0, paddingVertical: 8 },
   catalogToolbarClear: { alignItems: "center", justifyContent: "center", width: 36, height: 40 },
   catalogSearchShortcut: { color: catalogColors.secondary, borderColor: catalogColors.border, borderWidth: 1, borderRadius: 4, fontSize: 12, paddingHorizontal: 6, paddingVertical: 2 },
-  catalogToolbarControls: { alignItems: "center", flexDirection: "row", minHeight: 48, gap: 10, zIndex: 20 },
+  catalogToolbarControls: { alignItems: "center", flexDirection: "row", flexWrap: "wrap", flexShrink: 1, minHeight: 48, gap: 10, zIndex: 20 },
+  historyContent: { paddingBottom: 28 },
+  historyHeader: { paddingVertical: 24 },
+  historyTitle: { color: catalogColors.text, fontSize: 24, fontWeight: "600", marginBottom: 5 },
   catalogToolbarSegments: { alignItems: "center", backgroundColor: catalogColors.surface, borderColor: catalogColors.border, borderWidth: 1, borderRadius: 7, flexDirection: "row", padding: 3 },
   catalogToolbarSegment: { alignItems: "center", justifyContent: "center", borderRadius: 4, minHeight: 38, paddingHorizontal: 12 },
   catalogToolbarSegmentActive: { backgroundColor: catalogColors.accent },
