@@ -675,6 +675,27 @@ describe('shadow extraction queue and cost ledger', () => {
     }
   });
 
+  it('limits the dev grant to $2 in October without changing production or historical caps', async () => {
+    const DB = schema(); const now = new Date('2026-10-21T00:00:00Z');
+    const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2000',
+      SHADOW_EXTRACTION_DEV_EXTRA_CENTS: '200', OUTBOUND_NOTIFICATIONS_ENABLED: 'false' };
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ allowanceCents: 2200, historical: { allowanceCents: 1000 } });
+    for (const changed of [{ OUTBOUND_NOTIFICATIONS_ENABLED: 'true' }, { OUTBOUND_NOTIFICATIONS_ENABLED: undefined },
+      { SHADOW_EXTRACTION_DEV_EXTRA_CENTS: '201' }, { SHADOW_EXTRACTION_DEV_EXTRA_CENTS: '-1' }]) {
+      expect(await providerShadowBudgetStatus(DB, now, { ...env, ...changed })).toMatchObject({ allowanceCents: 2000 });
+    }
+    expect(await providerShadowBudgetStatus(DB, new Date('2026-11-01T00:00:00Z'), env)).toMatchObject({ allowanceCents: 2000 });
+    expect(await providerShadowBudgetStatus(DB, now, { ...env, SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '3701' })).toMatchObject({ allowanceCents: 0 });
+    const key = 'f'.repeat(64);
+    await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key,job_id,source_id,external_id,source_url,posting_identity,content_hash,
+      model_id,prompt_version,schema_version,preprocessing_version,state,input_key,origin,created_at,updated_at)
+      VALUES (?,'dev','dev','dev','https://example.test','{}',?,'model','p','s','n','queued','input','provider-poll',?,?)`)
+      .bind(key, key, now.toISOString(), now.toISOString()).run();
+    const reserved = await Promise.all(Array.from({ length: 111 }, (_, index) => reserveShadowCost(DB, now, key, `dev-${index}`, 20, env)));
+    expect(reserved.filter(Boolean)).toHaveLength(110);
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ allowanceCents: 2200, spentCents: 2200, exhausted: true });
+  });
+
   it('retains the old 900¢ provider allowance until the $20 binding is applied', async () => {
     const DB = schema();
     const now = new Date('2026-09-24T00:00:00.000Z');

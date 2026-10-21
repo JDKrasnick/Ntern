@@ -57,6 +57,9 @@ export interface ShadowExtractionEnvironment {
   SHADOW_EXTRACTION_ENABLED?: string;
   SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS?: string;
   SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS?: string;
+  /** October-only, owner-approved $2 grant for isolated dev with delivery disabled. */
+  SHADOW_EXTRACTION_DEV_EXTRA_CENTS?: string;
+  OUTBOUND_NOTIFICATIONS_ENABLED?: string;
   OPENAI_KEY?: string;
   ANTHROPIC_API_KEY?: string;
   LLM_METADATA_PUBLICATION_POLICY_JSON?: string;
@@ -105,7 +108,16 @@ const providerRunReservationCents = 20;
 export const modelRuntimeProbeSourceId = '_metadata-model-runtime-probe';
 const modelRuntimeProbeMonthlyLimitCents = 100;
 
-function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOrigin, forecast: number, headroom: number): number {
+type ShadowBudgetEnvironment = Pick<ShadowExtractionEnvironment, 'SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS'
+  | 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS' | 'SHADOW_EXTRACTION_DEV_EXTRA_CENTS' | 'OUTBOUND_NOTIFICATIONS_ENABLED'>;
+
+function devBudgetExtra(period: string, env: ShadowBudgetEnvironment): number {
+  return period === '2026-10' && env.OUTBOUND_NOTIFICATIONS_ENABLED === 'false'
+    && env.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS === '2000'
+    && env.SHADOW_EXTRACTION_DEV_EXTRA_CENTS === '200' ? 200 : 0;
+}
+
+function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOrigin, forecast: number, headroom: number, devExtra = 0): number {
   // Owner-approved seven-day refresh: at approval the October ledger had
   // 1720 cents committed globally, including 877 historical cents. These
   // grants permit $5 originally, raised to $15 total by the owner, including
@@ -124,8 +136,8 @@ function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOri
       return Math.min(headroom + septemberIncreaseCents,
         Math.max(0, 2_000 + septemberIncreaseCents - forecast));
     }
-    return Math.min(headroom, providerMonthlyShadowLimitCents,
-      Math.max(0, providerMonthlyCombinedLimitCents - forecast));
+    return Math.min(headroom + devExtra, providerMonthlyShadowLimitCents + devExtra,
+      Math.max(0, providerMonthlyCombinedLimitCents + devExtra - forecast));
   }
   // The owner approved $5 more historical headroom starting in October.
   // Preserve earlier periods and keep every lane under the global model cap.
@@ -137,14 +149,14 @@ function monthlyShadowAllowanceCents(period: string, origin: ShadowExtractionOri
 }
 
 export async function providerShadowBudgetStatus(db: D1Database, now: Date,
-  env: Pick<ShadowExtractionEnvironment, 'SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS' | 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS'>,
+  env: ShadowBudgetEnvironment,
 ): Promise<{ period: string; allowanceCents: number; spentCents: number; exhausted: boolean;
   historical: { allowanceCents: number; spentCents: number; availableCents: number; exhausted: boolean } } | undefined> {
   const forecast = parseCents(env.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS);
   const headroom = parseCents(env.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS);
   if (forecast === undefined || headroom === undefined) return undefined;
   const period = month(now);
-  const allowanceCents = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom);
+  const allowanceCents = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom, devBudgetExtra(period, env));
   const row = await db.prepare(`SELECT COALESCE(SUM(charged_cents), 0) AS spent_cents,
       COALESCE(SUM(CASE WHEN origin != 'provider-poll' AND NOT (origin = 'controlled' AND source_id = ?)
         THEN charged_cents ELSE 0 END), 0) AS historical_cents
@@ -300,7 +312,7 @@ export async function queueModelRuntimeProbe(env: ShadowExtractionEnvironment, n
 
 /** Atomic reservation checks the already-forecast app spend and the monthly
  * shadow envelope before an inference call. A missing value fails closed. */
-export async function reserveShadowCost(db: D1Database, now: Date, runKey: string, leaseToken: string, reserveCents: number, env: Pick<ShadowExtractionEnvironment, 'SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS' | 'SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS'>): Promise<boolean> {
+export async function reserveShadowCost(db: D1Database, now: Date, runKey: string, leaseToken: string, reserveCents: number, env: ShadowBudgetEnvironment): Promise<boolean> {
   const forecast = parseCents(env.SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS);
   const headroom = parseCents(env.SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS);
   if (forecast === undefined || headroom === undefined || reserveCents <= 0) return false;
@@ -316,8 +328,8 @@ export async function reserveShadowCost(db: D1Database, now: Date, runKey: strin
   // charged to the existing global model ceiling. It never borrows the
   // historical cohort's smaller allowance or counts as natural traffic.
   const probe = run?.origin === 'controlled' && run.source_id === modelRuntimeProbeSourceId;
-  const allowance = monthlyShadowAllowanceCents(period, probe ? 'provider-poll' : run?.origin ?? 'legacy-unknown', forecast, headroom);
-  const globalAllowance = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom);
+  const allowance = monthlyShadowAllowanceCents(period, probe ? 'provider-poll' : run?.origin ?? 'legacy-unknown', forecast, headroom, devBudgetExtra(period, env));
+  const globalAllowance = monthlyShadowAllowanceCents(period, 'provider-poll', forecast, headroom, devBudgetExtra(period, env));
   const historical = !probe && run?.origin !== 'provider-poll';
   if (reserveCents > allowance) return false;
   const result = await db.prepare(`INSERT INTO shadow_extraction_cost_ledger (period, lease_token, run_key, reserved_cents, actual_cents, state, created_at, updated_at)

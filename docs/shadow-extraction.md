@@ -160,7 +160,12 @@ Cloudflare usage) and `SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS`. The consumer
 fails closed unless cumulative reservations and reconciled actual usage fit the
 total model allowance (at most $20/month with the $20 headroom binding), and the
 forecast plus model usage stays within $35/month. The legacy smaller binding
-retains its earlier limits. Historical/non-provider work also has its own
+retains its earlier limits. For October 2026 only, the isolated dev profile has
+an owner-approved 200-cent supplement through `SHADOW_EXTRACTION_DEV_EXTRA_CENTS`.
+It requires disabled outbound delivery and the existing 2000-cent binding,
+raising only dev's total ceiling to 2200 cents and forecast-plus-model ceiling
+to 3700 cents. Production settings and historical sublimits are unchanged.
+Historical/non-provider work also has its own
 $10/month sublimit starting in October 2026, with forecast plus historical usage
 capped at $25/month; earlier periods retain their original limits. Provider
 traffic and fixed diagnostic probes do not consume that sublimit. Every lane
