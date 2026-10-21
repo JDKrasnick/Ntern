@@ -2,7 +2,7 @@
 
 The public catalog defaults to **Best opportunities**. **Newest** remains a
 separate chronological sort. The main Catalog feed and Search share the selected
-sort and date window, while Search retains its own facets. New installations and
+sort and date window, while Search retains its own facets. New web installations and
 legacy preferences start with **Last day** (the last 24 hours) and **Best opportunities**.
 Readers can choose Last week or All independently of the ranking. Both sorts
 respect the same role, employer, education, source, availability, location and
@@ -14,7 +14,8 @@ and sort together below the search field. Results use continuous compact rows;
 the feed header has no swipe action or scoring subtitle.
 The layout changes apply only to web, including narrow browser widths. Native
 navigation, feed cards, catalog rows, search controls and their existing styles
-retain their previous presentation. Web compares season and education in plain
+retain their previous presentation. Native freshness controls, Newest default
+and v1 preferences also remain separate from the web migration. Web compares season and education in plain
 columns, with education labels separated by a slash (for example Undergrad / Masters).
 
 ## Score v1

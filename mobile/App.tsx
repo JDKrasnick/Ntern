@@ -51,7 +51,7 @@ import { calendarToday, monthCells, monthLabel, monthOf, monthRange, shiftMonth,
 import { dayIndexCacheKey, isDayIndexFresh, loadDayIndex, prefetchDayIndex, readDayIndex, readDayIndexCached, type ReleaseDayCount } from "./src/day-index";
 import { UTC_ZONE, deviceTimeZone, useDayZone } from "./src/day-zone";
 import { loadCatalogFilters, saveCatalogFilters } from "./src/catalog-filter-storage";
-import { catalogGroupHasNewRole, catalogListUsesColumns, type CatalogFreshness } from "./src/catalog-layout";
+import { catalogGroupHasNewRole, catalogGroupsForFreshness, catalogNewRoleCount, catalogListUsesColumns, type CatalogFreshness } from "./src/catalog-layout";
 import { shouldPrefetchNextPage } from "./src/infinite-scroll";
 import { deckCandidates, forgetSeen, forgetSkip, mergeDeckJobs, parseDeckCache, parseSeenList, parseSkipList, rememberSeen, rememberSkip, resolveSwipe, shouldLoadMoreDeck, swipeDeckCacheKey, swipeDeckPageSize, swipeDeckPrefetchFloor, swipeSeenCacheKey, swipeSkipCacheKey } from "./src/swipe-deck";
 import { isLandingTab, loadLandingTab, saveLandingTab, type LandingTab } from "./src/default-tab";
@@ -3653,6 +3653,73 @@ function CatalogColumnHeadings() {
   </View>;
 }
 
+
+/** Preserve the native catalog's existing freshness controls. */
+function NativeCatalogFreshnessToolbar({ visibleGroups, newJobIds, newSinceLabel, freshness, setFreshness }: {
+  visibleGroups: CatalogGroupRow[]; newJobIds?: Set<string>; newSinceLabel?: string;
+  freshness: CatalogFreshness; setFreshness: (value: CatalogFreshness) => void;
+}) {
+  const { width } = useWindowDimensions();
+  const stackedSearch = width < 560;
+  const freshnessNow = useRef(Date.now()).current;
+  const freshRoleCount = useMemo(() => catalogNewRoleCount(visibleGroups, newJobIds), [visibleGroups, newJobIds]);
+  const lastDayGroups = useMemo(
+    () => catalogGroupsForFreshness(visibleGroups, newJobIds, "day", freshnessNow),
+    [visibleGroups, newJobIds, freshnessNow],
+  );
+  const lastWeekGroups = useMemo(
+    () => catalogGroupsForFreshness(visibleGroups, newJobIds, "week", freshnessNow),
+    [visibleGroups, newJobIds, freshnessNow],
+  );
+  const freshnessCounts: Record<CatalogFreshness, number> = {
+    new: freshRoleCount,
+    day: lastDayGroups.length,
+    week: lastWeekGroups.length,
+    all: visibleGroups.length,
+  };
+  const freshnessTitle = freshness === "new" ? "New roles" : freshness === "day" ? "Last day" : freshness === "week" ? "Last week" : "All roles";
+  const freshnessSummary = freshness === "new"
+    ? freshRoleCount ? `${freshRoleCount} ${freshRoleCount === 1 ? "role" : "roles"} since your last app opening` : "Nothing new since your last app opening"
+    : freshness === "day"
+      ? `${lastDayGroups.length} ${lastDayGroups.length === 1 ? "group" : "groups"} updated in the last 24 hours`
+      : freshness === "week"
+        ? `${lastWeekGroups.length} ${lastWeekGroups.length === 1 ? "group" : "groups"} updated in the last 7 days`
+        : freshRoleCount ? `${freshRoleCount} new since ${newSinceLabel ?? "your last app opening"}` : "You’re caught up";
+  return <>{visibleGroups.length || freshness !== "all" ? (
+                <View style={[styles.catalogFreshToolbar, stackedSearch && styles.catalogFreshToolbarStacked]}>
+                  <View style={styles.catalogFreshCopy}>
+                    <Text style={styles.catalogFreshTitle}>{freshnessTitle}</Text>
+                    <Text style={styles.catalogFreshSummary} numberOfLines={1}>{freshnessSummary}</Text>
+                  </View>
+                  <View accessibilityLabel="Catalog freshness" accessibilityRole="tablist" style={[styles.catalogFreshSegments, stackedSearch && styles.catalogFreshSegmentsStacked]}>
+                    {([
+                      { value: "new", label: "New" },
+                      { value: "day", label: "Last day" },
+                      { value: "week", label: "Last week" },
+                      { value: "all", label: "All" },
+                    ] as const).map((option) => {
+                      const selected = freshness === option.value;
+                      const disabled = freshnessCounts[option.value] === 0 && !selected;
+                      return (
+                        <TouchableOpacity
+                          key={option.value}
+                          accessibilityRole="tab"
+                          aria-selected={selected}
+                          aria-disabled={disabled}
+                          disabled={disabled}
+                          onPress={() => setFreshness(option.value)}
+                          style={[styles.catalogFreshSegment, stackedSearch && styles.catalogFreshSegmentStacked, selected && styles.catalogFreshSegmentActive, disabled && styles.catalogFreshSegmentDisabled]}
+                        >
+                          {option.value === "new" ? <Ionicons name="sparkles-outline" size={13} color={selected ? colors.onDark : colors.signal} /> : null}
+                          <Text style={[styles.catalogFreshSegmentText, selected && styles.catalogFreshSegmentTextActive]}>{option.label}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+              ) : null}</>;
+}
+
 function CatalogScreen({
   groups,
   query,
@@ -3732,7 +3799,9 @@ function CatalogScreen({
   const [queryFocused, setQueryFocused] = useState(false);
   const searchFieldRef = useRef<TextInput>(null);
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const freshness: CatalogFreshness = !filters.addedSince ? "all"
+  const [nativeFreshness, setNativeFreshness] = useState<CatalogFreshness>("all");
+  const nativeFreshnessNow = useRef(Date.now()).current;
+  const freshness: CatalogFreshness = Platform.OS !== "web" ? nativeFreshness : !filters.addedSince ? "all"
     : filters.addedBefore && Date.parse(filters.addedBefore) - Date.parse(filters.addedSince) <= 86_400_000 ? "day" : "week";
   // Below this width the query field needs the whole row; the filter control
   // drops to its own line rather than truncating the placeholder.
@@ -3759,7 +3828,7 @@ function CatalogScreen({
     () => groups.filter((group) => !isHiddenGroup(group) || isUndoGroup(group)),
     [groups, hiddenJobIds, hiddenFeedbackJob],
   );
-  const displayedGroups = visibleGroups;
+  const displayedGroups = Platform.OS === "web" ? visibleGroups : catalogGroupsForFreshness(visibleGroups, newJobIds, nativeFreshness, nativeFreshnessNow);
   const openNextQueuedRole = () => {
     const target = queue
       ?.map((item) => queueEntryTarget(item, queueJobs ?? []))
@@ -3916,6 +3985,7 @@ function CatalogScreen({
             // screen: a refine keeps the current page and swaps it when the fresh
             // one lands. The skeleton belongs to the empty state, not the header.
             <>
+              {Platform.OS !== "web" ? <NativeCatalogFreshnessToolbar visibleGroups={visibleGroups} newJobIds={newJobIds} newSinceLabel={newSinceLabel} freshness={nativeFreshness} setFreshness={setNativeFreshness} /> : null}
               {wideCatalogList ? (
                 <CatalogColumnHeadings />
               ) : visibleGroups.length ? (
@@ -4805,17 +4875,17 @@ function AppContent() {
   const catalogQueryRef = useRef("");
   catalogQueryRef.current = query.trim();
   const debouncedCatalogQuery = useDebouncedValue(query.trim(), 150);
-  const [catalogFilters, setCatalogFilters] = useState<CatalogFilterValues>(() => defaultCatalogFilters());
+  const [catalogFilters, setCatalogFilters] = useState<CatalogFilterValues>(() => Platform.OS === "web" ? defaultCatalogFilters() : { ...emptyCatalogFilters, sort: 'newest' });
   const [catalogFiltersHydrated, setCatalogFiltersHydrated] = useState(false);
   useEffect(() => {
-    void loadCatalogFilters().then((stored) => {
+    void loadCatalogFilters(Platform.OS !== "web").then((stored) => {
       if (stored) setCatalogFilters(stored);
       setCatalogFiltersHydrated(true);
     });
   }, []);
   useEffect(() => {
     // Saving before the stored filters load would overwrite them with the defaults.
-    if (catalogFiltersHydrated) void saveCatalogFilters(catalogFilters);
+    if (catalogFiltersHydrated) void saveCatalogFilters(catalogFilters, Platform.OS !== "web");
   }, [catalogFilters, catalogFiltersHydrated]);
   useEffect(() => {
     if (!catalogFiltersHydrated) return;
