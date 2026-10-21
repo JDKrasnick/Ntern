@@ -86,4 +86,30 @@ describe('admitted company ranking', () => {
       }
     }
   });
+
+  it('validates the complete individual review file and prevents known company-name mix-ups', () => {
+    const reviews = readFileSync(new URL('../scripts/data/company-ranking-holistic-reviews.jsonl', import.meta.url), 'utf8')
+      .split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown> & { company: string; aliases: string[]; sources: string[] });
+    const keys = new Set<string>();
+    for (const review of reviews) {
+      expect(() => reviewCompanyRanking(review, 'data-validation', at), review.company).not.toThrow();
+      expect(review.reviewedOn, review.company).toMatch(/^\d{4}-\d{2}-\d{2}$/u);
+      expect(['high', 'medium', 'limited'], review.company).toContain(review.confidence);
+      expect(review.compensationEvidence, review.company).toBeTruthy();
+      expect(review.sources.length, review.company).toBeGreaterThan(0);
+      if (review.linkedInFollowers !== null) {
+        expect(Number.isSafeInteger(review.linkedInFollowers), review.company).toBe(true);
+        expect(review.sources.some(source => new URL(source).hostname.endsWith('linkedin.com')), review.company).toBe(true);
+      }
+      for (const name of [review.company, ...review.aliases]) {
+        const key = canonicalCompanyKey(name);
+        expect(key, name).not.toBe('');
+        expect(keys.has(key), name).toBe(false);
+        keys.add(key);
+      }
+    }
+    expect(reviews.find(review => review.company === 'Sage')).toMatchObject({ tier: 'established' });
+    expect(reviews.find(review => review.company === 'Sage')?.sources.some(source => source.includes('sage49'))).toBe(true);
+    expect(reviews.find(review => review.company === 'Pivotal Software')).toMatchObject({ tier: 'unrated', confidence: 'limited' });
+  });
 });
