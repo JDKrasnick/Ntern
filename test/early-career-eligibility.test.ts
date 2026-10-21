@@ -236,6 +236,25 @@ describe('employer-authoritative early-career policy', () => {
     await result.commitEffect?.();
     expect(commit).not.toHaveBeenCalled();
   });
+  it('admits an explicit graduate invitation through the complete v2 grading path', () => {
+    const role = posting('Network Security Engineer', 'This position is open to experienced candidates, as well as fresh graduates who will be graduating in December 2026.\nYou have a minimum of 4 years experience supporting network security products.');
+    expect(gradeAdmissionRow({ sourceId: role.sourceId, externalId: role.externalId, posting: role,
+      evaluatedAt: now, earlyCareerEligibilityEnabled: true, probe: { reachability: 'blocked' } }))
+      .toMatchObject({ decision: { kind: 'admitted' }, admission: { catalogEligible: true, alertEligible: true,
+        earlyCareer: { status: 'eligible', programType: 'entry-level' } } });
+  });
+  it('hydrates an index-only generic title and commits the body-supported internship', async () => {
+    const full = posting('Software Engineer', 'This position is a paid internship building software.');
+    const index = { ...full, content: [], contentCompleteness: 'index-only' as const };
+    const commit = vi.fn(async () => {});
+    const evaluator = new RuleBasedAdmissionV2Evaluator({ earlyCareerEligibilityEnabled: true, now: () => new Date(now),
+      prober: { async probe() { return { reachability: 'live', hydratedPosting: full }; } }, sink: { commit } });
+    const result = await evaluator.evaluate(admissionContext(index));
+    expect(result.decision.kind).toBe('admitted');
+    await result.commitEffect!();
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({ admission: expect.objectContaining({
+      catalogEligible: true, earlyCareer: expect.objectContaining({ programType: 'internship' }) }) }));
+  });
   it('hydrates a generic technical index candidate before rejecting its experienced minimum', async () => {
     const full = posting('Software Engineer', '4+ years of professional software engineering experience required.');
     const index = { ...full, content: [], contentCompleteness: 'index-only' as const };
