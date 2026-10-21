@@ -3,6 +3,7 @@ import { alertEligible, catalogEligible, deriveCanonicalAdmission, evaluateCatal
 import { openCatalogSortKey } from '../src/catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses } from '../src/catalog-fields.js';
 import { canonicalCompanyKey } from '../src/core/normalize.js';
+import { storedCompanyRanking, type CompanyRanking } from '../src/company-ranking.js';
 import { providerPostingReference, providerPostingAlias } from '../src/identity/posting.js';
 import type {
   AdmissionIncident,
@@ -1343,6 +1344,7 @@ export class D1CatalogAdmissionStore {
     return {
       id: row.id as string, displayName: row.display_name as string, reviewedAt: row.reviewed_at as string,
       reviewedBy: row.reviewed_by as string,
+      ranking: storedCompanyRanking(row.ranking_json),
       ...(row.icon_key ? { iconKey: row.icon_key as string } : {}),
       ...(row.icon_source ? { iconSource: row.icon_source as string } : {}),
       ...(row.icon_updated_at ? { iconUpdatedAt: row.icon_updated_at as string } : {}),
@@ -1357,7 +1359,7 @@ export class D1CatalogAdmissionStore {
     // only the machine key, so this distinction is what protects a human choice.
     // Every SET expression below reads the row's pre-update values, which is why
     // the CASE can compare the old key with the incoming one.
-    await this.db.prepare(`INSERT INTO canonical_employers
+    const statement = this.db.prepare(`INSERT INTO canonical_employers
       (id, display_name, icon_key, icon_source, icon_updated_at, reviewed_at, reviewed_by, parent_employer_id, brand_of_employer_id, created_at, updated_at)
       VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE 'reviewed' END, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
@@ -1369,7 +1371,18 @@ export class D1CatalogAdmissionStore {
         reviewed_by=excluded.reviewed_by, parent_employer_id=excluded.parent_employer_id,
         brand_of_employer_id=excluded.brand_of_employer_id, icon_key=excluded.icon_key,
         icon_updated_at=excluded.icon_updated_at, updated_at=excluded.updated_at`)
-      .bind(value.id, value.displayName, value.iconKey ?? null, value.iconKey ?? null, value.iconUpdatedAt ?? null, value.reviewedAt, value.reviewedBy, value.parentEmployerId ?? null, value.brandOfEmployerId ?? null, now, now).run();
+      .bind(value.id, value.displayName, value.iconKey ?? null, value.iconKey ?? null, value.iconUpdatedAt ?? null, value.reviewedAt, value.reviewedBy, value.parentEmployerId ?? null, value.brandOfEmployerId ?? null, now, now);
+    if (value.ranking) {
+      await this.db.batch([statement, this.db.prepare('UPDATE canonical_employers SET ranking_json = ? WHERE id = ?')
+        .bind(JSON.stringify(value.ranking), value.id)]);
+    } else await statement.run();
+  }
+
+  async putCompanyRanking(id: string, ranking: CompanyRanking, onlyUnreviewed: boolean, now: string): Promise<boolean> {
+    const result = await this.db.prepare(`UPDATE canonical_employers SET ranking_json = ?, updated_at = ?
+      WHERE id = ? AND (? = 0 OR ranking_json IS NULL OR COALESCE(json_extract(ranking_json, '$.status'), 'pending') <> 'reviewed')`)
+      .bind(JSON.stringify(ranking), now, id, onlyUnreviewed ? 1 : 0).run();
+    return result.meta.changes === 1;
   }
 
   async listEmployerMappings(): Promise<EmployerMapping[]> {
@@ -1567,6 +1580,7 @@ export class D1CatalogAdmissionStore {
       .map((value) => JSON.parse(value) as T);
     // Hash only admission-relevant configuration. The background icon resolver
     // writes `iconKey`/`iconSource`/`iconUpdatedAt` on every logo it resolves,
+    // and editorial `ranking` changes ordering, not eligibility;
     // and review-rule sampling rewrites `sampleDueAt`; neither changes how a
     // source row is admitted, but hashing them restarted a full catalog
     // re-grade on every icon update.

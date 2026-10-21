@@ -43,26 +43,13 @@ use stable group/role IDs. Last day, Last week and the release calendar narrow
 the candidate set separately. Observation-time windows use an inclusive UTC
 lower/upper bound, pinned when selected and preserved across pagination.
 
-- **Company:** 70% career/technical reputation and 30% business strength.
-  `src/company-ratings.ts` contains nine initial editorial assessments, their
-  official sources, aliases, rationales and review dates. Scores interpret the
-  evidence; they are not externally measured prestige, guarantees of internship
-  quality, or investment ratings. Unknown employers receive 50, independently
-  of employer category, application platform, company-name length or link shape.
-  Initial reviewed coverage is deliberately limited; an unrated employer is not a bad one.
-  Expansion follows the hybrid policy: gather primary evidence, propose a score
-  under the rubric, then review major employers and uncertain cases in a normal
-  reviewed repository change. No external company lookup runs on catalog requests.
-  The existing `src/config/weights.ts` company tiers provide the active simple
-  fallback, marked `companyEvidence: lookup`: 100, 80 or 60 points, with exact
-  normalized names and explicit aliases. These are presets, not newly researched
-  ratings. Reviewed scores take priority. Unknown companies stay neutral at 50.
-  An optional People Data Labs lookup supplies a cached company-size fallback,
-  marked `companyEvidence: size`, after both tables. Employee counts below
-  50 score 50, 50–199 score 55, 200–999 score 65, 1,000–9,999 score 75, and
-  10,000+ score 85. This is a rough company-size proxy, not a prestige assessment.
-  A checked-in public company-size snapshot supplies a fallback when the cache
-  has no valid score. Missing, unsupported, or unresolved employers stay neutral at 50.
+- **Company:** the tier recorded on the canonical employer during admission:
+  Exceptional (95), Strong (85), Established (70), or Unrated (neutral 50).
+  The editorial rubric blends technical-career reputation with business substance;
+  it is not an investment rating, a measured prestige index or a promise about
+  each internship. A reviewer supplies a reason, evidence links and exact aliases.
+  Headcount, company-name length and application platform contribute no points.
+  Automatically introduced and not-yet-reviewed companies stay neutral.
 
 - **Pay:** use the disclosed minimum base pay, never the maximum of a wide range.
   Missing, invalid, unsupported, ambiguous, multiple, degree-specific or
@@ -93,70 +80,70 @@ Unsupported currencies stay neutral. “Higher listed pay” means at least 70 u
 this policy, not a verified market percentile. Calibrate these anchors against a
 reviewed catalog sample before a production rollout.
 
-### Offline company-size lookup
+### Company ranking at admission
 
-`src/config/company-size-snapshot.json` contains 474 unique exact normalized-name
-and existing employer-domain matches from the full 32,330,231-record public
-[company dataset](https://huggingface.co/datasets/andreaaltomani/company-dataset).
-It is attributed to Andrea Altomani and the original People Data Labs free company
-dataset under CC BY 4.0. The pinned revision, SHA-256, upload date, catalog snapshot
-date, domain and provider ID are retained with the derived subset. The source was
-uploaded August 4, 2025; employee bands can be older. Size is a rough proxy, not
-a measured career-value or prestige rating.
+Migration `0059_company_admission_ranking.sql` adds `ranking_json` to
+`canonical_employers`. Every existing or automatically added employer starts
+with an explicit Unrated/Pending assessment. Ranking does not change identity
+verification, catalog admission, source ownership or notification eligibility.
 
-Reviewed ratings and existing tiers take priority, then a valid live-provider
-cache score, then the offline size band, then neutral 50. The size band's lower
-bound uses the same employee-count rubric as the optional provider. Domain-only,
-name-only, ambiguous, conflicting and missing records are excluded from this
-snapshot; being unresolved is not evidence that a company is weak. No dataset
-download, third-party request or API key is needed to rank the catalog.
+New reviewer-created employers require `ranking` on
+`PUT /internal/admission/employers`, alongside the existing identity/icon fields.
+Existing icon-only updates preserve the assessment. Employer portal members
+cannot set their own tier; these operations require the operations credential.
 
-The October 21, 2026 audit covered 1,290 company names and 5,416 roles. The accepted
-subset covers 2,645 roles; together with existing ratings/tiers it covers 2,998
-(55.4%). These are match-coverage figures, not independently measured precision.
-Spot checks rejected Klaviyo/LumApps, F5/F5 LLC and Johnson & Johnson/insurance
-matches, demonstrating why provisional matches must not be accepted automatically.
-Refresh the offline audit and run
-`npx tsx scripts/import-company-size-snapshot.ts <audit.json>` in a reviewed
-repository change to update the subset. New source revisions require an explicit
-provenance update in the importer. Numeric scores and component explanations
-remain internal to web ranking; the web catalog and grouped-role sheet do not
-display them. Native presentation is unchanged.
+A ranking review has `tier`, a 10–500 character `reason`, up to ten HTTPS
+`sources` (at least one for a rated company), and up to forty exact `aliases`.
+The API stamps `reviewedAt` and `reviewedBy`; client-supplied stamps are ignored.
+The sources establish employer identity/business context; the tier expresses
+editorial judgment. No company-size service or LLM is used.
 
-### Optional live company-size lookup
+Review without changing identity or icon metadata:
 
-The server-only `PDL_API_KEY` secret and `COMPANY_SIZE_LOOKUP_ENABLED=true` are
-both required. The flag defaults off and remains off while provider access is
-unavailable. A configured key alone makes zero provider requests. Never put the
-key in mobile configuration or commit it. Provision it only on the ingestion
-Worker; the API Worker reads the shared cache and forwards operations privately.
+```json
+{
+  "ranking": {
+    "tier": "strong",
+    "reason": "Established technical product business with recognized engineering work.",
+    "sources": ["https://www.adobe.com/about-adobe.html"],
+    "aliases": ["Adobe Inc"]
+  },
+  "onlyUnreviewed": false
+}
+```
 
-The existing ten-minute icon maintenance schedule processes up to five distinct
-open-catalog employers after checking D1 pressure. It uses a known employer
-website domain when available, never an ATS host. Domain matches require
-likelihood 6 and an exact matched website; name-only matches require likelihood
-5 and an exact normalized name. Requests use the fixed PDL endpoint, an eight-second
-timeout, a 16 KiB response limit, and no automatic retries or redirects.
+Send this to `PUT /internal/admission/company-rankings/<canonical-employer-id>`.
+`onlyUnreviewed: true` atomically skips an existing reviewed assessment, including
+one changed after the backfill inventory was read. Reviews create an operations
+audit decision. A pending ranking never hides an otherwise eligible role.
 
-Migration `0058_company_size_cache.sql` persists results independently of jobs.
-Matches last 30 days and no-match results last seven days. A shared lease prevents
-concurrent paid refreshes. Any provider error stops the batch and pauses further
-refreshes for an hour. Catalog reads use one score snapshot for both global
-ranking and selected-page hydration; cache failures retain the offline subset
-and neutral fallback.
+The initial backfill is a reviewed seed roster in
+`scripts/company-ranking-seeds.ts`, with aliases, evidence URLs and rationales.
+It corrects the old low presets for employers such as Salesforce and Adobe,
+and recognizes explicit legal/brand labels such as Anduril Industries. Employers
+outside that roster remain explicitly neutral and pending; they are not falsely
+marked as manually reviewed. The migration backfills the neutral state for all
+registry rows; the command below applies the recognized tiers. Dry runs write an
+inventory/report under `.context/`; credentials stay in untracked `.env`.
 
-Operations-key protected endpoints:
+```sh
+npx tsx scripts/backfill-company-rankings.ts --api https://api.ntern.app
+npx tsx scripts/backfill-company-rankings.ts --api https://intern-notifs-dev.jdkrasnick.workers.dev --apply --output .context/company-ranking-dev.json
+npx tsx scripts/backfill-company-rankings.ts --api https://api.ntern.app --apply --output .context/company-ranking-production.json
+```
 
-- `GET /internal/company-sizes`: all open-catalog employer names, role counts,
-  cache coverage and configuration presence, without credentials.
-- `POST /internal/company-sizes/refresh` with `{ "limit": 5 }`: refresh at most
-  25 due employers. A disabled flag means `skipped: disabled`; no key means
-  `skipped: missing-key`. Both make zero paid calls.
+The command only updates unreviewed rankings and is safe to retry. Reviewer
+changes take effect on the next Best request, with no job rewrite or R2 republish.
+The API reads only IDs, display names and ranking metadata in keyset pages of
+200, reusing one request-scoped map for global sorting and selected-page details.
+Canonical employer ID takes priority; a known but unreviewed ID cannot inherit
+another employer's same-name score. Roles without an ID can use exact unambiguous
+reviewed names/aliases. Conflicting names and unavailable ranking data stay
+neutral. Public query parameters cannot supply a company rating.
 
-`npx tsx scripts/audit-company-sizes.ts` audits all pages of the live public
-catalog, saves a reproducible snapshot under `.context/`, and checks each
-representative against every fallback band. It reports synthetic scenarios
-separately from real provider coverage and performs no paid provider lookups.
+The old size snapshot and importer are removed. The optional PDL size-cache
+operations remain legacy diagnostics and do not influence catalog ranking.
+Numeric scores remain hidden on web, and native layout is unchanged.
 
 ## Grouping, paging and explanations
 

@@ -1,3 +1,4 @@
+import type { CompanyRanking } from './company-ranking.js';
 import type { JobFilter } from './core/filters.js';
 import type { EmployerCategory } from './core/employers.js';
 import type { EducationLevel } from '../shared/education-display.js';
@@ -417,6 +418,8 @@ export type OccurrenceProvenance =
 export interface CanonicalEmployer {
   id: string;
   displayName: string;
+  /** Reviewer-owned ranking; automatic identities stay neutral pending review. */
+  ranking?: CompanyRanking;
   /** First-party R2 key for the reviewed company icon. */
   iconKey?: string;
   /**

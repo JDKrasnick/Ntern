@@ -552,7 +552,12 @@ secret under `/internal/admission/`. Begin with read-only `GET` requests to
 `audit`, `employers`, `mappings`, `host-rules`, and `incidents`. Use `PUT
 /internal/admission/employers`, `POST /internal/admission/mappings`, and `PUT
 /internal/admission/host-rules` only for reviewed decisions; replacing a
-mapping requires its explicit `supersedesMappingId`. Official single-employer
+mapping requires its explicit `supersedesMappingId`. New reviewer-created employers
+also require a company ranking, reason and supporting evidence. Use
+`PUT /internal/admission/company-rankings/<id>` for later ranking-only reviews;
+these preserve identity and do not invalidate admission versions. See
+[the ranking policy](opportunity-ranking.md#company-ranking-at-admission).
+Official single-employer
 feeds can use their source ID or tenant as the mapping scope. GitHub community
 lists contain many employers and must use the row scope
 `employer:<canonical-company-key>` (for example, `employer:acme`); a mapping for

@@ -12,17 +12,19 @@ npx wrangler r2 object put intern-notifs-documents/company-icons/acme/logo-v1.we
   --file ./reviewed-assets/acme-logo.webp \
   --content-type image/webp
 
+# New-employer example: choose its ranking during admission too.
+# For an existing employer's icon-only update, omit ranking to preserve its tier.
 # Keep the operations key out of history. This records the reviewed R2 key in D1.
 read -s OPERATIONS_SHARED_SECRET
 curl --fail-with-body --silent --show-error \
   -X PUT https://intern-notifs.jdkrasnick.workers.dev/internal/admission/employers \
   -H "X-Operations-Key: $OPERATIONS_SHARED_SECRET" \
   -H 'Content-Type: application/json' \
-  -d '{"id":"acme","displayName":"Acme","iconKey":"company-icons/acme/logo-v1.webp","reason":"Reviewed company icon"}'
+  -d '{"id":"acme","displayName":"Acme","iconKey":"company-icons/acme/logo-v1.webp","ranking":{"tier":"unrated","reason":"Insufficient evidence for a higher company tier.","sources":[]},"reason":"Reviewed employer admission and company icon"}'
 unset OPERATIONS_SHARED_SECRET
 ```
 
-Backfill existing canonical employers manually with this workflow. Keep the original display name, mapping, and reviewer record. A new canonical employer submitted through the operations API must include an `iconKey`; this prevents silently adding another unbranded company.
+Backfill existing canonical employers manually with this workflow. Keep the original display name, mapping, and reviewer record. A new canonical employer submitted through the operations API must include an `iconKey` and a [ranking review](opportunity-ranking.md#company-ranking-at-admission). Existing icon-only edits preserve the ranking when that field is omitted.
 
 To withdraw an existing employer's icon, send the same authenticated `PUT /internal/admission/employers` request with its `id`, current `displayName`, and `"iconKey": null`. The operation clears the reviewed D1 reference; `/company-icons/<id>` then returns 404 with `Cache-Control: no-store`. Omitting `iconKey` preserves the current icon. The R2 object can be removed separately after the D1 reference is cleared.
 

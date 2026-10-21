@@ -1,3 +1,5 @@
+/** Legacy presets for size-cache diagnostics only. Active catalog company
+ * rankings come exclusively from the admission registry (company-ranking.ts). */
 /** Editorial assessments, not measured prestige or investment recommendations.
  * Evidence establishes technical/business substance; the scores express our rubric.
  * Unknown employers stay neutral. Aliases are exact normalized names, never substrings.
