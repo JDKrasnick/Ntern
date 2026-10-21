@@ -5,6 +5,7 @@ import type { D1CatalogAdmissionStore, RepairChange } from './catalog-admission-
 import { validCompanyIconEmployerId } from './company-icon.js';
 import { reviewCompanyRanking } from '../src/company-ranking.js';
 import { readBoundedJson } from '../src/core/bounded-body.js';
+import { canonicalCompanyKey } from '../src/core/normalize.js';
 
 const json = (status: number, body: unknown) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
@@ -62,6 +63,23 @@ export async function handleCatalogAdmissionOperations(
         activeIncidents: incidents.length, operations: audit.operations });
     }
     if (request.method === 'GET' && path === '/internal/admission/employers') return json(200, { employers: await store.listCanonicalEmployers() });
+    if (path === '/internal/admission/catalog-company-rankings' && request.method === 'GET') {
+      return json(200, { companies: await store.listCatalogCompanyRankings() });
+    }
+    if (path === '/internal/admission/catalog-company-rankings' && request.method === 'PUT') {
+      const { value } = await readBoundedJson(new Response(request.body, { headers: request.headers }), 16_384, 'catalog-company-ranking');
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('A JSON object is required');
+      const input = value as Record<string, unknown>;
+      const company = text(input.company, 'company', 160);
+      const companyKey = canonicalCompanyKey(company);
+      if (!companyKey) throw new Error('company needs a non-empty normalized name');
+      const ranking = reviewCompanyRanking(input.ranking, actor, timestamp);
+      if (input.onlyUnreviewed !== undefined && typeof input.onlyUnreviewed !== 'boolean') throw new Error('onlyUnreviewed must be a boolean');
+      const applied = await store.putCatalogCompanyRanking(company, ranking, input.onlyUnreviewed !== false, timestamp);
+      if (applied) await store.recordReviewerDecision({ id: crypto.randomUUID(), subjectType: 'catalog-company', subjectId: companyKey,
+        decision: 'ranking-reviewed', reason: ranking.reason, reviewedAt: timestamp, reviewedBy: actor });
+      return json(200, { company: await store.getCatalogCompanyRanking(companyKey), applied });
+    }
     const rankingMatch = /^\/internal\/admission\/company-rankings\/([a-z0-9-]+)$/u.exec(path);
     if (request.method === 'PUT' && rankingMatch) {
       const employerId = rankingMatch[1]!;

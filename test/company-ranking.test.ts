@@ -40,11 +40,17 @@ describe('admitted company ranking', () => {
     const database = new DatabaseSync(':memory:');
     database.exec('CREATE TABLE canonical_employers(id TEXT PRIMARY KEY, display_name TEXT NOT NULL)');
     database.exec(readFileSync(new URL('../cloudflare/migrations/0059_company_admission_ranking.sql', import.meta.url), 'utf8'));
+    database.exec(readFileSync(new URL('../cloudflare/migrations/0060_catalog_company_rankings.sql', import.meta.url), 'utf8'));
     const insert = database.prepare('INSERT INTO canonical_employers(id,display_name,ranking_json) VALUES (?,?,?)');
     for (let i = 0; i < 401; i++) insert.run(`employer-${i.toString().padStart(3, '0')}`, `Company ${i}`, JSON.stringify(ranking('established', [])));
     insert.run('acme', 'Acme', JSON.stringify(ranking()));
     insert.run('other', 'Other', JSON.stringify(ranking('established', ['Acme Technology'])));
     database.prepare('INSERT INTO canonical_employers(id,display_name) VALUES (?,?)').run('new', 'New Company');
+    const insertCatalog = database.prepare('INSERT INTO catalog_company_rankings(company_key,display_name,ranking_json,created_at,updated_at) VALUES (?,?,?,?,?)');
+    for (let i = 0; i < 401; i++) insertCatalog.run(`catalog-${i.toString().padStart(3, '0')}`, `Catalog ${i}`, JSON.stringify(ranking('established', [])), at, at);
+    insertCatalog.run('conflict', 'Catalog Conflict', JSON.stringify(ranking('established', ['Acme'])), at, at);
+    insertCatalog.run('pending-conflict', 'Catalog Pending Conflict', JSON.stringify(ranking('strong', ['New Company'])), at, at);
+    insertCatalog.run('broken', 'Broken Catalog Company', '{}', at, at);
     let pages = 0;
     const db = { prepare(query: string) { return { bind(...values: SQLInputValue[]) { return { async all() {
       pages++;
@@ -54,12 +60,17 @@ describe('admitted company ranking', () => {
     try {
       expect(JSON.parse(database.prepare('SELECT ranking_json FROM canonical_employers WHERE id=?').get('new')!.ranking_json as string)).toEqual(pendingCompanyRanking());
       const scores = await new D1CompanyRankingStore(db).scores();
-      expect(pages).toBe(3);
+      expect(pages).toBe(6);
       expect(scores.get('employer:employer-400')).toBe(70);
       expect(scores.get('name:acme technology')).toBeUndefined();
       expect(scores.get('employer:acme')).toBe(85);
-      expect(scores.get('name:new')).toBe(50);
+      expect(scores.get('name:new')).toBeUndefined();
       expect(scores.get('employer:new')).toBeUndefined();
+      expect(scores.get('name:catalog 400')).toBe(70);
+      expect(scores.get('name:acme')).toBeUndefined();
+      expect(scores.get('name:broken catalog')).toBeUndefined();
+      expect(scoreOpportunity({ ...input, company: 'Catalog 400' }, scores)).toMatchObject({ company: 70, companyEvidence: 'reviewed' });
+      expect(scoreOpportunity({ ...input, company: 'Catalog 400', canonicalEmployerId: 'unreviewed-id' }, scores).company).toBe(50);
     } finally { database.close(); }
   });
 
@@ -74,5 +85,31 @@ describe('admitted company ranking', () => {
         keys.set(key, seed.company);
       }
     }
+  });
+
+  it('validates the complete individual review file and prevents known company-name mix-ups', () => {
+    const reviews = readFileSync(new URL('../scripts/data/company-ranking-holistic-reviews.jsonl', import.meta.url), 'utf8')
+      .split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown> & { company: string; aliases: string[]; sources: string[] });
+    const keys = new Set<string>();
+    for (const review of reviews) {
+      expect(() => reviewCompanyRanking(review, 'data-validation', at), review.company).not.toThrow();
+      expect(review.reviewedOn, review.company).toMatch(/^\d{4}-\d{2}-\d{2}$/u);
+      expect(['high', 'medium', 'limited'], review.company).toContain(review.confidence);
+      expect(review.compensationEvidence, review.company).toBeTruthy();
+      expect(review.sources.length, review.company).toBeGreaterThan(0);
+      if (review.linkedInFollowers !== null) {
+        expect(Number.isSafeInteger(review.linkedInFollowers), review.company).toBe(true);
+        expect(review.sources.some(source => new URL(source).hostname.endsWith('linkedin.com')), review.company).toBe(true);
+      }
+      for (const name of [review.company, ...review.aliases]) {
+        const key = canonicalCompanyKey(name);
+        expect(key, name).not.toBe('');
+        expect(keys.has(key), name).toBe(false);
+        keys.add(key);
+      }
+    }
+    expect(reviews.find(review => review.company === 'Sage')).toMatchObject({ tier: 'established' });
+    expect(reviews.find(review => review.company === 'Sage')?.sources.some(source => source.includes('sage49'))).toBe(true);
+    expect(reviews.find(review => review.company === 'Pivotal Software')).toMatchObject({ tier: 'unrated', confidence: 'limited' });
   });
 });

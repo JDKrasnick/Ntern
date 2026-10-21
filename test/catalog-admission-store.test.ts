@@ -68,7 +68,7 @@ function subject(budget?: QueryBudget) {
     '0012_destination_verification_schedule.sql',
     '0015_role_metadata_enrichment.sql', '0016_role_metadata_repair_plans.sql', '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
     '0013_canonical_employer_icons.sql', '0034_employer_icon_resolution.sql',
-    '0040_automatic_employer_identity.sql', '0059_company_admission_ranking.sql']) {
+    '0040_automatic_employer_identity.sql', '0059_company_admission_ranking.sql', '0060_catalog_company_rankings.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   const db = sqliteD1(database, budget);
@@ -76,6 +76,30 @@ function subject(budget?: QueryBudget) {
 }
 
 describe('D1 catalog admission operations', () => {
+  it('reviews source-only company ranks without admitting an employer or changing admission configuration', async () => {
+    const { database, admission: store } = subject();
+    const at = '2026-10-21T12:00:00.000Z';
+    const before = await store.configurationVersion();
+    const put = (company: string, tier = 'strong', extra = {}) => handleCatalogAdmissionOperations(new Request('https://api.test/internal/admission/catalog-company-rankings', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ company,
+        ranking: { tier, reason: 'Reviewed specialist product engineering employer.', sources: ['https://acme.test/'], reviewedBy: 'spoofed' }, ...extra }),
+    }), store, async () => { throw new Error('Ranking must not trigger projection or admission repair'); }, 'actual-reviewer', () => new Date(at));
+    try {
+      expect(await (await put('Catalog Acme')).json()).toMatchObject({ applied: true, company: { ranking: { tier: 'strong', reviewedBy: 'actual-reviewer' } } });
+      expect(await (await put('Catalog Acme', 'established')).json()).toMatchObject({ applied: false, company: { ranking: { tier: 'strong' } } });
+      expect(await (await put('Catalog Acme', 'established', { onlyUnreviewed: false })).json()).toMatchObject({ applied: true, company: { ranking: { tier: 'established' } } });
+      expect((await put('🚀')).status).toBe(409);
+      expect((await put('Another', 'constructor')).status).toBe(409);
+      expect((await put('Another', 'strong', { onlyUnreviewed: 'true' })).status).toBe(409);
+      expect(await store.listCanonicalEmployers()).toEqual([]);
+      expect(await store.listCatalogCompanyRankings()).toHaveLength(1);
+      expect(await store.configurationVersion()).toBe(before);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM admission_reviewer_decisions WHERE subject_type='catalog-company'").get()).toEqual({ count: 2 });
+      const list = await handleCatalogAdmissionOperations(new Request('https://api.test/internal/admission/catalog-company-rankings'), store, async () => undefined);
+      expect(await list.json()).toMatchObject({ companies: [{ company: 'Catalog Acme', ranking: { tier: 'established' } }] });
+    } finally { database.close(); }
+  });
+
   afterEach(() => vi.useRealTimers());
   it('requires ranking on new reviewed admissions and preserves it when only an icon is edited', async () => {
     const { database, admission: store } = subject();
