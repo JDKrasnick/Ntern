@@ -100,6 +100,22 @@ type Row = Record<string, string | number | null>;
 export class D1EmployerIconStore {
   constructor(private readonly db: D1Database) {}
 
+  /** Cron and operator catch-up share a single expiring lease across isolates. */
+  async acquireSweep(now: string, token: string, leaseMs: number): Promise<boolean> {
+    const until = new Date(Date.parse(now) + leaseMs).toISOString();
+    const result = await this.db.prepare(`INSERT INTO system_state (key, value, updated_at)
+      VALUES ('company_icon_sweep_lease', ?, ?) ON CONFLICT(key) DO UPDATE
+      SET value = excluded.value, updated_at = excluded.updated_at
+      WHERE json_extract(system_state.value, '$.until') <= ?`)
+      .bind(JSON.stringify({ token, until }), now, now).run();
+    return result.meta.changes === 1;
+  }
+
+  async releaseSweep(token: string): Promise<void> {
+    await this.db.prepare(`DELETE FROM system_state WHERE key = 'company_icon_sweep_lease'
+      AND json_extract(value, '$.token') = ?`).bind(token).run();
+  }
+
   /** Register icon evidence without creating or assigning a canonical employer. */
   async registerIdentity(seed: EmployerIconSeed, now: Date, canonicalEmployerId?: string): Promise<EmployerIconSeed | undefined> {
     const identity = companyIconIdentity(seed.displayName, seed.applicationUrl);
@@ -133,12 +149,13 @@ export class D1EmployerIconStore {
   }>> {
     const rows = await this.db.prepare(`SELECT item.sk AS key,
         json_extract(item.value, '$.group.featuredRole') AS role
-      FROM catalog_items AS item
-      JOIN catalog_items AS current ON current.pk = 'CATALOG_PROJECTION' AND current.sk = 'CURRENT'
+      FROM catalog_items AS current
       JOIN catalog_items AS manifest ON manifest.pk = 'CATALOG_PROJECTION#MANIFESTS'
         AND manifest.sk = json_extract(current.value, '$.version')
-      WHERE item.pk = 'CATALOG_PROJECTION#GROUPS' AND item.sk > ?
-        AND EXISTS (SELECT 1 FROM json_each(manifest.value, '$.keys') WHERE value = item.sk)
+      CROSS JOIN json_each(manifest.value, '$.keys') AS manifest_key
+      CROSS JOIN catalog_items AS item
+      WHERE current.pk = 'CATALOG_PROJECTION' AND current.sk = 'CURRENT'
+        AND item.pk = 'CATALOG_PROJECTION#GROUPS' AND item.sk = manifest_key.value AND item.sk > ?
       ORDER BY item.sk LIMIT ?`).bind(after, limit).all<{ key: string; role: string }>();
     return rows.results.map((row) => {
       const role = JSON.parse(row.role);
@@ -241,23 +258,60 @@ export class D1EmployerIconStore {
    * overlapping sweeps can select the same row but only one can own it.
    */
   async claimDue(now: string, limit: number, leaseMs: number): Promise<EmployerIconTask[]> {
-    const due = await this.db.prepare(`SELECT id, canonical_employer_id, evidence_fingerprint, evidence_json, attempts
-      FROM employer_icon_resolutions AS task
+    // Read the current manifest once, using primary-key lookups rather than a
+    // correlated scan of its JSON keys for every historical projection row.
+    const groups = await this.db.prepare(`SELECT
+        json_extract(item.value, '$.group.featuredRole.canonicalEmployerId') AS employer_id,
+        json_extract(item.value, '$.group.featuredRole.companyIconId') AS icon_id,
+        json_extract(item.value, '$.group.featuredRole.company') AS company,
+        json_extract(item.value, '$.group.featuredRole.officialApplyUrl') AS url,
+        json_extract(item.value, '$.group.roleCount') AS roles
+      FROM catalog_items AS current
+      JOIN catalog_items AS manifest ON manifest.pk = 'CATALOG_PROJECTION#MANIFESTS'
+        AND manifest.sk = json_extract(current.value, '$.version')
+      CROSS JOIN json_each(manifest.value, '$.keys') AS manifest_key
+      CROSS JOIN catalog_items AS item
+      WHERE current.pk = 'CATALOG_PROJECTION' AND current.sk = 'CURRENT'
+        AND item.pk = 'CATALOG_PROJECTION#GROUPS' AND item.sk = manifest_key.value`).all<{
+        employer_id: string | null; icon_id: string | null; company: string; url: string; roles: number;
+      }>();
+    const weights = new Map<string, number>();
+    for (const row of groups.results) {
+      const id = row.employer_id ?? row.icon_id ?? companyIconIdentity(row.company, row.url)?.id;
+      if (id) weights.set(id, (weights.get(id) ?? 0) + Math.max(0, Number(row.roles) || 0));
+    }
+    const due = await this.db.prepare(`WITH weights AS MATERIALIZED (
+        SELECT json_extract(value, '$[0]') AS id, json_extract(value, '$[1]') AS roles FROM json_each(?)
+      ), eligible AS (
+      SELECT task.*, COALESCE(weights.roles, 0) AS roles,
+        ROW_NUMBER() OVER (PARTITION BY task.canonical_employer_id
+          ORDER BY CASE WHEN task.review_priority >= 100 THEN 0 ELSE 1 END,
+            task.attempts, task.next_retry_at, task.created_at, task.id) AS employer_rank
+      FROM employer_icon_resolutions AS task LEFT JOIN weights ON weights.id = task.canonical_employer_id
       WHERE task.next_retry_at IS NOT NULL AND task.next_retry_at <= ?
         AND (task.lease_until IS NULL OR task.lease_until <= ?)
         AND task.status IN ('retryable', 'unresolved')
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS blocked
           WHERE blocked.canonical_employer_id = task.canonical_employer_id AND blocked.status = 'invalidated')
-      ORDER BY task.review_priority DESC,
-        CASE WHEN COALESCE(json_extract(task.evidence_json, '$.applicationUrl'), '') <> '' THEN 0 ELSE 1 END,
-        task.next_retry_at, task.created_at LIMIT ?`).bind(now, now, limit).all<Row>();
+        AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS busy
+          WHERE busy.canonical_employer_id = task.canonical_employer_id AND busy.lease_until > ?)
+      ) SELECT id, canonical_employer_id, evidence_fingerprint, evidence_json, attempts FROM eligible
+      WHERE employer_rank = 1
+      ORDER BY CASE WHEN review_priority >= 100 THEN 0 ELSE 1 END,
+        CASE WHEN roles > 0 THEN 0 ELSE 1 END,
+        CASE WHEN attempts = 0 THEN 0 ELSE 1 END,
+        roles DESC, attempts,
+        CASE WHEN COALESCE(json_extract(evidence_json, '$.applicationUrl'), '') <> '' THEN 0 ELSE 1 END,
+        next_retry_at, created_at, id LIMIT ?`).bind(JSON.stringify([...weights]), now, now, now, limit).all<Row>();
     const claimed: EmployerIconTask[] = [];
     for (const row of due.results) {
       const leaseToken = crypto.randomUUID();
       const leaseUntil = new Date(Date.parse(now) + leaseMs).toISOString();
       const result = await this.db.prepare(`UPDATE employer_icon_resolutions SET lease_token = ?, lease_until = ?, updated_at = ?
-        WHERE id = ? AND status IN ('retryable', 'unresolved') AND (lease_until IS NULL OR lease_until <= ?)`)
-        .bind(leaseToken, leaseUntil, now, row.id, now).run();
+        WHERE id = ? AND status IN ('retryable', 'unresolved') AND (lease_until IS NULL OR lease_until <= ?)
+          AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS busy
+            WHERE busy.canonical_employer_id = ? AND busy.lease_until > ?)`)
+        .bind(leaseToken, leaseUntil, now, row.id, now, row.canonical_employer_id, now).run();
       if (result.meta.changes !== 1) continue;
       claimed.push({
         id: row.id as string, canonicalEmployerId: row.canonical_employer_id as string,

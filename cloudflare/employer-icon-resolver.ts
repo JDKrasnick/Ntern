@@ -53,7 +53,9 @@ const ICON_UNRESOLVED_BASE_RETRY_MS = 24 * 60 * 60 * 1_000;
 /** A transient provider or network problem retries sooner, from one hour. */
 const ICON_TRANSIENT_BASE_RETRY_MS = 60 * 60 * 1_000;
 const ICON_TRANSIENT_MAX_RETRY_MS = 24 * 60 * 60 * 1_000;
-const ICON_LEASE_MS = 5 * 60_000;
+const ICON_LEASE_MS = 15 * 60_000;
+/** Stop starting work after 90s; finish the at most two tasks already running. */
+const ICON_SWEEP_START_BUDGET_MS = 90_000;
 const ICON_LINK_TIMEOUT_MS = 10_000;
 const ICON_LINK_MAX_REDIRECTS = 5;
 /**
@@ -181,6 +183,8 @@ export interface EmployerIconSweepResult {
    */
   confirmationProbes: number;
   confirmationTies: number;
+  deferredReason?: 'sweep-busy';
+  deferredTasks?: number;
 }
 
 /**
@@ -218,6 +222,7 @@ export async function runEmployerIconResolutionPass(
   env: EmployerIconResolverEnvironment,
   now: Date,
   deps: EmployerIconResolverDependencies,
+  options: { maxTasks?: number; backfill?: boolean } = {},
 ): Promise<EmployerIconSweepResult> {
   const store = new D1EmployerIconStore(env.DB);
   const settings = await store.settings();
@@ -227,51 +232,82 @@ export async function runEmployerIconResolutionPass(
   };
   if (settings.mode === 'off') return result;
 
-  const catalogBackfill = await backfillCatalogIconIdentities(store, now);
-  result.backfilled = catalogBackfill.enqueued + await backfillSeedlessEmployers(store, settings, now);
-  const tasks = await store.claimDue(now.toISOString(), settings.maxPerSweep, ICON_LEASE_MS);
-  result.claimed = tasks.length;
-  const providerOutcomes: Record<string, number> = {};
-  const confirmation: ConfirmationStats = { probes: 0, ties: 0 };
-
-  for (const task of tasks) {
-    try {
-      const outcome = await resolveEmployerIconTask({ store, task, settings, env, now, deps, providerOutcomes, confirmation });
-      result[outcome.outcome] += 1;
-      result.reasonCodes.push(outcome.reasonCode);
-    } catch (error) {
-      // Every definitive outcome is persisted inside the task; a throw means the
-      // resolver itself failed. Release the lease so the next sweep retries
-      // rather than waiting for the lease to expire.
-      await store.release(task.id, now.toISOString());
-      result.retryable += 1;
-      result.reasonCodes.push('unexpected-failure');
-      console.error(JSON.stringify({
-        event: 'company_icon_resolution_failed',
-        canonicalEmployerId: task.canonicalEmployerId,
-        error: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300),
-      }));
-    }
+  const sweepToken = crypto.randomUUID();
+  if (!await store.acquireSweep(now.toISOString(), sweepToken, ICON_LEASE_MS)) {
+    return { ...result, deferredReason: 'sweep-busy' };
+  }
+  try {
+    return await resolveSweep();
+  } finally {
+    await store.releaseSweep(sweepToken);
   }
 
-  result.confirmationProbes = confirmation.probes;
-  result.confirmationTies = confirmation.ties;
-  const reasonCodes: Record<string, number> = {};
-  for (const reasonCode of result.reasonCodes) reasonCodes[reasonCode] = (reasonCodes[reasonCode] ?? 0) + 1;
-  console.log(JSON.stringify({
-    event: 'company_icon_resolution_complete',
-    mode: result.mode,
-    company_icon_resolution_attempted_total: result.claimed,
-    company_icon_resolution_resolved_total: result.resolved,
-    company_icon_resolution_confirmation_probes: result.confirmationProbes,
-    company_icon_resolution_confirmation_ties: result.confirmationTies,
-    company_icon_resolution_monogram_total: result.unresolved + result.retryable,
-    company_icon_resolution_retryable_total: result.retryable,
-    company_icon_resolution_backfilled_total: result.backfilled,
-    company_icon_resolution_provider_outcomes: providerOutcomes,
-    company_icon_resolution_reason_codes: reasonCodes,
-  }));
-  return result;
+  async function resolveSweep(): Promise<EmployerIconSweepResult> {
+    if (options.backfill !== false) {
+      const catalogBackfill = await backfillCatalogIconIdentities(store, now);
+      result.backfilled = catalogBackfill.enqueued + await backfillSeedlessEmployers(store, settings, now);
+    }
+    const maximum = Number.isSafeInteger(options.maxTasks) && options.maxTasks! > 0
+      ? Math.min(options.maxTasks!, settings.maxPerSweep) : settings.maxPerSweep;
+    const tasks = await store.claimDue(now.toISOString(), maximum, ICON_LEASE_MS);
+    result.claimed = tasks.length;
+    console.log(JSON.stringify({ event: 'company_icon_resolution_started', mode: settings.mode,
+      claimed: tasks.length, firstAttempts: tasks.filter((task) => task.attempts === 0).length,
+      concurrency: Math.min(2, tasks.length) }));
+    const providerOutcomes: Record<string, number> = {};
+    const confirmation: ConfirmationStats = { probes: 0, ties: 0 };
+    const started = Date.now();
+    let next = 0;
+
+    const workers = await Promise.allSettled(Array.from({ length: Math.min(2, tasks.length) }, async () => {
+      while (next < tasks.length && Date.now() - started < ICON_SWEEP_START_BUDGET_MS) {
+        const task = tasks[next++]!;
+        try {
+          const outcome = await resolveEmployerIconTask({ store, task, settings, env, now, deps, providerOutcomes, confirmation });
+          result[outcome.outcome] += 1;
+          result.reasonCodes.push(outcome.reasonCode);
+        } catch (error) {
+          // Every definitive outcome is persisted inside the task; a throw means the
+          // resolver itself failed. Release the lease so the next sweep retries
+          // rather than waiting for the lease to expire.
+          await store.release(task.id, now.toISOString());
+          result.retryable += 1;
+          result.reasonCodes.push('unexpected-failure');
+          console.error(JSON.stringify({
+            event: 'company_icon_resolution_failed',
+            canonicalEmployerId: task.canonicalEmployerId,
+            error: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300),
+          }));
+        }
+      }
+    }));
+    // Unstarted claims consume no attempt and remain immediately eligible.
+    result.deferredTasks = tasks.length - next;
+    for (const task of tasks.slice(next)) await store.release(task.id, now.toISOString());
+    // A database failure in one worker must not release the sweep lease while
+    // its sibling is still resolving an employer.
+    const failed = workers.find((worker) => worker.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+
+    result.confirmationProbes = confirmation.probes;
+    result.confirmationTies = confirmation.ties;
+    const reasonCodes: Record<string, number> = {};
+    for (const reasonCode of result.reasonCodes) reasonCodes[reasonCode] = (reasonCodes[reasonCode] ?? 0) + 1;
+    console.log(JSON.stringify({
+      event: 'company_icon_resolution_complete',
+      mode: result.mode,
+      company_icon_resolution_attempted_total: result.claimed - (result.deferredTasks ?? 0),
+      company_icon_resolution_resolved_total: result.resolved,
+      company_icon_resolution_confirmation_probes: result.confirmationProbes,
+      company_icon_resolution_confirmation_ties: result.confirmationTies,
+      company_icon_resolution_monogram_total: result.unresolved + result.retryable,
+      company_icon_resolution_retryable_total: result.retryable,
+      company_icon_resolution_backfilled_total: result.backfilled,
+      company_icon_resolution_provider_outcomes: providerOutcomes,
+      company_icon_resolution_reason_codes: reasonCodes,
+    }));
+    return result;
+  }
 }
 
 /** Also recovers admissions that predate independent icon identities. */

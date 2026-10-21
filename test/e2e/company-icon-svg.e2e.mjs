@@ -318,3 +318,59 @@ test('backfills and serves a reviewed community role with no canonical employer'
     assert.equal(response.headers.get('content-type'), 'image/png');
   } finally { globalThis.fetch = realFetch; }
 });
+
+test('authenticated catch-up clamps batches, respects the sweep lease and overload gate, and serves its results', async () => {
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  const env = { ...cronEnvironment(), INTERNAL_SERVICE_SECRET: 'internal', OPERATIONS_SHARED_SECRET: 'operations' };
+  const request = (authorized = true) => new Request('https://api.example.test/internal/admission/employer-icons/sweep', {
+    method: 'POST', headers: { 'X-InternNotifs-Service-Key': 'internal',
+      ...(authorized ? { 'X-Operations-Key': 'operations' } : {}) }, body: JSON.stringify({ maxTasks: 1_000 }),
+  });
+  await database.prepare("UPDATE system_state SET value = ? WHERE key = 'company_icon_resolution'")
+    .bind(JSON.stringify({ mode: 'resolve', maxPerSweep: 20, logoDevRetentionLicensedAt: instant })).run();
+  assert.equal((await builtWorker.fetch(request(false), env)).status, 404);
+  await database.prepare(`INSERT INTO system_state (key, value, updated_at) VALUES ('company_icon_sweep_lease', ?, ?)`)
+    .bind(JSON.stringify({ token: 'another-sweep', until: new Date(Date.now() + 60_000).toISOString() }), instant).run();
+  const busy = await builtWorker.fetch(request(), env);
+  assert.equal(busy.status, 409);
+  assert.equal((await busy.json()).deferredReason, 'sweep-busy');
+  await database.prepare("DELETE FROM system_state WHERE key = 'company_icon_sweep_lease'").run();
+  const timestamp = new Date().toISOString();
+  await database.prepare(`INSERT INTO queue_failure_events
+    (id, queue_name, message_id, delivery_attempt, payload_hash, category, diagnostic, first_failed_at, last_failed_at)
+    VALUES ('icon-overload', 'fixture', 'fixture', 1, 'hash', 'database', 'D1 DB is overloaded', ?, ?)`)
+    .bind(timestamp, timestamp).run();
+  assert.equal((await builtWorker.fetch(request(), env)).status, 503);
+  await database.prepare("DELETE FROM queue_failure_events WHERE id = 'icon-overload'").run();
+  for (let n = 0; n < 6; n += 1) {
+    const id = `catchup-${n}`;
+    await database.batch([
+      database.prepare(`INSERT INTO canonical_employers (id, display_name, reviewed_at, reviewed_by, created_at, updated_at)
+        VALUES (?, 'Acme', ?, 'e2e', ?, ?)`).bind(id, instant, instant, instant),
+      database.prepare(`INSERT INTO employer_icon_resolutions
+        (id, canonical_employer_id, evidence_fingerprint, status, evidence_json, next_retry_at, created_at, updated_at)
+        VALUES (?, ?, ?, 'retryable', ?, ?, ?, ?)`).bind(id, id, id,
+        JSON.stringify({ canonicalEmployerId: id, displayName: 'Acme', applicationUrl, roleTitle: 'Intern', provider: 'ashby' }),
+        instant, instant, instant),
+    ]);
+  }
+  globalThis.fetch = internet;
+  try {
+    const response = await builtWorker.fetch(request(), env);
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.claimed, 5);
+    // Board assets can serve while the employer-domain decision stays unresolved.
+    assert.equal(result.reasonCodes.length, 5);
+    assert.equal(result.deferredTasks, 0);
+    assert.equal((await dump("SELECT id FROM employer_icon_resolutions WHERE id LIKE 'catchup-%' AND attempts = 0")).length, 1);
+    assert.deepEqual(await dump("SELECT key FROM system_state WHERE key = 'company_icon_sweep_lease'"), []);
+    globalThis.fetch = realFetch;
+    const fetcher = await worker.getWorker(workerName);
+    const served = await fetcher.fetch('https://api.example.test/company-icons/catchup-0', {
+      headers: { 'X-InternNotifs-Service-Key': 'e2e-internal-service-secret' },
+    });
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get('content-type'), 'image/png');
+  } finally { globalThis.fetch = realFetch; }
+});
