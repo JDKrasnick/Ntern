@@ -38,6 +38,7 @@ while (attempted < maximum && Date.now() < deadline) {
   attempted += completed;
   resolved += result.resolved;
   console.log(JSON.stringify({ at: new Date().toISOString(), batch: ++batch, attempted, resolved, result }));
+  if (result.reasonCodes.includes('unexpected-failure')) throw new Error('Icon catch-up stopped after an unexpected resolver failure');
   if (result.mode === 'off' || result.claimed === 0 || completed === 0) break;
   await new Promise((done) => setTimeout(done, 2_000));
 }
