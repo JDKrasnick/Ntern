@@ -322,7 +322,7 @@ test('backfills and serves a reviewed community role with no canonical employer'
 test('authenticated catch-up clamps batches, respects the sweep lease and overload gate, and serves its results', async () => {
   const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
   const env = { ...cronEnvironment(), INTERNAL_SERVICE_SECRET: 'internal', OPERATIONS_SHARED_SECRET: 'operations' };
-  const request = (authorized = true) => new Request('https://api.example.test/internal/admission/employer-icons/sweep', {
+  const request = (authorized = true) => new globalThis.Request('https://api.example.test/internal/admission/employer-icons/sweep', {
     method: 'POST', headers: { 'X-InternNotifs-Service-Key': 'internal',
       ...(authorized ? { 'X-Operations-Key': 'operations' } : {}) }, body: JSON.stringify({ maxTasks: 1_000 }),
   });
