@@ -278,7 +278,7 @@ const DEGREE_NOUN = String.raw`degrees?|program(?:me)?s?|students?|candidates?|s
 const EDUCATION_AUDIENCE_PATTERNS: Record<EducationLevel, readonly RegExp[]> = {
   undergraduate: [
     /\b(?:undergrad(?:uate)?s?|bachelor(?:['’]s|s)?(?:\s+degree)?|college students?|university students?|(?:four|4)[ -]?year(?: college| university)? degree)\b/iu,
-    /(?<![\w.])(?:BSc|BS|B\.S\.|BA|B\.A\.)(?![\w.])/u,
+    /(?<![\w.])(?:BSc|B\.Sc\.|BS|B\.S\.|BA|B\.A\.)(?![\w.])/u,
     new RegExp(String.raw`(?<![\w.])(?:bsc|bs|ba)(?![\w.])\s+(?:${DEGREE_NOUN}|in\s+\w+)`, 'iu'),
   ],
   masters: [
@@ -286,7 +286,7 @@ const EDUCATION_AUDIENCE_PATTERNS: Record<EducationLevel, readonly RegExp[]> = {
     new RegExp(String.raw`\bmasters\s+(?:${DEGREE_NOUN}|of\s+\w+|in\s+\w+)`, 'iu'),
     new RegExp(String.raw`\bmaster\s+(?:of|${DEGREE_NOUN})`, 'iu'),
     new RegExp(String.raw`\bgraduate\s+(?:students?|program(?:me)?s?|degree|level|coursework)`, 'iu'),
-    /(?<![\w.])(?:MSc|MS|M\.S\.)(?![\w.])/u,
+    /(?<![\w.])(?:MSc|M\.Sc\.|MS|M\.S\.)(?![\w.])/u,
     /(?<![\w.])(?:MA|M\.A\.)(?![\w.])/u,
     new RegExp(String.raw`(?<![\w.])(?:msc|ms|ma)(?![\w.])\s+(?:${DEGREE_NOUN}|in\s+\w+)`, 'iu'),
   ],

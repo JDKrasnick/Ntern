@@ -17,6 +17,8 @@ describe('brief metadata disclosures', () => {
     ['Bachelor’s or Master’s in Mechatronics', ['Bachelor’s', 'Master’s']],
     ['Pursuing a bachelor’s or master’s in Computer Science', ['Pursuing bachelor’s', 'Pursuing master’s']],
     ['Pursuing a PhD in Robotics', ['Pursuing PhD']],
+    ['Enrolled M.Sc. or Ph.D. in CS, EE, Data Science or related technical field', ['Pursuing master’s', 'Pursuing PhD']],
+    ['Currently pursuing a B.Sc. in Computer Science', ['Pursuing bachelor’s']],
     ['Currently enrolled in an MBA program', ['Pursuing MBA']],
     ['Bachelor’s degree or equivalent experience', ['Bachelor’s', 'Or equivalent exp.']],
     ['Master’s degree in Computer Science preferred', ['Master’s preferred']],
