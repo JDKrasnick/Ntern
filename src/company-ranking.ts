@@ -49,6 +49,8 @@ export function storedCompanyRanking(value: unknown): CompanyRanking {
 
 export function admittedCompanyScore(input: { company: string; canonicalEmployerId?: string }, scores?: CompanyRankingScores): number | undefined {
   // A known identity must never inherit a different employer's same-name rating.
-  const value = scores?.get(input.canonicalEmployerId ? employerRankingKey(input.canonicalEmployerId) : companyRankingNameKey(input.company));
+  const key = input.canonicalEmployerId ? employerRankingKey(input.canonicalEmployerId) : companyRankingNameKey(input.company);
+  if (key === 'name:') return undefined;
+  const value = scores?.get(key);
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : undefined;
 }

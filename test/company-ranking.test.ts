@@ -33,6 +33,7 @@ describe('admitted company ranking', () => {
       expect(scoreOpportunity({ ...input, company })).toMatchObject({ company: 50, companyEvidence: 'unrated' });
     }
     for (const invalid of [NaN, Infinity, -10, 101]) expect(scoreOpportunity(input, new Map([['name:acme', invalid]])).company).toBe(50);
+    expect(scoreOpportunity({ ...input, company: '未知公司' }, new Map([['name:', 95]])).company).toBe(50);
   });
 
   it('reads every employer in bounded pages and makes conflicting aliases neutral without losing ID ranks', async () => {
