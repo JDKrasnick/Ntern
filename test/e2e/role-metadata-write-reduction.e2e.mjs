@@ -621,7 +621,7 @@ for (const mode of ['control', 'lost-ack', 'budget-recovery', 'publisher-race', 
       assert.ok(prior);
       replacing = true;
       const replacementPolicy = { ...policy, cohort: [{ sourceId: messages[0].sourceId, externalId: messages[0].externalId, contentHash: messages[0].contentHash }] };
-      const replace = async (action = 'publish-approved') => builtWorker.fetch(new Request('https://ingestion.example.test/internal/operations/shadow-publication', {
+      const replace = async (action = 'publish-approved') => builtWorker.fetch(new globalThis.Request('https://ingestion.example.test/internal/operations/shadow-publication', {
         method: 'POST', headers: { 'X-InternNotifs-Service-Key': internalServiceSecret, 'X-Operations-Key': operationsSecret, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, runKey: messages[0].runKey, runKeys: [messages[0].runKey], replaceExisting: true,
           deferProjection: true, acceptedFields: saved.verification.acceptedFields }),
