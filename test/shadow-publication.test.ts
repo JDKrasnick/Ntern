@@ -13,6 +13,8 @@ import { D1InternshipStore } from '../cloudflare/d1-store.js';
 import { D1CatalogAdmissionStore } from '../cloudflare/catalog-admission-store.js';
 import { publishProspectiveShadowMetadata, naturalShadowCohortSql } from '../cloudflare/shadow-publication.js';
 import { mergeSourceOccurrence } from '../src/identity/source-occurrence.js';
+import { catalogEducation } from '../src/catalog-groups.js';
+import { matchesJobFilter } from '../src/core/filters.js';
 
 const hash = 'a'.repeat(64);
 const releaseApproval = { model: SHADOW_EXTRACTION_MODEL_ID, prompt: SHADOW_EXTRACTION_PROMPT_VERSION,
@@ -293,6 +295,9 @@ describe('shadow publication policy', () => {
     const jobs = new D1InternshipStore(d1(database));
     const job = (await jobs.getJob('job-1'))!;
     expect(job.postingFacts).toHaveLength(7);
+    expect(catalogEducation(job)).toMatchObject({ levels: ['undergraduate'], evidence: 'explicit' });
+    expect(matchesJobFilter(job, { educationLevel: 'masters' })).toBe(false);
+    expect(matchesJobFilter(job, { educationLevel: 'undergraduate' })).toBe(true);
     expect(job.postingFacts?.find(fact => fact.field === 'compensation')?.statements).toEqual(['USD 40–50/hour']);
     expect(job.postingFacts?.find(fact => fact.field === 'workMode')?.statements).toEqual(['Onsite']);
     const publicResponse = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/jobs/job-1'), env);

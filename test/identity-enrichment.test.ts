@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildInternshipIdentity,
   educationAudienceLevels,
+  educationAudienceOf,
   educationAudienceLabel,
   educationAudienceMatches,
   effectiveAdvancedDegreeRequired,
@@ -18,6 +19,31 @@ const evidence = (source: FieldProvenance['source'], evidenceCode: string): Fiel
 });
 
 describe('provider-neutral field enrichment', () => {
+  it.each([
+    ['Currently pursuing BS in computer science', [], ['undergraduate']],
+    ['Currently enrolled in a Masters or PhD program', [], ['doctoral', 'masters']],
+    ['Masters degree', ['Preferred'], []],
+    ['Masters degree.', ['Preferred'], []],
+    ['Masters degree.', ['Not required'], []],
+    ['No Masters degree is required', [], []],
+    ['PhD students are not eligible', [], []],
+    ['PhD students', ['Not considered'], []],
+    ['Studying software engineering', [], []],
+  ])('reads published education without inventing an audience: %s', (statement, qualifiers, levels) => {
+    const result = educationAudienceOf({
+      internshipIdentity: { education: { levels: [], evidenceStatus: 'unspecified' } },
+      postingFacts: [{ field: 'education', statements: [statement], qualifiers,
+        sourceUrl: 'https://employer.test/role', contentHash: 'a'.repeat(64) }],
+    });
+    expect(result?.levels ?? []).toEqual(levels);
+    if (levels.length) expect(result?.evidenceStatus).toBe('explicit');
+  });
+
+  it('preserves conflicting typed education rather than filling it from a fact', () => {
+    expect(educationAudienceOf({ internshipIdentity: { education: { levels: [], evidenceStatus: 'conflicting' } },
+      postingFacts: [{ field: 'education', statements: ['BS students required'], qualifiers: [], sourceUrl: 'https://employer.test', contentHash: 'a'.repeat(64) }],
+    })).toEqual({ levels: [], evidenceStatus: 'conflicting' });
+  });
   it('builds a durable grouping identity from one official ATS posting', () => {
     const identity = buildInternshipIdentity({
       sourceId: 'greenhouse-acme',
