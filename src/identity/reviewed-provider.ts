@@ -39,7 +39,9 @@ export function reviewedProviderEvidenceError(evidence: ProviderPostingEvidence)
 }
 
 function customGreenhousePostingId(url: URL): { postingId?: string; conflict?: boolean } {
-  const queryId = url.searchParams.get('gh_jid');
+  const queryIds = url.searchParams.getAll('gh_jid');
+  if (new Set(queryIds).size > 1) return { conflict: true };
+  const queryId = queryIds[0];
   const pathIds = [...url.pathname.matchAll(/(?:^|[-/])(\d{5,})(?=\/|$)/g)].map((match) => match[1]!);
   const ids = new Set([...(queryId && /^\d+$/.test(queryId) ? [queryId] : []), ...pathIds]);
   if (ids.size > 1) return { conflict: true };
