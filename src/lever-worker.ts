@@ -39,6 +39,7 @@ export interface LeverBoardDependencies {
   groupedNotificationCohort?: GroupedNotificationCohort;
   enqueueDestinationVerification?: (request: DestinationVerificationRequest) => Promise<void>;
   catalogAdmissionResolver?: CatalogAdmissionResolver;
+  earlyCareerEligibilityEnabled?: boolean;
   shadowDiscovery?: ShadowDiscoveryHook;
   v2CatalogWriteOwner?: (sourceId: string) => boolean;
   v2TrustedCommunityAlertsEnabled?: (sourceId: string) => boolean;
@@ -298,7 +299,7 @@ export async function runLeverBoard(
 
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
-    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({ runId: message.runId,
+    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled, dependencies.earlyCareerEligibilityEnabled).poll({ runId: message.runId,
       seedOnly: message.seedOnly === true, forceFullAcquisition: message.seedOnly === true,
       naturalProviderPoll: !message.force,
       allowCompleteEmptySnapshot: dependencies.v2CatalogWriteOwner?.(source.id) === true });

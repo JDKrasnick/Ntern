@@ -9,12 +9,13 @@ export const INGESTION_V2_EVALUATOR_REVISION = 9;
 
 export function ingestionV2AdmissionVersion(
   baseAdmissionVersion: string,
-  options: { trustedCommunityAlertsEnabled?: boolean; greenhouseIndexMaterial?: boolean } = {},
+  options: { trustedCommunityAlertsEnabled?: boolean; greenhouseIndexMaterial?: boolean; earlyCareerEligibilityEnabled?: boolean } = {},
 ): string {
   return createHash('sha256').update(JSON.stringify({
     baseAdmissionVersion,
     evaluatorRevision: INGESTION_V2_EVALUATOR_REVISION,
     trustedCommunityAlertsEnabled: options.trustedCommunityAlertsEnabled ?? false,
     ...(options.greenhouseIndexMaterial ? { greenhouseIndexMaterial: 1 } : {}),
+    ...(options.earlyCareerEligibilityEnabled ? { earlyCareerPolicyVersion: 3 } : {}),
   })).digest('hex');
 }

@@ -10,6 +10,7 @@ import { applicationUrlRejection } from '../sources/quality.js';
 import { providerPostingReference } from '../identity/posting.js';
 import { extractPostingMetadataEvidence } from '../role-metadata.js';
 import { metadataDescriptionText } from '../core/metadata-text.js';
+import { assessOfficialEarlyCareer } from '../early-career-eligibility.js';
 import { normalizeExactPostingDescription, shadowStructuredEvidenceHash } from '../shadow-extraction.js';
 import type {
   JobRequirements,
@@ -67,15 +68,23 @@ function destinationProviderReference(applyUrl: string) {
 export function processPosting(
   posting: SourcedPosting,
   employerTitles: readonly string[] = [],
+  earlyCareerEligibilityEnabled = false,
 ): { listing?: ProcessedListing; decision: PostingDecision } {
   if (posting.sourceState === 'prospect') {
     return { decision: { externalId: posting.externalId, outcome: 'filtered', reason: 'prospect' } };
   }
   const sourceTitle = htmlToText(posting.title);
   const title = repairTitle(sourceTitle, employerTitles);
-  // This scope decision uses only the title. Avoid converting large employer
-  // descriptions that cannot affect the rejection.
-  if (posting.lifecycleAuthority !== 'source' && posting.lifecycleAuthority !== 'posting' && !hasLifecycleTitleSignal(title)) {
+  const needsLifecycleEvidence = posting.lifecycleAuthority !== 'source' && posting.lifecycleAuthority !== 'posting' && !hasLifecycleTitleSignal(title);
+  const officialAssessment = needsLifecycleEvidence && earlyCareerEligibilityEnabled && ['official-ats', 'official-structured'].includes(posting.provenance ?? '')
+    ? assessOfficialEarlyCareer({ title, text: contentText(posting) }) : undefined;
+  const coverageCandidate = officialAssessment?.status === 'eligible'
+    || (officialAssessment && posting.contentCompleteness === 'index-only'
+      && officialAssessment.reason === 'no-explicit-programme'
+      && assessTechnicalRole({ company: '', title, location: '', season: 'ongoing' }).technical);
+  // Index-only technical candidates may reach bounded hydration; final
+  // admission still requires an explicit programme in the exact employer text.
+  if (needsLifecycleEvidence && !coverageCandidate) {
     return { decision: { externalId: posting.externalId, outcome: 'filtered', reason: 'not-early-career' } };
   }
   const content = contentText(posting);
@@ -130,6 +139,10 @@ export function processPosting(
     metadataEvidence: extractPostingMetadataEvidence({
       artifact: {
         title,
+        // `posting` authority represents an explicit provider internship field
+        // (currently Ashby's employmentType=Intern), not a community label.
+        ...(posting.lifecycleAuthority === 'posting' && ['official-ats', 'official-structured'].includes(posting.provenance ?? '')
+          ? { employmentType: 'Intern' } : {}),
         text: shadowDescription,
         ...(posting.compensationText ? { compensationText: posting.compensationText } : {}),
         ...(posting.compensationBands?.length ? { compensationBands: posting.compensationBands } : {}),
@@ -205,7 +218,7 @@ export function processPosting(
     : { listing, decision: { externalId: posting.externalId, outcome: 'shelved', reason: 'nontechnical' } };
 }
 
-export function processSnapshot(snapshot: SourceSnapshot): ProcessedSnapshot {
+export function processSnapshot(snapshot: SourceSnapshot, earlyCareerEligibilityEnabled = false): ProcessedSnapshot {
   const listings: ProcessedListing[] = [];
   const decisions: PostingDecision[] = [];
   // A source that truncates one row usually publishes the same role whole
@@ -222,7 +235,7 @@ export function processSnapshot(snapshot: SourceSnapshot): ProcessedSnapshot {
     else employerTitles.set(key, [title]);
   }
   for (const posting of snapshot.postings) {
-    const result = processPosting(posting, employerTitles.get(htmlToText(posting.employer.name).toLowerCase()) ?? []);
+    const result = processPosting(posting, employerTitles.get(htmlToText(posting.employer.name).toLowerCase()) ?? [], earlyCareerEligibilityEnabled);
     decisions.push(result.decision);
     if (result.listing) listings.push(result.listing);
   }

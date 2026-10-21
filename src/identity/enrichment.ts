@@ -11,6 +11,7 @@ import type {
   ProvenancedValue,
 } from '../types.js';
 import { canonicalCompanyKey } from '../core/normalize.js';
+import { explicitProgramType } from '../early-career-eligibility.js';
 import type { PostingFact } from '../../shared/posting-facts.js';
 
 const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
@@ -245,10 +246,7 @@ function seasonParts(value: string): { term?: 'spring' | 'summer' | 'fall' | 'wi
 }
 
 function programType(title: string, provenance: FieldProvenance): ProvenancedValue<InternshipIdentity['programType']['value']> {
-  const value = /\bco[ -]?op\b/i.test(title) ? 'co-op'
-    : /\bapprenticeship\b/i.test(title) ? 'apprenticeship'
-      : /\bnew[ -]?grad(?:uate)?\b/i.test(title) ? 'new-grad'
-        : /\bentry[ -]?level\b/i.test(title) ? 'entry-level' : 'internship';
+  const value = explicitProgramType(title);
   return { value, provenance: [{ ...provenance, evidenceCode: `program-type-${value}` }] };
 }
 

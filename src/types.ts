@@ -507,6 +507,8 @@ export interface MetadataCompleteness {
 }
 
 export type CatalogAdmissionReason =
+  | 'not-early-career'
+  | 'early-career-unverified'
   | 'employer-unresolved'
   | 'employer-generic-label'
   | 'employer-conflict'
@@ -528,6 +530,8 @@ export type CatalogAdmissionReason =
 export type CatalogAdmissionEvidence = 'trusted-community-source';
 
 export interface CatalogAdmission {
+  /** Explicit, default-off policy enrollment; absence preserves the existing rollout. */
+  earlyCareer?: EarlyCareerAssessment & { baseCatalogEligible: boolean; baseAlertEligible: boolean };
   canonicalEmployer?: Pick<CanonicalEmployer, 'id' | 'displayName'>;
   employerResolution: 'resolved' | 'source-reported' | 'unresolved' | 'conflict';
   postingAttribution: 'attributed' | 'unattributed';
@@ -628,7 +632,20 @@ export interface ProvenancedValue<T> {
   provenance: FieldProvenance[];
 }
 
-export type InternshipProgramType = 'internship' | 'co-op' | 'apprenticeship' | 'new-grad' | 'entry-level';
+export type InternshipProgramType = 'internship' | 'co-op' | 'apprenticeship' | 'new-grad' | 'entry-level' | 'unknown';
+
+export interface EarlyCareerAssessment {
+  policyVersion: 3;
+  status: 'eligible' | 'ineligible' | 'unknown';
+  reason: 'explicit-programme' | 'explicit-entry-level' | 'experienced-role' | 'no-explicit-programme' | 'missing-official-evidence' | 'conflicting-employer-evidence';
+  programType?: Exclude<InternshipProgramType, 'unknown'>;
+  officialTitle?: string;
+  evidence: string[];
+  sourceClass?: EvidenceSource;
+  sourceUrl?: string;
+  artifactHash?: string;
+  observedAt?: string;
+}
 export type SeasonTerm = 'spring' | 'summer' | 'fall' | 'winter';
 export type SeasonEvidenceStatus = 'explicit' | 'inferred' | 'unspecified';
 
@@ -884,6 +901,7 @@ export interface HousingDetail {
 
 /** Versioned, provider-neutral evidence extracted from one exact posting artifact. */
 export interface RoleMetadataEvidence {
+  earlyCareer?: EarlyCareerAssessment;
   schemaVersion: 1;
   extractionVersion: number;
   artifactHash: string;

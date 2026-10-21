@@ -38,6 +38,7 @@ export interface GreenhouseBoardDependencies {
   enqueueDestinationVerification?: (request: DestinationVerificationRequest) => Promise<void>;
   enqueueContinuation?: (message: GreenhouseWorkMessage) => Promise<void>;
   catalogAdmissionResolver?: CatalogAdmissionResolver;
+  earlyCareerEligibilityEnabled?: boolean;
   shadowDiscovery?: ShadowDiscoveryHook;
   v2CatalogWriteOwner?: (sourceId: string) => boolean;
   v2TrustedCommunityAlertsEnabled?: (sourceId: string) => boolean;
@@ -148,7 +149,7 @@ export async function runGreenhouseBoard(
 
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
-    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({
+    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled, dependencies.earlyCareerEligibilityEnabled).poll({
     naturalProviderPoll: !message.force, forceFullAcquisition: message.force === true, seedOnly: message.seedOnly === true,
     // V2 closes missing postings through verified complete snapshots and its
     // omission fence. A valid empty board must reach that durable path.

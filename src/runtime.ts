@@ -20,6 +20,8 @@ export interface RuntimeConfig {
 
 
 export interface RuntimeDependencies {
+  /** Default-off pending the labelled early-career policy audit and reviewed rollout. */
+  earlyCareerEligibilityEnabled?: boolean;
   store: InternshipStore;
   config: RuntimeConfig;
   sources?: SourceAdapter[];
@@ -74,6 +76,7 @@ export async function runRuntimeCommand(command: 'poll' | 'digest', dependencies
       dependencies.shadowDiscovery,
       dependencies.v2CatalogWriteOwner,
       dependencies.v2TrustedCommunityAlertsEnabled,
+      dependencies.earlyCareerEligibilityEnabled ?? false,
     ).poll({
       allowCompleteEmptySnapshot: dependencies.allowCompleteEmptySnapshot,
       maxAdmissionMigrationListingsPerSourceRun: dependencies.maxAdmissionMigrationListingsPerSourceRun,

@@ -24,6 +24,7 @@ import { decodeSourceAllowlist } from '../src/ingestion-v2/source-allowlist.js';
 export const ADMISSION_V2_QUEUE_NAME = 'intern-notifs-admission-v2';
 
 export interface AdmissionV2Environment {
+  EARLY_CAREER_ELIGIBILITY_ENABLED?: string;
   DB: D1Database;
   DOCUMENTS: R2Bucket;
   INGESTION_V2_SHADOW_DISCOVERY_ENABLED?: string;
@@ -137,6 +138,7 @@ export function stage2AdmissionEvaluator(
   sink: AdmissionV2CatalogSink = new RecordingAdmissionV2CatalogSink(),
   resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver,
   options: {
+    earlyCareerEligibilityEnabled?: boolean;
     resolvePriorContext?: AdmissionV2PriorContextResolver;
     trustedCommunityCatalogEnabled?: boolean;
     trustedCommunityAlertsEnabledForSource?: (sourceId: string) => boolean;
@@ -145,6 +147,7 @@ export function stage2AdmissionEvaluator(
   } = {},
 ): AdmissionV2RowEvaluator {
   return new RuleBasedAdmissionV2Evaluator({
+    earlyCareerEligibilityEnabled: options.earlyCareerEligibilityEnabled,
     prober: cloudflareAdmissionProber(resolver, options.providerGovernor),
     sink,
     ...(options.resolveIdentityApplicationUrl ? { resolveIdentityApplicationUrl: options.resolveIdentityApplicationUrl } : {}),
@@ -209,6 +212,7 @@ export async function processAdmissionV2Batch(
       providerGovernor: new D1AdmissionProviderGovernor(env.DB, now),
       resolveIdentityApplicationUrl: (applyUrl) => reviewedIdentityApplicationUrl(env.DB, applyUrl),
       trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
+      earlyCareerEligibilityEnabled: env.EARLY_CAREER_ELIGIBILITY_ENABLED === 'true',
       trustedCommunityAlertsEnabledForSource: (sourceId) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
       resolvePriorContext: async (sourceId, externalId) => {
         const prior = await internshipStore.getSourceOccurrence(sourceId, externalId);
