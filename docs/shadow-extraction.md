@@ -22,6 +22,18 @@ enqueues only a compact reference: posting IDs, source identity, content hash,
 versioned cache key, and R2 object key. Queue messages never contain the source
 description, prompts, user data, credentials, or an arbitrary URL to fetch.
 
+The provider-poll handoff first persists the existing deterministic (regex)
+metadata from the exact official API artifact. Model extraction supplements this
+baseline; when its budget is exhausted, the catalog retains regex-derived facts
+with official-source provenance. This metadata write preserves admission,
+destination verification, role lifecycle, and notification state.
+It refreshes the job after acquisition and compares the exact stored snapshot
+at commit time. Concurrent changes cause a retry before evidence persistence or
+model handoff, so completed notifications cannot become pending again.
+Budget-blocked runs can be reclaimed on a later delivery after headroom is
+restored; completed runs remain deduplicated. Restoring headroom does not itself
+requeue previously acknowledged messages.
+
 ### Compact role facts
 
 Prompt v55 / schema v6 returns housing, timing, education, and eligibility as
@@ -148,7 +160,12 @@ Cloudflare usage) and `SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS`. The consumer
 fails closed unless cumulative reservations and reconciled actual usage fit the
 total model allowance (at most $20/month with the $20 headroom binding), and the
 forecast plus model usage stays within $35/month. The legacy smaller binding
-retains its earlier limits. Historical/non-provider work also has its own
+retains its earlier limits. For October 2026 only, the isolated dev profile has
+an owner-approved 200-cent supplement through `SHADOW_EXTRACTION_DEV_EXTRA_CENTS`.
+It requires disabled outbound delivery and the existing 2000-cent binding,
+raising only dev's total ceiling to 2200 cents and forecast-plus-model ceiling
+to 3700 cents. Production settings and historical sublimits are unchanged.
+Historical/non-provider work also has its own
 $10/month sublimit starting in October 2026, with forecast plus historical usage
 capped at $25/month; earlier periods retain their original limits. Provider
 traffic and fixed diagnostic probes do not consume that sublimit. Every lane
@@ -307,12 +324,12 @@ Replacement retires prior metadata evidence and receipts, preserving source
 attachments, admission, identity, visibility, and notification history. Partial
 or incomplete refreshes cannot erase accepted metadata.
 
-The owner-approved October seven-day refresh has an $8 total ceiling, raised
+The owner-approved October seven-day refresh has a $15 total ceiling, raised
 from $5 without resetting prior spending. At the original approval
 the ledger committed 1720 cents globally, including 877 historical cents. An
-explicit headroom binding of `2520` permits at most 800 more committed cents
-from that original baseline, with historical spending capped at 1677 cents.
-The earlier `2220` binding retains the original $5 grant. Reservations and concurrent
+explicit headroom binding of `3220` permits at most 1500 more committed cents
+from that original baseline, with historical spending capped at 2377 cents.
+The earlier `2520` and `2220` bindings retain the $8 and $5 grants. Reservations and concurrent
 traffic count against these ceilings. The special allowance applies only in
 October 2026; other months retain the prior limits. The runner also caps its
 own task at 500 cents and must report unprocessed or unavailable roles rather

@@ -12,6 +12,7 @@ import { ROLE_METADATA_EXTRACTION_VERSION } from '../src/role-metadata.js';
 import type { Internship, SourceOccurrence } from '../src/types.js';
 import { normalizeExactPostingDescription } from '../src/shadow-extraction.js';
 import { metadataDescriptionText } from '../src/core/metadata-text.js';
+import { processShadowExtractionBatch } from '../cloudflare/shadow-extraction.js';
 
 const launch = vi.hoisted(() => vi.fn());
 vi.mock('@cloudflare/puppeteer', () => ({ default: { launch } }));
@@ -40,7 +41,8 @@ function subject() {
     '0012_destination_verification_schedule.sql', '0015_role_metadata_enrichment.sql', '0016_role_metadata_repair_plans.sql',
     '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
     '0020_shadow_extraction.sql', '0021_shadow_extraction_fencing.sql',
-    '0022_shadow_extraction_cache_expiry.sql', '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql',
+    '0022_shadow_extraction_cache_expiry.sql', '0023_shadow_extraction_attempt_costs.sql',
+    '0026_shadow_extraction_origin.sql', '0032_shadow_extraction_input_completeness.sql',
     '0015_dlq_recovery.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
@@ -599,6 +601,57 @@ describe('destination verification queue consumer', () => {
     expect(stale.retry).not.toHaveBeenCalled();
     expect(artifactPut).toHaveBeenCalledOnce();
     expect(shadowQueue.send).toHaveBeenCalledOnce();
+  });
+
+  it('keeps official regex metadata public when the model consumer has no budget', async () => {
+    const { database, db, jobs } = subject(); const { job, reference } = role();
+    await jobs.putInternship(job);
+    const description = 'Software Engineering Intern. Pay: USD 50 - 60 per hour. Work remotely.';
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => Response.json({
+      id: Number(reference.externalId), title: reference.title, content: description,
+      location: { name: 'Austin, TX' },
+    })));
+    const objects = new Map<string, ArrayBuffer>();
+    const artifacts = {
+      put: vi.fn(async (key: string, value: ArrayBuffer) => { objects.set(key, value); }),
+      get: vi.fn(async (key: string) => {
+        const value = objects.get(key);
+        return value ? { size: value.byteLength, body: new Response(value).body! } : null;
+      }),
+    } as unknown as R2Bucket;
+    const send = vi.fn(); const shadowQueue = { send, sendBatch: vi.fn() };
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId,
+      externalId: reference.externalId!, candidateUrl: reference.applyUrl,
+      providerIdentity: { provider: 'greenhouse', tenant: 'acme', postingId: reference.externalId,
+        sourceId: reference.sourceId, sourceUrl: reference.sourceUrl },
+      reason: 'content-change', queuedAt: '2026-10-20T00:00:00Z', shadowOrigin: 'provider-poll',
+      shadowContentHash: normalizeExactPostingDescription(reference.title, description).contentHash,
+    });
+    const now = () => new Date('2026-10-20T00:01:00Z');
+    await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, {
+      ...environment(db), SHADOW_EXTRACTION_QUEUE: shadowQueue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+    }, now);
+    expect(queued.ack).toHaveBeenCalledOnce(); expect(queued.retry).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledOnce();
+    const modelMessage = { id: 'model-budget-blocked', body: send.mock.calls[0]![0], ack: vi.fn(), retry: vi.fn() };
+    const infer = vi.fn();
+    await processShadowExtractionBatch({ queue: 'shadow-extraction', messages: [modelMessage] }, {
+      DB: db, SHADOW_EXTRACTION_QUEUE: shadowQueue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500',
+      SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '0',
+    }, now, infer);
+    expect(infer).not.toHaveBeenCalled(); expect(modelMessage.ack).toHaveBeenCalledOnce();
+    expect(database.prepare('SELECT state,error FROM shadow_extraction_runs').get())
+      .toMatchObject({ state: 'disabled', error: 'cost headroom unavailable' });
+    const stored = (await jobs.getJob(job.jobId))!;
+    const evidence = stored.sourceReferences[0]!.metadataEvidence!;
+    expect(evidence).toContainEqual(expect.objectContaining({ sourceClass: 'official-api',
+      compensationRanges: expect.arrayContaining([expect.objectContaining({ minAmount: 50, maxAmount: 60 })]) }));
+    expect(stored.compensation.raw).toContain('50');
+    expect(stored.location).toContain('Austin');
+    expect(stored.sourceReferences[0]!.admission).toEqual(reference.admission);
+    expect(stored.notification).toEqual(job.notification); expect(stored.open).toBe(job.open);
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it('rejects a natural metadata revision superseded by a later source poll before fetching or enqueueing', async () => {

@@ -566,6 +566,9 @@ describe('shadow extraction queue and cost ledger', () => {
     ['2026-11', '1500', '2000', 1000],
     ['2026-10', '1500', '2220', 1377],
     ['2026-10', '1500', '2520', 1677],
+    ['2026-10', '1500', '3220', 2377],
+    ['2026-11', '1500', '3220', 1000],
+    ['2026-09', '1500', '3220', 800],
     ['2026-11', '1500', '2520', 1000],
     ['2026-09', '1500', '2520', 800],
     ['2026-11', '1500', '2220', 1000],
@@ -607,6 +610,7 @@ describe('shadow extraction queue and cost ledger', () => {
   it.each([
     ['2220', 50, 2220, 1377],
     ['2520', 80, 2520, 1677],
+    ['3220', 150, 3220, 2377],
   ] as const)('caps the approved refresh with headroom %s including concurrent reservations', async (headroom, count, total, historicalLimit) => {
     const DB = schema(); const now = new Date('2026-10-15T22:00:00.000Z');
     const historical = '7'.repeat(64), provider = '8'.repeat(64);
@@ -671,12 +675,60 @@ describe('shadow extraction queue and cost ledger', () => {
     }
   });
 
+  it('limits the dev grant to $2 in October without changing production or historical caps', async () => {
+    const DB = schema(); const now = new Date('2026-10-21T00:00:00Z');
+    const env = { SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '2000',
+      SHADOW_EXTRACTION_DEV_EXTRA_CENTS: '200', OUTBOUND_NOTIFICATIONS_ENABLED: 'false' };
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ allowanceCents: 2200, historical: { allowanceCents: 1000 } });
+    for (const changed of [{ OUTBOUND_NOTIFICATIONS_ENABLED: 'true' }, { OUTBOUND_NOTIFICATIONS_ENABLED: undefined },
+      { SHADOW_EXTRACTION_DEV_EXTRA_CENTS: '201' }, { SHADOW_EXTRACTION_DEV_EXTRA_CENTS: '-1' }]) {
+      expect(await providerShadowBudgetStatus(DB, now, { ...env, ...changed })).toMatchObject({ allowanceCents: 2000 });
+    }
+    expect(await providerShadowBudgetStatus(DB, new Date('2026-11-01T00:00:00Z'), env)).toMatchObject({ allowanceCents: 2000 });
+    expect(await providerShadowBudgetStatus(DB, now, { ...env, SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '3701' })).toMatchObject({ allowanceCents: 0 });
+    const key = 'f'.repeat(64);
+    await DB.prepare(`INSERT INTO shadow_extraction_runs (run_key,job_id,source_id,external_id,source_url,posting_identity,content_hash,
+      model_id,prompt_version,schema_version,preprocessing_version,state,input_key,origin,created_at,updated_at)
+      VALUES (?,'dev','dev','dev','https://example.test','{}',?,'model','p','s','n','queued','input','provider-poll',?,?)`)
+      .bind(key, key, now.toISOString(), now.toISOString()).run();
+    const reserved = await Promise.all(Array.from({ length: 111 }, (_, index) => reserveShadowCost(DB, now, key, `dev-${index}`, 20, env)));
+    expect(reserved.filter(Boolean)).toHaveLength(110);
+    expect(await providerShadowBudgetStatus(DB, now, env)).toMatchObject({ allowanceCents: 2200, spentCents: 2200, exhausted: true });
+  });
+
   it('retains the old 900¢ provider allowance until the $20 binding is applied', async () => {
     const DB = schema();
     const now = new Date('2026-09-24T00:00:00.000Z');
     expect(await providerShadowBudgetStatus(DB, now, {
       SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '500',
     })).toMatchObject({ allowanceCents: 900, spentCents: 0, exhausted: false });
+  });
+
+  it('reclaims a redelivered budget-blocked run after headroom is restored without repeating completed inference', async () => {
+    const DB = schema(); const artifacts = new MemoryR2();
+    const queue: Queue = { async send() {}, async sendBatch() {} };
+    const now = () => new Date('2026-10-20T00:00:00Z');
+    const message = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts }, {
+      jobId: 'job-budget-retry', sourceId: identity.sourceId, externalId: '123', sourceUrl: identity.sourceUrl, providerIdentity: identity,
+      title: 'Software Engineering Intern', description, observedAt: now().toISOString(), origin: 'provider-poll',
+    });
+    let calls = 0;
+    const infer = async () => { calls++; return { response: output(), inputTokens: 100, outputTokens: 50, actualCostCents: 6 }; };
+    const batch = { queue: 'shadow-extraction', messages: [{ id: 'retry-budget', body: message,
+      ack() {}, retry() { throw new Error('Unexpected delivery retry'); } }] };
+    const env = { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '0' };
+    await processShadowExtractionBatch(batch, env, now, infer);
+    expect(calls).toBe(0);
+    expect(await DB.prepare('SELECT state,error FROM shadow_extraction_runs').first())
+      .toEqual({ state: 'disabled', error: 'cost headroom unavailable' });
+    const funded = { ...env, SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '3220' };
+    await processShadowExtractionBatch(batch, funded, now, infer);
+    expect(calls).toBe(1);
+    expect(await DB.prepare('SELECT state,attempts FROM shadow_extraction_runs').first())
+      .toEqual({ state: 'completed', attempts: 2 });
+    await processShadowExtractionBatch(batch, funded, now, infer);
+    expect(calls).toBe(1);
   });
 
   it('holds unknown billed usage across a transient retry and records deterministic baseline differences', async () => {
@@ -889,4 +941,55 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await DB.prepare('SELECT COUNT(*) AS attempts, SUM(actual_cents) AS actual FROM shadow_extraction_cost_ledger WHERE run_key = ?')
       .bind(message!.runKey).first()).toEqual({ attempts: 2, actual: 4 });
   });
+  it('keeps baseline and origin envelopes distinct while deduplicating identical observations', async () => {
+    const DB = schema(); const artifacts = new MemoryR2();
+    const queue: Queue = { async send() {}, async sendBatch() {} };
+    const env = { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts };
+    const base = { jobId: 'immutable', sourceId: identity.sourceId, externalId: 'immutable', sourceUrl: identity.sourceUrl,
+      providerIdentity: identity, title: 'Software Engineering Intern', description, observedAt: '2026-10-20T00:01:00.000Z',
+      origin: 'provider-poll' as const, baseline: { compensation: 'present' as const } };
+    const first = await enqueueShadowExtraction(env, base);
+    const identical = await enqueueShadowExtraction(env, base);
+    const changed = await enqueueShadowExtraction(env, { ...base, baseline: { compensation: 'incomplete' } });
+    const historical = await enqueueShadowExtraction(env, { ...base, origin: 'backfill' });
+    expect(identical!.inputKey).toBe(first!.inputKey);
+    expect(new Set([first!.inputKey, changed!.inputKey, historical!.inputKey]).size).toBe(3);
+    expect(new Set([first!.runKey, changed!.runKey, historical!.runKey]).size).toBe(1);
+    const envelope = JSON.parse(await new Response((await artifacts.get(first!.inputKey))!.body).text());
+    expect(envelope.baseline).toEqual({ compensation: 'present' });
+    expect(envelope.identity.origin).toBe('provider-poll');
+  });
+
+  it.each([false, true])('preserves prospective verification across repeated enqueue observations (newest first: %s)', async newestFirst => {
+    const DB = schema(); const artifacts = new MemoryR2(); const messages: unknown[] = [];
+    const queue: Queue = { async send(body) { messages.push(body); }, async sendBatch() {} };
+    const base = { jobId: 'repeat-job', sourceId: identity.sourceId, externalId: 'repeat', sourceUrl: identity.sourceUrl,
+      providerIdentity: identity, title: 'Software Engineering Intern', description, origin: 'provider-poll' as const };
+    const first = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts },
+      { ...base, observedAt: '2026-10-20T00:01:00.000Z' });
+    const second = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts },
+      { ...base, observedAt: '2026-10-20T00:02:00.000Z' });
+    expect(first!.runKey).toBe(second!.runKey);
+    expect(first!.inputKey).not.toBe(second!.inputKey);
+    const original = JSON.parse(await new Response((await artifacts.get(first!.inputKey))!.body).text());
+    expect(original.identity.observedAt).toBe(first!.queuedAt);
+    const policy = { enabled: true, version: 'prospective-retry-review', mode: 'prospective-provider-poll',
+      startsAt: '2026-10-20T00:00:00.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: 25 };
+    let calls = 0;
+    const env = { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '100', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100',
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+    for (const body of newestFirst ? [second, first] : [first, second]) await processShadowExtractionBatch({ queue: 'intern-notifs-shadow-extraction', messages: [{
+      id: 'repeat', body, ack() {}, retry() { throw new Error('Unexpected retry'); },
+    }] }, env, () => new Date('2026-10-20T00:03:00.000Z'), async () => {
+      calls++; return { response: output(), inputTokens: 100, outputTokens: 50, actualCostCents: 2 };
+    });
+    const run = await DB.prepare('SELECT state,response_key FROM shadow_extraction_runs WHERE run_key = ?')
+      .bind(first!.runKey).first<{ state: string; response_key: string }>();
+    expect(run?.state).toBe('completed');
+    const object = await artifacts.get(run!.response_key);
+    const saved = JSON.parse(await new Response(object!.body).text()) as { verification?: { acceptedFields: string[] } };
+    expect({ calls, acceptedFields: saved.verification?.acceptedFields }).toEqual({ calls: 2, acceptedFields: ['compensation', 'locations'] });
+  });
+
 });
