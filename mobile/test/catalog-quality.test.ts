@@ -12,7 +12,7 @@ describe("catalog presentation hardening", () => {
     expect(compactCatalogEducation(['Undergrad', 'Masters'])).toBe('Undergrad/Masters');
     expect(compactCatalogEducation(['Masters'])).toBe('Masters');
     expect(compactCatalogEducation(['MBA'])).toBe('MBA');
-    expect(compactCatalogEducation(['Pursuing degree'])).toBe('Pursuing degree');
+    expect(compactCatalogEducation(['Pursuing degree'])).toBe('All degree levels');
     expect(compactCatalogEducation(['Not specified'])).toBe('Not specified');
     expect(compactCatalogEducation(['Masters (inferred)', 'PhD (inferred)'])).toBe('Graduate (inferred)');
     expect(compactCatalogEducation(['Masters', 'PhD (inferred)'])).toBe('Masters/PhD (inferred)');
