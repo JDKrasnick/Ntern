@@ -54,6 +54,15 @@ describe('company icon route', () => {
 });
 
 describe('automatic company icon route', () => {
+  it('serves retained JPEG board logos as inert images', async () => {
+    const employer = { async getCanonicalEmployer() { return { id: 'acme', displayName: 'Acme',
+      iconKey: 'company-icons/acme/platform.jpg', reviewedAt: '', reviewedBy: '' }; } };
+    const response = await companyIconResponse('acme', employer,
+      { async get() { return object('image/jpeg'); } } as unknown as R2Bucket);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('image/jpeg');
+    expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  });
   const resolver: HostResolver = { async resolve() { return ['93.184.216.34']; } };
   const token = 'logo-dev-token';
   const imageUrl = logoDevImageUrl('acme.com', token);

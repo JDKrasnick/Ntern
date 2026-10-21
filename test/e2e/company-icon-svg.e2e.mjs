@@ -319,6 +319,41 @@ test('backfills and serves a reviewed community role with no canonical employer'
   } finally { globalThis.fetch = realFetch; }
 });
 
+test('discovers a new Workday company and serves its declared JPEG logo without a domain', async () => {
+  const { default: sharp } = await import('sharp');
+  const jpeg = await sharp({create:{width:96,height:96,channels:3,background:'#164e63'}}).jpeg().toBuffer();
+  const url = 'https://generictenant.wd5.myworkdayjobs.com/en-US/robotics/job/City/Intern_P123';
+  const logo = 'https://generictenant.wd5.myworkdayjobs.com/robotics/assets/logo';
+  await database.batch([
+    database.prepare(`UPDATE catalog_items SET value='{"version":"new-workday"}' WHERE pk='CATALOG_PROJECTION' AND sk='CURRENT'`),
+    database.prepare(`INSERT INTO catalog_items(pk,sk,kind,value) VALUES
+      ('CATALOG_PROJECTION#MANIFESTS','new-workday','catalog-projection','{"keys":["zz-new-workday"]}')`),
+    database.prepare(`INSERT INTO catalog_items(pk,sk,kind,value) VALUES ('CATALOG_PROJECTION#GROUPS','zz-new-workday','catalog-projection',?)`)
+      .bind(JSON.stringify({group:{roleCount:1,featuredRole:{company:'Northstar Robotics',title:'Software Intern',officialApplyUrl:url,
+        sourceReferences:[{sourceId:'new-reviewed-source',provenance:'reviewed-community'}]}}})),
+  ]);
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  globalThis.fetch = async request => {
+    const href = request instanceof URL ? request.href : typeof request === 'string' ? request : request.url;
+    if(href===url) return new Response(`<meta property="og:image" content="${logo}">`,{headers:{'content-type':'text/html'}});
+    if(href===logo) return new Response(jpeg,{headers:{'content-type':'image/jpeg'}});
+    return internet(request);
+  };
+  try {
+    await builtWorker.scheduled({cron,scheduledTime:Date.now(),noRetry(){}},cronEnvironment(),{waitUntil(){},passThroughOnException(){}});
+    const [icon] = await dump("SELECT id,icon_key,website_domain FROM company_icon_identities WHERE display_name='Northstar Robotics'");
+    assert.ok(icon.icon_key?.endsWith('.jpg'));
+    assert.equal(icon.website_domain,null);
+    assert.deepEqual(await dump("SELECT id FROM canonical_employers WHERE display_name='Northstar Robotics'"),[]);
+    globalThis.fetch=realFetch;
+    const fetcher=await worker.getWorker(workerName);
+    const response=await fetcher.fetch(`https://api.example.test/company-icons/${icon.id}`,{headers:{'X-InternNotifs-Service-Key':'e2e-internal-service-secret'}});
+    assert.equal(response.status,200);
+    assert.equal(response.headers.get('content-type'),'image/jpeg');
+    assert.equal((await sharp(Buffer.from(await response.arrayBuffer())).metadata()).width,96);
+  } finally {globalThis.fetch=realFetch;}
+});
+
 test('authenticated catch-up clamps batches, respects the sweep lease and overload gate, and serves its results', async () => {
   const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
   const env = { ...cronEnvironment(), INTERNAL_SERVICE_SECRET: 'internal', OPERATIONS_SHARED_SECRET: 'operations' };
