@@ -11,7 +11,8 @@ describe('opportunity score', () => {
   it('uses the agreed weights and neutral missing evidence', () => {
     expect(scoreOpportunity(input)).toMatchObject({ total: 60, company: 50, pay: 50, role: 90,
       companyEvidence: 'unrated', payEvidence: 'unknown' });
-    expect(scoreOpportunity({ ...input, company: 'Microsoft' })).toMatchObject({ total: 80.3, company: 95 });
+    expect(scoreOpportunity({ ...input, company: 'Microsoft' }, new Map([['name:microsoft', 95]]))).toMatchObject({ total: 80.3, company: 95 });
+    expect(scoreOpportunity({ ...input, company: 'Microsoft' })).toMatchObject({ company: 50, companyEvidence: 'unrated' });
   });
   it('does not mistake unknown for poor, match employer substrings, or use an ATS name', () => {
     for (const company of ['Workday customer', 'Microsoft Consulting Partners', 'Appleton', 'Unknown Labs']) {

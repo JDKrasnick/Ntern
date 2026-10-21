@@ -68,7 +68,7 @@ function subject(budget?: QueryBudget) {
     '0012_destination_verification_schedule.sql',
     '0015_role_metadata_enrichment.sql', '0016_role_metadata_repair_plans.sql', '0017_metadata_acquisition.sql', '0018_metadata_review.sql', '0019_metadata_job_review_revision.sql',
     '0013_canonical_employer_icons.sql', '0034_employer_icon_resolution.sql',
-    '0040_automatic_employer_identity.sql']) {
+    '0040_automatic_employer_identity.sql', '0059_company_admission_ranking.sql']) {
     database.exec(readFileSync(new URL(`../cloudflare/migrations/${migration}`, import.meta.url), 'utf8'));
   }
   const db = sqliteD1(database, budget);
@@ -77,12 +77,53 @@ function subject(budget?: QueryBudget) {
 
 describe('D1 catalog admission operations', () => {
   afterEach(() => vi.useRealTimers());
+  it('requires ranking on new reviewed admissions and preserves it when only an icon is edited', async () => {
+    const { database, admission: store } = subject();
+    const payload = { id: 'acme', displayName: 'Acme', iconKey: 'company-icons/acme/logo.webp' };
+    const put = (value: unknown) => handleCatalogAdmissionOperations(new Request('https://api.test/internal/admission/employers', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value),
+    }), store, async () => undefined, 'actual-reviewer', () => new Date('2026-10-21T12:00:00.000Z'));
+    try {
+      expect((await put(payload)).status).toBe(409);
+      expect(await store.getCanonicalEmployer('acme')).toBeUndefined();
+      const ranking = { tier: 'strong', reason: 'Reviewed technical product employer.', sources: ['https://acme.test/'], aliases: ['Acme Technology'], reviewedBy: 'spoofed' };
+      expect((await put({ ...payload, ranking })).status).toBe(200);
+      expect((await store.getCanonicalEmployer('acme'))?.ranking).toMatchObject({ tier: 'strong', reviewedBy: 'actual-reviewer', aliases: ['Acme Technology'] });
+      expect((await put({ ...payload, iconKey: null })).status).toBe(200);
+      expect((await store.getCanonicalEmployer('acme'))?.ranking).toMatchObject({ tier: 'strong', reviewedBy: 'actual-reviewer' });
+    } finally { database.close(); }
+  });
+
+  it('backfills only unreviewed rankings, is idempotent, and never changes identity or icon metadata', async () => {
+    const { database, admission: store } = subject();
+    const at = '2026-10-21T12:00:00.000Z';
+    await store.putCanonicalEmployer({ id: 'acme', displayName: 'Acme', iconKey: 'company-icons/acme/logo.webp',
+      reviewedAt: at, reviewedBy: 'identity-reviewer' }, at);
+    const admissionVersion = await store.configurationVersion();
+    const put = (tier: string, onlyUnreviewed: boolean) => handleCatalogAdmissionOperations(new Request('https://api.test/internal/admission/company-rankings/acme', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ onlyUnreviewed,
+        ranking: { tier, reason: 'Reviewed engineering business context.', sources: ['https://acme.test/'] } }),
+    }), store, async () => undefined, 'ranking-reviewer', () => new Date(at));
+    try {
+      expect((await store.getCanonicalEmployer('acme'))?.ranking?.status).toBe('pending');
+      expect(await (await put('strong', true)).json()).toMatchObject({ applied: true, ranking: { tier: 'strong' } });
+      expect(await (await put('strong', true)).json()).toMatchObject({ applied: false });
+      expect(await (await put('exceptional', false)).json()).toMatchObject({ applied: true, ranking: { tier: 'exceptional' } });
+      expect(await (await put('strong', true)).json()).toMatchObject({ applied: false, ranking: { tier: 'exceptional' } });
+      expect(await store.getCanonicalEmployer('acme')).toMatchObject({ displayName: 'Acme', iconKey: 'company-icons/acme/logo.webp', reviewedBy: 'identity-reviewer' });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM admission_reviewer_decisions WHERE decision='ranking-reviewed'").get()).toEqual({ count: 2 });
+      expect(await store.configurationVersion()).toBe(admissionVersion);
+      expect((await put('constructor', false)).status).toBe(409);
+    } finally { database.close(); }
+  });
+
   it('withdraws an icon through the reviewed employer operation and public route', async () => {
     const { database, admission: store } = subject();
     const url = 'https://api.test/internal/admission/employers';
     const update = async (iconKey?: string | null) => handleCatalogAdmissionOperations(new Request(url, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: 'acme', displayName: 'Acme', ...(iconKey !== undefined ? { iconKey } : {}) }),
+      body: JSON.stringify({ id: 'acme', displayName: 'Acme', ...(iconKey !== undefined ? { iconKey } : {}),
+        ...(typeof iconKey === 'string' ? { ranking: { tier: 'strong', reason: 'Reviewed technical product employer.', sources: ['https://acme.test/'] } } : {}) }),
     }), store, async () => undefined);
     const documents = { async get(key: string) {
       return key === 'company-icons/acme/logo-v1.webp'

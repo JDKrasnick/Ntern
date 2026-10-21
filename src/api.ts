@@ -13,7 +13,7 @@ import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
 import { rankCatalogGroups } from './catalog-ranking.js';
-import type { CompanySizeScores } from './company-size.js';
+import type { CompanyRankingScores } from './company-ranking.js';
 import { RESUME_DRAFT_MODELS_QUALITY } from './resume-generation.js';
 import { dropDuplicateAdditions, keepValidResumeChanges, normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
@@ -505,7 +505,7 @@ export interface ResumeArtifactStorage {
 }
 
 export interface ApiDependencies {
-  companySizes?: () => Promise<CompanySizeScores>;
+  companyRankings?: () => Promise<CompanyRankingScores>;
   jobs: InternshipStore;
   users: UserStore;
   releases?: ReleaseStore;
@@ -648,10 +648,10 @@ function validateResumeProfileSelection(bankItemIds: readonly string[], bank: re
   })) throw new Error('A resume profile must include a bullet\'s parent object');
 }
 export function createApiHandler(dependencies: ApiDependencies) {
-  const companySizes = async () => {
-    try { return await dependencies.companySizes?.(); }
+  const companyRankings = async () => {
+    try { return await dependencies.companyRankings?.(); }
     catch {
-      console.warn(JSON.stringify({ event: 'company_size_cache_unavailable' }));
+      console.warn(JSON.stringify({ event: 'company_ranking_unavailable' }));
       return undefined;
     }
   };
@@ -756,11 +756,11 @@ export function createApiHandler(dependencies: ApiDependencies) {
         }
         const requestedOffset = Number(cursor ?? 0);
         if (!Number.isFinite(requestedOffset) || requestedOffset < 0 || !Number.isInteger(requestedOffset)) return reply(400, { message: 'cursor is invalid' });
-        if (filter.sort === 'best') filter.companySizes = await companySizes();
+        if (filter.sort === 'best') filter.companyRankings = await companyRankings();
         const projected = await projectedCatalogPage(dependencies.jobs, cursor, limit, filter);
         if (projected) return reply(200, { groups: projected.groups.map((group) => group.group), ...(projected.cursor ? { cursor: projected.cursor } : {}) });
         const filtered = filterCatalogGroups(groupCatalogJobs(await completeCatalog(dependencies.jobs, identityUnconfirmedPublicationEnabled), { includeClosed: true }), filter as CatalogGroupFilter);
-        const grouped = filter.sort === 'best' ? rankCatalogGroups(filtered.map(catalogGroupDetails), filter.companySizes).map(details => ({ row: details.group })) : filtered;
+        const grouped = filter.sort === 'best' ? rankCatalogGroups(filtered.map(catalogGroupDetails), filter.companyRankings).map(details => ({ row: details.group })) : filtered;
         const page = grouped.slice(requestedOffset, requestedOffset + limit).map((group) => group.row);
         const nextOffset = requestedOffset + page.length;
         return reply(200, { groups: page, ...(nextOffset < grouped.length ? { cursor: String(nextOffset) } : {}) });
@@ -813,7 +813,7 @@ export function createApiHandler(dependencies: ApiDependencies) {
         if (status && status !== 'open' && status !== 'closed') return reply(400, { message: 'status must be open or closed' });
         const groupId = decodeURIComponent(catalogGroupMatch[1]!);
         const filter = { ...catalogFilter(event.queryStringParameters),
-          ...(event.queryStringParameters?.sort === 'best' ? { companySizes: await companySizes() } : {}),
+          ...(event.queryStringParameters?.sort === 'best' ? { companyRankings: await companyRankings() } : {}),
           ...(!identityUnconfirmedPublicationEnabled ? { postingIdentityConfirmedOnly: true } : {}) };
         const projected = await dependencies.jobs.getCatalogProjectionGroup?.(groupId);
         if (projected) {

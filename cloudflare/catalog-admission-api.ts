@@ -3,6 +3,8 @@ import type { DestinationVerificationRequest } from '../src/destination-verifica
 import { ATOMIC_REPAIR_RECORD_LIMIT, BACKFILL_REPAIR_RECORD_LIMIT } from './catalog-admission-store.js';
 import type { D1CatalogAdmissionStore, RepairChange } from './catalog-admission-store.js';
 import { validCompanyIconEmployerId } from './company-icon.js';
+import { reviewCompanyRanking } from '../src/company-ranking.js';
+import { readBoundedJson } from '../src/core/bounded-body.js';
 
 const json = (status: number, body: unknown) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
@@ -60,6 +62,20 @@ export async function handleCatalogAdmissionOperations(
         activeIncidents: incidents.length, operations: audit.operations });
     }
     if (request.method === 'GET' && path === '/internal/admission/employers') return json(200, { employers: await store.listCanonicalEmployers() });
+    const rankingMatch = /^\/internal\/admission\/company-rankings\/([a-z0-9-]+)$/u.exec(path);
+    if (request.method === 'PUT' && rankingMatch) {
+      const employerId = rankingMatch[1]!;
+      const { value } = await readBoundedJson(new Response(request.body, { headers: request.headers }), 16_384, 'company-ranking');
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('A JSON object is required');
+      const input = value as Record<string, unknown>;
+      const ranking = reviewCompanyRanking(input.ranking, actor, timestamp);
+      if (input.onlyUnreviewed !== undefined && typeof input.onlyUnreviewed !== 'boolean') throw new Error('onlyUnreviewed must be a boolean');
+      if (!await store.getCanonicalEmployer(employerId)) return json(404, { message: 'Canonical employer not found' });
+      const applied = await store.putCompanyRanking(employerId, ranking, input.onlyUnreviewed === true, timestamp);
+      if (applied) await store.recordReviewerDecision({ id: crypto.randomUUID(), subjectType: 'canonical-employer', subjectId: employerId,
+        decision: 'ranking-reviewed', reason: ranking.reason, reviewedAt: timestamp, reviewedBy: actor });
+      return json(200, { employerId, ranking: (await store.getCanonicalEmployer(employerId))!.ranking, applied });
+    }
     if (request.method === 'PUT' && path === '/internal/admission/employers') {
       const input = await body(request);
       const id = text(input.id, 'id', 160);
@@ -68,11 +84,13 @@ export async function handleCatalogAdmissionOperations(
       const clearIcon = input.iconKey === null;
       const nextIconKey = iconKey(input.iconKey, id);
       if (!existing && !nextIconKey) throw new Error('iconKey is required for a new canonical employer');
+      if (!existing && input.ranking === undefined) throw new Error('ranking is required when admitting a canonical employer');
       const employer: CanonicalEmployer = {
         id, displayName: text(input.displayName, 'displayName', 160),
         ...(nextIconKey ? { iconKey: nextIconKey, iconUpdatedAt: timestamp }
           : !clearIcon && existing?.iconKey ? { iconKey: existing.iconKey, iconUpdatedAt: existing.iconUpdatedAt } : {}),
         reviewedAt: timestamp, reviewedBy: actor,
+        ...(input.ranking !== undefined ? { ranking: reviewCompanyRanking(input.ranking, actor, timestamp) } : {}),
         ...(typeof input.parentEmployerId === 'string' && input.parentEmployerId.trim() ? { parentEmployerId: input.parentEmployerId.trim() } : {}),
         ...(typeof input.brandOfEmployerId === 'string' && input.brandOfEmployerId.trim() ? { brandOfEmployerId: input.brandOfEmployerId.trim() } : {}),
       };

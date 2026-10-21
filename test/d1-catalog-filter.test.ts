@@ -106,10 +106,10 @@ describe('D1 filtered catalog projection', () => {
       expect(compactRows.length).toBeGreaterThan(200);
       expect(compactRows.join('')).not.toContain('DO-NOT-HYDRATE');
       expect(hydrationSizes.every(size => size <= 7)).toBe(true);
-      const companySizes = new Map(values.map((value, index) => [value.company.toLowerCase(), index % 2 ? 85 : 55]));
-      const sizeExpected = rankCatalogGroups(projected, companySizes);
-      const sizeFirst = await store.listCatalogProjectionFiltered(undefined, 7, { sort: 'best', status: 'open', companySizes });
-      const sizeSecond = await store.listCatalogProjectionFiltered(sizeFirst!.cursor, 7, { sort: 'best', status: 'open', companySizes });
+      const companyRankings = new Map(values.map((value, index) => [`name:${value.company.toLowerCase()}`, index % 2 ? 85 : 70]));
+      const sizeExpected = rankCatalogGroups(projected, companyRankings);
+      const sizeFirst = await store.listCatalogProjectionFiltered(undefined, 7, { sort: 'best', status: 'open', companyRankings });
+      const sizeSecond = await store.listCatalogProjectionFiltered(sizeFirst!.cursor, 7, { sort: 'best', status: 'open', companyRankings });
       expect([...sizeFirst!.groups, ...sizeSecond!.groups].map(details => details.group.groupId)).toEqual(sizeExpected.slice(0, 14).map(details => details.group.groupId));
       expect(sizeFirst!.groups.map(details => details.group.opportunity)).toEqual(sizeExpected.slice(0, 7).map(details => details.group.opportunity));
       const filter = { sort: 'best' as const, status: 'open' as const, query: 'machine', addedSince: '2026-06-01T00:00:00.000Z' };
@@ -125,6 +125,7 @@ describe('D1 filtered catalog projection', () => {
       { ...job('top', 'Software Intern'), company: 'Microsoft' },
       { ...job('bottom', 'Software Intern'), company: 'Unknown' },
     ]).map(catalogGroupDetails);
+    published[0]!.roles[0]!.canonicalEmployerId = 'reviewed-microsoft';
     const live = groupCatalogJobs([{ ...job('live', 'Software Intern'), company: 'Other', compensation: { raw: '$100/hour', minHourlyUSD: 100 } }]).map(catalogGroupDetails);
     class WithOverlay extends D1InternshipStore {
       protected override async liveOverlayFor() { return { groups: live, groupIds: new Set(live.map(details => details.group.groupId)), roleIds: new Set(['live']) }; }
@@ -134,7 +135,7 @@ describe('D1 filtered catalog projection', () => {
       await store.putCatalogProjection(published, new Date().toISOString());
       const ids: string[] = []; let cursor: string | undefined;
       do {
-        const page = await store.listCatalogProjectionFiltered(cursor, 1, { sort: 'best', status: 'open' });
+        const page = await store.listCatalogProjectionFiltered(cursor, 1, { sort: 'best', status: 'open', companyRankings: new Map([['employer:reviewed-microsoft', 95], ['name:microsoft', 50]]) });
         ids.push(...page!.groups.flatMap(details => details.group.roleIds)); cursor = page!.cursor;
       } while (cursor);
       expect(ids).toEqual(['top', 'live', 'bottom']);

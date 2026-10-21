@@ -1,11 +1,10 @@
 import { opportunityWeights, type OpportunityScore } from '../shared/opportunity-score.js';
-import { companyRating, companyTierScore } from './company-ratings.js';
-import { companySizeKey, type CompanySizeScores } from './company-size.js';
-import { snapshotCompanySizeScore } from './company-size-snapshot.js';
+import { admittedCompanyScore, type CompanyRankingScores } from './company-ranking.js';
 import type { Compensation } from './types.js';
 
 export interface OpportunityInput {
   company: string;
+  canonicalEmployerId?: string;
   title: string;
   disciplines?: string[];
   programType?: string;
@@ -49,12 +48,9 @@ function payScore(compensation: Compensation): number | undefined {
   return clamp(amount <= middle ? (amount - low) / (middle - low) * 50 : 50 + (amount - middle) / (high - middle) * 50);
 }
 
-export function scoreOpportunity(input: OpportunityInput, companySizes?: CompanySizeScores): OpportunityScore {
-  const rating = companyRating(input.company);
-  const tier = companyTierScore(input.company);
-  const estimated = companySizes?.get(companySizeKey(input.company));
-  const size = typeof estimated === 'number' && Number.isFinite(estimated) ? clamp(estimated) : snapshotCompanySizeScore(input.company);
-  const company = rating ? rating.career * 0.7 + rating.business * 0.3 : tier ?? size ?? 50;
+export function scoreOpportunity(input: OpportunityInput, companyRankings?: CompanyRankingScores): OpportunityScore {
+  const assessed = admittedCompanyScore(input, companyRankings);
+  const company = assessed ?? 50;
   const disclosedPay = payScore(input.compensation);
   const pay = disclosedPay ?? 50;
   // All supported technical disciplines receive the same weight. A title is
@@ -65,11 +61,11 @@ export function scoreOpportunity(input: OpportunityInput, companySizes?: Company
   const senior = /\b(?:senior|staff|principal|director|head of)\b/iu.test(input.title);
   const role = senior && !earlyCareer ? 20 : technical && earlyCareer ? 90 : technical || earlyCareer ? 70 : 50;
   const reasons = [
-    ...((rating || tier !== undefined) && company >= 80 ? ['Strong employer'] : []),
+    ...(assessed !== undefined && company >= 80 ? ['Strong employer'] : []),
     ...(disclosedPay !== undefined && pay >= 70 ? ['Higher listed pay'] : []),
     ...(technical && earlyCareer ? ['Technical early-career role'] : []),
   ];
   return { version: 'v1', total: Math.round((company * opportunityWeights.company + pay * opportunityWeights.pay + role * opportunityWeights.role) * 10) / 10,
     company: Math.round(company * 10) / 10, pay: Math.round(pay * 10) / 10, role,
-    companyEvidence: rating ? 'reviewed' : tier !== undefined ? 'lookup' : size !== undefined ? 'size' : 'unrated', payEvidence: disclosedPay === undefined ? 'unknown' : 'listed', reasons };
+    companyEvidence: assessed !== undefined && company !== 50 ? 'reviewed' : 'unrated', payEvidence: disclosedPay === undefined ? 'unknown' : 'listed', reasons };
 }

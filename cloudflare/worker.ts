@@ -70,6 +70,7 @@ import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { destinationQueueHealth, observeDestinationUnknownAge } from './destination-queue-health.js';
 import { companyIconResponse } from './company-icon.js';
 import { D1CompanySizeStore } from './company-size-store.js';
+import { D1CompanyRankingStore } from './company-ranking-store.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
 import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, storeProviderIcon, verifyIconDomain } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
@@ -1646,7 +1647,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     return withCors(Response.json(result, { status: 201, headers: { 'Cache-Control': 'no-store' } }));
   }
   const handler = createApiHandler({
-    companySizes: () => new D1CompanySizeStore(env.DB).scores(),
+    companyRankings: () => new D1CompanyRankingStore(env.DB).scores(),
     jobs: env.CATALOG_R2_READ_ENABLED === 'true'
       ? new R2CatalogReadStore(env.DB, env.DOCUMENTS)
       : new D1InternshipStore(env.DB),

@@ -34,14 +34,14 @@ function databaseFixture() {
 
 afterEach(() => vi.useRealTimers());
 describe('company size lookup', () => {
-  it('uses monotonic bounded bands and preserves reviewed scores', () => {
+  it('retains size metadata bands without using headcount or legacy presets for catalog ranking', () => {
     expect([0, 49, 50, 199, 200, 999, 1000, 9999, 10000].map(companySizeScore)).toEqual([50, 50, 55, 55, 65, 65, 75, 75, 85]);
     for (const invalid of [-1, NaN, Infinity, .5, Number.MAX_VALUE]) expect(companySizeScore(invalid)).toBeUndefined();
-    expect(scoreOpportunity(input, new Map([['acme', 75]]))).toMatchObject({ company: 75, companyEvidence: 'size' });
-    expect(scoreOpportunity({ ...input, company: 'Microsoft' }, new Map([['microsoft', 50]]))).toMatchObject({ company: 95, companyEvidence: 'reviewed' });
-    expect(scoreOpportunity({ ...input, company: 'Microsoft Corporation LLC' })).toMatchObject({ company: 95, companyEvidence: 'reviewed' });
+    expect(scoreOpportunity(input, new Map([['acme', 75]]))).toMatchObject({ company: 50, companyEvidence: 'unrated' });
+    expect(scoreOpportunity({ ...input, company: 'Microsoft' }, new Map([['microsoft', 50]]))).toMatchObject({ company: 50, companyEvidence: 'unrated' });
+    expect(scoreOpportunity({ ...input, company: 'Microsoft Corporation LLC' })).toMatchObject({ company: 50, companyEvidence: 'unrated' });
     expect(scoreOpportunity({ ...input, company: '🔥 Hudson River Trading, LLC' }, new Map([['hudson river trading', 55]])))
-      .toMatchObject({ company: 100, companyEvidence: 'lookup' });
+      .toMatchObject({ company: 50, companyEvidence: 'unrated' });
     expect(scoreOpportunity({ ...input, company: 'Hudson River Trading Partners' })).toMatchObject({ company: 50, companyEvidence: 'unrated' });
     expect(scoreOpportunity(input, new Map([['acme', NaN]]))).toMatchObject({ company: 50, companyEvidence: 'unrated' });
     expect(companySizeKey('🔥 Acme Corporation LLC')).toBe('acme');
