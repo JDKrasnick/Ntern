@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { compensationLabels } from '../shared/compensation-display.js';
 import { metadataDescriptionText } from './core/metadata-text.js';
+import { assessOfficialEarlyCareer, enforceJobEarlyCareer } from './early-career-eligibility.js';
 import { hiringClausePattern, hiringSeasonText } from './core/early-career.js';
 import { boundedText, locationSummary, normalizeLocations } from './catalog-quality.js';
 import { educationAudienceLevels, effectiveAdvancedDegreeRequired, mergeEducationEvidence, mergeProvenance } from './identity/enrichment.js';
@@ -31,7 +32,7 @@ import type {
 // Increment whenever a parser change can produce a different result from an
 // unchanged artifact. This makes the collection scheduler revisit both a
 // previous negative result and an already-enriched posting.
-export const ROLE_METADATA_EXTRACTION_VERSION = 20;
+export const ROLE_METADATA_EXTRACTION_VERSION = 23;
 export const VERIFIED_PAGE_METADATA_SOURCES = ['official-json-ld', 'official-page'] as const;
 const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
   // Exact-role detail retrieval owns its own slot; a later board-list poll
@@ -49,6 +50,7 @@ const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
 
 export interface RoleMetadataArtifact {
   title: string;
+  employmentType?: string;
   text?: string;
   compensationText?: string;
   compensationSections?: Array<{ label: string; text: string }>;
@@ -137,6 +139,9 @@ export function applicationMetadataArtifactsFromJsonDocuments(documents: readonl
     const title = stringValue(row.title);
     if (!title) return [];
     const remote = stringValue(row.jobLocationType);
+    const employmentTypes = (Array.isArray(row.employmentType) ? row.employmentType : [row.employmentType])
+      .flatMap(value => stringValue(value) ? [stringValue(value)!] : []);
+    const employmentType = employmentTypes.find(value => /^(?:intern(?:ship)?|co[ -]?op|apprenticeship)$/iu.test(value)) ?? employmentTypes[0];
     const locations = [...jsonLdLocations(row.jobLocation), ...(remote?.toUpperCase() === 'TELECOMMUTE' ? ['Remote'] : [])];
     const roleText = [stringValue(row.description), ...[
       ['qualifications', 'Qualifications'], ['educationRequirements', 'Education requirements'],
@@ -149,6 +154,7 @@ export function applicationMetadataArtifactsFromJsonDocuments(documents: readonl
     })].filter(Boolean).join('\n');
     return [{
       title,
+      ...(employmentType ? { employmentType } : {}),
       ...(jsonLdIdentifier(row.identifier) ? { identifier: jsonLdIdentifier(row.identifier) } : {}),
       ...(roleText ? { text: metadataDescriptionText(roleText).slice(0, 40_000),
         ...(roleText.length > 40_000 ? { inspectionTruncated: true } : {}) } : {}),
@@ -888,6 +894,9 @@ export function extractPostingMetadataEvidence(input: Omit<ExtractRoleMetadataIn
     observedAt: input.observedAt,
     exactPosting: true,
   };
+  if (input.exactPosting && ['official-api', 'official-ats', 'official-json-ld', 'official-page'].includes(input.sourceClass)) {
+    sourceSnapshot.earlyCareer = assessOfficialEarlyCareer(input.artifact);
+  }
   return [
     sourceSnapshot,
     extractRoleMetadataEvidence({ ...input, artifactHash, sourceClass: 'deterministic-inference', titleOnly: true }),
@@ -1143,7 +1152,7 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
   const deferredEvidenceHashes = [...new Set(evidence.filter(item => item.schemaVersion === 1 && item.exactPosting
     && item.extractionVersion !== ROLE_METADATA_EXTRACTION_VERSION
     && acceptedHashes.has(item.artifactHash)).map(item => item.artifactHash))].sort();
-  if (deferredEvidenceHashes.length) return { job, conflicts: result.conflicts, deferredEvidenceHashes };
+  if (deferredEvidenceHashes.length) return { job: enforceJobEarlyCareer(job, evidence), conflicts: result.conflicts, deferredEvidenceHashes };
   // A conflict is not a withdrawal. Retain the accepted projection and its
   // provenance so later resolution or withdrawal can still replace it cleanly.
   if (result.metadata && previousMetadata) {
@@ -1160,7 +1169,7 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
     preserve('employerUpdatedAt', 'employer-updated-at');
     preserve('housing', 'housing');
   }
-  if (!result.metadata && !identity?.programType?.value && !previousMetadata) return { job, conflicts: result.conflicts };
+  if (!result.metadata && !identity?.programType?.value && !previousMetadata) return { job: enforceJobEarlyCareer(job, evidence), conflicts: result.conflicts };
   const metadataLocations = result.metadata?.locations;
   const locationNames = metadataLocations?.map((item) => item.name);
   const previousEducationWasProjected = Boolean(identity && previousMetadata?.education
@@ -1220,7 +1229,7 @@ export function projectRoleMetadata(job: Internship, evidence = job.sourceRefere
       projected.location = 'Location not specified';
     }
   }
-  return { job: projected, conflicts: result.conflicts };
+  return { job: enforceJobEarlyCareer(projected, evidence), conflicts: result.conflicts };
 }
 
 export function unsupportedMetadataCurrencies(evidence: readonly RoleMetadataEvidence[]): string[] {

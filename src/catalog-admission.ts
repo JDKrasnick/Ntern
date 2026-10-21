@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { sourceRoleAgreement } from './core/application-url.js';
+import { earlyCareerFromEvidence, selectEarlyCareerAssessment, withEarlyCareerAdmission } from './early-career-eligibility.js';
 import type { TrustedCommunityAdmissionPolicy } from './sources/trust-policy.js';
 import type {
   CatalogAdmission,
@@ -98,6 +99,7 @@ export function evaluateCatalogAdmission(input: {
   postingAttributed: boolean;
   evaluatedAt: string;
   previous?: CatalogAdmission;
+  earlyCareerEligibilityEnabled?: boolean;
   trustedCommunity?: {
     policy: TrustedCommunityAdmissionPolicy;
     qualification: TrustedCommunityAlertQualification;
@@ -142,7 +144,7 @@ export function evaluateCatalogAdmission(input: {
   const trustedAlertEligible = trustedCommunity?.policy.alertMode === 'exact-identity-or-two-complete-snapshots'
     && trustedCommunity.qualification.status === 'eligible'
     && !trustedCommunity.qualification.baselineSuppressed;
-  return {
+  const admission: CatalogAdmission = {
     ...(employer && !genericEmployer ? { canonicalEmployer: employer } : {}),
     employerResolution: employer && !genericEmployer
       ? 'resolved'
@@ -165,6 +167,8 @@ export function evaluateCatalogAdmission(input: {
     ...(verifiedAt ? { lastVerifiedAt: verifiedAt } : {}),
     ...(graceDeadline ? { graceDeadline } : {}),
   };
+  return input.earlyCareerEligibilityEnabled
+    ? withEarlyCareerAdmission(admission, earlyCareerFromEvidence(listing.metadataEvidence ?? [])) : admission;
 }
 
 export function deriveCanonicalAdmission(references: readonly SourceOccurrence[], evaluatedAt: string): CatalogAdmission | undefined {
@@ -217,6 +221,13 @@ export function deriveCanonicalAdmission(references: readonly SourceOccurrence[]
     .sort((a, b) => Number(b.employerResolution === 'resolved') - Number(a.employerResolution === 'resolved')
       || Number(b.alertEligible) - Number(a.alertEligible)
       || b.evaluatedAt.localeCompare(a.evaluatedAt))[0];
+  const enrolled = decisions.flatMap(d => d.earlyCareer ? [d.earlyCareer] : []);
+  if (enrolled.length) {
+    const assessment = selectEarlyCareerAssessment(enrolled);
+    const base = admissible ?? [...decisions].sort((a,b) => b.evaluatedAt.localeCompare(a.evaluatedAt))[0]!;
+    // An old community admission cannot reopen an officially disqualified role.
+    return { ...withEarlyCareerAdmission(base, assessment), evaluatedAt };
+  }
   if (admissible) return { ...admissible, evaluatedAt };
   const latest = [...decisions].sort((a, b) => b.evaluatedAt.localeCompare(a.evaluatedAt))[0]!;
   return { ...latest, catalogEligible: false, alertEligible: false, evaluatedAt };

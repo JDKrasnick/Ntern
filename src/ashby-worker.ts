@@ -50,6 +50,7 @@ export interface AshbyBoardDependencies {
   groupedNotificationCohort?: GroupedNotificationCohort;
   enqueueDestinationVerification?: (request: DestinationVerificationRequest) => Promise<void>;
   catalogAdmissionResolver?: CatalogAdmissionResolver;
+  earlyCareerEligibilityEnabled?: boolean;
   shadowDiscovery?: ShadowDiscoveryHook;
   v2CatalogWriteOwner?: (sourceId: string) => boolean;
   v2TrustedCommunityAlertsEnabled?: (sourceId: string) => boolean;
@@ -333,7 +334,7 @@ export async function runAshbyBoard(
 
   const poll = await new Poller([adapter], dependencies.store, undefined, undefined, validate, false,
     dependencies.enqueueDestinationVerification, dependencies.catalogAdmissionResolver, true, false, undefined,
-    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled).poll({
+    dependencies.shadowDiscovery, dependencies.v2CatalogWriteOwner, dependencies.v2TrustedCommunityAlertsEnabled, dependencies.earlyCareerEligibilityEnabled).poll({
     runId: message.runId,
     // Published Ashby boards already tolerate a complete empty snapshot, so an
     // `emptyBoardAcknowledged` declaration only changes the shadow guard above.

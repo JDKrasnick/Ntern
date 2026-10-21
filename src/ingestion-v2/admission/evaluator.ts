@@ -1,4 +1,5 @@
 import { evaluateCatalogAdmission } from '../../catalog-admission.js';
+import { extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence } from '../../role-metadata.js';
 import type { PostingObservationAdmissionFence } from '../../store.js';
 import type { ApplicationPageEvidence } from '../../core/application-url.js';
 import type { Reachability } from '../../core/application-verification.js';
@@ -116,6 +117,7 @@ export function gradeAdmissionRow(input: {
   canonicalEmployer?: Pick<CanonicalEmployer, 'id' | 'displayName'>;
   prior?: AdmissionV2PriorContext;
   trustedCommunityCatalogEnabled?: boolean;
+  earlyCareerEligibilityEnabled?: boolean;
   trustedCommunityAlertsEnabled?: boolean;
   baseline?: boolean;
   completeFetchSequence?: number;
@@ -124,7 +126,7 @@ export function gradeAdmissionRow(input: {
   probe: AdmissionDestinationProbe;
   evaluatedAt: string;
 }): GradedAdmissionRow | { decision: AdmissionRowEvaluation['decision'] } {
-  const { listing, decision } = processPosting(input.posting);
+  const { listing, decision } = processPosting(input.posting, [], input.earlyCareerEligibilityEnabled);
   if (decision.outcome !== 'included') {
     if (decision.outcome === 'shelved') return { decision: { kind: 'shelved', reason: decision.reason } };
     return { decision: { kind: 'blocked', reason: decision.reason } };
@@ -202,10 +204,19 @@ export function gradeAdmissionRow(input: {
       catalogPublicationSuppressed: false,
     }), ...(input.sourceMaterialHash ? { sourceMaterialHash: input.sourceMaterialHash } : {}) }
     : undefined;
-  const qualifiedListing: ProcessedListing = trustedCommunityQualification
+  let qualifiedListing: ProcessedListing = trustedCommunityQualification
     ? { ...normalized, trustedCommunityAlertQualification: trustedCommunityQualification }
     : normalized;
+  if (input.earlyCareerEligibilityEnabled && input.probe.evidence) {
+    const page = input.probe.evidence;
+    const metadata = extractVerifiedPageMetadataEvidence({ expectedTitle: qualifiedListing.title,
+      expectedPostingId: destination.expectedPostingId, sourceId: input.sourceId, sourceUrl: page.url,
+      observedAt: input.evaluatedAt, exactPosting: destination.classification === 'posting-detail' || destination.classification === 'application-form',
+      page: { title: page.title ?? '', text: page.contentExcerpt ?? page.description ?? '' } });
+    qualifiedListing = { ...qualifiedListing, metadataEvidence: mergeRoleMetadataEvidence(qualifiedListing.metadataEvidence, metadata) };
+  }
   const admission = evaluateCatalogAdmission({
+    earlyCareerEligibilityEnabled: input.earlyCareerEligibilityEnabled,
     listing: qualifiedListing,
     destination,
     postingAttributed: true,
@@ -228,6 +239,7 @@ function isGraded(row: GradedAdmissionRow | { decision: AdmissionRowEvaluation['
 }
 
 export interface RuleBasedAdmissionEvaluatorDependencies {
+  earlyCareerEligibilityEnabled?: boolean;
   prober: AdmissionDestinationProber;
   sink: AdmissionV2CatalogSink;
   resolveCanonicalEmployer?: AdmissionCanonicalEmployerResolver;
@@ -257,7 +269,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
     // these first keeps invalid URLs, nontechnical roles, and policy shelves
     // terminal instead of spending the row's transient retry budget.
     let posting = context.posting;
-    let deterministic = processPosting(posting);
+    let deterministic = processPosting(posting, [], this.dependencies.earlyCareerEligibilityEnabled);
     let probe: AdmissionDestinationProbe | undefined;
     // Title/lifecycle and invalid-URL decisions remain terminal without I/O.
     // Other index-only candidates need their description before technical,
@@ -281,7 +293,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
           throw new AdmissionRowTransientError('upstream-server-error', 'Complete exact provider material required for index admission');
         }
         posting = hydrated;
-        deterministic = processPosting(posting);
+        deterministic = processPosting(posting, [], this.dependencies.earlyCareerEligibilityEnabled);
       }
     }
     if (deterministic.decision.outcome !== 'included') {
@@ -306,6 +318,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
       observedAt,
     });
     const graded = gradeAdmissionRow({
+      earlyCareerEligibilityEnabled: this.dependencies.earlyCareerEligibilityEnabled,
       sourceId: context.sourceId,
       externalId: context.externalId,
       posting,
@@ -341,7 +354,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
         listing: graded.listing,
         admission: graded.admission,
         jobId: graded.jobId,
-        notify: admissionRowShouldNotify(context, { delayedPromotion }),
+        notify: graded.admission.alertEligible && admissionRowShouldNotify(context, { delayedPromotion }),
         trustedCommunityAlertsEnabled: delayedPromotion,
       };
       return {
