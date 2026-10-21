@@ -8,7 +8,7 @@ import { publicApplicationUrl } from './core/application-url.js';
 import { employerCategory, type EmployerCategory } from './core/employers.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { DEFAULT_DAY_ZONE, dayZone, zoneDay } from '../shared/zone-day.js';
-import { educationExcludesLevel } from './identity/enrichment.js';
+import { educationAudienceFromPostingFacts, educationExcludesLevel } from './identity/enrichment.js';
 import type { EducationLevel, Internship } from './types.js';
 import { allDisciplineStyles, disciplineKey, disciplineSearchVariants } from '../shared/discipline-display.js';
 import { classifyJob, type JobCategory } from './core/filters.js';
@@ -249,6 +249,8 @@ export function catalogEducation(job: Internship): CatalogEducationSummary {
   const status = evidence(audience?.evidenceStatus ?? audience?.evidence);
   if (status === 'conflicting') return { levels, evidence: status, label: 'Education requirements conflict across sources' };
   if (status === 'unspecified' || levels.length === 0) {
+    const published = educationAudienceFromPostingFacts(job.postingFacts);
+    if (published) return { levels: [...published.levels], evidence: 'explicit', label: published.levels.join(' + ') };
     return { levels: [], evidence: 'unspecified', label: 'Education level not specified by employer' };
   }
   return { levels, evidence: status, label: levels.join(' + ') };
