@@ -656,3 +656,73 @@ for (const mode of ['control', 'lost-ack', 'budget-recovery', 'publisher-race', 
     }
   });
 }
+
+for (const scenario of ['overlap', 'rollback']) {
+  test(`replacement receipt transaction survives ${scenario}`, async () => {
+    const run = await database.prepare(`SELECT * FROM shadow_extraction_runs
+      WHERE state='completed' ORDER BY completed_at DESC LIMIT 1`).first();
+    assert.ok(run);
+    const response = JSON.parse(await new Response((await shadowArtifacts.get(run.response_key)).body).text());
+    const profile = JSON.parse(await readFile(join(repositoryRoot, 'wrangler.dev.ingestion.jsonc'), 'utf8'));
+    const policy = { ...JSON.parse(profile.vars.LLM_METADATA_PUBLICATION_POLICY_JSON), version: `atomic-${scenario}-first`,
+      cohort: [{ sourceId: run.source_id, externalId: run.external_id, contentHash: run.content_hash }] };
+    const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+    const DB = countingDatabase(database);
+    const documents = await runtime.getR2Bucket('DOCUMENTS', workerName);
+    const publish = async (currentPolicy, action = 'publish-approved') => builtWorker.fetch(new globalThis.Request(
+      'https://ingestion.example.test/internal/operations/shadow-publication', {
+        method: 'POST', headers: { 'X-InternNotifs-Service-Key': internalServiceSecret, 'X-Operations-Key': operationsSecret,
+          'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, runKey: run.run_key, runKeys: [run.run_key], replaceExisting: true, deferProjection: true,
+          acceptedFields: response.verification.acceptedFields }),
+      }), { DB, DOCUMENTS: documents, SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
+        OPERATIONS_SHARED_SECRET: operationsSecret, INTERNAL_SERVICE_SECRET: internalServiceSecret,
+        LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(currentPolicy) });
+    const active = () => database.prepare(`SELECT receipt_id,policy_version FROM shadow_publication_receipts
+      WHERE job_id=? AND revoked_at IS NULL ORDER BY receipt_id`).bind(run.job_id).all();
+    const baseline = await publish(policy);
+    assert.equal(baseline.status, 200, await baseline.text());
+    const beforeReceipts = (await active()).results;
+    assert.equal(beforeReceipts.length, 1);
+    const beforeJob = await database.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='META'").bind(`JOB#${run.job_id}`).first();
+    const newerPolicy = { ...policy, version: `atomic-${scenario}-second` };
+    if (scenario === 'rollback') {
+      await database.prepare(`CREATE TRIGGER fail_replacement_job BEFORE UPDATE OF value ON catalog_items
+        WHEN OLD.pk='JOB#${jobId}' AND OLD.sk='META'
+        BEGIN SELECT RAISE(ABORT, 'injected replacement job failure'); END`).run();
+      try {
+        const failed = await publish(newerPolicy);
+        assert.equal(failed.status, 409, await failed.text());
+        const retained = (await active()).results.filter(receipt => beforeReceipts.some(previous => previous.receipt_id === receipt.receipt_id));
+        assert.deepEqual(retained, beforeReceipts, 'job failure must roll back receipt retirement');
+        const afterJob = await database.prepare("SELECT value FROM catalog_items WHERE pk=? AND sk='META'").bind(`JOB#${run.job_id}`).first();
+        assert.equal(afterJob.value, beforeJob.value);
+      } finally { await database.prepare('DROP TRIGGER fail_replacement_job').run(); }
+      const retry = await publish(newerPolicy);
+      assert.equal(retry.status, 200, await retry.text());
+    } else {
+      const batch = DB.batch.bind(DB);
+      let interleaved = false;
+      DB.batch = async statements => {
+        const result = await batch(statements);
+        if (!interleaved && statements.some(statement => statement.sql.includes('UPDATE catalog_items')
+          && statement.sql.includes('AND (? IS NULL OR value = ?)'))) {
+          interleaved = true;
+          const newer = await publish(newerPolicy);
+          assert.equal(newer.status, 200, await newer.text());
+        }
+        return result;
+      };
+      const older = await publish(policy);
+      assert.equal(older.status, 200, await older.text());
+      assert.equal(interleaved, true);
+    }
+    const remaining = (await active()).results;
+    assert.equal(remaining.length, 1, 'exactly one replacement must retain publication authority');
+    assert.equal(remaining[0].policy_version, newerPolicy.version);
+    const refreshed = await publish(newerPolicy, 'refresh-approved');
+    assert.equal(refreshed.status, 200, await refreshed.text());
+    const receipt = await database.prepare('SELECT projected_at FROM shadow_publication_receipts WHERE receipt_id=?').bind(remaining[0].receipt_id).first();
+    assert.ok(receipt.projected_at);
+  });
+}

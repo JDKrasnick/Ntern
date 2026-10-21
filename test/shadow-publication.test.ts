@@ -208,6 +208,50 @@ describe('shadow publication policy', () => {
     expect((await send()).status).toBe(409);
   });
 
+  it('keeps the newer replacement receipt active when a prior request resumes after its job write', async () => {
+    const { database, artifacts } = await publicationDatabase();
+    database.prepare("UPDATE shadow_extraction_runs SET input_completeness='complete'").run();
+    for (const field of shadowPublicationFields) database.prepare('INSERT OR REPLACE INTO shadow_extraction_field_outcomes (run_key,field,status,accepted) VALUES (?,?,?,1)')
+      .run(hash, field, extraction.fields[field].status);
+    const policy = { enabled: true, version: 'replacement-first', allowedFields: [...shadowPublicationFields],
+      cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }],
+      releaseApproval: { ...releaseApproval, replaceExistingMetadata: true } };
+    const DB = d1(database);
+    const prepare = DB.prepare.bind(DB);
+    const jobWrites = new Set<D1PreparedStatement>();
+    DB.prepare = query => {
+      const statement = prepare(query);
+      if (query.includes('UPDATE catalog_items') && query.includes('AND (? IS NULL OR value = ?)')) jobWrites.add(statement);
+      return statement;
+    };
+    const baseEnv = { OPERATIONS_SHARED_SECRET: 'secret', SHADOW_EXTRACTION_ARTIFACTS: artifacts };
+    const env = { ...baseEnv, DB, LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) } as unknown as Environment;
+    const newerEnv = { ...baseEnv, DB: d1(database),
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify({ ...policy, version: 'replacement-second' }) } as unknown as Environment;
+    const send = (environment: Environment) => cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+      method: 'POST', headers: { 'X-Operations-Key': 'secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'publish-approved', runKey: hash, replaceExisting: true, deferProjection: true,
+        acceptedFields: ['locations', 'workMode'] }),
+    }), environment);
+    const batch = DB.batch.bind(DB);
+    let interleaved = false;
+    DB.batch = async statements => {
+      const results = await batch(statements);
+      if (!interleaved && statements.some(statement => jobWrites.has(statement))) {
+        interleaved = true;
+        const newer = await send(newerEnv);
+        expect(newer.status).toBe(200);
+      }
+      return results;
+    };
+    expect((await send(env)).status).toBe(200);
+    expect(interleaved).toBe(true);
+    const receipts = database.prepare('SELECT policy_version,revoked_at FROM shadow_publication_receipts ORDER BY policy_version').all() as Array<{ policy_version: string; revoked_at: string | null }>;
+    expect(receipts).toHaveLength(2);
+    expect(receipts.find(receipt => receipt.policy_version === 'replacement-first')!.revoked_at).not.toBeNull();
+    expect(receipts.find(receipt => receipt.policy_version === 'replacement-second')!.revoked_at).toBeNull();
+  });
+
   it('binds release approval to the exact profile and requires it for a historical prospective cohort', () => {
     const policy = { enabled: true, version: 'full-metadata-2026-10-v1', mode: 'prospective-provider-poll',
       startsAt: '2026-09-24T03:20:27.000Z', allowedFields: [...shadowPublicationFields], maxReceipts: null,

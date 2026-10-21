@@ -421,13 +421,14 @@ export async function handleShadowPublication(request: Request, env: {
       { sourceId: run.source_id, sourceClasses: ['reviewed-shadow'] });
     const expectedReference = job.sourceReferences.find(reference => reference.sourceId === run.source_id
       && reference.externalId === run.external_id)!;
-    if (!await jobs.putAdmissionState(projected.job, expectedReference, undefined, undefined, undefined, snapshot!.value)) {
+    // Retire receipts against the pre-write snapshot in the same transaction as
+    // the job update. A delayed request cannot retire a newer replacement.
+    const retireReceipts = replaceExisting ? [env.DB.prepare(`UPDATE shadow_publication_receipts
+      SET revoked_at = ? WHERE job_id = ? AND receipt_id != ? AND revoked_at IS NULL
+        AND EXISTS (SELECT 1 FROM catalog_items WHERE pk = ? AND sk = 'META' AND kind = 'internship' AND value = ?)`)
+      .bind(new Date().toISOString(), run.job_id, receiptId, `JOB#${job.jobId}`, snapshot!.value)] : [];
+    if (!await jobs.putAdmissionState(projected.job, expectedReference, undefined, undefined, undefined, snapshot!.value, retireReceipts)) {
       throw new Error('Catalog job changed during shadow publication; retry the unprojected receipt');
-    }
-    // A conflicted replacement must leave the previous publication authorized.
-    if (replaceExisting) {
-      await env.DB.prepare(`UPDATE shadow_publication_receipts SET revoked_at = ? WHERE job_id = ? AND receipt_id != ? AND revoked_at IS NULL`)
-        .bind(new Date().toISOString(), run.job_id, receiptId).run();
     }
     if (approvedRelease && input.deferProjection === true) {
       return Response.json({ receiptId, evidenceFingerprint, policyVersion: policy.version, acceptedFields, publishedFields,

@@ -931,6 +931,8 @@ export class D1InternshipStore implements InternshipStore {
     expectedOccurrence?: SourceOccurrenceState,
     notificationEvent?: NotificationEvent,
     expectedJobValue?: string,
+    // These statements must use the same stored-job fence as the update below.
+    guardedBeforeUpdate: readonly D1PreparedStatement[] = [],
   ): Promise<boolean> {
     const canonical = canonicalCatalogRecency(job);
     const canonicalJson = JSON.stringify(canonical);
@@ -966,7 +968,7 @@ export class D1InternshipStore implements InternshipStore {
       expectedJobValue ?? null,
       expectedJobValue ?? null,
     );
-    const statements = [jobUpdate];
+    const statements = [...guardedBeforeUpdate, jobUpdate];
     if (occurrence && expectedOccurrence) {
       statements.push(this.db.prepare(`UPDATE catalog_items SET kind = 'source-occurrence', value = ?, source_id = ?, external_id = ?
         WHERE pk = ? AND sk = ? AND kind = 'source-occurrence' AND value = ?
@@ -983,7 +985,8 @@ export class D1InternshipStore implements InternshipStore {
         .bind(`OUTBOX#${notificationEvent.eventId}`, JSON.stringify(notificationEvent),
           `JOB#${canonical.jobId}`, canonicalJson));
     }
-    const [result] = await this.db.batch(statements);
+    const results = await this.db.batch(statements);
+    const result = results[guardedBeforeUpdate.length];
     // D1 includes trigger writes in changes (the metadata revision triggers
     // make a successful one-row update report more than one change).
     return (result?.meta.changes ?? 0) > 0;
