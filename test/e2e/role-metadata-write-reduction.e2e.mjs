@@ -207,6 +207,7 @@ before(async () => {
       TRUSTED_COMMUNITY_CATALOG_ENABLED: { type: 'text', value: 'false' },
       PUBLIC_API_URL: { type: 'text', value: 'https://api.example.test' },
       DB: { type: 'd1', id: 'intern-notifs-e2e-metadata' },
+      DOCUMENTS: { type: 'r2', name: 'intern-notifs-e2e-metadata-documents' },
       DESTINATION_VERIFICATION_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-metadata-destination' },
       DESTINATION_VERIFICATION_DLQ: { type: 'queue', name: 'intern-notifs-e2e-metadata-destination-dlq' },
       SHADOW_EXTRACTION_QUEUE: { type: 'queue', name: 'intern-notifs-e2e-metadata-shadow' },
@@ -241,7 +242,7 @@ async function operations(path, init = {}) {
 }
 
 /** Delivers one message to the compiled destination-verification consumer. */
-async function deliver(body, injectedFetch, { beforeCommit } = {}) {
+async function deliver(body, injectedFetch, { beforeCommit, loseQueueAck = false } = {}) {
   const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
   const counter = countingDatabase(database);
   const batch = counter.batch.bind(counter);
@@ -263,7 +264,7 @@ async function deliver(body, injectedFetch, { beforeCommit } = {}) {
       DB: counter,
       DESTINATION_VERIFICATION_QUEUE: { send: async () => undefined, sendBatch: async () => undefined },
       DESTINATION_VERIFICATION_DLQ: { send: async () => undefined, sendBatch: async () => undefined },
-      SHADOW_EXTRACTION_QUEUE: { send: async (message) => { shadowMessages.push(message); }, sendBatch: async () => undefined },
+      SHADOW_EXTRACTION_QUEUE: { send: async (message) => { shadowMessages.push(message); if (loseQueueAck) throw new Error('Injected send acknowledgement lost after acceptance'); }, sendBatch: async () => undefined },
       SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
       SHADOW_EXTRACTION_DLQ: { send: async () => undefined, sendBatch: async () => undefined },
       IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED: 'false',
@@ -383,8 +384,8 @@ test('collects one real artifact, then replays it without rewriting evidence', a
   const afterReplay = await revisions();
   assert.deepEqual(afterReplay.jobs, jobsAfterFirst.jobs, 'a replay must not expire a staged review');
   assert.equal(afterReplay.metadata, jobsAfterFirst.metadata + 1, 'only the observation trigger advances the metadata revision');
-  assert.equal((await shadowArtifacts.list()).objects.length, 1,
-    'an unchanged replay must not add a downstream artifact');
+  assert.equal((await shadowArtifacts.list()).objects.length, 2,
+    'each observation retains its immutable verification envelope');
   const replayedAttempt = await dump('SELECT artifact_hash, observed_at FROM role_metadata_extraction_attempts');
   assert.equal(replayedAttempt.length, 1);
   assert.ok(replayedAttempt[0].observed_at > attempts[0].observed_at,
@@ -537,4 +538,90 @@ for (const channel of ['sms', 'digest']) {
       assert.match(publicRole.location, /Austin/u);
     });
   }
+}
+
+for (const mode of ['control', 'lost-ack', 'budget-recovery', 'publisher-race']) {
+  test(`verified publication ${mode}: repeated handoff retains verified publication`, async () => {
+    const document = jobDocument();
+    if (mode === 'publisher-race') document.notification = { smsPending: true, digestPending: false };
+    await database.prepare("UPDATE catalog_items SET value = ? WHERE pk = ? AND sk = 'META'")
+      .bind(JSON.stringify(document), `JOB#${jobId}`).run();
+    const description = `Software Engineering Intern\nAustin\n$50 - $60 per hour\nReview scenario ${mode}.`;
+    const payload = { ...capturedPayload, content: description, pay_input_ranges: [], location: { name: 'Austin' } };
+    const shadowContentHash = createHash('sha256').update(JSON.stringify({ title: document.title, description, completeness: 'complete' })).digest('hex');
+    const body = { ...collectionMessage(), reason: 'content-change', shadowOrigin: 'provider-poll', shadowContentHash,
+      idempotencyKey: `deep-review-${mode}` };
+    const first = await deliver(body, payloadServer(payload, []), { loseQueueAck: mode === 'lost-ack' });
+    const messages = [...first.shadowMessages];
+    if (mode === 'lost-ack') {
+      assert.equal(first.settled.ack, 0); assert.equal(first.settled.retry.length, 1);
+      const second = await deliver(body, payloadServer(payload, []));
+      assert.equal(second.settled.ack, 1); messages.push(...second.shadowMessages);
+    } else assert.equal(first.settled.ack, 1);
+    const blank = { value: null, status: 'not-stated', evidence: [], qualifiers: [] };
+    const output = { classification: { technical: 'yes', earlyCareer: 'yes', disciplines: ['software'] }, fields: {
+      compensation: { value: [{ min: 50, max: 60, currency: 'USD', period: 'hour' }], status: 'present', evidence: ['$50 - $60 per hour'], qualifiers: [] },
+      locations: { value: ['Austin'], status: 'present', evidence: ['Austin'], qualifiers: [] },
+      workMode: blank, housing: blank, timing: blank, education: blank, eligibility: blank,
+    } };
+    const devProfile = JSON.parse(await readFile(join(repositoryRoot, 'wrangler.dev.ingestion.jsonc'), 'utf8'));
+    const policy = { ...JSON.parse(devProfile.vars.LLM_METADATA_PUBLICATION_POLICY_JSON), startsAt: new Date(Date.now() - 60000).toISOString() };
+    const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+    let calls = 0;
+    globalThis.fetch = async (url) => {
+      assert.equal(url, 'https://api.anthropic.com/v1/messages'); calls++;
+      return Response.json({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(output) }], usage: { input_tokens: 100, output_tokens: 50 } });
+    };
+    try {
+      if (mode === 'budget-recovery') {
+        await builtWorker.queue({ queue: 'intern-notifs-shadow-extraction', messages: [{ id: 'blocked', body: messages[0], attempts: 1, timestamp: new Date(), ack() {}, retry() { throw new Error('Unexpected budget retry'); } }] },
+          { DB: database, SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts, SHADOW_EXTRACTION_ENABLED: 'true', ANTHROPIC_API_KEY: 'unused-test-key',
+            SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '0', LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) });
+        assert.equal((await database.prepare('SELECT state FROM shadow_extraction_runs WHERE run_key = ?').bind(messages[0].runKey).first()).state, 'disabled');
+        assert.equal(calls, 0);
+      }
+      for (const message of messages) await builtWorker.queue({ queue: 'intern-notifs-shadow-extraction', messages: [{
+        id: 'deep-review-model', body: message, attempts: 1, timestamp: new Date(), ack() {}, retry() { throw new Error('Unexpected model retry'); },
+      }] }, { DB: database, SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts, SHADOW_EXTRACTION_ENABLED: 'true', ANTHROPIC_API_KEY: 'unused-test-key',
+        SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '1500', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '3220',
+        LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) });
+    } finally { globalThis.fetch = realFetch; }
+    const run = await database.prepare('SELECT state,response_key FROM shadow_extraction_runs WHERE run_key = ?').bind(messages[0].runKey).first();
+    assert.equal(run.state, 'completed');
+    const saved = JSON.parse(await new Response((await shadowArtifacts.get(run.response_key)).body).text());
+    const { default: publisher } = await import(new URL('../../cloudflare/dist/catalog-publisher/catalog-publisher-worker.js', import.meta.url));
+    const publicationDb = countingDatabase(database);
+    const realBatch = publicationDb.batch.bind(publicationDb);
+    let raced = false;
+    publicationDb.batch = async (statements) => {
+      if (mode === 'publisher-race' && !raced && statements.some(item => /INSERT/iu.test(item.sql) && item.sql.includes('role_metadata_evidence'))) {
+        raced = true;
+        const row = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'").bind(`JOB#${jobId}`).first();
+        const latest = JSON.parse(row.value); latest.notification = { smsPending: false, digestPending: false, smsSentAt: new Date().toISOString() };
+        await database.prepare("UPDATE catalog_items SET value = ?, sms_pending = 0 WHERE pk = ? AND sk = 'META'").bind(JSON.stringify(latest), `JOB#${jobId}`).run();
+      }
+      return realBatch(statements);
+    };
+    await publisher.scheduled({ cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() }, {
+      DB: publicationDb, DOCUMENTS: await runtime.getR2Bucket('DOCUMENTS', workerName), SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
+      INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true', LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy),
+    });
+    if (mode === 'publisher-race') {
+      const deferred = await database.prepare('SELECT projected_at FROM shadow_publication_receipts WHERE run_key = ?').bind(messages[0].runKey).first();
+      assert.equal(deferred.projected_at, null, 'a stale write must leave the receipt recoverable');
+      await publisher.scheduled({ cron: '1,11,21,31,41,51 * * * *', scheduledTime: Date.now() }, {
+        DB: publicationDb, DOCUMENTS: await runtime.getR2Bucket('DOCUMENTS', workerName), SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts,
+        INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true', LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy),
+      });
+    }
+    const receipts = await database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts WHERE run_key = ? AND projected_at IS NOT NULL').bind(messages[0].runKey).first();
+    console.log(JSON.stringify({ mode, calls, verified: Boolean(saved.verification), receipts: receipts.count }));
+    assert.equal(receipts.count, 1, 'a retried provider handoff must still reach verified metadata publication');
+    if (mode === 'publisher-race') {
+      assert.equal(raced, true, 'the test must interleave notification completion after the publisher read');
+      const stored = await database.prepare("SELECT value,sms_pending FROM catalog_items WHERE pk = ? AND sk = 'META'").bind(`JOB#${jobId}`).first();
+      assert.equal(JSON.parse(stored.value).notification.smsPending, false, 'verified publication must retain concurrent notification completion');
+      assert.equal(stored.sms_pending, 0);
+    }
+  });
 }

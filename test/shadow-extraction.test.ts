@@ -920,4 +920,36 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await DB.prepare('SELECT COUNT(*) AS attempts, SUM(actual_cents) AS actual FROM shadow_extraction_cost_ledger WHERE run_key = ?')
       .bind(message!.runKey).first()).toEqual({ attempts: 2, actual: 4 });
   });
+  it.each([false, true])('preserves prospective verification across repeated enqueue observations (newest first: %s)', async newestFirst => {
+    const DB = schema(); const artifacts = new MemoryR2(); const messages: unknown[] = [];
+    const queue: Queue = { async send(body) { messages.push(body); }, async sendBatch() {} };
+    const base = { jobId: 'repeat-job', sourceId: identity.sourceId, externalId: 'repeat', sourceUrl: identity.sourceUrl,
+      providerIdentity: identity, title: 'Software Engineering Intern', description, origin: 'provider-poll' as const };
+    const first = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts },
+      { ...base, observedAt: '2026-10-20T00:01:00.000Z' });
+    const second = await enqueueShadowExtraction({ DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts },
+      { ...base, observedAt: '2026-10-20T00:02:00.000Z' });
+    expect(first!.runKey).toBe(second!.runKey);
+    expect(first!.inputKey).not.toBe(second!.inputKey);
+    const original = JSON.parse(await new Response((await artifacts.get(first!.inputKey))!.body).text());
+    expect(original.identity.observedAt).toBe(first!.queuedAt);
+    const policy = { enabled: true, version: 'prospective-retry-review', mode: 'prospective-provider-poll',
+      startsAt: '2026-10-20T00:00:00.000Z', allowedFields: ['compensation', 'locations'], cohort: [], maxReceipts: 25 };
+    let calls = 0;
+    const env = { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+      SHADOW_EXTRACTION_ENABLED: 'true', SHADOW_EXTRACTION_MONTHLY_FORECAST_CENTS: '100', SHADOW_EXTRACTION_MONTHLY_HEADROOM_CENTS: '100',
+      LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+    for (const body of newestFirst ? [second, first] : [first, second]) await processShadowExtractionBatch({ queue: 'intern-notifs-shadow-extraction', messages: [{
+      id: 'repeat', body, ack() {}, retry() { throw new Error('Unexpected retry'); },
+    }] }, env, () => new Date('2026-10-20T00:03:00.000Z'), async () => {
+      calls++; return { response: output(), inputTokens: 100, outputTokens: 50, actualCostCents: 2 };
+    });
+    const run = await DB.prepare('SELECT state,response_key FROM shadow_extraction_runs WHERE run_key = ?')
+      .bind(first!.runKey).first<{ state: string; response_key: string }>();
+    expect(run?.state).toBe('completed');
+    const object = await artifacts.get(run!.response_key);
+    const saved = JSON.parse(await new Response(object!.body).text()) as { verification?: { acceptedFields: string[] } };
+    expect({ calls, acceptedFields: saved.verification?.acceptedFields }).toEqual({ calls: 2, acceptedFields: ['compensation', 'locations'] });
+  });
+
 });

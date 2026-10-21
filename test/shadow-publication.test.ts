@@ -280,6 +280,51 @@ describe('shadow publication policy', () => {
     expect(job.postingFacts?.map(fact => fact.field)).toEqual(['locations']);
     expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_extraction_evaluations').get()).toEqual({ count: 0 });
   });
+  for (const mode of ['prospective', 'approved'] as const) {
+    it(`defers ${mode} publication on a concurrent notification update and recovers without losing it`, async () => {
+      const { database, artifacts } = await publicationDatabase();
+      const policy = { enabled: true, version: 'publication-cas', mode: 'prospective-provider-poll',
+        startsAt: '2026-10-15T00:00:00.000Z', allowedFields: ['locations'], maxReceipts: null,
+        cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }], releaseApproval };
+      database.prepare(`UPDATE shadow_extraction_runs SET origin='provider-poll', input_completeness='complete',
+        created_at='2026-10-15T00:00:00.000Z', completed_at='2026-10-15T00:00:00.000Z'`).run();
+      database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at='2026-10-15T00:00:00.000Z'`).run();
+      await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
+        verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
+      const DB = d1(database);
+      const batch = DB.batch.bind(DB);
+      let raced = false;
+      DB.batch = async statements => {
+        if (!raced) {
+          raced = true;
+          database.prepare(`UPDATE catalog_items SET value = json_set(value,
+            '$.notification.smsPending', json('false'), '$.notification.smsSentAt', '2026-10-20T00:00:00.000Z'), sms_pending=0
+            WHERE pk='JOB#job-1' AND sk='META'`).run();
+        }
+        return batch(statements);
+      };
+      const env = { DB, DOCUMENTS: new MemoryR2(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+        OPERATIONS_SHARED_SECRET: 'secret', PUBLIC_API_URL: 'https://intern-notifs.test',
+        LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+      const publish = async () => mode === 'prospective'
+        ? publishProspectiveShadowMetadata(env, async () => undefined)
+        : cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+          method: 'POST', headers: { 'X-Operations-Key': 'secret', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'publish-approved', runKey: hash, acceptedFields: ['locations'] }),
+        }), env as unknown as Environment);
+      if (mode === 'prospective') await expect(publish()).rejects.toThrow('Catalog job changed');
+      else expect((await publish() as Response).status).toBe(409);
+      expect(raced).toBe(true);
+      expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).toEqual({ projected_at: null });
+      const recovered = await publish();
+      if (mode === 'prospective') expect(recovered).toEqual({ result: 'projected', runKey: hash });
+      else expect((recovered as Response).status).toBe(200);
+      const job = (await new D1InternshipStore(DB).getJob('job-1'))!;
+      expect(job.notification).toMatchObject({ smsPending: false, smsSentAt: '2026-10-20T00:00:00.000Z' });
+      expect(job.postingFacts?.map(fact => fact.field)).toContain('locations');
+      expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).not.toEqual({ projected_at: null });
+    });
+  }
   it('hides the runtime probe from unauthenticated callers', async () => {
     const { database } = await publicationDatabase();
     const response = await cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-extraction/probe',

@@ -223,9 +223,9 @@ export async function enqueueShadowExtraction(env: Pick<ShadowExtractionEnvironm
   const cacheKey = shadowExtractionCacheKey(normalized);
   const runKey = shadowReportFingerprint({ jobId: input.jobId, sourceId: input.sourceId, externalId: input.externalId,
     contentHash: normalized.contentHash, cacheKey });
-  // The normalized text is content-addressed by cacheKey, while this artifact
-  // also holds posting-specific baseline state and therefore must not be shared.
-  const inputKey = r2Key(runKey);
+  // A retry shares inference identity, but each observation must retain its own
+  // baseline and verification identity, even when a queue acknowledgement is lost.
+  const inputKey = r2Key(createHash('sha256').update(stored).digest('hex'));
   await env.SHADOW_EXTRACTION_ARTIFACTS.put(inputKey, new TextEncoder().encode(stored).buffer, { httpMetadata: { contentType: 'application/json' } });
   const message: ShadowExtractionMessage = { version: 1, runKey, cacheKey, jobId: input.jobId, sourceId: input.sourceId,
     externalId: input.externalId, sourceUrl: input.sourceUrl, providerIdentity: input.providerIdentity,
@@ -359,7 +359,7 @@ async function claimRun(db: D1Database, message: ShadowExtractionMessage, now: D
       state, attempts, lease_until, lease_token, cache_key, input_key, origin, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 1, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_key) DO UPDATE SET state = 'running', attempts = shadow_extraction_runs.attempts + 1, lease_until = excluded.lease_until,
-      lease_token = excluded.lease_token, updated_at = excluded.updated_at
+      lease_token = excluded.lease_token, input_key = excluded.input_key, updated_at = excluded.updated_at
     WHERE shadow_extraction_runs.state IN ('queued', 'transient-failure')
       OR (shadow_extraction_runs.state = 'disabled' AND shadow_extraction_runs.error = 'cost headroom unavailable')
       OR (shadow_extraction_runs.state = 'running' AND shadow_extraction_runs.lease_until < ?)`)
