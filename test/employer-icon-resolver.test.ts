@@ -1527,6 +1527,23 @@ describe('employer icon platform declarations and proposals', () => {
 describe('employer icon uploaded board logo', () => {
   const boardLogo = 'https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/204/510/original/Logo-IMC-Blue.png';
 
+  it.each(['canonical','independent'])('keeps %s corporate holds closed across fresh and duplicate work until explicit reopen', async (kind) => {
+    const {database,admission,icons}=subject();
+    const url='https://generic.wd5.myworkdayjobs.com/careers/job/Intern_P123';
+    let seed=employerSeed(url);
+    if(kind==='canonical') await admission.putCanonicalEmployer(employerRow('acme','Acme'),NOW.toISOString());
+    else seed=(await icons.registerIdentity(seed,NOW))!;
+    await enqueueEmployerIconResolution(icons,seed,NOW);
+    database.prepare('UPDATE employer_icon_resolutions SET review_priority=50 WHERE canonical_employer_id=?').run(seed.canonicalEmployerId);
+    database.prepare(`INSERT INTO employer_icon_resolutions
+      (id,canonical_employer_id,evidence_fingerprint,status,evidence_json,next_retry_at,created_at,updated_at)
+      VALUES ('duplicate',?,'duplicate','retryable','{}',?,'old','old')`).run(seed.canonicalEmployerId,NOW.toISOString());
+    expect(await enqueueEmployerIconResolution(icons,{...seed,applicationUrl:url.replace('P123','P456')},NOW)).toBe(false);
+    expect(await icons.claimDue(NOW.toISOString(),5,60_000)).toEqual([]);
+    expect(await icons.reopen(seed.canonicalEmployerId,NOW.toISOString())).toBe(1);
+    expect(await icons.claimDue(NOW.toISOString(),5,60_000)).toHaveLength(1);
+  });
+
   it('rejects an oversized decoded board image even when its compressed bytes fit', async () => {
     const { db, admission, icons } = subject();
     const r2 = r2Stub();

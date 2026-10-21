@@ -245,8 +245,9 @@ export class D1EmployerIconStore {
                 WHERE settled.canonical_employer_id = ${iconTable(input.canonicalEmployerId)}.id
                   AND settled.status = 'resolved'))))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions
-          WHERE canonical_employer_id = ? AND status = 'resolved'
-            AND (next_retry_at IS NULL OR next_retry_at > ?))
+          WHERE canonical_employer_id = ? AND (status = 'invalidated'
+            OR review_priority BETWEEN 50 AND 99
+            OR (status = 'resolved' AND (next_retry_at IS NULL OR next_retry_at > ?))))
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM employer_icon_resolutions
           WHERE canonical_employer_id = ? AND status IN ('retryable', 'unresolved') AND next_retry_at IS NOT NULL))
       ON CONFLICT(canonical_employer_id, evidence_fingerprint) DO NOTHING`)
@@ -311,7 +312,8 @@ export class D1EmployerIconStore {
         AND (task.lease_until IS NULL OR task.lease_until <= ?)
         AND task.status IN ('retryable', 'unresolved')
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS blocked
-          WHERE blocked.canonical_employer_id = task.canonical_employer_id AND blocked.status = 'invalidated')
+          WHERE blocked.canonical_employer_id = task.canonical_employer_id
+            AND (blocked.status = 'invalidated' OR blocked.review_priority BETWEEN 50 AND 99))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS busy
           WHERE busy.canonical_employer_id = task.canonical_employer_id AND busy.lease_until > ?)
       ) SELECT id, canonical_employer_id, evidence_fingerprint, evidence_json, attempts, previously_attempted FROM eligible
@@ -329,7 +331,8 @@ export class D1EmployerIconStore {
       const result = await this.db.prepare(`UPDATE employer_icon_resolutions SET lease_token = ?, lease_until = ?, updated_at = ?
         WHERE id = ? AND status IN ('retryable', 'unresolved') AND (lease_until IS NULL OR lease_until <= ?)
           AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS busy
-            WHERE busy.canonical_employer_id = ? AND busy.lease_until > ?)`)
+            WHERE busy.canonical_employer_id = ? AND (busy.lease_until > ?
+              OR busy.status = 'invalidated' OR busy.review_priority BETWEEN 50 AND 99))`)
         .bind(leaseToken, leaseUntil, now, row.id, now, row.canonical_employer_id, now).run();
       if (result.meta.changes !== 1) continue;
       claimed.push({
@@ -650,7 +653,8 @@ export class D1EmployerIconStore {
         review_priority = 0, invalidated_at = NULL, lease_token = NULL, lease_until = NULL,
         evidence_json = CASE WHEN json_valid(evidence_json)
           THEN json_remove(evidence_json, '$.invalidatedReason') ELSE evidence_json END,
-        updated_at = ? WHERE canonical_employer_id = ? AND status IN ('invalidated', 'resolved')`)
+        updated_at = ? WHERE canonical_employer_id = ?
+          AND (status IN ('invalidated', 'resolved') OR review_priority BETWEEN 50 AND 99)`)
         .bind(now, now, canonicalEmployerId),
       this.db.prepare(`UPDATE ${iconTable(canonicalEmployerId)} SET
         icon_resolution_status = CASE WHEN icon_resolution_status IN ('invalidated', 'resolved') THEN NULL ELSE icon_resolution_status END,

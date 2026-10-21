@@ -47,6 +47,8 @@ and other brands on the same tenant are excluded. Retained JPEG board logos are
 served alongside PNG, WebP, and AVIF. Raster board assets above four megapixels
 are rejected to bound client decoding memory. Migration `0064` retries one
 active missing-logo Workday task per identity and preserves review holds.
+Corporate identity-review holds also block new automatic enqueues and stale
+duplicate tasks until an operator explicitly reopens them.
 
 ### How a decision is made
 
