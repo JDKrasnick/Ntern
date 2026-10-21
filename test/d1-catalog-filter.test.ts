@@ -8,6 +8,8 @@ import type { EducationLevel, Internship, InternshipIdentity } from '../src/type
 import { createApiHandler } from '../src/api.js';
 import { MemoryUserStore } from '../src/store.js';
 import { buildInternshipIdentity } from '../src/identity/enrichment.js';
+import { filterCatalogGroupDetails } from '../src/catalog-groups.js';
+import { rankCatalogGroups } from '../src/catalog-ranking.js';
 
 function job(jobId: string, title: string): Internship {
   return {
@@ -74,6 +76,64 @@ function sqliteD1(
 
 describe('D1 filtered catalog projection', () => {
   afterEach(() => vi.useRealTimers());
+
+  it('globally ranks compact signals across scan and result pages without hydrating the catalog', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const compactRows: string[] = [], hydrationSizes: number[] = [];
+    const store = new D1InternshipStore(sqliteD1(database, (query, rows) => {
+      if (query.includes('AS roles')) for (const row of rows as Array<{ roles: string }>) compactRows.push(row.roles);
+      if (query.includes('SELECT sk, value FROM catalog_items')) hydrationSizes.push(rows.length);
+    }));
+    const values = Array.from({ length: 205 }, (_, index) => {
+      const visibleAt = new Date(Date.parse('2026-01-01T00:00:00.000Z') + index * 86_400_000).toISOString();
+      return { ...job(`ranking-${index}`, index % 3 ? 'Software Engineer Intern' : 'Machine Learning Intern'),
+        company: index % 17 === 0 ? 'Microsoft' : `Employer ${index}`, firstSeenAt: visibleAt, catalogVisibleAt: visibleAt,
+        compensation: index % 4 === 0 ? { raw: 'DO-NOT-HYDRATE-RAW-PAY'.repeat(100), ranges: [{
+          minAmount: 25 + index % 90, maxAmount: 150, currency: 'USD', period: 'hourly' as const,
+          sourceText: 'DO-NOT-HYDRATE-EVIDENCE'.repeat(100), provenance: [],
+        }] } : { raw: '' },
+      };
+    });
+    const projected = groupCatalogJobs(values).map(catalogGroupDetails);
+    try {
+      await store.putCatalogProjection(projected, new Date().toISOString());
+      const first = await store.listCatalogProjectionFiltered(undefined, 7, { sort: 'best', status: 'open' });
+      const second = await store.listCatalogProjectionFiltered(first!.cursor, 7, { sort: 'best', status: 'open' });
+      const expected = rankCatalogGroups(projected);
+      expect([...first!.groups, ...second!.groups].map(details => details.group.groupId)).toEqual(expected.slice(0, 14).map(details => details.group.groupId));
+      expect(first!.groups.map(details => details.group.opportunity!.total)).toEqual(expected.slice(0, 7).map(details => details.group.opportunity!.total));
+      expect(compactRows.length).toBeGreaterThan(200);
+      expect(compactRows.join('')).not.toContain('DO-NOT-HYDRATE');
+      expect(hydrationSizes.every(size => size <= 7)).toBe(true);
+      const filter = { sort: 'best' as const, status: 'open' as const, query: 'machine', addedSince: '2026-06-01T00:00:00.000Z' };
+      const searched = await store.listCatalogProjectionFiltered(undefined, 50, filter);
+      expect(searched!.groups.map(details => details.group.groupId)).toEqual(rankCatalogGroups(filterCatalogGroupDetails(projected, filter)).map(details => details.group.groupId));
+    } finally { database.close(); }
+  });
+
+  it('merges live roles at their score position rather than prepending them, including later pages', async () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec('CREATE TABLE catalog_items (pk TEXT NOT NULL, sk TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, catalog_sort_key TEXT, PRIMARY KEY (pk, sk))');
+    const published = groupCatalogJobs([
+      { ...job('top', 'Software Intern'), company: 'Microsoft' },
+      { ...job('bottom', 'Software Intern'), company: 'Unknown' },
+    ]).map(catalogGroupDetails);
+    const live = groupCatalogJobs([{ ...job('live', 'Software Intern'), company: 'Other', compensation: { raw: '$100/hour', minHourlyUSD: 100 } }]).map(catalogGroupDetails);
+    class WithOverlay extends D1InternshipStore {
+      protected override async liveOverlayFor() { return { groups: live, groupIds: new Set(live.map(details => details.group.groupId)), roleIds: new Set(['live']) }; }
+    }
+    const store = new WithOverlay(sqliteD1(database));
+    try {
+      await store.putCatalogProjection(published, new Date().toISOString());
+      const ids: string[] = []; let cursor: string | undefined;
+      do {
+        const page = await store.listCatalogProjectionFiltered(cursor, 1, { sort: 'best', status: 'open' });
+        ids.push(...page!.groups.flatMap(details => details.group.roleIds)); cursor = page!.cursor;
+      } while (cursor);
+      expect(ids).toEqual(['top', 'live', 'bottom']);
+    } finally { database.close(); }
+  });
 
   it('filters withheld history before hydration and preserves legacy and closed roles across pages', async () => {
     vi.useFakeTimers();

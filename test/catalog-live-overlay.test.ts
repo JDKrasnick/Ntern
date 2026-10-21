@@ -38,7 +38,9 @@ async function publish(jobs: MemoryInternshipStore, at: string) {
 }
 
 const event = (method: string, path: string, queryStringParameters?: Record<string, string>) => ({
-  rawPath: path, queryStringParameters, requestContext: { http: { method } },
+  // This suite exercises chronological prefixes. Opportunity-sort overlay
+  // placement is covered independently in catalog-api and d1-catalog-filter.
+  rawPath: path, queryStringParameters: { sort: 'newest', ...queryStringParameters }, requestContext: { http: { method } },
 });
 const body = <T>(response: { body: string }) => JSON.parse(response.body) as T;
 const handlerFor = (jobs: MemoryInternshipStore) => createApiHandler({ jobs, users: new MemoryUserStore() });

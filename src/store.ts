@@ -12,6 +12,7 @@ import type { LeverOwnershipEvidence } from './sources/lever-evidence.js';
 import type { LeverCandidateProbeResult } from './sources/lever-probe.js';
 import { filterCatalogGroupDetails, employerDropDay, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from './catalog-groups.js';
 import { catalogPublishable, liveCatalogOverlayFromStore, overlaySupersedesGroup, type LiveCatalogOverlay } from './catalog-live.js';
+import { rankCatalogGroups } from './catalog-ranking.js';
 import { alertEligible, catalogEligible } from './catalog-admission.js';
 import { postingObservationNotificationProjection, postingObservationProjection } from './identity/projection.js';
 import { postingIdentityIncidentId } from './identity/incident.js';
@@ -450,6 +451,11 @@ export class MemoryInternshipStore implements InternshipStore {
     const overlay = await this.liveCatalogOverlay();
     const matching = filterCatalogGroupDetails(this.catalogProjection.groups, filter)
       .filter((details) => !overlay || !overlaySupersedesGroup(overlay, details));
+    if (filter.sort === 'best') {
+      const ranked = rankCatalogGroups([...matching, ...filterCatalogGroupDetails(overlay?.groups ?? [], filter)]);
+      return { groups: structuredClone(ranked.slice(offset, offset + limit)),
+        ...(offset + limit < ranked.length ? { cursor: String(offset + limit) } : {}) };
+    }
     const groups = matching.slice(offset, offset + limit);
     const live = overlay && offset === 0 ? filterCatalogGroupDetails(overlay.groups, filter) : [];
     return {

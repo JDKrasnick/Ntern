@@ -1,7 +1,11 @@
 import { allDisciplineStyles } from '../../shared/discipline-display';
 import { DEFAULT_DAY_ZONE } from '../../shared/zone-day';
 import { educationLevelLabels, educationLevels, type EducationLevel } from '../../shared/education-display';
+import type { CatalogSort } from '../../shared/opportunity-score';
 export type GroupedCatalogFilterState = {
+  sort?: CatalogSort;
+  addedSince?: string;
+  addedBefore?: string;
   query?: string;
   source: 'all' | 'direct' | 'community' | 'corroborated';
   status: 'open' | 'closed';
@@ -49,6 +53,9 @@ export function groupedCatalogParameters(
   page: { limit?: number; cursor?: string } = {},
 ) {
   const params = new URLSearchParams({ limit: String(page.limit ?? 25), status: state.status });
+  params.set('sort', state.sort ?? 'best');
+  if (state.addedSince) params.set('addedSince', state.addedSince);
+  if (state.addedBefore) params.set('addedBefore', state.addedBefore);
   if (page.cursor) params.set('cursor', page.cursor);
   if (state.query?.trim()) params.set('q', state.query.trim());
   if (state.source !== 'all') params.set('source', state.source);
@@ -67,6 +74,9 @@ export function groupedCatalogParameters(
 }
 
 export type CatalogFilterValues = {
+  sort?: CatalogSort;
+  addedSince?: string;
+  addedBefore?: string;
   disciplines: string[];
   seasons: string[];
   workModes: string[];
@@ -85,6 +95,7 @@ const sourceFilterValues = ['all', 'direct', 'community', 'corroborated'] as con
 const jobStatusValues = ['open', 'closed'] as const;
 
 export const emptyCatalogFilters: CatalogFilterValues = {
+  sort: 'best',
   disciplines: [],
   seasons: [],
   workModes: [],
@@ -96,6 +107,29 @@ export const emptyCatalogFilters: CatalogFilterValues = {
   educationLevel: defaultEducationLevel,
 };
 
+export type CatalogDateWindow = 'day' | 'week' | 'all';
+
+export function withCatalogDateWindow(filters: CatalogFilterValues, window: CatalogDateWindow, now = Date.now()): CatalogFilterValues {
+  return { ...filters,
+    addedSince: window === 'all' ? undefined : new Date(now - (window === 'day' ? 86_400_000 : 7 * 86_400_000)).toISOString(),
+    addedBefore: window === 'all' ? undefined : new Date(now).toISOString(),
+  };
+}
+
+export function defaultCatalogFilters(now = Date.now()): CatalogFilterValues {
+  return withCatalogDateWindow({ ...emptyCatalogFilters, sort: 'best' }, 'day', now);
+}
+
+/** The main feed shares date and sort preferences, independent of Search facets. */
+export function catalogFeedParameters(filters: CatalogFilterValues, page: { cursor?: string; query?: string } = {}): URLSearchParams {
+  const params = new URLSearchParams({ status: 'open', sort: filters.sort ?? 'best', limit: '50' });
+  if (filters.addedSince) params.set('addedSince', filters.addedSince);
+  if (filters.addedBefore) params.set('addedBefore', filters.addedBefore);
+  if (page.cursor) params.set('cursor', page.cursor);
+  if (page.query?.trim()) params.set('q', page.query.trim());
+  return params;
+}
+
 /** The client's filter state as the request shape the catalog API takes. */
 export function catalogRequestState(
   filters: CatalogFilterValues,
@@ -104,6 +138,9 @@ export function catalogRequestState(
   const query = options.query?.trim();
   const day = filters.day;
   return {
+    sort: filters.sort ?? 'best',
+    addedSince: filters.addedSince,
+    addedBefore: filters.addedBefore,
     ...(query ? { query } : {}),
     source: filters.sourceFilter,
     status: filters.jobStatus,
@@ -142,6 +179,11 @@ function chosenOption<T extends string>(value: unknown, options: readonly T[], f
 export function parseCatalogFilters(value: unknown): CatalogFilterValues | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   return {
+    sort: chosenOption('sort' in value ? value.sort : undefined, ['best', 'newest'] as const, 'best'),
+    ...('addedSince' in value && typeof value.addedSince === 'string' && Number.isFinite(Date.parse(value.addedSince))
+      ? { addedSince: new Date(value.addedSince).toISOString() } : {}),
+    ...('addedBefore' in value && typeof value.addedBefore === 'string' && Number.isFinite(Date.parse(value.addedBefore))
+      ? { addedBefore: new Date(value.addedBefore).toISOString() } : {}),
     disciplines: storedList('disciplines' in value ? value.disciplines : undefined),
     seasons: storedList('seasons' in value ? value.seasons : undefined),
     workModes: storedList('workModes' in value ? value.workModes : undefined),
@@ -166,9 +208,19 @@ export function countActiveCatalogFilters(filters: CatalogFilterValues): number 
     filters.hasCompensation,
     filters.hideUsCitizenshipRequired,
     Boolean(filters.day),
+    Boolean(filters.addedSince),
     // The default level is how browse starts, so it is not a chosen filter.
     filters.educationLevel !== defaultEducationLevel,
   ].filter(Boolean).length;
+}
+
+/** Reopen relative day/week preferences against today's clock. Keep the chosen
+ * bounds stable for the rest of a paging session. */
+export function refreshCatalogDateWindow(filters: CatalogFilterValues, now = Date.now()): CatalogFilterValues {
+  if (!filters.addedSince || !filters.addedBefore) return filters;
+  const duration = Date.parse(filters.addedBefore) - Date.parse(filters.addedSince);
+  if (duration !== 86_400_000 && duration !== 7 * 86_400_000) return filters;
+  return { ...filters, addedSince: new Date(now - duration).toISOString(), addedBefore: new Date(now).toISOString() };
 }
 
 export const employerCategoryLabels: Record<'faang' | 'startup' | 'normal', string> = {
@@ -217,6 +269,7 @@ export function catalogDayIndexParameters(
 ) {
   const params = groupedCatalogParameters(catalogRequestState({ ...filters, day: undefined }, { dayZone: range.dayZone }));
   params.delete('limit');
+  params.delete('sort');
   params.set('from', range.from);
   params.set('to', range.to);
   params.set('dayZone', range.dayZone);
@@ -257,6 +310,7 @@ export function catalogFilterTokens(filters: CatalogFilterValues): CatalogFilter
       ? [{ key: 'source', label: optionLabel(sourceFilterOptions.slice(1), filters.sourceFilter), patch: { sourceFilter: 'all' as const } }]
       : []),
     ...(filters.hasCompensation ? [{ key: 'compensation', label: 'Pay listed', patch: { hasCompensation: false } }] : []),
+    ...(filters.addedSince ? [{ key: 'window', label: 'Date window', patch: { addedSince: undefined, addedBefore: undefined } }] : []),
     ...(filters.hideUsCitizenshipRequired
       ? [{ key: 'citizenship', label: 'No U.S. citizenship requirement', patch: { hideUsCitizenshipRequired: false } }]
       : []),

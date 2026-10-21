@@ -35,6 +35,41 @@ const event = (method: string, path: string, queryStringParameters?: Record<stri
 const body = <T>(response: { body: string }) => JSON.parse(response.body) as T;
 
 describe('grouped catalog API', () => {
+  it('defaults to global opportunity order across pages and keeps Newest separate', async () => {
+    const jobs = new MemoryInternshipStore();
+    const values = [
+      { ...job('unknown', 40), company: 'Unknown Labs' },
+      { ...job('known', 0), company: 'Microsoft' },
+      { ...job('high-pay', 20), company: 'Small Startup', compensation: { raw: '$100/hour', minHourlyUSD: 100 } },
+    ];
+    for (const value of values) await jobs.putInternship(value);
+    await jobs.putCatalogProjection(groupCatalogJobs(values).map(catalogGroupDetails), new Date().toISOString());
+    const handler = createApiHandler({ jobs, users: new MemoryUserStore() });
+    const ids: string[] = []; let cursor: string | undefined;
+    do {
+      const response = await handler(event('GET', '/catalog', { limit: '1', ...(cursor ? { cursor } : {}) }));
+      const page = body<{ groups: Array<{ roleIds: string[]; opportunity: { total: number } }>; cursor?: string }>(response);
+      expect(page.groups[0]?.opportunity.total).toBeGreaterThan(0);
+      ids.push(...page.groups.flatMap(group => group.roleIds)); cursor = page.cursor;
+    } while (cursor);
+    expect(ids).toEqual(['known', 'high-pay', 'unknown']);
+    const newest = body<{ groups: Array<{ roleIds: string[] }> }>(await handler(event('GET', '/catalog', { sort: 'newest' })));
+    expect(newest.groups.flatMap(group => group.roleIds)).toEqual(['unknown', 'high-pay', 'known']);
+    const filtered = body<{ groups: Array<{ roleIds: string[] }> }>(await handler(event('GET', '/catalog', { addedSince: '2026-08-23T12:00:10.000Z' })));
+    expect(filtered.groups.flatMap(group => group.roleIds)).toEqual(['high-pay', 'unknown']);
+    const fallback = createApiHandler({ jobs: { ...jobs, listCatalogProjection: undefined, listCatalog: async () => values } as unknown as MemoryInternshipStore, users: new MemoryUserStore() });
+    const raw = body<{ groups: Array<{ roleIds: string[] }> }>(await fallback(event('GET', '/catalog')));
+    expect(raw.groups.flatMap(group => group.roleIds)).toEqual(ids);
+  });
+
+  it('rejects invalid ranking and timestamp controls', async () => {
+    const handler = createApiHandler({ jobs: new MemoryInternshipStore(), users: new MemoryUserStore() });
+    const invalid: Record<string, string>[] = [{ sort: 'popular' }, { addedSince: 'yesterday' }, { addedBefore: '2026-99-99' }];
+    for (const params of invalid) {
+      expect((await handler(event('GET', '/catalog', params))).statusCode).toBe(400);
+    }
+  });
+
   it('rejects unsupported availability states for catalog rows and details', async () => {
     const jobs = new MemoryInternshipStore();
     await jobs.putInternship(job('one', 0));
@@ -138,7 +173,7 @@ describe('grouped catalog API', () => {
     const filtered = jobs.listCatalogProjectionFiltered.bind(jobs);
     jobs.listCatalogProjectionFiltered = async (...args) => { filteredReads += 1; return filtered(...args); };
     const response = await createApiHandler({ jobs, users: new MemoryUserStore() })(
-      event('GET', '/catalog', { status: 'open', source: 'all', limit: '50' }),
+      event('GET', '/catalog', { status: 'open', source: 'all', sort: 'newest', limit: '50' }),
     );
     expect(response.statusCode).toBe(200);
     expect(body<{ groups: Array<{ roleCount: number }> }>(response)).toMatchObject({ groups: [{ roleCount: 1 }] });

@@ -12,6 +12,7 @@ import { dayZone, isCalendarDay } from '../shared/zone-day.js';
 import { publicApplicationUrl } from './core/application-url.js';
 import { occurrenceProvenance } from './sources/provenance.js';
 import { catalogEligible, deriveCanonicalAdmission } from './catalog-admission.js';
+import { rankCatalogGroups } from './catalog-ranking.js';
 import { RESUME_DRAFT_MODELS_QUALITY } from './resume-generation.js';
 import { dropDuplicateAdditions, keepValidResumeChanges, normalizeResumeJobUrl, parseResumeBankDetails, parseResumeBankParentRef, proposeResumeReadabilityChanges, recommendResumeProfiles, resumeBankContentKey, resumeBankItemRef, ResumeBankGraphError, validateResumeBankGraph, validateResumeBankItemPlacement, validateResumeChanges, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeBankRootKind, type ResumeChange, type ResumeCompilation, type ResumeDraft, type ResumeLineBox, type ResumeProfile, type ResumeTemplateId } from './resume.js';
 import { extractResumeDocument, type ExtractedResumeItem } from './resume-document.js';
@@ -44,6 +45,9 @@ function catalogFilter(parameters: Record<string, string> | undefined): CatalogG
     return value?.split(',').map((item) => item.trim()).filter(Boolean);
   };
   return {
+    ...(parameters?.sort ? { sort: parameters.sort as CatalogGroupFilter['sort'] } : {}),
+    ...(parameters?.addedSince ? { addedSince: parameters.addedSince } : {}),
+    ...(parameters?.addedBefore ? { addedBefore: parameters.addedBefore } : {}),
     ...(parameters?.q?.trim() ? { query: parameters.q.trim() } : {}),
     ...(parameters?.source ? { source: parameters.source as CatalogGroupFilter['source'] } : {}),
     status: parameters?.status === 'closed' ? 'closed' : 'open',
@@ -114,7 +118,7 @@ function eligibleProjectedGroup(details: CatalogGroupDetails, at = new Date()): 
  */
 function isDefaultBrowseFilter(filter: CatalogGroupFilter) {
   if (filter.status !== 'open') return false;
-  return Object.keys(filter).every((key) => key === 'status' || (key === 'source' && filter.source === 'all'));
+  return Object.keys(filter).every((key) => key === 'status' || (key === 'source' && filter.source === 'all') || (key === 'sort' && filter.sort === 'newest'));
 }
 
 /** Projection cards are re-checked for admission and the active filter on every read. */
@@ -732,13 +736,20 @@ export function createApiHandler(dependencies: ApiDependencies) {
         if (source && !['all', 'direct', 'community', 'corroborated'].includes(source)) return reply(400, { message: 'source is not supported' });
         const filter = {
           ...catalogFilter(event.queryStringParameters),
+          sort: event.queryStringParameters?.sort ?? 'best',
           ...(!identityUnconfirmedPublicationEnabled ? { postingIdentityConfirmedOnly: true } : {}),
         };
+        if (filter.sort !== 'best' && filter.sort !== 'newest') return reply(400, { message: 'sort must be best or newest' });
+        for (const key of ['addedSince', 'addedBefore'] as const) {
+          const value = filter[key];
+          if (value && (!Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value)) return reply(400, { message: `${key} must be an ISO UTC timestamp` });
+        }
         const requestedOffset = Number(cursor ?? 0);
         if (!Number.isFinite(requestedOffset) || requestedOffset < 0 || !Number.isInteger(requestedOffset)) return reply(400, { message: 'cursor is invalid' });
-        const projected = await projectedCatalogPage(dependencies.jobs, cursor, limit, filter);
+        const projected = await projectedCatalogPage(dependencies.jobs, cursor, limit, filter as CatalogGroupFilter);
         if (projected) return reply(200, { groups: projected.groups.map((group) => group.group), ...(projected.cursor ? { cursor: projected.cursor } : {}) });
-        const grouped = filterCatalogGroups(groupCatalogJobs(await completeCatalog(dependencies.jobs, identityUnconfirmedPublicationEnabled), { includeClosed: true }), filter);
+        const filtered = filterCatalogGroups(groupCatalogJobs(await completeCatalog(dependencies.jobs, identityUnconfirmedPublicationEnabled), { includeClosed: true }), filter as CatalogGroupFilter);
+        const grouped = filter.sort === 'best' ? rankCatalogGroups(filtered.map(catalogGroupDetails)).map(details => ({ row: details.group })) : filtered;
         const page = grouped.slice(requestedOffset, requestedOffset + limit).map((group) => group.row);
         const nextOffset = requestedOffset + page.length;
         return reply(200, { groups: page, ...(nextOffset < grouped.length ? { cursor: String(nextOffset) } : {}) });

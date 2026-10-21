@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { parseCatalogFilters, type CatalogFilterValues } from './catalog-filters';
+import { defaultCatalogFilters, parseCatalogFilters, refreshCatalogDateWindow, type CatalogFilterValues } from './catalog-filters';
 
-const catalogFilterStorageKey = 'internnotifs.catalog-filters.v1';
+const catalogFilterStorageKey = 'internnotifs.catalog-filters.v2';
 
 /**
  * Browse filters are a device preference, not an account one: the catalog needs
@@ -11,7 +11,12 @@ const catalogFilterStorageKey = 'internnotifs.catalog-filters.v1';
 export async function loadCatalogFilters(): Promise<CatalogFilterValues | undefined> {
   try {
     const stored = await AsyncStorage.getItem(catalogFilterStorageKey);
-    return stored ? parseCatalogFilters(JSON.parse(stored)) : undefined;
+    const filters = stored ? parseCatalogFilters(JSON.parse(stored)) : undefined;
+    if (filters) return refreshCatalogDateWindow(filters);
+    const legacy = await AsyncStorage.getItem('internnotifs.catalog-filters.v1');
+    const previous = legacy ? parseCatalogFilters(JSON.parse(legacy)) : undefined;
+    const defaults = defaultCatalogFilters();
+    return previous ? { ...previous, sort: defaults.sort, addedSince: defaults.addedSince, addedBefore: defaults.addedBefore } : defaults;
   } catch {
     return undefined;
   }
