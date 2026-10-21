@@ -12,7 +12,9 @@ describe("catalogListUsesColumns", () => {
     [390, false],
     [699, false],
     [899, false],
-    [900, true],
+    [900, false],
+    [1099, false],
+    [1100, true],
     [1120, true],
     [1440, true],
   ])("maps %ipx to comparison columns: %s", (width, expected) => {

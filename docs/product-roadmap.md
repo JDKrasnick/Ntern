@@ -51,6 +51,10 @@
 
 ### Codex
 
+- [x] Implement a shared **Best opportunities** catalog sort (45% company value, 30% pay, 25% role fit), default Catalog and Search to **Last day**, keep **Newest** available, and apply freshness as an independent server-side date window. Includes sourced initial employer assessments, neutral unknowns, filtered-group explanations and global pagination; see [ranking policy](opportunity-ranking.md).
+- [x] Expose role/facet filters directly in the web catalog and apply them across pagination. Successful Apply handoffs move roles into persistent browser History and out of browsing, while remaining roles in a group stay available. Blocked popups leave the catalog unchanged; native layouts and controls remain unchanged.
+  - [ ] Calibrate the provisional pay anchors and employer ratings against a reviewed real-catalog sample, measure production-size read cost/latency, and complete release QA before production rollout.
+
 - [x] Complete the authenticated web-first Resume workspace in code; the production flag remains disabled pending the documented staged security and infrastructure rollout.
   - [x] Gate the fifth navigation tab behind `RESUME_TUNER_ENABLED`, persist a private Technical base content repository, saved-base recipes, imported-job records, and review drafts with revisions, account export, and account deletion cleanup.
   - [x] Provide a responsive GitHub-style diff review path that asks for approval only on job-specific changes, rejects private/non-HTTPS import targets, keeps pasted job descriptions per-user, and creates deterministic evidence-linked suggestions.

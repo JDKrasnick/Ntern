@@ -373,6 +373,9 @@ export class R2CatalogReadStore extends D1InternshipStore {
   }
 
   override async listCatalogProjectionFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
+    // R2 pages are chronological. Global opportunity ranking uses D1's compact
+    // signal scan and hydrates only the selected page, never every R2 object.
+    if (filter.sort === 'best') return super.listCatalogProjectionFiltered(cursor, limit, filter);
     try {
       if (!await this.currentGeneration()) return super.listCatalogProjectionFiltered(cursor, limit, filter);
       const page = await this.projection.listFiltered(cursor, limit, filter);

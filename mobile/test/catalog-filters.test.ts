@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, emptyCatalogFilters, groupedCatalogParameters, parseCatalogFilters } from '../src/catalog-filters';
+import { defaultCatalogFilters, catalogFeedParameters, withCatalogDateWindow, catalogDayIndexParameters, catalogFilterTokens, catalogGroupAvailabilityLabel, catalogRequestState, catalogViewNarrowed, countActiveCatalogFilters, emptyCatalogFilters, groupedCatalogParameters, parseCatalogFilters, refreshCatalogDateWindow } from '../src/catalog-filters';
 
 describe('catalog filter tokens', () => {
   it('names every active facet and clears only its own value', () => {
@@ -83,6 +83,35 @@ describe('release day requests', () => {
 });
 
 describe('grouped catalog request filters', () => {
+  it('starts on the last 24 hours ranked by opportunity, keeping the window across feed pages', () => {
+    const defaults = defaultCatalogFilters(Date.parse('2026-10-20T12:00:00.000Z'));
+    expect(defaults).toMatchObject({ sort: 'best', addedSince: '2026-10-19T12:00:00.000Z', addedBefore: '2026-10-20T12:00:00.000Z' });
+    const params = catalogFeedParameters({ ...defaults, disciplines: ['SWE'] }, { cursor: '50', query: ' Microsoft ' });
+    expect(params.get('q')).toBe('Microsoft');
+    expect(params.get('addedSince')).toBe(defaults.addedSince);
+    expect(params.get('addedBefore')).toBe(defaults.addedBefore);
+    expect(params.get('sort')).toBe('best'); expect(params.get('cursor')).toBe('50');
+    expect(params.get('disciplines')).toBe('SWE');
+    const all = catalogFeedParameters(withCatalogDateWindow(defaults, 'all'));
+    expect(all.has('addedSince')).toBe(false); expect(all.get('sort')).toBe('best');
+  });
+  it('refreshes a saved relative week at launch without changing explicit calendar dates', () => {
+    const filters = { ...emptyCatalogFilters, day: '2026-10-10', addedSince: '2026-10-01T00:00:00.000Z', addedBefore: '2026-10-08T00:00:00.000Z' };
+    expect(refreshCatalogDateWindow(filters, Date.parse('2026-10-20T00:00:00.000Z'))).toMatchObject({
+      day: '2026-10-10', addedSince: '2026-10-13T00:00:00.000Z', addedBefore: '2026-10-20T00:00:00.000Z',
+    });
+  });
+  it('keeps sort independent of filters and sends date windows on every page', () => {
+    expect(countActiveCatalogFilters({ ...emptyCatalogFilters, sort: 'newest' })).toBe(0);
+    expect(parseCatalogFilters({ sort: 'nonsense' })?.sort).toBe('best');
+    expect(parseCatalogFilters({ sort: 'newest' })?.sort).toBe('newest');
+    const filters = { ...emptyCatalogFilters, addedSince: '2026-10-13T00:00:00.000Z', addedBefore: '2026-10-20T00:00:00.000Z' };
+    const params = groupedCatalogParameters(catalogRequestState(filters), { cursor: '25' });
+    expect(params.get('sort')).toBe('best'); expect(params.get('cursor')).toBe('25');
+    expect(params.get('addedSince')).toBe(filters.addedSince); expect(params.get('addedBefore')).toBe(filters.addedBefore);
+    expect(countActiveCatalogFilters(filters)).toBe(1);
+    expect(catalogFilterTokens(filters).find(token => token.key === 'window')?.patch).toEqual({ addedSince: undefined, addedBefore: undefined });
+  });
   it('carries the same filters from a catalog row into group details', () => {
     const state = {
       query: 'machine learning', source: 'direct' as const, status: 'closed' as const,
@@ -90,7 +119,7 @@ describe('grouped catalog request filters', () => {
     };
     const params = groupedCatalogParameters(state);
     expect(Object.fromEntries(params)).toEqual({
-      limit: '25', status: 'closed', q: 'machine learning', source: 'direct', employerCategory: 'startup',
+      limit: '25', status: 'closed', sort: 'best', q: 'machine learning', source: 'direct', employerCategory: 'startup',
       hideUsCitizenshipRequired: 'true', educationLevel: 'masters',
     });
   });
@@ -102,7 +131,7 @@ describe('grouped catalog request filters', () => {
       hideUsCitizenshipRequired: false, educationLevel: 'undergraduate',
     });
     expect(Object.fromEntries(params)).toEqual({
-      limit: '25', status: 'open', disciplines: 'SWE,Quant/Fintech', seasons: 'summer-2027',
+      limit: '25', status: 'open', sort: 'best', disciplines: 'SWE,Quant/Fintech', seasons: 'summer-2027',
       workModes: 'remote', hasCompensation: 'true', educationLevel: 'undergraduate',
     });
   });

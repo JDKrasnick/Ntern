@@ -6,7 +6,9 @@ import { employerCategory } from '../src/core/employers.js';
 import type { ApplicationSession } from '../src/application-automation.js';
 import { preferredJobIdentityConflicts, providerPostingKey, resolvePostingAliases, type AliasResolution } from '../src/identity/posting.js';
 import { deletedUserTombstoneKey, SupersededPostingObservationError, type InternshipStore, type LeverAdmission, type PostingObservationCommit, type PostingObservationCommitResult, type ReleaseStore, type UserStore, type CatalogQuery } from '../src/store.js';
-import { catalogProjectionRoleMatches, catalogProjectionSortKey, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
+import { catalogProjectionRoleMatches, catalogProjectionSortKey, catalogTextMatches, materializedReleaseDay, disciplineSearchVariants, filterCatalogGroupDetails, type CatalogGroupDetails, type CatalogGroupFilter, type CatalogGroupRole, type CatalogProjectionPage, type CatalogRelease } from '../src/catalog-groups.js';
+import { compareOpportunityRanks, rankCatalogGroups, type RankingRole } from '../src/catalog-ranking.js';
+import { scoreOpportunity } from '../src/opportunity-score.js';
 import { liveCatalogOverlayFromStore, overlaySupersedesGroup, type LiveCatalogOverlay } from '../src/catalog-live.js';
 import type { ApplicantProfile, ApplicationRecord, CatalogAdmissionReason, DeliveryReceipt, DestinationClassification, DeviceToken, EvidenceSource, Internship, MetadataConflict, MonitoringChecklist, NotificationEvent, PostingIdentity, PostingIdentityDecision, PostingIdentityIncident, PostingProvider, RoleMetadataEvidence, SourceCheckpoint, SourceDispatch, SourceHealth, SourceOccurrence, SourceOccurrenceSelectionMetadata, SourceOccurrenceState, TrustedCommunityAlertQualification, TrustedCommunityOccurrenceHealth, UserDocument, UserPreferences } from '../src/types.js';
 import { validateResumeBankGraph, validateResumeBankItemPlacement, type ImportedJob, type ResumeArtifact, type ResumeBankItem, type ResumeDraft, type ResumeProfile } from '../src/resume.js';
@@ -210,6 +212,8 @@ function catalogProjectionRoleQuery(filter: CatalogGroupFilter) {
     clauses.push("json_extract(role.value, '$.releaseDay') BETWEEN date(?, '-1 day') AND date(?, '+1 day')");
     values.push(filter.day, filter.day);
   }
+  if (filter.addedSince) { clauses.push("json_extract(role.value, '$.visibleAt') >= ?"); values.push(filter.addedSince); }
+  if (filter.addedBefore) { clauses.push("json_extract(role.value, '$.visibleAt') <= ?"); values.push(filter.addedBefore); }
   return { clauses, values };
 }
 
@@ -1446,7 +1450,82 @@ export class D1InternshipStore implements InternshipStore {
       ...(overlay && offset === 0 && overlay.groups.length ? { live: overlay.groups } : {}),
     };
   }
+  /** Scan only comparison signals, one bounded SQL page at a time. Retain small
+   * keys/scores, then hydrate one result page. This works for old projections
+   * too, without rewriting ingestion rows or waiting for a publisher rollout.
+   * Evidence graphs, descriptions and URLs never cross the ranking scan.
+   */
+  private async rankedCatalogProjection(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
+    const pointer = await this.readCatalogProjectionPointer();
+    if (!pointer) return undefined;
+    const scope = this.catalogProjectionScope(pointer);
+    const offset = cursorOffset(cursor);
+    const overlay = await this.liveOverlayFor(pointer.liveWatermark);
+    const live = rankCatalogGroups(filterCatalogGroupDetails(overlay?.groups ?? [], filter));
+    const ranks: Array<{ sk?: string; id: string; score: number; live?: CatalogGroupDetails }> = live.map(details => ({
+      id: details.group.groupId, score: details.group.opportunity!.total, live: details,
+    }));
+    const { clauses, values } = catalogProjectionRoleQuery(filter);
+    let after = '';
+    for (;;) {
+      const page = await this.db.prepare(`SELECT projection.sk,
+        json_extract(projection.value, '$.group.groupId') AS id,
+        json_extract(projection.value, '$.group.roleIds') AS role_ids,
+        json_group_array(json_object(
+          'jobId', json_extract(role.value, '$.jobId'),
+          'company', json_extract(role.value, '$.company'),
+          'title', json_extract(role.value, '$.title'),
+          'disciplines', json_extract(role.value, '$.disciplines'),
+          'programType', json_extract(role.value, '$.programType'),
+          'visibleAt', json_extract(role.value, '$.visibleAt'),
+          'releaseDay', json_extract(role.value, '$.releaseDay'),
+          'releaseDayObserved', json_extract(role.value, '$.releaseDayObserved'),
+          'compensation', json_object(
+            'minHourlyUSD', json_extract(role.value, '$.compensation.minHourlyUSD'),
+            'maxHourlyUSD', json_extract(role.value, '$.compensation.maxHourlyUSD'),
+            'minAnnualUSD', json_extract(role.value, '$.compensation.minAnnualUSD'),
+            'maxAnnualUSD', json_extract(role.value, '$.compensation.maxAnnualUSD'),
+            'ranges', json((SELECT json_group_array(json_object(
+              'minAmount', json_extract(band.value, '$.minAmount'), 'maxAmount', json_extract(band.value, '$.maxAmount'),
+              'currency', json_extract(band.value, '$.currency'), 'period', json_extract(band.value, '$.period'),
+              'applicabilityLabel', json_extract(band.value, '$.applicabilityLabel'),
+              'applicableLocations', json_extract(band.value, '$.applicableLocations'),
+              'applicableEducationLevels', json_extract(band.value, '$.applicableEducationLevels')
+            )) FROM json_each(role.value, '$.compensation.ranges') AS band))
+          )
+        )) AS roles
+        FROM catalog_items AS projection, json_each(projection.value, '$.roles') AS role
+        WHERE projection.pk = ? AND projection.kind = 'catalog-projection' AND projection.sk > ?
+          ${this.catalogProjectionMembership(scope, 'projection')}
+          AND ${clauses.join(' AND ')}
+        GROUP BY projection.sk ORDER BY projection.sk LIMIT 100`)
+        .bind(scope.pk, after, ...(scope.manifestVersion ? [scope.manifestVersion] : []), ...values)
+        .all<{ sk: string; id: string; role_ids: string; roles: string }>();
+      for (const row of page.results) {
+        if (overlay && (JSON.parse(row.role_ids) as string[]).every(id => overlay.roleIds.has(id))) continue;
+        const roles = (JSON.parse(row.roles) as RankingRole[]).filter(role =>
+          (!filter.query || catalogTextMatches(filter.query, [role.company, role.title]))
+          && (!filter.day || materializedReleaseDay(role as CatalogGroupRole, filter.dayZone) === filter.day));
+        if (roles.length) ranks.push({ sk: row.sk, id: row.id, score: roles.reduce((best, role) => Math.max(best, scoreOpportunity(role).total), 0) });
+      }
+      if (page.results.length < 100) break;
+      after = page.results.at(-1)!.sk;
+    }
+    ranks.sort(compareOpportunityRanks);
+    const selected = ranks.slice(offset, offset + limit);
+    const keys = selected.flatMap(row => row.sk ? [row.sk] : []);
+    const hydrated = keys.length ? await this.db.prepare(`SELECT sk, value FROM catalog_items
+      WHERE pk = ? AND sk IN (${placeholders(keys)})`).bind(scope.pk, ...keys).all<JsonRow & { sk: string }>() : { results: [] };
+    const byKey = new Map(hydrated.results.map(row => [row.sk, JSON.parse(row.value) as CatalogGroupDetails]));
+    const groups = selected.flatMap(row => {
+      const details = row.live ?? byKey.get(row.sk!);
+      return details ? rankCatalogGroups(filterCatalogGroupDetails([details], filter)) : [];
+    });
+    return { groups, ...(offset + limit < ranks.length ? { cursor: String(offset + limit) } : {}) };
+  }
+
   async listCatalogProjectionFiltered(cursor: string | undefined, limit: number, filter: CatalogGroupFilter): Promise<CatalogProjectionPage | undefined> {
+    if (filter.sort === 'best') return this.rankedCatalogProjection(cursor, limit, filter);
     const pointer = await this.readCatalogProjectionPointer();
     if (!pointer) return undefined;
     const scope = this.catalogProjectionScope(pointer);

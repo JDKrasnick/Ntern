@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { boundedCatalogText, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "../src/catalog-quality.js";
+import { boundedCatalogText, catalogMetadataTags, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "../src/catalog-quality.js";
 import { compactCompensationLabel } from "../../shared/compensation-display.js";
 
 describe("catalog presentation hardening", () => {
+  it("shows season and education tags without turning missing or inferred evidence into requirements", () => {
+    expect(catalogMetadataTags(['summer-2027'], [{ levels: ['undergraduate', 'masters'], evidence: 'explicit' }])).toEqual([
+      { label: 'Summer 2027', kind: 'season' }, { label: 'Undergrad', kind: 'education' }, { label: 'Masters', kind: 'education' },
+    ]);
+    expect(catalogMetadataTags(['ongoing'], [{ levels: ['doctoral'], evidence: 'inferred' }])).toEqual([
+      { label: 'Season unspecified', kind: 'neutral' }, { label: 'PhD (inferred)', kind: 'education' },
+    ]);
+    expect(catalogMetadataTags([], [{ levels: ['undergraduate'], evidence: 'unspecified' }])).toEqual([
+      { label: 'Season unspecified', kind: 'neutral' }, { label: 'Education unspecified', kind: 'neutral' },
+    ]);
+    expect(catalogMetadataTags(['Fall 2027', 'Fall 2027'], [{ levels: ['masters'], evidence: 'conflicting' }])).toEqual([
+      { label: 'Fall 2027', kind: 'season' }, { label: 'Education unclear', kind: 'neutral' },
+    ]);
+  });
   it("shows the term once in the role sheet title", () => {
     expect(roleSheetTitle("Hardware Intern [Winter 2027]", "winter-2027")).toBe("Hardware Intern [Winter 2027]");
     expect(roleSheetTitle("Hardware Intern", "winter-2027")).toBe("Hardware Intern · Winter 2027");
