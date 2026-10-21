@@ -1,5 +1,27 @@
 import { compensationLabels, type DisplayCompensation } from '../../shared/compensation-display';
+import { educationLevelLabels, educationLevels } from '../../shared/education-display';
 export { compensationLabels };
+
+export function catalogMetadataTags(seasons: string[], education: Array<{ levels: string[]; evidence: string }>) {
+  const tags: Array<{ label: string; kind: 'season' | 'education' | 'neutral' }> = [];
+  for (const season of new Set(seasons)) {
+    const label = boundedCatalogText(season, 80).replace(/-/gu, ' ').replace(/^\w/u, letter => letter.toUpperCase());
+    if (label && !/^(ongoing|unspecified|season not specified)$/iu.test(label)) tags.push({ label, kind: 'season' });
+  }
+  if (!tags.length) tags.push({ label: 'Season unspecified', kind: 'neutral' });
+  for (const audience of education) {
+    if (audience.evidence === 'conflicting') {
+      tags.push({ label: 'Education unclear', kind: 'neutral' });
+      continue;
+    }
+    if (audience.evidence !== 'explicit' && audience.evidence !== 'inferred') continue;
+    for (const level of educationLevels) {
+      if (audience.levels.includes(level)) tags.push({ label: `${educationLevelLabels[level]}${audience.evidence === 'inferred' ? ' (inferred)' : ''}`, kind: 'education' });
+    }
+  }
+  if (!tags.some(tag => tag.kind === 'education' || tag.label === 'Education unclear')) tags.push({ label: 'Education unspecified', kind: 'neutral' });
+  return tags.filter((tag, index) => tags.findIndex(other => other.label === tag.label) === index);
+}
 
 export function boundedCatalogText(value: unknown, maximum: number): string {
   const clean = typeof value === "string" ? value.normalize("NFC").replace(/\s+/gu, " ").trim() : "";

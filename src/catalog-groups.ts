@@ -12,6 +12,8 @@ import { educationExcludesLevel } from './identity/enrichment.js';
 import type { EducationLevel, Internship } from './types.js';
 import { allDisciplineStyles, disciplineKey, disciplineSearchVariants } from '../shared/discipline-display.js';
 import { classifyJob, type JobCategory } from './core/filters.js';
+import type { CatalogSort, OpportunityScore } from '../shared/opportunity-score.js';
+import { rankCatalogGroups } from './catalog-ranking.js';
 
 const DISCIPLINE_FILTER_VALUES: Record<string, string> = Object.fromEntries(
   allDisciplineStyles().map(({ tag, style }) => [tag, style.filterValue]),
@@ -33,6 +35,7 @@ export interface CatalogEducationSummary {
 }
 
 export interface CatalogGroupRow {
+  opportunity?: OpportunityScore;
   groupId: string;
   kind: CatalogGroupKind;
   company: string;
@@ -81,6 +84,7 @@ export interface CatalogProjectionPage {
 }
 
 export interface CatalogGroupRole {
+  opportunity?: OpportunityScore;
   jobId: string;
   company: string;
   /** Stable reviewed employer identity; clients use this to resolve a first-party icon. */
@@ -122,6 +126,10 @@ export interface CatalogGroupRole {
 }
 
 export interface CatalogGroupFilter {
+  sort?: CatalogSort;
+  /** Observation-time window, independent of opportunity scoring. */
+  addedSince?: string;
+  addedBefore?: string;
   query?: string;
   source?: CatalogSource;
   disciplines?: string[];
@@ -580,6 +588,8 @@ export function filterCatalogGroups(groups: BuiltGroup[], filter: CatalogGroupFi
         && (!filter.source || filter.source === 'all' || catalogSourceClasses(job).includes(filter.source))
         && (!filter.hasCompensation || Boolean(job.compensation?.raw?.trim()))
         && (!filter.day || employerDropDay(job, filter.dayZone) === filter.day)
+        && (!filter.addedSince || catalogVisibleAt(job) >= filter.addedSince)
+        && (!filter.addedBefore || catalogVisibleAt(job) <= filter.addedBefore)
         && (!filter.disciplines?.length || disciplinesMatch(disciplinesFor(job), filter.disciplines))
         && (!filter.seasons?.length || includesFolded([seasonFor(job)], filter.seasons))
         // Unspecified education matches every audience but remains visibly unspecified.
@@ -620,12 +630,14 @@ export function catalogProjectionRoleMatches(role: CatalogGroupRole, filter: Cat
     && (!filter.workModes?.length || includesFolded(role.workModes, filter.workModes))
     && (!filter.hasCompensation || Boolean(role.compensation?.raw?.trim()))
     && (!filter.day || materializedReleaseDay(role, filter.dayZone) === filter.day)
+    && (!filter.addedSince || role.visibleAt >= filter.addedSince)
+    && (!filter.addedBefore || role.visibleAt <= filter.addedBefore)
     && (!filter.locations?.length || filter.locations.some((location) => folded((role.locations ?? role.location.split(/\s*(?:;|\||\n)\s*/)).join(' ')).includes(folded(location))));
 }
 
 /** Filters a materialized projection without loading full catalog job records. */
 export function filterCatalogGroupDetails(groups: CatalogGroupDetails[], filter: CatalogGroupFilter): CatalogGroupDetails[] {
-  return groups.flatMap((details) => {
+  const filtered = groups.flatMap((details) => {
     const roles = details.roles.filter((role) => catalogProjectionRoleMatches(role, filter));
     if (!roles.length) return [];
     return [{
@@ -649,4 +661,5 @@ export function filterCatalogGroupDetails(groups: CatalogGroupDetails[], filter:
       roles,
     }];
   });
+  return filter.sort === 'best' ? rankCatalogGroups(filtered) : filtered;
 }

@@ -1,10 +1,10 @@
 /**
- * A catalog row becomes a comparison record only when its four columns have
+ * A catalog row becomes a comparison record only when its six columns have
  * enough room to stay readable. Narrower surfaces keep one touch-first reading
  * order instead of compressing desktop columns into a phone.
  */
 export function catalogListUsesColumns(width: number) {
-  return width >= 900;
+  return width >= 1100;
 }
 
 export type CatalogFreshness = "new" | "day" | "week" | "all";
