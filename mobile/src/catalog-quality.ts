@@ -1,8 +1,10 @@
 import { compensationLabels, type DisplayCompensation } from '../../shared/compensation-display';
 import { educationLevelLabels, educationLevels } from '../../shared/education-display';
+import { postingFactSummaries } from '../../shared/posting-fact-display';
+import type { PostingFact } from '../../shared/posting-facts';
 export { compensationLabels };
 
-export function catalogMetadataTags(seasons: string[], education: Array<{ levels: string[]; evidence: string }>) {
+export function catalogMetadataTags(seasons: string[], education: Array<{ levels: string[]; evidence: string }>, postingFacts?: readonly PostingFact[]) {
   const tags: Array<{ label: string; kind: 'season' | 'education' | 'neutral' }> = [];
   for (const season of new Set(seasons)) {
     const label = boundedCatalogText(season, 80).replace(/-/gu, ' ').replace(/^\w/u, letter => letter.toUpperCase());
@@ -19,7 +21,13 @@ export function catalogMetadataTags(seasons: string[], education: Array<{ levels
       if (audience.levels.includes(level)) tags.push({ label: `${educationLevelLabels[level]}${audience.evidence === 'inferred' ? ' (inferred)' : ''}`, kind: 'education' });
     }
   }
-  if (!tags.some(tag => tag.kind === 'education' || tag.label === 'Education unclear')) tags.push({ label: 'Education unspecified', kind: 'neutral' });
+  if (!tags.some(tag => tag.kind === 'education' || tag.label === 'Education unclear')) {
+    const summary = postingFactSummaries(postingFacts).find(fact => fact.field === 'education');
+    const generic = summary?.tags.find(label => ['Pursuing degree', 'Pursuing engineering degree', 'Enrolled'].includes(label));
+    tags.push(generic
+      ? { label: generic === 'Pursuing engineering degree' ? 'Pursuing degree' : generic, kind: 'education' }
+      : { label: 'Education unspecified', kind: 'neutral' });
+  }
   return tags.filter((tag, index) => tags.findIndex(other => other.label === tag.label) === index);
 }
 

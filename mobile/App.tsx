@@ -1502,8 +1502,8 @@ function CatalogFreshnessLabel({ label, isNew }: { label: string; isNew: boolean
   );
 }
 
-function CatalogMetadataColumns({ seasons, education, wide = false }: { seasons: string[]; education: CatalogEducation[]; wide?: boolean }) {
-  const values = catalogMetadataTags(seasons, education);
+function CatalogMetadataColumns({ seasons, education, postingFacts, wide = false }: { seasons: string[]; education: CatalogEducation[]; postingFacts?: PostingFact[]; wide?: boolean }) {
+  const values = catalogMetadataTags(seasons, education, postingFacts);
   const season = values.filter(item => item.kind === 'season' || item.label === 'Season unspecified').map(item => item.label.replace('Season unspecified', 'Not specified')).join(' · ');
   const audienceLabels = values.filter(item => item.kind === 'education' || item.label.startsWith('Education ')).map(item => item.label.replace('Education unspecified', 'Not specified').replace('Education unclear', 'Conflicting sources'));
   const audience = audienceLabels.map(label => audienceLabels.length > 2 ? label.replace(/^Undergrad\b/u, 'UGrad') : label).join('/');
@@ -1703,11 +1703,11 @@ function CatalogTile({
               <View style={styles.catalogListPrimary}>
                 <Text style={styles.catalogListTitle} numberOfLines={2}>{compactTitle}</Text>
                 <Text style={styles.catalogListEmployerName} numberOfLines={1}>{employerName(display.company, job.employerCategory)}</Text>
-                {!wideRow ? <CatalogMetadataColumns seasons={[job.season]} education={job.education ? [job.education] : []} /> : null}
+                {!wideRow ? <CatalogMetadataColumns seasons={[job.season]} education={job.education ? [job.education] : []} postingFacts={job.postingFacts} /> : null}
                 {!wideRow ? <Text style={styles.catalogListMeta} numberOfLines={2}>{compactLocation}{pay ? ` · ${pay}` : ""}</Text> : null}
                 {job.postingIdentityStatus === "unconfirmed" ? <Text style={styles.catalogListMeta}>Identity unconfirmed</Text> : null}
               </View>
-              {wideRow ? <CatalogMetadataColumns seasons={[job.season]} education={job.education ? [job.education] : []} wide /> : null}
+              {wideRow ? <CatalogMetadataColumns seasons={[job.season]} education={job.education ? [job.education] : []} postingFacts={job.postingFacts} wide /> : null}
               {wideRow ? <View style={styles.catalogListDetails}>
                 <Text style={styles.catalogListLocation} numberOfLines={2}>{compactLocation}</Text>
               </View> : null}
@@ -1859,11 +1859,11 @@ function CatalogGroupTile({
               <View style={styles.catalogListPrimary}>
                 <Text style={styles.catalogListTitle} numberOfLines={2}>{compactGroupTitle}</Text>
                 <Text style={styles.catalogListEmployerName} numberOfLines={1}>{employerName(groupCompany, group.featuredRole?.employerCategory)} · {group.roleCount} roles</Text>
-                {!wideRow ? <CatalogMetadataColumns seasons={group.seasons} education={group.education} /> : null}
+                {!wideRow ? <CatalogMetadataColumns seasons={group.seasons} education={group.education} postingFacts={group.featuredRole?.postingFacts} /> : null}
                 {!wideRow ? <Text style={styles.catalogListMeta} numberOfLines={2}>{groupLocation}</Text> : null}
                 {group.unconfirmedRoleCount ? <Text style={styles.catalogListMeta}>{group.unconfirmedRoleCount} unconfirmed</Text> : null}
               </View>
-              {wideRow ? <CatalogMetadataColumns seasons={group.seasons} education={group.education} wide /> : null}
+              {wideRow ? <CatalogMetadataColumns seasons={group.seasons} education={group.education} postingFacts={group.featuredRole?.postingFacts} wide /> : null}
               {wideRow ? <View style={styles.catalogListDetails}><Text style={styles.catalogListLocation} numberOfLines={2}>{groupLocation}</Text></View> : null}
               {wideRow ? <Text style={styles.catalogListPay}>—</Text> : null}
               <View style={[styles.catalogListActivity, !wideRow && styles.catalogListActivityMobile]}>

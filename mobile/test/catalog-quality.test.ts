@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { boundedCatalogText, catalogMetadataTags, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "../src/catalog-quality.js";
 import { compactCompensationLabel } from "../../shared/compensation-display.js";
+import type { PostingFact } from "../../shared/posting-facts.js";
 
 describe("catalog presentation hardening", () => {
+  it("keeps a stated degree requirement visible when its level is unspecified", () => {
+    const facts: PostingFact[] = [{ field: 'education', statements: ['Working towards advanced degree in quantitative field (economics, finance, CS or applied math)'], qualifiers: [], sourceUrl: 'https://example.com/job', contentHash: 'a'.repeat(64) }];
+    const unspecified = [{ levels: [], evidence: 'unspecified' }];
+    expect(catalogMetadataTags([], unspecified, facts)).toContainEqual({ label: 'Pursuing degree', kind: 'education' });
+    expect(catalogMetadataTags([], unspecified, facts)).not.toContainEqual({ label: 'Education unspecified', kind: 'neutral' });
+    expect(catalogMetadataTags([], unspecified)).toContainEqual({ label: 'Education unspecified', kind: 'neutral' });
+    expect(catalogMetadataTags([], [{ levels: ['masters'], evidence: 'explicit' }], facts)).not.toContainEqual({ label: 'Pursuing degree', kind: 'education' });
+    expect(catalogMetadataTags([], [{ levels: [], evidence: 'conflicting' }], facts)).toContainEqual({ label: 'Education unclear', kind: 'neutral' });
+  });
   it("shows season and education tags without turning missing or inferred evidence into requirements", () => {
     expect(catalogMetadataTags(['summer-2027'], [{ levels: ['undergraduate', 'masters'], evidence: 'explicit' }])).toEqual([
       { label: 'Summer 2027', kind: 'season' }, { label: 'Undergrad', kind: 'education' }, { label: 'Masters', kind: 'education' },
