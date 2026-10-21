@@ -1,6 +1,6 @@
 # Company icons
 
-Company icons are stored against `canonical_employers`, not provider mappings or a company website domain. The asset lives in the existing `DOCUMENTS` R2 bucket under `company-icons/<canonical-employer-id>/...`; the D1 `icon_key` is the only public reference.
+Company icons belong to a canonical employer or an independent company/site identity. Assets live in the existing `DOCUMENTS` R2 bucket under `company-icons/<identity-id>/...`; D1 owns the icon reference and resolution evidence. Provider mappings, admission, and ranking identity remain separate.
 
 ## Operator workflow
 
@@ -35,6 +35,27 @@ Do not derive branding from arbitrary websites or third-party favicon services. 
 Most canonical employers are created before anyone has an icon for them, and a role must never wait on one. An employer without a reviewed icon therefore gets a background decision, and every unresolved case renders the deterministic monogram the client already draws. A role published without an icon is never hidden and never delays a notification.
 
 ### How a decision is made
+
+The V2 live catalog writer also registers reviewed official-source employer IDs
+before publication and enqueues icon work afterward. Existing provider/tenant
+mappings outrank source-local board IDs. Canary and shadow sinks do neither.
+Migration `0060` registers the 19 reviewed Greenhouse IDs previously published
+without employer rows, and re-arms unresolved icon work under resolver v5 while
+preserving reviewed icons, withdrawn decisions, and corporate-redirect holds.
+
+Reviewed ATS routes now carry stronger identity weight: when an immutable
+Greenhouse, Lever, Ashby, or Workday route's tenant exactly matches a provider
+candidate's domain brand, and that tenant also names the catalog employer, the
+candidate can resolve at **0.60** with the existing **0.15** lead over alternatives.
+Regional-domain ties still go to the model. Model acceptance for that same
+evidence uses **0.60** confidence instead of **0.80**, with two valid supporting
+citations still required. Unreviewed, mismatched, and generic transport routes
+retain the existing rules. A selected domain must still produce a usable image.
+
+Claimed historical tasks missing a posting URL or provenance refresh from a
+current catalog role. Decision records preserve provenance and exact model
+decline reason codes, so later retries keep the reviewed-source evidence and
+operators can distinguish a model decline from failed domain verification.
 
 1. **Admission records the task.** When posting admission resolves a canonical employer, `src/poll.ts` hands the employer ID, the application URL, and the provider/tenant to `enqueueEmployerIconResolution`. That is one deduplicated `INSERT` keyed by `(canonical_employer_id, evidence_fingerprint)`; no provider or model is called on the ingestion path, and the insert is skipped when the employer already has a reviewed icon or a live decision. Employers that predate the resolver are seeded the same way by a bounded backfill, and each backfilled task carries the employer's own live posting link when the catalog still has one, so it resolves with the same page evidence — including the site its board or Organization node declares — as a fresh admission instead of on the name alone.
 2. **A sweep resolves it.** The dedicated `6-56/10 * * * *` cron calls `runEmployerIconResolutionPass`, which claims at most `maxPerSweep` due rows with a lease. Keeping the sweep separate from the catalog projection (now its own `1-51/10 * * * *` cron) prevents memory-heavy publication work from starving icon resolution. The sweep reads the real application link through the existing SSRF controls (`safeFetchText`, five redirects, 10s, 512 KiB), presenting an identifying user agent and `Accept: text/html` (`NternCompanyIcons/1.0 (+…; read-only)`), parses only bounded public metadata (`<title>`, OpenGraph, JSON-LD `Organization` name and URL), and asks Logo.dev and Brandfetch for domains by employer name — first under the catalog's name, then under the names the employer's own board and page declare about itself (the board's organisation name, a structured-data `Organization.name`, the Open Graph site name), then under the employer's distinctive brand token. Every query is matched against the name that was asked for, each employer asks at most four, and the query that actually reached the provider is logged (`company_icon_provider_query_won`), because that is the only way to know whether the extra names earn their requests. A posting page larger than the ceiling is **truncated, not rejected**: the employer's name is in the first few kilobytes of `<head>`, and a two-megabyte Lever page must not cost that employer its icon. A page that answers **non-2xx** is a retrieval failure, not a page that happens to say nothing: it yields no evidence, records `pageFailure`/`pageStatus` for the reviewer, and a rate limit or bot wall (403, 406, 408, 425, 429, 5xx) takes the one-hour transient backoff while a withdrawn or malformed posting takes the long one.
@@ -263,6 +284,31 @@ Decision paths taken: automatic resolution, tie-break acceptance, and monogram f
 - **Simple Icons and favicon services are not used.** The mobile client previously carried a hardcoded map of `cdn.simpleicons.org` and `icons.duckduckgo.com` URLs; it has been removed in favour of the first-party route and the monogram.
 
 ### Serving an automatic icon
+
+Icon resolution does not require a canonical employer ID. Catalog roles without
+one use a stable `icon-v1-…` identity derived from the normalized company name and
+application host plus ATS board/site. The browser and native client use the same
+helper as admission and backfill. A shared tenant alone never merges brands:
+RTX/Raytheon and TikTok/ByteDance keep separate identities. These identities live
+in `company_icon_identities`; they grant no admission or ranking authority.
+
+Owning V2 admission records the icon identity after publication. The dedicated
+icon cron also pages 50 current-manifest groups per pass, recovering legacy
+roles and failed enqueues without changing individual role records. Operators
+can accelerate that same bounded recovery with
+`POST /internal/admission/employer-icons/backfill`; repeat until `complete` is
+true. This queues discovery, rather than treating a lookup key as a found logo.
+Matching scope plus brand, or a verified domain plus brand, can reuse an existing
+canonical logo through a live donor reference. Operator invalidations and later
+logo corrections still apply.
+
+Coverage includes every role in the current manifest, including unresolved
+employers. The operations API labels its estimate `coverageBasis: stored-reference`.
+For actual served coverage, run
+`npx tsx scripts/measure-served-company-icons.ts --report <path.json>`.
+It probes every distinct public icon key and counts only nonempty successful
+image responses, weighted by all catalog roles. Lookup eligibility and stored
+references are not measured image availability.
 
 `GET /company-icons/:id` resolves in this order:
 

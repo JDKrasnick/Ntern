@@ -1000,8 +1000,9 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     // Provider bytes are cached only once the operator confirms self-hosting rights.
     const retainIcon = settings.logoDevRetentionLicensedAt
       ? async (id: string, asset: { bytes: Uint8Array; contentType: string }) => {
-        const key = await storeProviderIcon(env, id, asset.bytes, asset.contentType);
-        await employerIcons.markProviderIcon({ canonicalEmployerId: id, iconKey: key, now: new Date().toISOString() });
+        const owner = iconState?.inheritedFromEmployerId ?? id;
+        const key = await storeProviderIcon(env, owner, asset.bytes, asset.contentType);
+        await employerIcons.markProviderIcon({ canonicalEmployerId: owner, iconKey: key, now: new Date().toISOString() });
       }
       : undefined;
     const cache = edgeIconCache();

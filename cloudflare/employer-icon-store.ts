@@ -6,10 +6,14 @@
  * binding is not needed to make progress. A sweep claims due rows with a lease,
  * so a duplicate or overlapping pass can never resolve the same employer twice.
  *
- * `canonical_employers` remains the owner of the durable icon reference. The
- * columns added by migration 0034 record what the resolver decided and why.
+ * Canonical employers and icon-only identities share resolution tasks and review
+ * controls. Icon-only identities never create admission or ranking authority.
  */
 
+import { companyIconIdentity, companyIconName } from '../shared/company-icon.js';
+import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
+import { isIconTransportHost } from '../src/employer-icon-resolution.js';
+import { registrableDomain } from '../src/core/registrable-domain.js';
 import type { D1Database } from './types.js';
 
 export type EmployerIconResolutionStatus = 'resolved' | 'unresolved' | 'retryable' | 'invalidated';
@@ -80,6 +84,7 @@ export interface EmployerIconReviewItem {
 }
 
 export interface EmployerIconResolutionCounts {
+  coverageBasis: 'stored-reference';
   status: Record<string, number>;
   iconSource: Record<string, number>;
   active: {
@@ -88,10 +93,72 @@ export interface EmployerIconResolutionCounts {
   };
 }
 
+const iconTable = (id: string) => id.startsWith('icon-v1-') ? 'company_icon_identities' : 'canonical_employers';
+
 type Row = Record<string, string | number | null>;
 
 export class D1EmployerIconStore {
   constructor(private readonly db: D1Database) {}
+
+  /** Register icon evidence without creating or assigning a canonical employer. */
+  async registerIdentity(seed: EmployerIconSeed, now: Date, canonicalEmployerId?: string): Promise<EmployerIconSeed | undefined> {
+    const identity = companyIconIdentity(seed.displayName, seed.applicationUrl);
+    if (!identity) return undefined;
+    const donor = canonicalEmployerId && !canonicalEmployerId.startsWith('icon-v1-') ? await this.context(canonicalEmployerId) : undefined;
+    let donorId = donor && companyIconName(donor.displayName) === identity.name ? donor.id : null;
+    const domain = registrableDomain(new URL(seed.applicationUrl).hostname);
+    if (!donorId && domain && !isIconTransportHost(domain)) {
+      const matches = await this.db.prepare(`SELECT id, display_name FROM canonical_employers
+        WHERE website_domain = ? AND (icon_key IS NOT NULL OR icon_resolution_status = 'resolved')`)
+        .bind(domain).all<{ id: string; display_name: string }>();
+      const sameBrand = matches.results.filter((row) => companyIconName(row.display_name) === identity.name);
+      if (sameBrand.length === 1) donorId = sameBrand[0]!.id;
+    }
+    const evidence = { ...seed, canonicalEmployerId: identity.id };
+    const at = now.toISOString();
+    await this.db.prepare(`INSERT INTO company_icon_identities
+      (id, display_name, scope, name_key, seed_json, donor_employer_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET seed_json = excluded.seed_json,
+        donor_employer_id = COALESCE(excluded.donor_employer_id, company_icon_identities.donor_employer_id),
+        updated_at = excluded.updated_at`)
+      .bind(identity.id, seed.displayName, identity.scope, identity.name, JSON.stringify(evidence), donorId, at, at).run();
+    return evidence;
+  }
+
+  /** Current manifest only; the cursor makes background recovery bounded. */
+  async catalogIconPage(after: string, limit: number): Promise<Array<{
+    key: string; company: string; url: string; title: string; employerId?: string;
+    provenance?: EmployerIconSeed['provenance']; sourceId?: string;
+  }>> {
+    const rows = await this.db.prepare(`SELECT item.sk AS key,
+        json_extract(item.value, '$.group.featuredRole') AS role
+      FROM catalog_items AS item
+      JOIN catalog_items AS current ON current.pk = 'CATALOG_PROJECTION' AND current.sk = 'CURRENT'
+      JOIN catalog_items AS manifest ON manifest.pk = 'CATALOG_PROJECTION#MANIFESTS'
+        AND manifest.sk = json_extract(current.value, '$.version')
+      WHERE item.pk = 'CATALOG_PROJECTION#GROUPS' AND item.sk > ?
+        AND EXISTS (SELECT 1 FROM json_each(manifest.value, '$.keys') WHERE value = item.sk)
+      ORDER BY item.sk LIMIT ?`).bind(after, limit).all<{ key: string; role: string }>();
+    return rows.results.map((row) => {
+      const role = JSON.parse(row.role);
+      return { key: row.key, company: role.company, url: role.officialApplyUrl, title: role.title,
+        employerId: role.canonicalEmployerId, provenance: role.sourceReferences?.[0]?.provenance,
+        sourceId: role.sourceReferences?.[0]?.sourceId };
+    });
+  }
+
+  async iconBackfillCursor(): Promise<string> {
+    const row = await this.db.prepare("SELECT value FROM system_state WHERE key = 'company_icon_identity_cursor'")
+      .first<{ value: string }>();
+    return row?.value ?? '';
+  }
+
+  async setIconBackfillCursor(cursor: string, now: string): Promise<void> {
+    await this.db.prepare(`INSERT INTO system_state (key, value, updated_at)
+      VALUES ('company_icon_identity_cursor', ?, ?) ON CONFLICT(key) DO UPDATE
+      SET value = excluded.value, updated_at = excluded.updated_at`).bind(cursor, now).run();
+  }
 
   async settings(): Promise<EmployerIconSettings> {
     const row = await this.db.prepare('SELECT value FROM system_state WHERE key = ?')
@@ -149,19 +216,22 @@ export class D1EmployerIconStore {
     const result = await this.db.prepare(`INSERT INTO employer_icon_resolutions
       (id, canonical_employer_id, evidence_fingerprint, status, evidence_json, attempts, next_retry_at, created_at, updated_at)
       SELECT ?, ?, ?, 'retryable', ?, 0, ?, ?, ?
-      WHERE EXISTS (SELECT 1 FROM canonical_employers WHERE id = ?
+      WHERE EXISTS (SELECT 1 FROM ${iconTable(input.canonicalEmployerId)} WHERE id = ?
           AND (icon_key IS NULL OR icon_key = '')
           AND (icon_resolution_status IS NULL OR icon_resolution_status NOT IN ('resolved', 'invalidated')
             OR (icon_resolution_status = 'resolved'
               AND EXISTS (SELECT 1 FROM employer_icon_resolutions AS settled
-                WHERE settled.canonical_employer_id = canonical_employers.id
+                WHERE settled.canonical_employer_id = ${iconTable(input.canonicalEmployerId)}.id
                   AND settled.status = 'resolved'))))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions
           WHERE canonical_employer_id = ? AND status = 'resolved'
             AND (next_retry_at IS NULL OR next_retry_at > ?))
+        AND (? = 0 OR NOT EXISTS (SELECT 1 FROM employer_icon_resolutions
+          WHERE canonical_employer_id = ? AND status IN ('retryable', 'unresolved') AND next_retry_at IS NOT NULL))
       ON CONFLICT(canonical_employer_id, evidence_fingerprint) DO NOTHING`)
       .bind(input.id, input.canonicalEmployerId, input.evidenceFingerprint, input.evidenceJson,
-        input.nextRetryAt, input.now, input.now, input.canonicalEmployerId, input.canonicalEmployerId, input.now)
+        input.nextRetryAt, input.now, input.now, input.canonicalEmployerId, input.canonicalEmployerId, input.now,
+        input.canonicalEmployerId.startsWith('icon-v1-') ? 1 : 0, input.canonicalEmployerId)
       .run();
     return result.meta.changes > 0;
   }
@@ -201,7 +271,7 @@ export class D1EmployerIconStore {
   async context(employerId: string): Promise<EmployerIconContext | undefined> {
     const row = await this.db.prepare(`SELECT id, display_name, icon_key, icon_source, icon_resolution_status,
       website_domain, website_domain_source, icon_tie_break_at, icon_tie_break_fingerprint, icon_tie_break_input_tokens, icon_tie_break_output_tokens
-      FROM canonical_employers WHERE id = ?`).bind(employerId).first<Row>();
+      FROM ${iconTable(employerId)} WHERE id = ?`).bind(employerId).first<Row>();
     if (!row) return undefined;
     return {
       id: row.id as string, displayName: row.display_name as string,
@@ -227,12 +297,18 @@ export class D1EmployerIconStore {
   async renderContext(employerId: string): Promise<EmployerIconContext | undefined> {
     const child = await this.context(employerId);
     if (!child) return undefined;
-    if (child.iconKey || (child.resolutionStatus === 'resolved' && child.websiteDomain)) return child;
-    const relations = await this.db.prepare(`SELECT brand_of_employer_id, parent_employer_id
-      FROM canonical_employers WHERE id = ?`).bind(employerId).first<Row>();
+    if (child.resolutionStatus === 'invalidated' || child.iconKey || (child.resolutionStatus === 'resolved' && child.websiteDomain)) return child;
+    const relations = await this.db.prepare(`SELECT ${employerId.startsWith('icon-v1-') ? 'donor_employer_id AS brand_of_employer_id, NULL AS parent_employer_id' : 'brand_of_employer_id, parent_employer_id'}
+      FROM ${iconTable(employerId)} WHERE id = ?`).bind(employerId).first<Row>();
     for (const relation of [relations?.brand_of_employer_id, relations?.parent_employer_id]) {
       if (typeof relation !== 'string' || !relation) continue;
-      const donor = await this.context(relation);
+      const donor = employerId.startsWith('icon-v1-') ? await this.renderContext(relation) : await this.context(relation);
+      if (employerId.startsWith('icon-v1-') && donor?.resolutionStatus === 'invalidated') {
+        return { ...child, resolutionStatus: 'invalidated', inheritedFromEmployerId: donor.id };
+      }
+      if (employerId.startsWith('icon-v1-') && donor && !donor.iconKey && !(donor.resolutionStatus === 'resolved' && donor.websiteDomain)) {
+        return { ...child, inheritedFromEmployerId: donor.id };
+      }
       if (!donor || (!donor.iconKey && !(donor.resolutionStatus === 'resolved' && donor.websiteDomain))) continue;
       return {
         ...child,
@@ -284,7 +360,7 @@ export class D1EmployerIconStore {
         lease_token = NULL, lease_until = NULL, updated_at = ? WHERE id = ?`)
         .bind(input.selectedDomain ?? null, input.selectedSource, input.confidence, input.evidenceJson,
           input.revalidateAt, input.now, input.taskId),
-      this.db.prepare(`UPDATE canonical_employers SET
+      this.db.prepare(`UPDATE ${iconTable(input.canonicalEmployerId)} SET
         icon_key = CASE WHEN icon_key IS NULL THEN ? ELSE icon_key END,
         icon_source = CASE WHEN icon_key IS NULL AND ? IS NOT NULL THEN 'logo-dev' ELSE icon_source END,
         website_domain = CASE WHEN website_domain_source = 'reviewed' THEN website_domain ELSE ? END,
@@ -314,7 +390,7 @@ export class D1EmployerIconStore {
         next_retry_at = ?, lease_token = NULL, lease_until = NULL, updated_at = ? WHERE id = ?`)
         .bind(input.evidenceJson, input.reviewPriority ?? 0, employerIconReviewAfterAttempts, employerIconExhaustedPriority,
           input.nextRetryAt, input.now, input.taskId),
-      this.db.prepare(`UPDATE canonical_employers SET icon_resolution_status = 'unresolved', updated_at = ?
+      this.db.prepare(`UPDATE ${iconTable(input.canonicalEmployerId)} SET icon_resolution_status = 'unresolved', updated_at = ?
         WHERE id = ? AND icon_resolution_status IS NOT 'resolved'`)
         .bind(input.now, input.canonicalEmployerId),
     ]);
@@ -339,7 +415,7 @@ export class D1EmployerIconStore {
   async recordTieBreak(input: {
     canonicalEmployerId: string; at: string; evidenceFingerprint: string; inputTokens: number; outputTokens: number;
   }): Promise<void> {
-    await this.db.prepare(`UPDATE canonical_employers SET icon_tie_break_at = ?, icon_tie_break_fingerprint = ?,
+    await this.db.prepare(`UPDATE ${iconTable(input.canonicalEmployerId)} SET icon_tie_break_at = ?, icon_tie_break_fingerprint = ?,
       icon_tie_break_input_tokens = ?, icon_tie_break_output_tokens = ?, updated_at = ? WHERE id = ?`)
       .bind(input.at, input.evidenceFingerprint, input.inputTokens, input.outputTokens, input.at, input.canonicalEmployerId).run();
   }
@@ -374,7 +450,7 @@ export class D1EmployerIconStore {
           version: 1, kind: 'operator-report', canonicalEmployerId,
           reasonCode: 'operator-report', invalidatedReason: boundedReason,
         }), employerIconWrongMatchPriority, now, now, now, canonicalEmployerId),
-      this.db.prepare(`UPDATE canonical_employers SET
+      this.db.prepare(`UPDATE ${iconTable(canonicalEmployerId)} SET
         icon_key = CASE WHEN icon_source IN ('logo-dev', 'platform', 'domain-asset') THEN NULL ELSE icon_key END,
         icon_source = CASE WHEN icon_source IN ('logo-dev', 'platform', 'domain-asset') THEN NULL ELSE icon_source END,
         website_domain = NULL, website_domain_source = NULL, website_domain_reviewed_at = NULL,
@@ -400,7 +476,7 @@ export class D1EmployerIconStore {
     now: string;
     source?: 'platform' | 'domain-asset';
   }): Promise<void> {
-    await this.db.prepare(`UPDATE canonical_employers SET
+    await this.db.prepare(`UPDATE ${iconTable(input.canonicalEmployerId)} SET
       icon_key = CASE WHEN icon_key IS NULL THEN ? ELSE icon_key END,
       icon_source = CASE WHEN icon_key IS NULL THEN ? ELSE icon_source END,
       icon_updated_at = CASE WHEN icon_key IS NULL THEN ? ELSE icon_updated_at END,
@@ -417,7 +493,7 @@ export class D1EmployerIconStore {
   async markProviderIcon(input: {
     canonicalEmployerId: string; iconKey: string; now: string;
   }): Promise<void> {
-    await this.db.prepare(`UPDATE canonical_employers SET
+    await this.db.prepare(`UPDATE ${iconTable(input.canonicalEmployerId)} SET
       icon_key = CASE WHEN icon_key IS NULL OR icon_source IN ('logo-dev', 'platform', 'domain-asset') THEN ? ELSE icon_key END,
       icon_source = CASE WHEN icon_key IS NULL OR icon_source IN ('logo-dev', 'platform', 'domain-asset') THEN 'logo-dev' ELSE icon_source END,
       icon_updated_at = CASE WHEN icon_key IS NULL OR icon_source IN ('logo-dev', 'platform', 'domain-asset') THEN ? ELSE icon_updated_at END,
@@ -440,7 +516,7 @@ export class D1EmployerIconStore {
         review_priority = 0, invalidated_at = NULL, lease_token = NULL, lease_until = NULL, updated_at = ?
         WHERE canonical_employer_id = ? AND status <> 'resolved'`)
         .bind(input.domain, input.evidenceJson, input.revalidateAt, input.now, input.canonicalEmployerId),
-      this.db.prepare(`UPDATE canonical_employers SET
+      this.db.prepare(`UPDATE ${iconTable(input.canonicalEmployerId)} SET
         icon_source = CASE WHEN icon_key IS NULL THEN 'logo-dev' ELSE icon_source END,
         website_domain = ?, website_domain_source = 'reviewed', website_domain_reviewed_at = ?,
         website_domain_reviewed_by = 'employer-icon-operations', icon_resolution_status = 'resolved',
@@ -477,7 +553,7 @@ export class D1EmployerIconStore {
 
   /** The domain an automatically resolved icon is served from, when one exists. */
   async automaticDomain(canonicalEmployerId: string): Promise<string | undefined> {
-    const row = await this.db.prepare(`SELECT website_domain FROM canonical_employers
+    const row = await this.db.prepare(`SELECT website_domain FROM ${iconTable(canonicalEmployerId)}
       WHERE id = ? AND icon_resolution_status = 'resolved' AND website_domain IS NOT NULL LIMIT 1`)
       .bind(canonicalEmployerId).first<{ website_domain: string | null }>();
     return row?.website_domain ?? undefined;
@@ -502,7 +578,7 @@ export class D1EmployerIconStore {
           THEN json_remove(evidence_json, '$.invalidatedReason') ELSE evidence_json END,
         updated_at = ? WHERE canonical_employer_id = ? AND status IN ('invalidated', 'resolved')`)
         .bind(now, now, canonicalEmployerId),
-      this.db.prepare(`UPDATE canonical_employers SET
+      this.db.prepare(`UPDATE ${iconTable(canonicalEmployerId)} SET
         icon_resolution_status = CASE WHEN icon_resolution_status IN ('invalidated', 'resolved') THEN NULL ELSE icon_resolution_status END,
         updated_at = ? WHERE id = ?`).bind(now, canonicalEmployerId),
     ]);
@@ -528,7 +604,8 @@ export class D1EmployerIconStore {
    * person's answer.
    */
   async employersNeedingResolution(limit: number): Promise<Array<{ id: string; displayName: string }>> {
-    const rows = await this.db.prepare(`SELECT employer.id, employer.display_name FROM canonical_employers AS employer
+    const rows = await this.db.prepare(`SELECT employer.id, employer.display_name FROM (SELECT id, display_name, icon_key, icon_resolution_status FROM canonical_employers
+        UNION ALL SELECT id, display_name, icon_key, icon_resolution_status FROM company_icon_identities WHERE donor_employer_id IS NULL) AS employer
       WHERE (employer.icon_key IS NULL OR employer.icon_key = '')
         AND (employer.icon_resolution_status IS NULL OR employer.icon_resolution_status NOT IN ('resolved', 'invalidated'))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS task
@@ -552,6 +629,14 @@ export class D1EmployerIconStore {
     sourceId?: string;
     provenance?: 'official-ats' | 'official-structured' | 'employer-submitted' | 'reviewed-community';
   } | undefined> {
+    if (canonicalEmployerId.startsWith('icon-v1-')) {
+      const row = await this.db.prepare('SELECT seed_json FROM company_icon_identities WHERE id = ?')
+        .bind(canonicalEmployerId).first<{ seed_json: string }>();
+      if (!row) return undefined;
+      const seed = JSON.parse(row.seed_json) as EmployerIconSeed;
+      return { url: seed.applicationUrl, title: seed.roleTitle, provider: seed.provider,
+        sourceId: seed.sourceId, provenance: seed.provenance };
+    }
     const row = await this.db.prepare(`SELECT
         json_extract(value, '$.normalizedUrl') AS url,
         json_extract(value, '$.title') AS title,
@@ -582,12 +667,15 @@ export class D1EmployerIconStore {
   async counts(): Promise<EmployerIconResolutionCounts> {
     const [statuses, sources, active] = await Promise.all([
       this.db.prepare('SELECT status, COUNT(*) AS count FROM employer_icon_resolutions GROUP BY status').all<Row>(),
-      this.db.prepare("SELECT COALESCE(icon_source, 'none') AS source, COUNT(*) AS count FROM canonical_employers GROUP BY source").all<Row>(),
+      this.db.prepare(`SELECT COALESCE(icon_source, 'none') AS source, COUNT(*) AS count FROM
+        (SELECT icon_source FROM canonical_employers UNION ALL SELECT icon_source FROM company_icon_identities) GROUP BY source`).all<Row>(),
       this.db.prepare(`WITH current_projection AS (
           SELECT json_extract(value, '$.version') AS version
           FROM catalog_items WHERE pk = 'CATALOG_PROJECTION' AND sk = 'CURRENT'
         ), active_groups AS (
-          SELECT json_extract(group_row.value, '$.group.featuredRole.canonicalEmployerId') AS employer_id,
+          SELECT COALESCE(json_extract(group_row.value, '$.group.featuredRole.canonicalEmployerId'),
+              json_extract(group_row.value, '$.group.featuredRole.companyIconId'),
+              'unmapped:' || json_extract(group_row.value, '$.group.featuredRole.company')) AS employer_id,
             COALESCE(json_extract(group_row.value, '$.group.roleCount'), 0) AS role_count
           FROM catalog_items AS group_row
           JOIN current_projection
@@ -597,21 +685,27 @@ export class D1EmployerIconStore {
           WHERE group_row.pk = 'CATALOG_PROJECTION#GROUPS'
             AND group_row.kind = 'catalog-projection'
             AND EXISTS (SELECT 1 FROM json_each(manifest.value, '$.keys') WHERE value = group_row.sk)
-            AND COALESCE(json_extract(group_row.value, '$.group.featuredRole.canonicalEmployerId'), '') <> ''
+
+        ), registry AS (
+          SELECT id, icon_key, icon_resolution_status, website_domain, brand_of_employer_id, parent_employer_id
+          FROM canonical_employers
+          UNION ALL
+          SELECT id, icon_key, icon_resolution_status, website_domain, donor_employer_id, NULL FROM company_icon_identities
         ), covered AS (
           SELECT active_groups.employer_id, active_groups.role_count,
             CASE WHEN
-              employer.icon_key IS NOT NULL
+              COALESCE(employer.icon_key, '') <> ''
               OR (employer.icon_resolution_status = 'resolved' AND employer.website_domain IS NOT NULL)
-              OR brand.icon_key IS NOT NULL
-              OR (brand.icon_resolution_status = 'resolved' AND brand.website_domain IS NOT NULL)
-              OR parent.icon_key IS NOT NULL
-              OR (parent.icon_resolution_status = 'resolved' AND parent.website_domain IS NOT NULL)
+              OR (COALESCE(employer.icon_resolution_status, '') <> 'invalidated' AND (
+                COALESCE(brand.icon_key, '') <> ''
+                OR (brand.icon_resolution_status = 'resolved' AND brand.website_domain IS NOT NULL)
+                OR COALESCE(parent.icon_key, '') <> ''
+                OR (parent.icon_resolution_status = 'resolved' AND parent.website_domain IS NOT NULL)))
             THEN 1 ELSE 0 END AS has_icon
           FROM active_groups
-          LEFT JOIN canonical_employers AS employer ON employer.id = active_groups.employer_id
-          LEFT JOIN canonical_employers AS brand ON brand.id = employer.brand_of_employer_id
-          LEFT JOIN canonical_employers AS parent ON parent.id = employer.parent_employer_id
+          LEFT JOIN registry AS employer ON employer.id = active_groups.employer_id
+          LEFT JOIN registry AS brand ON brand.id = employer.brand_of_employer_id
+          LEFT JOIN registry AS parent ON parent.id = employer.parent_employer_id
         )
         SELECT COUNT(DISTINCT employer_id) AS employers,
           COUNT(DISTINCT CASE WHEN has_icon = 1 THEN employer_id END) AS covered_employers,
@@ -623,6 +717,7 @@ export class D1EmployerIconStore {
     const roles = Number(active?.roles ?? 0);
     const coveredRoles = Number(active?.covered_roles ?? 0);
     return {
+      coverageBasis: 'stored-reference',
       status: Object.fromEntries(statuses.results.map((row) => [String(row.status), Number(row.count)])),
       iconSource: Object.fromEntries(sources.results.map((row) => [String(row.source), Number(row.count)])),
       active: {

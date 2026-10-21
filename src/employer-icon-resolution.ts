@@ -15,6 +15,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalCompanyKey } from './core/normalize.js';
 import { registrableDomain } from './core/registrable-domain.js';
+import { providerPostingReference } from './identity/posting.js';
 import type { OccurrenceProvenance } from './types.js';
 
 /**
@@ -46,6 +47,8 @@ export type IconEvidenceSignal =
   | 'proposed-domain'
   /** The posting's own reviewed ATS board slug names the canonical employer. */
   | 'ats-tenant'
+  /** A reviewed immutable ATS tenant exactly names this provider-nominated domain. */
+  | 'reviewed-ats-domain'
   /** Logo.dev name search selected this domain. */
   | 'logo-dev'
   /** Brandfetch name search selected this domain, as corroboration only. */
@@ -86,6 +89,7 @@ const GROUP_WEIGHTS = {
   jsonld: 0.35,
   provider: 0.30,
   metadata: 0.15,
+  reviewedAts: 0.35,
   /**
    * Added to the 0.45 URL weight when the candidate is the application host that
    * an officially-admitted role was recorded on, taking it to exactly the 0.85
@@ -105,11 +109,14 @@ const MAX_SCORE = 1.0;
 
 /** A domain is accepted automatically only above this score and beyond the margin. */
 export const ICON_AUTO_RESOLVE_SCORE = 0.85;
+export const ICON_REVIEWED_ATS_AUTO_RESOLVE_SCORE = 0.6;
 export const ICON_AUTO_RESOLVE_MARGIN = 0.15;
 /** The band where one bounded LLM tie-breaker may be consulted. */
 export const ICON_LLM_BAND_MINIMUM = 0.55;
 /** The LLM may accept on its own word at or above this confidence. */
 export const ICON_LLM_MINIMUM_CONFIDENCE = 0.8;
+/** Reviewed ATS identity supplies the independent anchor missing from name search. */
+export const ICON_REVIEWED_ATS_MINIMUM_CONFIDENCE = 0.6;
 /**
  * ...or below it, down to this floor, when the domain it selected proves itself.
  *
@@ -367,6 +374,21 @@ export function tenantCorroboratesEmployer(tenant: string | undefined, canonical
   return employer.length >= 4 && (board.startsWith(employer) || board.endsWith(employer));
 }
 
+/** Exact tenant/domain brand equality, never a substring or an ATS transport host. */
+export function reviewedAtsNamesDomain(seed: EmployerIconSeed, domain: string): boolean {
+  if ((!officialIconProvenance(seed.provenance) && seed.provenance !== 'reviewed-community') || !seed.tenant
+    || seed.provider === 'unknown' || seed.provider === 'paylocity'
+    || !/^[a-z0-9-]+$/iu.test(seed.tenant) || isIconTransportHost(domain)) return false;
+  const reference = providerPostingReference(seed.applicationUrl);
+  if (reference.provider !== seed.provider || reference.tenant?.toLowerCase() !== seed.tenant.toLowerCase()
+    || !reference.postingId) return false;
+  const tenant = seed.tenant.toLowerCase().replace(/-/gu, '');
+  const brand = registrableDomain(domain).split('.')[0]!.replace(/-/gu, '');
+  return tenant.length >= 3 && tenant === brand
+    && (employerDistinctiveTerms(seed.displayName).includes(tenant)
+      || tenantCorroboratesEmployer(seed.tenant, seed.displayName));
+}
+
 /** Stable evidence identifier a decision may cite, e.g. `logo-dev:example.com`. */
 export function iconEvidenceId(signal: IconEvidenceSignal, domain: string): string {
   return `${signal}:${domain}`;
@@ -408,6 +430,7 @@ export function scoreIconCandidate(
     || signals.includes('platform-name')) {
     score += GROUP_WEIGHTS.metadata;
   }
+  if (signals.includes('reviewed-ats-domain')) score += GROUP_WEIGHTS.reviewedAts;
   // Decimal weights accumulate binary float error, and a resolved/unresolved
   // decision compares against a threshold exactly, so the sum is settled here
   // rather than left to whatever `0.45 + 0.40` happens to produce.
@@ -471,11 +494,18 @@ export function decideIconDomain(candidates: readonly IconDomainCandidate[]): Ic
   }
   const runnerUp = eligible.find((candidate) => candidate.domain !== best.domain);
   const margin = runnerUp ? best.score - runnerUp.score : MAX_SCORE;
-  if (best.score >= ICON_AUTO_RESOLVE_SCORE && margin >= ICON_AUTO_RESOLVE_MARGIN) {
+  const threshold = best.signals.includes('reviewed-ats-domain')
+    && best.signals.some((signal) => signal === 'logo-dev' || signal === 'brandfetch')
+    ? ICON_REVIEWED_ATS_AUTO_RESOLVE_SCORE : ICON_AUTO_RESOLVE_SCORE;
+  // Search providers can agree on a namesake. Such agreement cannot silently
+  // override a competing domain anchored by the reviewed posting's own tenant.
+  const reviewedAtsAlternative = eligible.some((candidate) => candidate.domain !== best.domain
+    && candidate.signals.includes('reviewed-ats-domain'));
+  if (best.score >= threshold && margin >= ICON_AUTO_RESOLVE_MARGIN && !reviewedAtsAlternative) {
     return {
       outcome: 'resolved', scores, selectedDomain: best.domain, selectedScore: best.score,
       ...(runnerUp ? { runnerUpScore: runnerUp.score } : {}),
-      reason: `Score ${best.score.toFixed(2)} clears ${ICON_AUTO_RESOLVE_SCORE} with a ${margin.toFixed(2)} margin`,
+      reason: `Score ${best.score.toFixed(2)} clears ${threshold} with a ${margin.toFixed(2)} margin`,
     };
   }
   const closeCompetition = runnerUp !== undefined && margin < ICON_AUTO_RESOLVE_MARGIN;
@@ -582,7 +612,9 @@ export function acceptIconTieBreak(
   if (cited.length < 2) return { accepted: false, reasonCode: 'insufficient-independent-evidence' };
   // Every structural rule holds, so the only question left is whether this answer is
   // believed on its own confidence or has to be proven against the domain.
-  if (decision.confidence >= ICON_LLM_MINIMUM_CONFIDENCE) {
+  const minimumConfidence = selected.signals.includes('reviewed-ats-domain')
+    ? ICON_REVIEWED_ATS_MINIMUM_CONFIDENCE : ICON_LLM_MINIMUM_CONFIDENCE;
+  if (decision.confidence >= minimumConfidence) {
     return { accepted: true, domain: selected.domain, reasonCode: 'accepted' };
   }
   if (decision.confidence < ICON_LLM_VERIFIED_MINIMUM_CONFIDENCE) {

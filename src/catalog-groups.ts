@@ -1,3 +1,4 @@
+import { companyIconIdentity } from '../shared/company-icon.js';
 import { createHash } from 'node:crypto';
 import { inferJobFocuses } from './core/filters.js';
 import { catalogSourceClasses, type CatalogSource } from './catalog-fields.js';
@@ -90,6 +91,8 @@ export interface CatalogGroupRole {
   company: string;
   /** Stable reviewed employer identity; clients use this to resolve a first-party icon. */
   canonicalEmployerId?: string;
+  /** Icon identity remains available when employer admission is unresolved. */
+  companyIconId?: string;
   title: string;
   location: string;
   locations: string[];
@@ -534,6 +537,7 @@ function catalogGroupRole(job: Internship): CatalogGroupRole {
   return {
     jobId: job.jobId, company: job.company, title: titleFor(job), location: job.location, season: seasonFor(job),
     ...(job.admission?.canonicalEmployer?.id ? { canonicalEmployerId: job.admission.canonicalEmployer.id } : {}),
+    companyIconId: job.admission?.canonicalEmployer?.id ?? companyIconIdentity(job.company, publicApplicationUrl(job.applyUrl))?.id,
     locations: locationsFor(job), visibleAt: catalogVisibleAt(job),
     ...(releaseDay ? { releaseDay } : {}),
     // A day read from an instant can be re-read in the reader's own zone; a

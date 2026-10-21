@@ -18,6 +18,9 @@ const tieBreakRearm = readFileSync(new URL(
   '../cloudflare/migrations/0044_rearm_icon_tie_break_changed_evidence.sql',
   import.meta.url,
 ), 'utf8');
+const reviewedSourceRepair = readFileSync(new URL(
+  '../cloudflare/migrations/0061_reviewed_source_icon_identity.sql', import.meta.url,
+), 'utf8');
 
 function migrated(): DatabaseSync {
   const database = new DatabaseSync(':memory:');
@@ -43,6 +46,42 @@ function indexColumns(database: DatabaseSync, index: string): string[] {
 }
 
 describe('employer icon resolution migration', () => {
+  it('registers missing reviewed source IDs without replacing existing reviewer choices', () => {
+    const database = migrated();
+    database.exec(readFileSync(new URL('../cloudflare/migrations/0013_canonical_employer_icons.sql', import.meta.url), 'utf8'));
+    database.exec(`INSERT INTO canonical_employers (id, display_name, reviewed_at, reviewed_by, created_at, updated_at, icon_key)
+      VALUES ('waymo', 'Operator Waymo', 'old', 'operator', 'old', 'old', 'reviewed.png')`);
+    database.exec(reviewedSourceRepair);
+    expect(database.prepare("SELECT display_name, reviewed_by, icon_key FROM canonical_employers WHERE id = 'waymo'").get())
+      .toMatchObject({ display_name: 'Operator Waymo', reviewed_by: 'operator', icon_key: 'reviewed.png' });
+    expect(database.prepare("SELECT display_name, reviewed_by FROM canonical_employers WHERE id = 'flyzipline'").get())
+      .toMatchObject({ display_name: 'Zipline', reviewed_by: 'reviewed-source-registry' });
+    expect(database.prepare('SELECT COUNT(*) AS n FROM canonical_employers').get()).toMatchObject({ n: 20 });
+    database.close();
+  });
+
+  it.each(['unresolved', 'resolved', 'invalidated', 'corporate-review', 'reviewed-domain', 'stored-icon'])(
+    're-arms unresolved work while preserving %s decisions', (state) => {
+      const database = migrated();
+      database.exec(readFileSync(new URL('../cloudflare/migrations/0013_canonical_employer_icons.sql', import.meta.url), 'utf8'));
+      database.prepare(`UPDATE canonical_employers SET icon_resolution_status = ?, icon_key = ?, website_domain_source = ?,
+        icon_tie_break_at = '2026-10-20', icon_tie_break_fingerprint = 'fp' WHERE id = 'acme'`)
+        .run(['resolved', 'invalidated'].includes(state) ? state : 'unresolved', state === 'stored-icon' ? 'stored.png' : null,
+          state === 'reviewed-domain' ? 'reviewed' : 'automatic');
+      database.prepare(`INSERT INTO employer_icon_resolutions
+        (id, canonical_employer_id, evidence_fingerprint, status, evidence_json, attempts, next_retry_at, created_at, updated_at)
+        VALUES ('task', 'acme', 'fp', ?, json_object('reasonCode', ?), 5, '2026-11-01', 'old', 'old')`)
+        .run(['resolved', 'invalidated'].includes(state) ? state : 'unresolved',
+          state === 'corporate-review' ? 'corporate-redirect-review' : 'tie-break-budget-exhausted');
+      database.exec(reviewedSourceRepair);
+      expect(database.prepare('SELECT next_retry_at, attempts FROM employer_icon_resolutions WHERE id = ?').get('task'))
+        .toMatchObject({ next_retry_at: state === 'unresolved' ? '1970-01-01T00:00:00.000Z' : '2026-11-01',
+          attempts: state === 'unresolved' ? 0 : 5 });
+      expect(database.prepare("SELECT icon_tie_break_at FROM canonical_employers WHERE id = 'acme'").get())
+        .toMatchObject({ icon_tie_break_at: state === 'unresolved' ? null : '2026-10-20' });
+      database.close();
+    },
+  );
   it('adds the resolver bookkeeping columns to canonical_employers and round-trips them', () => {
     const database = migrated();
     const columns = (database.prepare(`SELECT name FROM pragma_table_info('canonical_employers')`).all() as { name: string }[])

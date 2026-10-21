@@ -17,6 +17,7 @@ import { officialAdmissionProviderProbe } from './admission-v2-provider.js';
 import { D1AdmissionProviderGovernor, type AdmissionProviderGovernor } from './admission-v2-provider-governor.js';
 import { providerPostingReference } from '../src/identity/posting.js';
 import { reviewedIdentityApplicationUrl } from './posting-source-corrections.js';
+import { registerAdmissionEmployer, enqueueAdmissionEmployerIcon } from './admission-employer-icons.js';
 import { safeDiagnostic } from '../src/source-health.js';
 import { decodeSourceAllowlist } from '../src/ingestion-v2/source-allowlist.js';
 
@@ -192,10 +193,13 @@ export async function processAdmissionV2Batch(
         await new ReconcilerAdmissionV2CatalogSink(internshipStore, now).revoke(input);
       },
       async commit(input) {
-        const sink = admissionV2OwnsCatalogWrites(env, input.sourceId)
-          ? new ReconcilerAdmissionV2CatalogSink(internshipStore, now)
-          : new D1RecordingAdmissionV2CatalogSink(env.DB, now);
-        return sink.commit(input);
+        if (!admissionV2OwnsCatalogWrites(env, input.sourceId)) {
+          return new D1RecordingAdmissionV2CatalogSink(env.DB, now).commit(input);
+        }
+        await registerAdmissionEmployer(env.DB, input, now());
+        const result = await new ReconcilerAdmissionV2CatalogSink(internshipStore, now).commit(input);
+        await enqueueAdmissionEmployerIcon(env.DB, input, now());
+        return result;
       },
     },
     async (listing) => listing.providerIdentity

@@ -6,7 +6,7 @@ import { companyIconResponse } from '../cloudflare/company-icon.js';
 import { handleEmployerIconOperations } from '../cloudflare/employer-icon-api.js';
 import { D1EmployerIconStore } from '../cloudflare/employer-icon-store.js';
 import {
-  diagnoseEmployerIcon, enqueueEmployerIconResolution, runEmployerIconResolutionPass,
+  backfillCatalogIconIdentities, diagnoseEmployerIcon, enqueueEmployerIconResolution, runEmployerIconResolutionPass,
 } from '../cloudflare/employer-icon-resolver.js';
 import { brandfetchSearchUrl, logoDevImageUrl, logoDevSearchUrl, rasterDimensions } from '../src/employer-icon-discovery.js';
 import { createIconSvgRasterizer } from '../cloudflare/svg-raster.js';
@@ -15,6 +15,7 @@ import type { HostResolver } from '../src/employer/safe-network.js';
 import type { OpenAIJsonRequest, OpenAIJsonResult } from '../cloudflare/openai-shadow-inference.js';
 import type { CanonicalEmployer } from '../src/types.js';
 import type { D1Database, D1PreparedStatement, R2Bucket } from '../cloudflare/types.js';
+import { companyIconIdentity } from '../shared/company-icon.js';
 
 type QueryBudget = { used: number; maximum: number; queries?: string[] };
 
@@ -44,7 +45,7 @@ function sqliteD1(database: DatabaseSync, budget?: QueryBudget): D1Database {
 const MIGRATIONS = [
   '0001_initial.sql', '0003_billing_shutdown.sql', '0007_catalog_admission.sql',
   '0013_canonical_employer_icons.sql', '0034_employer_icon_resolution.sql',
-  '0038_employer_icon_resolution_v2.sql',
+  '0038_employer_icon_resolution_v2.sql', '0062_independent_company_icons.sql',
 ];
 
 function subject() {
@@ -2279,6 +2280,77 @@ describe('employer icon coverage v2', () => {
       roles: 3, coveredRoles: 2, roleCoverageRate: 2 / 3,
     });
   });
+
+  it('counts roles without an employer ID in the coverage denominator', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme', 'reviewed.webp'), NOW.toISOString());
+    database.exec(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES
+      ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection', '{"version":"v"}'),
+      ('CATALOG_PROJECTION#MANIFESTS', 'v', 'catalog-projection', '{"keys":["a","b"]}'),
+      ('CATALOG_PROJECTION#GROUPS', 'a', 'catalog-projection', '{"group":{"roleCount":2,"featuredRole":{"canonicalEmployerId":"acme"}}}'),
+      ('CATALOG_PROJECTION#GROUPS', 'b', 'catalog-projection', '{"group":{"roleCount":3,"featuredRole":{"company":"Unmapped"}}}'),
+      ('CATALOG_PROJECTION#GROUPS', 'old', 'catalog-projection', '{"group":{"roleCount":100,"featuredRole":{"canonicalEmployerId":"acme"}}}')`);
+    expect((await icons.counts()).active).toMatchObject({ roles: 5, coveredRoles: 2, roleCoverageRate: 0.4 });
+  });
+
+  it('bounds catalog recovery and deduplicates icon tasks across pages', async () => {
+    const { database, icons } = subject();
+    const keys = Array.from({ length: 60 }, (_, index) => `role-${String(index).padStart(2, '0')}`);
+    database.exec(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection', '{"version":"v"}')`);
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION#MANIFESTS', 'v', 'catalog-projection', ?)`)
+      .run(JSON.stringify({ keys }));
+    const insert = database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION#GROUPS', ?, 'catalog-projection', ?)`);
+    for (const key of keys) insert.run(key, JSON.stringify({ group: { roleCount: 1, featuredRole: {
+      company: 'Acme', title: 'Software Intern', officialApplyUrl: `https://job-boards.greenhouse.io/acme/jobs/${key}`,
+      sourceReferences: [{ sourceId: 'reviewed', provenance: 'reviewed-community' }],
+    } } }));
+    expect(await backfillCatalogIconIdentities(icons, NOW)).toEqual({ scanned: 50, enqueued: 1, complete: false });
+    expect(await backfillCatalogIconIdentities(icons, NOW)).toEqual({ scanned: 10, enqueued: 0, complete: true });
+    expect(database.prepare('SELECT COUNT(*) AS n FROM employer_icon_resolutions').get()).toMatchObject({ n: 1 });
+  });
+
+  it('resolves and serves a board logo without creating a canonical employer', async () => {
+    const { database, db, icons } = subject();
+    const r2 = r2Stub();
+    const url = 'https://job-boards.greenhouse.io/board-1/jobs/1';
+    const logo = 'https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/1/original/mark.png';
+    const seed = await icons.registerIdentity({ ...employerSeed(url), provenance: 'reviewed-community' }, NOW);
+    expect(seed?.canonicalEmployerId).toBe(companyIconIdentity('Acme', url)?.id);
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, seed!, NOW);
+    expect(await enqueueEmployerIconResolution(icons, { ...seed!, applicationUrl: 'https://job-boards.greenhouse.io/board-1/jobs/2' }, NOW)).toBe(false);
+    await runEmployerIconResolutionPass(environment(db, r2.bucket), NOW, DEPENDENCIES(scriptedFetch({
+      [url]: () => html(`<meta property="og:image" content="${logo}">`),
+      [logo]: () => new Response(new Uint8Array(64), { headers: { 'content-type': 'image/png' } }),
+    })));
+    expect(database.prepare('SELECT COUNT(*) AS n FROM canonical_employers').get()).toMatchObject({ n: 0 });
+    const context = await icons.renderContext(seed!.canonicalEmployerId);
+    expect(context?.iconSource).toBe('platform');
+    const response = await companyIconResponse(seed!.canonicalEmployerId, {
+      async getCanonicalEmployer() { return { ...employerRow(context!.id, context!.displayName), iconKey: context!.iconKey, iconSource: context!.iconSource }; },
+    }, r2.bucket, { automaticDisplay: async () => true });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('image/png');
+    await icons.invalidate(seed!.canonicalEmployerId, NOW.toISOString(), 'wrong');
+    expect((await icons.renderContext(seed!.canonicalEmployerId))?.iconKey).toBeUndefined();
+  });
+
+  it('reuses a matching scope and brand while preserving live donor corrections', async () => {
+    const { admission, icons } = subject();
+    const seed = { ...employerSeed('https://jobs.ashbyhq.com/acme/one'), provider: 'ashby' };
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme', 'first.webp'), NOW.toISOString());
+    const independent = await icons.registerIdentity(seed, NOW, 'acme');
+    expect((await icons.renderContext(independent!.canonicalEmployerId))?.iconKey).toBe('first.webp');
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme', 'corrected.webp'), NOW.toISOString());
+    expect((await icons.renderContext(independent!.canonicalEmployerId))?.iconKey).toBe('corrected.webp');
+    const otherBrand = await icons.registerIdentity({ ...seed, displayName: 'Other Brand' }, NOW, 'acme');
+    expect((await icons.renderContext(otherBrand!.canonicalEmployerId))?.iconKey).toBeUndefined();
+    await icons.invalidate(independent!.canonicalEmployerId, NOW.toISOString(), 'wrong alias');
+    expect((await icons.renderContext(independent!.canonicalEmployerId))?.iconKey).toBeUndefined();
+  });
 });
 
 describe('employer icon provider cache', () => {
@@ -2532,6 +2604,52 @@ describe('employer declared-site precedence', () => {
 });
 
 describe('employer icon backfill', () => {
+  it('refreshes an old name-only task from a live posting and retains reviewed provenance', async () => {
+    const { database, db, admission, icons } = subject();
+    const url = 'https://job-boards.greenhouse.io/acme/jobs/123';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, { ...employerSeed(''), provider: 'reviewed-registry', tenant: undefined }, NOW);
+    database.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES ('active', 'posting', 'internship', ?)")
+      .run(JSON.stringify({ normalizedUrl: url, title: 'Software Engineering Intern',
+        internshipIdentity: { company: { canonicalId: 'acme' } },
+        sourceReferences: [{ sourceId: 'greenhouse-acme', provenance: 'official-ats' }] }));
+    const infer = vi.fn();
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {
+      LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'test-key',
+    }), NOW, { ...DEPENDENCIES(scriptedFetch({
+      [url]: () => html('<title>Careers</title>'),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(), 'https://acme.com/': () => status(403),
+    })), infer });
+    expect(result.resolved).toBe(1);
+    expect(infer).not.toHaveBeenCalled();
+    const evidence = database.prepare('SELECT evidence_json FROM employer_icon_resolutions').get()!;
+    expect(JSON.parse(String(evidence.evidence_json))).toMatchObject({ applicationUrl: url, provenance: 'official-ats',
+      provider: 'greenhouse', tenant: 'acme', reasonCode: 'domain-accepted' });
+  });
+
+  it('persists the exact model decline instead of only a generic tie-break rejection', async () => {
+    const { database, db, admission, icons } = subject();
+    const url = 'https://job-boards.greenhouse.io/acme/jobs/123';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed(url), NOW);
+    const infer = vi.fn(async () => ({ response: { decision: 'uncertain', officialDomain: null, confidence: 0.4,
+      evidenceIds: [], reason: 'Ambiguous company' }, inputTokens: 10, outputTokens: 10, actualCostCents: 1 }));
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {
+      LOGO_DEV_TOKEN: LOGO_TOKEN, OPENAI_KEY: 'test-key',
+    }), NOW, { ...DEPENDENCIES(scriptedFetch({
+      [url]: () => html('<title>Software Engineering Intern at Acme</title>'),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      'https://acme.com/': () => status(403),
+    })), infer });
+    expect(result.unresolved).toBe(1);
+    const evidence = database.prepare('SELECT evidence_json FROM employer_icon_resolutions').get()!;
+    expect(JSON.parse(String(evidence.evidence_json))).toMatchObject({ reasonCode: 'tie-break-rejected',
+      modelDiagnostics: { tieBreakReason: 'decision-uncertain' } });
+  });
+
   it('uses the newest open posting before a newer closed-history row', async () => {
     const { database, icons } = subject();
     const insert = database.prepare(`INSERT INTO catalog_items

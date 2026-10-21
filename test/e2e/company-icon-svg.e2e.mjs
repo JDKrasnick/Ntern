@@ -229,3 +229,92 @@ test('renders the employer’s SVG board logo from the dedicated icon cron and s
   assert.equal(resolution.status, 'unresolved');
   assert.equal(resolution.selected_domain, null);
 });
+
+test('resolves a reviewed Workday tenant from a provider logo despite an empty ATS shell', async () => {
+  const id = 'nxp-reviewed';
+  const url = 'https://nxp.wd3.myworkdayjobs.com/careers/job/Intern_R-123';
+  const [acme] = await dump("SELECT icon_key FROM canonical_employers WHERE id = 'acme'");
+  const png = new Uint8Array(await (await documents.get(acme.icon_key)).arrayBuffer());
+  await database.batch([
+    database.prepare(`INSERT INTO canonical_employers (id, display_name, reviewed_at, reviewed_by, created_at, updated_at)
+      VALUES (?, 'NXP Semiconductors', ?, 'reviewed-source-registry', ?, ?)`).bind(id, instant, instant, instant),
+    database.prepare("UPDATE system_state SET value = ? WHERE key = 'company_icon_resolution'")
+      .bind(JSON.stringify({ mode: 'resolve', maxPerSweep: 1, logoDevRetentionLicensedAt: instant })),
+    database.prepare(`INSERT INTO employer_icon_resolutions
+      (id, canonical_employer_id, evidence_fingerprint, status, evidence_json, attempts, next_retry_at, created_at, updated_at)
+      VALUES ('nxp-task', ?, 'nxp-fingerprint', 'retryable', ?, 0, ?, ?, ?)`).bind(id,
+      JSON.stringify({ displayName: 'NXP Semiconductors', roleTitle: 'Software Intern', applicationUrl: url,
+        provider: 'workday', tenant: 'nxp', sourceId: 'reviewed-source', provenance: 'official-ats' }),
+      '1970-01-01T00:00:00.000Z', instant, instant),
+  ]);
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  const calls = [];
+  globalThis.fetch = async (request) => {
+    const href = request instanceof URL ? request.href : typeof request === 'string' ? request : request.url;
+    const parsed = new URL(href);
+    calls.push(href);
+    if (href === url) return new Response('<html><title>Workday</title></html>', { headers: { 'content-type': 'text/html' } });
+    if (parsed.hostname === 'api.logo.dev') return Response.json([{ name: 'NXP Semiconductors', domain: 'nxp.com' }]);
+    if (parsed.hostname === 'img.logo.dev') return new Response(png, { headers: { 'content-type': 'image/png' } });
+    if (parsed.hostname === 'nxp.com') return new Response(null, { status: 403 });
+    return internet(request);
+  };
+  try {
+    await builtWorker.scheduled({ cron, scheduledTime: Date.now(), noRetry() {} }, {
+      ...cronEnvironment(), LOGO_DEV_TOKEN: 'fixture-search-token', LOGO_DEV_IMAGE_TOKEN: 'fixture-image-token',
+    }, { waitUntil() {}, passThroughOnException() {} });
+  } finally { globalThis.fetch = realFetch; }
+  const [employer] = await dump("SELECT icon_key, icon_source, website_domain FROM canonical_employers WHERE id = 'nxp-reviewed'");
+  assert.equal(employer.website_domain, 'nxp.com');
+  assert.equal(employer.icon_source, 'logo-dev');
+  assert.ok(await documents.get(employer.icon_key), 'the provider image must be retained in real R2');
+  const [task] = await dump("SELECT status, evidence_json FROM employer_icon_resolutions WHERE id = 'nxp-task'");
+  assert.equal(task.status, 'resolved');
+  assert.equal(JSON.parse(task.evidence_json).provenance, 'official-ats');
+  assert.ok(calls.includes(url));
+  assert.ok(!calls.some((href) => href.includes('api.openai.com')), 'reviewed ATS identity must resolve without a model');
+});
+
+test('backfills and serves a reviewed community role with no canonical employer', async () => {
+  const url = 'https://zillow.wd5.myworkdayjobs.com/en-US/Zillow_Group_External/job/Intern_R123';
+  const [acme] = await dump("SELECT icon_key FROM canonical_employers WHERE id = 'acme'");
+  const png = new Uint8Array(await (await documents.get(acme.icon_key)).arrayBuffer());
+  await database.batch([
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES
+      ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection', '{"version":"independent-icons"}'),
+      ('CATALOG_PROJECTION#MANIFESTS', 'independent-icons', 'catalog-projection', '{"keys":["zillow"]}')`),
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value) VALUES
+      ('CATALOG_PROJECTION#GROUPS', 'zillow', 'catalog-projection', ?)`)
+      .bind(JSON.stringify({ group: { roleCount: 1, featuredRole: {
+        company: 'Zillow', title: 'Applied Scientist Intern', officialApplyUrl: url,
+        sourceReferences: [{ sourceId: 'reviewed-community', provenance: 'reviewed-community' }],
+      } } })),
+  ]);
+  const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  globalThis.fetch = async (request) => {
+    const href = request instanceof URL ? request.href : typeof request === 'string' ? request : request.url;
+    const parsed = new URL(href);
+    if (href === url) return new Response('<html><title>Workday</title></html>', { headers: { 'content-type': 'text/html' } });
+    if (parsed.hostname === 'api.logo.dev') return Response.json([{ name: 'Zillow', domain: 'zillow.com' }]);
+    if (parsed.hostname === 'img.logo.dev') return new Response(png, { headers: { 'content-type': 'image/png' } });
+    if (parsed.hostname === 'zillow.com') return new Response(null, { status: 403 });
+    return internet(request);
+  };
+  try {
+    await builtWorker.scheduled({ cron, scheduledTime: Date.now(), noRetry() {} }, {
+      ...cronEnvironment(), LOGO_DEV_TOKEN: 'fixture-search-token', LOGO_DEV_IMAGE_TOKEN: 'fixture-image-token',
+    }, { waitUntil() {}, passThroughOnException() {} });
+    const [icon] = await dump("SELECT id, icon_key, website_domain FROM company_icon_identities WHERE display_name = 'Zillow'");
+    assert.match(icon.id, /^icon-v1-[a-f0-9]{32}$/u);
+    assert.equal(icon.website_domain, 'zillow.com');
+    assert.ok(await documents.get(icon.icon_key));
+    assert.deepEqual(await dump("SELECT id FROM canonical_employers WHERE display_name = 'Zillow'"), []);
+    globalThis.fetch = realFetch;
+    const fetcher = await worker.getWorker(workerName);
+    const response = await fetcher.fetch(`https://api.example.test/company-icons/${icon.id}`, {
+      headers: { 'X-InternNotifs-Service-Key': 'e2e-internal-service-secret' },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/png');
+  } finally { globalThis.fetch = realFetch; }
+});

@@ -40,7 +40,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, createCatalogPageReader, catalogCardKind, catalogQueryPreview, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, refreshCacheFirst, type GroupedCatalogPage } from "./src/catalog";
 import { boundedCatalogText, catalogMetadataTags, compactCatalogEducation, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "./src/catalog-quality";
-import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
+import { companyIconIdentity, companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
 import { type DisplayHousingDetail } from "../shared/housing-display";
 import { type PostingFact } from "../shared/posting-facts";
@@ -143,6 +143,7 @@ type Job = {
   postingIdentityStatus?: "confirmed" | "unconfirmed";
   /** Stable reviewed employer identity; clients use this to resolve a first-party icon. */
   canonicalEmployerId?: string;
+  companyIconId?: string;
   /** Raw admission carried by plain job payloads, before catalog projection derives the id above. */
   admission?: { canonicalEmployer?: { id: string; displayName: string } };
   sourceReferences: Array<{
@@ -210,6 +211,7 @@ type CatalogGroupRole = {
   postingIdentityStatus?: "confirmed" | "unconfirmed";
   /** Stable reviewed employer identity; clients use this to resolve a first-party icon. */
   canonicalEmployerId?: string;
+  companyIconId?: string;
 };
 type CatalogGroupDetails = { group: CatalogGroupRow; roles: CatalogGroupRole[] };
 type AppTab = "roles" | "swipe" | "queue" | "catalog" | "history" | "resume" | "profile";
@@ -943,7 +945,7 @@ function JobCard({
   roleFeed?: boolean;
 }) {
   const display = presentCatalogRole(job);
-  const employerId = job.canonicalEmployerId ?? job.admission?.canonicalEmployer?.id;
+  const employerId = job.canonicalEmployerId ?? job.admission?.canonicalEmployer?.id ?? job.companyIconId ?? companyIconIdentity(job.company, job.applyUrl)?.id;
   const { width } = useWindowDimensions();
   const compactMobile = width < 600;
   // Inspired by Linear's issue list: wide screens use stable information and
@@ -1201,6 +1203,7 @@ function catalogRoleJob(role: CatalogGroupRole): Job {
     ...(role.invalidApplicationUrl ? { invalidApplicationUrl: role.invalidApplicationUrl } : {}),
     ...(role.postingIdentityStatus ? { postingIdentityStatus: role.postingIdentityStatus } : {}),
     ...(role.canonicalEmployerId ? { canonicalEmployerId: role.canonicalEmployerId } : {}),
+    ...(role.companyIconId ? { companyIconId: role.companyIconId } : {}),
   };
 }
 
@@ -1537,7 +1540,7 @@ function CatalogTile({
   const display = presentCatalogRole(job);
   const compactTitle = compactCatalogTitle(display.title);
   const compactLocation = compactCatalogLocation(job.locations, job.location);
-  const employerId = job.canonicalEmployerId ?? job.admission?.canonicalEmployer?.id;
+  const employerId = job.canonicalEmployerId ?? job.admission?.canonicalEmployer?.id ?? job.companyIconId ?? companyIconIdentity(job.company, job.applyUrl)?.id;
   const pay = compactCompensationLabel(job.compensation);
   const source = sourcePresentation(job.sourceReferences);
   const timing = postingTimingPresentation(job.sourceReferences, job.firstSeenAt);
@@ -1818,7 +1821,7 @@ function CatalogGroupTile({
           >
             {lane ? <>
               <View style={styles.catalogTileIdentity}>
-                <CompanyMark company={groupCompany} employerId={featuredRole?.canonicalEmployerId} size={30} />
+                <CompanyMark company={groupCompany} employerId={featuredRole?.canonicalEmployerId ?? featuredRole?.companyIconId ?? (featuredRole ? companyIconIdentity(featuredRole.company, featuredRole.officialApplyUrl)?.id : undefined)} size={30} />
                 <Text style={styles.catalogTileCompany} numberOfLines={1}>{employerName(groupCompany, group.featuredRole?.employerCategory)}</Text>
                 {recencyBadge ? <CatalogFreshnessLabel label={recencyBadge} isNew={hasNewRole} /> : null}
               </View>
@@ -1840,7 +1843,7 @@ function CatalogGroupTile({
               </View>
             </> : Platform.OS !== "web" ? (<>
               <View style={[styles.catalogListEmployer, wideRow && styles.catalogListEmployerWide]}>
-                <CompanyMark company={groupCompany} employerId={featuredRole?.canonicalEmployerId} size={wideRow ? 32 : 34} />
+                <CompanyMark company={groupCompany} employerId={featuredRole?.canonicalEmployerId ?? featuredRole?.companyIconId ?? (featuredRole ? companyIconIdentity(featuredRole.company, featuredRole.officialApplyUrl)?.id : undefined)} size={wideRow ? 32 : 34} />
                 {wideRow ? <Text style={styles.catalogListCompany} numberOfLines={2}>{employerName(groupCompany, group.featuredRole?.employerCategory)}</Text> : null}
               </View>
               <View style={styles.catalogListPrimary}>
@@ -1854,7 +1857,7 @@ function CatalogGroupTile({
               </View>
             </>) : (<>
               <View style={styles.catalogListEmployer}>
-                <CompanyMark company={groupCompany} employerId={featuredRole?.canonicalEmployerId} size={34} />
+                <CompanyMark company={groupCompany} employerId={featuredRole?.canonicalEmployerId ?? featuredRole?.companyIconId ?? (featuredRole ? companyIconIdentity(featuredRole.company, featuredRole.officialApplyUrl)?.id : undefined)} size={34} />
               </View>
               <View style={styles.catalogListPrimary}>
                 <Text style={styles.catalogListTitle} numberOfLines={2}>{compactGroupTitle}</Text>
@@ -2272,7 +2275,7 @@ function JobDetailSheet({
                 <CompanyMark
                   key={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id ?? role.company}
                   company={employerName(roleDisplay?.company, role.employerCategory)}
-                  employerId={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id}
+                  employerId={role.canonicalEmployerId ?? role.admission?.canonicalEmployer?.id ?? role.companyIconId ?? companyIconIdentity(role.company, role.applyUrl)?.id}
                   size={40}
                 />
                 <View style={styles.sheetHeadingCopy}>
@@ -3652,7 +3655,7 @@ function ApplicationHistoryScreen({ entries, applications = [], jobs = [], onOpe
       ListHeaderComponent={<View style={styles.historyHeader}><Text style={styles.historyTitle}>History</Text><Text style={styles.catalogListMeta}>Saved on this browser. Opening a form does not confirm submission.</Text></View>}
       ListEmptyComponent={<View style={styles.emptyState}><Text style={styles.catalogEmptyTitle}>No applications opened yet.</Text><Text style={styles.catalogEmptyCopy}>Click Apply on a role to move it here.</Text></View>}
       renderItem={({ item }) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Open application for ${item.job.title} at ${item.job.company}`} aria-disabled={!item.job.applyUrl} disabled={!item.job.applyUrl} onPress={() => onOpen(item.job)} style={styles.catalogListRow}>
-        <View style={styles.catalogListEmployer}><CompanyMark company={item.job.company} size={34} /></View>
+        <View style={styles.catalogListEmployer}><CompanyMark company={item.job.company} employerId={companyIconIdentity(item.job.company, item.job.applyUrl)?.id} size={34} /></View>
         <View style={styles.catalogListPrimary}><Text style={styles.catalogListTitle}>{item.job.title}</Text><Text style={styles.catalogListEmployerName}>{item.job.company}</Text><Text style={styles.catalogListMeta}>{item.status}{item.openedAt ? ` · ${new Date(item.openedAt).toLocaleDateString()}` : ''}</Text></View>
         {item.job.applyUrl ? <Ionicons name="open-outline" size={17} color={catalogColors.accent} /> : <Text style={styles.catalogListMeta}>Listing unavailable</Text>}
       </TouchableOpacity>} />
@@ -4544,7 +4547,7 @@ function SwipeScreen({
 
   const renderCard = (job: Job) => {
     const display = presentCatalogRole(job);
-    const employerId = job.canonicalEmployerId ?? job.admission?.canonicalEmployer?.id;
+    const employerId = job.canonicalEmployerId ?? job.admission?.canonicalEmployer?.id ?? job.companyIconId ?? companyIconIdentity(job.company, job.applyUrl)?.id;
     const source = sourcePresentation(job.sourceReferences);
     const timing = postingTimingPresentation(job.sourceReferences, job.firstSeenAt);
     const recencyBadge = postingRecencyBadge(Boolean(newJobIds?.has(job.jobId)), timing);

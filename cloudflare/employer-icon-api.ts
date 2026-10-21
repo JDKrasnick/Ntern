@@ -9,7 +9,7 @@
  */
 
 import { validCompanyIconEmployerId } from './company-icon.js';
-import { enqueueEmployerIconResolution } from './employer-icon-resolver.js';
+import { backfillCatalogIconIdentities, enqueueEmployerIconResolution } from './employer-icon-resolver.js';
 import { employerNamesDomain, isIconTransportHost } from '../src/employer-icon-resolution.js';
 import { normalizeCompanyDomain } from '../src/employer/domain.js';
 import { registrableDomain } from '../src/core/registrable-domain.js';
@@ -55,6 +55,9 @@ export async function handleEmployerIconOperations(
   const path = url.pathname;
   const timestamp = now().toISOString();
   try {
+    if (request.method === 'POST' && path === '/internal/admission/employer-icons/backfill') {
+      return json(200, await backfillCatalogIconIdentities(store, now()));
+    }
     if (request.method === 'GET' && path === '/internal/admission/employer-icons') {
       const requested = Number(url.searchParams.get('limit'));
       const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, MAX_REVIEW_QUEUE) : 25;
