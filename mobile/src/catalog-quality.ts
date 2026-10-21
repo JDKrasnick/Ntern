@@ -13,7 +13,7 @@ export function compactCatalogEducation(labels: string[]): string {
     if (has('Undergrad') && has('Masters') && has('PhD')) return `All degree levels${suffix}`;
     if (!has('Undergrad') && has('Masters') && has('PhD')) return `Graduate${suffix}`;
   }
-  return unique.join('/');
+  return unique.map(label => label === 'Pursuing degree' ? 'All degree levels' : label).join('/');
 }
 
 export function catalogMetadataTags(seasons: string[], education: Array<{ levels: string[]; evidence: string }>, postingFacts?: readonly PostingFact[]) {
