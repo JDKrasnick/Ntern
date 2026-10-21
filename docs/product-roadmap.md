@@ -6,7 +6,7 @@
 
 **Initial audience:** international and domestic undergraduate/graduate students.
 
-**Initial scope:** technical internships, co-ops, apprenticeships, new-grad programs, and explicitly entry-level roles — software engineering, AI/ML, data, infrastructure/cloud, security, quantitative roles, product, and technical design.
+**Initial scope:** technical internships, co-ops, apprenticeships, new-grad programs and explicitly entry-level roles — software engineering, AI/ML, data, infrastructure/cloud, security, quantitative roles, product and technical design. Require explicit employer programme or applicant-eligibility evidence; generic roles with unspecified seniority stay outside the early-career feed.
 
 **Product constraints:**
 
@@ -17,6 +17,10 @@
 - Browsing, alerts, application tracking, the technical résumé bank, diff review, and prior downloads stay free to access; only creation of new AI-tailored résumé reviews has a monthly allowance.
 
 ## Milestones
+
+- [x] Implement a default-off employer-authoritative early-career admission gate, including refresh withdrawal and protection against stale community classifications. See [policy and validation](early-career-eligibility.md).
+- [x] Implement explicit employer programme matching and validate both frozen 200-role cohorts: 202 true positives, 187 true negatives, zero false positives, two accepted coverage gaps and nine unverifiable cases withheld. Preserve acquisition repairs for seven genuine internships; see [policy and evaluation limits](early-career-eligibility.md).
+- [ ] Validate the new eligibility policy in isolated dev and complete a reviewed employer-evidence backfill/canary before production activation.
 
 - [x] Add search metadata, production canonicals, robots rules, and a sitemap to the public web export; keep Pages previews out of search. Deployment and Search Console verification are tracked in [`seo.md`](seo.md).
 - [x] Support public, source-attributed facts for all seven model metadata fields in role details, with brief colored field labels and anchored hint bubbles in the app, profile-bound release approval, exact historical cohorts, durable receipts, and bounded catalog refreshes. Acquire Microsoft and Meta JSON-LD qualification sections and exact Amazon requisitions. See [the release contract](shadow-extraction.md#owner-approved-full-metadata-release).

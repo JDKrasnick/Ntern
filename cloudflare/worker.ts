@@ -152,6 +152,8 @@ export interface Environment extends AuthEnvironment,
   IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED?: string;
   IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED?: string;
   TRUSTED_COMMUNITY_CATALOG_ENABLED?: string;
+  /** Default off until the labelled early-career audit and guarded backfill pass. */
+  EARLY_CAREER_ELIGIBILITY_ENABLED?: string;
   IDENTITY_CONFIRMED_COVERAGE_FLOOR?: string;
   BILLING_WEBHOOK_SECRET?: string;
   CLOUDFLARE_SHUTDOWN_TOKEN?: string;
@@ -426,6 +428,7 @@ async function runStructuredSource(source: ReviewedStructuredSource, env: Enviro
   const result = await runRuntimeCommand('poll', { store, userStore, sources: [connector], validateCatalogOnPoll: false,
     enqueueDestinationVerification: (request) => env.DESTINATION_VERIFICATION_QUEUE.send(destinationVerificationMessage(request)),
     catalogAdmissionResolver: catalogAdmissionResolver(env),
+    earlyCareerEligibilityEnabled: env.EARLY_CAREER_ELIGIBILITY_ENABLED === 'true',
     enqueueEmployerIconResolution: employerIconEnqueue(env),
     identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
     trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
@@ -1551,6 +1554,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     const event = { Records: [{ messageId: crypto.randomUUID(), body: JSON.stringify(message) }] };
     const dependencies = { store: new D1InternshipStore(env.DB), userStore: new D1UserStore(env.DB), publisher: notificationPublisher(env),
       catalogAdmissionResolver: catalogAdmissionResolver(env),
+      earlyCareerEligibilityEnabled: env.EARLY_CAREER_ELIGIBILITY_ENABLED === 'true',
       shadowDiscovery: ingestionV2ShadowDiscovery(env),
       v2CatalogWriteOwner: (sourceId: string) => admissionV2OwnsCatalogWrites(env, sourceId),
       v2TrustedCommunityAlertsEnabled: (sourceId: string) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId) };
@@ -2894,6 +2898,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
           validateCatalogOnPoll: false,
           enqueueDestinationVerification: (request) => sendQueueMessageWithin(env.DESTINATION_VERIFICATION_QUEUE, destinationVerificationMessage(request)),
           catalogAdmissionResolver: admissionResolver,
+          earlyCareerEligibilityEnabled: env.EARLY_CAREER_ELIGIBILITY_ENABLED === 'true',
           enqueueEmployerIconResolution: employerIconEnqueue(env),
           identityUnconfirmedPublicationEnabled: env.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED === 'true',
           trustedCommunityCatalogEnabled: env.TRUSTED_COMMUNITY_CATALOG_ENABLED === 'true',
@@ -3130,6 +3135,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     shadowDiscovery: ingestionV2ShadowDiscovery(env),
     v2CatalogWriteOwner: (sourceId: string) => admissionV2OwnsCatalogWrites(env, sourceId),
     v2TrustedCommunityAlertsEnabled: (sourceId: string) => admissionV2TrustedCommunityAlertsAllowed(env, sourceId),
+    earlyCareerEligibilityEnabled: env.EARLY_CAREER_ELIGIBILITY_ENABLED === 'true',
   };
   // Legacy Lever admissions are irrelevant to Greenhouse and Ashby polls.
   // Avoid an additional D1 read before those providers enter their per-record

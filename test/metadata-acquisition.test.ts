@@ -75,6 +75,55 @@ function streamed(body: string, chunkSize: number): Response {
 }
 
 describe('identity-bound public metadata APIs', () => {
+  it('recovers an exact Lever JSON-LD internship after its detail API returns 404', async () => {
+    const candidate = `https://jobs.lever.co/acme/${uuid}/apply`;
+    const pageUrl = `https://jobs.lever.co/acme/${uuid}`;
+    const fetcher = vi.fn(async (url: string | URL | Request) => String(url).startsWith('https://api.lever.co/')
+      ? new Response('', { status: 404 }) : new Response(`<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting',
+        identifier: uuid, title: 'Associate Software Engineer', employmentType: 'Intern', description: 'A placement for current students.' })}</script>`,
+      { headers: { 'content-type': 'text/html' } }));
+    const acquire = createMetadataAcquirer(fetcher);
+    expect(await acquire(identity('lever'), candidate)).toMatchObject({ outcome: 'acquired', method: 'json-ld-page', sourceUrl: pageUrl,
+      artifact: { title: 'Associate Software Engineer', employmentType: 'Intern' } });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await acquire.close();
+  });
+  it('does not override an explicit Lever gone response with page metadata', async () => {
+    const fetcher = vi.fn(async () => new Response('', { status: 410 }));
+    const acquire = createMetadataAcquirer(fetcher);
+    expect(await acquire(identity('lever'), `https://jobs.lever.co/acme/${uuid}`)).toMatchObject({ outcome: 'failed', status: 410 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await acquire.close();
+  });
+  it('retains an employer-declared internship from exact JSON-LD with a generic job title', () => {
+    const candidate = `https://jobs.lever.co/acme/${uuid}`;
+    const html = `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', title: 'Associate Software Engineer',
+      identifier: uuid, employmentType: ['FullTime', 'Intern'], description: 'A placement for current students.' })}</script>`;
+    expect(parseMetadataApiResponse(identity('lever'), 'json-ld-page', html, candidate)).toMatchObject({ title: 'Associate Software Engineer', employmentType: 'Intern' });
+  });
+  it.each([
+    ['jobs.eu.lever.co', 'api.eu.lever.co', 'cirrus'],
+    ['jobs.lever.co', 'api.lever.co', 'CesiumAstro'],
+  ])('acquires %s postings without losing the observed tenant case', async (host, apiHost, tenant) => {
+    const candidate = `https://${host}/${tenant}/${uuid}/apply`;
+    const expected = `https://${apiHost}/v0/postings/${tenant}/${uuid}?mode=json`;
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ id: uuid, text: 'Software Engineering Intern',
+      hostedUrl: `https://${host}/${tenant}/${uuid}`, descriptionPlain: 'An internship for engineering students.' }),
+      { headers: { 'content-type': 'application/json' } }));
+    const acquire = createMetadataAcquirer(fetcher);
+    const result = await acquire({ ...identity('lever'), tenant: tenant.toLowerCase() }, candidate);
+    expect(fetcher).toHaveBeenCalledWith(expected, expect.anything());
+    expect(result).toMatchObject({ outcome: 'acquired', artifact: { title: 'Software Engineering Intern' } });
+    await acquire.close();
+  });
+  it('does not weaken Lever employer, posting or region identity checks', () => {
+    const payload = { id: uuid, text: 'Intern', hostedUrl: `https://jobs.eu.lever.co/Acme/${uuid}`, descriptionPlain: 'Build software.' };
+    expect(parseMetadataApiResponse(identity('lever'), 'lever-api', payload, `https://api.eu.lever.co/v0/postings/acme/${uuid}?mode=json`)).toBeDefined();
+    expect(parseMetadataApiResponse(identity('lever'), 'lever-api', payload, `https://api.lever.co/v0/postings/acme/${uuid}?mode=json`)).toBeUndefined();
+    expect(parseMetadataApiResponse({ ...identity('lever'), tenant: 'other' }, 'lever-api', payload)).toBeUndefined();
+    expect(metadataApiRoute(identity('lever'), `https://jobs.eu.lever.co/other/${uuid}`)).toBeUndefined();
+    expect(metadataApiRoute(identity('lever'), `https://jobs.eu.lever.co/acme/00000000-0000-0000-0000-000000000000`)).toBeUndefined();
+  });
   it.each(['OnSite', 'Hybrid', 'Remote'])('carries Ashby structured %s and compensation into model evidence', (workplaceType) => {
     const artifact = parseMetadataApiResponse(identity('ashby'), 'ashby-api', { jobs: [{
       id: uuid, title: 'Engineering Intern', jobUrl: `https://jobs.ashbyhq.com/acme/${uuid}`,

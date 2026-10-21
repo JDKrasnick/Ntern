@@ -1,5 +1,6 @@
 import { htmlToText } from './core/early-career.js';
 import { metadataDescriptionText } from './core/metadata-text.js';
+import { providerPostingReference } from './identity/posting.js';
 import type { ProviderIdentity } from './types.js';
 import { applicationMetadataArtifactsFromJsonDocuments, postingIdentifierMatches, type RoleMetadataArtifact } from './role-metadata.js';
 
@@ -42,6 +43,14 @@ export function metadataApiRoute(identity: ProviderIdentity, candidateUrl?: stri
     try {
       const url = new URL(candidateUrl);
       if (url.protocol !== 'https:' || url.username || url.password || url.port) return undefined;
+      if (provider === 'lever') {
+        const reference = providerPostingReference(candidateUrl);
+        const observedTenant = url.pathname.split('/')[1];
+        if (reference.provider !== 'lever' || reference.tenant !== tenant?.toLowerCase()
+          || reference.postingId !== postingId?.toLowerCase() || !observedTenant || !/^[a-z0-9_-]{1,100}$/iu.test(observedTenant)) return undefined;
+        const apiHost = url.hostname === 'jobs.eu.lever.co' ? 'api.eu.lever.co' : 'api.lever.co';
+        return { method: 'lever-api', url: `https://${apiHost}/v0/postings/${observedTenant}/${postingId}?mode=json` };
+      }
       if (postingId && /^\d+$/u.test(postingId)) {
         if (provider === 'microsoft' && url.hostname === 'apply.careers.microsoft.com'
           && url.pathname.replace(/\/$/u, '') === `/careers/job/${postingId}`) return {
@@ -204,6 +213,7 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
     if (!selected || !selected.title) return undefined;
     return {
       title: selected.title,
+      ...(selected.employmentType ? { employmentType: selected.employmentType } : {}),
       ...(selected.text ? { text: selected.text } : {}),
       ...(selected.compensationText ? { compensationText: selected.compensationText } : {}),
       ...(selected.compensationSections ? { compensationSections: selected.compensationSections } : {}),
@@ -277,7 +287,15 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
     if (payload.id !== expected || !text(payload.text)) return undefined;
     try {
       const url = new URL(String(payload.hostedUrl));
-      if (url.origin !== 'https://jobs.lever.co' || url.pathname.replace(/\/$/u, '') !== `/${identity.tenant}/${expected}`) return undefined;
+      const reference = providerPostingReference(String(payload.hostedUrl));
+      if (url.protocol !== 'https:' || url.username || url.password || url.port
+        || reference.provider !== 'lever' || reference.tenant !== identity.tenant?.toLowerCase()
+        || reference.postingId !== expected) return undefined;
+      if (requestUrl) {
+        const apiHost = new URL(requestUrl).hostname;
+        if ((apiHost === 'api.eu.lever.co' && url.hostname !== 'jobs.eu.lever.co')
+          || (apiHost === 'api.lever.co' && url.hostname !== 'jobs.lever.co')) return undefined;
+      }
     } catch { return undefined; }
     const sections = Array.isArray(payload.lists) ? payload.lists.flatMap((item) => {
       if (!record(item)) return [];
@@ -288,6 +306,7 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
     if (![...descriptions, ...sections].some(Boolean)) return undefined;
     const timestamp = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && !Number.isNaN(new Date(value).valueOf()) ? new Date(value).toISOString() : undefined;
     return { title: text(payload.text), text: [...descriptions, ...sections].filter(Boolean).join('\n'),
+      ...(record(payload.categories) && text(payload.categories.commitment) ? { employmentType: text(payload.categories.commitment) } : {}),
       compensationText: [bandText(payload.salaryRange), description(payload.salaryDescriptionPlain), description(payload.salaryDescription)].filter(Boolean).join('\n'),
       locations: record(payload.categories) ? [text(payload.categories.location), ...strings(payload.categories.allLocations)].filter(Boolean) : [],
       workMode: text(payload.workplaceType) || undefined, publishedAt: timestamp(payload.createdAt), updatedAt: timestamp(payload.updatedAt) };
@@ -306,6 +325,7 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
   const exactDescription = typeof job.descriptionHtml === 'string' && job.descriptionHtml.trim()
     ? job.descriptionHtml : job.descriptionPlain;
   return { title: text(job.title), text: description(String(exactDescription ?? '')),
+    ...(text(job.employmentType) ? { employmentType: text(job.employmentType) } : {}),
     compensationText: record(job.compensation) ? [job.compensation.scrapeableCompensationSalarySummary, job.compensation.compensationTierSummary].map(description).filter(Boolean).join('\n') : undefined,
     locations: [text(job.location), ...(Array.isArray(job.secondaryLocations) ? job.secondaryLocations.flatMap((item) => record(item) ? [text(item.location)] : []) : [])].filter(Boolean),
     workMode: text(job.workplaceType) || undefined, publishedAt: text(job.publishedAt) || undefined };
@@ -477,7 +497,26 @@ function jsonLdPageFallback(
   route: { method: MetadataAcquisition['method']; url: string },
   result: { outcome: MetadataAcquisition['outcome']; status?: number },
 ): string | undefined {
-  if (route.method !== 'icims-page' || !candidateUrl || !identity.postingId) return undefined;
+  if (!candidateUrl || !identity.postingId) return undefined;
+  if (route.method === 'lever-api') {
+    // Some public detail API routes return 404 while the exact employer page
+    // still serves a current posting. Recover content, never lifecycle authority.
+    if (result.status !== 404) return undefined;
+    try {
+      const candidate = new URL(candidateUrl);
+      const reference = providerPostingReference(candidateUrl);
+      const api = new URL(route.url);
+      const matchingRegion = api.hostname === 'api.eu.lever.co' ? candidate.hostname === 'jobs.eu.lever.co'
+        : api.hostname === 'api.lever.co' && candidate.hostname === 'jobs.lever.co';
+      if (candidate.protocol !== 'https:' || candidate.username || candidate.password || candidate.port || !matchingRegion
+        || reference.provider !== 'lever' || reference.tenant !== identity.tenant?.toLowerCase()
+        || reference.postingId !== identity.postingId.toLowerCase()) return undefined;
+      candidate.pathname = candidate.pathname.replace(/\/apply\/?$/u, '');
+      candidate.search = ''; candidate.hash = '';
+      return candidate.toString();
+    } catch { return undefined; }
+  }
+  if (route.method !== 'icims-page') return undefined;
   const replaced = result.outcome === 'identity-mismatch'
     || result.outcome === 'failed' && result.status !== undefined
       && [301, 302, 303, 307, 308, 404, 410].includes(result.status);
@@ -609,8 +648,9 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
     if (artifact) return acquisition;
     // A dead or replaced HTML frame host must not strand a description the
     // posting's own page still publishes. Retry the employer page the
-    // destination already points at and read its JobPosting JSON-LD. JSON APIs
-    // are excluded: they fail because the posting is gone, which this cannot fix.
+    // destination already points at and read identity-matched JobPosting JSON-LD.
+    // Only the reviewed Lever 404 case may recover content from a JSON API miss;
+    // this does not override any destination/lifecycle closure decision.
     const fallback = jsonLdPageFallback(identity, candidateUrl, route, result);
     if (!fallback) return acquisition;
     const page = await fetchDocument(fallback, true, false, true);

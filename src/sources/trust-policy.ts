@@ -85,13 +85,16 @@ export function effectiveAdmissionConfigurationVersion(input: {
   sourceId: string;
   resolverVersion?: string;
   trustedCommunityCatalogEnabled: boolean;
+  earlyCareerEligibilityEnabled?: boolean;
 }): string | undefined {
+  const resolverVersion = input.earlyCareerEligibilityEnabled
+    ? createHash('sha256').update(`${input.resolverVersion ?? 'legacy'}:early-career-v3`).digest('hex') : input.resolverVersion;
   const policy = sourceAdmissionPolicy(input.sourceId);
   // A dormant deploy must be byte-for-byte compatible with the existing
   // resolver version. The gate-on transition introduces the policy version.
-  if (policy.trust === 'standard' || !input.trustedCommunityCatalogEnabled) return input.resolverVersion;
+  if (policy.trust === 'standard' || !input.trustedCommunityCatalogEnabled) return resolverVersion;
   return createHash('sha256').update(JSON.stringify({
-    resolverVersion: input.resolverVersion ?? null,
+    resolverVersion: resolverVersion ?? null,
     sourcePolicyVersion: policy.version,
     trustedCommunityCatalogEnabled: policy.trust === 'trusted-community'
       ? input.trustedCommunityCatalogEnabled

@@ -501,8 +501,8 @@ function legacyBatch(result: SourceFetchResult): TrustedBatch {
   };
 }
 
-function neutralBatch(result: SourceFetchResult & SourceSnapshot): TrustedBatch {
-  const processed = result.processed ?? processSnapshot(result);
+function neutralBatch(result: SourceFetchResult & SourceSnapshot, earlyCareerEligibilityEnabled = false): TrustedBatch {
+  const processed = earlyCareerEligibilityEnabled ? processSnapshot(result, true) : result.processed ?? processSnapshot(result);
   return {
     fetchResult: result,
     processed,
@@ -560,6 +560,7 @@ export class IngestionRunner {
     private readonly v2CatalogWriteOwner?: (sourceId: string) => boolean,
     /** Included in the durable admission version so alert-policy changes re-grade safely. */
     private readonly v2TrustedCommunityAlertsEnabled?: (sourceId: string) => boolean,
+    private readonly earlyCareerEligibilityEnabled = false,
   ) {}
 
   private async quarantine(job: Internship) {
@@ -676,6 +677,7 @@ export class IngestionRunner {
     const previousAdmission = reference.admission!;
     const job = await this.store.getJob(prior.jobId);
     const admission = evaluateCatalogAdmission({
+      earlyCareerEligibilityEnabled: this.earlyCareerEligibilityEnabled,
       listing: { ...reference, fetchedAt: now,
         ...(previousAdmission.canonicalEmployer ? { employerEvidence: {
           authority: 'reviewed-registry', canonicalEmployer: previousAdmission.canonicalEmployer,
@@ -1035,6 +1037,7 @@ export class IngestionRunner {
             catalogPublicationSuppressed: false,
           });
           const admission = evaluateCatalogAdmission({
+            earlyCareerEligibilityEnabled: this.earlyCareerEligibilityEnabled,
             listing: { ...listing, ...priorListing,
               ...(priorListing.admission!.canonicalEmployer ? { employerEvidence: {
                 authority: 'reviewed-registry', canonicalEmployer: priorListing.admission!.canonicalEmployer,
@@ -1355,6 +1358,7 @@ export class IngestionRunner {
           }), sourceMaterialHash: materialHash }
           : undefined;
         const admission = evaluateCatalogAdmission({
+          earlyCareerEligibilityEnabled: this.earlyCareerEligibilityEnabled,
           listing,
           destination,
           postingAttributed: listing.provenance !== 'reviewed-community' || attribution !== 'unattributed' || described === true
@@ -1516,6 +1520,7 @@ export class IngestionRunner {
           sourceId: connector.id,
           resolverVersion: await this.catalogAdmissionResolver?.configurationVersion?.(),
           trustedCommunityCatalogEnabled: this.trustedCommunityCatalogEnabled,
+          earlyCareerEligibilityEnabled: this.earlyCareerEligibilityEnabled,
         });
         const configurationChanged = Boolean(prefetched.previous?.pendingAdmissionConfigurationVersion || (prefetched.admissionConfigurationVersion
           && prefetched.previous?.admissionConfigurationVersion
@@ -1566,6 +1571,7 @@ export class IngestionRunner {
             sourceId: connector.id,
             resolverVersion: await this.catalogAdmissionResolver?.configurationVersion?.(),
             trustedCommunityCatalogEnabled: this.trustedCommunityCatalogEnabled,
+            earlyCareerEligibilityEnabled: this.earlyCareerEligibilityEnabled,
           });
         let remainingMigrationLimit = options.maxAdmissionMigrationListingsPerSourceRun;
         let revocationOccurrences: SourceOccurrenceState[] | undefined;
@@ -1637,7 +1643,7 @@ export class IngestionRunner {
           allowCompleteEmptySnapshot: options.allowCompleteEmptySnapshot && isSourceSnapshot(result),
         });
         if (qualityFailures.length) throw new SourceFetchError(qualityFailures.join('; '), 'empty');
-        const batch = isSourceSnapshot(result) ? neutralBatch(result) : legacyBatch(result);
+        const batch = isSourceSnapshot(result) ? neutralBatch(result, this.earlyCareerEligibilityEnabled) : legacyBatch(result);
         if (batch.unchanged) report.unchangedSources.push(connector.id);
         const baseline = Boolean(!previous || previous.successfulFetches === 0 || options.seedOnly);
         if (baseline) report.baselineSources.push(connector.id);
@@ -1917,6 +1923,7 @@ export class IngestionRunner {
             admissionVersion: ingestionV2AdmissionVersion(
               githubAdmissionConfigurationVersion ?? admissionConfigurationVersion ?? 'standard-v1',
               { trustedCommunityAlertsEnabled: this.v2TrustedCommunityAlertsEnabled?.(connector.id) === true,
+                earlyCareerEligibilityEnabled: this.earlyCareerEligibilityEnabled,
                 greenhouseIndexMaterial: result.discoveryPostings !== undefined },
             ),
             baseline,
