@@ -61,7 +61,8 @@ lower/upper bound, pinned when selected and preserved across pagination.
   marked `companyEvidence: size`, after both tables. Employee counts below
   50 score 50, 50–199 score 55, 200–999 score 65, 1,000–9,999 score 75, and
   10,000+ score 85. This is a rough company-size proxy, not a prestige assessment.
-  Missing, expired, unsupported, or failed lookups remain neutral at 50.
+  A checked-in public company-size snapshot supplies a fallback when the cache
+  has no valid score. Missing, unsupported, or unresolved employers stay neutral at 50.
 
 - **Pay:** use the disclosed minimum base pay, never the maximum of a wide range.
   Missing, invalid, unsupported, ambiguous, multiple, degree-specific or
@@ -92,7 +93,37 @@ Unsupported currencies stay neutral. “Higher listed pay” means at least 70 u
 this policy, not a verified market percentile. Calibrate these anchors against a
 reviewed catalog sample before a production rollout.
 
-### Optional company-size lookup
+### Offline company-size lookup
+
+`src/config/company-size-snapshot.json` contains 474 unique exact normalized-name
+and existing employer-domain matches from the full 32,330,231-record public
+[company dataset](https://huggingface.co/datasets/andreaaltomani/company-dataset).
+It is attributed to Andrea Altomani and the original People Data Labs free company
+dataset under CC BY 4.0. The pinned revision, SHA-256, upload date, catalog snapshot
+date, domain and provider ID are retained with the derived subset. The source was
+uploaded August 4, 2025; employee bands can be older. Size is a rough proxy, not
+a measured career-value or prestige rating.
+
+Reviewed ratings and existing tiers take priority, then a valid live-provider
+cache score, then the offline size band, then neutral 50. The size band's lower
+bound uses the same employee-count rubric as the optional provider. Domain-only,
+name-only, ambiguous, conflicting and missing records are excluded from this
+snapshot; being unresolved is not evidence that a company is weak. No dataset
+download, third-party request or API key is needed to rank the catalog.
+
+The October 21, 2026 audit covered 1,290 company names and 5,416 roles. The accepted
+subset covers 2,645 roles; together with existing ratings/tiers it covers 2,998
+(55.4%). These are match-coverage figures, not independently measured precision.
+Spot checks rejected Klaviyo/LumApps, F5/F5 LLC and Johnson & Johnson/insurance
+matches, demonstrating why provisional matches must not be accepted automatically.
+Refresh the offline audit and run
+`npx tsx scripts/import-company-size-snapshot.ts <audit.json>` in a reviewed
+repository change to update the subset. New source revisions require an explicit
+provenance update in the importer. Numeric scores and component explanations
+remain internal to web ranking; the web catalog and grouped-role sheet do not
+display them. Native presentation is unchanged.
+
+### Optional live company-size lookup
 
 The server-only `PDL_API_KEY` secret and `COMPANY_SIZE_LOOKUP_ENABLED=true` are
 both required. The flag defaults off and remains off while provider access is
@@ -111,7 +142,8 @@ Migration `0058_company_size_cache.sql` persists results independently of jobs.
 Matches last 30 days and no-match results last seven days. A shared lease prevents
 concurrent paid refreshes. Any provider error stops the batch and pauses further
 refreshes for an hour. Catalog reads use one score snapshot for both global
-ranking and selected-page hydration; cache failures retain neutral scores.
+ranking and selected-page hydration; cache failures retain the offline subset
+and neutral fallback.
 
 Operations-key protected endpoints:
 
