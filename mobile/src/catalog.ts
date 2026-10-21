@@ -8,6 +8,26 @@ export type GroupedCatalogPage<T> = {
   cursor?: string;
 };
 
+/** Share public reads across catalog surfaces; retain only eight recent pages. */
+export function createCatalogPageReader<T>(fetchPage: (parameters: string) => Promise<GroupedCatalogPage<T>>, now = Date.now) {
+  const cached = new Map<string, { page: GroupedCatalogPage<T>; expires: number }>();
+  const pending = new Map<string, Promise<GroupedCatalogPage<T>>>();
+  return (parameters: string): Promise<GroupedCatalogPage<T>> => {
+    const hit = cached.get(parameters);
+    if (hit && hit.expires > now()) return Promise.resolve(hit.page);
+    const active = pending.get(parameters);
+    if (active) return active;
+    const request = Promise.resolve().then(() => fetchPage(parameters)).then(page => {
+      cached.delete(parameters);
+      cached.set(parameters, { page, expires: now() + 15_000 });
+      while (cached.size > 8) cached.delete(cached.keys().next().value!);
+      return page;
+    }).finally(() => pending.delete(parameters));
+    pending.set(parameters, request);
+    return request;
+  };
+}
+
 export type SearchableCatalogGroup = {
   company: string;
   titles: string[];

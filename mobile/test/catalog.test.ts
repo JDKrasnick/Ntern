@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendCatalogPage,
+  createCatalogPageReader,
   catalogQueryPreview,
   catalogCardKind,
   filterGroupedCatalogPage,
@@ -9,6 +10,52 @@ import {
 } from '../src/catalog.js';
 
 describe('mobile catalog pagination', () => {
+  it('shares concurrent reads across surfaces and reuses a recent exact query', async () => {
+    let calls = 0;
+    let finish!: (page: { groups: string[]; cursor: string }) => void;
+    let clock = 0;
+    const read = createCatalogPageReader(() => {
+      calls++;
+      return new Promise<{ groups: string[]; cursor: string }>(resolve => { finish = resolve; });
+    }, () => clock);
+    const first = read('q=nvi&educationLevel=undergraduate');
+    const second = read('q=nvi&educationLevel=undergraduate');
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    finish({ groups: ['NVIDIA'], cursor: '50' });
+    expect(await first).toEqual(await second);
+    expect((await read('q=nvi&educationLevel=undergraduate')).cursor).toBe('50');
+    expect(calls).toBe(1);
+    clock = 15_000;
+    const expired = read('q=nvi&educationLevel=undergraduate');
+    await Promise.resolve();
+    expect(calls).toBe(2);
+    finish({ groups: ['new listing'], cursor: '100' });
+    expect((await expired).groups).toEqual(['new listing']);
+  });
+
+  it('isolates query, facet, and cursor responses and bounds retained pages', async () => {
+    let calls = 0;
+    const read = createCatalogPageReader(async parameters => { calls++; return { groups: [parameters] }; });
+    for (const parameters of ['q=nvi', 'q=nvi&educationLevel=masters', 'q=nvi&cursor=50', 'q=google']) {
+      expect((await read(parameters)).groups).toEqual([parameters]);
+    }
+    expect(calls).toBe(4);
+    for (let i = 0; i < 8; i++) await read(`q=other${i}`);
+    await read('q=nvi');
+    expect(calls).toBe(13);
+  });
+
+  it('retries failed shared reads rather than caching the failure', async () => {
+    let calls = 0;
+    const read = createCatalogPageReader(async () => {
+      if (++calls === 1) throw new Error('offline');
+      return { groups: ['recovered'] };
+    });
+    await expect(read('q=nvi')).rejects.toThrow('offline');
+    expect((await read('q=nvi')).groups).toEqual(['recovered']);
+  });
+
   it('appends later pages in order without duplicating a refreshed role', () => {
     const jobs = appendCatalogPage(
       [{ jobId: 'newest' }, { jobId: 'already-loaded' }],

@@ -8,10 +8,10 @@
  * place before the seam is ever reached.
  *
  * `fraction` is measured against the scrollable length
- * (`contentHeight - viewportHeight`), not the viewport, so "half the page"
- * means half of the content the reader can actually travel through.
+ * (`contentHeight - viewportHeight`), not the viewport, so "25% of the page"
+ * means a quarter of the content the reader can actually travel through.
  */
-export const proactivePrefetchFraction = 0.5;
+export const proactivePrefetchFraction = 0.25;
 
 export function shouldPrefetchNextPage(input: {
   contentOffsetY: number;
