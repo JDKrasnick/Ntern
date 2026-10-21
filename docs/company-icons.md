@@ -293,7 +293,7 @@ RTX/Raytheon and TikTok/ByteDance keep separate identities. These identities liv
 in `company_icon_identities`; they grant no admission or ranking authority.
 
 Owning V2 admission records the icon identity after publication. The dedicated
-icon cron also pages 100 current-manifest groups per pass, recovering legacy
+icon cron also pages 50 current-manifest groups per pass, recovering legacy
 roles and failed enqueues without changing individual role records. Operators
 can accelerate that same bounded recovery with
 `POST /internal/admission/employer-icons/backfill`; repeat until `complete` is

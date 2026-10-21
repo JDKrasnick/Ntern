@@ -6,7 +6,7 @@ import { companyIconResponse } from '../cloudflare/company-icon.js';
 import { handleEmployerIconOperations } from '../cloudflare/employer-icon-api.js';
 import { D1EmployerIconStore } from '../cloudflare/employer-icon-store.js';
 import {
-  diagnoseEmployerIcon, enqueueEmployerIconResolution, runEmployerIconResolutionPass,
+  backfillCatalogIconIdentities, diagnoseEmployerIcon, enqueueEmployerIconResolution, runEmployerIconResolutionPass,
 } from '../cloudflare/employer-icon-resolver.js';
 import { brandfetchSearchUrl, logoDevImageUrl, logoDevSearchUrl, rasterDimensions } from '../src/employer-icon-discovery.js';
 import { createIconSvgRasterizer } from '../cloudflare/svg-raster.js';
@@ -2291,6 +2291,25 @@ describe('employer icon coverage v2', () => {
       ('CATALOG_PROJECTION#GROUPS', 'b', 'catalog-projection', '{"group":{"roleCount":3,"featuredRole":{"company":"Unmapped"}}}'),
       ('CATALOG_PROJECTION#GROUPS', 'old', 'catalog-projection', '{"group":{"roleCount":100,"featuredRole":{"canonicalEmployerId":"acme"}}}')`);
     expect((await icons.counts()).active).toMatchObject({ roles: 5, coveredRoles: 2, roleCoverageRate: 0.4 });
+  });
+
+  it('bounds catalog recovery and deduplicates icon tasks across pages', async () => {
+    const { database, icons } = subject();
+    const keys = Array.from({ length: 60 }, (_, index) => `role-${String(index).padStart(2, '0')}`);
+    database.exec(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION', 'CURRENT', 'catalog-projection', '{"version":"v"}')`);
+    database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION#MANIFESTS', 'v', 'catalog-projection', ?)`)
+      .run(JSON.stringify({ keys }));
+    const insert = database.prepare(`INSERT INTO catalog_items (pk, sk, kind, value)
+      VALUES ('CATALOG_PROJECTION#GROUPS', ?, 'catalog-projection', ?)`);
+    for (const key of keys) insert.run(key, JSON.stringify({ group: { roleCount: 1, featuredRole: {
+      company: 'Acme', title: 'Software Intern', officialApplyUrl: `https://job-boards.greenhouse.io/acme/jobs/${key}`,
+      sourceReferences: [{ sourceId: 'reviewed', provenance: 'reviewed-community' }],
+    } } }));
+    expect(await backfillCatalogIconIdentities(icons, NOW)).toEqual({ scanned: 50, enqueued: 1, complete: false });
+    expect(await backfillCatalogIconIdentities(icons, NOW)).toEqual({ scanned: 10, enqueued: 0, complete: true });
+    expect(database.prepare('SELECT COUNT(*) AS n FROM employer_icon_resolutions').get()).toMatchObject({ n: 1 });
   });
 
   it('resolves and serves a board logo without creating a canonical employer', async () => {

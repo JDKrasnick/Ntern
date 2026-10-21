@@ -276,7 +276,7 @@ export async function runEmployerIconResolutionPass(
 
 /** Also recovers admissions that predate independent icon identities. */
 export async function backfillCatalogIconIdentities(store: D1EmployerIconStore, now: Date): Promise<{ scanned: number; enqueued: number; complete: boolean }> {
-  const page = await store.catalogIconPage(await store.iconBackfillCursor(), 100);
+  const page = await store.catalogIconPage(await store.iconBackfillCursor(), 50);
   const seen = new Set<string>();
   let enqueued = 0;
   for (const role of page) {
@@ -295,8 +295,8 @@ export async function backfillCatalogIconIdentities(store: D1EmployerIconStore, 
     if (context?.inheritedFromEmployerId || context?.iconKey || context?.resolutionStatus === 'invalidated') continue;
     if (await enqueueEmployerIconResolution(store, seed, now)) enqueued += 1;
   }
-  await store.setIconBackfillCursor(page.length === 100 ? page.at(-1)!.key : '', now.toISOString());
-  return { scanned: page.length, enqueued, complete: page.length < 100 };
+  await store.setIconBackfillCursor(page.length === 50 ? page.at(-1)!.key : '', now.toISOString());
+  return { scanned: page.length, enqueued, complete: page.length < 50 };
 }
 
 /**
