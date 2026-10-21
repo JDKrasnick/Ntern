@@ -67,7 +67,7 @@ import { disconnectGmail, gmailApi, gmailCallback, GmailStore, processGmailWork,
 import { D1EmployerStore } from './employer-store.js';
 import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalog-admission-store.js';
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
-import { destinationQueueHealth } from './destination-queue-health.js';
+import { destinationQueueHealth, observeDestinationUnknownAge } from './destination-queue-health.js';
 import { companyIconResponse } from './company-icon.js';
 import { D1CompanySizeStore } from './company-size-store.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
@@ -2140,7 +2140,13 @@ export async function runScheduledPostingIdentityAudit(
   if (signals.length) try {
     const input = {
       signals,
-      details: `Posting-identity audit status: ${event.status}; recurring unresolved sources: ${event.recurringUnconfirmedSources ?? 'unavailable'}; newly recurring sources: ${event.newRecurringUnconfirmedSources ?? 'unavailable'}; confirmed coverage: ${event.confirmedCoverage ?? 'unavailable'}; coverage floor: ${event.confirmedCoverageFloor ?? 'unavailable'}.`,
+      details: `Posting-identity audit status: ${event.status}; recurring unresolved sources: ${event.recurringUnconfirmedSources ?? 'unavailable'}; newly recurring sources: ${event.newRecurringUnconfirmedSources ?? 'unavailable'}; confirmed coverage: ${event.confirmedCoverage ?? 'unavailable'}; coverage floor: ${event.confirmedCoverageFloor ?? 'unavailable'}.`
+        + `\nIntegrity counters: ${JSON.stringify({ exactDuplicateGroups: event.exactDuplicateGroups,
+          duplicateJobs: event.duplicateJobs, duplicateAlertGroups: event.duplicateAlertGroups,
+          aliasConflicts: event.aliasConflicts, untrackedQuarantines: event.untrackedQuarantines,
+          presentationBlockers: event.presentationBlockers, legacyOccurrences: event.legacyOccurrences,
+          projectionMismatches: event.projectionMismatches, duplicateOccurrenceReferences: event.duplicateOccurrenceReferences,
+          danglingOccurrenceReferences: event.danglingOccurrenceReferences })}.`,
       observedAt: new Date().toISOString(),
       // A different cohort on the same day is a different incident. Otherwise
       // daily signal-level dedupe could acknowledge a recurrence never emailed.
@@ -2349,6 +2355,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
           ...(metrics.oldest_message_timestamp_ms
             ? { oldestMessageTimestamp: new Date(metrics.oldest_message_timestamp_ms) } : {}) };
       },
+      (unknown) => observeDestinationUnknownAge(env.DB, unknown, new Date()),
     ));
     const queueAgeMs = destinationHealth?.ageMs;
     // A stalled publication pipeline is invisible in the source-health surface:

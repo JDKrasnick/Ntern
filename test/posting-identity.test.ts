@@ -627,6 +627,20 @@ describe('posting identity', () => {
     expect(reviewedProviderUrlReference('https://careers.roblox.com/jobs/7116940?gh_jid=7116999')).toMatchObject({ outcome: 'conflict' });
   });
 
+  it('recognizes the incident Databricks URL with tracking and rejects unknown hosts or conflicting IDs', () => {
+    for (const host of ['databricks.com', 'www.databricks.com']) {
+      expect(reviewedProviderUrlReference(`https://${host}/company/careers/open-positions/job?gh_jid=6865687002&utm_source=github-vansh-ouckah`))
+        .toMatchObject({ outcome: 'match', reference: { provider: 'greenhouse', tenant: 'databricks',
+          postingId: '6865687002', sourceId: 'greenhouse-databricks', customHost: true } });
+    }
+    for (const url of [
+      'https://databricks.com/company/careers/open-positions/job',
+      'https://databricks.example.test/company/careers/open-positions/job?gh_jid=6865687002',
+    ]) expect(reviewedProviderUrlReference(url)).toEqual({ outcome: 'none' });
+    expect(reviewedProviderUrlReference('https://databricks.com/company/careers/open-positions/job?gh_jid=6865687002&gh_jid=999'))
+      .toMatchObject({ outcome: 'conflict' });
+  });
+
   // #231 remediation batch 1: admitting the official board is what makes these
   // reviewed community custom-host routes collision-safe exact evidence.
   it.each([
