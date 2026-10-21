@@ -38,8 +38,8 @@ import * as DocumentPicker from "expo-document-picker";
 import * as Clipboard from "expo-clipboard";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
-import { appendGroupedCatalogPage, catalogCardKind, catalogQueryPreview, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, refreshCacheFirst, type GroupedCatalogPage } from "./src/catalog";
-import { boundedCatalogText, catalogMetadataTags, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "./src/catalog-quality";
+import { appendGroupedCatalogPage, createCatalogPageReader, catalogCardKind, catalogQueryPreview, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, refreshCacheFirst, type GroupedCatalogPage } from "./src/catalog";
+import { boundedCatalogText, catalogMetadataTags, compactCatalogEducation, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "./src/catalog-quality";
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
 import { type DisplayHousingDetail } from "../shared/housing-display";
@@ -1506,7 +1506,7 @@ function CatalogMetadataColumns({ seasons, education, postingFacts, wide = false
   const values = catalogMetadataTags(seasons, education, postingFacts);
   const season = values.filter(item => item.kind === 'season' || item.label === 'Season unspecified').map(item => item.label.replace('Season unspecified', 'Not specified')).join(' · ');
   const audienceLabels = values.filter(item => item.kind === 'education' || item.label.startsWith('Education ')).map(item => item.label.replace('Education unspecified', 'Not specified').replace('Education unclear', 'Conflicting sources'));
-  const audience = audienceLabels.map(label => audienceLabels.length > 2 ? label.replace(/^Undergrad\b/u, 'UGrad') : label).join('/');
+  const audience = compactCatalogEducation(audienceLabels);
   return <View style={[styles.catalogMetadataColumns, !wide && styles.catalogMetadataColumnsMobile]}>
     <View style={styles.catalogSeasonColumn}>
       {!wide ? <Text style={styles.catalogMetadataCaption}>Season</Text> : null}
@@ -2992,7 +2992,7 @@ function CompanyCoverageDisclosure() {
 }
 
 /**
- * Fire `onLoadMore` once the reader has scrolled halfway through the list that
+ * Fire `onLoadMore` once the reader has scrolled one quarter through the list that
  * is already loaded, so the next page is usually in place before the bottom
  * edge is reached. The load-more callback owns its own in-flight guard, so a
  * burst of scroll events can never start the same page twice.
@@ -4953,6 +4953,12 @@ function AppContent() {
   const [catalogMoreError, setCatalogMoreError] = useState<string>();
   const [nextCatalogCursor, setNextCatalogCursor] = useState<string>();
   const [catalogRefresh, setCatalogRefresh] = useState(0);
+  // A manual refresh owns a fresh reader, so it always bypasses the short cache.
+  const readCatalogPage = useMemo(() => createCatalogPageReader<CatalogGroupRow>(
+    parameters => api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${parameters}`, ""),
+  ), [catalogRefresh]);
+  const roleFeedScope = useRef("");
+  const roleFeedQuery = useRef("");
   const [applications, setApplications] = useState<Application[]>([]);
   const [applicationHistory, setApplicationHistory] = useState<ApplicationHistoryEntry[]>([]);
   const [historyHydrated, setHistoryHydrated] = useState(Platform.OS !== "web");
@@ -5029,12 +5035,18 @@ function AppContent() {
     if (!catalogFiltersHydrated) return;
     let active = true;
     roleFeedGeneration.current += 1;
-    roleFeedRequestInFlight.current = false;
+    roleFeedRequestInFlight.current = true;
     const parameters = Platform.OS === "web" ? catalogFeedParameters(catalogFilters, { query: debouncedCatalogQuery, dayZone }) : new URLSearchParams({ status: 'open', sort: 'newest', limit: '50' });
     const duration = catalogFilters.addedSince && catalogFilters.addedBefore
       ? Date.parse(catalogFilters.addedBefore) - Date.parse(catalogFilters.addedSince) : 'all';
     const cacheKey = `${roleFeedCacheKey}.${catalogFilters.sort ?? 'best'}.${duration}`;
     const request = parameters.toString();
+    const scopeParameters = new URLSearchParams(parameters);
+    scopeParameters.delete("q");
+    const scope = scopeParameters.toString();
+    const sameScope = roleFeedScope.current === scope;
+    roleFeedScope.current = scope;
+    roleFeedQuery.current = debouncedCatalogQuery;
     setRoleFeedLoading(true);
     setRoleFeedError(undefined);
     setRoleFeedLoadingMore(false);
@@ -5043,22 +5055,24 @@ function AppContent() {
     setRoleFeedReachedEnd(false);
     // Each order owns its cached first page and cursor. A sort switch cannot
     // append a continuation from the previous order.
-    setRoleFeedGroups([]);
+    setRoleFeedGroups(current => sameScope
+      ? filterGroupedCatalogPage({ groups: current }, debouncedCatalogQuery).groups
+      : []);
     void refreshCacheFirst({
       readCache: async () => {
         const cached = await responseCache.get<CatalogCache & { request?: string }>(cacheKey);
         return cached?.request === request ? cached : undefined;
       },
-      fetchFresh: () => api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${parameters.toString()}`, ""),
+      fetchFresh: () => readCatalogPage(parameters.toString()),
       onCached: (cached) => {
-        if (active && Array.isArray(cached.groups) && cached.groups.length) {
+        if (active && (Platform.OS !== "web" || catalogQueryRef.current === debouncedCatalogQuery) && Array.isArray(cached.groups) && cached.groups.length) {
           setRoleFeedGroups(cached.groups);
           roleFeedCursorRef.current = cached.cursor;
           setRoleFeedReachedEnd(!cached.cursor);
         }
       },
       onFresh: (page) => {
-        if (!active) return;
+        if (!active || (Platform.OS === "web" && catalogQueryRef.current !== debouncedCatalogQuery)) return;
         setRoleFeedGroups(page.groups);
         roleFeedCursorRef.current = page.cursor;
         setRoleFeedReachedEnd(!page.cursor);
@@ -5069,7 +5083,10 @@ function AppContent() {
         if (active) setRoleFeedError(error instanceof Error ? error.message : "We couldn't load roles right now.");
       })
       .finally(() => {
-        if (active) setRoleFeedLoading(false);
+        if (active) {
+          roleFeedRequestInFlight.current = false;
+          setRoleFeedLoading(false);
+        }
       });
     return () => { active = false; };
   }, [catalogRefresh, catalogFilters, catalogFiltersHydrated, debouncedCatalogQuery, dayZone]);
@@ -5267,9 +5284,9 @@ function AppContent() {
     setCatalogError(undefined);
     setCatalogMoreError(undefined);
     const catalogQuery = debouncedCatalogQuery;
-    const params = groupedCatalogParameters(catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }));
+    const params = groupedCatalogParameters(catalogRequestState(catalogFilters, { query: catalogQuery, dayZone }), { limit: 50 });
     catalogPageRequestRef.current = { query: catalogQuery, parameters: params.toString() };
-    void api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "")
+    void readCatalogPage(params.toString())
       .then((page) => {
         if (catalogRequestGeneration.current !== requestGeneration || catalogQueryRef.current !== catalogQuery) return;
         // Older deployed API versions used substring matching over locations.
@@ -5320,7 +5337,7 @@ function AppContent() {
     const fetchPage = (pageCursor: string) => {
       const params = new URLSearchParams(pageRequest.parameters);
       params.set("cursor", pageCursor);
-      return api<GroupedCatalogPage<CatalogGroupRow>>(`/catalog?${params.toString()}`, "");
+      return readCatalogPage(params.toString());
     };
     void nextMatchingGroupedCatalogPage(cursor, catalogQuery, fetchPage)
       .then((page) => {
@@ -5352,18 +5369,17 @@ function AppContent() {
    */
   const loadMoreRoleFeed = (retry = false) => {
     const cursor = roleFeedCursorRef.current;
-    if (!cursor || roleFeedRequestInFlight.current || (!retry && roleFeedMoreError)) return;
+    if (!cursor || roleFeedRequestInFlight.current || (!retry && roleFeedMoreError)
+      || (Platform.OS === "web" && roleFeedQuery.current !== catalogQueryRef.current)) return;
     roleFeedRequestInFlight.current = true;
     const generation = roleFeedGeneration.current;
     const parameters = Platform.OS === "web" ? catalogFeedParameters(catalogFilters, { cursor, query: debouncedCatalogQuery, dayZone }) : new URLSearchParams({ status: 'open', sort: 'newest', limit: '50', ...(cursor ? { cursor } : {}) });
     setRoleFeedLoadingMore(true);
     setRoleFeedMoreError(undefined);
-    void api<GroupedCatalogPage<CatalogGroupRow>>(
-      `/catalog?${parameters.toString()}`,
-      "",
-    )
+    void readCatalogPage(parameters.toString())
       .then((page) => {
-        if (generation !== roleFeedGeneration.current) return;
+        if (generation !== roleFeedGeneration.current
+          || (Platform.OS === "web" && roleFeedQuery.current !== catalogQueryRef.current)) return;
         roleFeedCursorRef.current = page.cursor;
         setRoleFeedReachedEnd(!page.cursor);
         setRoleFeedGroups((current) => appendGroupedCatalogPage(current, page));
@@ -5742,8 +5758,9 @@ function AppContent() {
   // owns an unfiltered public page, rather than borrowing Catalog's current
   // search/filter state, so it stays a scrollable browse surface.
   const latestCatalogJobs = useMemo(
-    () => visibleRoleFeedGroups.flatMap(group => group.featuredRole ? [catalogRoleJob(group.featuredRole)] : []),
-    [visibleRoleFeedGroups],
+    () => (Platform.OS === "web" ? filterGroupedCatalogPage({ groups: visibleRoleFeedGroups }, query).groups : visibleRoleFeedGroups)
+      .flatMap(group => group.featuredRole ? [catalogRoleJob(group.featuredRole)] : []),
+    [visibleRoleFeedGroups, query],
   );
   // The catalog's newness lane reads the same release the Roles tab shows, so
   // "new" means one thing across both surfaces.
@@ -10914,7 +10931,7 @@ const styles = StyleSheet.create({
   catalogListColumnEmployer: { width: 180 },
   catalogListColumnRole: { flex: 1, minWidth: 0 },
   catalogListColumnDetails: Platform.OS === "web" ? ({ width: 150 }) : ({ width: 220 }),
-  catalogRoleHeading: { paddingLeft: 44 },
+  catalogRoleHeading: { paddingLeft: 0 },
   catalogListColumnActivity: Platform.OS === "web" ? ({ width: 160 }) : ({ textAlign: "right", width: 170 }),
   catalogListGestureHint: {
     alignItems: "center",

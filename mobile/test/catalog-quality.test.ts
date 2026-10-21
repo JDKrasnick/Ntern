@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { boundedCatalogText, catalogMetadataTags, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "../src/catalog-quality.js";
+import { boundedCatalogText, catalogMetadataTags, compactCatalogEducation, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "../src/catalog-quality.js";
 import { compactCompensationLabel } from "../../shared/compensation-display.js";
 import type { PostingFact } from "../../shared/posting-facts.js";
 
 describe("catalog presentation hardening", () => {
+  it("summarizes broad degree eligibility while retaining specific and uncertain requirements", () => {
+    expect(compactCatalogEducation(['Undergrad', 'Masters', 'PhD'])).toBe('All degree levels');
+    expect(compactCatalogEducation(['Masters', 'PhD'])).toBe('Graduate');
+    expect(compactCatalogEducation(['Masters', 'MBA', 'PhD'])).toBe('Graduate');
+    expect(compactCatalogEducation(['Undergrad', 'Masters', 'MBA', 'PhD'])).toBe('All degree levels');
+    expect(compactCatalogEducation(['Undergrad', 'Masters'])).toBe('Undergrad/Masters');
+    expect(compactCatalogEducation(['Masters'])).toBe('Masters');
+    expect(compactCatalogEducation(['MBA'])).toBe('MBA');
+    expect(compactCatalogEducation(['Pursuing degree'])).toBe('All degree levels');
+    expect(compactCatalogEducation(['Not specified'])).toBe('Not specified');
+    expect(compactCatalogEducation(['Masters (inferred)', 'PhD (inferred)'])).toBe('Graduate (inferred)');
+    expect(compactCatalogEducation(['Masters', 'PhD (inferred)'])).toBe('Masters/PhD (inferred)');
+    expect(compactCatalogEducation(['Undergrad', 'Masters', 'PhD', 'Conflicting sources'])).toBe('Undergrad/Masters/PhD/Conflicting sources');
+  });
   it("keeps a stated degree requirement visible when its level is unspecified", () => {
     const facts: PostingFact[] = [{ field: 'education', statements: ['Working towards advanced degree in quantitative field (economics, finance, CS or applied math)'], qualifiers: [], sourceUrl: 'https://example.com/job', contentHash: 'a'.repeat(64) }];
     const unspecified = [{ levels: [], evidence: 'unspecified' }];

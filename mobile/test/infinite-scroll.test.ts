@@ -11,10 +11,10 @@ const scrolled = (contentOffsetY: number) => ({
 });
 
 describe("shouldPrefetchNextPage", () => {
-  it("waits until the reader is halfway through the loaded content", () => {
-    // Scrollable length is 3000, so the midpoint is 1500.
-    expect(shouldPrefetchNextPage(scrolled(1400))).toBe(false);
-    expect(shouldPrefetchNextPage(scrolled(1500))).toBe(true);
+  it("starts at one quarter of the scrollable content", () => {
+    // Scrollable length is 3000, so the quarter mark is 750.
+    expect(shouldPrefetchNextPage(scrolled(749))).toBe(false);
+    expect(shouldPrefetchNextPage(scrolled(750))).toBe(true);
     expect(shouldPrefetchNextPage(scrolled(2600))).toBe(true);
   });
 
@@ -39,7 +39,7 @@ describe("shouldPrefetchNextPage", () => {
     expect(shouldPrefetchNextPage({ ...scrolled(0), contentHeight: 600 })).toBe(true);
   });
 
-  it("uses a half-page default fraction", () => {
-    expect(proactivePrefetchFraction).toBe(0.5);
+  it("uses a quarter-page default fraction", () => {
+    expect(proactivePrefetchFraction).toBe(0.25);
   });
 });
