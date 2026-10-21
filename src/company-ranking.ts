@@ -13,6 +13,12 @@ export interface CompanyRanking {
   reviewedBy?: string;
 }
 export type CompanyRankingScores = ReadonlyMap<string, number>;
+export interface CatalogCompanyRanking {
+  companyKey: string;
+  company: string;
+  ranking: CompanyRanking;
+  updatedAt: string;
+}
 export const employerRankingKey = (id: string) => `employer:${id}`;
 export const companyRankingNameKey = (name: string) => `name:${canonicalCompanyKey(name)}`;
 export const pendingCompanyRanking = (): CompanyRanking => ({ tier: 'unrated', status: 'pending',

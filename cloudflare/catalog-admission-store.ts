@@ -3,7 +3,7 @@ import { alertEligible, catalogEligible, deriveCanonicalAdmission, evaluateCatal
 import { openCatalogSortKey } from '../src/catalog-recency.js';
 import { catalogSearchText, catalogSourceClasses } from '../src/catalog-fields.js';
 import { canonicalCompanyKey } from '../src/core/normalize.js';
-import { storedCompanyRanking, type CompanyRanking } from '../src/company-ranking.js';
+import { storedCompanyRanking, type CompanyRanking, type CatalogCompanyRanking } from '../src/company-ranking.js';
 import { providerPostingReference, providerPostingAlias } from '../src/identity/posting.js';
 import type {
   AdmissionIncident,
@@ -1385,6 +1385,36 @@ export class D1CatalogAdmissionStore {
     return result.meta.changes === 1;
   }
 
+  async listCatalogCompanyRankings(): Promise<CatalogCompanyRanking[]> {
+    const rankings: CatalogCompanyRanking[] = [];
+    let after = '';
+    for (;;) {
+      const page = await this.db.prepare(`SELECT company_key, display_name, ranking_json, updated_at FROM catalog_company_rankings
+        WHERE company_key > ? ORDER BY company_key LIMIT 200`).bind(after)
+        .all<{ company_key: string; display_name: string; ranking_json: string; updated_at: string }>();
+      rankings.push(...page.results.map(row => ({ companyKey: row.company_key, company: row.display_name,
+        ranking: storedCompanyRanking(row.ranking_json), updatedAt: row.updated_at })));
+      if (page.results.length < 200) break;
+      after = page.results.at(-1)!.company_key;
+    }
+    return rankings;
+  }
+
+  async getCatalogCompanyRanking(key: string): Promise<CatalogCompanyRanking | undefined> {
+    const row = await this.db.prepare('SELECT company_key, display_name, ranking_json, updated_at FROM catalog_company_rankings WHERE company_key = ?')
+      .bind(key).first<{ company_key: string; display_name: string; ranking_json: string; updated_at: string }>();
+    return row ? { companyKey: row.company_key, company: row.display_name, ranking: storedCompanyRanking(row.ranking_json), updatedAt: row.updated_at } : undefined;
+  }
+
+  async putCatalogCompanyRanking(company: string, ranking: CompanyRanking, onlyUnreviewed: boolean, now: string): Promise<boolean> {
+    const result = await this.db.prepare(`INSERT INTO catalog_company_rankings
+      (company_key, display_name, ranking_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(company_key) DO UPDATE SET display_name = excluded.display_name, ranking_json = excluded.ranking_json, updated_at = excluded.updated_at
+      WHERE ? = 0 OR COALESCE(json_extract(catalog_company_rankings.ranking_json, '$.status'), 'pending') <> 'reviewed'`)
+      .bind(canonicalCompanyKey(company), company, JSON.stringify(ranking), now, now, onlyUnreviewed ? 1 : 0).run();
+    return result.meta.changes === 1;
+  }
+
   async listEmployerMappings(): Promise<EmployerMapping[]> {
     const rows = await this.db.prepare('SELECT * FROM employer_mappings ORDER BY provider, scope, reviewed_at').all<Record<string, unknown>>();
     return rows.results.map((row) => ({
@@ -1661,7 +1691,7 @@ export class D1CatalogAdmissionStore {
 
   async recordReviewerDecision(value: {
     id: string;
-    subjectType: 'canonical-employer' | 'employer-mapping' | 'destination-rule' | 'catalog-repair';
+    subjectType: 'canonical-employer' | 'catalog-company' | 'employer-mapping' | 'destination-rule' | 'catalog-repair';
     subjectId: string;
     decision: string;
     reason: string;

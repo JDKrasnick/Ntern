@@ -33,3 +33,19 @@ The audit writes the full missing-company list to
 `.context/holistic-ranking-coverage.json` and fails the completeness gate while
 any inventory company lacks a review. This ongoing review is not complete and
 has not been published merely because the file passes schema validation.
+
+Apply reviewed batches through the operations API after migration 0060 and
+the corresponding Worker release. The importer preserves reviewed rows,
+validates every proposal before writing, and re-reads all applied records to
+verify durable tier, rationale, sources and aliases:
+
+```sh
+npx tsx scripts/apply-company-ranking-reviews.ts --api https://api.ntern.app --catalog
+npx tsx scripts/apply-company-ranking-reviews.ts --api https://api.ntern.app --catalog --apply
+```
+
+The importer includes the existing seed roster; individual reviews take
+precedence. Its canonical employer updates and separate catalog name updates
+never create employer identities. A batch receipt is not proof of complete
+coverage: refresh the inventory and compare it against both persisted registries
+before declaring the catalog-wide review complete.
