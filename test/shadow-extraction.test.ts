@@ -920,6 +920,25 @@ describe('shadow extraction queue and cost ledger', () => {
     expect(await DB.prepare('SELECT COUNT(*) AS attempts, SUM(actual_cents) AS actual FROM shadow_extraction_cost_ledger WHERE run_key = ?')
       .bind(message!.runKey).first()).toEqual({ attempts: 2, actual: 4 });
   });
+  it('keeps baseline and origin envelopes distinct while deduplicating identical observations', async () => {
+    const DB = schema(); const artifacts = new MemoryR2();
+    const queue: Queue = { async send() {}, async sendBatch() {} };
+    const env = { DB, SHADOW_EXTRACTION_QUEUE: queue, SHADOW_EXTRACTION_ARTIFACTS: artifacts };
+    const base = { jobId: 'immutable', sourceId: identity.sourceId, externalId: 'immutable', sourceUrl: identity.sourceUrl,
+      providerIdentity: identity, title: 'Software Engineering Intern', description, observedAt: '2026-10-20T00:01:00.000Z',
+      origin: 'provider-poll' as const, baseline: { compensation: 'present' as const } };
+    const first = await enqueueShadowExtraction(env, base);
+    const identical = await enqueueShadowExtraction(env, base);
+    const changed = await enqueueShadowExtraction(env, { ...base, baseline: { compensation: 'incomplete' } });
+    const historical = await enqueueShadowExtraction(env, { ...base, origin: 'backfill' });
+    expect(identical!.inputKey).toBe(first!.inputKey);
+    expect(new Set([first!.inputKey, changed!.inputKey, historical!.inputKey]).size).toBe(3);
+    expect(new Set([first!.runKey, changed!.runKey, historical!.runKey]).size).toBe(1);
+    const envelope = JSON.parse(await new Response((await artifacts.get(first!.inputKey))!.body).text());
+    expect(envelope.baseline).toEqual({ compensation: 'present' });
+    expect(envelope.identity.origin).toBe('provider-poll');
+  });
+
   it.each([false, true])('preserves prospective verification across repeated enqueue observations (newest first: %s)', async newestFirst => {
     const DB = schema(); const artifacts = new MemoryR2(); const messages: unknown[] = [];
     const queue: Queue = { async send(body) { messages.push(body); }, async sendBatch() {} };

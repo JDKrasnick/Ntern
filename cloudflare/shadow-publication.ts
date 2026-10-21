@@ -417,14 +417,17 @@ export async function handleShadowPublication(request: Request, env: {
         await operations.recordRoleMetadataEvidence(run.job_id, evidence && sourceId === run.source_id ? [evidence] : [],
           projected.conflicts, revision.observed_at, { sourceId, sourceClasses: classes });
       }
-      await env.DB.prepare(`UPDATE shadow_publication_receipts SET revoked_at = ? WHERE job_id = ? AND receipt_id != ? AND revoked_at IS NULL`)
-        .bind(new Date().toISOString(), run.job_id, receiptId).run();
     } else await operations.recordRoleMetadataEvidence(run.job_id, evidence ? [evidence] : [], projected.conflicts, revision.observed_at,
       { sourceId: run.source_id, sourceClasses: ['reviewed-shadow'] });
     const expectedReference = job.sourceReferences.find(reference => reference.sourceId === run.source_id
       && reference.externalId === run.external_id)!;
     if (!await jobs.putAdmissionState(projected.job, expectedReference, undefined, undefined, undefined, snapshot!.value)) {
       throw new Error('Catalog job changed during shadow publication; retry the unprojected receipt');
+    }
+    // A conflicted replacement must leave the previous publication authorized.
+    if (replaceExisting) {
+      await env.DB.prepare(`UPDATE shadow_publication_receipts SET revoked_at = ? WHERE job_id = ? AND receipt_id != ? AND revoked_at IS NULL`)
+        .bind(new Date().toISOString(), run.job_id, receiptId).run();
     }
     if (approvedRelease && input.deferProjection === true) {
       return Response.json({ receiptId, evidenceFingerprint, policyVersion: policy.version, acceptedFields, publishedFields,

@@ -161,7 +161,18 @@ describe('shadow publication policy', () => {
     database.prepare(`INSERT INTO shadow_publication_receipts (receipt_id,job_id,source_id,external_id,content_hash,run_key,policy_version,accepted_fields,evidence_fingerprint,created_at) VALUES ('old','job-1','greenhouse-acme','123',?,?,'old','["education"]','old','2026-10-01T00:00:00.000Z')`).run(hash, hash);
     const policy = { enabled: true, version: 'full-metadata-2026-10-v1', allowedFields: [...shadowPublicationFields],
       cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }], releaseApproval: { ...releaseApproval, replaceExistingMetadata: true } };
-    const env = { OPERATIONS_SHARED_SECRET: 'secret', DB: d1(database), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+    const DB = d1(database);
+    const originalBatch = DB.batch.bind(DB);
+    let conflict = false;
+    DB.batch = async statements => {
+      if (conflict) {
+        conflict = false;
+        database.prepare(`UPDATE catalog_items SET value=json_set(value, '$.notification.smsSentAt', '2026-10-20T00:00:00.000Z')
+          WHERE pk='JOB#job-1' AND sk='META'`).run();
+      }
+      return originalBatch(statements);
+    };
+    const env = { OPERATIONS_SHARED_SECRET: 'secret', DB, SHADOW_EXTRACTION_ARTIFACTS: artifacts,
       LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) } as unknown as Environment;
     const send = (extra = {}) => cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
       method: 'POST', headers: { 'X-Operations-Key': 'secret', 'Content-Type': 'application/json' }, body: JSON.stringify({
@@ -173,6 +184,11 @@ describe('shadow publication policy', () => {
     expect((await send()).status).toBe(409);
     policy.releaseApproval.replaceExistingMetadata = true;
     env.LLM_METADATA_PUBLICATION_POLICY_JSON = JSON.stringify(policy);
+    conflict = true;
+    expect((await send()).status).toBe(409);
+    expect(database.prepare("SELECT revoked_at FROM shadow_publication_receipts WHERE receipt_id='old'").get()).toEqual({ revoked_at: null });
+    expect((await jobs.getJob('job-1'))!.compensation.raw).toBe('Old $99/hour');
+    original.notification.smsSentAt = '2026-10-20T00:00:00.000Z';
     expect((await send()).status).toBe(200);
     expect((await send()).status).toBe(200);
     const result = (await jobs.getJob('job-1'))!;
@@ -281,49 +297,70 @@ describe('shadow publication policy', () => {
     expect(database.prepare('SELECT COUNT(*) AS count FROM shadow_extraction_evaluations').get()).toEqual({ count: 0 });
   });
   for (const mode of ['prospective', 'approved'] as const) {
-    it(`defers ${mode} publication on a concurrent notification update and recovers without losing it`, async () => {
-      const { database, artifacts } = await publicationDatabase();
-      const policy = { enabled: true, version: 'publication-cas', mode: 'prospective-provider-poll',
-        startsAt: '2026-10-15T00:00:00.000Z', allowedFields: ['locations'], maxReceipts: null,
-        cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }], releaseApproval };
-      database.prepare(`UPDATE shadow_extraction_runs SET origin='provider-poll', input_completeness='complete',
-        created_at='2026-10-15T00:00:00.000Z', completed_at='2026-10-15T00:00:00.000Z'`).run();
-      database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at='2026-10-15T00:00:00.000Z'`).run();
-      await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
-        verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
-      const DB = d1(database);
-      const batch = DB.batch.bind(DB);
-      let raced = false;
-      DB.batch = async statements => {
-        if (!raced) {
-          raced = true;
-          database.prepare(`UPDATE catalog_items SET value = json_set(value,
-            '$.notification.smsPending', json('false'), '$.notification.smsSentAt', '2026-10-20T00:00:00.000Z'), sms_pending=0
-            WHERE pk='JOB#job-1' AND sk='META'`).run();
+    for (const change of ['notification', 'closed', 'detached', 'attached', 'revision'] as const) {
+      it(`fences ${mode} publication against a concurrent ${change} update`, async () => {
+        const { database, artifacts } = await publicationDatabase();
+        const policy = { enabled: true, version: 'publication-cas', mode: 'prospective-provider-poll',
+          startsAt: '2026-10-15T00:00:00.000Z', allowedFields: ['locations'], maxReceipts: null,
+          cohort: [{ sourceId: 'greenhouse-acme', externalId: '123', contentHash: hash }], releaseApproval };
+        database.prepare(`UPDATE shadow_extraction_runs SET origin='provider-poll', input_completeness='complete',
+          created_at='2026-10-15T00:00:00.000Z', completed_at='2026-10-15T00:00:00.000Z'`).run();
+        database.prepare(`UPDATE shadow_extraction_posting_revisions SET observed_at='2026-10-15T00:00:00.000Z'`).run();
+        await artifacts.put('response', new TextEncoder().encode(JSON.stringify({ validation: { accepted: extraction, failures: [] },
+          verification: { policyVersion: policy.version, startsAt: policy.startsAt, acceptedFields: ['locations'] } })).buffer);
+        const DB = d1(database);
+        const batch = DB.batch.bind(DB);
+        let raced = false;
+        let concurrentValue: string | undefined;
+        DB.batch = async statements => {
+          if (!raced) {
+            raced = true;
+            const jobs = new D1InternshipStore(d1(database));
+            const latest = (await jobs.getJob('job-1'))!;
+            if (change === 'notification') latest.notification = { ...latest.notification, smsPending: false, smsSentAt: '2026-10-20T00:00:00.000Z' };
+            if (change === 'closed') latest.open = false;
+            if (change === 'detached') latest.sourceReferences = [];
+            if (change === 'attached') latest.sourceReferences.push({ ...latest.sourceReferences[0]!, sourceId: 'secondary-source', externalId: '456' });
+            if (change === 'revision') {
+              latest.sourceReferences[0]!.shadowContentHash = 'b'.repeat(64);
+              database.prepare('UPDATE shadow_extraction_posting_revisions SET content_hash=?').run('b'.repeat(64));
+            }
+            await jobs.putInternship(latest);
+            concurrentValue = (database.prepare("SELECT value FROM catalog_items WHERE pk='JOB#job-1' AND sk='META'").get() as { value: string }).value;
+          }
+          return batch(statements);
+        };
+        const env = { DB, DOCUMENTS: new MemoryR2(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
+          OPERATIONS_SHARED_SECRET: 'secret', PUBLIC_API_URL: 'https://intern-notifs.test',
+          LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
+        const publish = async () => mode === 'prospective'
+          ? publishProspectiveShadowMetadata(env, async () => undefined)
+          : cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
+            method: 'POST', headers: { 'X-Operations-Key': 'secret', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'publish-approved', runKey: hash, acceptedFields: ['locations'] }),
+          }), env as unknown as Environment);
+        if (mode === 'prospective') await expect(publish()).rejects.toThrow('Catalog job changed');
+        else expect((await publish() as Response).status).toBe(409);
+        expect(raced).toBe(true);
+        expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).toEqual({ projected_at: null });
+        expect((database.prepare("SELECT value FROM catalog_items WHERE pk='JOB#job-1' AND sk='META'").get() as { value: string }).value).toBe(concurrentValue);
+        if (change === 'closed' || change === 'detached' || change === 'revision') {
+          if (mode === 'approved') expect((await publish() as Response).status).toBe(409);
+          else if (change === 'revision') expect(await publish()).toEqual({ result: 'none' });
+          else expect(await publish()).toMatchObject({ result: 'skipped' });
+          expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).toEqual({ projected_at: null });
+          return;
         }
-        return batch(statements);
-      };
-      const env = { DB, DOCUMENTS: new MemoryR2(), SHADOW_EXTRACTION_ARTIFACTS: artifacts,
-        OPERATIONS_SHARED_SECRET: 'secret', PUBLIC_API_URL: 'https://intern-notifs.test',
-        LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy) };
-      const publish = async () => mode === 'prospective'
-        ? publishProspectiveShadowMetadata(env, async () => undefined)
-        : cloudflareWorker.fetch(new Request('https://intern-notifs.test/internal/operations/shadow-publication', {
-          method: 'POST', headers: { 'X-Operations-Key': 'secret', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'publish-approved', runKey: hash, acceptedFields: ['locations'] }),
-        }), env as unknown as Environment);
-      if (mode === 'prospective') await expect(publish()).rejects.toThrow('Catalog job changed');
-      else expect((await publish() as Response).status).toBe(409);
-      expect(raced).toBe(true);
-      expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).toEqual({ projected_at: null });
-      const recovered = await publish();
-      if (mode === 'prospective') expect(recovered).toEqual({ result: 'projected', runKey: hash });
-      else expect((recovered as Response).status).toBe(200);
-      const job = (await new D1InternshipStore(DB).getJob('job-1'))!;
-      expect(job.notification).toMatchObject({ smsPending: false, smsSentAt: '2026-10-20T00:00:00.000Z' });
-      expect(job.postingFacts?.map(fact => fact.field)).toContain('locations');
-      expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).not.toEqual({ projected_at: null });
-    });
+        const recovered = await publish();
+        if (mode === 'prospective') expect(recovered).toEqual({ result: 'projected', runKey: hash });
+        else expect((recovered as Response).status).toBe(200);
+        const job = (await new D1InternshipStore(DB).getJob('job-1'))!;
+        if (change === 'notification') expect(job.notification).toMatchObject({ smsPending: false, smsSentAt: '2026-10-20T00:00:00.000Z' });
+        if (change === 'attached') expect(job.sourceReferences.map(reference => reference.sourceId)).toContain('secondary-source');
+        expect(job.postingFacts?.map(fact => fact.field)).toContain('locations');
+        expect(database.prepare('SELECT projected_at FROM shadow_publication_receipts').get()).not.toEqual({ projected_at: null });
+      });
+    }
   }
   it('hides the runtime probe from unauthenticated callers', async () => {
     const { database } = await publicationDatabase();

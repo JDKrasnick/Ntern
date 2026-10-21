@@ -540,7 +540,7 @@ for (const channel of ['sms', 'digest']) {
   }
 }
 
-for (const mode of ['control', 'lost-ack', 'budget-recovery', 'publisher-race']) {
+for (const mode of ['control', 'lost-ack', 'budget-recovery', 'publisher-race', 'replacement-race']) {
   test(`verified publication ${mode}: repeated handoff retains verified publication`, async () => {
     const document = jobDocument();
     if (mode === 'publisher-race') document.notification = { smsPending: true, digestPending: false };
@@ -593,8 +593,10 @@ for (const mode of ['control', 'lost-ack', 'budget-recovery', 'publisher-race'])
     const publicationDb = countingDatabase(database);
     const realBatch = publicationDb.batch.bind(publicationDb);
     let raced = false;
+    let replacing = false;
     publicationDb.batch = async (statements) => {
-      if (mode === 'publisher-race' && !raced && statements.some(item => /INSERT/iu.test(item.sql) && item.sql.includes('role_metadata_evidence'))) {
+      if (!raced && ((mode === 'publisher-race' && statements.some(item => /INSERT/iu.test(item.sql) && item.sql.includes('role_metadata_evidence')))
+        || (replacing && statements.some(item => item.sql.includes('UPDATE catalog_items') && item.sql.includes('AND (? IS NULL OR value = ?)'))))) {
         raced = true;
         const row = await database.prepare("SELECT value FROM catalog_items WHERE pk = ? AND sk = 'META'").bind(`JOB#${jobId}`).first();
         const latest = JSON.parse(row.value); latest.notification = { smsPending: false, digestPending: false, smsSentAt: new Date().toISOString() };
@@ -614,7 +616,36 @@ for (const mode of ['control', 'lost-ack', 'budget-recovery', 'publisher-race'])
         INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true', LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(policy),
       });
     }
-    const receipts = await database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts WHERE run_key = ? AND projected_at IS NOT NULL').bind(messages[0].runKey).first();
+    if (mode === 'replacement-race') {
+      const prior = await database.prepare('SELECT receipt_id FROM shadow_publication_receipts WHERE run_key=? AND projected_at IS NOT NULL').bind(messages[0].runKey).first();
+      assert.ok(prior);
+      replacing = true;
+      const replacementPolicy = { ...policy, cohort: [{ sourceId: messages[0].sourceId, externalId: messages[0].externalId, contentHash: messages[0].contentHash }] };
+      const replace = async (action = 'publish-approved') => builtWorker.fetch(new Request('https://ingestion.example.test/internal/operations/shadow-publication', {
+        method: 'POST', headers: { 'X-InternNotifs-Service-Key': internalServiceSecret, 'X-Operations-Key': operationsSecret, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, runKey: messages[0].runKey, runKeys: [messages[0].runKey], replaceExisting: true,
+          deferProjection: true, acceptedFields: saved.verification.acceptedFields }),
+      }), { DB: publicationDb, DOCUMENTS: await runtime.getR2Bucket('DOCUMENTS', workerName), SHADOW_EXTRACTION_ARTIFACTS: shadowArtifacts, OPERATIONS_SHARED_SECRET: operationsSecret,
+        INTERNAL_SERVICE_SECRET: internalServiceSecret, LLM_METADATA_PUBLICATION_POLICY_JSON: JSON.stringify(replacementPolicy) });
+      const conflicted = await replace();
+      const conflictBody = await conflicted.text();
+      assert.equal(conflicted.status, 409, conflictBody);
+      assert.match(conflictBody, /Catalog job changed/);
+      assert.equal(raced, true);
+      const retained = await database.prepare('SELECT revoked_at FROM shadow_publication_receipts WHERE receipt_id=?').bind(prior.receipt_id).first();
+      assert.equal(retained.revoked_at, null, 'a conflicted replacement must retain the previous publication receipt');
+      const recovered = await replace();
+      assert.equal(recovered.status, 200, await recovered.text());
+      const replaced = await database.prepare('SELECT revoked_at FROM shadow_publication_receipts WHERE receipt_id=?').bind(prior.receipt_id).first();
+      assert.ok(replaced.revoked_at, 'successful retry retires the previous receipt');
+      const refreshed = await replace('refresh-approved');
+      assert.equal(refreshed.status, 200, await refreshed.text());
+      const stored = await database.prepare("SELECT value,sms_pending FROM catalog_items WHERE pk=? AND sk='META'").bind(`JOB#${jobId}`).first();
+      assert.equal(JSON.parse(stored.value).notification.smsPending, false);
+      assert.ok(JSON.parse(stored.value).notification.smsSentAt);
+      assert.equal(stored.sms_pending, 0);
+    }
+    const receipts = await database.prepare('SELECT COUNT(*) AS count FROM shadow_publication_receipts WHERE run_key = ? AND projected_at IS NOT NULL AND revoked_at IS NULL').bind(messages[0].runKey).first();
     console.log(JSON.stringify({ mode, calls, verified: Boolean(saved.verification), receipts: receipts.count }));
     assert.equal(receipts.count, 1, 'a retried provider handoff must still reach verified metadata publication');
     if (mode === 'publisher-race') {
