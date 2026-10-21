@@ -50,9 +50,9 @@ function housingTags(statements: string[], qualifiers: string[]): string[] {
 
 function educationTags(text: string): string[] {
   const levels = [
-    [/\b(?:bachelors?|B\.?S\.?|B\.?A\.?|BSc)\b/iu, 'Bachelor’s'],
+    [/\b(?:bachelors?|B\.?S\.?|B\.?A\.?|B\.?Sc\.?)\b/iu, 'Bachelor’s'],
     [/\bundergrad(?:uate)?\b/iu, 'Undergrad'],
-    [/\b(?:masters?|M\.?S\.?|MSc)\b/iu, 'Master’s'],
+    [/\b(?:masters?|M\.?S\.?|M\.?Sc\.?)\b/iu, 'Master’s'],
     [/\bMBA\b/iu, 'MBA'],
     [/\b(?:PhD|Ph\.D\.?|doctoral|doctorate)\b/iu, 'PhD'],
     [/\bassociate/iu, 'Associate'], [/\bhigh school\b/iu, 'High school'],
