@@ -147,9 +147,16 @@ export function educationAudienceFromPostingFacts(facts: readonly PostingFact[] 
     .flatMap(fact => {
       const text = [...fact.statements, ...fact.qualifiers].join(' ');
       // An exclusion or optional qualification is not a positive degree audience.
-      if (/\b(?:not (?:eligible|accepted|considered)|ineligible|must not|cannot|excluding|except)\b/iu.test(text)
-        || fact.qualifiers.some(value => DEGREE_PREFERRED_ONLY.test(value) || DEGREE_WAIVED.test(value))) return [];
-      return educationAudienceLevels(text);
+      if (/\b(?:not (?:eligible|accepted|considered)|ineligible|must not|cannot|excluding|except)\b/iu.test(text)) return [];
+      const stated = new Set(educationAudienceLevels(fact.statements.join(' ')));
+      for (const qualifier of fact.qualifiers) {
+        if (DEGREE_PREFERRED_ONLY.test(qualifier) || DEGREE_WAIVED.test(qualifier)) {
+          const scoped = educationAudienceLevels(qualifier.replace(DEGREE_PREFERRED_ONLY, '').replace(DEGREE_WAIVED, ''));
+          if (!scoped.length) return [];
+          for (const level of scoped) stated.delete(level);
+        } else for (const level of educationAudienceLevels(qualifier)) stated.add(level);
+      }
+      return [...stated];
     }))].sort();
   return levels.length ? { levels, evidenceStatus: 'explicit' } : undefined;
 }

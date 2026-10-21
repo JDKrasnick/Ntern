@@ -25,6 +25,8 @@ describe('provider-neutral field enrichment', () => {
     ['Masters degree', ['Preferred'], []],
     ['Masters degree.', ['Preferred'], []],
     ['Masters degree.', ['Not required'], []],
+    ['Currently pursuing a BS or MS degree', ['Masters degree preferred'], ['undergraduate']],
+    ['Currently pursuing a BS degree', ['Masters degree preferred'], ['undergraduate']],
     ['No Masters degree is required', [], []],
     ['PhD students are not eligible', [], []],
     ['PhD students', ['Not considered'], []],
