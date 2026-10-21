@@ -69,6 +69,7 @@ import { D1CatalogAdmissionStore, ROLE_METADATA_REVALIDATION_MS } from './catalo
 import { handleCatalogAdmissionOperations } from './catalog-admission-api.js';
 import { destinationQueueHealth } from './destination-queue-health.js';
 import { companyIconResponse } from './company-icon.js';
+import { D1CompanySizeStore } from './company-size-store.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
 import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, storeProviderIcon, verifyIconDomain } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
@@ -142,6 +143,9 @@ export interface Environment extends AuthEnvironment,
   NTFY_TOPIC?: string;
   NTFY_ENDPOINT?: string;
   OPERATIONS_SHARED_SECRET: string;
+  /** Server-only People Data Labs company enrichment key. No public lookup calls. */
+  PDL_API_KEY?: string;
+  COMPANY_SIZE_LOOKUP_ENABLED?: string;
   EMPLOYER_PORTAL_ENABLED?: string;
   IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED?: string;
   IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED?: string;
@@ -1033,6 +1037,26 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     return withCors(Response.json(await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS)));
   }
+  if (url.pathname === '/internal/company-sizes' || url.pathname === '/internal/company-sizes/refresh') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    const sizes = new D1CompanySizeStore(env.DB);
+    if (request.method === 'GET' && url.pathname === '/internal/company-sizes') {
+      const companies = await sizes.inventory();
+      return withCors(Response.json({ configured: Boolean(env.PDL_API_KEY?.trim()), enabled: env.COMPANY_SIZE_LOOKUP_ENABLED === 'true', companies,
+        roles: companies.reduce((total, company) => total + company.roles, 0) }, { headers: { 'Cache-Control': 'no-store' } }));
+    }
+    if (request.method === 'POST' && url.pathname === '/internal/company-sizes/refresh') {
+      const input = await request.json().catch(() => null) as { limit?: unknown } | null;
+      if (!input || typeof input !== 'object' || Array.isArray(input) || (input.limit !== undefined && (typeof input.limit !== 'number' || !Number.isInteger(input.limit) || input.limit < 1 || input.limit > 25))) {
+        return withCors(Response.json({ message: 'limit must be an integer from 1 to 25' }, { status: 400 }));
+      }
+      const enabled = env.COMPANY_SIZE_LOOKUP_ENABLED === 'true';
+      const result = await sizes.refresh(enabled ? env.PDL_API_KEY : undefined, { limit: input.limit as number | undefined });
+      return withCors(Response.json(enabled ? result : { ...result, skipped: 'disabled' },
+        { headers: { 'Cache-Control': 'no-store' } }));
+    }
+    return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+  }
   if (request.method === 'POST' && url.pathname === '/internal/recover-notifications') {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
     const body = await request.json().catch(() => null) as { since?: unknown; limit?: unknown; apply?: unknown; expectedCandidateJobIds?: unknown } | null;
@@ -1622,6 +1646,7 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     return withCors(Response.json(result, { status: 201, headers: { 'Cache-Control': 'no-store' } }));
   }
   const handler = createApiHandler({
+    companySizes: () => new D1CompanySizeStore(env.DB).scores(),
     jobs: env.CATALOG_R2_READ_ENABLED === 'true'
       ? new R2CatalogReadStore(env.DB, env.DOCUMENTS)
       : new D1InternshipStore(env.DB),
@@ -2211,6 +2236,10 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       }))
       : undefined;
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'company_icon_resolution_deferred', recentOverloads: recentOverloads ?? null }));
+    if (recentOverloads === 0 && env.COMPANY_SIZE_LOOKUP_ENABLED === 'true' && env.PDL_API_KEY?.trim()) {
+      const companySizes = await runScheduledStep('company_size_lookup', () => new D1CompanySizeStore(env.DB).refresh(env.PDL_API_KEY));
+      console.log(JSON.stringify({ event: 'company_size_lookup_complete', companySizes }));
+    }
     console.log(JSON.stringify({ event: 'company_icon_resolution_schedule_complete', companyIconResolution }));
     return;
   }

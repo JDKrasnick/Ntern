@@ -37,6 +37,8 @@ describe('API and ingestion Worker boundary', () => {
     expect(await forwarded?.json()).toEqual({ sourceIds: ['speedyapply-2027-swe'] });
     expect(isIngestionOperationPath('/internal/trusted-admission-backfill')).toBe(true);
     expect(isIngestionOperationPath('/internal/backfill')).toBe(true);
+    expect(isIngestionOperationPath('/internal/company-sizes')).toBe(true);
+    expect(isIngestionOperationPath('/internal/company-sizes/refresh')).toBe(true);
     expect(isIngestionOperationPath('/internal/role-metadata/backfill')).toBe(true);
     expect(isIngestionOperationPath('/jobs')).toBe(false);
   });

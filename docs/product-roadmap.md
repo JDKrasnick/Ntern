@@ -53,6 +53,7 @@
 
 - [x] Implement a shared **Best opportunities** catalog sort (45% company value, 30% pay, 25% role fit), default Catalog and Search to **Last day**, keep **Newest** available, and apply freshness as an independent server-side date window. Includes sourced initial employer assessments, neutral unknowns, filtered-group explanations and global pagination; see [ranking policy](opportunity-ranking.md).
 - [x] Expose role/facet filters directly in the web catalog and apply them across pagination. Successful Apply handoffs move roles into persistent browser History and out of browsing, while remaining roles in a group stay available. Blocked popups leave the catalog unchanged; native layouts and controls remain unchanged.
+- [x] Reuse the existing company-tier lookup behind reviewed company scores. Add a durable, bounded People Data Labs size fallback with expiry, deduplication, failure backoff and catalog-wide audits; external enrichment remains disabled while provider access is unavailable.
   - [ ] Calibrate the provisional pay anchors and employer ratings against a reviewed real-catalog sample, measure production-size read cost/latency, and complete release QA before production rollout.
 
 - [x] Complete the authenticated web-first Resume workspace in code; the production flag remains disabled pending the documented staged security and infrastructure rollout.

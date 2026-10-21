@@ -11,6 +11,8 @@ export interface ServiceBinding {
 export function isIngestionOperationPath(pathname: string): boolean {
   return pathname === '/internal/billing-shutdown'
     || pathname === '/internal/refresh-catalog'
+    || pathname === '/internal/company-sizes'
+    || pathname === '/internal/company-sizes/refresh'
     || pathname === '/internal/recover-notifications'
     || pathname === '/internal/catalog-quality-backfill'
     || pathname === '/internal/trusted-admission-backfill'

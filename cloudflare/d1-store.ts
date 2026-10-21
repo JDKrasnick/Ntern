@@ -1461,7 +1461,7 @@ export class D1InternshipStore implements InternshipStore {
     const scope = this.catalogProjectionScope(pointer);
     const offset = cursorOffset(cursor);
     const overlay = await this.liveOverlayFor(pointer.liveWatermark);
-    const live = rankCatalogGroups(filterCatalogGroupDetails(overlay?.groups ?? [], filter));
+    const live = rankCatalogGroups(filterCatalogGroupDetails(overlay?.groups ?? [], filter), filter.companySizes);
     const ranks: Array<{ sk?: string; id: string; score: number; live?: CatalogGroupDetails }> = live.map(details => ({
       id: details.group.groupId, score: details.group.opportunity!.total, live: details,
     }));
@@ -1506,7 +1506,7 @@ export class D1InternshipStore implements InternshipStore {
         const roles = (JSON.parse(row.roles) as RankingRole[]).filter(role =>
           (!filter.query || catalogTextMatches(filter.query, [role.company, role.title]))
           && (!filter.day || materializedReleaseDay(role as CatalogGroupRole, filter.dayZone) === filter.day));
-        if (roles.length) ranks.push({ sk: row.sk, id: row.id, score: roles.reduce((best, role) => Math.max(best, scoreOpportunity(role).total), 0) });
+        if (roles.length) ranks.push({ sk: row.sk, id: row.id, score: roles.reduce((best, role) => Math.max(best, scoreOpportunity(role, filter.companySizes).total), 0) });
       }
       if (page.results.length < 100) break;
       after = page.results.at(-1)!.sk;
@@ -1519,7 +1519,7 @@ export class D1InternshipStore implements InternshipStore {
     const byKey = new Map(hydrated.results.map(row => [row.sk, JSON.parse(row.value) as CatalogGroupDetails]));
     const groups = selected.flatMap(row => {
       const details = row.live ?? byKey.get(row.sk!);
-      return details ? rankCatalogGroups(filterCatalogGroupDetails([details], filter)) : [];
+      return details ? rankCatalogGroups(filterCatalogGroupDetails([details], filter), filter.companySizes) : [];
     });
     return { groups, ...(offset + limit < ranks.length ? { cursor: String(offset + limit) } : {}) };
   }
