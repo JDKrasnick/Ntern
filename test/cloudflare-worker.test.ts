@@ -1015,6 +1015,20 @@ describe('Cloudflare scheduled posting identity audit', () => {
     });
   });
 
+  it('includes structural failure counters in the alert even when coverage clears the floor', async () => {
+    const alert = vi.fn().mockResolvedValue(undefined);
+    await runScheduledPostingIdentityAudit({
+      DB: {} as Environment['DB'], IDENTITY_CONFIRMED_COVERAGE_FLOOR: '0.9',
+    }, { audit: async () => failedPlan, log: () => undefined, alert });
+    expect(alert).toHaveBeenCalledOnce();
+    const { details } = alert.mock.calls[0]![0];
+    for (const [key, count] of Object.entries(failedPlan.gate)) {
+      if (key !== 'passed') expect(details).toContain(`"${key}":${count}`);
+    }
+    expect(details).not.toContain('repairToken');
+    expect(details).not.toContain('jobId');
+  });
+
   it('treats a missing or invalid coverage floor as unavailable gate evidence', async () => {
     const logs: string[] = [];
     await expect(runScheduledPostingIdentityAudit({

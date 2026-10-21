@@ -590,6 +590,18 @@ ignores timestamps for empty queues, and rejects timestamps outside Cloudflare's
 `destination-verification-metrics-unavailable` and retains any plausible old
 binding age; an unusable REST result emits
 `destination-verification-metrics-invalid` rather than claiming a known work age.
+Cloudflare's documented zero/absent oldest timestamp means the age is unknown,
+even when the backlog is nonempty. A durable 30-minute grace period absorbs
+transient unknown timestamps; continued unknown age emits
+`destination-verification-metrics-unavailable`. A fresh timestamp or an empty
+queue clears the episode. Unknown age is never reported as zero age, and
+confirmed stale work, malformed metrics, and REST failures still alert.
+
+Posting-identity integrity emails include the structural gate counters (duplicate
+groups, alias conflicts, quarantines, presentation blockers, legacy occurrences,
+projection mismatches, and duplicate/dangling references). Coverage above its
+floor does not clear a structural failure; use the failing counters to scope a
+guarded read-only audit before repairing catalog data.
 Neither path pulls, acknowledges, replays, or purges messages. Inspect the reported
 binding/effective timestamps alongside live queue metrics when these signals fire.
 
