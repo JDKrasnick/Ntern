@@ -2132,7 +2132,7 @@ function CatalogGroupSheet({
                   >
                     <View style={styles.catalogGroupRoleCopy}>
                       <Text style={styles.catalogGroupRoleTitle} numberOfLines={2}>{boundedCatalogText(item.title, 240)}</Text>
-                      {item.opportunity ? <Text style={styles.catalogGroupRoleMeta}>Opportunity score {item.opportunity.total}/100 · {item.opportunity.reasons.join(" · ") || "Limited ranking evidence"}</Text> : null}
+                      {Platform.OS !== "web" && item.opportunity ? <Text style={styles.catalogGroupRoleMeta}>Opportunity score {item.opportunity.total}/100 · {item.opportunity.reasons.join(" · ") || "Limited ranking evidence"}</Text> : null}
                       <Text style={styles.catalogGroupRoleMeta} numberOfLines={2}>{compactLocations(item.locations, item.location)} · {seasonLabel(item.season)}</Text>
                       {item.postingIdentityStatus === "unconfirmed" ? <IdentityTrustLabel /> : null}
                       {presentCatalogRole(item).compensation ? <Text style={styles.catalogGroupRolePay} numberOfLines={2}>{presentCatalogRole(item).compensation}</Text> : null}

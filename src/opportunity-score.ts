@@ -1,6 +1,7 @@
 import { opportunityWeights, type OpportunityScore } from '../shared/opportunity-score.js';
 import { companyRating, companyTierScore } from './company-ratings.js';
 import { companySizeKey, type CompanySizeScores } from './company-size.js';
+import { snapshotCompanySizeScore } from './company-size-snapshot.js';
 import type { Compensation } from './types.js';
 
 export interface OpportunityInput {
@@ -52,7 +53,7 @@ export function scoreOpportunity(input: OpportunityInput, companySizes?: Company
   const rating = companyRating(input.company);
   const tier = companyTierScore(input.company);
   const estimated = companySizes?.get(companySizeKey(input.company));
-  const size = typeof estimated === 'number' && Number.isFinite(estimated) ? clamp(estimated) : undefined;
+  const size = typeof estimated === 'number' && Number.isFinite(estimated) ? clamp(estimated) : snapshotCompanySizeScore(input.company);
   const company = rating ? rating.career * 0.7 + rating.business * 0.3 : tier ?? size ?? 50;
   const disclosedPay = payScore(input.compensation);
   const pay = disclosedPay ?? 50;
