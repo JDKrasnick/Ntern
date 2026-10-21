@@ -2532,6 +2532,52 @@ describe('employer declared-site precedence', () => {
 });
 
 describe('employer icon backfill', () => {
+  it('refreshes an old name-only task from a live posting and retains reviewed provenance', async () => {
+    const { database, db, admission, icons } = subject();
+    const url = 'https://job-boards.greenhouse.io/acme/jobs/123';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, { ...employerSeed(''), provider: 'reviewed-registry', tenant: undefined }, NOW);
+    database.prepare("INSERT INTO catalog_items (pk, sk, kind, value) VALUES ('active', 'posting', 'internship', ?)")
+      .run(JSON.stringify({ normalizedUrl: url, title: 'Software Engineering Intern',
+        internshipIdentity: { company: { canonicalId: 'acme' } },
+        sourceReferences: [{ sourceId: 'greenhouse-acme', provenance: 'official-ats' }] }));
+    const infer = vi.fn();
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {
+      LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN, OPENAI_KEY: 'test-key',
+    }), NOW, { ...DEPENDENCIES(scriptedFetch({
+      [url]: () => html('<title>Careers</title>'),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      [IMAGE_URL]: () => webp(), 'https://acme.com/': () => status(403),
+    })), infer });
+    expect(result.resolved).toBe(1);
+    expect(infer).not.toHaveBeenCalled();
+    const evidence = database.prepare('SELECT evidence_json FROM employer_icon_resolutions').get()!;
+    expect(JSON.parse(String(evidence.evidence_json))).toMatchObject({ applicationUrl: url, provenance: 'official-ats',
+      provider: 'greenhouse', tenant: 'acme', reasonCode: 'domain-accepted' });
+  });
+
+  it('persists the exact model decline instead of only a generic tie-break rejection', async () => {
+    const { database, db, admission, icons } = subject();
+    const url = 'https://job-boards.greenhouse.io/acme/jobs/123';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed(url), NOW);
+    const infer = vi.fn(async () => ({ response: { decision: 'uncertain', officialDomain: null, confidence: 0.4,
+      evidenceIds: [], reason: 'Ambiguous company' }, inputTokens: 10, outputTokens: 10, actualCostCents: 1 }));
+    const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket, {
+      LOGO_DEV_TOKEN: LOGO_TOKEN, OPENAI_KEY: 'test-key',
+    }), NOW, { ...DEPENDENCIES(scriptedFetch({
+      [url]: () => html('<title>Software Engineering Intern at Acme</title>'),
+      [logoDevSearchUrl('Acme')]: () => ok([{ name: 'Acme', domain: 'acme.com' }]),
+      'https://acme.com/': () => status(403),
+    })), infer });
+    expect(result.unresolved).toBe(1);
+    const evidence = database.prepare('SELECT evidence_json FROM employer_icon_resolutions').get()!;
+    expect(JSON.parse(String(evidence.evidence_json))).toMatchObject({ reasonCode: 'tie-break-rejected',
+      modelDiagnostics: { tieBreakReason: 'decision-uncertain' } });
+  });
+
   it('uses the newest open posting before a newer closed-history row', async () => {
     const { database, icons } = subject();
     const insert = database.prepare(`INSERT INTO catalog_items

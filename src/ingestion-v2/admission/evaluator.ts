@@ -290,10 +290,11 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
         reason: deterministic.decision.reason,
       });
     }
-    const canonicalEmployer = deterministic.listing?.employerEvidence?.canonicalEmployer
-      ?? (deterministic.listing && this.dependencies.resolveCanonicalEmployer
+    // A source's reviewed board token is not necessarily the durable employer ID.
+    // An explicit provider/tenant mapping always outranks the source-local hint.
+    const canonicalEmployer = (deterministic.listing && this.dependencies.resolveCanonicalEmployer
         ? await this.dependencies.resolveCanonicalEmployer(deterministic.listing)
-        : undefined);
+        : undefined) ?? deterministic.listing?.employerEvidence?.canonicalEmployer;
     const prior = this.dependencies.resolvePriorContext
       ? await this.dependencies.resolvePriorContext(context.sourceId, context.externalId)
       : undefined;

@@ -5,7 +5,7 @@ import {
   acceptIconTieBreak, decideIconDomain, employerDistinctiveTerms, employerNamesDomain,
   iconEvidenceFingerprint, iconTextMatchesEmployer, isIconTransportHost, parseIconTieBreakDecision,
   providerNameMatchesEmployer, scoreIconCandidate, scoreIconCandidates, tenantCorroboratesEmployer,
-  officialIconProvenance,
+  officialIconProvenance, reviewedAtsNamesDomain,
 } from '../src/employer-icon-resolution.js';
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from '../shared/company-icon.js';
 import type { IconCandidateScore, IconDomainCandidate, IconTieBreakDecision } from '../src/employer-icon-resolution.js';
@@ -30,6 +30,39 @@ const submitted: readonly IconCandidateScore[] = [
   score('acme.com', ['final-url:acme.com', 'jsonld-url:acme.com']),
   score('other.com', ['final-url:other.com']),
 ];
+
+describe('reviewed ATS icon confidence', () => {
+  const seed = { canonicalEmployerId: 'ats-workday-nxp-opaque', displayName: 'NXP Semiconductors',
+    roleTitle: 'Software Intern', provider: 'workday', tenant: 'nxp', sourceId: 'reviewed-source',
+    applicationUrl: 'https://nxp.wd3.myworkdayjobs.com/careers/job/Intern_R-123', provenance: 'reviewed-community' as const };
+
+  it('uses the immutable tenant as identity even when the page is only an ATS shell', () => {
+    expect(reviewedAtsNamesDomain(seed, 'nxp.com')).toBe(true);
+    expect(reviewedAtsNamesDomain(seed, 'nxp-semiconductors.com')).toBe(false);
+    expect(reviewedAtsNamesDomain(seed, 'myworkdayjobs.com')).toBe(false);
+    expect(reviewedAtsNamesDomain({ ...seed, applicationUrl: 'https://other.wd3.myworkdayjobs.com/careers/job/Intern_R-123' }, 'nxp.com')).toBe(false);
+    expect(reviewedAtsNamesDomain({ ...seed, applicationUrl: 'https://example.com/job' }, 'nxp.com')).toBe(false);
+    expect(reviewedAtsNamesDomain({ ...seed, provenance: undefined }, 'nxp.com')).toBe(false);
+  });
+
+  it('accepts a unique tenant/domain match while retaining regional-domain ties', () => {
+    const nxp = candidate('nxp.com', ['logo-dev', 'reviewed-ats-domain']);
+    expect(decideIconDomain([nxp, candidate('other.com', ['logo-dev'])])).toMatchObject({ outcome: 'resolved', selectedDomain: 'nxp.com' });
+    expect(decideIconDomain([nxp, candidate('nxp.co.kr', ['logo-dev', 'reviewed-ats-domain'])])).toMatchObject({ outcome: 'llm-review' });
+    expect(decideIconDomain([nxp, candidate('namesake.com', ['logo-dev', 'brandfetch', 'page-title'])]))
+      .toMatchObject({ outcome: 'llm-review' });
+    expect(decideIconDomain([candidate('nxp.com', ['logo-dev'])]).outcome).not.toBe('resolved');
+  });
+
+  it('accepts 0.60 model confidence only with reviewed ATS support and valid citations', () => {
+    const nxp = scoreIconCandidate(candidate('nxp.com', ['logo-dev', 'reviewed-ats-domain']));
+    const decision = tieBreak({ officialDomain: 'nxp.com', confidence: 0.6, evidenceIds: nxp.evidenceIds });
+    expect(acceptIconTieBreak(decision, [nxp])).toMatchObject({ accepted: true, domain: 'nxp.com' });
+    expect(acceptIconTieBreak({ ...decision, evidenceIds: ['logo-dev:nxp.com'] }, [nxp]).accepted).toBe(false);
+    expect(acceptIconTieBreak({ ...decision, officialDomain: 'evil.com' }, [nxp]).accepted).toBe(false);
+    expect(acceptIconTieBreak(tieBreak({ confidence: 0.6 }), submitted).accepted).toBe(false);
+  });
+});
 
 describe('registrable domains', () => {
   it('strips subdomains and keeps hosts that merely share a two-label suffix apart', () => {

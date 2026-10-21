@@ -15,10 +15,11 @@
 
 import { createHash } from 'node:crypto';
 import { registrableDomain } from '../src/core/registrable-domain.js';
+import { providerPostingReference } from '../src/identity/posting.js';
 import {
   MAX_PROVIDER_CANDIDATES, decideIconDomain, acceptIconTieBreak, iconEvidenceFingerprint,
   iconTextMatchesEmployer, iconTieBreakSchema, isIconTransportHost, parseIconTieBreakDecision,
-  tenantCorroboratesEmployer, employerNamesDomain, employerDistinctiveTerms, officialIconProvenance,
+  tenantCorroboratesEmployer, employerNamesDomain, employerDistinctiveTerms, officialIconProvenance, reviewedAtsNamesDomain,
   plausibleEmployerName, providerNameMatchesEmployer, parseIconProposal, iconProposalSchema,
   acceptIconAssetPick, parseIconAssetPick, iconAssetPickSchema,
   ICON_PROPOSAL_MINIMUM_CONFIDENCE,
@@ -46,7 +47,7 @@ import type { D1Database, R2Bucket } from './types.js';
 /** A resolved decision is revalidated on this cadence. */
 const ICON_REVALIDATE_MS = 30 * 24 * 60 * 60 * 1_000;
 /** Bump whenever resolver semantics change so old misses can be reconsidered. */
-export const ICON_RESOLVER_VERSION = 4;
+export const ICON_RESOLVER_VERSION = 5;
 /** A definitive no-match backs off from one day to the revalidation ceiling. */
 const ICON_UNRESOLVED_BASE_RETRY_MS = 24 * 60 * 60 * 1_000;
 /** A transient provider or network problem retries sooner, from one hour. */
@@ -289,10 +290,12 @@ async function backfillSeedlessEmployers(
     // reach a provider nomination and often declines ("AEVEX" has no provider entry,
     // but the Greenhouse posting's own board link names `aevex.com`).
     const posting = await store.latestPostingForEmployer(employer.id);
-    const provider = posting?.provider ?? 'reviewed-registry';
+    const reference = posting ? providerPostingReference(posting.url) : undefined;
+    const provider = reference?.provider !== 'unknown' && reference?.provider
+      ? reference.provider : posting?.provider ?? 'reviewed-registry';
     const sourceId = posting?.sourceId ?? 'reviewed-registry';
     const prefix = `${provider}-`;
-    const tenant = sourceId.startsWith(prefix) ? sourceId.slice(prefix.length) : undefined;
+    const tenant = reference?.tenant ?? (sourceId.startsWith(prefix) ? sourceId.slice(prefix.length) : undefined);
     const recorded = await enqueueEmployerIconResolution(store, {
       canonicalEmployerId: employer.id, displayName: employer.displayName,
       roleTitle: posting?.title ?? '', applicationUrl: posting?.url ?? '',
@@ -323,6 +326,7 @@ interface ResolveTaskInput {
   providerOutcomes?: Record<string, number>;
   /** Pass-level tally of what confirming candidates cost and how often it tied. */
   confirmation?: ConfirmationStats;
+  diagnostics?: { tieBreakReason?: string; proposalReason?: string };
 }
 
 interface ResolveOutcome {
@@ -331,6 +335,7 @@ interface ResolveOutcome {
 }
 
 async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<ResolveOutcome> {
+  input.diagnostics = {};
   const { store, task, env, now, deps } = input;
   const at = now.toISOString();
   const context = await store.context(task.canonicalEmployerId);
@@ -338,7 +343,19 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
     await store.dropTask(task.id, at, 'employer-missing');
     return { outcome: 'unresolved', reasonCode: 'employer-missing' };
   }
-  const seed = parseIconSeed(task.evidenceJson, context);
+  let seed = parseIconSeed(task.evidenceJson, context);
+  // Early backfills had only a name. Refresh their evidence from a current role
+  // when they are claimed, instead of repeating name-only searches for a month.
+  if (!seed.applicationUrl || !seed.provenance) {
+    const posting = await store.latestPostingForEmployer(context.id);
+    if (posting) {
+      const reference = providerPostingReference(posting.url);
+      seed = { ...seed, applicationUrl: posting.url, roleTitle: posting.title ?? seed.roleTitle,
+        provider: reference.provider !== 'unknown' ? reference.provider : posting.provider ?? seed.provider,
+        ...(reference.tenant ? { tenant: reference.tenant } : {}),
+        ...(posting.provenance ? { provenance: posting.provenance } : {}) };
+    }
+  }
   const previousInvalidation = parseInvalidatedReason(task.evidenceJson);
   // A reviewer-uploaded icon outranks every automatic answer, and a wrong-icon
   // report must be reviewed by a person rather than retried automatically. Only
@@ -478,6 +495,7 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
     taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
     evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
       outcome: 'unresolved', reasonCode: decision.outcome === 'llm-review' ? 'tie-break-rejected' : 'no-reliable-domain', attempt,
+      modelDiagnostics: input.diagnostics,
     })),
     nextRetryAt, now: at,
   });
@@ -648,6 +666,7 @@ async function escalateToTieBreak(input: AcceptInput): Promise<ResolveOutcome | 
   const submitted = decision.scores.filter((candidate) => !candidate.rejected).slice(0, 5);
   if (!submitted.length) return undefined;
   const result = await runIconTieBreak({ seed, gathered, submitted, apiKey, deps });
+  if (input.diagnostics) input.diagnostics.tieBreakReason = result.reasonCode;
   await store.recordTieBreak({
     canonicalEmployerId: context.id, at, evidenceFingerprint: task.evidenceFingerprint,
     inputTokens: result.inputTokens, outputTokens: result.outputTokens,
@@ -699,7 +718,10 @@ interface TieBreakOutcome {
    const { store, task, env, now, deps, context, seed, gathered, at, declaredName } = input;
    const apiKey = env.OPENAI_KEY;
    if (!apiKey) return undefined;
-   if (!withinTieBreakBudget(context, task.evidenceFingerprint, now)) return undefined;
+   if (!withinTieBreakBudget(context, task.evidenceFingerprint, now)) {
+     if (input.diagnostics) input.diagnostics.proposalReason = 'tie-break-budget-exhausted';
+     return undefined;
+   }
 
    const infer = deps.infer ?? ((request: OpenAIJsonRequest) => inferOpenAIJson(apiKey, request, deps.fetchImpl ?? fetch));
    const result = await infer({
@@ -716,6 +738,7 @@ interface TieBreakOutcome {
      displayName: context.displayName, declaredName, deps, response: result.response,
    });
    logProposal(context.id, proposal.domain, proposal.confidence, proposal.reasonCode);
+   if (input.diagnostics) input.diagnostics.proposalReason = proposal.reasonCode;
    if (proposal.reasonCode !== 'verified' || !proposal.domain) return undefined;
 
    return acceptSelectedDomain({
@@ -990,6 +1013,7 @@ const tieBreakSystemPrompt = [
   'You identify the official web domain of the employer behind one job posting.',
   'Use only the supplied JSON. Never invent a domain and never answer with a URL.',
   'The candidates array lists every domain that may be selected, each with the evidence ids that support it.',
+  'Evidence ids beginning reviewed-ats-domain mean a reviewed source identifies the employer through an immutable ATS posting whose tenant exactly names that domain brand; this is strong employer identity even when the ATS page has no readable metadata.',
   "A candidate the employer's own Organization node or ATS board declares (evidence ids beginning jsonld-url or platform-website) is the employer's own statement of its domain, and outranks a careers host, an ATS host, or a provider nomination that merely shares the name.",
   'When two candidates both fit the name, prefer the corporate brand domain over a careers or jobs subdomain and over a namesake.',
   'Answer with decision "accept" only when the candidates themselves prove the official domain;',
@@ -1376,6 +1400,9 @@ function iconCandidates(
   }
   for (const domain of providers.logoDev) add(domain, 'logo-dev');
   for (const domain of providers.brandfetch) add(domain, 'brandfetch');
+  for (const domain of providerIdentityTargets) {
+    if (reviewedAtsNamesDomain(seed, domain)) add(domain, 'reviewed-ats-domain');
+  }
   // An officially-admitted role's application host is the employer's own site. A
   // transport host is not: it is the platform, and the exemption above decides
   // whether it is the employer's own platform domain.
@@ -1807,6 +1834,7 @@ interface EvidenceRecordInput {
   attempt?: number;
   imageVerified?: boolean;
   iconKey?: string;
+  modelDiagnostics?: { tieBreakReason?: string; proposalReason?: string };
   tieBreak?: { citedEvidenceIds: readonly string[]; inputTokens: number; outputTokens: number; reasonCode: string };
 }
 
@@ -1842,6 +1870,8 @@ function evidenceRecord(
     displayName: seed.displayName.slice(0, 200),
     roleTitle: seed.roleTitle.slice(0, 200),
     provider: seed.provider,
+    sourceId: seed.sourceId,
+    ...(seed.provenance ? { provenance: seed.provenance } : {}),
     ...(seed.tenant ? { tenant: seed.tenant } : {}),
     ...(seed.applicationUrl ? { applicationUrl: seed.applicationUrl.slice(0, 2_048) } : {}),
     ...(gathered ? { finalUrl: gathered.finalUrl.slice(0, 2_048) } : {}),
@@ -1854,6 +1884,7 @@ function evidenceRecord(
     candidates,
     outcome: outcome.outcome,
     reasonCode: outcome.reasonCode,
+    ...(outcome.modelDiagnostics ? { modelDiagnostics: outcome.modelDiagnostics } : {}),
     ...(outcome.imageVerified === undefined ? {} : { imageVerified: outcome.imageVerified }),
     // What the model cited is the whole basis for a middle-band decision, so the
     // exception reviewer can see it without replaying the request.

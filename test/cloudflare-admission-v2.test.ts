@@ -10,6 +10,7 @@ import { ingestionV2AdmissionVersion } from '../src/ingestion-v2/admission/versi
 import { D1IngestionV2Repository } from '../cloudflare/ingestion-v2-store.js';
 import { normalizeSourceSnapshot } from '../src/ingestion-v2/normalize.js';
 import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/catalog-sink.js';
+import { D1InternshipStore } from '../cloudflare/d1-store.js';
 
 afterEach(() => vi.unstubAllGlobals());
 const observedAt = '2026-10-03T00:00:00.000Z';
@@ -34,16 +35,23 @@ function row(): IngestionRowRecord {
 }
 
 describe('Cloudflare admission v2 boundary', () => {
-  it('passes the committed catalog identity through the default live sink router to D1 settlement', async () => {
+  it.each(['unmapped', 'mapped', 'canary', 'live'] as const)('connects reviewed employer icons through the default %s sink', async (mode) => {
     const database = new DatabaseSync(':memory:');
     for (const file of readdirSync(new URL('../cloudflare/migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
     }
     const db = sqliteD1(database);
+    if (mode === 'mapped') {
+      database.exec(`INSERT INTO canonical_employers (id, display_name, reviewed_at, reviewed_by, created_at, updated_at)
+        VALUES ('mapped-acme', 'Acme', '${observedAt}', 'operator', '${observedAt}', '${observedAt}');
+        INSERT INTO employer_mappings (id, provider, scope, canonical_employer_id, reviewed_at, reviewed_by, created_at)
+        VALUES ('acme-mapping', 'greenhouse', 'acme', 'mapped-acme', '${observedAt}', 'operator', '${observedAt}')`);
+    }
     const repository = new D1IngestionV2Repository(db);
     const envelope = normalizeSourceSnapshot({ sourceId: 'source', admissionVersion: 'standard-v1', observedAt,
       postings: [{ sourceId: 'source', externalId: 'role', sourceUrl: 'https://careers.example.com/opportunities',
-        fetchedAt: observedAt, employer: { id: 'acme', name: 'Acme', authority: 'reviewed-registry' },
+        fetchedAt: observedAt, provenance: 'official-ats', employer: { id: 'acme', name: 'Acme', authority: 'reviewed-registry' },
+        providerIdentity: { provider: 'greenhouse', tenant: 'acme' },
         title: 'Software Engineering Intern', content: [{ kind: 'description', format: 'plain', value: 'Build distributed systems.' }],
         locations: ['Remote'], applyUrl: 'https://careers.example.com/opportunities/software-intern', sourceState: 'open', lifecycleAuthority: 'title' }],
     });
@@ -54,7 +62,8 @@ describe('Cloudflare admission v2 boundary', () => {
       materialHash: envelope.rows[0]!.materialHash, notificationBaseline: true }]);
     vi.stubGlobal('fetch', vi.fn(async () => new Response('<title>Software Engineering Intern</title><main>Build distributed systems.</main><form><input type="file" name="resume"></form>',
       { headers: { 'Content-Type': 'text/html' } })));
-    const committed = vi.spyOn(ReconcilerAdmissionV2CatalogSink.prototype, 'commit').mockResolvedValue({ jobId: 'retained-catalog-job' });
+    const committed = vi.spyOn(ReconcilerAdmissionV2CatalogSink.prototype, 'commit');
+    if (mode !== 'live') committed.mockResolvedValue({ jobId: 'retained-catalog-job' });
     try {
       const [body] = buildAdmissionV2Messages({ sourceId: 'source', snapshotHash: envelope.snapshotHash, snapshotKey: 'snapshot',
         admissionVersion: 'standard-v1', baseline: true, externalIds: ['role'] });
@@ -64,13 +73,33 @@ describe('Cloudflare admission v2 boundary', () => {
         DB: db, DOCUMENTS: { async get() { return { body: new Response(JSON.stringify(envelope)).body }; } } as unknown as R2Bucket,
         INGESTION_V2_SHADOW_DISCOVERY_ENABLED: 'true', INGESTION_V2_SHADOW_SOURCE_ALLOWLIST: 'source',
         INGESTION_V2_ADMISSION_ENABLED: 'true', INGESTION_V2_ADMISSION_SOURCE_ALLOWLIST: 'source',
-        INGESTION_V2_CATALOG_WRITER_ENABLED: 'true', INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: 'source',
+        INGESTION_V2_CATALOG_WRITER_ENABLED: mode === 'canary' ? 'false' : 'true', INGESTION_V2_CATALOG_WRITER_SOURCE_ALLOWLIST: 'source',
         INGESTION_V2_LEGACY_CATALOG_WRITE_DISABLED_SOURCE_ALLOWLIST: 'source',
       }, { resolver: { async resolve() { return ['93.184.216.34']; } }, now: () => new Date(observedAt) });
       expect(acknowledged).toBe(1);
+      if (mode === 'canary') {
+        expect(committed).not.toHaveBeenCalled();
+        expect(database.prepare("SELECT id FROM canonical_employers WHERE id = 'acme'").get()).toBeUndefined();
+        expect(database.prepare('SELECT COUNT(*) AS n FROM employer_icon_resolutions').get()).toMatchObject({ n: 0 });
+        return;
+      }
       expect(committed).toHaveBeenCalledOnce();
+      const employerId = mode === 'mapped' ? 'mapped-acme' : 'acme';
+      expect(committed.mock.calls[0]![0].admission.canonicalEmployer?.id).toBe(employerId);
+      expect(database.prepare('SELECT reviewed_by FROM canonical_employers WHERE id = ?').get(employerId))
+        .toMatchObject({ reviewed_by: mode === 'mapped' ? 'operator' : 'reviewed-source-registry' });
+      if (mode === 'mapped') expect(database.prepare("SELECT id FROM canonical_employers WHERE id = 'acme'").get()).toBeUndefined();
+      const task = database.prepare('SELECT canonical_employer_id, evidence_json FROM employer_icon_resolutions').get()!;
+      expect(task.canonical_employer_id).toBe(employerId);
+      expect(JSON.parse(String(task.evidence_json))).toMatchObject({ applicationUrl: envelope.rows[0]!.posting.applyUrl,
+        provenance: 'official-ats', tenant: 'acme', provider: 'greenhouse' });
       expect(database.prepare('SELECT state,job_id,notification_baseline FROM ingestion_rows').get())
-        .toMatchObject({ state: 'settled', job_id: 'retained-catalog-job', notification_baseline: 1 });
+        .toMatchObject({ state: 'settled', job_id: mode === 'live' ? committed.mock.calls[0]![0].jobId : 'retained-catalog-job', notification_baseline: 1 });
+      if (mode === 'live') {
+        const job = await new D1InternshipStore(db).getJob(committed.mock.calls[0]![0].jobId);
+        expect(job?.admission?.canonicalEmployer?.id).toBe(employerId);
+        expect(job?.internshipIdentity).toMatchObject({ company: { canonicalId: employerId } });
+      }
     } finally { committed.mockRestore(); database.close(); }
   });
   it('retains a provider Retry-After minimum without interpreting a 429 as a closed job', async () => {
