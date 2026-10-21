@@ -35,6 +35,18 @@ function identity(options: {
 }
 
 describe('grouped catalog domain', () => {
+  it('uses already-published education facts in materialized rows and audience filters', () => {
+    const role = job('backfilled', 0, { internshipIdentity: { ...identity(), education: { levels: [], evidenceStatus: 'unspecified', provenance: [] } },
+      postingFacts: [{ field: 'education', statements: ['Currently pursuing a Masters or PhD degree'], qualifiers: [],
+        sourceUrl: 'https://employer.test/role', contentHash: 'a'.repeat(64) }],
+    });
+    expect(catalogEducation(role)).toEqual({ levels: ['doctoral', 'masters'], evidence: 'explicit', label: 'doctoral + masters' });
+    const groups = groupCatalogJobs([role]);
+    const details = groups.map(catalogGroupDetails);
+    expect(details[0]?.group.education).toContainEqual(catalogEducation(role));
+    expect(filterCatalogGroups(groups, { educationLevel: 'undergraduate' })).toHaveLength(0);
+    expect(filterCatalogGroupDetails(details, { educationLevel: 'masters' })).toHaveLength(1);
+  });
   it('consumes publication input one group at a time with identical cards for releases, programs, closed and individual roles', () => {
     const jobs = [
       ...Array.from({ length: 25 }, (_, index) => job(`release-${index}`, index)),

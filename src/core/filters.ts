@@ -1,4 +1,5 @@
 import type { EducationLevel, RawListing } from '../types.js';
+import type { PostingFact } from '../../shared/posting-facts.js';
 import { educationLevels } from '../../shared/education-display.js';
 import { educationAudienceOf, educationExcludesLevel } from '../identity/enrichment.js';
 import { employerCategories, employerCategory, type EmployerCategory } from './employers.js';
@@ -39,7 +40,7 @@ export function isEducationLevel(value: unknown): value is EducationLevel {
 
 /** Fields any filterable listing carries; the education audience lives in its identity. */
 export type FilterableListing = Pick<RawListing, 'company' | 'title' | 'location' | 'season' | 'requirements'>
-  & { internshipIdentity?: unknown; roleMetadata?: unknown; technicalScope?: 'legacy' | 'expanded' };
+  & { internshipIdentity?: unknown; roleMetadata?: unknown; postingFacts?: readonly PostingFact[]; technicalScope?: 'legacy' | 'expanded' };
 
 export type FilterMatchReasonKind = 'category' | 'keyword' | 'company-type' | 'default-all-technical';
 export interface FilterMatchReason { kind: FilterMatchReasonKind; label: string; }

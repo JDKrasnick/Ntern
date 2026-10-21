@@ -11,6 +11,7 @@ import type {
   ProvenancedValue,
 } from '../types.js';
 import { canonicalCompanyKey } from '../core/normalize.js';
+import type { PostingFact } from '../../shared/posting-facts.js';
 
 const SOURCE_PRIORITY: Record<EvidenceSource, number> = {
   'official-api': -1,
@@ -122,18 +123,30 @@ export interface StatedEducationAudience {
  * stored records hold that identity untyped. Reconciled official-page evidence
  * replaces the identity's own scan, so the first holder that states levels wins.
  */
-export function educationAudienceOf(job: { internshipIdentity?: unknown; roleMetadata?: unknown }): StatedEducationAudience | undefined {
+export function educationAudienceOf(job: { internshipIdentity?: unknown; roleMetadata?: unknown; postingFacts?: readonly PostingFact[] }): StatedEducationAudience | undefined {
+  let unstated: StatedEducationAudience | undefined;
   for (const holder of [job.internshipIdentity, job.roleMetadata]) {
     if (!holder || typeof holder !== 'object' || !('education' in holder)) continue;
     const education = holder.education;
     if (!education || typeof education !== 'object' || !('levels' in education) || !Array.isArray(education.levels)) continue;
     const evidence = 'evidenceStatus' in education ? education.evidenceStatus : undefined;
-    return {
+    const audience = {
       levels: education.levels.filter((level): level is string => typeof level === 'string'),
       ...(typeof evidence === 'string' ? { evidenceStatus: evidence } : {}),
     };
+    if (audience.evidenceStatus === 'conflicting' || audience.levels.length) return audience;
+    unstated ??= audience;
   }
-  return undefined;
+  return educationAudienceFromPostingFacts(job.postingFacts) ?? unstated;
+}
+
+/** Published facts already passed source/revision validation. Reuse their stated
+ * degree audience for older records whose typed identity was not projected. */
+export function educationAudienceFromPostingFacts(facts: readonly PostingFact[] | undefined): StatedEducationAudience | undefined {
+  const levels = [...new Set((facts ?? []).filter(fact => fact.field === 'education')
+    .flatMap(fact => fact.qualifiers.some(text => DEGREE_PREFERRED_ONLY.test(text) || DEGREE_WAIVED.test(text))
+      ? [] : educationAudienceLevels([...fact.statements, ...fact.qualifiers].join(' '))))].sort();
+  return levels.length ? { levels, evidenceStatus: 'explicit' } : undefined;
 }
 
 /**
