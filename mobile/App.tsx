@@ -96,7 +96,7 @@ import {
   type JobRouteState,
 } from "./src/job-detail";
 import { applicationSections, applicationStatusLabel, nextAvailableQueueEntry, queueEntryTarget, resolveApplicationJob, selectBulkTargets, sortApplyQueue, type ApplicationJobSummary } from "./src/application";
-import { loadApplicationHistory, parseApplicationHistory, rememberApplication, remainingCatalogGroup, saveApplicationHistory, type ApplicationHistoryEntry, type HistoryRole } from "./src/application-history";
+import { applicationHistoryRows, loadApplicationHistory, parseApplicationHistory, rememberApplication, remainingCatalogGroup, saveApplicationHistory, type ApplicationHistoryEntry, type HistoryRole } from "./src/application-history";
 import {
   appSettingsPayload,
   jobPreferencesPayload,
@@ -3618,26 +3618,15 @@ function CatalogFilterToolbar({ query, onQueryChange, filters, onFiltersChange, 
 function ApplicationHistoryScreen({ entries, applications = [], jobs = [], onOpen }: {
   entries: ApplicationHistoryEntry[]; applications?: Application[]; jobs?: Job[]; onOpen: (job: HistoryRole) => void;
 }) {
-  const rows = entries.map(entry => {
-    const application = applications.find(item => item.jobId === entry.job.jobId && item.status !== 'saved');
-    return { ...entry, status: application ? applicationStatusLabel(application.status, application.queuedAt) : 'Opened application' };
-  });
-  for (const application of applications) {
-    if (application.status === 'saved' && application.queuedAt !== undefined || rows.some(row => row.job.jobId === application.jobId)) continue;
-    const job = resolveApplicationJob(application, jobs);
-    if (!job?.applyUrl) continue;
-    rows.push({ job: { jobId: job.jobId, company: job.company, title: job.title, applyUrl: job.applyUrl },
-      openedAt: application.appliedAt ?? application.createdAt ?? '', status: applicationStatusLabel(application.status, application.queuedAt) });
-  }
-  rows.sort((a, b) => b.openedAt.localeCompare(a.openedAt));
+  const rows = applicationHistoryRows(entries, applications, jobs);
   return <View style={styles.catalogPageColumn}>
     <FlatList data={rows} keyExtractor={item => item.job.jobId} contentContainerStyle={styles.historyContent}
       ListHeaderComponent={<View style={styles.historyHeader}><Text style={styles.historyTitle}>History</Text><Text style={styles.catalogListMeta}>Saved on this browser. Opening a form does not confirm submission.</Text></View>}
       ListEmptyComponent={<View style={styles.emptyState}><Text style={styles.catalogEmptyTitle}>No applications opened yet.</Text><Text style={styles.catalogEmptyCopy}>Click Apply on a role to move it here.</Text></View>}
-      renderItem={({ item }) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Open application for ${item.job.title} at ${item.job.company}`} onPress={() => onOpen(item.job)} style={styles.catalogListRow}>
+      renderItem={({ item }) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Open application for ${item.job.title} at ${item.job.company}`} aria-disabled={!item.job.applyUrl} disabled={!item.job.applyUrl} onPress={() => onOpen(item.job)} style={styles.catalogListRow}>
         <View style={styles.catalogListEmployer}><CompanyMark company={item.job.company} size={34} /></View>
         <View style={styles.catalogListPrimary}><Text style={styles.catalogListTitle}>{item.job.title}</Text><Text style={styles.catalogListEmployerName}>{item.job.company}</Text><Text style={styles.catalogListMeta}>{item.status}{item.openedAt ? ` · ${new Date(item.openedAt).toLocaleDateString()}` : ''}</Text></View>
-        <Ionicons name="open-outline" size={17} color={catalogColors.accent} />
+        {item.job.applyUrl ? <Ionicons name="open-outline" size={17} color={catalogColors.accent} /> : <Text style={styles.catalogListMeta}>Listing unavailable</Text>}
       </TouchableOpacity>} />
   </View>;
 }

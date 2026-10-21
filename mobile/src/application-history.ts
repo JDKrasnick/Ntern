@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { applicationStatusLabel, resolveApplicationJob, type QueueEntry } from './application';
 
 export type HistoryRole = { jobId: string; company: string; title: string; applyUrl: string; location?: string; season?: string };
 export type ApplicationHistoryEntry = { job: HistoryRole; openedAt: string };
@@ -35,6 +36,23 @@ export async function loadApplicationHistory() {
 export function saveApplicationHistory(history: ApplicationHistoryEntry[]) {
   writes = writes.catch(() => undefined).then(() => AsyncStorage.setItem(key, JSON.stringify(history)));
   return writes;
+}
+
+export function applicationHistoryRows(entries: ApplicationHistoryEntry[], applications: Array<QueueEntry & { appliedAt?: string }> = [], jobs: Array<HistoryRole & { open?: boolean }> = []) {
+  const rows = entries.map(entry => {
+    const application = applications.find(item => item.jobId === entry.job.jobId && item.status !== 'saved');
+    return { ...entry, status: application ? applicationStatusLabel(application.status, application.queuedAt) : 'Opened application' };
+  });
+  const seen = new Set(rows.map(row => row.job.jobId));
+  const catalogJobs = jobs.map(job => ({ ...job, open: job.open ?? false }));
+  for (const application of applications) {
+    if (application.status === 'saved' && application.queuedAt !== undefined || seen.has(application.jobId)) continue;
+    const job = resolveApplicationJob(application, catalogJobs);
+    rows.push({ job: { jobId: application.jobId, company: job?.company ?? 'Employer not specified', title: job?.title ?? 'Role details unavailable', applyUrl: job?.applyUrl ?? '' },
+      openedAt: application.appliedAt ?? application.createdAt ?? '', status: applicationStatusLabel(application.status, application.queuedAt) });
+    seen.add(application.jobId);
+  }
+  return rows.sort((a, b) => b.openedAt.localeCompare(a.openedAt));
 }
 
 /** Remove only completed handoffs. A group with other roles gets a fresh representative. */

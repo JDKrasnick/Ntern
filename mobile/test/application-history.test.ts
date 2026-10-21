@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadApplicationHistory, parseApplicationHistory, rememberApplication, remainingCatalogGroup, saveApplicationHistory } from '../src/application-history';
+import { applicationHistoryRows, loadApplicationHistory, parseApplicationHistory, rememberApplication, remainingCatalogGroup, saveApplicationHistory } from '../src/application-history';
 
 const storage = vi.hoisted(() => new Map<string, string>());
 vi.mock('@react-native-async-storage/async-storage', () => ({ default: {
@@ -38,5 +38,16 @@ describe('application handoff history', () => {
     expect(remainingCatalogGroup(group, new Set(['a']))).toBeUndefined();
     expect(remainingCatalogGroup(group, new Set(['a']), [unrelated, a, b])).toMatchObject({ roleIds: ['b'], roleCount: 1, featuredRole: b, titles: [b.title], opportunity: b.opportunity });
     expect(remainingCatalogGroup(group, new Set(['a', 'b']), [a, b])).toBeUndefined();
+  });
+  it('retains signed-in history when a listing expires, keeps confirmed statuses and excludes queued roles', () => {
+    const entries = rememberApplication([], job);
+    const rows = applicationHistoryRows(entries, [
+      { applicationId: 'a', jobId: 'a', status: 'applied' },
+      { applicationId: 'b', jobId: 'b', status: 'rejected', job: { jobId: 'b', title: 'Expired role', company: 'Employer', open: false } },
+      { applicationId: 'c', jobId: 'c', status: 'saved', queuedAt: new Date().toISOString() },
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows.find(row => row.job.jobId === 'a')?.status).toBe('APPLIED');
+    expect(rows.find(row => row.job.jobId === 'b')).toMatchObject({ job: { title: 'Expired role', applyUrl: '' }, status: 'REJECTED' });
   });
 });
