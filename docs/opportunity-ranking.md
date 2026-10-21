@@ -1,8 +1,8 @@
 # Opportunity ranking
 
 The public catalog defaults to **Best opportunities**. **Newest** remains a
-separate chronological sort. The main Catalog feed and Search share the selected
-sort and date window, while Search retains its own facets. New web installations and
+separate chronological sort. The main web Catalog feed and Search share the selected
+query, sort, date window and facets, including role focus. New web installations and
 legacy preferences start with **Last day** (the last 24 hours) and **Best opportunities**.
 Readers can choose Last week or All independently of the ranking. Both sorts
 respect the same role, employer, education, source, availability, location and
@@ -12,11 +12,25 @@ The catalog uses a compact filter toolbar: company/role search, time window
 and sort sit on one horizontal row on wide screens. Narrow screens keep time
 and sort together below the search field. Results use continuous compact rows;
 the feed header has no swipe action or scoring subtitle.
+The Roles control opens the existing facet sheet; selected role types and other
+facets apply to every feed page, while Best and Newest sort the matching roles.
 The layout changes apply only to web, including narrow browser widths. Native
 navigation, feed cards, catalog rows, search controls and their existing styles
 retain their previous presentation. Native freshness controls, Newest default
 and v1 preferences also remain separate from the web migration. Web compares season and education in plain
 columns, with education labels separated by a slash (for example Undergrad / Masters).
+
+## Web application history
+
+A successful Apply handoff saves the role and opening time in this browser's
+History tab and removes that role from Catalog, Search and grouped-role details.
+Opening a form is labeled as an opened application, not proof of submission.
+Invalid links and blocked popups do not create history or hide the role. Other
+roles in the same group stay available: the client loads the group's remaining
+roles when its previous representative moves to History. Browser history persists
+across reloads and works without an account; it does not claim cross-device sync.
+Signed-in History also includes existing tracked applications, and the web Queue
+keeps only roles still waiting in the queue. Native presentation stays unchanged.
 
 ## Score v1
 

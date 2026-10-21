@@ -91,7 +91,7 @@ describe('grouped catalog request filters', () => {
     expect(params.get('addedSince')).toBe(defaults.addedSince);
     expect(params.get('addedBefore')).toBe(defaults.addedBefore);
     expect(params.get('sort')).toBe('best'); expect(params.get('cursor')).toBe('50');
-    expect(params.has('disciplines')).toBe(false);
+    expect(params.get('disciplines')).toBe('SWE');
     const all = catalogFeedParameters(withCatalogDateWindow(defaults, 'all'));
     expect(all.has('addedSince')).toBe(false); expect(all.get('sort')).toBe('best');
   });
