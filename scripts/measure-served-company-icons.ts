@@ -4,6 +4,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
+import sharp from 'sharp';
 import { companyIconIdentity } from '../shared/company-icon.js';
 
 const args = process.argv.slice(2);
@@ -11,12 +12,13 @@ const option = (name: string) => args.includes(name) ? args[args.indexOf(name) +
 const base = option('--base-url') ?? 'https://api.ntern.app';
 const sql = `SELECT json_extract(item.value, '$.group.featuredRole') AS role,
     json_extract(item.value, '$.group.roleCount') AS roles
-  FROM catalog_items AS item
-  JOIN catalog_items AS current ON current.pk = 'CATALOG_PROJECTION' AND current.sk = 'CURRENT'
+  FROM catalog_items AS current
   JOIN catalog_items AS manifest ON manifest.pk = 'CATALOG_PROJECTION#MANIFESTS'
     AND manifest.sk = json_extract(current.value, '$.version')
-  WHERE item.pk = 'CATALOG_PROJECTION#GROUPS'
-    AND EXISTS (SELECT 1 FROM json_each(manifest.value, '$.keys') WHERE value = item.sk)`;
+  CROSS JOIN json_each(manifest.value, '$.keys') AS manifest_key
+  CROSS JOIN catalog_items AS item
+  WHERE current.pk = 'CATALOG_PROJECTION' AND current.sk = 'CURRENT'
+    AND item.pk = 'CATALOG_PROJECTION#GROUPS' AND item.sk = manifest_key.value`;
 const pages = JSON.parse(execFileSync('npx', ['wrangler', 'd1', 'execute', 'intern-notifs-db',
   '--config', 'wrangler.api.jsonc', '--remote', '--json', '--command', sql],
 { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) as Array<{ results: Array<{ role: string; roles: number }> }>;
@@ -29,19 +31,33 @@ for (const row of pages.flatMap((page) => page.results)) {
   if (key) keys.set(key, (keys.get(key) ?? 0) + row.roles);
 }
 const queue = [...keys];
-const results: Array<{ id: string; roles: number; status: number; type?: string; bytes?: number }> = [];
+const results: Array<{ id: string; roles: number; status: number; type?: string; bytes?: number; decoded?: boolean }> = [];
+// Serialize decoding so historical large PNGs cannot multiply native memory use.
+let decoder: Promise<unknown> = Promise.resolve();
+function decode(bytes: ArrayBuffer): Promise<boolean> {
+  const next = decoder.then(async () => {
+    await sharp(Buffer.from(bytes), { limitInputPixels: 128_000_000 })
+      .resize(64, 64, { fit: 'inside', withoutEnlargement: true }).png().toBuffer();
+    return true;
+  }).catch(() => false);
+  decoder = next;
+  return next;
+}
 let next = 0;
 await Promise.all(Array.from({ length: 6 }, async () => {
   while (next < queue.length) {
     const [id, roles] = queue[next++]!;
     try {
       const response = await fetch(`${base.replace(/\/$/u, '')}/company-icons/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(20_000) });
-      const bytes = (await response.arrayBuffer()).byteLength;
-      results.push({ id, roles, status: response.status, type: response.headers.get('content-type') ?? '', bytes });
+      const data = await response.arrayBuffer();
+      const type = response.headers.get('content-type') ?? '';
+      const decoded = response.ok && /^image\/(?:png|webp|avif)(?:;|$)/u.test(type) && data.byteLength > 0
+        ? await decode(data) : false;
+      results.push({ id, roles, status: response.status, type, bytes: data.byteLength, decoded });
     } catch { results.push({ id, roles, status: 0 }); }
   }
 }));
-const served = results.filter((row) => row.status === 200 && /^image\/(?:png|webp|avif)(?:;|$)/u.test(row.type ?? '') && (row.bytes ?? 0) > 0);
+const served = results.filter((row) => row.status === 200 && row.decoded);
 const coveredRoles = served.reduce((total, row) => total + row.roles, 0);
 const report = { measuredAt: new Date().toISOString(), base, totalRoles, coveredRoles,
   coveragePercent: 100 * coveredRoles / totalRoles,

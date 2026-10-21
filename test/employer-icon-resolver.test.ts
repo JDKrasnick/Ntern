@@ -2142,6 +2142,89 @@ describe('employers needing resolution', () => {
 });
 
 describe('employer icon coverage v2', () => {
+  it('prioritizes fresh active discoveries by role count ahead of exhausted retries and stale groups', async () => {
+    const { database, admission, icons } = subject();
+    const independent = await icons.registerIdentity({ canonicalEmployerId: '', displayName: 'Novel Robotics',
+      applicationUrl: 'https://novel.example/jobs/1', roleTitle: 'Intern', provider: 'unknown', sourceId: 'test' }, NOW);
+    for (const id of ['retry', 'fresh', 'stale']) {
+      await admission.putCanonicalEmployer(employerRow(id, id), NOW.toISOString());
+    }
+    for (const id of ['retry', 'fresh', 'stale', independent!.canonicalEmployerId]) {
+      await icons.enqueue({ id: `task-${id}`, canonicalEmployerId: id, evidenceFingerprint: id,
+        evidenceJson: '{}', nextRetryAt: NOW.toISOString(), now: NOW.toISOString() });
+    }
+    database.exec("UPDATE employer_icon_resolutions SET attempts = 10, review_priority = 10 WHERE canonical_employer_id = 'retry'");
+    const groups = [
+      ['retry', { canonicalEmployerId: 'retry' }, 1_000],
+      ['fresh', { canonicalEmployerId: 'fresh' }, 1],
+      // Old projections predate companyIconId; use exactly the client's fallback.
+      ['novel', { company: 'Novel Robotics', officialApplyUrl: 'https://novel.example/jobs/1' }, 274],
+      ['stale', { canonicalEmployerId: 'stale' }, 10_000],
+    ];
+    database.prepare("INSERT INTO catalog_items (pk,sk,kind,value) VALUES ('CATALOG_PROJECTION','CURRENT','catalog-projection-pointer',?)")
+      .run(JSON.stringify({ version: 'scheduling' }));
+    database.prepare("INSERT INTO catalog_items (pk,sk,kind,value) VALUES ('CATALOG_PROJECTION#MANIFESTS','scheduling','catalog-projection-manifest',?)")
+      .run(JSON.stringify({ keys: ['retry', 'fresh', 'novel'] }));
+    for (const [key, role, roles] of groups) {
+      database.prepare("INSERT INTO catalog_items (pk,sk,kind,value) VALUES ('CATALOG_PROJECTION#GROUPS',?,'catalog-projection',?)")
+        .run(key as string, JSON.stringify({ group: { featuredRole: role, roleCount: roles } }));
+    }
+    expect((await icons.claimDue(NOW.toISOString(), 2, 60_000)).map((task) => task.canonicalEmployerId))
+      .toEqual([independent!.canonicalEmployerId, 'fresh']);
+  });
+
+  it('leases only one evidence task per employer across overlapping claims', async () => {
+    const { admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    for (const id of ['first', 'second']) await icons.enqueue({ id, canonicalEmployerId: 'acme',
+      evidenceFingerprint: id, evidenceJson: '{}', nextRetryAt: NOW.toISOString(), now: NOW.toISOString() });
+    expect(await icons.claimDue(NOW.toISOString(), 5, 60_000)).toHaveLength(1);
+    expect(await icons.claimDue(NOW.toISOString(), 5, 60_000)).toHaveLength(0);
+  });
+
+  it('shares a crash-recoverable sweep lease without letting an old owner release a new lease', async () => {
+    const { db, icons } = subject();
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
+    expect(await icons.acquireSweep(NOW.toISOString(), 'old', 60_000)).toBe(true);
+    const fetchImpl = vi.fn();
+    expect(await runEmployerIconResolutionPass(environment(db, r2Stub().bucket), NOW, DEPENDENCIES(fetchImpl)))
+      .toMatchObject({ claimed: 0, deferredReason: 'sweep-busy' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    const later = new Date(NOW.getTime() + 60_001).toISOString();
+    expect(await icons.acquireSweep(later, 'new', 60_000)).toBe(true);
+    await icons.releaseSweep('old');
+    expect(await icons.acquireSweep(later, 'third', 60_000)).toBe(false);
+    await icons.releaseSweep('new');
+    expect(await icons.acquireSweep(later, 'third', 60_000)).toBe(true);
+  });
+
+  it('bounds catch-up claims and returns unstarted tasks without consuming attempts after its time budget', async () => {
+    const { database, db, admission, icons } = subject();
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 20 }, NOW.toISOString());
+    for (let n = 0; n < 6; n += 1) {
+      const id = `budget-${n}`;
+      await admission.putCanonicalEmployer(employerRow(id, `Budget ${n}`), NOW.toISOString());
+      await icons.enqueue({ id, canonicalEmployerId: id, evidenceFingerprint: id,
+        evidenceJson: '{}', nextRetryAt: NOW.toISOString(), now: NOW.toISOString() });
+    }
+    let elapsed = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => NOW.getTime() + elapsed);
+    try {
+      const result = await runEmployerIconResolutionPass(environment(db, r2Stub().bucket), NOW,
+        DEPENDENCIES((async () => { elapsed = 100_000; return status(404); }) as typeof fetch),
+        { maxTasks: 5, backfill: false });
+      expect(result.claimed).toBe(5);
+      expect(result.deferredTasks).toBe(3);
+      expect(result.reasonCodes).toHaveLength(2);
+      const rows = database.prepare('SELECT id, attempts, lease_until FROM employer_icon_resolutions').all();
+      // The unclaimed sixth task and the three unstarted claims stay untouched.
+      expect(rows.filter((row) => ['budget-2', 'budget-3', 'budget-4', 'budget-5'].includes(row.id as string))
+        .every((row) => row.attempts === 0)).toBe(true);
+      expect(rows.every((row) => row.lease_until === null)).toBe(true);
+      expect(await icons.acquireSweep(NOW.toISOString(), 'next', 60_000)).toBe(true);
+    } finally { clock.mockRestore(); }
+  });
+
   it('claims corrective retries before the ordinary coverage backlog', async () => {
     const { database, admission, icons } = subject();
     await admission.putCanonicalEmployer(employerRow('ordinary', 'Ordinary'), NOW.toISOString());

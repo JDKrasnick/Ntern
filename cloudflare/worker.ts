@@ -1231,6 +1231,29 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
   }
   if (url.pathname.startsWith('/internal/admission/employer-icons')) {
     if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    if (request.method === 'POST' && url.pathname === '/internal/admission/employer-icons/sweep') {
+      // Catch-up uses the ingestion resolver and its credentials/rasterizer. The
+      // shared sweep lease prevents overlapping operator and cron batches.
+      try {
+        const now = new Date();
+        if (await recentD1OverloadCount(env.DB, now) !== 0) {
+          return withCors(Response.json({ message: 'Icon sweep deferred for D1 overload' },
+            { status: 503, headers: { 'Retry-After': '300', 'Cache-Control': 'no-store' } }));
+        }
+        const input = await request.json().catch(() => ({})) as { maxTasks?: number };
+        const maxTasks = Number.isSafeInteger(input?.maxTasks) && input.maxTasks! > 0 ? Math.min(input.maxTasks!, 5) : 5;
+        const result = await runEmployerIconResolutionPass(env, now, {
+          resolver: publicHostResolver,
+          ...(iconSvgRasterizer ? { rasterizeSvg: iconSvgRasterizer } : {}),
+        }, { maxTasks, backfill: false });
+        return withCors(Response.json(result, { status: result.deferredReason ? 409 : 200,
+          headers: { 'Cache-Control': 'no-store', ...(result.deferredReason ? { 'Retry-After': '30' } : {}) } }));
+      } catch (error) {
+        console.error(JSON.stringify({ event: 'company_icon_catchup_failed', diagnostic: safeDiagnostic(error) }));
+        return withCors(Response.json({ message: 'Icon sweep could not complete' },
+          { status: 503, headers: { 'Retry-After': '300', 'Cache-Control': 'no-store' } }));
+      }
+    }
     return withCors(await handleEmployerIconOperations(request, new D1EmployerIconStore(env.DB), () => ({
       logoDev: Boolean(credentials.logoDevToken),
       logoDevImageToken: Boolean(credentials.logoDevImageToken),
