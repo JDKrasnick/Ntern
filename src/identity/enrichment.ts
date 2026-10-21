@@ -144,8 +144,13 @@ export function educationAudienceOf(job: { internshipIdentity?: unknown; roleMet
  * degree audience for older records whose typed identity was not projected. */
 export function educationAudienceFromPostingFacts(facts: readonly PostingFact[] | undefined): StatedEducationAudience | undefined {
   const levels = [...new Set((facts ?? []).filter(fact => fact.field === 'education')
-    .flatMap(fact => fact.qualifiers.some(text => DEGREE_PREFERRED_ONLY.test(text) || DEGREE_WAIVED.test(text))
-      ? [] : educationAudienceLevels([...fact.statements, ...fact.qualifiers].join(' '))))].sort();
+    .flatMap(fact => {
+      const text = [...fact.statements, ...fact.qualifiers].join(' ');
+      // An exclusion or optional qualification is not a positive degree audience.
+      if (/\b(?:not (?:eligible|accepted|considered)|ineligible|must not|cannot|excluding|except)\b/iu.test(text)
+        || fact.qualifiers.some(value => DEGREE_PREFERRED_ONLY.test(value) || DEGREE_WAIVED.test(value))) return [];
+      return educationAudienceLevels(text);
+    }))].sort();
   return levels.length ? { levels, evidenceStatus: 'explicit' } : undefined;
 }
 

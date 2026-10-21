@@ -26,6 +26,8 @@ describe('provider-neutral field enrichment', () => {
     ['Masters degree.', ['Preferred'], []],
     ['Masters degree.', ['Not required'], []],
     ['No Masters degree is required', [], []],
+    ['PhD students are not eligible', [], []],
+    ['PhD students', ['Not considered'], []],
     ['Studying software engineering', [], []],
   ])('reads published education without inventing an audience: %s', (statement, qualifiers, levels) => {
     const result = educationAudienceOf({
