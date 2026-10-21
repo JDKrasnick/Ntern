@@ -1,0 +1,34 @@
+{
+  "@context": "https://schema.org",
+  "@type": "JobPosting",
+  "title": "Optical Engineering AI and Data Analytics Intern",
+  "description": "We are the independent measurement engine for Meta's MR hardware. Every optical claim a headset makes \u2014 how sharp it looks, whether the colour is right, whether the two eyes fuse comfortably \u2014 is something our team measures and signs off on before the product ships.\nThat measurement happens across roughly 80 instruments and factory stations spread over contract manufacturers in Asia, display vendors, and labs in Sunnyvale and Redmond. Those stations generate about 1.3 billion rows of test data, which flow through a pipeline we own and used across the org.\n\nThe physics is interesting, but the bottleneck is not physics. It is data. Measurements that never reach the pipeline cannot be acted on, and today a large fraction of our upstream quality data never does. That is the problem this internship is pointed at.\n\nThis is a 12 week internship. ",
+  "responsibilities": "Upstream Data Ingestion: Build automated ingestion paths and pipeline schemas to integrate previously offline lab and bench measurement data.&nbsp;Tool Calibration AI Agent: Develop an AI agent and system of record to track instrument certification, trigger automated maintenance alerts, and coordinate service scheduling.&nbsp;Production Test Analytics: Implement automated analytics layers for measurement system analysis (Gauge R&R), station-to-station correlation, and drift detection across large-scale production test data.",
+  "hiringOrganization": {
+    "@type": "Organization",
+    "name": "Meta",
+    "sameAs": "https://www.meta.com/",
+    "logo": "https://static.xx.fbcdn.net/rsrc.php/y3/r/7ngPh_7s-rQ.webp"
+  },
+  "datePosted": "2026-10-19T07:58:02-07:00",
+  "jobLocation": [
+    {
+      "@type": "Place",
+      "name": "Sunnyvale, CA",
+      "address": {
+        "@type": "PostalAddress",
+        "addressLocality": "Sunnyvale",
+        "addressRegion": "California",
+        "addressCountry": "US"
+      }
+    }
+  ],
+  "qualifications": "Currently pursuing a BS, MS, or PhD in Computer Science, Data Science, Statistics, Electrical Engineering, or a related field&nbsp;Proficiency in Python or TypeScript/JavaScript, and comfort learning the other&nbsp;Working knowledge of SQL and experience querying a relational or columnar data store&nbsp;Foundation in statistics and data modeling: distributions, hypothesis testing, regression, and fitting and judging a model against held-out data&nbsp;Experience building something other people used, such as a tool, pipeline, dashboard, model or library. Coursework counts if the artifact was real&nbsp;Able to explain a technical result, and how confident you are in it, to someone who does not share your background&nbsp;Must obtain work authorization in country of employment at the time of hire, and maintain ongoing work authorization during employment&nbsp;Intent to return to full-time degree program after completion of the internship Predictive modeling and time-series analysis: forecasting, trend and change-point detection, anomaly or drift detection, and back-testing a model before trusting it&nbsp;Statistical process control and measurement systems analysis: Cpk, control charts, Gauge R&R, station-to-station correlation&nbsp;Data modeling and pipelines: designing warehouse schemas, and distributed processing (Spark, Presto, Hive or equivalent) with ETL / pipeline orchestration&nbsp;Full-stack web development for data products: React / Next.js with TypeScript, server-side APIs (REST or GraphQL), and scheduled jobs&nbsp;Building with LLMs: agents, tool use, retrieval, or evaluation&nbsp;Testing and validating data products: automated checks that the numbers shown match the source data, and catching silent regressions&nbsp;Exposure to manufacturing, test, or instrumentation data and its usual problems: inconsistent station naming, missing metadata, silent schema drift&nbsp;An interest in optics or imaging. Useful, but genuinely not required",
+  "employmentType": "INTERN",
+  "directApply": true,
+  "identifier": {
+    "@type": "PropertyValue",
+    "name": "Meta",
+    "value": "a1KiE0000003Se5UAE"
+  }
+}

@@ -138,11 +138,20 @@ export function applicationMetadataArtifactsFromJsonDocuments(documents: readonl
     if (!title) return [];
     const remote = stringValue(row.jobLocationType);
     const locations = [...jsonLdLocations(row.jobLocation), ...(remote?.toUpperCase() === 'TELECOMMUTE' ? ['Remote'] : [])];
+    const roleText = [stringValue(row.description), ...[
+      ['qualifications', 'Qualifications'], ['educationRequirements', 'Education requirements'],
+      ['experienceRequirements', 'Experience requirements'], ['skills', 'Skills'],
+      ['responsibilities', 'Responsibilities'], ['jobBenefits', 'Job benefits'], ['workHours', 'Work hours'],
+    ].flatMap(([key, label]) => {
+      const value = row[key!];
+      const content = stringValue(value) ?? (Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').join('\n') : '');
+      return content ? [`${label}:\n${content}`] : [];
+    })].filter(Boolean).join('\n');
     return [{
       title,
       ...(jsonLdIdentifier(row.identifier) ? { identifier: jsonLdIdentifier(row.identifier) } : {}),
-      ...(stringValue(row.description) ? { text: metadataDescriptionText(stringValue(row.description)!).slice(0, 40_000),
-        ...(stringValue(row.description)!.length > 40_000 ? { inspectionTruncated: true } : {}) } : {}),
+      ...(roleText ? { text: metadataDescriptionText(roleText).slice(0, 40_000),
+        ...(roleText.length > 40_000 ? { inspectionTruncated: true } : {}) } : {}),
       ...(locations.length ? { locations } : {}),
       ...(remote ? { workMode: remote } : {}),
       ...(jsonLdCompensation(row.baseSalary) ? { compensationText: jsonLdCompensation(row.baseSalary) } : {}),

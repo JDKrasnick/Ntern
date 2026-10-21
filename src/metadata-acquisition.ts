@@ -4,7 +4,7 @@ import type { ProviderIdentity } from './types.js';
 import { applicationMetadataArtifactsFromJsonDocuments, postingIdentifierMatches, type RoleMetadataArtifact } from './role-metadata.js';
 
 export type MetadataAcquisition = {
-  method: 'greenhouse-api' | 'lever-api' | 'ashby-api' | 'workday-api' | 'smartrecruiters-api' | 'icims-page' | 'json-ld-page';
+  method: 'greenhouse-api' | 'lever-api' | 'ashby-api' | 'workday-api' | 'amazon-api' | 'smartrecruiters-api' | 'icims-page' | 'json-ld-page';
   sourceUrl: string;
   outcome: 'acquired' | 'failed' | 'identity-mismatch' | 'incomplete';
   artifact?: RoleMetadataArtifact;
@@ -42,6 +42,20 @@ export function metadataApiRoute(identity: ProviderIdentity, candidateUrl?: stri
     try {
       const url = new URL(candidateUrl);
       if (url.protocol !== 'https:' || url.username || url.password || url.port) return undefined;
+      if (postingId && /^\d+$/u.test(postingId)) {
+        if (provider === 'microsoft' && url.hostname === 'apply.careers.microsoft.com'
+          && url.pathname.replace(/\/$/u, '') === `/careers/job/${postingId}`) return {
+          method: 'json-ld-page', url: `${url.origin}/careers/job/${postingId}`,
+        };
+        if (provider === 'meta' && ['www.metacareers.com', 'metacareers.com'].includes(url.hostname)
+          && [`/jobs/${postingId}`, `/profile/job_details/${postingId}`].includes(url.pathname.replace(/\/$/u, ''))) return {
+          method: 'json-ld-page', url: `https://www.metacareers.com/profile/job_details/${postingId}/`,
+        };
+        if (provider === 'amazon' && ['www.amazon.jobs', 'amazon.jobs'].includes(url.hostname)
+          && new RegExp(`^/(?:[a-z]{2}(?:-[A-Z]{2})?/)?jobs/${postingId}(?:/[^/]*)?/?$`, 'u').test(url.pathname)) return {
+          method: 'amazon-api', url: `https://www.amazon.jobs/en/search.json?base_query=${postingId}&offset=0&result_limit=10`,
+        };
+      }
       // Embedded Greenhouse forms expose the board and immutable posting in
       // `for`/`token`. Recover only that observed identity, not the signed form
       // token, and reject duplicate parameters or disagreement with known IDs.
@@ -166,6 +180,10 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
   if (method === 'json-ld-page') {
     if (typeof payload !== 'string' || !identity.postingId) return undefined;
     const documents = [...payload.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/giu)].map((match) => match[1]!);
+    if (identity.provider === 'microsoft' && !documents.some(document => {
+      try { const value: unknown = JSON.parse(document); return record(value) && value['@type'] === 'JobPosting'
+        && value.url === `https://apply.careers.microsoft.com/careers/job/${identity.postingId}`; } catch { return false; }
+    })) return undefined;
     const artifacts = applicationMetadataArtifactsFromJsonDocuments(documents);
     const expected = identity.postingId.toLowerCase();
     const matching = artifacts.filter((artifact) => postingIdentifierMatches(expected, artifact.identifier));
@@ -173,7 +191,15 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
     const idPresent = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'iu').test(payload);
     // A page commonly omits `identifier` but names the posting in its URL or
     // body; accept a sole posting that still carries the requested id.
+    // Meta publishes a CRM identifier in JSON-LD and its public numeric id in
+    // the page canonical. Accept that alias only on an exact canonical page
+    // containing a single posting, never on a search or another role's page.
+    const canonical = /<link\b(?=[^>]*\brel=["']canonical["'])[^>]*\bhref=["']([^"']+)["'][^>]*>/iu.exec(payload)?.[1];
+    const metaCanonical = identity.provider === 'meta'
+      && canonical === `https://www.metacareers.com/profile/job_details/${identity.postingId}/`;
+    if (identity.provider === 'meta' && !metaCanonical) return undefined;
     const selected = matching.length === 1 ? matching[0]
+      : metaCanonical && artifacts.length === 1 ? artifacts[0]
       : !matching.length && artifacts.length === 1 && !artifacts[0]!.identifier && idPresent ? artifacts[0] : undefined;
     if (!selected || !selected.title) return undefined;
     return {
@@ -192,6 +218,18 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
   }
   if (!record(payload)) return undefined;
   const expected = identity.postingId;
+  if (method === 'amazon-api') {
+    if (!expected || !/^\d+$/u.test(expected) || !Array.isArray(payload.jobs)) return undefined;
+    const matching = payload.jobs.filter((job: unknown) => record(job) && String(job.id_icims) === expected);
+    const job = matching.length === 1 ? matching[0] : undefined;
+    if (!record(job) || !text(job.title) || !text(job.description) || typeof job.job_path !== 'string'
+      || !new RegExp(`^/[a-z]{2}/jobs/${expected}(?:/|$)`, 'u').test(job.job_path)) return undefined;
+    return { title: text(job.title), text: [description(job.description),
+      description(job.basic_qualifications) && `Basic qualifications:\n${description(job.basic_qualifications)}`,
+      description(job.preferred_qualifications) && `Preferred qualifications:\n${description(job.preferred_qualifications)
+        .split(/\n+|(?<=[.!?])\s+/u).filter(Boolean).map(value => `Preferred qualification: ${value}`).join('\n')}`].filter(Boolean).join('\n'),
+      ...(text(job.location) ? { locations: [text(job.location)] } : {}) };
+  }
   if (method === 'workday-api') {
     const job = payload.jobPostingInfo;
     if (!record(job) || !text(job.title) || !text(job.jobDescription)) return undefined;
@@ -493,7 +531,7 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
   };
   /** One reviewed, timed and bounded document fetch. Provider routes do not
    * follow redirects; the employer-page fallback may, within its own host.
-   * iCIMS and that fallback accept HTML, every other route is JSON-only, and
+   * Reviewed JSON-LD pages and iCIMS accept HTML; API routes are JSON-only, and
    * `keepBoard` leaves an Ashby board's reader open for the whole batch. */
   const fetchDocument = async (url: string, html: boolean, keepBoard = false, follow = false): Promise<RequestResult> => {
     const host = new URL(url).hostname;
@@ -544,7 +582,7 @@ export function createMetadataAcquirer(fetchImpl: typeof fetch = fetch, hooks: {
     const route = metadataApiRoute(identity, candidateUrl);
     if (!route) return undefined;
     if (!requests.has(route.url)) requests.set(route.url,
-      fetchDocument(route.url, route.method === 'icims-page', route.method === 'ashby-api'));
+      fetchDocument(route.url, route.method === 'icims-page' || route.method === 'json-ld-page', route.method === 'ashby-api'));
     const result = await requests.get(route.url)!;
     // The board route is shared by every posting on the board, so each identity
     // scans the one fetched board rather than fetching it again. Reads are
