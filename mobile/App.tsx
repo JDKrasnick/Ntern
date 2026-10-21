@@ -39,7 +39,7 @@ import * as Clipboard from "expo-clipboard";
 import { Ionicons } from "@expo/vector-icons";
 import { ApiError, api, authenticatedRead, responseCache, sessionStorage } from "./src/api";
 import { appendGroupedCatalogPage, catalogCardKind, catalogQueryPreview, catalogSearchPreviewMatches, filterGroupedCatalogPage, nextMatchingGroupedCatalogPage, refreshCacheFirst, type GroupedCatalogPage } from "./src/catalog";
-import { boundedCatalogText, catalogMetadataTags, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "./src/catalog-quality";
+import { boundedCatalogText, catalogMetadataTags, compactCatalogEducation, compactCatalogLocation, compactCatalogTitle, compactLocations, presentCatalogRole, roleSheetTitle, seasonLabel } from "./src/catalog-quality";
 import { companyMonogramColorIndex, companyMonogramColors, companyMonogramInitials } from "../shared/company-icon";
 import { compactCompensationLabel } from "../shared/compensation-display";
 import { type DisplayHousingDetail } from "../shared/housing-display";
@@ -1506,7 +1506,7 @@ function CatalogMetadataColumns({ seasons, education, postingFacts, wide = false
   const values = catalogMetadataTags(seasons, education, postingFacts);
   const season = values.filter(item => item.kind === 'season' || item.label === 'Season unspecified').map(item => item.label.replace('Season unspecified', 'Not specified')).join(' · ');
   const audienceLabels = values.filter(item => item.kind === 'education' || item.label.startsWith('Education ')).map(item => item.label.replace('Education unspecified', 'Not specified').replace('Education unclear', 'Conflicting sources'));
-  const audience = audienceLabels.map(label => audienceLabels.length > 2 ? label.replace(/^Undergrad\b/u, 'UGrad') : label).join('/');
+  const audience = compactCatalogEducation(audienceLabels);
   return <View style={[styles.catalogMetadataColumns, !wide && styles.catalogMetadataColumnsMobile]}>
     <View style={styles.catalogSeasonColumn}>
       {!wide ? <Text style={styles.catalogMetadataCaption}>Season</Text> : null}

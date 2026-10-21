@@ -4,6 +4,18 @@ import { postingFactSummaries } from '../../shared/posting-fact-display';
 import type { PostingFact } from '../../shared/posting-facts';
 export { compensationLabels };
 
+/** Summarize broad eligibility without hiding uncertainty or inventing levels. */
+export function compactCatalogEducation(labels: string[]): string {
+  const unique = [...new Set(labels)];
+  for (const suffix of ['', ' (inferred)']) {
+    const has = (label: string) => unique.includes(`${label}${suffix}`);
+    if (!unique.every(label => ['Undergrad', 'Masters', 'MBA', 'PhD'].some(level => label === `${level}${suffix}`))) continue;
+    if (has('Undergrad') && has('Masters') && has('PhD')) return `All degree levels${suffix}`;
+    if (!has('Undergrad') && has('Masters') && has('PhD')) return `Graduate${suffix}`;
+  }
+  return unique.join('/');
+}
+
 export function catalogMetadataTags(seasons: string[], education: Array<{ levels: string[]; evidence: string }>, postingFacts?: readonly PostingFact[]) {
   const tags: Array<{ label: string; kind: 'season' | 'education' | 'neutral' }> = [];
   for (const season of new Set(seasons)) {
