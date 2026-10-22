@@ -10,6 +10,7 @@ import { providerPostingKey, providerPostingReference } from '../identity/postin
 import { stableSourceOccurrenceJobId } from '../identity/registry.js';
 import { observationClockFreeContent, projectRoleMetadata, withoutObservationTimestamps } from '../role-metadata.js';
 import { mergeSourceOccurrence } from '../identity/source-occurrence.js';
+import { postingObservationOccurrenceProjection } from '../identity/projection.js';
 import type {
   Internship,
   NotificationEvent,
@@ -461,7 +462,7 @@ export class CatalogReconciler {
       const firstAttachedAt = prior?.occurrence.firstAttachedAt ?? prior?.firstObservedAt ?? prior?.changedAt ?? input.now;
       const firstAttachedAtPrecision = prior?.occurrence.firstAttachedAtPrecision
         ?? (prior?.firstObservedAt ? prior.firstObservedAtPrecision ?? 'exact' as const : prior ? 'unknown' as const : 'exact' as const);
-      const next: SourceOccurrenceState = {
+      const next: SourceOccurrenceState = postingObservationOccurrenceProjection(job, {
         sourceId: input.sourceId,
         externalId,
         jobId: job.jobId,
@@ -482,7 +483,7 @@ export class CatalogReconciler {
         ...(prior?.firstObservedAtPrecision
           ? { firstObservedAtPrecision: prior.firstObservedAtPrecision }
           : {}),
-      };
+      });
       if (shouldPersist(priorById.get(externalId), next)) occurrences.push(next);
     }
 

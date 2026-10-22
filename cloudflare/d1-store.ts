@@ -15,7 +15,7 @@ import { validateResumeBankGraph, validateResumeBankItemPlacement, type Imported
 import type { ResumeSubscription } from '../src/subscription.js';
 import type { D1Database, D1PreparedStatement } from './types.js';
 import { alertEligible, catalogEligible } from '../src/catalog-admission.js';
-import { postingObservationNotificationProjection, postingObservationProjection } from '../src/identity/projection.js';
+import { postingObservationNotificationProjection, postingObservationOccurrenceProjection, postingObservationProjection } from '../src/identity/projection.js';
 import { mergeSourceOccurrence } from '../src/identity/source-occurrence.js';
 import { POSTING_IDENTITY_INCIDENT_V2_PREFIX, postingIdentityIncidentId } from '../src/identity/incident.js';
 import { D1CatalogAdmissionStore } from './catalog-admission-store.js';
@@ -615,7 +615,7 @@ export class D1InternshipStore implements InternshipStore {
           source_id = excluded.source_id, external_id = excluded.external_id
       `).bind(
         `SOURCE#${input.occurrence.sourceId}`, `OCCURRENCE#${input.occurrence.externalId}`,
-        JSON.stringify(occurrence), input.occurrence.sourceId, input.occurrence.externalId,
+        JSON.stringify(postingObservationOccurrenceProjection(canonical, occurrence)), input.occurrence.sourceId, input.occurrence.externalId,
         ...guardValues, `JOB#${canonical.jobId}`, canonicalJson,
       ));
       const shadowVerification = input.providerShadowVerification;

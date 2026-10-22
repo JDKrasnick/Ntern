@@ -849,7 +849,9 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
       INSERT INTO ingestion_admission_handoffs
         (batch_id, source_id, snapshot_hash, admission_version, baseline, external_ids, dispatched_at, acknowledged_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(batch_id) DO NOTHING
+      ON CONFLICT(batch_id) DO UPDATE SET
+        dispatched_at = excluded.dispatched_at, acknowledged_at = excluded.acknowledged_at
+      WHERE ingestion_admission_handoffs.dispatched_at < excluded.dispatched_at
     `).bind(
       handoff.batchId, handoff.sourceId, handoff.snapshotHash, handoff.admissionVersion,
       handoff.baseline ? 1 : 0, JSON.stringify(handoff.externalIds), handoff.dispatchedAt,
@@ -886,6 +888,24 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
           )
       `).bind(now, expiresAt, batchId),
     ]);
+  }
+
+  async retireCompletedHandoffs(sourceId: string, now: string, limit: number): Promise<void> {
+    await this.db.prepare(`
+      UPDATE ingestion_admission_handoffs SET acknowledged_at = ?
+      WHERE batch_id IN (
+        SELECT h.batch_id FROM ingestion_admission_handoffs h
+        WHERE h.source_id = ? AND h.acknowledged_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(h.external_ids) ids
+            JOIN ingestion_rows r ON r.source_id = h.source_id AND r.external_id = ids.value
+            WHERE r.snapshot_hash = h.snapshot_hash AND r.admission_version = h.admission_version
+              AND r.notification_baseline = h.baseline
+              AND r.state IN ('pending', 'queued', 'processing') AND r.consecutive_omissions < 2
+          )
+        ORDER BY h.dispatched_at, h.batch_id LIMIT ?
+      )
+    `).bind(now, sourceId, Math.max(1, Math.min(limit, 200))).run();
   }
 
   async listActiveHandoffs(sourceId: string, staleBefore: string): Promise<AdmissionV2Handoff[]> {

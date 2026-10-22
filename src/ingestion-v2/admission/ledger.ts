@@ -111,6 +111,8 @@ export interface AdmissionV2Ledger {
   /** Expired leases are reclaimable; returns the rows moved back to `queued`. */
   reclaimExpiredLeases(now: string, limit: number): Promise<IngestionRowRecord[]>;
   recordHandoff(handoff: AdmissionV2Handoff): Promise<void>;
+  /** Retire receipts whose exact row identities no longer have actionable work. */
+  retireCompletedHandoffs(sourceId: string, now: string, limit: number): Promise<void>;
   acknowledgeHandoff(batchId: string, now: string): Promise<void>;
   /** Handoffs still within their dispatch lease, used to avoid duplicate sends. */
   listActiveHandoffs(sourceId: string, staleBefore: string): Promise<AdmissionV2Handoff[]>;

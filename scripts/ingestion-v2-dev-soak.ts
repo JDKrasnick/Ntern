@@ -9,6 +9,7 @@ import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseEnvelope } from '../src/ingestion-v2/normalize.js';
 import { admissionV2OwnsCatalogWrites } from '../src/ingestion-v2/admission/types.js';
+import { ADMISSION_V2_DISPATCH_LEASE_MS } from '../src/ingestion-v2/admission/dispatcher.js';
 import { INGESTION_V2_D1_WRITE_LIMIT, INGESTION_V2_RUN_LIMIT } from '../cloudflare/ingestion-health-alert.js';
 
 const DEFAULT_DATABASE_ID = 'cedc86d8-69a5-4a72-a1e6-f5629d722338';
@@ -322,7 +323,7 @@ async function main(): Promise<number> {
     throw new Error('INGESTION_V2_SOAK_STARTED_AT must be an ISO-8601 timestamp');
   }
   const windowStart = new Date(Math.max(rollingWindowStart.getTime(), deploymentAt.getTime(), configuredWindowStart?.getTime() ?? 0)).toISOString();
-  const staleHandoffBefore = new Date(capturedAt.getTime() - 15 * 60_000).toISOString();
+  const staleHandoffBefore = new Date(capturedAt.getTime() - ADMISSION_V2_DISPATCH_LEASE_MS).toISOString();
 
   async function cloudflare<T>(path: string): Promise<T> {
     const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}${path}`, {

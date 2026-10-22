@@ -48,6 +48,7 @@ export async function planAdmissionV2Dispatch(
   const maxRows = dependencies.maxRowsPerSource ?? 500;
 
   await dependencies.ledger.reclaimExpiredLeases(nowIso, maxRows);
+  await dependencies.ledger.retireCompletedHandoffs(sourceId, nowIso, 200);
   const candidates = await dependencies.ledger.listDispatchableRows(sourceId, nowIso, maxRows);
   if (candidates.length === 0) {
     return { sourceId, snapshotHash: '', snapshotKey: '', admissionVersion: '', baseline: false, messages: [], skipped: 'no-work' };
@@ -55,11 +56,13 @@ export async function planAdmissionV2Dispatch(
 
   const staleBefore = new Date(now().getTime() - dispatchLeaseMs).toISOString();
   const activeHandoffs = await dependencies.ledger.listActiveHandoffs(sourceId, staleBefore);
-  const covered = new Set(activeHandoffs.flatMap((handoff) => handoff.externalIds));
+  const identity = (value: { snapshotHash: string; admissionVersion: string; baseline: boolean }, externalId: string) =>
+    JSON.stringify([value.snapshotHash, value.admissionVersion, value.baseline, externalId]);
+  const covered = new Set(activeHandoffs.flatMap((handoff) => handoff.externalIds.map((id) => identity(handoff, id))));
 
   const groups = new Map<string, { snapshotHash: string; admissionVersion: string; baseline: boolean; rows: IngestionRowRecord[] }>();
   for (const row of candidates) {
-    if (covered.has(row.externalId)) continue;
+    if (covered.has(identity({ ...row, baseline: row.notificationBaseline ?? false }, row.externalId))) continue;
     // An absent row has no snapshot to grade against until it reappears.
     if (row.state === 'absent') continue;
     const baseline = row.notificationBaseline ?? false;

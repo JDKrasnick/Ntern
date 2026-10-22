@@ -166,7 +166,19 @@ class FakeLedger implements AdmissionV2Ledger {
   }
 
   async recordHandoff(handoff: AdmissionV2Handoff): Promise<void> {
-    if (!this.handoffs.has(handoff.batchId)) this.handoffs.set(handoff.batchId, handoff);
+    const prior = this.handoffs.get(handoff.batchId);
+    if (!prior || prior.dispatchedAt < handoff.dispatchedAt) this.handoffs.set(handoff.batchId, handoff);
+  }
+
+  async retireCompletedHandoffs(sourceId: string, now: string, limit: number): Promise<void> {
+    const completed = [...this.handoffs.values()].filter(handoff => handoff.sourceId === sourceId
+      && !handoff.acknowledgedAt && !handoff.externalIds.some(id => {
+        const row = this.row(sourceId, id);
+        return row && row.snapshotHash === handoff.snapshotHash && row.admissionVersion === handoff.admissionVersion
+          && (row.notificationBaseline ?? false) === handoff.baseline
+          && ['pending', 'queued', 'processing'].includes(row.state) && row.consecutiveOmissions < 2;
+      })).slice(0, limit);
+    for (const handoff of completed) await this.acknowledgeHandoff(handoff.batchId, now);
   }
 
   async acknowledgeHandoff(batchId: string, now: string): Promise<void> {

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { D1IngestionV2Repository } from '../cloudflare/ingestion-v2-store.js';
+import { planAdmissionV2Dispatch } from '../src/ingestion-v2/admission/dispatcher.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import type { IngestionRowRecord, IngestionSnapshotRecord, ShadowComparisonMetrics } from '../src/ingestion-v2/types.js';
 
@@ -77,6 +78,73 @@ function row(overrides: Partial<IngestionRowRecord> & { externalId: string }): I
 }
 
 describe('ingestion v2 D1 repository', () => {
+  it.each(['lost', 'acknowledged'] as const)('renews a %s receipt and suppresses sends on subsequent cadences', async (status) => {
+    const { repository } = subject();
+    await repository.putSnapshot(snapshot({ state: 'active', activatedAt: '2026-10-01T00:00:00.000Z' }));
+    await repository.putRows([row({ externalId: 'retry', state: 'queued' })]);
+    const dispatch = (time: string) => planAdmissionV2Dispatch('community-example', {
+      ledger: repository, now: () => new Date(`2026-10-01T${time}.000Z`),
+    });
+    const first = await dispatch('00:00:00');
+    const batchId = first.messages[0]!.batchId;
+    if (status === 'acknowledged') await repository.acknowledgeHandoff(batchId, '2026-10-01T00:01:00.000Z');
+    const retry = await dispatch('00:31:00');
+    expect(retry.messages[0]?.batchId).toBe(batchId);
+    expect(await dispatch('00:41:00')).toMatchObject({ messages: [] });
+    expect(await dispatch('00:51:00')).toMatchObject({ messages: [] });
+    expect(await repository.listActiveHandoffs('community-example', '2026-10-01T00:30:00.000Z'))
+      .toMatchObject([{ batchId, dispatchedAt: '2026-10-01T00:31:00.000Z' }]);
+    const renewed = (await repository.listActiveHandoffs('community-example', '2026-10-01T00:30:00.000Z'))[0]!;
+    await repository.recordHandoff({ ...renewed, dispatchedAt: '2026-10-01T00:00:00.000Z', acknowledgedAt: '2026-10-01T00:01:00.000Z' });
+    expect(await repository.listActiveHandoffs('community-example', '2026-10-01T00:30:00.000Z')).toEqual([renewed]);
+  });
+
+  it('retires completed receipts without hiding future retries or processing work', async () => {
+    const { database, repository } = subject();
+    await repository.putRows([
+      row({ externalId: 'done' }),
+      row({ externalId: 'retry', state: 'queued', retryAt: '2026-10-02T00:00:00.000Z' }),
+      row({ externalId: 'working', state: 'processing', leaseExpiresAt: '2026-10-02T00:00:00.000Z' }),
+      row({ externalId: 'obsolete', state: 'queued', admissionVersion: 'new-policy' }),
+    ]);
+    for (const id of ['done', 'retry', 'working', 'obsolete']) await repository.recordHandoff({
+      batchId: id, sourceId: 'community-example', snapshotHash: 'a'.repeat(64), admissionVersion: 'standard-v1',
+      baseline: false, externalIds: [id], dispatchedAt: '2026-10-01T00:00:00.000Z',
+    });
+    await repository.retireCompletedHandoffs('community-example', '2026-10-01T00:01:00.000Z', 1);
+    expect(database.prepare('SELECT count(*) AS n FROM ingestion_admission_handoffs WHERE acknowledged_at IS NOT NULL').get())
+      .toEqual({ n: 1 });
+    await repository.retireCompletedHandoffs('community-example', '2026-10-01T00:02:00.000Z', 200);
+    expect(database.prepare('SELECT batch_id FROM ingestion_admission_handoffs WHERE acknowledged_at IS NULL ORDER BY batch_id').all())
+      .toEqual([{ batch_id: 'retry' }, { batch_id: 'working' }]);
+    database.prepare("UPDATE ingestion_rows SET state = 'settled'").run();
+    const plan = await planAdmissionV2Dispatch('community-example', {
+      ledger: repository, now: () => new Date('2026-10-01T00:03:00.000Z'),
+    });
+    expect(plan.messages).toEqual([]);
+    expect(database.prepare('SELECT count(*) AS n FROM ingestion_admission_handoffs WHERE acknowledged_at IS NULL').get())
+      .toEqual({ n: 0 });
+  });
+
+  it.each(['snapshot', 'policy', 'baseline'] as const)('does not let an old %s receipt suppress a new row identity', async (changed) => {
+    const { repository } = subject();
+    const current = row({ externalId: 'role', state: 'queued',
+      ...(changed === 'snapshot' ? { snapshotHash: 'b'.repeat(64) } : {}),
+      ...(changed === 'policy' ? { admissionVersion: 'new-policy' } : {}),
+      notificationBaseline: changed === 'baseline',
+    });
+    await repository.putSnapshot(snapshot({ snapshotHash: current.snapshotHash, state: 'active' }));
+    await repository.putRows([current, row({ externalId: 'peer', state: 'queued' })]);
+    await repository.recordHandoff({ batchId: 'old', sourceId: 'community-example', snapshotHash: 'a'.repeat(64),
+      admissionVersion: 'standard-v1', baseline: false, externalIds: ['role', 'peer'], dispatchedAt: '2026-10-01T00:00:00.000Z' });
+    const plan = await planAdmissionV2Dispatch('community-example', {
+      ledger: repository, now: () => new Date('2026-10-01T00:01:00.000Z'),
+    });
+    expect(plan.messages).toHaveLength(1);
+    expect(plan.messages[0]).toMatchObject({ snapshotHash: current.snapshotHash, admissionVersion: current.admissionVersion,
+      baseline: current.notificationBaseline, externalIds: ['role'] });
+  });
+
   it('upserts snapshots idempotently and never regresses a terminal state', async () => {
     const { repository } = subject();
     await repository.putSnapshot(snapshot());
