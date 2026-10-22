@@ -48,7 +48,7 @@ import type { D1Database, R2Bucket } from './types.js';
 const ICON_REVALIDATE_MS = 30 * 24 * 60 * 60 * 1_000;
 /** Bump whenever resolver semantics change so old misses can be reconsidered. */
 export const ICON_RESOLVER_VERSION = 5;
-/** Persisted attempts retry after 5 minutes, 15 minutes, then stop. */
+/** Persisted attempts retry after 5 minutes, 15 minutes, and one day, then stop. */
 const ICON_RETRY_DELAYS_MS = [5 * 60_000, 15 * 60_000, 24 * 60 * 60_000] as const;
 const ICON_LEASE_MS = 15 * 60_000;
 /** Stop starting work after 90s; finish the at most two tasks already running. */
