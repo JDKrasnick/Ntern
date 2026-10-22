@@ -336,7 +336,7 @@ test('discovers a new Workday company and serves its declared JPEG logo without 
   globalThis.fetch = async request => {
     const href = request instanceof URL ? request.href : typeof request === 'string' ? request : request.url;
     if(href===url) return new Response(`<meta property="og:image" content="${logo}">`,{headers:{'content-type':'text/html'}});
-    if(href===logo) return new Response(jpeg,{headers:{'content-type':'image/jpeg'}});
+    if(href===logo) return new Response(jpeg,{headers:{'content-type':'text/plain; charset=UTF-8'}});
     return internet(request);
   };
   try {

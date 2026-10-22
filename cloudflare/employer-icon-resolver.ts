@@ -1606,14 +1606,16 @@ async function platformAsset(
   banner: boolean,
   deps: EmployerIconResolverDependencies,
 ): Promise<PlatformAsset> {
-  const raster = iconAssetType(contentType, bytes);
+  // Some employer-uploaded Workday logos are served as text/plain. The declared
+  // board-logo URL establishes provenance; raster magic establishes its type.
+  const raster = iconAssetType(contentType, bytes) ?? iconAssetType(undefined, bytes);
   if (raster) {
     const size = rasterDimensions(bytes);
     if (size && size.width * size.height > 4_194_304) return { usable: false, reason: 'logo-too-many-pixels' };
     if (banner && !bannerAssetShapeUsable(bytes)) return { usable: false, reason: 'banner-not-square' };
     return { usable: true, bytes, contentType: raster, rasterized: false };
   }
-  const svg = iconSvgAsset(contentType, bytes);
+  const svg = iconSvgAsset(contentType, bytes) ?? iconSvgAsset(undefined, bytes);
   if (!svg) return { usable: false, reason: 'not-a-raster' };
   if (!deps.rasterizeSvg) return { usable: false, reason: 'svg-not-servable' };
   const safe = safeIconSvg(svg);
