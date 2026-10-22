@@ -636,6 +636,19 @@ function isResumeTunerEnablement(before: unknown, after: unknown): boolean {
   );
 }
 
+/** Reviewed eligibility switch; never permits removal or another binding change. */
+function isEarlyCareerBindingUpdate(address: string, before: unknown, after: unknown): boolean {
+  if (!['cloudflare_workers_script.application', 'cloudflare_workers_script.ingestion', 'cloudflare_workers_script.isolated["admission"]'].includes(address)
+    || !Array.isArray(before) || !Array.isArray(after)) return false;
+  const named = (binding: unknown) => isRecord(binding) && binding.name === 'EARLY_CAREER_ELIGIBILITY_ENABLED';
+  const prior = before.filter(named), next = after.filter(named);
+  if (prior.length > 1 || next.length !== 1) return false;
+  if (![...prior, ...next].every(binding => isRecord(binding) && binding.type === 'plain_text'
+    && typeof binding.text === 'string' && ['true', 'false'].includes(binding.text)
+    && Object.entries(binding).every(([key, value]) => ['name', 'type', 'text'].includes(key) || value === null))) return false;
+  return bindingsMatchByName(before.filter(binding => !named(binding)), after.filter(binding => !named(binding)));
+}
+
 function isSafeWorkerUpdate(address: string, change: ResourceChange['change'], expectedDeploySha?: string): boolean {
   if (!isRecord(change.before) || !isRecord(change.after)) return false;
   const before = change.before;
@@ -673,6 +686,7 @@ function isSafeWorkerUpdate(address: string, change: ResourceChange['change'], e
     : [normalizedAfterBindings, withoutOutboundAddition];
   const permittedBindingChanged = bindingCandidates.some((candidate) => (
     isPermittedBindingUpdate(before.bindings, candidate)
+    || isEarlyCareerBindingUpdate(address, before.bindings, candidate)
     || isPermittedBindingRetirement(before.bindings, candidate)
     || isResumeTunerEnablement(before.bindings, candidate)
     || ((address === 'cloudflare_workers_script.ingestion' || isolatedAddresses.has(address)) && isIngestionV2BindingUpdate(before.bindings, candidate))
