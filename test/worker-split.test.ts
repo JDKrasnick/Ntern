@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('cloudflare:workers', () => ({ DurableObject: class {} }));
 import apiWorker, { type ApiEnvironment } from '../cloudflare/api-worker.js';
 import ingestionWorker, { type IngestionEnvironment } from '../cloudflare/ingestion-worker.js';
+import admissionWorker, { type AdmissionWorkerEnvironment } from '../cloudflare/admission-worker.js';
 import { isIngestionOperationPath, secretMatches } from '../cloudflare/split.js';
 import { billingShutdownQueueIds, type Environment } from '../cloudflare/worker.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
@@ -16,6 +17,47 @@ function reconnectingD1(): { db: D1Database; first: ReturnType<typeof vi.fn> } {
 }
 
 describe('API and ingestion Worker boundary', () => {
+  it.each(['discovery', 'admission'])('retries in-flight %s work instead of discarding it during billing shutdown', async (lane) => {
+    const db: D1Database = {
+      prepare() { return { bind() { return this; }, async first<T>() { return { value: 'stopped' } as T; },
+        async all() { return { results: [] }; }, async run() { return { meta: { changes: 0 } }; } }; },
+      async batch() { return []; },
+    };
+    const message = { id: 'paused', body: {}, ack: vi.fn(), retry: vi.fn() };
+    if (lane === 'discovery') await ingestionWorker.queue({ queue: 'intern-notifs-greenhouse', messages: [message] }, { DB: db } as Environment);
+    else await admissionWorker.queue({ queue: 'intern-notifs-admission-v2', messages: [message] }, {
+      DB: db, INGESTION_V2_ISOLATED_WORKERS_ENABLED: 'true',
+    } as AdmissionWorkerEnvironment);
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 3600 });
+  });
+
+  it('latches billing before resource discovery fails and keeps management failures visible', async () => {
+    const events: string[] = [];
+    const statement = { bind: vi.fn(), run: vi.fn(async () => {
+      events.push('local-latch'); return { meta: { changes: 1 } };
+    }) };
+    statement.bind.mockReturnValue(statement);
+    const fetcher = vi.fn(async () => { events.push('management'); throw new Error('Permission denied'); });
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const env = {
+        DB: { prepare: vi.fn(() => statement) }, INTERNAL_SERVICE_SECRET: 'internal-test-secret',
+        BILLING_WEBHOOK_SECRET: 'billing-test-secret', CLOUDFLARE_SHUTDOWN_TOKEN: 'management-token',
+        CLOUDFLARE_ACCOUNT_ID: 'account', WORKER_NAME: 'intern-notifs-ingestion',
+        // Resource ID bindings are intentionally absent: discovery cannot gate the latch.
+      } as unknown as IngestionEnvironment;
+      const response = await ingestionWorker.fetch(new Request('https://ingestion.example.test/internal/billing-shutdown', {
+        method: 'POST', headers: { 'X-InternNotifs-Service-Key': 'internal-test-secret',
+          'cf-webhook-auth': 'billing-test-secret', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: 'account', alert_type: 'billing_budget_alert', policy_name: 'InternNotifs budget warning: $5' }),
+      }), env);
+      expect(events[0]).toBe('local-latch');
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ stopped: false, failures: expect.arrayContaining(['discover-workers', 'discover-queues']) });
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('forwards the trusted-admission backfill through the authenticated service binding', async () => {
     let forwarded: Request | undefined;
     const env = {
@@ -81,7 +123,7 @@ describe('API and ingestion Worker boundary', () => {
     expect(secretMatches('different', 'same')).toBe(false);
   });
 
-  it('stops every ingestion queue during billing shutdown', () => {
+  it('lists legacy queue bindings for the read-only management readiness probe', () => {
     const env = {
       GREENHOUSE_QUEUE_ID: 'greenhouse', LEVER_QUEUE_ID: 'lever', ASHBY_QUEUE_ID: 'ashby',
       GITHUB_QUEUE_ID: 'github', GMAIL_QUEUE_ID: 'gmail',

@@ -411,11 +411,12 @@ describe('Cloudflare deployment configuration', () => {
     expect(terraform.match(/traces\s+= \{ enabled = false, head_sampling_rate = 1, persist = true \}/gu)).toHaveLength(3);
   });
 
-  it('restores billing-shutdown schedules only on ingestion', () => {
-    const runbook = read('docs/cloudflare-migration.md');
+  it('requires reviewed recovery instead of restoring schedules behind an active billing latch', () => {
+    const runbook = read('docs/cloudflare-migration.md').replace(/\s+/gu, ' ');
 
-    expect(runbook).toContain('wrangler triggers deploy --name intern-notifs-ingestion');
-    expect(runbook).toContain('--config wrangler.ingestion.jsonc');
+    expect(runbook).toContain('Ordinary production deploys and the dev preflight refuse to restore processing');
+    expect(runbook).toContain('No workflow automatically clears a billing latch.');
+    expect(runbook).toContain('the plan must account for schedules as well as consumers');
     expect(runbook).not.toContain('--config .context/wrangler.remote.json');
     expect(runbook).not.toContain('wrangler triggers deploy --name intern-notifs \\');
   });

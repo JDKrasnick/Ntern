@@ -2,6 +2,7 @@ import { processAdmissionV2Batch, ADMISSION_V2_QUEUE_NAME } from './admission-v2
 import { AdmissionDispatchNotReady, runAdmissionV2Dispatch, type AdmissionDispatchEnvironment } from './admission-v2-dispatch.js';
 import { admissionV2OwnsCatalogWrites } from '../src/ingestion-v2/admission/types.js';
 import { billingStopped, isolationEnabled } from './isolated-work.js';
+import { BILLING_SHUTDOWN_RETRY_SECONDS } from '../src/cloudflare-budget.js';
 import { D1MaintenancePhaseStore, recordPhase } from './maintenance-phases.js';
 import { publicHostResolver } from './public-host-resolver.js';
 import { isolatedScheduleRequest } from './isolated-schedule.js';
@@ -56,7 +57,10 @@ export default {
   async queue(batch: MessageBatch<unknown>, env: AdmissionWorkerEnvironment): Promise<void> {
     if (batch.queue !== (env.ADMISSION_V2_QUEUE_NAME ?? ADMISSION_V2_QUEUE_NAME)) throw new Error('Unexpected admission queue');
     if (!isolationEnabled(env)) { for (const message of batch.messages) message.retry({ delaySeconds: 60 }); return; }
-    if (await billingStopped(env.DB)) { for (const message of batch.messages) message.ack(); return; }
+    if (await billingStopped(env.DB)) {
+      for (const message of batch.messages) message.retry({ delaySeconds: BILLING_SHUTDOWN_RETRY_SECONDS });
+      return;
+    }
     await processAdmissionV2Batch(batch, env, { resolver: publicHostResolver });
   },
 };

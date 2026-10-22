@@ -127,6 +127,10 @@ jobs:
             | grep -qx true
           echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
       - run: npm ci
+      - name: Preserve an active billing shutdown
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: node --import tsx scripts/cloudflare-budget-guard.ts --check-running
       - name: Ensure the resume embedding index exists
         shell: bash
         run: |

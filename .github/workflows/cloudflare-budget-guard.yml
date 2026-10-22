@@ -1,0 +1,40 @@
+name: Enforce Cloudflare spending budget
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize with production deploys: neither may restore resources behind the
+# other's inspection. The durable latch also blocks subsequent deployment.
+concurrency:
+  group: cloudflare-workers-production
+  cancel-in-progress: false
+
+jobs:
+  budget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: cloudflare-workers-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Check measured account usage and pause both environments when necessary
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_USAGE_BUDGET_DOLLARS: ${{ vars.CLOUDFLARE_USAGE_BUDGET_DOLLARS || '5' }}
+          CLOUDFLARE_D1_WRITES_PER_HOUR: ${{ vars.CLOUDFLARE_D1_WRITES_PER_HOUR || '60000' }}
+        run: node --import tsx scripts/cloudflare-budget-guard.ts --enforce
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cloudflare-budget-${{ github.run_id }}
+          path: .context/verification/budget/report.json
+          if-no-files-found: error
+          retention-days: 30

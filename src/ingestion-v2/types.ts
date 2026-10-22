@@ -180,6 +180,7 @@ export interface ShadowComparisonMetrics {
   v2Only: ShadowMismatchSample;
   legacyOnly: ShadowMismatchSample;
   d1RowsRead: number;
+  /** Logical-row estimate, excluding index amplification and cadence bulk updates; not a spending limit. */
   d1RowsWritten: number;
   r2Bytes: number;
   status: 'complete' | 'incomplete' | 'failed';

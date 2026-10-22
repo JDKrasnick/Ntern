@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { applicationDatabases, assertApplicationRunning } from '../src/cloudflare-budget.js';
+import { cloudflareManagementApi } from './cloudflare-budget-guard.js';
 
 const roles = ['ingestion', 'admission', 'catalog-publisher', 'api'] as const;
 type Profile = { name: string; vars: Record<string, string>; triggers?: { crons: string[] };
@@ -148,6 +150,7 @@ async function main(): Promise<void> {
     return body.result;
   };
   if (process.argv.includes('--preflight')) {
+    await assertApplicationRunning(cloudflareManagementApi(account, token), [applicationDatabases.dev]);
     await preflightCloudflareDevTransfer(request);
     console.log('Dev transfer credentials, queue read access, and existing ownership checked.');
     return;

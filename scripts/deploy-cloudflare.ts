@@ -12,6 +12,8 @@ import {
   type Plan as AuditPlan,
 } from './cloudflare-live-audit.js';
 import { validateCloudflarePlan, type Plan as GuardPlan } from './cloudflare-plan-guard.js';
+import { applicationDatabases, assertApplicationRunning } from '../src/cloudflare-budget.js';
+import { cloudflareManagementApi } from './cloudflare-budget-guard.js';
 
 /**
  * Local production deploy: build, plan, guard, apply the exact plan, then require
@@ -218,8 +220,12 @@ function auditFinalState(
   if (driftExitCode !== 0) throw new Error('Production still differs from this working tree after apply; inspect the final plan.');
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const planOnly = process.argv.includes('--plan-only');
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.TF_VAR_cloudflare_account_id;
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  if (!accountId || !token) throw new Error('Cloudflare account and API token are required');
+  await assertApplicationRunning(cloudflareManagementApi(accountId, token), [applicationDatabases.production]);
   const deploySha = currentDeploySha();
   tofu(['init', '-reconfigure', '-input=false']);
   const planPath = join(tmpdir(), `cloudflare-${process.pid}.tfplan`);
@@ -255,4 +261,6 @@ function main(): void {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+}
