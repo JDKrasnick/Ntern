@@ -15,6 +15,7 @@ if(!base||!secret||!input||!output)throw Error('CATALOG_API_URL, OPERATIONS_SHAR
 const candidates=JSON.parse(await readFile(input,'utf8')) as ReviewedCandidate[];
 if(!Array.isArray(candidates)||new Set(candidates.map(c=>c.jobId)).size!==candidates.length||candidates.some(c=>!c.expected))throw Error('Each distinct job requires an explicit reviewed expectation');
 const apply=args.includes('--apply');
+const deferProjection=args.includes('--defer-projection-refresh');
 async function request(body:unknown){
  const response=await fetch(base+'/internal/early-career/backfill',{method:'POST',headers:{'X-Operations-Key':secret!,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(60000)});
  const value=await response.json() as {repairToken?:string;expectedJobs?:number;reviews?:Array<{jobId:string;change:string;oldTitle:string;title:string}>;message?:string};
@@ -31,8 +32,15 @@ for(let i=0;i<candidates.length;i+=10){
  }
  await appendFile(output,JSON.stringify({at:new Date().toISOString(),stage:'preview',...preview})+'\n');
  if(apply){
-  const result=await request({action:'apply',repairToken:preview.repairToken,expectedJobs:preview.expectedJobs});
+  const result=await request({action:'apply',repairToken:preview.repairToken,expectedJobs:preview.expectedJobs,finalize:!deferProjection});
   await appendFile(output,JSON.stringify({at:new Date().toISOString(),stage:'apply',...result})+'\n');
  }
  console.log(JSON.stringify({reviewed:Math.min(i+10,candidates.length),total:candidates.length,applied:apply,changes:preview.reviews.map(r=>({jobId:r.jobId,change:r.change}))}));
+}
+if(apply&&deferProjection){
+ const response=await fetch(base+'/internal/refresh-catalog',{method:'POST',headers:{'X-Operations-Key':secret},signal:AbortSignal.timeout(300000)});
+ const result=await response.json();
+ await appendFile(output,JSON.stringify({at:new Date().toISOString(),stage:'projection',status:response.status,result})+'\n');
+ if(!response.ok)throw Error(`Catalog finalization failed: HTTP ${response.status}; committed batch receipts remain valid`);
+ console.log(JSON.stringify({finalized:true,result}));
 }

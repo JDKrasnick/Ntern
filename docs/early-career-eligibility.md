@@ -124,6 +124,13 @@ npx tsx scripts/evaluate-early-career-policy.ts \
 
 ## Reviewed production backfill
 
+For bulk runs, pass `--defer-projection-refresh` to the operator script. Each
+reviewed batch commits with `finalize: false` and returns its durable receipt;
+the script rebuilds the catalog once after all batches finish. If interrupted,
+retain the committed receipts and complete `POST /internal/refresh-catalog`
+before declaring publication complete. A catalog rebuild timeout does not undo
+the committed, idempotent job/source repair.
+
 `POST /internal/early-career/backfill` requires the operations key. `preview`
 accepts at most ten open job IDs and bounded, employer artifacts observed within 24 hours
 or confirmed exact-page absence receipts. Each proof is bound to an existing

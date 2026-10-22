@@ -1106,11 +1106,11 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
     try {
       const text = await request.text();
       if (new TextEncoder().encode(text).length > 2 * 1024 * 1024) throw new Error('Request exceeds bounded review size');
-      const input = JSON.parse(text) as { action?: string; candidates?: Array<{jobId:string;proofs:EarlyCareerProof[]}>; repairToken?:string;expectedJobs?:number };
+      const input = JSON.parse(text) as { action?: string; candidates?: Array<{jobId:string;proofs:EarlyCareerProof[]}>; repairToken?:string;expectedJobs?:number;finalize?:boolean };
       if (input.action === 'preview') return withCors(Response.json(await previewEarlyCareerBackfill(env.DB, input.candidates ?? []), { headers: { 'Cache-Control': 'no-store' } }));
       if (input.action !== 'apply') throw new Error('action must be preview or apply');
       const result = await applyEarlyCareerBackfill(env.DB, input.repairToken ?? '', input.expectedJobs ?? -1);
-      if (result.projectionRefreshRequired) await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
+      if (result.projectionRefreshRequired && input.finalize !== false) await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
       return withCors(Response.json(result, { headers: { 'Cache-Control': 'no-store' } }));
     } catch (error) {
       return withCors(Response.json({ message: error instanceof Error ? error.message : 'Early-career repair failed' }, { status: 409 }));
