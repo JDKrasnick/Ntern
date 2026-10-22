@@ -20,7 +20,7 @@
 
 - [x] Implement a default-off employer-authoritative early-career admission gate, including refresh withdrawal and protection against stale community classifications. See [policy and validation](early-career-eligibility.md).
 - [x] Implement explicit employer programme matching and validate both frozen 200-role cohorts: 202 true positives, 187 true negatives, zero false positives, two accepted coverage gaps and nine unverifiable cases withheld. Preserve acquisition repairs for seven genuine internships; see [policy and evaluation limits](early-career-eligibility.md).
-- [ ] Validate the new eligibility policy in isolated dev and complete a reviewed employer-evidence backfill/canary before production activation.
+- [x] Validate the new eligibility policy in isolated dev and complete a reviewed employer-evidence canary before production activation. Keep the historical backfill bounded and inspect every proposed visibility change; preserve approved existing funded fellowships. See [rollout and backfill policy](early-career-eligibility.md#reviewed-production-backfill).
 
 - [x] Add search metadata, production canonicals, robots rules, and a sitemap to the public web export; keep Pages previews out of search. Deployment and Search Console verification are tracked in [`seo.md`](seo.md).
 - [x] Support public, source-attributed facts for all seven model metadata fields in role details, with brief colored field labels and anchored hint bubbles in the app, profile-bound release approval, exact historical cohorts, durable receipts, and bounded catalog refreshes. Acquire Microsoft and Meta JSON-LD qualification sections and exact Amazon requisitions. See [the release contract](shadow-extraction.md#owner-approved-full-metadata-release).
