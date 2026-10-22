@@ -46,7 +46,8 @@ function indexColumns(database: DatabaseSync, index: string): string[] {
 }
 
 describe('employer icon resolution migration', () => {
-  it.each(['canonical', 'independent'])('retries one Workday logo task and preserves %s review boundaries', (kind) => {
+  it.each(['canonical', 'independent'].flatMap(kind => ['0064_discover_workday_board_logos.sql',
+    '0065_recognize_mislabeled_board_logos.sql'].map(file => [kind,file])))('preserves %s review boundaries in %s', (kind,file) => {
     const database = migrated();
     for (const file of ['0001_initial.sql', '0013_canonical_employer_icons.sql', '0062_independent_company_icons.sql']) {
       database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
@@ -77,7 +78,7 @@ describe('employer icon resolution migration', () => {
       ('CATALOG_PROJECTION','CURRENT','catalog-projection','{"version":"current"}'),
       ('CATALOG_PROJECTION#MANIFESTS','current','catalog-projection',?)`)
       .run(JSON.stringify({keys:states.filter(x=>x!=='inactive')}));
-    database.exec(readFileSync(new URL('../cloudflare/migrations/0064_discover_workday_board_logos.sql', import.meta.url),'utf8'));
+    database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url),'utf8'));
     expect(database.prepare("SELECT id FROM employer_icon_resolutions WHERE next_retry_at='1970-01-01T00:00:00.000Z'").all())
       .toEqual([{id:kind === 'canonical' ? 'missing-a' : 'icon-v1-missing-a'}]);
     database.close();

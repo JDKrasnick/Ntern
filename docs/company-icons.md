@@ -49,6 +49,10 @@ are rejected to bound client decoding memory. Migration `0064` retries one
 active missing-logo Workday task per identity and preserves review holds.
 Corporate identity-review holds also block new automatic enqueues and stale
 duplicate tasks until an operator explicitly reopens them.
+Some board endpoints mislabel image bytes as `text/plain`. Declared board assets
+are recognized by raster signatures or sanitized SVG content, then stored with
+their validated image type. HTML error pages remain unusable. Migration `0065`
+retries active Workday misses with these rules and the same review boundaries.
 
 ### How a decision is made
 

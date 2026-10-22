@@ -1527,6 +1527,23 @@ describe('employer icon platform declarations and proposals', () => {
 describe('employer icon uploaded board logo', () => {
   const boardLogo = 'https://s101-recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/400/204/510/original/Logo-IMC-Blue.png';
 
+  it.each(['png','html'])('recognizes mislabeled board bytes while validating the %s body', async (kind) => {
+    const { db, admission, icons } = subject();
+    const r2 = r2Stub();
+    const url='https://tenant.wd5.myworkdayjobs.com/careers/job/Intern_P123';
+    const logo='https://tenant.wd5.myworkdayjobs.com/careers/assets/logo';
+    await admission.putCanonicalEmployer(employerRow('acme','Acme'),NOW.toISOString());
+    await icons.putSettings({mode:'resolve',maxPerSweep:5},NOW.toISOString());
+    await enqueueEmployerIconResolution(icons,{...employerSeed(url),provider:'workday',tenant:'tenant'},NOW);
+    const fetchImpl=scriptedFetch({
+      [url]:()=>html(`<meta property="og:image" content="${logo}">`),
+      [logo]:()=>new Response(kind==='png'?pngBytes(128,128):'<html>Access denied</html>',{headers:{'content-type':'text/plain; charset=UTF-8'}}),
+    });
+    await runEmployerIconResolutionPass(environment(db,r2.bucket,{}),NOW,DEPENDENCIES(fetchImpl));
+    expect(r2.puts).toHaveLength(kind==='png'?1:0);
+    if(kind==='png') expect(r2.puts[0]?.contentType).toBe('image/png');
+  });
+
   it.each(['canonical','independent'])('keeps %s corporate holds closed across fresh and duplicate work until explicit reopen', async (kind) => {
     const {database,admission,icons}=subject();
     const url='https://generic.wd5.myworkdayjobs.com/careers/job/Intern_P123';
