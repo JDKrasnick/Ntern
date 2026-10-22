@@ -16,6 +16,6 @@ export function ingestionV2AdmissionVersion(
     evaluatorRevision: INGESTION_V2_EVALUATOR_REVISION,
     trustedCommunityAlertsEnabled: options.trustedCommunityAlertsEnabled ?? false,
     ...(options.greenhouseIndexMaterial ? { greenhouseIndexMaterial: 1 } : {}),
-    ...(options.earlyCareerEligibilityEnabled ? { earlyCareerPolicyVersion: 3 } : {}),
+    ...(options.earlyCareerEligibilityEnabled ? { earlyCareerPolicyVersion: 4 } : {}),
   })).digest('hex');
 }

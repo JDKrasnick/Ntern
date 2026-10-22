@@ -1,3 +1,4 @@
+import {previewEarlyCareerBackfill, applyEarlyCareerBackfill, type EarlyCareerProof} from './early-career-backfill.js';
 import { createHash } from 'node:crypto';
 import { dnsJson, publicHostResolver } from './public-host-resolver.js';
 export { dnsJson, publicHostResolver } from './public-host-resolver.js';
@@ -1098,6 +1099,21 @@ async function fetchHandler(request: Request, env: Environment): Promise<Respons
       return withCors(Response.json({ ...result, applied: apply }));
     } catch (error) {
       return withCors(Response.json({ message: error instanceof Error ? error.message : 'Notification recovery failed' }, { status: 409 }));
+    }
+  }
+  if (url.pathname === '/internal/early-career/backfill' && request.method === 'POST') {
+    if (!operationsAuthorized(request, env)) return withCors(Response.json({ message: 'Not found' }, { status: 404 }));
+    try {
+      const text = await request.text();
+      if (new TextEncoder().encode(text).length > 2 * 1024 * 1024) throw new Error('Request exceeds bounded review size');
+      const input = JSON.parse(text) as { action?: string; candidates?: Array<{jobId:string;proofs:EarlyCareerProof[]}>; repairToken?:string;expectedJobs?:number };
+      if (input.action === 'preview') return withCors(Response.json(await previewEarlyCareerBackfill(env.DB, input.candidates ?? []), { headers: { 'Cache-Control': 'no-store' } }));
+      if (input.action !== 'apply') throw new Error('action must be preview or apply');
+      const result = await applyEarlyCareerBackfill(env.DB, input.repairToken ?? '', input.expectedJobs ?? -1);
+      if (result.projectionRefreshRequired) await refreshCatalogProjection(new D1InternshipStore(env.DB), env.DOCUMENTS);
+      return withCors(Response.json(result, { headers: { 'Cache-Control': 'no-store' } }));
+    } catch (error) {
+      return withCors(Response.json({ message: error instanceof Error ? error.message : 'Early-career repair failed' }, { status: 409 }));
     }
   }
   if (url.pathname === '/internal/role-metadata/audit' && request.method === 'GET') {

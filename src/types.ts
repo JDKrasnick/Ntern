@@ -532,6 +532,8 @@ export type CatalogAdmissionEvidence = 'trusted-community-source';
 export interface CatalogAdmission {
   /** Explicit, default-off policy enrollment; absence preserves the existing rollout. */
   earlyCareer?: EarlyCareerAssessment & { baseCatalogEligible: boolean; baseAlertEligible: boolean };
+  /** Previously visible legacy role: withdrawal awaits individual operator review. Never admits a new role. */
+  earlyCareerReviewPending?: EarlyCareerAssessment;
   canonicalEmployer?: Pick<CanonicalEmployer, 'id' | 'displayName'>;
   employerResolution: 'resolved' | 'source-reported' | 'unresolved' | 'conflict';
   postingAttribution: 'attributed' | 'unattributed';
@@ -635,7 +637,7 @@ export interface ProvenancedValue<T> {
 export type InternshipProgramType = 'internship' | 'co-op' | 'apprenticeship' | 'new-grad' | 'entry-level' | 'unknown';
 
 export interface EarlyCareerAssessment {
-  policyVersion: 3;
+  policyVersion: 4;
   status: 'eligible' | 'ineligible' | 'unknown';
   reason: 'explicit-programme' | 'explicit-entry-level' | 'experienced-role' | 'no-explicit-programme' | 'missing-official-evidence' | 'conflicting-employer-evidence';
   programType?: Exclude<InternshipProgramType, 'unknown'>;

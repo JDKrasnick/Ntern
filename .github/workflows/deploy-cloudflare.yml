@@ -53,6 +53,7 @@ jobs:
       TF_VAR_gmail_client_id: ${{ vars.GMAIL_CLIENT_ID }}
       TF_VAR_gmail_redirect_uri: ${{ vars.GMAIL_REDIRECT_URI }}
       TF_VAR_identity_unconfirmed_publication_enabled: ${{ vars.IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED }}
+      TF_VAR_early_career_eligibility_enabled: ${{ vars.EARLY_CAREER_ELIGIBILITY_ENABLED || 'false' }}
       TF_VAR_trusted_community_catalog_enabled: ${{ vars.TRUSTED_COMMUNITY_CATALOG_ENABLED }}
       TF_VAR_identity_confirmed_coverage_floor: ${{ vars.IDENTITY_CONFIRMED_COVERAGE_FLOOR }}
       TF_VAR_ingestion_v2_isolated_workers_enabled: ${{ vars.INGESTION_V2_ISOLATED_WORKERS_ENABLED || 'false' }}
