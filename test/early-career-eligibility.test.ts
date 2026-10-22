@@ -255,7 +255,7 @@ describe('employer-authoritative early-career policy', () => {
   });
   it('carries reviewed base admission across aliases of the same exact posting without bypassing new conflicts', () => {
     const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
-    const vetted = { ...admission(closed), employerResolution: 'source-reported' as const, evidenceCodes: ['trusted-community-source'] };
+    const vetted = { ...admission(closed), employerResolution: 'source-reported' as const, evidenceCodes: ['trusted-community-source' as const] };
     const open = listing({ sourceId: 'another-community', provenance: 'reviewed-community' });
     const weak = withEarlyCareerAdmission({ ...admission(open, false), employerResolution: 'unresolved', catalogEligible: false, alertEligible: false,
       reasonCodes: ['employer-unresolved'], evidenceCodes: [] }, earlyCareerFromEvidence([]));
