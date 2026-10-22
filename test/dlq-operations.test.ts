@@ -111,6 +111,21 @@ it('uses the payload index when a queue move replaces the delivery ID', () => {
 });
 
 describe('protected DLQ operations', () => {
+  it.each(['message-id', 'payload-hash'] as const)('shows destination failures matched by %s after a queue move', async match => {
+    const message = destinationMessage('dead-letter-id');
+    const { database, dependencies, purge } = subject([message]);
+    await recordQueueFailure({ db: dependencies.db, queueName: 'intern-notifs-destination-verification',
+      messageId: match === 'message-id' ? message.id : 'original-delivery-id', attempts: 3,
+      sourceId: 'greenhouse-acme', body: message.body,
+      error: new Error('Unable to create new browser: code: 503: message: No browser available') });
+    const result = await inspectDlq({ queue: 'destination-verification' }, dependencies);
+    expect(result).toMatchObject({ classificationCounts: { ledgered: 1, 'missing-ledger': 0, 'not-applicable': 0 },
+      messages: [{ failureProvenance: 'ledgered', failureCategory: 'capacity', failureMatch: match,
+        latestDiagnostic: expect.stringContaining('No browser available') }] });
+    expect(purge).not.toHaveBeenCalled();
+    database.close();
+  });
+
   it('inspects sanitized summaries without consuming or exposing bodies and refs', async () => {
     const { database, dependencies, purge } = subject([catalogMessage('m1')], async () => ({
       sourceId: 'lever-acme', state: 'degraded', sourceStatus: 'active', lastAttemptAt: 'now', consecutiveFailures: 1,

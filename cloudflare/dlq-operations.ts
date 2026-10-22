@@ -106,7 +106,7 @@ function isCatalogDlq(name: DlqName): name is Extract<DlqName, 'greenhouse' | 'l
 async function summary(name: DlqName, message: PeekedMessage, dependencies: DlqDependencies) {
   const parsed = discardableMessage(name, message);
   const health = parsed.sourceId ? await dependencies.sourceHealth(parsed.sourceId) : undefined;
-  const tracksFailures = isCatalogDlq(name) || name === 'admission-v2';
+  const tracksFailures = isCatalogDlq(name) || name === 'admission-v2' || name === 'destination-verification';
   let failure = tracksFailures
     ? await dependencies.db.prepare(`SELECT category, diagnostic, message_id FROM queue_failure_events
         WHERE queue_name = ? AND message_id = ? ORDER BY last_failed_at DESC LIMIT 1`)

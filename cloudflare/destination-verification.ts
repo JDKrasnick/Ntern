@@ -1,4 +1,5 @@
-import puppeteer, { type BrowserWorker } from '@cloudflare/puppeteer';
+import type { BrowserWorker } from '@cloudflare/puppeteer';
+import { acquireDestinationBrowser, DestinationBrowserUnavailable } from './destination-browser.js';
 import { createHash } from 'node:crypto';
 import { evaluateCatalogAdmission, deriveCanonicalAdmission, metadataCompleteness } from '../src/catalog-admission.js';
 import { classifyDestination, matchingBrowserDestination } from '../src/destination-verification.js';
@@ -586,7 +587,7 @@ export async function processDestinationVerificationBatch(
     canRequest: (host) => operations.metadataHostAvailable(host),
     deferHost: (host, until) => operations.deferMetadataHost(host, until),
   });
-  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
+  let browser: Awaited<ReturnType<typeof acquireDestinationBrowser>> | undefined;
   try {
     for (const { queued, message } of pending) {
       const attemptedAt = now().toISOString();
@@ -724,7 +725,7 @@ export async function processDestinationVerificationBatch(
         let collisionJobIds: string[] = [];
         let browserError: unknown = cachedRender?.browserError;
         if (!apiVerified && !cachedRender) {
-          browser ??= await puppeteer.launch(env.DESTINATION_BROWSER);
+          browser ??= await acquireDestinationBrowser(env.DESTINATION_BROWSER);
           const page = await browser.newPage();
           try {
             let response = await page.goto(message.candidateUrl, { waitUntil: 'domcontentloaded', timeout: DESTINATION_NAVIGATION_TIMEOUT_MS });
@@ -995,7 +996,9 @@ export async function processDestinationVerificationBatch(
           sourceKind: message.providerIdentity.provider, body: queued.body, error });
         console.error(JSON.stringify({ command: 'destination-verification', messageId: queued.id,
           sourceId: message.sourceId, reason: message.reason, error: safeDiagnostic(error) }));
-        queued.retry({ delaySeconds: 300 }, error);
+        // Keep the platform's bounded attempt count, but let browser capacity
+        // recover for 15 minutes instead of exhausting every attempt in 10.
+        queued.retry({ delaySeconds: error instanceof DestinationBrowserUnavailable ? 900 : 300 }, error);
       }
     }
   } catch (error) {

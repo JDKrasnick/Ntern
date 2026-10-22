@@ -13,9 +13,11 @@ import { mergeSourceOccurrence } from '../src/identity/source-occurrence.js';
 import type { Internship } from '../src/types.js';
 import { combineRenderedFrameEvidence } from '../src/rendered-destination-evidence.js';
 
-const browserMocks = vi.hoisted(() => ({ launch: vi.fn() }));
-vi.mock('@cloudflare/puppeteer', () => ({ default: { launch: browserMocks.launch } }));
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); browserMocks.launch.mockReset(); });
+const browserMocks = vi.hoisted(() => ({ connect: vi.fn() }));
+vi.mock('@cloudflare/puppeteer', () => ({ default: {
+  acquire: async () => ({ sessionId: 'metadata-session' }), connect: browserMocks.connect,
+} }));
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); browserMocks.connect.mockReset(); });
 
 function sqliteD1(database: DatabaseSync, inspectRows?: (query: string, rows: unknown[]) => void,
   queryExecuted?: (query: string) => void): D1Database {
@@ -311,7 +313,7 @@ describe('staged browser-to-API collection', () => {
     const page = { goto: vi.fn().mockResolvedValue({ status: () => 200 }), url: () => candidateUrl,
       frames: () => [frame], evaluate: vi.fn().mockResolvedValue([]), close: vi.fn() };
     const browser = { newPage: vi.fn().mockResolvedValue(page), close: vi.fn() };
-    browserMocks.launch.mockResolvedValue(browser);
+    browserMocks.connect.mockResolvedValue(browser);
     const apiFetch = vi.fn().mockResolvedValue(Response.json({ id: returnedId, title: original.title,
       content: '<p>Salary: USD $3500 to $5700 per week.</p><p>USD $900 monthly housing stipend.</p>' }));
     vi.stubGlobal('fetch', apiFetch);

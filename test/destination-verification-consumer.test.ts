@@ -14,8 +14,8 @@ import { normalizeExactPostingDescription } from '../src/shadow-extraction.js';
 import { metadataDescriptionText } from '../src/core/metadata-text.js';
 import { processShadowExtractionBatch } from '../cloudflare/shadow-extraction.js';
 
-const launch = vi.hoisted(() => vi.fn());
-vi.mock('@cloudflare/puppeteer', () => ({ default: { launch } }));
+const { acquire, connect } = vi.hoisted(() => ({ acquire: vi.fn(), connect: vi.fn() }));
+vi.mock('@cloudflare/puppeteer', () => ({ default: { acquire, connect } }));
 
 function sqliteD1(database: DatabaseSync): D1Database {
   const prepared = (query: string, values: SQLInputValue[] = []): D1PreparedStatement => ({
@@ -79,10 +79,29 @@ function environment(db: D1Database): DestinationVerificationEnvironment {
 
 describe('destination verification queue consumer', () => {
   beforeEach(() => {
-    launch.mockReset();
+    acquire.mockReset().mockResolvedValue({ sessionId: 'session-1' });
+    connect.mockReset();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 503 })));
   });
   afterEach(() => vi.unstubAllGlobals());
+
+  it('gives browser capacity time to recover without recording negative destination evidence', async () => {
+    const { db, database, jobs } = subject(); const { job, reference } = role();
+    await jobs.putInternship(job);
+    acquire.mockRejectedValue(new Error('Unable to create new browser: code: 503: message: No browser available'));
+    const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId,
+      externalId: reference.externalId!, candidateUrl: reference.applyUrl,
+      providerIdentity: { provider: 'greenhouse', sourceId: reference.sourceId, sourceUrl: reference.sourceUrl,
+        tenant: 'acme', postingId: reference.externalId }, reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' }, 3);
+    await processDestinationVerificationBatch({ queue: 'intern-notifs-destination-verification', messages: [queued] }, environment(db));
+    expect(queued.retry).toHaveBeenCalledWith({ delaySeconds: 900 }, expect.any(Error));
+    expect(queued.ack).not.toHaveBeenCalled(); expect(connect).not.toHaveBeenCalled();
+    expect((await jobs.getJob(job.jobId))?.sourceReferences[0]?.admission).toBeUndefined();
+    expect(database.prepare('SELECT COUNT(*) AS n FROM destination_verification_attempts').get()).toMatchObject({ n: 0 });
+    expect(database.prepare('SELECT category, resolved_at FROM queue_failure_events').get())
+      .toMatchObject({ category: 'capacity', resolved_at: null });
+    database.close();
+  });
 
   it.each(['provider-poll', 'backfill', 'scheduled-verification'] as const)('preserves structured Lever mode and pay through the %s handoff', async (origin) => {
     const { db, jobs } = subject(); const { job, reference } = role();
@@ -144,7 +163,7 @@ describe('destination verification queue consumer', () => {
     const { db, operations } = subject();
     await operations.recordVerificationCompletion('already-complete', '2026-08-30T00:00:00Z');
     const newPage = vi.fn();
-    launch.mockResolvedValue({ newPage, close: vi.fn() });
+    connect.mockResolvedValue({ newPage, close: vi.fn() });
     const { reference } = role();
     const queued = queueMessage({ version: 1, jobId: 'job-1', sourceId: reference.sourceId,
       externalId: reference.externalId!, candidateUrl: reference.applyUrl, providerIdentity: {
@@ -171,7 +190,7 @@ describe('destination verification queue consumer', () => {
         jobPostingCount: 1, distinctJobLinkCount: 0, applicationFormPresent: true }), parentFrame: () => null };
     const newPage = vi.fn().mockResolvedValue({ goto: vi.fn().mockResolvedValue({ status: () => 200 }),
       url: () => reference.applyUrl, evaluate: vi.fn().mockResolvedValue([]), frames: () => [frame], close: vi.fn() });
-    launch.mockResolvedValue({ newPage, close: vi.fn() });
+    connect.mockResolvedValue({ newPage, close: vi.fn() });
     const identity = (sourceId: string, sourceUrl: string) => ({ provider: 'greenhouse' as const, sourceId, sourceUrl,
       tenant: 'acme', postingId: reference.externalId! });
     const first = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
@@ -211,7 +230,7 @@ describe('destination verification queue consumer', () => {
       ...environment(db), SHADOW_EXTRACTION_QUEUE: shadowQueue,
       SHADOW_EXTRACTION_ARTIFACTS: { put: vi.fn().mockResolvedValue(undefined) } as unknown as R2Bucket,
     }, () => new Date('2026-08-30T00:01:00Z'));
-    expect(launch).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(queued.retry).not.toHaveBeenCalled();
     expect(shadowQueue.send).toHaveBeenCalledOnce();
@@ -250,7 +269,7 @@ describe('destination verification queue consumer', () => {
     expect(cancel).toHaveBeenCalledOnce();
     expect(body.locked).toBe(false);
     expect(put).toHaveBeenCalled();
-    expect(launch).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
     if (storageFailure) {
       expect(queued.retry).toHaveBeenCalledOnce();
       expect(queued.ack).not.toHaveBeenCalled();
@@ -286,7 +305,7 @@ describe('destination verification queue consumer', () => {
     const newPage = vi.fn().mockResolvedValue({
       goto: vi.fn().mockRejectedValue(new Error('timeout')), frames: () => [], close: vi.fn(),
     });
-    launch.mockResolvedValue({ newPage, close: vi.fn() });
+    connect.mockResolvedValue({ newPage, close: vi.fn() });
     const identity = (sourceId: string, sourceUrl: string) => ({ provider: 'greenhouse' as const, sourceId, sourceUrl,
       tenant: 'acme', postingId: reference.externalId! });
     const unseen = queueMessage({ version: 1, jobId: unseenJob.jobId, sourceId: unseenReference.sourceId,
@@ -321,7 +340,7 @@ describe('destination verification queue consumer', () => {
     // The provider route exists but the API answers 500, so no artifact is
     // available and the render must run.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 500 })));
-    launch.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
+    connect.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
       goto: vi.fn().mockRejectedValue(new Error('timeout')), frames: () => [], close: vi.fn() }), close: vi.fn() });
     const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId, externalId: reference.externalId!,
       candidateUrl: reference.applyUrl, providerIdentity: { provider: 'greenhouse', sourceId: reference.sourceId,
@@ -329,7 +348,7 @@ describe('destination verification queue consumer', () => {
       reason: 'first-sight', queuedAt: '2026-08-30T00:00:00Z' });
     await processDestinationVerificationBatch({ queue: 'destination-verification', messages: [queued] }, environment(db),
       () => new Date('2026-08-30T00:01:00Z'));
-    expect(launch).toHaveBeenCalledOnce();
+    expect(connect).toHaveBeenCalledOnce();
     expect(queued.retry).toHaveBeenCalled();
   });
 
@@ -344,7 +363,7 @@ describe('destination verification queue consumer', () => {
     })));
     const newPage = vi.fn().mockResolvedValue({ goto: vi.fn().mockResolvedValue({ status: () => 200 }), url: () => reference.applyUrl,
       evaluate: vi.fn().mockResolvedValue([]), frames: () => [], close: vi.fn() });
-    launch.mockResolvedValue({ newPage, close: vi.fn() });
+    connect.mockResolvedValue({ newPage, close: vi.fn() });
     const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: communityReference.sourceId,
       externalId: communityReference.externalId!, candidateUrl: communityReference.applyUrl,
       providerIdentity: { provider: 'greenhouse', sourceId: communityReference.sourceId,
@@ -399,7 +418,7 @@ describe('destination verification queue consumer', () => {
       () => new Date('2026-08-30T00:01:00Z'));
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(queued.retry).not.toHaveBeenCalled();
-    expect(launch).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
     expect(await jobs.getJob(job.jobId)).toMatchObject({ applyUrl: currentReference.applyUrl,
       sourceReferences: [{ applyUrl: currentReference.applyUrl }] });
   });
@@ -435,7 +454,7 @@ describe('destination verification queue consumer', () => {
 
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(queued.retry).not.toHaveBeenCalled();
-    expect(launch).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
     await expect(operations.verificationCompleted('recent-scheduled-generation')).resolves.toBe(true);
     await expect(operations.leaseDueVerifications('2026-08-30T00:16:00Z')).resolves.toEqual([]);
     await expect(operations.leaseDueVerifications('2026-08-31T00:01:00Z')).resolves.toHaveLength(1);
@@ -450,7 +469,7 @@ describe('destination verification queue consumer', () => {
       visibleText: `${reference.title} ${reference.externalId} Apply`,
       structuredJobText: JSON.stringify({ '@type': 'JobPosting', identifier: reference.externalId, title: reference.title }),
       jobPostingCount: 1, distinctJobLinkCount: 0, applicationFormPresent: true }), parentFrame: () => null };
-    launch.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
+    connect.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
       goto: vi.fn().mockImplementation(async () => {
         await jobs.putInternship({ ...job, applyUrl: changedReference.applyUrl, normalizedUrl: changedReference.applyUrl,
           sourceReferences: [changedReference] });
@@ -489,7 +508,7 @@ describe('destination verification queue consumer', () => {
       visibleText: `${reference.externalId} Responsibilities and qualifications. ${'Build reliable systems. '.repeat(30)}`,
       structuredJobText: JSON.stringify({ '@type': 'JobPosting', identifier: reference.externalId, description: reference.title }),
       jobPostingCount: 1, distinctJobLinkCount: 0, applicationFormPresent: true }), parentFrame: () => null };
-    launch.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
+    connect.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
       goto: vi.fn().mockResolvedValue({ status: () => 200 }), url: () => reference.applyUrl,
       evaluate: vi.fn().mockResolvedValue([]), frames: () => [frame], close: vi.fn(),
     }), close: vi.fn() });
@@ -522,7 +541,7 @@ describe('destination verification queue consumer', () => {
         jobPostingCount: 1, distinctJobLinkCount: 0, applicationFormPresent: true }),
       parentFrame: () => null,
     };
-    launch.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
+    connect.mockResolvedValue({ newPage: vi.fn().mockResolvedValue({
       goto: vi.fn().mockResolvedValue({ status: () => 200 }), url: () => reference.applyUrl,
       evaluate: vi.fn().mockResolvedValue([]), frames: () => [frame], close: vi.fn(),
     }), close: vi.fn() });
@@ -585,7 +604,7 @@ describe('destination verification queue consumer', () => {
 
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(queued.retry).not.toHaveBeenCalled();
-    expect(launch).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
     expect(artifactPut).toHaveBeenCalledOnce();
     expect(shadowQueue.send).toHaveBeenCalledOnce();
     expect(shadowQueue.send.mock.calls[0]![0]).toMatchObject({ origin: 'provider-poll' });
@@ -651,7 +670,7 @@ describe('destination verification queue consumer', () => {
     expect(stored.location).toContain('Austin');
     expect(stored.sourceReferences[0]!.admission).toEqual(reference.admission);
     expect(stored.notification).toEqual(job.notification); expect(stored.open).toBe(job.open);
-    expect(launch).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it('rejects a natural metadata revision superseded by a later source poll before fetching or enqueueing', async () => {
@@ -769,7 +788,7 @@ describe('destination verification queue consumer', () => {
     }, () => new Date('2026-08-30T00:01:00Z'));
 
     expect(queued.ack).toHaveBeenCalledOnce();
-    expect(launch).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
     expect(await jobs.getJob(job.jobId)).toEqual(before);
     expect(artifactPut).toHaveBeenCalledOnce();
     expect(shadowQueue.send).toHaveBeenCalledOnce();
@@ -865,7 +884,7 @@ describe('destination verification queue consumer', () => {
     const newPage = vi.fn().mockResolvedValue({
       goto: vi.fn().mockRejectedValue(new Error('timeout')), frames: () => [], close: vi.fn(),
     });
-    launch.mockResolvedValue({ newPage, close: vi.fn() });
+    connect.mockResolvedValue({ newPage, close: vi.fn() });
     const queued = queueMessage({ version: 1, jobId: job.jobId, sourceId: reference.sourceId,
       externalId: reference.externalId!, candidateUrl: reference.applyUrl, providerIdentity: scheduled!.providerIdentity,
       reason: 'daily-retry', queuedAt: '2026-08-30T00:00:00Z', occurrenceKey: scheduled!.occurrenceKey,
