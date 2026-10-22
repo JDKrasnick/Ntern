@@ -18,7 +18,7 @@ describe('approved billing recovery', () => {
     const fetch = vi.fn().mockImplementation(async () => Response.json({ success: true, result: [] }));
     vi.stubGlobal('fetch', fetch);
     const env = {
-      DB: { prepare }, BILLING_WEBHOOK_SECRET: 'test-secret', CLOUDFLARE_ACCOUNT_ID: 'account',
+      DB: { prepare, batch: vi.fn() }, BILLING_WEBHOOK_SECRET: 'test-secret', CLOUDFLARE_ACCOUNT_ID: 'account',
       CLOUDFLARE_SHUTDOWN_TOKEN: 'test-token', WORKER_NAME: 'intern-notifs-ingestion',
       GREENHOUSE_QUEUE_ID: 'greenhouse', LEVER_QUEUE_ID: 'lever', ASHBY_QUEUE_ID: 'ashby', GITHUB_QUEUE_ID: 'github',
       GMAIL_QUEUE_ID: 'gmail', DESTINATION_VERIFICATION_QUEUE_ID: 'destination-verification',
