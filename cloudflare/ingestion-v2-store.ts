@@ -239,6 +239,7 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
         qualification_observed_sequence = ?
       WHERE source_id = ? AND snapshot_hash = ? AND admission_version = ?
         AND consecutive_omissions = 0 AND state <> 'absent'
+        AND (qualification_complete_snapshots < 2 OR qualification_pending = 1 OR state <> 'settled')
         AND (qualification_observed_sequence IS NULL OR qualification_observed_sequence < ?)
         AND EXISTS (SELECT 1 FROM ingestion_snapshots WHERE source_id = ? AND snapshot_hash = ?
           AND admission_version = ? AND state = 'active' AND complete_fetch_sequence = ?)
@@ -288,6 +289,29 @@ export class D1IngestionV2Repository implements IngestionV2Repository, Admission
           )
       `).bind(activatedAt, expiresAt, sourceId, snapshotHash, sourceId, snapshotHash),
     ]);
+  }
+
+  async refreshUnchangedRows(sourceId: string, snapshotHash: string, admissionVersion: string,
+    rows: readonly { externalId: string; materialHash: string }[], baseline: boolean): Promise<void> {
+    // Snapshot membership must advance so admission can read the current R2
+    // object. Material, leases, decisions and indexed observation clocks do not.
+    // Keep the JSON input bounded independently of the size of the source board.
+    for (let offset = 0; offset < rows.length; offset += chunkSize) {
+      const chunk = rows.slice(offset, offset + chunkSize);
+      const result = await this.db.prepare(`UPDATE ingestion_rows SET
+          snapshot_hash = ?, consecutive_omissions = 0, closure_pending = 0,
+          notification_baseline = notification_baseline OR ?
+        WHERE source_id = ? AND admission_version = ? AND consecutive_omissions < 2
+          AND external_id IN (SELECT json_extract(value, '$.externalId') FROM json_each(?))
+          AND EXISTS (SELECT 1 FROM json_each(?) AS observed
+            WHERE json_extract(observed.value, '$.externalId') = ingestion_rows.external_id
+              AND json_extract(observed.value, '$.materialHash') = ingestion_rows.material_hash)
+      `).bind(snapshotHash, baseline ? 1 : 0, sourceId, admissionVersion,
+        JSON.stringify(chunk), JSON.stringify(chunk)).run();
+      // A concurrent policy/material replacement must be diffed again; never
+      // mark its source snapshot active with a silently omitted membership row.
+      if (result.meta.changes !== chunk.length) throw new Error('Ingestion rows changed during snapshot refresh');
+    }
   }
 
   async putRows(records: readonly IngestionRowRecord[]): Promise<void> {

@@ -1,5 +1,24 @@
 # D1 write reduction plan
 
+## October ingestion follow-up
+
+Changed board snapshots now refresh unchanged rows through a bounded membership
+update rather than the full admission upsert. The snapshot link still advances;
+leases, retry state, decisions, baseline provenance, and observation clocks stay
+intact. Material and policy checks reject a concurrent replacement instead of
+activating a snapshot with incomplete membership. New, changed, reappeared, and
+stale-policy rows retain the full admission path.
+
+Settled rows stop receiving qualification-counter updates once they have two
+complete observations and no pending qualification. Pending work and active
+leases continue observing cadences; material replacement resets qualification.
+
+A local Miniflare D1 fixture with 1,000 unchanged settled rows reports 6,000
+`meta.rows_written` through the previous broad upsert versus 2,000 through the
+membership update. An in-memory SQL regression also verifies zero counter
+updates for 1,000 settled rows already at two observations. These are operation
+measurements, not a production fleet replay or a measured monthly saving.
+
 ## Goal and scope
 
 Reduce billed D1 rows written while preserving the current ten-minute catalog refresh, admission and revocation behavior, metadata collection coverage, and guarded repair checks. This plan covers two write paths: catalog projection publication and role metadata evidence recording. It does not change production configuration or deploy code.

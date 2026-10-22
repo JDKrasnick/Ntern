@@ -77,6 +77,46 @@ function row(overrides: Partial<IngestionRowRecord> & { externalId: string }): I
 }
 
 describe('ingestion v2 D1 repository', () => {
+  it('does not rewrite 1000 settled qualification counters after they reach two observations', async () => {
+    const { database, repository } = subject();
+    await repository.putSnapshot(snapshot({ state: 'active', completeFetchSequence: 1 }));
+    await repository.putRows(Array.from({ length: 1000 }, (_, index) => row({
+      externalId: String(index), qualificationCompleteSnapshots: 2, qualificationObservedSequence: 1,
+    })));
+    database.exec(`CREATE TABLE cadence_writes (id TEXT);
+      CREATE TRIGGER count_cadence_writes AFTER UPDATE OF qualification_observed_sequence ON ingestion_rows
+      BEGIN INSERT INTO cadence_writes VALUES (new.external_id); END;`);
+    await repository.recordCompleteCadence('community-example', 'a'.repeat(64), 'standard-v1', 2, '2026-10-01T01:00:00Z');
+    await repository.recordCompleteCadence('community-example', 'a'.repeat(64), 'standard-v1', 3, '2026-10-01T02:00:00Z');
+    expect(database.prepare('SELECT COUNT(*) AS n FROM cadence_writes').get()).toEqual({ n: 0 });
+    expect(await repository.getSnapshot('community-example', 'a'.repeat(64))).toMatchObject({ completeFetchSequence: 3 });
+    database.close();
+  });
+
+  it('refreshes unchanged board membership without touching lease or observation indexes', async () => {
+    const { database, repository } = subject();
+    await repository.putRows([
+      row({ externalId: 'leased', state: 'processing', leaseOwner: 'worker', leaseExpiresAt: '2026-10-02', attemptCount: 2 }),
+      row({ externalId: 'settled', decision: 'blocked', consecutiveOmissions: 1, notificationBaseline: true }),
+    ]);
+    database.exec(`CREATE TABLE broad_writes (id TEXT);
+      CREATE TRIGGER count_broad_writes AFTER UPDATE OF state, retry_at, last_observed_at, lease_expires_at ON ingestion_rows
+      BEGIN INSERT INTO broad_writes VALUES (new.external_id); END;`);
+    await repository.refreshUnchangedRows('community-example', 'b'.repeat(64), 'standard-v1', [
+      { externalId: 'leased', materialHash: 'm' }, { externalId: 'settled', materialHash: 'm' },
+    ], false);
+    expect(database.prepare('SELECT COUNT(*) AS n FROM broad_writes').get()).toEqual({ n: 0 });
+    expect(await repository.getRow('community-example', 'leased')).toMatchObject({ snapshotHash: 'b'.repeat(64),
+      state: 'processing', leaseOwner: 'worker', leaseExpiresAt: '2026-10-02', attemptCount: 2 });
+    expect(await repository.getRow('community-example', 'settled')).toMatchObject({ snapshotHash: 'b'.repeat(64),
+      decision: 'blocked', consecutiveOmissions: 0, notificationBaseline: true, lastObservedAt: '2026-10-01T00:00:00.000Z' });
+    await expect(repository.refreshUnchangedRows('community-example', 'c'.repeat(64), 'standard-v1', [
+      { externalId: 'leased', materialHash: 'different' },
+    ], false)).rejects.toThrow('changed during snapshot refresh');
+    expect((await repository.getRow('community-example', 'leased'))?.snapshotHash).toBe('b'.repeat(64));
+    database.close();
+  });
+
   it('upserts snapshots idempotently and never regresses a terminal state', async () => {
     const { repository } = subject();
     await repository.putSnapshot(snapshot());

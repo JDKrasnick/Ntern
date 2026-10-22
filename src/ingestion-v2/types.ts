@@ -249,6 +249,9 @@ export interface IngestionV2Repository {
   hasPendingOmissionClosures?(sourceId: string): Promise<boolean>;
   activateSnapshot(sourceId: string, snapshotHash: string, activatedAt: string): Promise<void>;
   putRows(records: readonly IngestionRowRecord[]): Promise<void>;
+  /** Move unchanged material to a new board without rewriting admission state or observation clocks. */
+  refreshUnchangedRows?(sourceId: string, snapshotHash: string, admissionVersion: string,
+    rows: readonly { externalId: string; materialHash: string }[], baseline: boolean): Promise<void>;
   /** Apply one-complete-snapshot omission increments without rewriting bodies. */
   applyOmissions(sourceId: string, updates: readonly SnapshotOmissionUpdate[], updatedAt: string): Promise<void>;
   getRow(sourceId: string, externalId: string): Promise<IngestionRowRecord | undefined>;
