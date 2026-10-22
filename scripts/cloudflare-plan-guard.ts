@@ -855,6 +855,14 @@ const splitProjectionIngestionCrons = [
 const reliableSplitProjectionIngestionCrons = splitProjectionIngestionCrons.map((cron) => (
   cron === '4-54/10 * * * *' ? '4,14,24,34,44,54 * * * *' : cron
 ));
+const beforeIconRetryIngestionCrons = [
+  '*/5 * * * *', '7-57/10 * * * *', '9-59/10 * * * *',
+  '1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *', '6-56/10 * * * *',
+  '12,42 * * * *', '22,52 * * * *', '2,32 * * * *', '0 * * * *', '34 8 * * *', '17 9 * * *',
+];
+const iconRetryIngestionCrons = beforeIconRetryIngestionCrons.map((cron) => (
+  cron === '6-56/10 * * * *' ? '3-58/5 * * * *' : cron
+));
 
 function cronValues(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -895,9 +903,11 @@ function isReviewedIngestionCronUpdate(address: string, change: ResourceChange['
     && isDeepStrictEqual(afterCrons, splitProjectionIngestionCrons);
   const repairsR2ProjectionCron = isDeepStrictEqual(beforeCrons, splitProjectionIngestionCrons)
     && isDeepStrictEqual(afterCrons, reliableSplitProjectionIngestionCrons);
+  const acceleratesIconRetries = isDeepStrictEqual(beforeCrons, beforeIconRetryIngestionCrons)
+    && isDeepStrictEqual(afterCrons, iconRetryIngestionCrons);
   const reviewedTransition = (isDeepStrictEqual(beforeCrons, priorIngestionCrons)
       && isDeepStrictEqual(afterCrons, currentIngestionCrons))
-    || addsIconCron || addsProjectionCron || addsR2ProjectionCron || repairsR2ProjectionCron;
+    || addsIconCron || addsProjectionCron || addsR2ProjectionCron || repairsR2ProjectionCron || acceleratesIconRetries;
   if (!reviewedTransition || !afterCrons) return false;
   const insertsElement = addsIconCron || addsProjectionCron || addsR2ProjectionCron;
   return isDeepStrictEqual(change.after_unknown, {

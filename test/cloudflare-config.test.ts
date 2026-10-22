@@ -74,7 +74,7 @@ describe('Cloudflare deployment configuration', () => {
       'intern-notifs-shadow-extraction', 'intern-notifs-resume-job-import', 'intern-notifs-admission-v2',
     ]);
     expect(ingestion.triggers?.crons).toHaveLength(12);
-    expect(ingestion.triggers?.crons).toContain('6-56/10 * * * *');
+    expect(ingestion.triggers?.crons).toContain('3-58/5 * * * *');
     expect(ingestion.triggers?.crons).toContain('1,11,21,31,41,51 * * * *');
     expect(ingestion.triggers?.crons).toContain('5,15,25,35,45,55 * * * *');
     expect(ingestion.workers_dev).toBe(false);

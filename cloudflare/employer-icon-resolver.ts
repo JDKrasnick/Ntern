@@ -48,11 +48,8 @@ import type { D1Database, R2Bucket } from './types.js';
 const ICON_REVALIDATE_MS = 30 * 24 * 60 * 60 * 1_000;
 /** Bump whenever resolver semantics change so old misses can be reconsidered. */
 export const ICON_RESOLVER_VERSION = 5;
-/** A definitive no-match backs off from one day to the revalidation ceiling. */
-const ICON_UNRESOLVED_BASE_RETRY_MS = 24 * 60 * 60 * 1_000;
-/** A transient provider or network problem retries sooner, from one hour. */
-const ICON_TRANSIENT_BASE_RETRY_MS = 60 * 60 * 1_000;
-const ICON_TRANSIENT_MAX_RETRY_MS = 24 * 60 * 60 * 1_000;
+/** Persisted attempts retry after 5 minutes, 15 minutes, then daily. */
+const ICON_RETRY_DELAYS_MS = [5 * 60_000, 15 * 60_000, 24 * 60 * 60_000] as const;
 const ICON_LEASE_MS = 15 * 60_000;
 /** Stop starting work after 90s; finish the at most two tasks already running. */
 const ICON_SWEEP_START_BUDGET_MS = 90_000;
@@ -267,10 +264,11 @@ export async function runEmployerIconResolutionPass(
           result[outcome.outcome] += 1;
           result.reasonCodes.push(outcome.reasonCode);
         } catch (error) {
-          // Every definitive outcome is persisted inside the task; a throw means the
-          // resolver itself failed. Release the lease so the next sweep retries
-          // rather than waiting for the lease to expire.
-          await store.release(task.id, now.toISOString());
+          // Keep the seed and retry count durable even when the resolver throws.
+          // If D1 itself is unavailable, the lease expires and another sweep recovers.
+          await store.markRetryable({ taskId: task.id, evidenceJson: task.evidenceJson,
+            nextRetryAt: new Date(now.getTime() + unresolvedRetryDelay(task.attempts + 1)).toISOString(),
+            now: now.toISOString() });
           result.retryable += 1;
           result.reasonCodes.push('unexpected-failure');
           console.error(JSON.stringify({
@@ -663,7 +661,7 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
       // Still a configuration state rather than a verdict on this employer: say so,
       // and retry soon instead of spending its revalidation window on a monogram.
       // `markRetryable` (not `markUnresolved`) keeps a config problem out of the
-      // exception queue and out of the attempt count.
+      // human exception queue while still advancing the durable retry schedule.
       await store.markRetryable({
         taskId: task.id,
         evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
@@ -1861,11 +1859,11 @@ export async function storeProviderIcon(
 }
 
 function unresolvedRetryDelay(attempt: number): number {
-  return Math.min(ICON_UNRESOLVED_BASE_RETRY_MS * 2 ** Math.max(0, attempt - 1), ICON_REVALIDATE_MS);
+  return ICON_RETRY_DELAYS_MS[Math.min(Math.max(0, attempt - 1), ICON_RETRY_DELAYS_MS.length - 1)]!;
 }
 
 function transientRetryDelay(attempt: number, retryAfterMs?: number): number {
-  const backoff = Math.min(ICON_TRANSIENT_BASE_RETRY_MS * 2 ** Math.max(0, attempt - 1), ICON_TRANSIENT_MAX_RETRY_MS);
+  const backoff = unresolvedRetryDelay(attempt);
   // A server may ask for a `Retry-After` beyond the revalidation horizon; that must
   // never push an employer past the point where it would be re-checked anyway.
   return Math.min(Math.max(backoff, retryAfterMs ?? 0), ICON_REVALIDATE_MS);
