@@ -31,6 +31,28 @@ const worker = {
   limits: { cpu_ms: 30_000, subrequests: 10_000 },
 };
 
+describe('reviewed early-career flag', () => {
+  const flag = (text: string) => ({ name: 'EARLY_CAREER_ELIGIBILITY_ENABLED', type: 'plain_text', text });
+  const addresses = ['cloudflare_workers_script.application', 'cloudflare_workers_script.ingestion', 'cloudflare_workers_script.isolated["admission"]'];
+  it.each(addresses)('permits boolean addition, activation and rollback on %s', address => {
+    for (const [prior, next] of [[undefined, 'false'], [undefined, 'true'], ['false', 'true'], ['true', 'false']] as const) {
+      expect(validateCloudflarePlan(plan([{ address, actions: ['update'],
+        before: { ...worker, bindings: [...worker.bindings, ...(prior ? [flag(prior)] : [])] },
+        after: { ...worker, content_sha256: 'new-sha', bindings: [...worker.bindings, flag(next)] },
+      }]))).toHaveLength(1);
+    }
+  });
+  it.each(['invalid', 'duplicate', 'other-binding', 'removal', 'publisher', 'extra-field'])('rejects %s changes', fault => {
+    const before = { ...worker, bindings: [...worker.bindings, ...(fault === 'removal' ? [flag('true')] : [])] };
+    const bindings: unknown[] = fault === 'removal' ? [...worker.bindings] : [...worker.bindings, flag(fault === 'invalid' ? 'yes' : 'false')];
+    if (fault === 'duplicate') bindings.push(flag('false'));
+    if (fault === 'other-binding') bindings[0] = { ...worker.bindings[0], id: 'other-db' };
+    if (fault === 'extra-field') bindings[1] = { ...flag('false'), service: 'unreviewed' };
+    const address = fault === 'publisher' ? 'cloudflare_workers_script.isolated["catalog-publisher"]' : addresses[0]!;
+    expect(() => validateCloudflarePlan(plan([{ address, actions: ['update'], before, after: { ...worker, content_sha256: 'new-sha', bindings } }]))).toThrow('unsafe');
+  });
+});
+
 const contentUpdate = {
   address: 'cloudflare_workers_script.application',
   actions: ['update'],
