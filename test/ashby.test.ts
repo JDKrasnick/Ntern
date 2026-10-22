@@ -185,10 +185,14 @@ describe('Ashby offline manifest and reverification', () => {
       'Junior', 'Airwallex', 'Netic', 'Retell AI', 'Quadrillion', 'Pylon', 'NationGraph',
     ]));
     expect(reviewedAshbySources.filter(({ status }) => status === 'published')).toHaveLength(81);
-    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(18);
+    expect(reviewedAshbySources.filter(({ status }) => status === 'shadow')).toHaveLength(19);
+    expect(reviewedAshbySources.find(({ id }) => id === 'ashby-old-mission-capital')).toMatchObject({
+      company: 'Old Mission Capital', status: 'shadow',
+      identity: { provider: 'ashby', boardKey: 'old-mission-capital', apiRegion: 'global' },
+    });
     // The clock must sit after the newest admittedAt so fresh admissions are not
     // read as future-dated; bump it alongside the next admission.
-    expect(collectAshbyManifestViolations(reviewedAshbySources, { fs: nodeAshbyManifestFs(), now: new Date('2026-10-14T00:00:00Z') })).toEqual([]);
+    expect(collectAshbyManifestViolations(reviewedAshbySources, { fs: nodeAshbyManifestFs(), now: new Date('2026-10-22T04:00:00Z') })).toEqual([]);
   });
 
   it('keeps any expansion replacements ordered and unadmitted', () => {

@@ -31,7 +31,6 @@ function setup() {
 afterEach(() => vi.unstubAllGlobals());
 describe('Greenhouse index admission', () => {
   it.each([
-    ['oldmissioncapital', 'https://oldmissioncapital.com/careers/?gh_jid=5001'],
     ['squarepointcapital', 'https://www.squarepoint-capital.com/open-opportunities/?id=5001&gh_jid=5001'],
     ['airbnb', 'https://careers.airbnb.com/positions/5001'],
     ['gemini', 'https://boards.greenhouse.io/embed/job_app?for=gemini&token=5001&gh_jid=5001'],
@@ -62,14 +61,14 @@ describe('Greenhouse index admission', () => {
   });
 
   it.each(['tenant', 'source', 'employer', 'authority', 'host'])('refuses a forged employer-hosted index %s before fetching', async field => {
-    const lookup = findReviewedGreenhouseSource('greenhouse-oldmissioncapital');
+    const lookup = findReviewedGreenhouseSource('greenhouse-mongodb');
     if (lookup.status !== 'found') throw new Error('Reviewed test source required');
-    const posting = { ...mapGreenhouseSourcedPosting({ ...technicalInternship, content: '', absolute_url: 'https://oldmissioncapital.com/careers/?gh_jid=5001' }, lookup.source, now)!, contentCompleteness: 'index-only' as const };
+    const posting = { ...mapGreenhouseSourcedPosting({ ...technicalInternship, content: '', absolute_url: 'https://www.mongodb.com/careers/job/?gh_jid=5001' }, lookup.source, now)!, contentCompleteness: 'index-only' as const };
     if (field === 'tenant') posting.providerIdentity = { provider: 'greenhouse', tenant: 'other' };
     if (field === 'source') posting.sourceId = 'greenhouse-unknown';
     if (field === 'employer') posting.employer = { ...posting.employer, id: 'other' };
     if (field === 'authority') posting.employer = { ...posting.employer, authority: 'source-row' };
-    if (field === 'host') posting.applyUrl = 'https://oldmissioncapital.com.evil.test/careers/?gh_jid=5001';
+    if (field === 'host') posting.applyUrl = 'https://www.mongodb.com.evil.test/careers/job/?gh_jid=5001';
     const input = context(); input.sourceId = posting.sourceId; input.posting = posting; input.row.sourceId = posting.sourceId;
     const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
     await expect(setup().evaluator.evaluate(input)).rejects.toThrow();
@@ -77,11 +76,11 @@ describe('Greenhouse index admission', () => {
   });
 
   it('refuses a reviewed board response with another employer application URL', async () => {
-    const lookup = findReviewedGreenhouseSource('greenhouse-oldmissioncapital');
+    const lookup = findReviewedGreenhouseSource('greenhouse-mongodb');
     if (lookup.status !== 'found') throw new Error('Reviewed test source required');
-    const posting = { ...mapGreenhouseSourcedPosting({ ...technicalInternship, content: '', absolute_url: 'https://oldmissioncapital.com/careers/?gh_jid=5001' }, lookup.source, now)!, contentCompleteness: 'index-only' as const };
+    const posting = { ...mapGreenhouseSourcedPosting({ ...technicalInternship, content: '', absolute_url: 'https://www.mongodb.com/careers/job/?gh_jid=5001' }, lookup.source, now)!, contentCompleteness: 'index-only' as const };
     const input = context(); input.sourceId = posting.sourceId; input.posting = posting; input.row.sourceId = posting.sourceId;
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...technicalInternship, absolute_url: 'https://oldmissioncapital.com/careers/?gh_jid=5002' }))));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...technicalInternship, absolute_url: 'https://www.mongodb.com/careers/job/?gh_jid=5002' }))));
     await expect(setup().evaluator.evaluate(input)).rejects.toThrow('application URL identity mismatch');
   });
 

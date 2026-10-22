@@ -48,6 +48,19 @@ const health = (sql: DatabaseSync, sourceId: string, value: Record<string, unkno
 describe('ingestion health signals', () => {
   const observedAt = new Date('2026-09-25T12:00:00Z');
 
+  it('retains retired quarantine history without paging, while other quarantines still alert', async () => {
+    const { sql, db } = setup();
+    try {
+      health(sql, 'greenhouse-oldmissioncapital', { state: 'quarantined', sourceStatus: 'paused' });
+      health(sql, 'ashby-current', { state: 'quarantined', sourceStatus: 'active' });
+      const result = await ingestionHealthSignals(db, observedAt, { retiredSourceIds: new Set(['greenhouse-oldmissioncapital']) });
+      expect(result.signals).toContain('source-quarantined');
+      expect(result.details).toContain('ashby-current');
+      expect(result.details).not.toContain('oldmissioncapital');
+      expect(sql.prepare("SELECT COUNT(*) AS n FROM catalog_items WHERE sk='HEALTH'").get()).toMatchObject({ n: 2 });
+    } finally { sql.close(); }
+  });
+
   it('keeps reviewed paused quarantines quiet until another attempt fails', async () => {
     const { sql, db } = setup();
     try {

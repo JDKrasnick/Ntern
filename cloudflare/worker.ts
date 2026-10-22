@@ -23,7 +23,7 @@ import {
 import { runRuntimeCommand } from '../src/runtime.js';
 import { createSourceOperationsHandler } from '../src/greenhouse-operations-api.js';
 import { reviewedAshbySources } from '../src/sources/ashby-config.js';
-import { reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
+import { retiredGreenhouseSourceIds, reviewedGreenhouseSources } from '../src/sources/greenhouse-config.js';
 import { reviewedLeverSources } from '../src/sources/lever-config.js';
 import { defaultSources } from '../src/sources/index.js';
 import type { SourceCheckpoint, SourceHealth } from '../src/types.js';
@@ -2420,7 +2420,9 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       : undefined;
     // Beyond the DLQ: unresolved source failures by category, quarantined sources,
     // an unavailable failure ledger, and any maintenance step that threw.
-    const ingestionHealth = await step('ingestion_health_signals', () => ingestionHealthSignals(env.DB, observedAt));
+    const ingestionHealth = await step('ingestion_health_signals', () => ingestionHealthSignals(env.DB, observedAt, {
+      retiredSourceIds: retiredGreenhouseSourceIds,
+    }));
     const operationalSignals = [
       ...(deadLetterMetrics?.backlogCount ? ['destination-verification-dlq'] : []),
       ...(destinationHealth?.signals ?? []),

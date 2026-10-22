@@ -189,7 +189,6 @@ const apiProbedBoards: Array<{
   { token: "duolingo", name: "Duolingo", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["careers.duolingo.com"], finalHosts: ["careers.duolingo.com"] },
   { token: "epicgames", name: "Epic Games", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["epicgames.com"], finalHosts: ["epicgames.com"] },
   { token: "flyzipline", name: "Zipline", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["zipline.com"], finalHosts: ["zipline.com"] },
-  { token: "oldmissioncapital", name: "Old Mission Capital", boardName: "Old Mission", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["oldmissioncapital.com"], finalHosts: ["oldmissioncapital.com"] },
   { token: "pathai", name: "PathAI", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["pathai.com"], finalHosts: ["pathai.com"] },
   { token: "rubrik", name: "Rubrik Job Board", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["rubrik.com"], finalHosts: ["rubrik.com"] },
   { token: "samsara", name: "Samsara", admittedAt: "2026-09-29T15:38:36.000Z", initialHosts: ["samsara.com"], finalHosts: ["samsara.com"] },

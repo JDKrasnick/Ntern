@@ -52,12 +52,12 @@ function jsonResponse(body: unknown, url: string, status = 200): Response {
 
 describe('reviewed Greenhouse registry', () => {
   it('keeps the published inventory plus reviewed shadow additions', () => {
-    expect(reviewedGreenhouseSources).toHaveLength(206);
+    expect(reviewedGreenhouseSources).toHaveLength(205);
     expect(reviewedGreenhouseSources.slice(0, 3).map((source) => source.id)).toEqual(['greenhouse-figma', 'greenhouse-datadog', 'greenhouse-cloudflare']);
-    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(187);
+    expect(reviewedGreenhouseSources.filter((source) => source.status === 'published')).toHaveLength(186);
     expect(reviewedGreenhouseSources.filter((source) => source.status === 'shadow')).toHaveLength(19);
     expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'reviewed')).toHaveLength(22);
-    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(184);
+    expect(reviewedGreenhouseSources.filter((source) => source.evidenceStatus === 'api-probed')).toHaveLength(183);
   });
 
   it('keeps the #231 remediation probe identities and admission time exact', () => {
@@ -66,7 +66,6 @@ describe('reviewed Greenhouse registry', () => {
       'greenhouse-duolingo',
       'greenhouse-epicgames',
       'greenhouse-flyzipline',
-      'greenhouse-oldmissioncapital',
       'greenhouse-pathai',
       'greenhouse-rubrik',
       'greenhouse-samsara',
@@ -78,11 +77,7 @@ describe('reviewed Greenhouse registry', () => {
 
     expect(remediationSources).toHaveLength(remediationSourceIds.length);
     expect(remediationSources.every((source) => source.admittedAt === '2026-09-29T15:38:36.000Z')).toBe(true);
-    expect(remediationSources.find((source) => source.id === 'greenhouse-oldmissioncapital')).toMatchObject({
-      displayName: 'Old Mission Capital',
-      expectedBoardNames: ['Old Mission'],
-      admittedBoardName: 'Old Mission',
-    });
+    expect(findReviewedGreenhouseSource('greenhouse-oldmissioncapital')).toEqual({ status: 'unknown' });
   });
 
   it('keeps the #231 remediation batch 2 probe identities exact', () => {

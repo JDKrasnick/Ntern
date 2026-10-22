@@ -7,6 +7,11 @@ import { reviewedGreenhouseOwnerApprovedExpansionSources } from './greenhouse-ow
 /** The only Greenhouse board host we ever read identity/jobs from. */
 export const GREENHOUSE_BOARD_API_HOST = 'boards-api.greenhouse.io';
 
+/** Explicit retirements retain health history without paging for a defunct board. */
+export const retiredGreenhouseSourceIds: ReadonlySet<string> = new Set([
+  'greenhouse-oldmissioncapital', // Employer migrated to ashby-old-mission-capital on 2026-10-21.
+]);
+
 export type ReviewedGreenhouseStatus = 'shadow' | 'published';
 
 /**

@@ -1,0 +1,56 @@
+{
+  "probedAt": "2026-10-22T03:03:00.000Z",
+  "retention": "metadata-only",
+  "results": [
+    {
+      "state": "ok",
+      "boardName": "old-mission-capital",
+      "endpoint": "https://api.ashbyhq.com/posting-api/job-board/old-mission-capital",
+      "apiVersion": "1",
+      "apiRegion": "global",
+      "rawRows": 39,
+      "listedRows": 39,
+      "unlistedRows": 0,
+      "malformedRows": 0,
+      "boardPathViolations": 0,
+      "technicalEarlyCareerRoles": 8,
+      "geographicCoverage": [
+        "Chicago, IL",
+        "Chicago, IL or New York, NY",
+        "Hong Kong",
+        "London",
+        "New York, NY"
+      ],
+      "applicationHostSummary": {
+        "jobs.ashbyhq.com": 39
+      },
+      "qualifyingRoleSamples": [
+        {
+          "id": "a7b34fe6-cd82-4f17-b5d7-983aa354b505",
+          "title": "Quantitative Trader – 2027 Graduate Program (February Start)",
+          "location": "Chicago, IL or New York, NY"
+        },
+        {
+          "id": "a8bad54c-405b-469c-8a7d-b7794dfb54b3",
+          "title": " Quantitative Trader – 2027 Graduate Program (August Start)",
+          "location": "Chicago, IL or New York, NY"
+        },
+        {
+          "id": "78e433a8-cd5f-404d-8f58-3fcb61e9837d",
+          "title": "Software Engineer – 2027 Graduate Program (August Start)",
+          "location": "Chicago, IL"
+        },
+        {
+          "id": "cec17eab-6e17-4248-aa35-3824392c056d",
+          "title": "Quantitative Trader – 2027 Graduate Program (August Start)",
+          "location": "London"
+        },
+        {
+          "id": "d003aaa4-a1e9-46b5-b271-eaccc15db9d6",
+          "title": "Software Engineer – 2027 Internship Program (June Start)",
+          "location": "Chicago, IL"
+        }
+      ]
+    }
+  ]
+}
