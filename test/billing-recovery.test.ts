@@ -23,7 +23,7 @@ describe('approved billing recovery', () => {
       GREENHOUSE_QUEUE_ID: 'greenhouse', LEVER_QUEUE_ID: 'lever', ASHBY_QUEUE_ID: 'ashby', GITHUB_QUEUE_ID: 'github',
       GMAIL_QUEUE_ID: 'gmail', DESTINATION_VERIFICATION_QUEUE_ID: 'destination-verification',
       SHADOW_EXTRACTION_QUEUE_ID: 'shadow',
-    } as Environment;
+    } as unknown as Environment;
     const response = await worker.fetch(new Request('https://example.test/internal/billing-shutdown', {
       method: 'POST', headers: { 'cf-webhook-auth': authenticated ? 'test-secret' : 'wrong' },
       body: JSON.stringify({ account_id: 'account', alert_type: 'billing_budget_alert', policy_name: policy }),
