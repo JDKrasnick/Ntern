@@ -414,8 +414,10 @@ describe('Cloudflare deployment configuration', () => {
   it('restores billing-shutdown schedules only on ingestion', () => {
     const runbook = read('docs/cloudflare-migration.md');
 
-    expect(runbook).toContain('wrangler triggers deploy --name intern-notifs-ingestion');
-    expect(runbook).toContain('--config wrangler.ingestion.jsonc');
+    expect(runbook).toContain('Restore schedules\nthrough the schedules API');
+    expect(runbook).toContain('twelve ingestion cron schedules');
+    expect(runbook).toContain('admission-v2 belongs to the admission Worker');
+    expect(runbook).toContain('Avoid\n`wrangler triggers deploy`');
     expect(runbook).not.toContain('--config .context/wrangler.remote.json');
     expect(runbook).not.toContain('wrangler triggers deploy --name intern-notifs \\');
   });
