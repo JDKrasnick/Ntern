@@ -118,6 +118,24 @@ function setup() {
 }
 
 describe('trusted community two complete cadence promotion', () => {
+  it('updates only changed admission rows when a peer changes the board hash', async () => {
+    const s = setup();
+    const rows = Array.from({ length: 20 }, (_, index) => posting(`role-${index}`));
+    await s.discover(1, rows); await s.drain();
+    s.advance(); await s.discover(2, rows); await s.drain();
+    s.database.exec(`CREATE TABLE broad_writes (id TEXT);
+      CREATE TRIGGER count_broad_writes AFTER UPDATE OF last_observed_at ON ingestion_rows
+      BEGIN INSERT INTO broad_writes VALUES (new.external_id); END;`);
+    const changed = rows.map((row, index) => index === 0 ? { ...row, title: 'Software Engineering Intern - Data' } : row);
+    s.advance(); const hash = await s.discover(3, changed);
+    expect(s.database.prepare('SELECT id FROM broad_writes').all()).toEqual([{ id: 'role-0' }]);
+    const memberships = s.database.prepare('SELECT COUNT(*) AS n FROM ingestion_rows WHERE snapshot_hash = ?').get(hash);
+    expect(memberships).toEqual({ n: 20 });
+    await s.drain();
+    expect(s.store.notificationEvents.size).toBe(20);
+    s.database.close();
+  });
+
   it.each(['settled', 'queued', 'processing'] as const)('preserves %s qualification ownership when source admission is disabled', async (state) => {
     const s = setup();
     const hash = await s.discover(1); await s.drain();

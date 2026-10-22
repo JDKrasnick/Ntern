@@ -205,7 +205,12 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
     if (!reuseActiveSnapshot) {
       const decisions = new Map(input.processed.decisions.map((decision) => [decision.externalId, decision]));
       const classifications = new Map(diff.rows.map((row) => [row.externalId, row.classification]));
-      const rows: IngestionRowRecord[] = envelope.rows.map((row) => {
+      const unchanged = repository.refreshUnchangedRows ? envelope.rows.filter((row) => {
+        const classification = classifications.get(row.externalId);
+        return classification === 'unchanged' || classification === 'retryable';
+      }) : [];
+      const unchangedIds = new Set(unchanged.map(row => row.externalId));
+      const rows: IngestionRowRecord[] = envelope.rows.filter(row => !unchangedIds.has(row.externalId)).map((row) => {
         const decision = projectDecision(decisions.get(row.externalId));
         return {
           sourceId: input.sourceId,
@@ -227,6 +232,8 @@ export class IngestionV2ShadowDiscovery implements ShadowDiscoveryHook {
         };
       });
       await repository.putRows(rows);
+      if (unchanged.length) await repository.refreshUnchangedRows!(input.sourceId, envelope.snapshotHash,
+        input.admissionVersion, unchanged, input.baseline || !admissionEnabled);
       await repository.applyOmissions(input.sourceId, diff.omissionUpdates, input.observedAt);
       await repository.activateSnapshot(input.sourceId, envelope.snapshotHash, input.observedAt);
     }
