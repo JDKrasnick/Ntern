@@ -143,8 +143,8 @@ The preview returns every proposed visibility change and an exact token/count.
 `apply` expires after ten minutes and atomically guards all canonical and source
 occurrence values against concurrent changes. It persists current proof, updates
 browse indexes and pending-alert flags, and preserves lifecycle, application and
-sent-notification history. Backfill never creates notification events. Changed
-visibility/presentation requires projection refresh before the API returns.
+sent-notification history. Backfill never creates notification events. Complete
+projection refresh before declaring visibility or presentation changes published.
 
 The live preview found additional valid explicit placements absent from the
 English-heavy 400-case audit: French/Italian stages, Spanish prácticas, German
@@ -163,3 +163,18 @@ automatically; withdrawals require the reviewed backfill. Once enrolled, later
 source refreshes continue enforcing the policy even with the global flag off.
 Unsupported employer pages therefore stay visible pending inspection rather than
 being removed speculatively. New roles always require explicit employer evidence.
+
+The owner approved preserving existing funded early-career fellowships on
+21 October 2026. Faculty's eight-week Data Science Fellowship, Point72's Data
+Research Fellowship and the New York Times A.I. Initiatives fellowship remain
+visible under the legacy review hold. Do not withdraw these funded programmes
+solely because they lack internship/co-op wording. This exception does not
+automatically admit unverified new fellowships.
+
+The 21 October rollout passed isolated-dev preview, atomic apply and deferred
+catalog finalization. Its first production canary withdrew OpenAI's experienced
+Backend Software Engineer, Cooperative AI (Evals) role and retained a Waymo
+software engineering internship. Canonical/source admission, pending-alert flags
+and public detail/catalog visibility were checked. This canary does not claim
+every legacy role is employer-verified; the historical backfill retains separate
+receipts for applied batches, unresolved targets and individually reviewed changes.
