@@ -48,7 +48,7 @@ const postingHtml = '<!doctype html><html><head><title>Software Engineering Inte
 const logoDocument = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
   + '<rect width="64" height="64" fill="#123456"/><path d="M12 12h40v40H12z" fill="#0af"/></svg>';
 const instant = '2026-09-01T00:00:00.000Z';
-const cron = '6-56/10 * * * *';
+const cron = '3-58/5 * * * *';
 const seenOutbound = [];
 const realFetch = globalThis.fetch;
 
@@ -319,7 +319,7 @@ test('backfills and serves a reviewed community role with no canonical employer'
   } finally { globalThis.fetch = realFetch; }
 });
 
-test('discovers a new Workday company and serves its declared JPEG logo without a domain', async () => {
+test('durably retries a new Workday company and serves its declared JPEG after recovery', async () => {
   const { default: sharp } = await import('sharp');
   const jpeg = await sharp({create:{width:96,height:96,channels:3,background:'#164e63'}}).jpeg().toBuffer();
   const url = 'https://generictenant.wd5.myworkdayjobs.com/en-US/robotics/job/City/Intern_P123';
@@ -333,14 +333,28 @@ test('discovers a new Workday company and serves its declared JPEG logo without 
         sourceReferences:[{sourceId:'new-reviewed-source',provenance:'reviewed-community'}]}}})),
   ]);
   const { default: builtWorker } = await import(new URL('../../cloudflare/dist/ingestion/ingestion-worker.js', import.meta.url));
+  let healthy = false;
   globalThis.fetch = async request => {
     const href = request instanceof URL ? request.href : typeof request === 'string' ? request : request.url;
-    if(href===url) return new Response(`<meta property="og:image" content="${logo}">`,{headers:{'content-type':'text/html'}});
+    if(href===url) return healthy
+      ? new Response(`<meta property="og:image" content="${logo}">`,{headers:{'content-type':'text/html'}})
+      : new Response(null,{status:503});
     if(href===logo) return new Response(jpeg,{headers:{'content-type':'text/plain; charset=UTF-8'}});
     return internet(request);
   };
   try {
-    await builtWorker.scheduled({cron,scheduledTime:Date.now(),noRetry(){}},cronEnvironment(),{waitUntil(){},passThroughOnException(){}});
+    const failedAt = Date.now();
+    const sweep = scheduledTime => builtWorker.scheduled({cron,scheduledTime,noRetry(){}},cronEnvironment(),{waitUntil(){},passThroughOnException(){}});
+    await sweep(failedAt);
+    const [pending] = await dump("SELECT r.attempts,r.next_retry_at,r.lease_until FROM employer_icon_resolutions r JOIN company_icon_identities i ON i.id=r.canonical_employer_id WHERE i.display_name='Northstar Robotics'");
+    assert.equal(pending.attempts,1);
+    assert.equal(pending.next_retry_at,new Date(failedAt+300_000).toISOString());
+    assert.equal(pending.lease_until,null);
+    healthy = true;
+    await sweep(failedAt+299_999);
+    const [beforeDue] = await dump("SELECT icon_key FROM company_icon_identities WHERE display_name='Northstar Robotics'");
+    assert.equal(beforeDue.icon_key,null);
+    await sweep(failedAt+300_000);
     const [icon] = await dump("SELECT id,icon_key,website_domain FROM company_icon_identities WHERE display_name='Northstar Robotics'");
     assert.ok(icon.icon_key?.endsWith('.jpg'));
     assert.equal(icon.website_domain,null);

@@ -162,6 +162,54 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+describe('durable icon retries', () => {
+  it.each([404, 503, 'exception'] as const)('persists the retry sequence and recovers after %s failures', async (failure) => {
+    const { database, admission, icons } = subject();
+    const r2 = r2Stub();
+    const url = 'https://job-boards.greenhouse.io/acme/jobs/1';
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await icons.putSettings({ mode: 'resolve', maxPerSweep: 5, logoDevRetentionLicensedAt: NOW.toISOString() }, NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed(url), NOW);
+    let healthy = false;
+    const fetchImpl = scriptedFetch({
+      [url]: () => healthy ? html(linkPage({ name: 'Acme', url: 'https://acme.com' })) : status(failure === 'exception' ? 503 : failure),
+      'https://acme.com/': () => html(linkPage({ name: 'Acme', url: 'https://acme.com' })),
+      [IMAGE_URL]: () => webp(),
+    });
+    // Each pass builds a fresh store over persisted D1 state, as a new Worker does.
+    const pass = (at: Date) => runEmployerIconResolutionPass(
+      environment(sqliteD1(database), r2.bucket, { LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), at,
+      DEPENDENCIES(fetchImpl), { backfill: false },
+    );
+    let at = NOW;
+    for (const [index, delay] of [300_000, 900_000, 86_400_000, 86_400_000].entries()) {
+      if (failure === 'exception') vi.spyOn(D1EmployerIconStore.prototype, 'renderContext').mockRejectedValueOnce(new Error('resolver interrupted'));
+      const result = await pass(at);
+      expect(result.claimed).toBe(1);
+      if (failure === 'exception') expect(result.reasonCodes).toContain('unexpected-failure');
+      const due = new Date(at.getTime() + delay);
+      expect(database.prepare('SELECT attempts, next_retry_at, lease_until FROM employer_icon_resolutions').get())
+        .toMatchObject({ attempts: index + 1, next_retry_at: due.toISOString(), lease_until: null });
+      expect((await pass(new Date(due.getTime() - 1))).claimed).toBe(0);
+      at = due;
+    }
+    healthy = true;
+    expect((await pass(at)).resolved).toBe(1);
+    expect(r2.puts).toHaveLength(1);
+    expect((await pass(new Date(at.getTime() + 86_400_000))).claimed).toBe(0);
+  });
+
+  it('recovers a task after its Worker disappears and the persisted lease expires', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'), NOW);
+    expect(await icons.claimDue(NOW.toISOString(), 1, 900_000)).toHaveLength(1);
+    const restarted = new D1EmployerIconStore(sqliteD1(database));
+    expect(await restarted.claimDue(new Date(NOW.getTime() + 899_999).toISOString(), 1, 900_000)).toHaveLength(0);
+    expect(await restarted.claimDue(new Date(NOW.getTime() + 900_001).toISOString(), 1, 900_000)).toHaveLength(1);
+  });
+});
+
 describe('employer icon diagnosis', () => {
   it('rejects the ATS transport host and selects the employer domain the page names', async () => {
     const fetchImpl = scriptedFetch({
@@ -893,7 +941,7 @@ describe('employer icon provider plumbing', () => {
 
     const fetchImpl = scriptedFetch({
       'https://job-boards.greenhouse.io/acme/jobs/4001': () => html('<!doctype html><html><head><title>Open roles</title></head></html>'),
-      [logoDevSearchUrl('Acme')]: () => status(429, { 'retry-after': '120' }),
+      [logoDevSearchUrl('Acme')]: () => status(429, { 'retry-after': '1800' }),
     });
     const result = await runEmployerIconResolutionPass(
       environment(db, r2Stub().bucket, { LOGO_DEV_TOKEN: LOGO_TOKEN, LOGO_DEV_IMAGE_TOKEN: LOGO_IMAGE_TOKEN }), NOW, DEPENDENCIES(fetchImpl),
@@ -904,7 +952,7 @@ describe('employer icon provider plumbing', () => {
     const row = database.prepare('SELECT status, next_retry_at, evidence_json FROM employer_icon_resolutions WHERE canonical_employer_id = ?')
       .get('acme') as { status: string; next_retry_at: string; evidence_json: string };
     expect(row.status).toBe('retryable');
-    expect(Date.parse(row.next_retry_at) - NOW.getTime()).toBeGreaterThanOrEqual(120_000);
+    expect(Date.parse(row.next_retry_at) - NOW.getTime()).toBe(1_800_000);
     expect(JSON.parse(row.evidence_json).providerFailures['logo-dev']).toBe('http-429');
   });
 });
@@ -2708,7 +2756,7 @@ describe('employer icon resolver correctness fixes', () => {
     await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
     await icons.putSettings({ mode: 'resolve', maxPerSweep: 5 }, NOW.toISOString());
     await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/board-1/jobs/1'), NOW);
-    const infer = async (): Promise<OpenAIJsonResult> => { throw new Error('openai unavailable'); };
+    const infer = vi.fn(async (): Promise<OpenAIJsonResult> => { throw new Error('openai unavailable'); });
     const fetchImpl = scriptedFetch({
       'https://job-boards.greenhouse.io/board-1/jobs/1': () => html(
         '<!doctype html><html><head><title>Software Engineering Intern at Acme</title></head></html>',
@@ -2724,6 +2772,9 @@ describe('employer icon resolver correctness fixes', () => {
     // The failure schedules a retry in the future, so the same instant cannot claim it again.
     const second = await runEmployerIconResolutionPass(env, NOW, { ...DEPENDENCIES(fetchImpl), infer });
     expect(second.claimed).toBe(0);
+    const retry = await runEmployerIconResolutionPass(env, new Date(NOW.getTime() + 300_000), { ...DEPENDENCIES(fetchImpl), infer });
+    expect(retry.reasonCodes).toContain('model-call-failed');
+    expect(infer).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a task dropped for an existing reviewer icon out of the exception queue', async () => {

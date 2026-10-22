@@ -2282,7 +2282,7 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
     if (overdue.length) await alertCadenceSlip(env, 'github', overdue, now);
     return;
   }
-  if (event.cron === '6-56/10 * * * *') {
+  if (event.cron === '3-58/5 * * * *' || event.cron === '6-56/10 * * * *') {
     const observedAt = new Date(event.scheduledTime);
     const recentOverloads = await runScheduledStep('d1_overload_metrics', () => recentD1OverloadCount(env.DB, observedAt));
     const companyIconResolution = recentOverloads === 0
@@ -2292,7 +2292,9 @@ async function scheduledHandler(event: ScheduledController, env: Environment): P
       }))
       : undefined;
     if (recentOverloads !== 0) console.warn(JSON.stringify({ event: 'company_icon_resolution_deferred', recentOverloads: recentOverloads ?? null }));
-    if (recentOverloads === 0 && env.COMPANY_SIZE_LOOKUP_ENABLED === 'true' && env.PDL_API_KEY?.trim()) {
+    // Icon retries run every five minutes; company-size lookup stays ten-minute.
+    const refreshCompanySizes = event.cron === '6-56/10 * * * *' || observedAt.getUTCMinutes() % 10 === 3;
+    if (refreshCompanySizes && recentOverloads === 0 && env.COMPANY_SIZE_LOOKUP_ENABLED === 'true' && env.PDL_API_KEY?.trim()) {
       const companySizes = await runScheduledStep('company_size_lookup', () => new D1CompanySizeStore(env.DB).refresh(env.PDL_API_KEY));
       console.log(JSON.stringify({ event: 'company_size_lookup_complete', companySizes }));
     }

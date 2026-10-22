@@ -31,6 +31,26 @@ const worker = {
   limits: { cpu_ms: 30_000, subrequests: 10_000 },
 };
 
+describe('reviewed icon retry cadence', () => {
+  it('permits only the five-minute icon cron replacement', () => {
+    const crons = ['*/5 * * * *', '7-57/10 * * * *', '9-59/10 * * * *',
+      '1,11,21,31,41,51 * * * *', '5,15,25,35,45,55 * * * *', '6-56/10 * * * *',
+      '12,42 * * * *', '22,52 * * * *', '2,32 * * * *', '0 * * * *', '34 8 * * *', '17 9 * * *'];
+    const schedules = (values: string[]) => values.map(cron => ({ cron, created_on: '2026-10-01T00:00:00Z' }));
+    const before = { account_id: 'account', id: 'intern-notifs-ingestion', script_name: 'intern-notifs-ingestion', schedules: schedules(crons) };
+    const after = { ...before, schedules: schedules(crons.map(cron => cron === '6-56/10 * * * *' ? '3-58/5 * * * *' : cron)) };
+    const change = { address: 'cloudflare_workers_cron_trigger.ingestion', actions: ['update'], before, after,
+      after_unknown: { schedules: crons.map(() => ({ modified_on: true })) } };
+    expect(validateCloudflarePlan(plan([change]))).toHaveLength(1);
+    for (const unsafe of [
+      { ...change, after: { ...after, schedules: schedules([...crons, '3-58/5 * * * *']) } },
+      { ...change, after: { ...after, schedules: after.schedules.slice(1) } },
+      { ...change, after: { ...after, schedules: after.schedules.map(row => row.cron === '0 * * * *' ? { ...row, cron: '1 * * * *' } : row) } },
+      { ...change, before: after, after: before },
+    ]) expect(() => validateCloudflarePlan(plan([unsafe]))).toThrow('Refusing unsafe Cloudflare plan');
+  });
+});
+
 describe('reviewed early-career flag', () => {
   const flag = (text: string) => ({ name: 'EARLY_CAREER_ELIGIBILITY_ENABLED', type: 'plain_text', text });
   const addresses = ['cloudflare_workers_script.application', 'cloudflare_workers_script.ingestion', 'cloudflare_workers_script.isolated["admission"]'];
