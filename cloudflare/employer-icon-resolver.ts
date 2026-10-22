@@ -48,7 +48,7 @@ import type { D1Database, R2Bucket } from './types.js';
 const ICON_REVALIDATE_MS = 30 * 24 * 60 * 60 * 1_000;
 /** Bump whenever resolver semantics change so old misses can be reconsidered. */
 export const ICON_RESOLVER_VERSION = 5;
-/** Persisted attempts retry after 5 minutes, 15 minutes, then daily. */
+/** Persisted attempts retry after 5 minutes, 15 minutes, then stop. */
 const ICON_RETRY_DELAYS_MS = [5 * 60_000, 15 * 60_000, 24 * 60 * 60_000] as const;
 const ICON_LEASE_MS = 15 * 60_000;
 /** Stop starting work after 90s; finish the at most two tasks already running. */
@@ -267,7 +267,7 @@ export async function runEmployerIconResolutionPass(
           // Keep the seed and retry count durable even when the resolver throws.
           // If D1 itself is unavailable, the lease expires and another sweep recovers.
           await store.markRetryable({ taskId: task.id, evidenceJson: task.evidenceJson,
-            nextRetryAt: new Date(now.getTime() + unresolvedRetryDelay(task.attempts + 1)).toISOString(),
+            nextRetryAt: iconRetryAt(now, task.attempts + 1),
             now: now.toISOString() });
           result.retryable += 1;
           result.reasonCodes.push('unexpected-failure');
@@ -519,7 +519,7 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
       evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
         outcome: 'retryable', reasonCode: 'model-call-failed', attempt,
       })),
-      nextRetryAt: new Date(now.getTime() + transientRetryDelay(attempt)).toISOString(), now: at,
+      nextRetryAt: iconRetryAt(now, attempt), now: at,
     });
     return { outcome: 'retryable', reasonCode: 'model-call-failed' };
   };
@@ -549,13 +549,13 @@ async function resolveEmployerIconTask(input: ResolveTaskInput): Promise<Resolve
       evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
         outcome: 'retryable', reasonCode: 'transient-provider-failure', attempt,
       })),
-      nextRetryAt: new Date(now.getTime() + transientRetryDelay(attempt, providers.retryAfterMs)).toISOString(),
+      nextRetryAt: iconRetryAt(now, attempt, providers.retryAfterMs),
       now: at,
     });
     return { outcome: 'retryable', reasonCode: 'transient-provider-failure' };
   }
 
-  const nextRetryAt = new Date(now.getTime() + unresolvedRetryDelay(attempt)).toISOString();
+  const nextRetryAt = iconRetryAt(now, attempt);
   await store.markUnresolved({
     taskId: task.id, canonicalEmployerId: task.canonicalEmployerId,
     evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
@@ -625,7 +625,7 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
         evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
           outcome: 'retryable', reasonCode: 'image-probe-transient',
         })),
-        nextRetryAt: new Date(now.getTime() + transientRetryDelay(input.attempt, probe.retryAfterMs)).toISOString(),
+        nextRetryAt: iconRetryAt(now, input.attempt, probe.retryAfterMs),
         now: at,
       });
       return { outcome: 'retryable', reasonCode: 'image-probe-transient' };
@@ -667,7 +667,7 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
         evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
           outcome: 'retryable', reasonCode: 'image-token-missing',
         })),
-        nextRetryAt: new Date(now.getTime() + transientRetryDelay(input.attempt)).toISOString(), now: at,
+        nextRetryAt: iconRetryAt(now, input.attempt), now: at,
       });
       return { outcome: 'retryable', reasonCode: 'image-token-missing' };
     } else {
@@ -679,7 +679,7 @@ async function acceptSelectedDomain(input: AcceptInput): Promise<ResolveOutcome>
           outcome: 'unresolved', reasonCode: 'image-unavailable',
           ...(input.tieBreak ? { tieBreak: input.tieBreak } : {}),
         })),
-        nextRetryAt: new Date(now.getTime() + unresolvedRetryDelay(input.attempt)).toISOString(), now: at,
+        nextRetryAt: iconRetryAt(now, input.attempt), now: at,
       });
       return { outcome: 'unresolved', reasonCode: 'image-unavailable' };
     }
@@ -723,7 +723,7 @@ async function escalateToTieBreak(input: AcceptInput): Promise<ResolveOutcome | 
       evidenceJson: boundedIconEvidence(evidenceRecord(seed, decision, gathered, providers, {
         outcome: 'unresolved', reasonCode: 'tie-break-budget-exhausted',
       })),
-      nextRetryAt: new Date(now.getTime() + unresolvedRetryDelay(attempt)).toISOString(), now: at,
+      nextRetryAt: iconRetryAt(now, attempt), now: at,
     });
     return { outcome: 'unresolved', reasonCode: 'tie-break-budget-exhausted' };
   }
@@ -1858,15 +1858,11 @@ export async function storeProviderIcon(
   return storeIconAsset(env, canonicalEmployerId, bytes, contentType, 'logo');
 }
 
-function unresolvedRetryDelay(attempt: number): number {
-  return ICON_RETRY_DELAYS_MS[Math.min(Math.max(0, attempt - 1), ICON_RETRY_DELAYS_MS.length - 1)]!;
-}
-
-function transientRetryDelay(attempt: number, retryAfterMs?: number): number {
-  const backoff = unresolvedRetryDelay(attempt);
-  // A server may ask for a `Retry-After` beyond the revalidation horizon; that must
-  // never push an employer past the point where it would be re-checked anyway.
-  return Math.min(Math.max(backoff, retryAfterMs ?? 0), ICON_REVALIDATE_MS);
+/** Three retries after the initial lookup; null permanently parks exhausted work. */
+function iconRetryAt(now: Date, attempt: number, retryAfterMs = 0): string | null {
+  const delay = ICON_RETRY_DELAYS_MS[attempt - 1];
+  if (delay === undefined) return null;
+  return new Date(now.getTime() + Math.min(Math.max(delay, retryAfterMs), ICON_REVALIDATE_MS)).toISOString();
 }
 
 function parseIconSeed(evidenceJson: string, context: EmployerIconContext): EmployerIconSeed {

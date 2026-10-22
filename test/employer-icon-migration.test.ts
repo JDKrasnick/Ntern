@@ -46,6 +46,28 @@ function indexColumns(database: DatabaseSync, index: string): string[] {
 }
 
 describe('employer icon resolution migration', () => {
+  it('parks existing exhausted retries without changing holds, live claims, or remaining attempts', () => {
+    const database = migrated();
+    const cases = [
+      ['unresolved', 'unresolved', 4, 10, null], ['transient', 'retryable', 5, 0, null],
+      ['remaining', 'retryable', 3, 0, null], ['held', 'unresolved', 4, 50, null],
+      ['claimed', 'retryable', 4, 0, '2999-01-01'], ['settled', 'resolved', 8, 0, null],
+      ['invalidated', 'invalidated', 5, 100, null],
+    ] as const;
+    for (const [id, status, attempts, priority, lease] of cases) {
+      insertTask(database, id, id, status);
+      database.prepare(`UPDATE employer_icon_resolutions SET attempts=?,review_priority=?,lease_until=?,next_retry_at='2999-02-01' WHERE id=?`)
+        .run(attempts, priority, lease, id);
+    }
+    const stop = readFileSync(new URL('../cloudflare/migrations/0066_stop_exhausted_icon_retries.sql', import.meta.url), 'utf8');
+    database.exec(stop);
+    database.exec(stop);
+    for (const [id, status, attempts, priority, lease] of cases) {
+      expect(database.prepare('SELECT status,attempts,review_priority,lease_until,next_retry_at FROM employer_icon_resolutions WHERE id=?').get(id))
+        .toMatchObject({status,attempts,review_priority:priority,lease_until:lease,
+          next_retry_at:['unresolved','transient'].includes(id) ? null : '2999-02-01'});
+    }
+  });
   it.each(['canonical', 'independent'].flatMap(kind => ['0064_discover_workday_board_logos.sql',
     '0065_recognize_mislabeled_board_logos.sql'].map(file => [kind,file])))('preserves %s review boundaries in %s', (kind,file) => {
     const database = migrated();

@@ -163,8 +163,8 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('durable icon retries', () => {
-  it.each([404, 503, 'exception'] as const)('persists the retry sequence and recovers after %s failures', async (failure) => {
-    const { database, admission, icons } = subject();
+  it.each(([404, 503, 'exception'] as const).flatMap(failure => [true, false].map(recover => ({ failure, recover }))))('persists three retries after $failure failures, recovery=$recover', async ({ failure, recover }) => {
+    const { database, db, admission, icons } = subject();
     const r2 = r2Stub();
     const url = 'https://job-boards.greenhouse.io/acme/jobs/1';
     await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
@@ -182,7 +182,7 @@ describe('durable icon retries', () => {
       DEPENDENCIES(fetchImpl), { backfill: false },
     );
     let at = NOW;
-    for (const [index, delay] of [300_000, 900_000, 86_400_000, 86_400_000].entries()) {
+    for (const [index, delay] of [300_000, 900_000, 86_400_000].entries()) {
       if (failure === 'exception') vi.spyOn(D1EmployerIconStore.prototype, 'renderContext').mockRejectedValueOnce(new Error('resolver interrupted'));
       const result = await pass(at);
       expect(result.claimed).toBe(1);
@@ -193,10 +193,22 @@ describe('durable icon retries', () => {
       expect((await pass(new Date(due.getTime() - 1))).claimed).toBe(0);
       at = due;
     }
-    healthy = true;
-    expect((await pass(at)).resolved).toBe(1);
-    expect(r2.puts).toHaveLength(1);
-    expect((await pass(new Date(at.getTime() + 86_400_000))).claimed).toBe(0);
+    healthy = recover;
+    expect((await pass(at)).resolved).toBe(recover ? 1 : 0);
+    expect(r2.puts).toHaveLength(recover ? 1 : 0);
+    for (const days of [1, 7, 30, 90]) {
+      expect((await pass(new Date(at.getTime() + days * 86_400_000))).claimed).toBe(0);
+    }
+    if (!recover) {
+      expect(database.prepare('SELECT attempts, next_retry_at FROM employer_icon_resolutions').get())
+        .toMatchObject({ attempts: 4, next_retry_at: null });
+      expect(await enqueueEmployerIconResolution(new D1EmployerIconStore(db), employerSeed(url.replace('/1', '/2')), at)).toBe(false);
+      expect(await new D1EmployerIconStore(db).employersNeedingResolution(10)).toEqual([]);
+      expect(await new D1EmployerIconStore(db).reopen('acme', at.toISOString())).toBe(1);
+      expect((await pass(at)).claimed).toBe(1);
+      expect(database.prepare('SELECT attempts, next_retry_at FROM employer_icon_resolutions').get())
+        .toMatchObject({ attempts: 1, next_retry_at: new Date(at.getTime() + 300_000).toISOString() });
+    }
   });
 
   it('recovers a task after its Worker disappears and the persisted lease expires', async () => {
@@ -207,6 +219,18 @@ describe('durable icon retries', () => {
     const restarted = new D1EmployerIconStore(sqliteD1(database));
     expect(await restarted.claimDue(new Date(NOW.getTime() + 899_999).toISOString(), 1, 900_000)).toHaveLength(0);
     expect(await restarted.claimDue(new Date(NOW.getTime() + 900_001).toISOString(), 1, 900_000)).toHaveLength(1);
+  });
+
+  it('refuses exhausted historical tasks even if a future retry was already scheduled', async () => {
+    const { database, admission, icons } = subject();
+    await admission.putCanonicalEmployer(employerRow('acme', 'Acme'), NOW.toISOString());
+    await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/1'), NOW);
+    database.exec('UPDATE employer_icon_resolutions SET attempts=4');
+    database.prepare(`INSERT INTO employer_icon_resolutions
+      (id,canonical_employer_id,evidence_fingerprint,status,evidence_json,next_retry_at,created_at,updated_at)
+      VALUES ('sibling','acme','other','retryable','{}',?,?,?)`).run(NOW.toISOString(),NOW.toISOString(),NOW.toISOString());
+    expect(await icons.claimDue(NOW.toISOString(), 5, 900_000)).toEqual([]);
+    expect(await enqueueEmployerIconResolution(icons, employerSeed('https://job-boards.greenhouse.io/acme/jobs/2'), NOW)).toBe(false);
   });
 });
 
@@ -2297,7 +2321,7 @@ describe('employer icon coverage v2', () => {
       await icons.enqueue({ id: `task-${id}`, canonicalEmployerId: id, evidenceFingerprint: id,
         evidenceJson: '{}', nextRetryAt: NOW.toISOString(), now: NOW.toISOString() });
     }
-    database.exec("UPDATE employer_icon_resolutions SET attempts = 10, review_priority = 10 WHERE canonical_employer_id = 'retry'");
+    database.exec("UPDATE employer_icon_resolutions SET attempts = 3, review_priority = 10 WHERE canonical_employer_id = 'retry'");
     const groups = [
       ['retry', { canonicalEmployerId: 'retry' }, 1_000],
       ['fresh', { canonicalEmployerId: 'fresh' }, 1],
