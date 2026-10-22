@@ -1,0 +1,19 @@
+{
+  "provider": "ashby",
+  "boardKey": "old-mission-capital",
+  "apiRegion": "global",
+  "careersUrl": "https://www.oldmissioncapital.com/careers/",
+  "firstPartyEvidenceUrl": "https://www.oldmissioncapital.com/careers/",
+  "exactBoardUrl": "https://jobs.ashbyhq.com/old-mission-capital/embed?version=2",
+  "evidenceExcerpt": "<script src=\"https://jobs.ashbyhq.com/old-mission-capital/embed?version=2\"></script>",
+  "observedJobUrl": "https://jobs.ashbyhq.com/old-mission-capital/d003aaa4-a1e9-46b5-b271-eaccc15db9d6",
+  "verifiedAt": "2026-10-22T03:03:00.000Z",
+  "state": "ownership-verified",
+  "initialTechnicalEarlyCareerRoles": 8,
+  "allowedApplicationHosts": [
+    {
+      "host": "jobs.ashbyhq.com"
+    }
+  ],
+  "notes": "The official employer careers page now embeds Ashby. The retired Greenhouse board oldmissioncapital returns 404. Admit the replacement to shadow; promotion remains a separate review."
+}

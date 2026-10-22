@@ -653,13 +653,17 @@ describe('posting identity', () => {
     ['https://www.samsara.com/company/careers/roles/8082091?gh_jid=8082091', 'samsara', '8082091'],
     ['https://careers.duolingo.com/jobs/8806187002?gh_jid=8806187002', 'duolingo', '8806187002'],
     ['https://www.rubrik.com/company/careers/departments/job.8171088?gh_jid=8171088', 'rubrik', '8171088'],
-    ['https://www.oldmissioncapital.com/careers/?gh_jid=7796180003', 'oldmissioncapital', '7796180003'],
     ['https://www.pathai.com/careers/8843495002?gh_jid=8843495002', 'pathai', '8843495002'],
   ])('recognizes %s as reviewed board evidence', (url, tenant, postingId) => {
     expect(reviewedProviderUrlReference(url)).toMatchObject({
       outcome: 'match',
       reference: { provider: 'greenhouse', tenant, postingId, sourceId: `greenhouse-${tenant}`, customHost: true },
     });
+  });
+
+  it('stops treating Old Mission Greenhouse links as reviewed after its move to Ashby', () => {
+    expect(reviewedProviderUrlReference('https://www.oldmissioncapital.com/careers/?gh_jid=7796180003'))
+      .toEqual({ outcome: 'none' });
   });
 
   // #231 remediation batch 2: same admission rule, plus the shared-host

@@ -204,6 +204,13 @@ const admittedAshbySources: ReviewedAshbySource[] = [
     careersUrl: 'https://www.lvt.com/careers/roles', admittedAt: '2026-09-30T01:38:23.152Z', evidenceState: 'ownership-verified',
     allowedApplicationHosts: [{ host: 'jobs.ashbyhq.com' }], status: 'shadow',
   },
+  {
+    // The employer careers page replaced its defunct Greenhouse board with this embed.
+    id: 'ashby-old-mission-capital', company: 'Old Mission Capital',
+    identity: { provider: 'ashby', boardKey: 'old-mission-capital', apiRegion: 'global' },
+    careersUrl: 'https://www.oldmissioncapital.com/careers/', admittedAt: '2026-10-22T03:03:00.000Z',
+    evidenceState: 'ownership-verified', allowedApplicationHosts: [{ host: 'jobs.ashbyhq.com' }], status: 'shadow',
+  },
   ...reviewedAshbyExpansionSources as ReviewedAshbySource[],
   ...reviewedAshbyOwnerApprovedExpansionSources as ReviewedAshbySource[],
 ];

@@ -500,3 +500,42 @@ stale.
 Outside a Stage 3 source allowlist this lane runs in verification mode (the catalog writer is
 a recorded decision sink), so a drained or retained `admission-v2` DLQ cannot have
 published anything to the live catalog.
+
+## 2026-10-22 browser capacity and Old Mission migration
+
+The 02:32Z and 02:51Z admission-health emails described two separate incidents.
+Read-only source health, non-consuming destination DLQ inspection, and exact
+payload-hash matches in `queue_failure_events` established:
+
+| Signal | Confirmed cause |
+| --- | --- |
+| Two destination dead letters | `vanshb03-summer-2027` and `simplify-summer-2026` exhausted their three deliveries during repeated `Unable to create new browser: code: 503: message: No browser available` responses. The latter also failed to connect to an allocated session (`Cannot read properties of null (reading 'accept')`). |
+| Old Mission quarantine | `greenhouse-oldmissioncapital` last succeeded at 2026-10-21T13:45:39Z, then received HTTP 404. Both its identity and jobs endpoints still return 404. The [official careers page](https://www.oldmissioncapital.com/careers/) now embeds `https://jobs.ashbyhq.com/old-mission-capital/embed?version=2`. |
+
+The 03:03Z Ashby probe returned 39 listed rows, eight technical early-career
+titles, no malformed rows, and no board-path violations. The metadata-only
+ownership/probe artifacts live in `test/fixtures/ashby/old-mission-capital/`.
+The replacement enters shadow; publication still requires normal promotion
+evidence. Removing the defunct registry entry stops polling its old board.
+Quarantine alerts exclude only explicitly retired source IDs while preserving historical
+health rows and unresolved failure-ledger alerts.
+
+Browser acquisition now reconnects once to the same allocated session after a
+one-second startup delay. An allocation/connection failure retries the queue
+delivery after 15 minutes, retaining the existing two-retry ceiling; it never
+becomes negative application-page evidence or an unbounded fresh-message loop.
+DLQ inspection now includes destination failures, using the payload index when
+Cloudflare assigns a different message ID on dead-lettering.
+
+Deployment and recovery remain separate steps. After the guarded release,
+inspect both retained dead letters and current job revisions before staging an
+exact reviewed replay. The source feeds were paused at inspection time; do not
+resume them as a side effect of replay. No production messages were replayed or
+purged during this investigation. Verify queue progress and durable completion
+after recovery; a code patch alone does not establish production recovery.
+
+A later read-only check found `billing_shutdown=stopped`, updated at
+2026-10-22T03:03:50.531Z. Both `/jobs` and the protected source operations
+endpoint then returned HTTP 503 (`Service paused by billing guard`). The guard
+remains intact; restoration requires reviewing that budget shutdown separately
+before attempting release/replay or claiming live recovery.

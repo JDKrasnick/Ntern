@@ -49,7 +49,8 @@ type V2CostRow = {
 export async function ingestionHealthSignals(
   db: D1Database,
   observedAt: Date,
-  options: { windowMs?: number; v2CostWindowMs?: number; v2RunLimit?: number; v2D1WriteLimit?: number } = {},
+  options: { windowMs?: number; v2CostWindowMs?: number; v2RunLimit?: number; v2D1WriteLimit?: number;
+    retiredSourceIds?: ReadonlySet<string> } = {},
 ): Promise<IngestionHealthSignals> {
   const windowMs = options.windowMs ?? DEFAULT_FAILURE_WINDOW_MS;
   const since = new Date(observedAt.getTime() - windowMs).toISOString();
@@ -72,8 +73,8 @@ export async function ingestionHealthSignals(
       .slice(0, MAX_DETAIL_ITEMS).map((row) => `${row.source_id ?? row.queue_name} ${row.category} x${row.n}`).join('; ')}`);
   }
 
-  // 2. Quarantined sources, from stored source health. A disabled source keeps no
-  // health row, so only a live quarantine appears here.
+  // 2. Quarantined sources, excluding explicit retirements. They retain historical
+  // health rows, but must not page forever after their replacement is admitted.
   // `kind` is the leading column of catalog_items_kind_pk_sk, so naming it lets
   // SQLite use that index instead of scanning the whole catalog on every pass.
   const healthRows = (await db.prepare(`SELECT pk, value FROM catalog_items WHERE sk = 'HEALTH' AND kind = 'source-health'`).all<HealthRow>()).results;
@@ -82,12 +83,14 @@ export async function ingestionHealthSignals(
     let health: SourceHealth | undefined;
     try { health = JSON.parse(row.value) as SourceHealth; } catch { continue; }
     if (!health) continue;
+    const sourceId = health.sourceId ?? row.pk.replace(/^SOURCE#/u, '');
+    if (options.retiredSourceIds?.has(sourceId)) continue;
     // A reviewed incident on an intentionally paused source remains visible in
     // operations, but does not need another daily page while nothing changes.
     if (health.state === 'quarantined'
       && !(health.sourceStatus === 'paused' && health.incidentState === 'acknowledged'
         && Date.parse(health.lastAttemptAt) <= Date.parse(health.incidentAcknowledgedAt ?? ''))) {
-      quarantined.push(health.sourceId ?? row.pk.replace(/^SOURCE#/u, ''));
+      quarantined.push(sourceId);
     }
   }
   if (quarantined.length) {
