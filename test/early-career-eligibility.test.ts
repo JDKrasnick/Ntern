@@ -253,6 +253,15 @@ describe('employer-authoritative early-career policy', () => {
     const refreshed = projectRoleMetadata({ ...job([{ ...closed, admission: admission(closed) }]), open: false, notification: { smsPending: false, digestPending: false } }).job;
     expect(refreshed).toMatchObject({ open: false, admission: { catalogEligible: true, earlyCareer: { status: 'eligible' } }, notification: { smsPending: false, digestPending: false } });
   });
+  it('preserves programme proof when the last occurrence closes before canonical lifecycle reconciliation', () => {
+    const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
+    const original = { ...job([{ ...closed, admission: admission(closed) }]), notification: { smsPending: false, digestPending: false } };
+    const refreshed = projectRoleMetadata(original).job;
+    expect(refreshed).toMatchObject({ open: true, programType: 'internship',
+      admission: { catalogEligible: true, earlyCareer: { status: 'eligible' } },
+      notification: { smsPending: false, digestPending: false } });
+    expect(refreshed.sourceReferences[0]?.state).toBe('closed');
+  });
   it('carries reviewed base admission across aliases of the same exact posting without bypassing new conflicts', () => {
     const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
     const vetted = { ...admission(closed), employerResolution: 'source-reported' as const, evidenceCodes: ['trusted-community-source' as const] };
