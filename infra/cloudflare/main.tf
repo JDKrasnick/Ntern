@@ -50,6 +50,7 @@ locals {
       { name = "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED", type = "plain_text", text = tostring(var.identity_unconfirmed_publication_enabled) },
       { name = "IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED", type = "plain_text", text = tostring(var.identity_integrity_enforcement_enabled) },
       { name = "TRUSTED_COMMUNITY_CATALOG_ENABLED", type = "plain_text", text = tostring(var.trusted_community_catalog_enabled) },
+      { name = "EARLY_CAREER_ELIGIBILITY_ENABLED", type = "plain_text", text = tostring(var.early_career_eligibility_enabled) },
       { name = "IDENTITY_CONFIRMED_COVERAGE_FLOOR", type = "plain_text", text = tostring(var.identity_confirmed_coverage_floor) },
       { name = "DEPLOYMENT_ROLE", type = "plain_text", text = "api" },
     ],
@@ -67,6 +68,7 @@ locals {
       { name = "IDENTITY_UNCONFIRMED_PUBLICATION_ENABLED", type = "plain_text", text = tostring(var.identity_unconfirmed_publication_enabled) },
       { name = "IDENTITY_INTEGRITY_ENFORCEMENT_ENABLED", type = "plain_text", text = tostring(var.identity_integrity_enforcement_enabled) },
       { name = "TRUSTED_COMMUNITY_CATALOG_ENABLED", type = "plain_text", text = tostring(var.trusted_community_catalog_enabled) },
+      { name = "EARLY_CAREER_ELIGIBILITY_ENABLED", type = "plain_text", text = tostring(var.early_career_eligibility_enabled) },
       { name = "OUTBOUND_NOTIFICATIONS_ENABLED", type = "plain_text", text = tostring(var.outbound_notifications_enabled) },
       { name = "INGESTION_V2_ISOLATED_WORKERS_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_isolated_workers_enabled) },
       { name = "INGESTION_V2_SHADOW_DISCOVERY_ENABLED", type = "plain_text", text = tostring(var.ingestion_v2_shadow_discovery_enabled) },
@@ -219,7 +221,7 @@ resource "cloudflare_workers_script" "isolated" {
     ], each.key == "admission" ? concat([
       { name = "ADMISSION_V2_QUEUE", type = "queue", queue_name = cloudflare_queue.work["admission-v2"].queue_name },
       { name = "ADMISSION_V2_QUEUE_NAME", type = "plain_text", text = cloudflare_queue.work["admission-v2"].queue_name },
-    ], [for binding in local.ingestion_plain_bindings : binding if(startswith(binding.name, "INGESTION_V2_") && binding.name != "INGESTION_V2_ISOLATED_WORKERS_ENABLED") || binding.name == "TRUSTED_COMMUNITY_CATALOG_ENABLED"]) : [
+    ], [for binding in local.ingestion_plain_bindings : binding if(startswith(binding.name, "INGESTION_V2_") && binding.name != "INGESTION_V2_ISOLATED_WORKERS_ENABLED") || binding.name == "TRUSTED_COMMUNITY_CATALOG_ENABLED" || binding.name == "EARLY_CAREER_ELIGIBILITY_ENABLED"]) : [
     { name = "SHADOW_EXTRACTION_ARTIFACTS", type = "r2_bucket", bucket_name = cloudflare_r2_bucket.shadow_extraction.name },
     { name = "LLM_METADATA_PUBLICATION_POLICY_JSON", type = "plain_text", text = var.llm_metadata_publication_policy_json },
   ])

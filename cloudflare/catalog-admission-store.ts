@@ -134,7 +134,7 @@ function roleMetadataSchemaMissing(error: unknown): boolean {
 
 type MetadataCollectionReference = Pick<SourceOccurrence, 'sourceId' | 'sourceUrl' | 'externalId' | 'applyUrl' | 'admission' | 'postingIdentityDecision'>;
 
-function metadataCollectionTarget(reference: MetadataCollectionReference): { candidateUrl: string; providerIdentity: ProviderIdentity } | undefined {
+export function metadataCollectionTarget(reference: MetadataCollectionReference): { candidateUrl: string; providerIdentity: ProviderIdentity } | undefined {
   if (!reference.externalId) return undefined;
   const destination = reference.admission?.destination;
   if (destination) {

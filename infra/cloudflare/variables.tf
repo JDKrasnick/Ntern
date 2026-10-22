@@ -127,6 +127,12 @@ variable "trusted_community_catalog_enabled" {
   default     = false
 }
 
+variable "early_career_eligibility_enabled" {
+  description = "Requires explicit exact-employer programme evidence. Enable only after the reviewed bounded backfill."
+  type        = bool
+  default     = false
+}
+
 variable "ingestion_v2_shadow_discovery_enabled" {
   description = "Runs additive Ingestion V2 shadow discovery after the legacy quality gates. It records only V2 state and never creates jobs, occurrences, notifications, or admission work."
   type        = bool

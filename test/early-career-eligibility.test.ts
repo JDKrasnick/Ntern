@@ -92,6 +92,30 @@ describe('employer-authoritative early-career policy', () => {
     expect(assessOfficialEarlyCareer({ title, text })).toMatchObject({ status });
     expect(assessOfficialEarlyCareer({ title, text }).programType).toBe(programType);
   });
+  it.each([
+    ['Prácticas en BI - Data Analytics', '', 'internship'],
+    ['Pflichtpraktikum - Embedded Linux Entwicklung', '', 'internship'],
+    ['Stage Full Stack – IA Générative', 'Étudiant·e en dernière année en informatique.', 'internship'],
+    ["AI Analytics - Stage de fin d'études", '', 'internship'],
+    ['Stage Consultant Data Science', 'Sia ricerca uno stagista come Data Scientist.', 'internship'],
+    ['Software Engineer - Student Placement', '', 'co-op'],
+    ['Data Science Industrial Placement', '', 'co-op'],
+    ['Summer Placement Software Engineer', '', 'internship'],
+    ['Part-Time Student - Software Engineering', '', 'co-op'],
+    ['Contract Student Worker – Software Engineer', 'This is not an internship. Ongoing work alongside your studies.', 'co-op'],
+    ['MTS Intern', 'This is not an internship built around shadowing. Own real software projects.', 'internship'],
+    ['Research Assistant', 'The lab is seeking Undergraduate Research Assistants/Interns for machine learning projects.', 'internship'],
+  ])('preserves explicit student programmes: %s', (title, text, type) => {
+    expect(assessOfficialEarlyCareer({ title, text })).toMatchObject({ status: 'eligible', programType: type });
+  });
+  it.each([
+    ['Software Engineer', 'We are hiring engineers to mentor interns.'],
+    ['Student Placement Coordinator', 'Manage the student placement programme.'],
+    ['Stage Systems Engineer', 'Manage deployment stages for production systems.'],
+    ['Software Engineer - Mejores Prácticas', 'Improve software engineering best practices.'],
+  ])('does not confuse programme administration or generic stages with a placement: %s', (title,text) => {
+    expect(assessOfficialEarlyCareer({ title,text }).status).not.toBe('eligible');
+  });
   it('never defaults generic titles or Cooperative AI to an internship', () => {
     expect(explicitProgramType('Backend Software Engineer, Cooperative AI')).toBe('unknown');
     expect(explicitProgramType('Software Engineer')).toBe('unknown');
@@ -109,6 +133,24 @@ describe('employer-authoritative early-career policy', () => {
   it('leaves the rollout disabled by default', () => {
     expect(admission(listing(), false)).toMatchObject({ catalogEligible: true, alertEligible: true });
     expect(admission(listing(), false).earlyCareer).toBeUndefined();
+  });
+  it('keeps reviewed enrollment enforced on later refreshes while the global rollout is off', () => {
+    const role = listing({ metadataEvidence: evidence('Backend Software Engineer', '4+ years of professional experience excluding internships.') });
+    const previous = admission(role);
+    expect(evaluateCatalogAdmission({ listing: role, previous, earlyCareerEligibilityEnabled: false,
+      postingAttributed: true, evaluatedAt: now, destination: classifyDestination({ listing: role, reachability: 'blocked', inspectedAt: now }) }))
+      .toMatchObject({ catalogEligible: false, earlyCareer: { reason: 'no-explicit-programme' } });
+  });
+  it('holds an unreviewed legacy withdrawal without opening new or otherwise blocked roles', () => {
+    const role = listing({ metadataEvidence: evidence('Backend Software Engineer') });
+    const previous = admission(role, false);
+    const input = { listing: role, previous, earlyCareerEligibilityEnabled: true, postingAttributed: true,
+      evaluatedAt: now, destination: classifyDestination({ listing: role, reachability: 'blocked' as const, inspectedAt: now }) };
+    expect(evaluateCatalogAdmission(input)).toMatchObject({ catalogEligible: true, alertEligible: false,
+      earlyCareerReviewPending: { reason: 'no-explicit-programme' } });
+    expect(evaluateCatalogAdmission({ ...input, previous: undefined }).catalogEligible).toBe(false);
+    expect(evaluateCatalogAdmission({ ...input, previous: { ...previous, catalogEligible: false } }).catalogEligible).toBe(false);
+    expect(evaluateCatalogAdmission({ ...input, destination: { ...input.destination, classification: 'gone' } }).catalogEligible).toBe(false);
   });
   it('withholds verified general roles without inventing a programme or minting alerts', () => {
     const role = listing({ title: 'Software Engineer', metadataEvidence: evidence('Software Engineer', 'Build services using Python and personal projects.') });
@@ -225,6 +267,19 @@ describe('employer-authoritative early-career policy', () => {
     const config = { sourceId: 'greenhouse-acme', resolverVersion: 'v1', trustedCommunityCatalogEnabled: false };
     expect(effectiveAdmissionConfigurationVersion(config)).toBe('v1');
     expect(effectiveAdmissionConfigurationVersion({ ...config, earlyCareerEligibilityEnabled: true })).not.toBe('v1');
+  });
+  it('retains an unreviewed legacy v2 role without a speculative notification', async () => {
+    const role = posting('Software Engineer', 'Build software with Python.');
+    const previous = admission(listing(), false), commit = vi.fn(async () => {});
+    const resolvePriorContext = vi.fn(async () => ({ admission: previous }));
+    const evaluator = new RuleBasedAdmissionV2Evaluator({ earlyCareerEligibilityEnabled: true, now: () => new Date(now),
+      resolvePriorContext, prober: { async probe() { return { reachability: 'blocked' }; } }, sink: { commit } });
+    const result = await evaluator.evaluate(admissionContext(role));
+    expect(result.decision.kind).toBe('admitted');
+    await result.commitEffect!();
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({ notify: false, admission: expect.objectContaining({
+      catalogEligible: true, alertEligible: false, earlyCareerReviewPending: expect.objectContaining({ reason: 'no-explicit-programme' }) }) }));
+    expect(resolvePriorContext).toHaveBeenCalledTimes(1);
   });
   it('never commits or requests notifications for a general v2 role', async () => {
     const role = posting('Software Engineer', 'Build software with Python. Personal projects count.');

@@ -263,7 +263,8 @@ export function parseMetadataApiResponse(identity: ProviderIdentity, method: Met
     const content = ['jobDescription', 'qualifications', 'additionalInformation'].flatMap((key) => record(sections[key]) ? [description(sections[key].text)] : []).filter(Boolean).join('\n');
     if (!content) return undefined;
     const location = record(payload.location) ? payload.location : {};
-    return { title: text(payload.name), text: content, locations: [text(location.fullLocation) || [location.city, location.region, location.country].map(text).filter(Boolean).join(', ')].filter(Boolean),
+    return { title: text(payload.name), text: content,
+      ...(record(payload.typeOfEmployment) && text(payload.typeOfEmployment.id).toLowerCase() === 'intern' ? { employmentType: 'Intern' } : {}), locations: [text(location.fullLocation) || [location.city, location.region, location.country].map(text).filter(Boolean).join(', ')].filter(Boolean),
       workMode: location.hybrid === true ? 'hybrid' : location.remote === true ? 'remote' : undefined,
       publishedAt: text(payload.releasedDate) || undefined };
   }
