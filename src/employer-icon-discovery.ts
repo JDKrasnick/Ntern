@@ -13,6 +13,7 @@
  */
 
 import { registrableDomain } from './core/registrable-domain.js';
+import { providerPostingReference } from './identity/posting.js';
 import {
   MAX_PROVIDER_CANDIDATES, iconTextMatchesEmployer, providerNameMatchStrength, providerNameMatchesEmployer,
 } from './employer-icon-resolution.js';
@@ -147,7 +148,7 @@ function providerDomains(value: unknown, displayName: string): { domains: string
  * candidate is returned so a caller can fall through when one turns out to be
  * unusable.
  */
-export function platformLogoUrls(html: string): string[] {
+export function platformLogoUrls(html: string, postingUrl?: string): string[] {
   const ranked = [
     // Source rank: a square logo beats a wide wordmark, and both beat the social
     // card crop, which is still the employer's own uploaded art.
@@ -157,7 +158,7 @@ export function platformLogoUrls(html: string): string[] {
     { url: greenhouseBoardLogoUrl(html), rank: 2 },
     { url: greenhouseBannerUrl(html), rank: 3 },
   ].filter((candidate): candidate is { url: string; rank: number } =>
-    Boolean(candidate.url) && isPlatformLogoHost(candidate.url!));
+    Boolean(candidate.url) && (isPlatformLogoHost(candidate.url!) || workdayBoardLogo(candidate.url!, postingUrl)));
   const unique = [...new Map(ranked.map((candidate) => [candidate.url, candidate])).values()];
   const isSvg = (url: string) => /\.svg($|\?)/iu.test(url);
   // A raster is usable, an SVG cannot be stored, so format outranks source: Ashby
@@ -168,6 +169,24 @@ export function platformLogoUrls(html: string): string[] {
     .slice()
     .sort((left, right) => (isSvg(left.url) ? 1 : 0) - (isSvg(right.url) ? 1 : 0) || left.rank - right.rank)
     .map((candidate) => candidate.url);
+}
+
+/** Workday's declared logo must belong to this exact tenant and career site.
+ * Locale segments vary between the posting and asset; other sites on the same
+ * tenant may represent different brands and cannot lend their logos.
+ */
+function workdayBoardLogo(value: string, postingUrl?: string): boolean {
+  if (!postingUrl || !providerPostingReference(postingUrl).postingId) return false;
+  try {
+    const page = new URL(postingUrl), asset = new URL(value);
+    if (page.protocol !== 'https:' || !/^[a-z0-9-]+\.wd\d+\.myworkdayjobs\.com$/iu.test(page.hostname)
+      || asset.origin !== page.origin || asset.username || asset.password || asset.search || asset.hash) return false;
+    const segments = (url: URL) => url.pathname.split('/').filter(Boolean)
+      .filter((part) => !/^[a-z]{2}-[a-z]{2}$/iu.test(part)).map((part) => part.toLowerCase());
+    const site = segments(page), logo = segments(asset);
+    return site[1] === 'job' && logo.length === 3 && logo[0] === site[0]
+      && logo[1] === 'assets' && logo[2] === 'logo';
+  } catch { return false; }
 }
 
 /**

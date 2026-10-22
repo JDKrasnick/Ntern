@@ -2394,6 +2394,20 @@ export class IngestionRunner {
           if (migrationLimit === undefined) throw notificationError;
           report.failures.push(`${connector.id}: migration notification persistence failed: ${notificationError instanceof Error ? notificationError.message : String(notificationError)}`);
         }
+        // Newly published legacy/source-reported companies need the same immediate
+        // icon queue as V2, even when admission has no canonical employer ID.
+        if (this.enqueueEmployerIconResolution) {
+          for (const job of plan.jobs) {
+            if (!job.open || job.admission?.canonicalEmployer || job.admission?.catalogEligible === false
+              || blockedJobIds.has(job.jobId) || persistenceFailedJobIds.has(job.jobId)) continue;
+            const reference = job.sourceReferences.find((item) => item.sourceId === connector.id);
+            const identity = providerPostingReference(job.applyUrl);
+            await this.enqueueEmployerIconResolution({ canonicalEmployerId: '', displayName: job.company,
+              roleTitle: job.title, applicationUrl: job.applyUrl, provider: identity.provider,
+              ...(identity.tenant ? { tenant: identity.tenant } : {}),
+              ...(reference?.provenance ? { provenance: reference.provenance } : {}), sourceId: connector.id });
+          }
+        }
         const provider = providerFor(connector.id);
         if ((trustedPolicy || boundedMetadataRefresh) && migrationLimit !== undefined && persistenceFailedJobIds.size) {
           admissionMigrationPending = true;

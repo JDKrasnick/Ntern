@@ -75,6 +75,7 @@ import { D1CompanyRankingStore } from './company-ranking-store.js';
 import { handleEmployerIconOperations } from './employer-icon-api.js';
 import { enqueueEmployerIconResolution, logoDevCredentials, runEmployerIconResolutionPass, storeProviderIcon, verifyIconDomain } from './employer-icon-resolver.js';
 import { D1EmployerIconStore } from './employer-icon-store.js';
+import { companyIconIdentity } from '../shared/company-icon.js';
 import type { EmployerIconSeed } from '../src/employer-icon-resolution.js';
 import type { IconSvgRasterizer } from '../src/svg-icon.js';
 import { handleEmployerApi } from './employer-api.js';
@@ -295,10 +296,14 @@ function employerIconEnqueue(env: Environment): (seed: EmployerIconSeed) => Prom
   const store = new D1EmployerIconStore(env.DB);
   const attempted = new Set<string>();
   return async (seed) => {
-    if (attempted.has(seed.canonicalEmployerId)) return;
-    attempted.add(seed.canonicalEmployerId);
+    const identity = seed.canonicalEmployerId || companyIconIdentity(seed.displayName, seed.applicationUrl)?.id;
+    if (!identity || attempted.has(identity)) return;
+    attempted.add(identity);
     try {
-      await enqueueEmployerIconResolution(store, seed, new Date());
+      const now = new Date();
+      const independent = await store.registerIdentity(seed, now, seed.canonicalEmployerId || undefined);
+      if (seed.canonicalEmployerId) await enqueueEmployerIconResolution(store, seed, now);
+      else if (independent) await enqueueEmployerIconResolution(store, independent, now);
     } catch (error) {
       console.error(JSON.stringify({
         event: 'company_icon_resolution_enqueue_failed',

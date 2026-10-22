@@ -29,7 +29,7 @@ import {
 import {
   ICON_PROVIDER_TIMEOUT_MS, MAX_ICON_ASSET_BYTES, assetShapeUsable, bannerAssetShapeUsable,
   brandfetchSearchUrl, providerDomainCandidates,
-  iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls,
+  iconAssetType, iconSvgAsset, isPlatformBannerUrl, platformLogoUrls, rasterDimensions,
   proposedDomainMatchesEmployer, siteLogoAssetCandidates,
   logoDevImageUrl, logoDevSearchUrl, parseIconPageEvidence,
   type IconPageEvidence,
@@ -1156,7 +1156,7 @@ async function gatherIconEvidence(seed: EmployerIconSeed, deps: EmployerIconReso
         page: { organizations: [] }, failure: pageFailureOutcome(result.status), status: result.status,
       };
     }
-    const logoUrls = platformLogoUrls(result.body);
+    const logoUrls = platformLogoUrls(result.body, result.url);
     // The employer's own declared marks, read from the page already in hand: for an
     // employer whose postings live on its own domain this is the whole site-asset
     // fallback with no extra request at all. Only URLs are kept, and the report is
@@ -1606,12 +1606,16 @@ async function platformAsset(
   banner: boolean,
   deps: EmployerIconResolverDependencies,
 ): Promise<PlatformAsset> {
-  const raster = iconAssetType(contentType, bytes);
+  // Some employer-uploaded Workday logos are served as text/plain. The declared
+  // board-logo URL establishes provenance; raster magic establishes its type.
+  const raster = iconAssetType(contentType, bytes) ?? iconAssetType(undefined, bytes);
   if (raster) {
+    const size = rasterDimensions(bytes);
+    if (size && size.width * size.height > 4_194_304) return { usable: false, reason: 'logo-too-many-pixels' };
     if (banner && !bannerAssetShapeUsable(bytes)) return { usable: false, reason: 'banner-not-square' };
     return { usable: true, bytes, contentType: raster, rasterized: false };
   }
-  const svg = iconSvgAsset(contentType, bytes);
+  const svg = iconSvgAsset(contentType, bytes) ?? iconSvgAsset(undefined, bytes);
   if (!svg) return { usable: false, reason: 'not-a-raster' };
   if (!deps.rasterizeSvg) return { usable: false, reason: 'svg-not-servable' };
   const safe = safeIconSvg(svg);

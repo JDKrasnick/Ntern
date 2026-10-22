@@ -46,6 +46,43 @@ function indexColumns(database: DatabaseSync, index: string): string[] {
 }
 
 describe('employer icon resolution migration', () => {
+  it.each(['canonical', 'independent'].flatMap(kind => ['0064_discover_workday_board_logos.sql',
+    '0065_recognize_mislabeled_board_logos.sql'].map(file => [kind,file])))('preserves %s review boundaries in %s', (kind,file) => {
+    const database = migrated();
+    for (const file of ['0001_initial.sql', '0013_canonical_employer_icons.sql', '0062_independent_company_icons.sql']) {
+      database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url), 'utf8'));
+    }
+    const states = ['missing', 'inactive', 'other-ats', 'unreviewed', 'stored', 'resolved', 'invalidated',
+      'reviewed-domain', 'corporate', 'inflight', 'blocked-sibling'];
+    const table = kind === 'canonical' ? 'canonical_employers' : 'company_icon_identities';
+    for (const state of states) {
+      const id = kind === 'canonical' ? state : `icon-v1-${state}`;
+      if (kind === 'canonical') database.prepare(`INSERT INTO canonical_employers
+        (id,display_name,reviewed_at,reviewed_by,created_at,updated_at) VALUES (?,?,'old','review','old','old')`).run(id, state);
+      else database.prepare(`INSERT INTO company_icon_identities
+        (id,display_name,scope,name_key,seed_json,created_at,updated_at) VALUES (?,?,'scope',?,'{}','old','old')`).run(id, state, state);
+      database.prepare(`UPDATE ${table} SET icon_resolution_status=?,icon_key=?,website_domain_source=? WHERE id=?`)
+        .run(['resolved', 'invalidated'].includes(state) ? state : 'unresolved', state === 'stored' ? 'key' : null,
+          state === 'reviewed-domain' ? 'reviewed' : 'automatic', id);
+      for (const suffix of ['a', 'b']) database.prepare(`INSERT INTO employer_icon_resolutions
+        (id,canonical_employer_id,evidence_fingerprint,status,evidence_json,attempts,next_retry_at,review_priority,lease_until,created_at,updated_at)
+        VALUES (?,?,?,'unresolved','{}',1,'2099-01-01',?,?,'old','old')`)
+        .run(`${id}-${suffix}`,id,suffix,state === 'corporate' ? 50 : 0,state === 'inflight' ? '2100-01-01' : null);
+      if (state === 'blocked-sibling') database.prepare(`UPDATE employer_icon_resolutions SET status='invalidated' WHERE id=?`).run(`${id}-b`);
+      database.prepare(`INSERT INTO catalog_items(pk,sk,kind,value) VALUES ('CATALOG_PROJECTION#GROUPS',?,'catalog-projection',?)`)
+        .run(state,JSON.stringify({group:{featuredRole:{[kind === 'canonical' ? 'canonicalEmployerId' : 'companyIconId']:id,
+          officialApplyUrl:state === 'other-ats' ? 'https://jobs.lever.co/brand/123' : 'https://tenant.wd3.myworkdayjobs.com/careers/job/Intern_P123',
+          sourceReferences:[{provenance:state === 'unreviewed' ? 'unknown' : 'reviewed-community'}]}}}));
+    }
+    database.prepare(`INSERT INTO catalog_items(pk,sk,kind,value) VALUES
+      ('CATALOG_PROJECTION','CURRENT','catalog-projection','{"version":"current"}'),
+      ('CATALOG_PROJECTION#MANIFESTS','current','catalog-projection',?)`)
+      .run(JSON.stringify({keys:states.filter(x=>x!=='inactive')}));
+    database.exec(readFileSync(new URL(`../cloudflare/migrations/${file}`, import.meta.url),'utf8'));
+    expect(database.prepare("SELECT id FROM employer_icon_resolutions WHERE next_retry_at='1970-01-01T00:00:00.000Z'").all())
+      .toEqual([{id:kind === 'canonical' ? 'missing-a' : 'icon-v1-missing-a'}]);
+    database.close();
+  });
   it.each(['missing', 'known', 'inactive', 'resolved', 'invalidated', 'corporate', 'reviewed-domain', 'stored-icon', 'inflight', 'blocked-sibling'])(
     'restores current catalog evidence while preserving %s decisions', (state) => {
       const database = migrated();

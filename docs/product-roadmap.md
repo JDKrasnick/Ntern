@@ -245,6 +245,8 @@
 - [x] Connect V2 live admission to canonical employer registration and icon tasks, prefer reviewed tenant mappings, and lower icon confidence for corroborated reviewed ATS routes. Include migration `0061` for missing source IDs and stale unresolved retries; preserve manual decisions and review holds.
 - [x] Resolve icons independently of canonical employer IDs using company plus application host/ATS site, reuse matching existing logos, recover older roles through a bounded catalog backfill, and include unresolved employers in measured coverage.
 - [x] Prioritize fresh icon discovery by company-wide attempt history and active role count, restore reviewed provenance from the current catalog for historical canonical tasks, separate exhausted human-review priority from automatic scheduling, and provide authenticated catch-up with shared leases, two-task concurrency, and D1 overload checks.
+- [x] Acquire employer-uploaded Workday logos from each exact career site, serve retained JPEG logos, bound raster decoding size, and enqueue new legacy companies immediately even without canonical employer IDs.
+- [x] Recognize declared board-logo bytes when the ATS labels a real image as plain text, while rejecting HTML errors and preserving asset size and review boundaries.
 - [x] Define and test Greenhouse and Lever high-confidence route detection plus the simple-field, review-only, and never-fill policy.
 - [x] Build a local-only headed, no-submit browser companion pilot for reviewed Greenhouse and Lever test forms.
 - [ ] Add the application review and verification-handoff experience.

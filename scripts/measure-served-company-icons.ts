@@ -51,7 +51,7 @@ await Promise.all(Array.from({ length: 6 }, async () => {
       const response = await fetch(`${base.replace(/\/$/u, '')}/company-icons/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(20_000) });
       const data = await response.arrayBuffer();
       const type = response.headers.get('content-type') ?? '';
-      const decoded = response.ok && /^image\/(?:png|webp|avif)(?:;|$)/u.test(type) && data.byteLength > 0
+      const decoded = response.ok && /^image\/(?:png|webp|avif|jpeg)(?:;|$)/u.test(type) && data.byteLength > 0
         ? await decode(data) : false;
       results.push({ id, roles, status: response.status, type, bytes: data.byteLength, decoded });
     } catch { results.push({ id, roles, status: 0 }); }
