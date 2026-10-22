@@ -713,9 +713,9 @@ async function billingShutdown(request: Request, env: Environment): Promise<Resp
     return Response.json({ message: 'Not found' }, { status: 404 });
   }
 
-  const queueIds = await resolvedBillingShutdownQueueIds(env);
   const scriptPath = `/workers/scripts/${encodeURIComponent(env.WORKER_NAME)}`;
   if (new URL(request.url).searchParams.get('dry-run') === 'true') {
+    const queueIds = await resolvedBillingShutdownQueueIds(env);
     await Promise.all([
       ...queueIds.map((queueId) => cloudflareApi(env, `/queues/${queueId}/consumers`)),
       cloudflareApi(env, `${scriptPath}/schedules`),
@@ -731,6 +731,26 @@ async function billingShutdown(request: Request, env: Environment): Promise<Resp
     return Response.json({ ignored: true });
   }
 
+  // Clearing the latch alone does not suppress delayed or repeated webhooks.
+  // Only a separately recorded, time-bounded owner approval can do that.
+  const recovery = await env.DB.prepare("SELECT value FROM system_state WHERE key = 'billing_recovery_approval'")
+    .first<{ value: string }>();
+  if (recovery?.value && recovery.value.length <= 1024) {
+    try {
+      const approval: unknown = JSON.parse(recovery.value);
+      if (approval && typeof approval === 'object' && 'policyName' in approval
+        && approval.policyName === payload.policy_name && 'approvedAt' in approval && 'expiresAt' in approval
+        && typeof approval.approvedAt === 'string' && typeof approval.expiresAt === 'string') {
+        const approvedAt = Date.parse(approval.approvedAt), expiresAt = Date.parse(approval.expiresAt), now = Date.now();
+        if (Number.isFinite(approvedAt) && Number.isFinite(expiresAt) && approvedAt <= now && now < expiresAt
+          && expiresAt - approvedAt <= 31 * 24 * 60 * 60 * 1000) {
+          return Response.json({ ignored: true, reason: 'owner-approved-recovery', expiresAt: approval.expiresAt });
+        }
+      }
+    } catch { /* Malformed approval never disables the shutdown. */ }
+  }
+
+  const queueIds = await resolvedBillingShutdownQueueIds(env);
   await env.DB.prepare(`
     INSERT INTO system_state (key, value, updated_at) VALUES ('billing_shutdown', 'stopped', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at

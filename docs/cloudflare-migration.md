@@ -154,20 +154,31 @@ HTTP work fail closed even if a management API call is delayed. Test webhook
 payloads are ignored; shutdown requires the signed `billing_budget_alert`
 payload for the named $5 policy and account.
 
-To recover after reviewing the bill, reapply `infra/cloudflare` to restore the
-ingestion consumers. The provider does not currently detect an externally
-emptied cron list, so restore only the ingestion schedules explicitly. Confirm
-that all seven queues and all nine schedules have exactly one owner and that the
-API Worker owns none of them before clearing the latch:
+Clearing the latch alone cannot authorize recovery above the cutoff: another
+authenticated alert can stop service again. After explicit owner approval,
+record `system_state.billing_recovery_approval` as JSON with `policyName`,
+`approvedAt`, and `expiresAt` (ISO timestamps). The policy must match exactly,
+the approval must already have begun, and its duration cannot exceed 31 days.
+Use the approved billing-period boundary as the expiry. Missing, malformed,
+future, or expired approval retains the normal shutdown behavior. The approval
+prevents relatching; it does not clear an existing latch or restore infrastructure.
+Keep budget email warnings enabled when disconnecting the approved shutdown
+webhook, and retain the approval and recovery receipts.
 
-```sh
-npx wrangler triggers deploy --name intern-notifs-ingestion \
-  --config wrangler.ingestion.jsonc
+Prepare and review restoration against `infra/cloudflare`, then clear the exact
+reviewed latch before attaching consumers: stopped queue handlers acknowledge
+deliveries. Restore nine consumers with their configured settings and DLQs:
+eight belong to ingestion, while admission-v2 belongs to the admission Worker.
+Restore only the twelve ingestion cron schedules; API, admission, and catalog
+publisher own none. Keep the ingestion workers.dev subdomain disabled.
 
-npx wrangler d1 execute intern-notifs-db --remote \
-  --config wrangler.api.jsonc \
-  --command "DELETE FROM system_state WHERE key = 'billing_shutdown'"
-```
+The provider may not detect an externally emptied cron list. Restore schedules
+through the schedules API and verify them against the checked-in config. Avoid
+`wrangler triggers deploy` during isolated-worker recovery: it can also recreate
+consumers from the ingestion config and attach admission-v2 to the wrong owner.
+If consumer IDs are recreated outside OpenTofu, reconcile only their IDs and
+creation timestamps after verifying every owner, setting, and DLQ; use normal
+state locking and serial checks before the next guarded deployment.
 
 Terraform deliberately keeps Worker secret bindings; recovery does not require
 rotating the shutdown credentials.
