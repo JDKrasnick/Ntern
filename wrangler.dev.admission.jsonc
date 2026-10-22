@@ -43,6 +43,7 @@
     "crons": []
   },
   "vars": {
+    "EARLY_CAREER_ELIGIBILITY_ENABLED": "true",
     "INGESTION_V2_ISOLATED_WORKERS_ENABLED": "true",
     "OUTBOUND_NOTIFICATIONS_ENABLED": "false",
     "DEPLOYMENT_ROLE": "admission",

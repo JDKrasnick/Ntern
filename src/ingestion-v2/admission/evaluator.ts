@@ -126,7 +126,8 @@ export function gradeAdmissionRow(input: {
   probe: AdmissionDestinationProbe;
   evaluatedAt: string;
 }): GradedAdmissionRow | { decision: AdmissionRowEvaluation['decision'] } {
-  const { listing, decision } = processPosting(input.posting, [], input.earlyCareerEligibilityEnabled);
+  const legacyReview = input.earlyCareerEligibilityEnabled && input.prior?.admission?.catalogEligible && !input.prior.admission.earlyCareer;
+  const { listing, decision } = processPosting(legacyReview ? { ...input.posting, lifecycleAuthority: 'source' } : input.posting, [], input.earlyCareerEligibilityEnabled);
   if (decision.outcome !== 'included') {
     if (decision.outcome === 'shelved') return { decision: { kind: 'shelved', reason: decision.reason } };
     return { decision: { kind: 'blocked', reason: decision.reason } };
@@ -269,6 +270,14 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
     // these first keeps invalid URLs, nontechnical roles, and policy shelves
     // terminal instead of spending the row's transient retry budget.
     let posting = context.posting;
+    // Do not let the title prefilter revoke an unreviewed legacy role before
+    // the admission layer can apply its operator-review hold.
+    const priorPromise = this.dependencies.earlyCareerEligibilityEnabled && this.dependencies.resolvePriorContext
+      ? this.dependencies.resolvePriorContext(context.sourceId, context.externalId) : undefined;
+    if (priorPromise) {
+      const prior = await priorPromise;
+      if (prior?.admission?.catalogEligible && !prior.admission.earlyCareer) posting = { ...posting, lifecycleAuthority: 'source' };
+    }
     let deterministic = processPosting(posting, [], this.dependencies.earlyCareerEligibilityEnabled);
     let probe: AdmissionDestinationProbe | undefined;
     // Title/lifecycle and invalid-URL decisions remain terminal without I/O.
@@ -307,7 +316,7 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
     const canonicalEmployer = (deterministic.listing && this.dependencies.resolveCanonicalEmployer
         ? await this.dependencies.resolveCanonicalEmployer(deterministic.listing)
         : undefined) ?? deterministic.listing?.employerEvidence?.canonicalEmployer;
-    const prior = this.dependencies.resolvePriorContext
+    const prior = priorPromise ? await priorPromise : this.dependencies.resolvePriorContext
       ? await this.dependencies.resolvePriorContext(context.sourceId, context.externalId)
       : undefined;
     const identityApplicationUrl = await this.dependencies.resolveIdentityApplicationUrl?.(context.posting.applyUrl);

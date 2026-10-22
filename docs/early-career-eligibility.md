@@ -1,8 +1,8 @@
 # Explicit employer evidence for early-career roles
 
 The runtime gate is `EARLY_CAREER_ELIGIBILITY_ENABLED=true`, absent by default.
-Legacy polling and V2 admission share the policy. Policy version 3 and metadata
-extraction version 23 enroll existing rows in bounded re-evaluation when enabled.
+Legacy polling and V2 admission share the policy. Policy version 4 and metadata
+extraction version 24 enroll existing rows in bounded re-evaluation when enabled.
 Opening or merging this implementation does not activate production or backfill.
 
 ## Publication rule
@@ -121,3 +121,38 @@ npx tsx scripts/evaluate-early-career-policy.ts \
 - Preview a bounded backfill/canary and retain acquisition failures separately.
 - Use the guarded release workflow. Disabling the flag alone does not reverse
   persisted admission decisions; rollback requires an explicit data plan.
+
+## Reviewed production backfill
+
+`POST /internal/early-career/backfill` requires the operations key. `preview`
+accepts at most ten open job IDs and bounded, employer artifacts observed within 24 hours
+or confirmed exact-page absence receipts. Each proof is bound to an existing
+source occurrence and its reviewed exact employer/API target. Unsupported/blocked
+pages are held for review; an API error alone never proves a posting is absent.
+Pruning requires refreshed proof within 30 minutes. Before pruning a merged job, every distinct open target must be reviewed. One
+qualifying live target protects a job with another expired alias.
+
+The preview returns every proposed visibility change and an exact token/count.
+`apply` expires after ten minutes and atomically guards all canonical and source
+occurrence values against concurrent changes. It persists current proof, updates
+browse indexes and pending-alert flags, and preserves lifecycle, application and
+sent-notification history. Backfill never creates notification events. Changed
+visibility/presentation requires projection refresh before the API returns.
+
+The live preview found additional valid explicit placements absent from the
+English-heavy 400-case audit: French/Italian stages, Spanish prácticas, German
+Pflichtpraktikum, UK industrial/student placements and student-worker contracts.
+These are explicit employer programmes, not unspecified roles. Categorical
+negation is type-specific: “not an internship” does not deny a working-student
+contract, and “not an internship built around shadowing” is not a denial.
+Production activation is managed by OpenTofu and remains false until reviewed
+backfill receipts and isolated-dev verification are complete.
+
+Activation preserves previously visible, unreviewed legacy roles when programme
+proof is missing, and records `earlyCareerReviewPending` while suppressing alerts.
+This hold never admits a new or previously withheld role and never bypasses
+identity, destination or technical gates. Positive proof can enroll a legacy role
+automatically; withdrawals require the reviewed backfill. Once enrolled, later
+source refreshes continue enforcing the policy even with the global flag off.
+Unsupported employer pages therefore stay visible pending inspection rather than
+being removed speculatively. New roles always require explicit employer evidence.

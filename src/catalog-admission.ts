@@ -167,8 +167,18 @@ export function evaluateCatalogAdmission(input: {
     ...(verifiedAt ? { lastVerifiedAt: verifiedAt } : {}),
     ...(graceDeadline ? { graceDeadline } : {}),
   };
-  return input.earlyCareerEligibilityEnabled
-    ? withEarlyCareerAdmission(admission, earlyCareerFromEvidence(listing.metadataEvidence ?? [])) : admission;
+  // Reviewed backfill enrollment survives a dormant global rollout flag.
+  // Otherwise an ordinary source refresh could silently reopen a pruned role.
+  if (input.earlyCareerEligibilityEnabled || previous?.earlyCareer) {
+    const assessment = earlyCareerFromEvidence(listing.metadataEvidence ?? []);
+    // Activation cannot prune an unreviewed legacy role. Other gates still
+    // apply; only a previously visible role can wait for operator review.
+    if (previous?.catalogEligible && !previous.earlyCareer && assessment.status !== 'eligible') {
+      return { ...admission, alertEligible: false, earlyCareerReviewPending: assessment };
+    }
+    return withEarlyCareerAdmission(admission, assessment);
+  }
+  return admission;
 }
 
 export function deriveCanonicalAdmission(references: readonly SourceOccurrence[], evaluatedAt: string): CatalogAdmission | undefined {
