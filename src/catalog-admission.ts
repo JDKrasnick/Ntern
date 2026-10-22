@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { sourceRoleAgreement } from './core/application-url.js';
-import { earlyCareerFromEvidence, selectEarlyCareerAssessment, withEarlyCareerAdmission } from './early-career-eligibility.js';
+import { earlyCareerFromEvidence, retainedEarlyCareerAssessment, selectEarlyCareerAssessment, withEarlyCareerAdmission } from './early-career-eligibility.js';
 import type { TrustedCommunityAdmissionPolicy } from './sources/trust-policy.js';
 import type {
   CatalogAdmission,
@@ -170,7 +170,8 @@ export function evaluateCatalogAdmission(input: {
   // Reviewed backfill enrollment survives a dormant global rollout flag.
   // Otherwise an ordinary source refresh could silently reopen a pruned role.
   if (input.earlyCareerEligibilityEnabled || previous?.earlyCareer) {
-    const assessment = earlyCareerFromEvidence(listing.metadataEvidence ?? []);
+    const retained = retainedEarlyCareerAssessment(previous, listing.applyUrl);
+    const assessment = selectEarlyCareerAssessment([...(retained ? [retained] : []), earlyCareerFromEvidence(listing.metadataEvidence ?? [])]);
     // Activation cannot prune an unreviewed legacy role. Other gates still
     // apply; only a previously visible role can wait for operator review.
     if (previous?.catalogEligible && !previous.earlyCareer && assessment.status !== 'eligible') {

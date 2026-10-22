@@ -99,6 +99,19 @@ export function earlyCareerFromEvidence(evidence: readonly RoleMetadataEvidence[
     ? [{ ...e.earlyCareer, sourceClass: e.sourceClass, sourceUrl: e.sourceUrl, artifactHash: e.artifactHash, observedAt: e.observedAt }] : []));
 }
 
+/** A community refresh cannot erase reviewed employer proof for the same immutable posting. */
+export function retainedEarlyCareerAssessment(previous: CatalogAdmission | undefined, applyUrl: string): EarlyCareerAssessment | undefined {
+  const assessment = previous?.earlyCareer;
+  if (!assessment?.sourceClass || officialSources[assessment.sourceClass] === undefined
+    || assessment.policyVersion !== EARLY_CAREER_POLICY_VERSION || !assessment.artifactHash || !assessment.sourceUrl) return undefined;
+  try {
+    const current = providerPostingReference(applyUrl);
+    if (current.provider === 'unknown' || !current.postingId) return undefined;
+    const prior = providerPostingReference(previous!.destination.finalUrl ?? previous!.destination.candidateUrl);
+    return providerPostingAlias(current) === providerPostingAlias(prior) ? assessment : undefined;
+  } catch { return undefined; }
+}
+
 /** Preserve all other admission decisions; this gate cannot bypass destination or identity policy. */
 export function withEarlyCareerAdmission(admission: CatalogAdmission, assessment: EarlyCareerAssessment): CatalogAdmission {
   const reasons: CatalogAdmissionReason[] = admission.reasonCodes.filter(r => r !== 'not-early-career' && r !== 'early-career-unverified');
