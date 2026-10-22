@@ -263,6 +263,8 @@ describe('employer-authoritative early-career policy', () => {
     const refreshed = projectRoleMetadata(job(refs, weak)).job;
     expect(refreshed.admission).toMatchObject({ catalogEligible: true, alertEligible: false });
     expect(deriveCanonicalAdmission(refreshed.sourceReferences, now)?.catalogEligible).toBe(true);
+    const historical = projectRoleMetadata({ ...job(refs.map(r => ({ ...r, state: 'closed' as const })), weak), open: false }).job;
+    expect(historical).toMatchObject({ open: false, admission: { catalogEligible: true, alertEligible: false } });
     const blocked = projectRoleMetadata(job(refs, { ...weak, reasonCodes: [...weak.reasonCodes, 'metadata-conflict'] })).job;
     expect(blocked.admission?.catalogEligible).toBe(false);
   });

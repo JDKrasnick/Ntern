@@ -143,7 +143,7 @@ export function enforceJobEarlyCareer(job: Internship, evidence: readonly RoleMe
   const assessment = earlyCareerFromEvidence(evidence.filter(e => !job.open || !closedEvidence.has(evidenceKey(e))
     || openEvidence.has(evidenceKey(e)) || [...closedEvidence.get(evidenceKey(e))!].some(posting => openTargets.has(posting))));
   const canonicalTarget = target({ applyUrl: job.admission.destination.finalUrl ?? job.admission.destination.candidateUrl });
-  const qualified = assessment.status === 'eligible' && canonicalTarget && openTargets.has(canonicalTarget)
+  const qualified = assessment.status === 'eligible' && canonicalTarget && (!job.open || openTargets.has(canonicalTarget))
     ? job.sourceReferences.find(r => target(r) === canonicalTarget && r.admission?.earlyCareer?.baseCatalogEligible)
     : undefined;
   const preserveQualifiedBase = (current: CatalogAdmission, posting: string | undefined): CatalogAdmission => {
