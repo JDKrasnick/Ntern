@@ -128,11 +128,12 @@ jobs:
           echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
       - run: npm ci
       - name: Preserve an active billing shutdown
+        id: billing_preflight
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: node --import tsx scripts/cloudflare-budget-guard.ts --check-running
       - name: Ensure the resume embedding index exists
-        shell: bash
+        shell: node --import tsx scripts/cloudflare-deploy-guard.ts production -- bash --noprofile --norc -e -o pipefail {0}
         run: |
           index=$(npx wrangler vectorize list --json | jq -c --arg name "$TF_VAR_resume_embedding_index_name" '.[] | select(.name == $name)')
           if test -z "$index"; then
@@ -195,12 +196,14 @@ jobs:
             --endpoint-url "$AWS_ENDPOINT_URL_S3" --only-show-errors
           sha256sum "$RUNNER_TEMP/cloudflare.tfplan" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Apply production D1 migrations
+        shell: node --import tsx scripts/cloudflare-deploy-guard.ts production -- bash --noprofile --norc -e -o pipefail {0}
         run: npx wrangler d1 migrations apply intern-notifs-db --remote --config wrangler.api.jsonc
       - name: Apply exact saved plan
         if: steps.plan.outputs.changed == 'true'
+        shell: node --import tsx scripts/cloudflare-deploy-guard.ts production -- bash --noprofile --norc -e -o pipefail {0}
         run: tofu -chdir=infra/cloudflare apply -auto-approve "$RUNNER_TEMP/cloudflare.tfplan"
       - name: Publish and roll out the resume PDF compiler container
-        shell: bash
+        shell: node --import tsx scripts/cloudflare-deploy-guard.ts production -- bash --noprofile --norc -e -o pipefail {0}
         run: |
           config="$GITHUB_WORKSPACE/.wrangler.api.production.jsonc"
           trap 'rm -f "$config"' EXIT
@@ -238,7 +241,7 @@ jobs:
             jq -e --arg sha "$DEPLOY_SHA" '.annotations["workers/tag"] == $sha and .annotations["workers/message"] == ("Release " + $sha)' "$RUNNER_TEMP/$role-expected-version.json" >/dev/null
           done
       - name: Restore operations binding if its deployment check rejects the key
-        shell: bash
+        shell: node --import tsx scripts/cloudflare-deploy-guard.ts production -- bash --noprofile --norc -e -o pipefail {0}
         run: |
           if test -n "$OPERATIONS_SHARED_SECRET"; then
             restore_secret() {
@@ -324,6 +327,9 @@ jobs:
 
           # Any drift fails the deployment before smoke tests or success reporting.
           test "$drift" = 0
+      - name: Preserve shutdown after success, failure, or cancellation
+        if: always() && steps.billing_preflight.outcome == 'success'
+        run: node --import tsx scripts/cloudflare-deploy-guard.ts production --reconcile
       - name: Back up post-deploy state
         if: always() && steps.backup_before.outcome == 'success'
         shell: bash

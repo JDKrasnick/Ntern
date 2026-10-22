@@ -6,6 +6,7 @@ export const applicationDatabases = {
   production: '4e389f1c-7c6d-48e1-aa97-dc4cb1769bb8',
   dev: 'cedc86d8-69a5-4a72-a1e6-f5629d722338',
 } as const;
+export type ApplicationEnvironment = keyof typeof applicationDatabases;
 
 const applicationWorker = (name: string) => name === 'intern-notifs' || name.startsWith('intern-notifs-');
 const latchSql = `INSERT INTO system_state (key, value, updated_at)
@@ -33,14 +34,17 @@ export interface ApplicationPauseReport {
   failures: string[];
 }
 
-export async function pauseCloudflareApplication(api: CloudflareManagementApi): Promise<ApplicationPauseReport> {
+export async function pauseCloudflareApplication(api: CloudflareManagementApi,
+  environment?: ApplicationEnvironment): Promise<ApplicationPauseReport> {
+  const belongsToEnvironment = (name: string) => applicationWorker(name) && (environment === undefined
+    || (environment === 'dev') === (name === 'intern-notifs-dev' || name.startsWith('intern-notifs-dev-')));
   const report: ApplicationPauseReport = { latchedDatabases: [], clearedWorkers: [], removedConsumers: 0, failures: [] };
   const attempt = async (label: string, action: () => Promise<void>): Promise<void> => {
     try { await action(); } catch { report.failures.push(label); }
   };
   // The durable latches come first. A failure in resource discovery or any
   // management operation must not prevent either environment from stopping.
-  for (const id of Object.values(applicationDatabases)) {
+  for (const id of environment ? [applicationDatabases[environment]] : Object.values(applicationDatabases)) {
     await attempt(`latch:${id}`, async () => {
       await api(`/d1/database/${id}/query`, { method: 'POST', body: JSON.stringify({ sql: latchSql }) });
       const verified = await api<Array<{ results: Array<{ value: string }> }>>(`/d1/database/${id}/query`, {
@@ -52,7 +56,7 @@ export async function pauseCloudflareApplication(api: CloudflareManagementApi): 
   }
   await attempt('discover-workers', async () => {
     const workers = await api<Array<{ id: string }>>('/workers/scripts');
-    for (const worker of workers.filter(worker => applicationWorker(worker.id))) {
+    for (const worker of workers.filter(worker => belongsToEnvironment(worker.id))) {
       await attempt(`schedules:${worker.id}`, async () => {
         const path = `/workers/scripts/${encodeURIComponent(worker.id)}/schedules`;
         await api(path, { method: 'PUT', body: '[]' });
@@ -65,13 +69,13 @@ export async function pauseCloudflareApplication(api: CloudflareManagementApi): 
   await attempt('discover-queues', async () => {
     for (let page = 1; ; page++) {
       const queues = await api<Array<{ queue_id: string; queue_name: string }>>(`/queues?per_page=100&page=${page}`);
-      for (const queue of queues.filter(queue => applicationWorker(queue.queue_name))) {
+      for (const queue of queues.filter(queue => belongsToEnvironment(queue.queue_name))) {
         const path = `/queues/${encodeURIComponent(queue.queue_id)}/consumers`;
         await attempt(`consumers:${queue.queue_name}`, async () => {
           const consumers = await api<Array<{ consumer_id: string; script?: string; script_name?: string }>>(path);
           for (const consumer of consumers) {
             const script = consumer.script ?? consumer.script_name;
-            if (!script || !applicationWorker(script)) throw new Error('Unexpected queue consumer owner');
+            if (!script || !belongsToEnvironment(script)) throw new Error('Unexpected queue consumer owner');
             await attempt(`consumer:${queue.queue_name}:${consumer.consumer_id}`, async () => {
               await api(`${path}/${encodeURIComponent(consumer.consumer_id)}`, { method: 'DELETE' });
               report.removedConsumers++;
@@ -84,6 +88,26 @@ export async function pauseCloudflareApplication(api: CloudflareManagementApi): 
     }
   });
   return report;
+}
+
+/** Stop is monotonic: a deployment must compensate if shutdown wins mid-command.
+ * Also fail closed when the final latch read is unavailable. Never clear a latch.
+ */
+export async function preserveBillingShutdown(api: CloudflareManagementApi,
+  environment: ApplicationEnvironment): Promise<void> {
+  try { await assertApplicationRunning(api, [applicationDatabases[environment]]); }
+  catch (cause) {
+    const report = await pauseCloudflareApplication(api, environment);
+    throw new Error(`Deployment stopped: billing shutdown preserved${report.failures.length
+      ? `; incomplete cleanup: ${report.failures.join(', ')}` : ''}`, { cause });
+  }
+}
+
+export async function withBillingDeployment<T>(api: CloudflareManagementApi,
+  environment: ApplicationEnvironment, deploy: () => Promise<T>): Promise<T> {
+  await assertApplicationRunning(api, [applicationDatabases[environment]]);
+  try { return await deploy(); }
+  finally { await preserveBillingShutdown(api, environment); }
 }
 
 export interface BillableUsageRow {

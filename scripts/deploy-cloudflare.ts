@@ -12,7 +12,7 @@ import {
   type Plan as AuditPlan,
 } from './cloudflare-live-audit.js';
 import { validateCloudflarePlan, type Plan as GuardPlan } from './cloudflare-plan-guard.js';
-import { applicationDatabases, assertApplicationRunning } from '../src/cloudflare-budget.js';
+import { applicationDatabases, assertApplicationRunning, withBillingDeployment } from '../src/cloudflare-budget.js';
 import { cloudflareManagementApi } from './cloudflare-budget-guard.js';
 
 /**
@@ -225,40 +225,50 @@ async function main(): Promise<void> {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.TF_VAR_cloudflare_account_id;
   const token = process.env.CLOUDFLARE_API_TOKEN;
   if (!accountId || !token) throw new Error('Cloudflare account and API token are required');
-  await assertApplicationRunning(cloudflareManagementApi(accountId, token), [applicationDatabases.production]);
-  const deploySha = currentDeploySha();
-  tofu(['init', '-reconfigure', '-input=false']);
-  const planPath = join(tmpdir(), `cloudflare-${process.pid}.tfplan`);
-  const finalPlanPath = join(tmpdir(), `cloudflare-${process.pid}-final.tfplan`);
-  try {
-    tofu(['plan', '-input=false', '-lock-timeout=5m', `-out=${planPath}`]);
-    const plan = JSON.parse(tofu(['show', '-json', planPath]).stdout) as GuardPlan;
-    const changes = validateCloudflarePlan(plan, { expectedDeploySha: deploySha });
-    console.log(`Safe plan: ${changes.length} reviewed infrastructure change(s).`);
-    if (planOnly) {
-      console.log('Plan only: nothing applied.');
-      return;
+  const api = cloudflareManagementApi(accountId, token);
+  const deploy = async () => {
+    const deploySha = currentDeploySha();
+    tofu(['init', '-reconfigure', '-input=false']);
+    const planPath = join(tmpdir(), `cloudflare-${process.pid}.tfplan`);
+    const finalPlanPath = join(tmpdir(), `cloudflare-${process.pid}-final.tfplan`);
+    try {
+      tofu(['plan', '-input=false', '-lock-timeout=5m', `-out=${planPath}`]);
+      const plan = JSON.parse(tofu(['show', '-json', planPath]).stdout) as GuardPlan;
+      const changes = validateCloudflarePlan(plan, { expectedDeploySha: deploySha });
+      console.log(`Safe plan: ${changes.length} reviewed infrastructure change(s).`);
+      if (planOnly) {
+        console.log('Plan only: nothing applied.');
+        return;
+      }
+      if (changes.length) await withBillingDeployment(api, 'production', async () => {
+        tofu(['apply', '-input=false', '-auto-approve', planPath]);
+      });
+      const expected = {
+        api: captureExpectedWorkerIdentity(workers.api, deploySha),
+        ingestion: captureExpectedWorkerIdentity(workers.ingestion, deploySha),
+      };
+      const isolated = ['admission', 'catalog-publisher'].map((role) => ({
+        ...captureExpectedWorkerIdentity({ scriptName: `intern-notifs-${role}`, config: `wrangler.${role}.jsonc` }, deploySha),
+        address: `cloudflare_workers_script.isolated["${role}"]`,
+      }));
+      if (changes.length) await withBillingDeployment(api, 'production', async () => {
+        restoreOperationsSecrets(expected, deploySha);
+      });
+      const converged = tofu([
+        'plan', '-input=false', '-lock-timeout=5m', '-detailed-exitcode', `-out=${finalPlanPath}`,
+      ], { allowExitCodes: [0, 2] });
+      const finalPlan = JSON.parse(tofu(['show', '-json', finalPlanPath]).stdout) as AuditPlan;
+      auditFinalState(finalPlan, expected, converged.status, isolated);
+      return changes.length ? 'Deployed and converged.' : 'Production already matches this working tree and passed the live audit.';
+    } finally {
+      rmSync(planPath, { force: true });
+      rmSync(finalPlanPath, { force: true });
     }
-    if (changes.length) tofu(['apply', '-input=false', '-auto-approve', planPath]);
-    const expected = {
-      api: captureExpectedWorkerIdentity(workers.api, deploySha),
-      ingestion: captureExpectedWorkerIdentity(workers.ingestion, deploySha),
-    };
-    const isolated = ['admission', 'catalog-publisher'].map((role) => ({
-      ...captureExpectedWorkerIdentity({ scriptName: `intern-notifs-${role}`, config: `wrangler.${role}.jsonc` }, deploySha),
-      address: `cloudflare_workers_script.isolated["${role}"]`,
-    }));
-    if (changes.length) restoreOperationsSecrets(expected, deploySha);
-    const converged = tofu([
-      'plan', '-input=false', '-lock-timeout=5m', '-detailed-exitcode', `-out=${finalPlanPath}`,
-    ], { allowExitCodes: [0, 2] });
-    const finalPlan = JSON.parse(tofu(['show', '-json', finalPlanPath]).stdout) as AuditPlan;
-    auditFinalState(finalPlan, expected, converged.status, isolated);
-    console.log(changes.length ? 'Deployed and converged.' : 'Production already matches this working tree and passed the live audit.');
-  } finally {
-    rmSync(planPath, { force: true });
-    rmSync(finalPlanPath, { force: true });
-  }
+  };
+  if (planOnly) {
+    await assertApplicationRunning(api, [applicationDatabases.production]);
+    await deploy();
+  } else console.log(await withBillingDeployment(api, 'production', deploy));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

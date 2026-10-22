@@ -196,6 +196,20 @@ plan must account for schedules as well as consumers. Verify exact ownership,
 the actual account guard, and durable catalog progress before declaring recovery
 complete. No workflow automatically clears a billing latch.
 
+Deployments check the environment's durable billing latch before each deployment
+phase and after the command exits, including command failure. If a shutdown
+arrives while a command is already restoring resources, deployment reasserts the
+latch, removes that environment's consumers, clears its schedules, verifies the
+result, and fails. An unavailable final latch read also fails closed. Production
+workflow mutation steps and the local deployment commands use this same guard;
+the workflow also reconciles shutdown after failure or cancellation. The command
+guard stops its child process group on cancellation before reconciling resources.
+Dev cleanup targets only dev; it never pauses production as a side effect.
+This is compensation for in-flight management requests, not an atomic Cloudflare
+transaction, and a killed runner cannot guarantee cleanup. The independent
+account guard remains the backstop. Use the guarded npm commands rather than
+invoking individual Wrangler commands during deployment.
+
 Terraform deliberately keeps Worker secret bindings; recovery does not require
 rotating the shutdown credentials.
 

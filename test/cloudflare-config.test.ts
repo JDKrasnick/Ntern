@@ -356,7 +356,7 @@ describe('Cloudflare deployment configuration', () => {
     expect(localDeploy.indexOf('captureExpectedWorkerIdentity(workers.ingestion, deploySha)'))
       .toBeLessThan(localDeploy.indexOf('restoreOperationsSecrets(expected, deploySha)'));
     expect(localDeploy.indexOf('auditFinalState(finalPlan, expected, converged.status)'))
-      .toBeLessThan(localDeploy.indexOf("console.log(changes.length ? 'Deployed and converged.'"));
+      .toBeLessThan(localDeploy.indexOf("console.log(await withBillingDeployment(api, 'production', deploy))"));
     expect(compilerImage).toContain('apk add --no-cache poppler-utils python3 texlive texmf-dist-fontsrecommended');
     expect(compilerImage).not.toContain('texlive-full');
   });

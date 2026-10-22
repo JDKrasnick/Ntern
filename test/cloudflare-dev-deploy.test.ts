@@ -3,29 +3,26 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { deployCloudflareDev } from '../scripts/deploy-cloudflare-dev.js';
 import { preflightCloudflareDevTransfer, releaseLegacyDevAdmissionConsumer, verifyCloudflareDevProfile } from '../scripts/verify-cloudflare-dev-profile.js';
 
-const command = JSON.parse(readFileSync('package.json', 'utf8')).scripts['cloudflare:dev:deploy'] as string;
+const command = 'tsx scripts/verify-cloudflare-dev-profile.ts --preflight';
 
-it.each([false, true])('transfers the consumer before enabling its new owner; failure=%s', (failAdmission) => {
-  const directory = mkdtempSync(join(tmpdir(), 'dev-deploy-'));
-  const log = join(directory, 'commands');
-  try {
-    for (const name of ['npm', 'wrangler', 'tsx']) writeFileSync(join(directory, name),
-      '#!/bin/sh\nprintf "%s\\n" "$*" >> "$DEPLOY_TEST_LOG"\n' +
-      'if [ "$DEPLOY_TEST_FAIL" = true ] && [ "$*" = "deploy --config wrangler.dev.admission.jsonc" ]; then exit 1; fi\n', { mode: 0o755 });
-    const run = () => execFileSync('/bin/sh', ['-c', command], { env: { ...process.env,
-      PATH: directory, DEPLOY_TEST_LOG: log, DEPLOY_TEST_FAIL: String(failAdmission),
-    } });
-    if (failAdmission) expect(run).toThrow(); else run();
-    const commands = readFileSync(log, 'utf8').trim().split('\n');
-    expect(commands.slice(0, 5)).toEqual(['scripts/verify-cloudflare-dev-profile.ts --preflight', 'run cloudflare:dev:provision',
-      'deploy --config wrangler.dev.ingestion.jsonc', 'scripts/verify-cloudflare-dev-profile.ts --release-legacy-consumer',
-      'deploy --config wrangler.dev.admission.jsonc']);
-    if (failAdmission) expect(commands).toHaveLength(5);
-    else expect(commands.slice(5)).toEqual(['deploy --config wrangler.dev.catalog-publisher.jsonc',
-      'deploy --config wrangler.dev.api.jsonc --containers-rollout=none', 'scripts/verify-cloudflare-dev-profile.ts']);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+it.each([false, true])('transfers the consumer before enabling its new owner; failure=%s', async (failAdmission) => {
+  const commands: string[] = [];
+  const api = async <T>(): Promise<T> => [{ results: [] }] as T;
+  const run = async (_command: string, args: string[]) => {
+    commands.push(args.join(' '));
+    if (failAdmission && args.join(' ') === 'deploy --config wrangler.dev.admission.jsonc') throw new Error('deploy failed');
+  };
+  const result = deployCloudflareDev(api, run);
+  if (failAdmission) await expect(result).rejects.toThrow('deploy failed'); else await result;
+  expect(commands.slice(0, 5)).toEqual(['scripts/verify-cloudflare-dev-profile.ts --preflight', 'run cloudflare:dev:provision',
+    'deploy --config wrangler.dev.ingestion.jsonc', 'scripts/verify-cloudflare-dev-profile.ts --release-legacy-consumer',
+    'deploy --config wrangler.dev.admission.jsonc']);
+  if (failAdmission) expect(commands).toHaveLength(5);
+  else expect(commands.slice(5)).toEqual(['deploy --config wrangler.dev.catalog-publisher.jsonc',
+    'deploy --config wrangler.dev.api.jsonc --containers-rollout=none', 'scripts/verify-cloudflare-dev-profile.ts']);
 });
 
 it.each(['missing token', 'missing account', 'denied access', 'delayed delivery', 'billing paused', 'unavailable billing latch'])('the real helper preflight stops before every mutation: %s', (fault) => {
