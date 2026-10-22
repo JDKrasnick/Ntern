@@ -14,7 +14,7 @@ import { filterCatalogGroupDetails, employerDropDay, type CatalogGroupDetails, t
 import { catalogPublishable, liveCatalogOverlayFromStore, overlaySupersedesGroup, type LiveCatalogOverlay } from './catalog-live.js';
 import { rankCatalogGroups } from './catalog-ranking.js';
 import { alertEligible, catalogEligible } from './catalog-admission.js';
-import { postingObservationNotificationProjection, postingObservationProjection } from './identity/projection.js';
+import { postingObservationNotificationProjection, postingObservationOccurrenceProjection, postingObservationProjection } from './identity/projection.js';
 import { postingIdentityIncidentId } from './identity/incident.js';
 import type { DestinationVerificationRequest } from './destination-verification.js';
 import type { ResumeSubscription } from './subscription.js';
@@ -242,7 +242,8 @@ export class MemoryInternshipStore implements InternshipStore {
     const projected = postingObservationProjection(storedJob, input.job, input.occurrence);
     const finalized = postingObservationNotificationProjection(storedJob, projected, input.notificationEvent);
     this.jobs.set(input.job.jobId, structuredClone(finalized.job));
-    this.occurrences.set(`${input.occurrence.sourceId}#${input.occurrence.externalId}`, structuredClone(input.occurrence));
+    this.occurrences.set(`${input.occurrence.sourceId}#${input.occurrence.externalId}`,
+      structuredClone(postingObservationOccurrenceProjection(finalized.job, input.occurrence)));
     if (input.decision.status === 'unconfirmed') {
       const candidateId = createHash('sha256').update(`posting-review-family-v1:${input.decision.reviewFamilyKey}`).digest('hex');
       const prior = this.postingIdentityReviewCandidates.get(candidateId);

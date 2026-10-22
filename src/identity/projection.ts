@@ -111,6 +111,17 @@ export function postingObservationProjection(
   return canonicalCatalogRecency(projectRoleMetadata(projected).job);
 }
 
+/** Persist the same final policy verdict in the job and its occurrence row. */
+export function postingObservationOccurrenceProjection(job: Internship, occurrence: SourceOccurrenceState): SourceOccurrenceState {
+  const key = sourceOccurrenceKey(occurrence.occurrence);
+  const reference = job.sourceReferences.find(item => sourceOccurrenceKey(item) === key);
+  // Keep the source's material fields: canonical presentation normalization
+  // must not make an unchanged input look changed on the next refresh.
+  return reference?.admission
+    ? { ...occurrence, occurrence: { ...occurrence.occurrence, admission: reference.admission } }
+    : occurrence;
+}
+
 /**
  * Finalizes delayed notification state from the same canonical projection that
  * the store compare-and-swap commits. A stale caller may propose a promotion

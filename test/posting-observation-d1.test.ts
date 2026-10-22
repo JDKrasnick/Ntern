@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { D1InternshipStore } from '../cloudflare/d1-store.js';
+import { MemoryInternshipStore } from '../src/store.js';
+import { CatalogReconciler } from '../src/ingestion/catalog-reconciler.js';
 import type { D1Database, D1PreparedStatement } from '../cloudflare/types.js';
 import { buildPostingIdentity } from '../src/identity/posting.js';
 import type { CatalogAdmission, Internship, PostingIdentityDecision, SourceOccurrenceState } from '../src/types.js';
@@ -168,6 +170,34 @@ describe('D1 atomic posting observation', () => {
     const projectedOccurrence = (await store.getSourceOccurrences(original.occurrence.sourceId))[0];
     expect(projected?.sourceReferences[0]?.admission).toEqual(browserAdmission);
     expect(projectedOccurrence?.occurrence.admission).toEqual(browserAdmission);
+  });
+
+  it.each(['D1', 'memory'] as const)('persists the final early-career gate in both projections in %s', async kind => {
+    const store = kind === 'D1' ? subject().store : new MemoryInternshipStore();
+    const observation = input();
+    const provisional: CatalogAdmission = { ...admission(observation.job.lastSeenAt), earlyCareer: {
+      policyVersion: 4, status: 'eligible', reason: 'explicit-programme', evidence: [],
+      baseCatalogEligible: true, baseAlertEligible: true,
+    } };
+    const reference = { ...observation.occurrence.occurrence, admission: provisional, technical: true,
+      firstAttachedAt: observation.job.lastSeenAt, firstAttachedAtPrecision: 'exact' as const };
+    await store.commitPostingObservation({ ...observation,
+      job: { ...observation.job, admission: provisional, sourceReferences: [reference] },
+      occurrence: { ...observation.occurrence, occurrence: reference },
+    });
+    const job = await store.getJob(observation.job.jobId);
+    const occurrence = await store.getSourceOccurrence(reference.sourceId, reference.externalId!);
+    expect(job?.admission).toMatchObject({ catalogEligible: false, reasonCodes: ['early-career-unverified'] });
+    expect(occurrence?.occurrence.admission).toEqual(job?.sourceReferences[0]?.admission);
+    expect(occurrence?.occurrence.admission?.catalogEligible).toBe(false);
+    const refresh = new CatalogReconciler().reconcile({
+      sourceId: reference.sourceId, snapshotHash: 'next-snapshot',
+      listings: [{ ...reference, fetchedAt: '2026-08-29T13:00:00.000Z' }],
+      activeExternalIds: new Set([reference.externalId!]), priorOccurrences: [occurrence!],
+      resolvedJobs: new Map([[reference.externalId!, job!]]), baseline: false,
+      now: '2026-08-29T13:00:00.000Z',
+    });
+    expect(refresh.occurrences).toEqual([]);
   });
 
   it('does not persist a stale promotion when the committed projection has an employer conflict', async () => {
