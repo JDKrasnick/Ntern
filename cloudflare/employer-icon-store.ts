@@ -246,10 +246,11 @@ export class D1EmployerIconStore {
                   AND settled.status = 'resolved'))))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions
           WHERE canonical_employer_id = ? AND (status = 'invalidated'
+            OR (status IN ('retryable', 'unresolved') AND attempts >= 4)
             OR review_priority BETWEEN 50 AND 99
             OR (status = 'resolved' AND (next_retry_at IS NULL OR next_retry_at > ?))))
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM employer_icon_resolutions
-          WHERE canonical_employer_id = ? AND status IN ('retryable', 'unresolved') AND next_retry_at IS NOT NULL))
+          WHERE canonical_employer_id = ? AND status IN ('retryable', 'unresolved')))
       ON CONFLICT(canonical_employer_id, evidence_fingerprint) DO NOTHING`)
       .bind(input.id, input.canonicalEmployerId, input.evidenceFingerprint, input.evidenceJson,
         input.nextRetryAt, input.now, input.now, input.canonicalEmployerId, input.canonicalEmployerId, input.now,
@@ -308,12 +309,13 @@ export class D1EmployerIconStore {
           ORDER BY CASE WHEN task.review_priority >= 100 THEN 0 ELSE 1 END,
             task.attempts, task.next_retry_at, task.created_at, task.id) AS employer_rank
       FROM employer_icon_resolutions AS task LEFT JOIN weights ON weights.id = task.canonical_employer_id
-      WHERE task.next_retry_at IS NOT NULL AND task.next_retry_at <= ?
+      WHERE task.attempts < 4 AND task.next_retry_at IS NOT NULL AND task.next_retry_at <= ?
         AND (task.lease_until IS NULL OR task.lease_until <= ?)
         AND task.status IN ('retryable', 'unresolved')
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS blocked
           WHERE blocked.canonical_employer_id = task.canonical_employer_id
-            AND (blocked.status = 'invalidated' OR blocked.review_priority BETWEEN 50 AND 99))
+            AND (blocked.status = 'invalidated' OR blocked.review_priority BETWEEN 50 AND 99
+              OR (blocked.status IN ('retryable', 'unresolved') AND blocked.attempts >= 4)))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS busy
           WHERE busy.canonical_employer_id = task.canonical_employer_id AND busy.lease_until > ?)
       ) SELECT id, canonical_employer_id, evidence_fingerprint, evidence_json, attempts, previously_attempted FROM eligible
@@ -329,10 +331,11 @@ export class D1EmployerIconStore {
       const leaseToken = crypto.randomUUID();
       const leaseUntil = new Date(Date.parse(now) + leaseMs).toISOString();
       const result = await this.db.prepare(`UPDATE employer_icon_resolutions SET lease_token = ?, lease_until = ?, updated_at = ?
-        WHERE id = ? AND status IN ('retryable', 'unresolved') AND (lease_until IS NULL OR lease_until <= ?)
+        WHERE id = ? AND attempts < 4 AND status IN ('retryable', 'unresolved') AND (lease_until IS NULL OR lease_until <= ?)
           AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS busy
             WHERE busy.canonical_employer_id = ? AND (busy.lease_until > ?
-              OR busy.status = 'invalidated' OR busy.review_priority BETWEEN 50 AND 99))`)
+              OR busy.status = 'invalidated' OR busy.review_priority BETWEEN 50 AND 99
+              OR (busy.status IN ('retryable', 'unresolved') AND busy.attempts >= 4)))`)
         .bind(leaseToken, leaseUntil, now, row.id, now, row.canonical_employer_id, now).run();
       if (result.meta.changes !== 1) continue;
       claimed.push({
@@ -458,7 +461,7 @@ export class D1EmployerIconStore {
    * wrong-icon report) keep their own, higher, priority.
    */
   async markUnresolved(input: {
-    taskId: string; canonicalEmployerId: string; evidenceJson: string; nextRetryAt: string; now: string;
+    taskId: string; canonicalEmployerId: string; evidenceJson: string; nextRetryAt: string | null; now: string;
     reviewPriority?: number;
   }): Promise<void> {
     await this.db.batch([
@@ -475,7 +478,7 @@ export class D1EmployerIconStore {
 
   /** Records a transient failure and schedules the next attempt. */
   async markRetryable(input: {
-    taskId: string; evidenceJson: string; nextRetryAt: string; now: string;
+    taskId: string; evidenceJson: string; nextRetryAt: string | null; now: string;
   }): Promise<void> {
     await this.db.prepare(`UPDATE employer_icon_resolutions SET status = 'retryable', evidence_json = ?,
       attempts = attempts + 1, next_retry_at = ?, lease_token = NULL, lease_until = NULL, updated_at = ?
@@ -650,11 +653,12 @@ export class D1EmployerIconStore {
   async reopen(canonicalEmployerId: string, now: string): Promise<number> {
     const [reopened] = await this.db.batch([
       this.db.prepare(`UPDATE employer_icon_resolutions SET status = 'unresolved', next_retry_at = ?,
-        review_priority = 0, invalidated_at = NULL, lease_token = NULL, lease_until = NULL,
+        review_priority = 0, attempts = 0, invalidated_at = NULL, lease_token = NULL, lease_until = NULL,
         evidence_json = CASE WHEN json_valid(evidence_json)
           THEN json_remove(evidence_json, '$.invalidatedReason') ELSE evidence_json END,
         updated_at = ? WHERE canonical_employer_id = ?
-          AND (status IN ('invalidated', 'resolved') OR review_priority BETWEEN 50 AND 99)`)
+          AND (status IN ('invalidated', 'resolved') OR review_priority BETWEEN 50 AND 99
+            OR (status IN ('retryable', 'unresolved') AND attempts >= 4))`)
         .bind(now, now, canonicalEmployerId),
       this.db.prepare(`UPDATE ${iconTable(canonicalEmployerId)} SET
         icon_resolution_status = CASE WHEN icon_resolution_status IN ('invalidated', 'resolved') THEN NULL ELSE icon_resolution_status END,
@@ -688,7 +692,7 @@ export class D1EmployerIconStore {
         AND (employer.icon_resolution_status IS NULL OR employer.icon_resolution_status NOT IN ('resolved', 'invalidated'))
         AND NOT EXISTS (SELECT 1 FROM employer_icon_resolutions AS task
           WHERE task.canonical_employer_id = employer.id
-            AND (task.status IN ('resolved', 'invalidated') OR task.next_retry_at IS NOT NULL))
+            AND (task.status IN ('resolved', 'invalidated') OR task.next_retry_at IS NOT NULL OR task.attempts >= 4))
       ORDER BY employer.display_name LIMIT ?`).bind(limit).all<Row>();
     return rows.results.map((row) => ({ id: row.id as string, displayName: row.display_name as string }));
   }
