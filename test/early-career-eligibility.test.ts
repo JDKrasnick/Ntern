@@ -212,11 +212,59 @@ describe('employer-authoritative early-career policy', () => {
     expect(refreshed.admission?.catalogEligible).toBe(true);
     expect(refreshed.programType).toBe('internship');
   });
-  it('ignores evidence from a closed occurrence when an open occurrence exists', () => {
-    const closed = listing({ state: 'closed', metadataEvidence: evidence('Senior Software Engineer', '', '2026-10-22T12:00:00Z') });
+  it('ignores evidence from a closed different posting when an open occurrence exists', () => {
+    const other = url.replace('1234567', '7654321');
+    const closed = listing({ state: 'closed', applyUrl: other, providerIdentity: { ...listing().providerIdentity!, postingId: '7654321' }, metadataEvidence: evidence('Senior Software Engineer', '', '2026-10-22T12:00:00Z').map(e => ({ ...e, sourceUrl: other })) });
     const open = listing({ metadataEvidence: evidence('Software Engineering Intern') });
     const refreshed = projectRoleMetadata(job([{ ...closed, admission: admission(closed) }, { ...open, admission: admission(open) }])).job;
     expect(refreshed.admission?.catalogEligible).toBe(true);
+  });
+  it('retains employer proof after one community occurrence closes while the same posting stays open', () => {
+    const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
+    const open = listing({ sourceId: 'another-community', provenance: 'reviewed-community' });
+    const refreshed = projectRoleMetadata(job([{ ...closed, admission: admission(closed) }, { ...open, admission: admission(open, false) }])).job;
+    expect(refreshed.admission).toMatchObject({ catalogEligible: true, earlyCareer: { status: 'eligible' } });
+    expect(refreshed.open).toBe(true);
+  });
+  it('does not transfer proof to a different posting or an unrecognized URL', () => {
+    const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
+    for (const applyUrl of [url.replace('1234567', '7654321'), url.replace('/acme/', '/other/'), 'https://example.test/unknown']) {
+      const open = listing({ sourceId: 'another-community', provenance: 'reviewed-community', applyUrl });
+      const refreshed = projectRoleMetadata(job([{ ...closed, admission: admission(closed) }, { ...open, admission: admission(open, false) }])).job;
+      expect(refreshed.admission?.catalogEligible).toBe(false);
+    }
+  });
+  it('does not confuse identical artifact hashes from distinct posting occurrences', () => {
+    const proof = evidence('Software Engineering Intern');
+    const closed = listing({ state: 'closed', metadataEvidence: proof });
+    const open = listing({ sourceId: 'another-community', applyUrl: url.replace('1234567', '7654321'),
+      metadataEvidence: proof.map(e => ({ ...e, sourceId: 'another-community', sourceUrl: url.replace('1234567', '7654321'), earlyCareer: undefined })) });
+    const refreshed = projectRoleMetadata(job([{ ...closed, admission: admission(closed) }, { ...open, admission: admission(open, false) }])).job;
+    expect(refreshed.admission?.catalogEligible).toBe(false);
+  });
+  it('honors newer employer rejection on the same posting even when its community occurrence closed', () => {
+    const closed = listing({ state: 'closed', metadataEvidence: evidence('Senior Software Engineer', '', '2026-10-22T12:00:00Z') });
+    const open = listing({ sourceId: 'another-community', metadataEvidence: evidence('Software Engineering Intern') });
+    const refreshed = projectRoleMetadata(job([{ ...closed, admission: admission(closed) }, { ...open, admission: admission(open) }])).job;
+    expect(refreshed.admission?.catalogEligible).toBe(false);
+  });
+  it('retains legitimate closed-role classification and preserves lifecycle and alert suppression', () => {
+    const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
+    const refreshed = projectRoleMetadata({ ...job([{ ...closed, admission: admission(closed) }]), open: false, notification: { smsPending: false, digestPending: false } }).job;
+    expect(refreshed).toMatchObject({ open: false, admission: { catalogEligible: true, earlyCareer: { status: 'eligible' } }, notification: { smsPending: false, digestPending: false } });
+  });
+  it('carries reviewed base admission across aliases of the same exact posting without bypassing new conflicts', () => {
+    const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
+    const vetted = { ...admission(closed), employerResolution: 'source-reported' as const, evidenceCodes: ['trusted-community-source'] };
+    const open = listing({ sourceId: 'another-community', provenance: 'reviewed-community' });
+    const weak = withEarlyCareerAdmission({ ...admission(open, false), employerResolution: 'unresolved', catalogEligible: false, alertEligible: false,
+      reasonCodes: ['employer-unresolved'], evidenceCodes: [] }, earlyCareerFromEvidence([]));
+    const refs = [{ ...closed, admission: vetted }, { ...open, admission: weak }];
+    const refreshed = projectRoleMetadata(job(refs, weak)).job;
+    expect(refreshed.admission).toMatchObject({ catalogEligible: true, alertEligible: false });
+    expect(deriveCanonicalAdmission(refreshed.sourceReferences, now)?.catalogEligible).toBe(true);
+    const blocked = projectRoleMetadata(job(refs, { ...weak, reasonCodes: [...weak.reasonCodes, 'metadata-conflict'] })).job;
+    expect(blocked.admission?.catalogEligible).toBe(false);
   });
   it('uses current official evidence and holds conflicting same-time claims', () => {
     const positive = earlyCareerFromEvidence(evidence('Software Engineering Intern'));
