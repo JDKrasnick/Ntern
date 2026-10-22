@@ -178,3 +178,11 @@ software engineering internship. Canonical/source admission, pending-alert flags
 and public detail/catalog visibility were checked. This canary does not claim
 every legacy role is employer-verified; the historical backfill retains separate
 receipts for applied batches, unresolved targets and individually reviewed changes.
+
+Employer proof follows the exact provider/tenant/posting identity, rather than
+the continued presence of a community row. Closing one community occurrence
+must not discard proof while another occurrence of that same posting remains
+open. A previously reviewed base admission can follow that exact target, with
+alerts suppressed and all current identity/destination/conflict gates enforced.
+Closed roles retain their historical programme classification without reopening.
+Proof from a different posting or tenant, or an unrecognized URL, cannot transfer.
