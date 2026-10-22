@@ -1,4 +1,5 @@
 import { evaluateCatalogAdmission } from '../../catalog-admission.js';
+import { retainedEarlyCareerAssessment } from '../../early-career-eligibility.js';
 import { extractVerifiedPageMetadataEvidence, mergeRoleMetadataEvidence } from '../../role-metadata.js';
 import type { PostingObservationAdmissionFence } from '../../store.js';
 import type { ApplicationPageEvidence } from '../../core/application-url.js';
@@ -127,7 +128,8 @@ export function gradeAdmissionRow(input: {
   evaluatedAt: string;
 }): GradedAdmissionRow | { decision: AdmissionRowEvaluation['decision'] } {
   const legacyReview = input.earlyCareerEligibilityEnabled && input.prior?.admission?.catalogEligible && !input.prior.admission.earlyCareer;
-  const { listing, decision } = processPosting(legacyReview ? { ...input.posting, lifecycleAuthority: 'source' } : input.posting, [], input.earlyCareerEligibilityEnabled);
+  const verifiedProgramme = retainedEarlyCareerAssessment(input.prior?.admission, input.posting.applyUrl)?.status === 'eligible';
+  const { listing, decision } = processPosting(legacyReview || verifiedProgramme ? { ...input.posting, lifecycleAuthority: 'source' } : input.posting, [], input.earlyCareerEligibilityEnabled);
   if (decision.outcome !== 'included') {
     if (decision.outcome === 'shelved') return { decision: { kind: 'shelved', reason: decision.reason } };
     return { decision: { kind: 'blocked', reason: decision.reason } };
@@ -208,7 +210,7 @@ export function gradeAdmissionRow(input: {
   let qualifiedListing: ProcessedListing = trustedCommunityQualification
     ? { ...normalized, trustedCommunityAlertQualification: trustedCommunityQualification }
     : normalized;
-  if (input.earlyCareerEligibilityEnabled && input.probe.evidence) {
+  if ((input.earlyCareerEligibilityEnabled || input.prior?.admission?.earlyCareer) && input.probe.evidence) {
     const page = input.probe.evidence;
     const metadata = extractVerifiedPageMetadataEvidence({ expectedTitle: qualifiedListing.title,
       expectedPostingId: destination.expectedPostingId, sourceId: input.sourceId, sourceUrl: page.url,
@@ -272,11 +274,12 @@ export class RuleBasedAdmissionV2Evaluator implements AdmissionV2RowEvaluator {
     let posting = context.posting;
     // Do not let the title prefilter revoke an unreviewed legacy role before
     // the admission layer can apply its operator-review hold.
-    const priorPromise = this.dependencies.earlyCareerEligibilityEnabled && this.dependencies.resolvePriorContext
+    const priorPromise = this.dependencies.resolvePriorContext
       ? this.dependencies.resolvePriorContext(context.sourceId, context.externalId) : undefined;
     if (priorPromise) {
       const prior = await priorPromise;
-      if (prior?.admission?.catalogEligible && !prior.admission.earlyCareer) posting = { ...posting, lifecycleAuthority: 'source' };
+      if ((this.dependencies.earlyCareerEligibilityEnabled && prior?.admission?.catalogEligible && !prior.admission.earlyCareer)
+        || retainedEarlyCareerAssessment(prior?.admission, posting.applyUrl)?.status === 'eligible') posting = { ...posting, lifecycleAuthority: 'source' };
     }
     let deterministic = processPosting(posting, [], this.dependencies.earlyCareerEligibilityEnabled);
     let probe: AdmissionDestinationProbe | undefined;

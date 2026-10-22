@@ -99,6 +99,19 @@ export function earlyCareerFromEvidence(evidence: readonly RoleMetadataEvidence[
     ? [{ ...e.earlyCareer, sourceClass: e.sourceClass, sourceUrl: e.sourceUrl, artifactHash: e.artifactHash, observedAt: e.observedAt }] : []));
 }
 
+/** A community refresh cannot erase reviewed employer proof for the same immutable posting. */
+export function retainedEarlyCareerAssessment(previous: CatalogAdmission | undefined, applyUrl: string): EarlyCareerAssessment | undefined {
+  const assessment = previous?.earlyCareer;
+  if (!assessment?.sourceClass || officialSources[assessment.sourceClass] === undefined
+    || assessment.policyVersion !== EARLY_CAREER_POLICY_VERSION || !assessment.artifactHash || !assessment.sourceUrl) return undefined;
+  try {
+    const current = providerPostingReference(applyUrl);
+    if (current.provider === 'unknown' || !current.postingId) return undefined;
+    const prior = providerPostingReference(previous!.destination.finalUrl ?? previous!.destination.candidateUrl);
+    return providerPostingAlias(current) === providerPostingAlias(prior) ? assessment : undefined;
+  } catch { return undefined; }
+}
+
 /** Preserve all other admission decisions; this gate cannot bypass destination or identity policy. */
 export function withEarlyCareerAdmission(admission: CatalogAdmission, assessment: EarlyCareerAssessment): CatalogAdmission {
   const reasons: CatalogAdmissionReason[] = admission.reasonCodes.filter(r => r !== 'not-early-career' && r !== 'early-career-unverified');
@@ -126,7 +139,9 @@ export function enforceJobEarlyCareer(job: Internship, evidence: readonly RoleMe
       return posting.provider !== 'unknown' && posting.postingId ? providerPostingAlias(posting) : undefined;
     } catch { return undefined; }
   };
-  const openTargets = new Set(job.sourceReferences.filter(r => r.state === 'open').map(target).filter(Boolean));
+  const openReferences = job.sourceReferences.filter(r => r.state === 'open');
+  const historical = !job.open || openReferences.length === 0;
+  const openTargets = new Set(openReferences.map(target).filter(Boolean));
   const openEvidence = new Set(job.sourceReferences.filter(r => r.state === 'open').flatMap(r => r.metadataEvidence?.map(evidenceKey) ?? []));
   const closedEvidence = new Map<string, Set<string>>();
   for (const reference of job.sourceReferences.filter(r => r.state === 'closed')) {
@@ -139,11 +154,12 @@ export function enforceJobEarlyCareer(job: Internship, evidence: readonly RoleMe
   }
   // A community omission closes its occurrence, not the employer's posting.
   // Keep exact employer proof while another alias of that posting remains open.
-  // Closed jobs retain their historical classification without reopening them.
-  const assessment = earlyCareerFromEvidence(evidence.filter(e => !job.open || !closedEvidence.has(evidenceKey(e))
+  // The last occurrence may close before the canonical lifecycle is updated.
+  // Retain historical classification in either ordering without reopening it.
+  const assessment = earlyCareerFromEvidence(evidence.filter(e => historical || !closedEvidence.has(evidenceKey(e))
     || openEvidence.has(evidenceKey(e)) || [...closedEvidence.get(evidenceKey(e))!].some(posting => openTargets.has(posting))));
   const canonicalTarget = target({ applyUrl: job.admission.destination.finalUrl ?? job.admission.destination.candidateUrl });
-  const qualified = assessment.status === 'eligible' && canonicalTarget && (!job.open || openTargets.has(canonicalTarget))
+  const qualified = assessment.status === 'eligible' && canonicalTarget && (historical || openTargets.has(canonicalTarget))
     ? job.sourceReferences.find(r => target(r) === canonicalTarget && r.admission?.earlyCareer?.baseCatalogEligible)
     : undefined;
   const preserveQualifiedBase = (current: CatalogAdmission, posting: string | undefined): CatalogAdmission => {

@@ -253,6 +253,15 @@ describe('employer-authoritative early-career policy', () => {
     const refreshed = projectRoleMetadata({ ...job([{ ...closed, admission: admission(closed) }]), open: false, notification: { smsPending: false, digestPending: false } }).job;
     expect(refreshed).toMatchObject({ open: false, admission: { catalogEligible: true, earlyCareer: { status: 'eligible' } }, notification: { smsPending: false, digestPending: false } });
   });
+  it('preserves programme proof when the last occurrence closes before canonical lifecycle reconciliation', () => {
+    const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
+    const original = { ...job([{ ...closed, admission: admission(closed) }]), notification: { smsPending: false, digestPending: false } };
+    const refreshed = projectRoleMetadata(original).job;
+    expect(refreshed).toMatchObject({ open: true, programType: 'internship',
+      admission: { catalogEligible: true, earlyCareer: { status: 'eligible' } },
+      notification: { smsPending: false, digestPending: false } });
+    expect(refreshed.sourceReferences[0]?.state).toBe('closed');
+  });
   it('carries reviewed base admission across aliases of the same exact posting without bypassing new conflicts', () => {
     const closed = listing({ state: 'closed', metadataEvidence: evidence('Software Engineering Intern') });
     const vetted = { ...admission(closed), employerResolution: 'source-reported' as const, evidenceCodes: ['trusted-community-source' as const] };
@@ -330,6 +339,32 @@ describe('employer-authoritative early-career policy', () => {
     expect(commit).toHaveBeenCalledWith(expect.objectContaining({ notify: false, admission: expect.objectContaining({
       catalogEligible: true, alertEligible: false, earlyCareerReviewPending: expect.objectContaining({ reason: 'no-explicit-programme' }) }) }));
     expect(resolvePriorContext).toHaveBeenCalledTimes(1);
+  });
+  it.each([false, true])('retains exact employer proof on a later community refresh with policy enabled=%s', async enabled => {
+    const previous = admission(listing({ metadataEvidence: evidence('Software Engineering Intern') }));
+    const role = { ...posting('Software Engineer', 'Build software with Python.'), provenance: 'reviewed-community' as const };
+    const resolvePriorContext = vi.fn(async () => ({ admission: previous }));
+    const commit = vi.fn(async () => {}), revoke = vi.fn(async () => {});
+    const evaluator = new RuleBasedAdmissionV2Evaluator({ earlyCareerEligibilityEnabled: enabled, now: () => new Date(now),
+      resolvePriorContext, prober: { async probe() { return { reachability: 'blocked' }; } }, sink: { commit, revoke } });
+    const result = await evaluator.evaluate(admissionContext(role));
+    expect(result.decision.kind).toBe('admitted');
+    await result.commitEffect!();
+    expect(revoke).not.toHaveBeenCalled();
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({ admission: expect.objectContaining({
+      catalogEligible: true, earlyCareer: expect.objectContaining({ artifactHash: previous.earlyCareer!.artifactHash }) }) }));
+    expect(resolvePriorContext).toHaveBeenCalledTimes(1);
+  });
+  it('does not carry reviewed proof to another posting or tenant, or bypass newer employer rejection', () => {
+    const previous = admission(listing({ metadataEvidence: evidence('Software Engineering Intern') }));
+    const unknown = listing({ metadataEvidence: undefined });
+    for (const applyUrl of [url.replace('1234567', '7654321'), url.replace('/acme/', '/other/'), 'https://example.com/job']) {
+      expect(evaluateCatalogAdmission({ listing: { ...unknown, applyUrl }, destination: previous.destination,
+        postingAttributed: true, evaluatedAt: now, previous, earlyCareerEligibilityEnabled: true }).catalogEligible).toBe(false);
+    }
+    const newer = listing({ metadataEvidence: evidence('Senior Software Engineer', '', '2026-10-22T12:00:00Z') });
+    expect(evaluateCatalogAdmission({ listing: newer, destination: previous.destination, postingAttributed: true,
+      evaluatedAt: now, previous, earlyCareerEligibilityEnabled: true }).catalogEligible).toBe(false);
   });
   it('never commits or requests notifications for a general v2 role', async () => {
     const role = posting('Software Engineer', 'Build software with Python. Personal projects count.');
