@@ -12,6 +12,8 @@ import { D1InternshipStore, D1UserStore } from '../cloudflare/d1-store.js';
 import { D1EmployerStore } from '../cloudflare/employer-store.js';
 import { D1CompanySizeStore } from '../cloudflare/company-size-store.js';
 import * as employerRegistry from '../cloudflare/employer-registry.js';
+import * as earlyCareerBackfill from '../cloudflare/early-career-backfill.js';
+import * as catalogProjectionMaintenance from '../cloudflare/catalog-projection-maintenance.js';
 import * as greenhouseWorker from '../src/greenhouse-worker.js';
 import * as leverWorker from '../src/lever-worker.js';
 import * as ashbyWorker from '../src/ashby-worker.js';
@@ -38,6 +40,24 @@ const queue = (metrics: Queue['metrics']): Queue => ({
   async send() {},
   async sendBatch() {},
   metrics,
+});
+
+describe('early-career bulk finalization', () => {
+  it.each([undefined, true, false])('refreshes by default and permits explicit deferral: %s', async finalize => {
+    const apply = vi.spyOn(earlyCareerBackfill, 'applyEarlyCareerBackfill').mockResolvedValue({ applied: true, alreadyApplied: false, reviews: [], projectionRefreshRequired: true });
+    const refresh = vi.spyOn(catalogProjectionMaintenance, 'refreshCatalogProjection').mockResolvedValue({ generatedAt: 'now', groups: 1, roles: 1 });
+    try {
+      const env = { OPERATIONS_SHARED_SECRET: 'secret', DB: { prepare: () => ({ async first() { return null; } }) } } as unknown as Environment;
+      const request = (authorized: boolean) => new Request('https://example.test/internal/early-career/backfill', { method: 'POST', headers: authorized ? { 'X-Operations-Key': 'secret' } : {}, body: JSON.stringify({ action: 'apply', repairToken: 'token', expectedJobs: 1, finalize }) });
+      expect((await cloudflareWorker.fetch(request(false), env)).status).toBe(404);
+      expect(apply).not.toHaveBeenCalled();
+      const response = await cloudflareWorker.fetch(request(true), env);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ applied: true, projectionRefreshRequired: true });
+      expect(apply).toHaveBeenCalledOnce();
+      expect(refresh).toHaveBeenCalledTimes(finalize === false ? 0 : 1);
+    } finally { apply.mockRestore(); refresh.mockRestore(); }
+  });
 });
 
 describe('company size operations', () => {
