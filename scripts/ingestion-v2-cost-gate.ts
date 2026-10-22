@@ -1,4 +1,5 @@
-/** Read-only, out-of-band production guard for ingestion V2 D1 cost windows. */
+/** Read-only per-source anomaly check using logical-row estimates.
+ * Account billing enforcement uses cloudflare-budget-guard.ts and measured D1 usage. */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';

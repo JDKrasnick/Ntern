@@ -41,7 +41,8 @@ import { ReconcilerAdmissionV2CatalogSink } from '../src/ingestion-v2/admission/
 import { ingestionV2FeatureConfig, INGESTION_ROW_STATES, type IngestionRowState } from '../src/ingestion-v2/types.js';
 import { runAdmissionV2Dispatch } from './admission-v2-dispatch.js';
 import { forwardIsolatedSchedule } from './isolated-schedule.js';
-import type { ServiceBinding } from './split.js';
+import { secretMatches, type ServiceBinding } from './split.js';
+import { BILLING_SHUTDOWN_RETRY_SECONDS, pauseCloudflareApplication } from '../src/cloudflare-budget.js';
 export { ADMISSION_V2_SOURCE_LIMIT } from './admission-v2-dispatch.js';
 import { applyAdmissionReplay, inspectAdmissionOverview, inspectAdmissionRows, planAdmissionReplay } from '../src/ingestion-v2/admission/operations.js';
 import { applyIngestionV2Bootstrap, planIngestionV2Bootstrap } from '../src/ingestion-v2/bootstrap.js';
@@ -709,13 +710,13 @@ async function resolvedBillingShutdownQueueIds(env: Environment): Promise<string
 }
 
 async function billingShutdown(request: Request, env: Environment): Promise<Response> {
-  if (request.method !== 'POST' || !env.BILLING_WEBHOOK_SECRET || request.headers.get('cf-webhook-auth') !== env.BILLING_WEBHOOK_SECRET) {
+  if (request.method !== 'POST' || !secretMatches(request.headers.get('cf-webhook-auth'), env.BILLING_WEBHOOK_SECRET)) {
     return Response.json({ message: 'Not found' }, { status: 404 });
   }
 
-  const queueIds = await resolvedBillingShutdownQueueIds(env);
-  const scriptPath = `/workers/scripts/${encodeURIComponent(env.WORKER_NAME)}`;
   if (new URL(request.url).searchParams.get('dry-run') === 'true') {
+    const queueIds = await resolvedBillingShutdownQueueIds(env);
+    const scriptPath = `/workers/scripts/${encodeURIComponent(env.WORKER_NAME)}`;
     await Promise.all([
       ...queueIds.map((queueId) => cloudflareApi(env, `/queues/${queueId}/consumers`)),
       cloudflareApi(env, `${scriptPath}/schedules`),
@@ -736,15 +737,13 @@ async function billingShutdown(request: Request, env: Environment): Promise<Resp
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
   `).bind(new Date().toISOString()).run();
 
-  for (const queueId of queueIds) {
-    const consumers = await cloudflareApi(env, `/queues/${queueId}/consumers`) as Array<{ consumer_id?: string }>;
-    for (const consumer of consumers) {
-      if (consumer.consumer_id) await cloudflareApi(env, `/queues/${queueId}/consumers/${consumer.consumer_id}`, { method: 'DELETE' });
-    }
-  }
-  await cloudflareApi(env, `${scriptPath}/schedules`, { method: 'PUT', body: '[]' });
-  await cloudflareApi(env, `${scriptPath}/subdomain`, { method: 'DELETE' });
-  return Response.json({ stopped: true });
+  // Discovery and management failures happen after the durable stop. Continue
+  // through every resource so one failed API call cannot leave the rest active.
+  const report = await pauseCloudflareApplication(async <T>(path: string, init?: RequestInit) =>
+    await cloudflareApi(env, path, init) as T);
+  return Response.json({ stopped: report.failures.length === 0, ...report }, {
+    status: report.failures.length ? 503 : 200,
+  });
 }
 
 class ResendEmailSender implements EmailSender {
@@ -2674,7 +2673,7 @@ async function queueHandler(batch: MessageBatch<unknown>, env: Environment): Pro
     return;
   }
   if (shutdown) {
-    for (const message of batch.messages) message.ack();
+    for (const message of batch.messages) message.retry({ delaySeconds: BILLING_SHUTDOWN_RETRY_SECONDS });
     return;
   }
   const trafficObservations = new Map<string, Awaited<ReturnType<typeof observeD1Delivery>>>();

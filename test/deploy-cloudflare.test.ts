@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { resolveDeploySha, validateExpectedWorkerIdentity } from '../scripts/deploy-cloudflare.js';
 
 const headSha = 'a'.repeat(40);
@@ -13,6 +17,24 @@ const version = {
 const latest = { id: 'version-1', created_on: '2026-10-01T00:00:00Z' };
 
 describe('local Cloudflare deploy provenance', () => {
+  it('stops the real deploy before infrastructure commands when production billing is latched', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'production-billing-pause-'));
+    const log = join(directory, 'mutations');
+    try {
+      const stub = join(directory, 'fetch.mjs');
+      writeFileSync(stub, "globalThis.fetch = async () => Response.json({success:true,result:[{results:[{value:'stopped'}]}]});\n");
+      writeFileSync(join(directory, 'tofu'), '#!/bin/sh\nprintf "mutation" >> "$BILLING_TEST_LOG"\nexit 1\n', { mode: 0o755 });
+      const result = spawnSync(process.execPath, ['--import', resolve('node_modules/tsx/dist/loader.mjs'),
+        '--import', stub, resolve('scripts/deploy-cloudflare.ts')], {
+        cwd: directory, encoding: 'utf8', env: { ...process.env, PATH: directory,
+          BILLING_TEST_LOG: log, CLOUDFLARE_ACCOUNT_ID: '4d67a0f1b73641df84af0a283dd5b3d8', CLOUDFLARE_API_TOKEN: 'test-token' },
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('Billing shutdown is latched');
+      expect(existsSync(log)).toBe(false);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
   it('uses Git HEAD and accepts only matching release overrides', () => {
     expect(resolveDeploySha(headSha)).toBe(headSha);
     expect(resolveDeploySha(headSha, headSha, headSha)).toBe(headSha);

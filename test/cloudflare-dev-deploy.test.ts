@@ -28,7 +28,7 @@ it.each([false, true])('transfers the consumer before enabling its new owner; fa
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-it.each(['missing token', 'missing account', 'denied access', 'delayed delivery'])('the real helper preflight stops before every mutation: %s', (fault) => {
+it.each(['missing token', 'missing account', 'denied access', 'delayed delivery', 'billing paused', 'unavailable billing latch'])('the real helper preflight stops before every mutation: %s', (fault) => {
   const directory = mkdtempSync(join(tmpdir(), 'dev-preflight-'));
   const log = join(directory, 'commands');
   try {
@@ -36,7 +36,11 @@ it.each(['missing token', 'missing account', 'denied access', 'delayed delivery'
       '#!/bin/sh\nprintf "%s\\n" "$*" >> "$DEPLOY_TEST_LOG"\n', { mode: 0o755 });
     const fetchStub = join(directory, 'fetch.mjs');
     writeFileSync(fetchStub, fault === 'delayed delivery'
-      ? "globalThis.fetch = async () => Response.json({success:true,result:[{queue_name:'intern-notifs-dev-admission-v2',queue_id:'test-queue',settings:{delivery_delay:86400}}]});\n"
+      ? "globalThis.fetch = async (url) => Response.json({success:true,result:String(url).includes('/d1/')?[{results:[]}]:[{queue_name:'intern-notifs-dev-admission-v2',queue_id:'test-queue',settings:{delivery_delay:86400}}]});\n"
+      : fault === 'billing paused'
+      ? "globalThis.fetch = async () => Response.json({success:true,result:[{results:[{value:'stopped'}]}]});\n"
+      : fault === 'unavailable billing latch'
+      ? "globalThis.fetch = async () => Response.json({success:true,result:[]});\n"
       : "globalThis.fetch = async () => Response.json({success:false}, {status:403});\n");
     writeFileSync(join(directory, 'tsx'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$DEPLOY_TEST_LOG"\n' +
       'exec "$DEPLOY_TEST_NODE" --import "$DEPLOY_TEST_FETCH_STUB" --import "$DEPLOY_TEST_LOADER" "$DEPLOY_TEST_REPO/$1" "$2"\n', { mode: 0o755 });
@@ -50,8 +54,13 @@ it.each(['missing token', 'missing account', 'denied access', 'delayed delivery'
     if (fault !== 'missing account') env.CLOUDFLARE_ACCOUNT_ID = '4d67a0f1b73641df84af0a283dd5b3d8';
     const result = spawnSync('/bin/sh', ['-c', command], { cwd: directory, env, encoding: 'utf8' });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(fault === 'delayed delivery' ? 'initial delivery delay must be zero'
-      : fault === 'denied access' ? 'Dev profile request failed' : 'CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are required');
+    const expectedErrors: Record<string, string> = {
+      'delayed delivery': 'initial delivery delay must be zero',
+      'denied access': 'Cloudflare management request failed',
+      'billing paused': 'Billing shutdown is latched',
+      'unavailable billing latch': 'Billing latch could not be verified',
+    };
+    expect(result.stderr).toContain(expectedErrors[fault] ?? 'CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are required');
     expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(['scripts/verify-cloudflare-dev-profile.ts --preflight']);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

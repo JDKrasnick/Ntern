@@ -1119,8 +1119,8 @@ describe('Catalog queue setup failures', () => {
 
     expect(first).toHaveBeenCalledTimes(2);
     expect(prepare).toHaveBeenCalledTimes(2);
-    expect(message.ack).toHaveBeenCalledOnce();
-    expect(message.retry).not.toHaveBeenCalled();
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 3600 });
   });
 
   it('defers ordinary catalog work when the shutdown guard fails on the final delivery', async () => {

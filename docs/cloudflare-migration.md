@@ -143,31 +143,58 @@ These application limits do not cap billable inbound Worker requests. Keep the
 account-wide $1, $3, and $5 budget alerts enabled and investigate the first
 warning rather than waiting for the billing cycle to close.
 
+An independent GitHub workflow, `cloudflare-budget-guard.yml`, runs every ten
+minutes. It reads the account-wide bill feed and measured D1 writes across all
+databases, including dev. It replaces the delayed D1 write charge with a
+conservative estimate from the measured billing-cycle total and the shared
+50-million-row allowance. The separate rolling-hour limit defaults to 60,000
+billed writes across the account; it is not a per-source estimate.
+
+The usage ceiling defaults to the existing **$5** shutdown policy. The
+`CLOUDFLARE_USAGE_BUDGET_DOLLARS` and `CLOUDFLARE_D1_WRITES_PER_HOUR` repository
+variables can set reviewed limits. Subscription fees and external model-provider
+charges are outside this usage ceiling. Changing a notification threshold does
+not change these workflow limits. A cost estimate is not approval to raise them.
+
+The guard is read-only unless invoked with `--enforce`; its scheduled workflow
+uses enforcement. A breached limit or unavailable billing/analytics telemetry
+latches both production and dev, removes their queue consumers, and clears their
+Worker schedules. It verifies the latches, cleared schedules, and empty consumer
+lists, retaining a report even when an individual operation fails. It preserves
+stored data and does not purge queues. In-flight discovery and admission
+messages retry after an hour instead of being acknowledged without processing;
+queue retention and dead-letter limits still apply. Management credentials need D1 read/write,
+Workers Scripts read/write, Queues read/write, Billing read, and Analytics read.
+The webhook shutdown credential also needs management access to both databases.
+
+This is a periodically enforced control, not an exact provider-side spending
+cap: GitHub scheduling and Cloudflare analytics can lag, and in-flight work can
+finish after a pause. Non-D1 product usage still comes from the daily billing
+feed. Keep Cloudflare notifications enabled as an independent signal.
+
 The $5 alert also targets a generic webhook at
 `/internal/billing-shutdown`. Cloudflare authenticates it with the
 `cf-webhook-auth` header. The API Worker forwards the authenticated webhook to
-the ingestion Worker, which latches `billing_shutdown=stopped` in D1, removes
-all seven ingestion queue consumers, clears the ingestion Worker schedules, and
-keeps its workers.dev subdomain disabled. The public API Worker remains routed
+the ingestion Worker, which latches `billing_shutdown=stopped` in its D1 binding
+**before** resource discovery, then invokes the same production-and-dev shutdown
+procedure. A failed management operation does not prevent the remaining stop
+actions; an incomplete shutdown returns 503 and identifies failed operations.
+The public API Worker remains routed
 but returns the latched 503 response. The D1 latch makes scheduled, queued, and
 HTTP work fail closed even if a management API call is delayed. Test webhook
 payloads are ignored; shutdown requires the signed `billing_budget_alert`
 payload for the named $5 policy and account.
 
-To recover after reviewing the bill, reapply `infra/cloudflare` to restore the
-ingestion consumers. The provider does not currently detect an externally
-emptied cron list, so restore only the ingestion schedules explicitly. Confirm
-that all seven queues and all nine schedules have exactly one owner and that the
-API Worker owns none of them before clearing the latch:
-
-```sh
-npx wrangler triggers deploy --name intern-notifs-ingestion \
-  --config wrangler.ingestion.jsonc
-
-npx wrangler d1 execute intern-notifs-db --remote \
-  --config wrangler.api.jsonc \
-  --command "DELETE FROM system_state WHERE key = 'billing_shutdown'"
-```
+Ordinary production deploys and the dev preflight refuse to restore processing
+while the billing latch is set. Recovery therefore requires an explicitly
+reviewed recovery plan: verify the cause and the current account budget, agree
+which environment may run, deliberately clear only that environment's latch as
+part of the reviewed recovery, then restore its consumers and schedules through
+the guarded infrastructure workflow.
+The provider does not reliably detect an externally emptied cron list, so the
+plan must account for schedules as well as consumers. Verify exact ownership,
+the actual account guard, and durable catalog progress before declaring recovery
+complete. No workflow automatically clears a billing latch.
 
 Terraform deliberately keeps Worker secret bindings; recovery does not require
 rotating the shutdown credentials.
